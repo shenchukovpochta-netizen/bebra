@@ -39,13 +39,15 @@ $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.tx
           'README.md', 'INSTALL.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/config.py', 'app/db.py',
          'app/logic.py', 'app/texts.py', 'app/keyboards.py', 'app/middlewares.py',
-         'app/tasks.py')
+         'app/filters.py', 'app/tasks.py', 'app/contract_template.md')
 $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
-              'app/handlers/moderation.py', 'app/handlers/menu.py')
+              'app/handlers/moderation.py', 'app/handlers/menu.py',
+              'app/handlers/contract.py')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
-              'app/services/files.py', 'app/services/ocr.py')
+              'app/services/files.py', 'app/services/ocr.py',
+              'app/services/contract.py', 'app/services/crypto.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
-          'tests/test_sql.py', 'tests/test_flow.py')
+          'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py')
 
 foreach ($f in ($root + $app + $handlers + $services + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }

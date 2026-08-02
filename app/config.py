@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import logic
+
 
 def _env(name: str, default: str | None = None, *, required: bool = False) -> str:
     """Значение переменной окружения.
@@ -53,6 +55,21 @@ def _int(name: str, default: str | None = None, *, required: bool = False) -> in
         raise RuntimeError(f"{name} должно быть целым числом, получено {raw!r}") from exc
 
 
+def _int_or_none(name: str) -> int | None:
+    """Необязательное числовое значение.
+
+    Отличать «не задано» от нуля обязательно: message_thread_id = 0 - это
+    не «без темы», а невалидный номер темы, и Telegram отвергнет отправку.
+    """
+    raw = _env(name)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} должно быть целым числом, получено {raw!r}") from exc
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str
@@ -66,6 +83,20 @@ class Config:
     # теряется. Отдельные аргументы create_pool снимают вопрос целиком.
     pg: dict[str, Any]
     storage_dir: Path
+
+    # Ключ шифрования анкеты. Паспортные данные и адреса лежат в базе только
+    # в зашифрованном виде, ключ - отдельным файлом, чтобы дамп базы без него
+    # ничего не давал.
+    pdn_key: str
+    # Личка того, кто утверждает договоры (@arenda_velo_kazan). Бот не может
+    # написать первым, поэтому владелец аккаунта обязан один раз нажать /start,
+    # а сюда прописывается его ЧИСЛОВОЙ id - username Telegram API не примет.
+    contract_chat_id: int
+    # Куда уходит подписанный договор. Обычно группа с темами: fix_topic_id -
+    # номер темы «Фиксация сдачи».
+    fix_chat_id: int
+    fix_topic_id: int | None
+    contract_template: Path
 
     channel_url: str
     oferta_url: str
@@ -124,6 +155,15 @@ class Config:
                 "port": _int("POSTGRES_PORT", "5432"),
             },
             storage_dir=Path(_env("STORAGE_DIR", "/files/kyc")),
+            pdn_key=_secret("PDN_KEY"),
+            # По умолчанию договоры едут в тот же чат модерации, что и заявки:
+            # так бот остаётся работоспособным, пока владелец @arenda_velo_kazan
+            # не нажал /start и его числовой id ещё неизвестен.
+            contract_chat_id=_int("CONTRACT_CHAT_ID", _env("ADMIN_CHAT_ID", required=True)),
+            fix_chat_id=_int("FIX_CHAT_ID", _env("ADMIN_CHAT_ID", required=True)),
+            fix_topic_id=_int_or_none("FIX_TOPIC_ID"),
+            contract_template=Path(
+                _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.md")),
             channel_url=_env("CHANNEL_URL", "https://t.me/mybike"),
             oferta_url=_env("OFERTA_URL", required=True),
             oferta_version=_env("OFERTA_VERSION", "2026-01-15"),
@@ -145,7 +185,7 @@ class Config:
             purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
             purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
             updates_log_days=_int("UPDATES_LOG_DAYS", "7"),
-            rate_soft=_int("RATE_SOFT", "20"),
-            rate_hard=_int("RATE_HARD", "25"),
+            rate_soft=_int("RATE_SOFT", str(logic.RATE_SOFT_DEFAULT)),
+            rate_hard=_int("RATE_HARD", str(logic.RATE_HARD_DEFAULT)),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
         )

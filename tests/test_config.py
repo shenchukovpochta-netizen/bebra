@@ -22,6 +22,9 @@ from app.config import Config  # noqa: E402
 BASE_ENV = {
     "BOT_TOKEN": "123:abc",
     "POSTGRES_PASSWORD": "pw",
+    # 32 байта в base64: ключ шифрования анкеты обязателен, без него бот
+    # не стартует - паспортным данным негде лежать.
+    "PDN_KEY": base64.b64encode(b"k" * 32).decode(),
     "CHANNEL_ID": "-1001234567890",
     "ADMIN_CHAT_ID": "-1009876543210",
     "ADMINS": "111 222",

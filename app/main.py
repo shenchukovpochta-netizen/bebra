@@ -20,8 +20,10 @@ from aiogram.enums import ParseMode
 from . import tasks
 from .config import Config
 from .db import Database
-from .handlers import menu, moderation, registration
+from .handlers import contract, menu, moderation, registration
 from .middlewares import PipelineMiddleware
+from .services.contract import load_template
+from .services.crypto import Vault
 
 log = logging.getLogger("mybike")
 
@@ -33,6 +35,13 @@ async def run() -> None:
         stream=sys.stdout,
     )
     cfg = Config.load()
+    vault = Vault.from_raw(cfg.pdn_key)
+    # Шаблон читается на старте, хотя нужен только при выдаче договора:
+    # опечатка в пути обнаружилась бы иначе в момент, когда пользователю уже
+    # сказано «заявка одобрена», а договора нет.
+    load_template(cfg.contract_template)
+    log.info("шаблон договора на месте: %s", cfg.contract_template)
+
     db = await Database.connect(cfg.pg)
     await db.apply_schema(Path(__file__).resolve().parent.parent / "schema.sql")
     log.info("схема применена")
@@ -42,10 +51,12 @@ async def run() -> None:
     log.info("бот @%s готов", me.username)
 
     dp = Dispatcher()
-    dp.update.outer_middleware(PipelineMiddleware(db, cfg))
+    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault))
     # Порядок важен: модерация раньше регистрации, иначе клик админа
-    # провалится в пользовательский сценарий. menu - последним, там ловушка.
+    # провалится в пользовательский сценарий. Договор - до регистрации,
+    # чтобы «Подписываю» не поймала ловушка шага. menu - последним.
     dp.include_router(moderation.router)
+    dp.include_router(contract.router)
     dp.include_router(registration.router)
     dp.include_router(menu.router)
 

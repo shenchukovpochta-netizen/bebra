@@ -14,6 +14,7 @@ from . import keyboards as kb
 from . import logic, texts
 from .config import Config
 from .db import Database
+from .services.crypto import Vault
 from .services.subscription import check_subscription
 
 log = logging.getLogger(__name__)
@@ -54,9 +55,18 @@ def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
 
 
 class PipelineMiddleware(BaseMiddleware):
-    def __init__(self, db: Database, cfg: Config) -> None:
+    def __init__(self, db: Database, cfg: Config, vault: Vault) -> None:
         self.db = db
         self.cfg = cfg
+        self.vault = vault
+
+    def _is_service_chat(self, chat_id: int) -> bool:
+        """Служебные чаты: модерация заявок и утверждение договоров.
+
+        Их два, и совпадать они не обязаны: заявки могут разбирать в группе,
+        а договоры утверждает один человек в личке.
+        """
+        return chat_id in {self.cfg.admin_chat_id, self.cfg.contract_chat_id}
 
     async def __call__(self, handler: Handler, event: TelegramObject,
                        data: dict[str, Any]) -> Any:
@@ -70,12 +80,20 @@ class PipelineMiddleware(BaseMiddleware):
 
         is_moderation = (
             isinstance(inner, CallbackQuery)
-            and logic.parse_moderation_callback(inner.data) is not None
+            and logic.is_moderation_data(inner.data)
+        )
+        # Ответ на карточку - это отказ «с указанием ошибок». Что ответили
+        # именно на карточку, выясняет уже обработчик по mod_message_id:
+        # тут дешёвая проверка, чтобы не ходить в базу на каждое сообщение
+        # в служебном чате.
+        is_moderation_reply = (
+            isinstance(inner, Message) and inner.reply_to_message is not None
         )
         if not logic.should_process(
             payload.get("chat_type"),
-            from_admin_chat=chat_id == self.cfg.admin_chat_id,
+            from_admin_chat=self._is_service_chat(chat_id),
             is_moderation_callback=is_moderation,
+            is_moderation_reply=is_moderation_reply,
         ):
             return None
 
@@ -83,8 +101,14 @@ class PipelineMiddleware(BaseMiddleware):
             log.info("апдейт %s уже обработан, пропускаю", update.update_id)
             return None
 
+        # Мимо пользовательского конвейера идёт только то, что пришло
+        # из служебного чата. Чат утверждения договоров - это личка, и без
+        # проверки чата владелец @arenda_velo_kazan попадал бы под гейт
+        # подписки и рейт-лимит наравне с клиентами.
+        service = self._is_service_chat(chat_id) and (is_moderation or is_moderation_reply)
+
         try:
-            result = await self._dispatch(handler, event, data, inner, user_id, is_moderation)
+            result = await self._dispatch(handler, event, data, inner, user_id, service)
         except Exception:
             # Клейм намеренно НЕ закрывается: запись остаётся в processing,
             # и повторная доставка того же update_id переиграет его. Пометить
@@ -98,6 +122,7 @@ class PipelineMiddleware(BaseMiddleware):
                         inner: Any, user_id: int, is_moderation: bool) -> Any:
         data["db"] = self.db
         data["cfg"] = self.cfg
+        data["vault"] = self.vault
 
         # Модерация идёт мимо всего пользовательского конвейера: у админа нет
         # анкеты, рейт-лимит и подписка к нему не относятся.

@@ -52,6 +52,12 @@ if [ ! -s secrets/db_password ]; then
   openssl rand -hex 32 | tr -d '\n' > secrets/db_password
   say "сгенерирован secrets/db_password"
 fi
+if [ ! -s secrets/pdn_key ]; then
+  # Ключ шифрования анкеты. Генерируется один раз: смена ключа делает
+  # незаконченные анкеты нечитаемыми, и люди проходят их заново.
+  openssl rand -base64 32 | tr -d '\n' > secrets/pdn_key
+  say "сгенерирован secrets/pdn_key — положите его в бэкап отдельно от базы"
+fi
 if [ ! -s secrets/bot_token ]; then
   die "нет secrets/bot_token. Создайте: printf '%s' '<токен>' > secrets/bot_token"
 fi

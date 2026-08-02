@@ -19,6 +19,10 @@ PATCHABLE = frozenset({
     "doc_ocr", "name_match", "ocr_at",
     "oferta_version", "oferta_accepted_at", "pdn_version", "pdn_consent_at",
     "status", "reject_reason", "reviewed_by", "reviewed_at", "purge_after",
+    "anketa_enc",
+    "contract_no", "contract_path", "contract_sha256", "contract_status",
+    "contract_issued_at", "contract_signed_at",
+    "mod_chat_id", "mod_message_id",
 })
 
 JSON_COLUMNS = frozenset({"doc_ocr"})
@@ -179,6 +183,44 @@ class Database:
             tg_id, sha256,
         ) or 0
 
+    # ─────────────────────── договор ───────────────────────
+
+    async def next_contract_seq(self) -> int:
+        """Очередной номер договора.
+
+        nextval, а не «max + 1»: два одновременных подтверждения при втором
+        варианте получают один номер, и в двух бумажных договорах оказывается
+        одинаковый реквизит. Пропуски в нумерации при откате транзакции
+        допустимы, повтор - нет.
+        """
+        return int(await self.pool.fetchval("select nextval('bot.contract_seq')"))
+
+    async def user_by_mod_message(self, chat_id: int, message_id: int) -> asyncpg.Record | None:
+        """Кому принадлежит карточка модерации, на которую ответили.
+
+        Ответ реплаем - это способ отклонить заявку с описанием ошибок.
+        Разбирать tg_id из подписи карточки нельзя: любая правка формулировки
+        в texts.py тихо ломала бы отказы.
+        """
+        return await self.pool.fetchrow(
+            "select * from bot.users where mod_chat_id = $1 and mod_message_id = $2",
+            chat_id, message_id,
+        )
+
+    async def clear_anketa(self, tg_id: int) -> None:
+        """Стирает паспортные данные и адреса из базы.
+
+        Вызывается, когда договор подписан и зафиксирован в Telegram: дальше
+        эти данные боту не нужны, а хранить их «на всякий случай» - ровно
+        то, за что спрашивают при проверке. Реквизиты самого договора
+        (номер, отпечаток, момент подписания) остаются: без них нечем
+        доказать, что подписано именно то, что выдано.
+        """
+        await self.pool.execute(
+            "update bot.users set anketa_enc = null, updated_at = now() where tg_id = $1",
+            tg_id,
+        )
+
     async def set_purge_after(self, tg_id: int, days: int) -> None:
         await self.pool.execute(
             "update bot.users set purge_after = now() + ($2 || ' days')::interval, "
@@ -190,9 +232,10 @@ class Database:
 
     async def rows_to_purge(self, limit: int = 200) -> list[asyncpg.Record]:
         return await self.pool.fetch(
-            "select tg_id, doc_path, selfie_path from bot.users "
+            "select tg_id, doc_path, selfie_path, contract_path from bot.users "
             "where purge_after is not null and purge_after < now() "
-            "  and (doc_path is not null or selfie_path is not null) "
+            "  and (doc_path is not null or selfie_path is not null "
+            "       or contract_path is not null) "
             "limit $1",
             limit,
         )
@@ -205,11 +248,17 @@ class Database:
         с нового аккаунта. Хэш не позволяет восстановить изображение, но
         остаётся псевдонимным идентификатором - и это должно быть описано
         в политике обработки, а не подразумеваться.
+
+        Файл договора удаляется вместе со сканами, а его реквизиты - номер,
+        отпечаток текста и момент подписания - остаются: иначе нечем доказать,
+        что было подписано, а сам договор в бумажном виде продолжает
+        существовать у сторон.
         """
         await self.pool.execute(
             "update bot.users set doc_file_id = null, doc_path = null, "
             "selfie_file_id = null, selfie_path = null, "
             "doc_ocr = null, name_match = null, ocr_at = null, "
+            "contract_path = null, anketa_enc = null, "
             "purge_after = null, updated_at = now() where tg_id = $1",
             tg_id,
         )

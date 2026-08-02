@@ -24,27 +24,62 @@ try:
     from aiogram import Bot, Dispatcher
     from aiogram.client.session.base import BaseSession
     from aiogram.methods import (
-        AnswerCallbackQuery, EditMessageCaption, EditMessageReplyMarkup,
-        GetChatMember, GetMe, SendMessage, SendPhoto,
+        AnswerCallbackQuery,
+        EditMessageCaption,
+        EditMessageReplyMarkup,
+        GetChatMember,
+        GetMe,
+        SendDocument,
+        SendMessage,
+        SendPhoto,
     )
     from aiogram.types import (
-        CallbackQuery, Chat, ChatMemberLeft, ChatMemberMember, Contact,
-        Message, PhotoSize, Update, User,
+        CallbackQuery,
+        Chat,
+        ChatMemberLeft,
+        ChatMemberMember,
+        Contact,
+        Message,
+        PhotoSize,
+        Update,
+        User,
     )
+
     # app.tasks тянет app.db, а тот - asyncpg, поэтому обе зависимости
     # проверяются одной попыткой: иначе набор падает на машине без asyncpg.
     from app import logic, tasks
     from app.config import Config
-    from app.handlers import menu, moderation, registration
+    from app.handlers import contract, menu, moderation, registration
     from app.middlewares import PipelineMiddleware
     from app.services import files
+    from app.services.crypto import Vault, generate_key
     HAVE_AIOGRAM = True
 except ImportError:                                    # pragma: no cover
     HAVE_AIOGRAM = False
+    # Заглушка обязательна: FakeSession ниже наследуется от BaseSession
+    # на уровне модуля, и без неё импорт падал с NameError вместо пропуска -
+    # весь файл не собирался, хотя пропустить его тут и предполагается.
+    BaseSession = object
 
 USER_ID, CHAT_ID = 5001, 5001
 ADMIN_ID, ADMIN_CHAT = 111, -1009876543210
 CHANNEL_ID = -1001234567890
+# Чат фиксации сдачи и номер темы в нём - туда уходит подписанный договор.
+FIX_CHAT, FIX_TOPIC = -1005555555555, 42
+
+# Ответы на шаги анкеты в порядке logic.ANKETA_STEPS.
+ANKETA_ANSWERS = (
+    "07.03.1990",
+    "гор. Казань",
+    "1234 567890",
+    "01.02.2015",
+    "160-002",
+    "ОУФМС России по Респ. Татарстан",
+    "г. Казань, ул. Баумана, д. 1, кв. 2",
+    "г. Казань, ул. Кремлёвская, д. 5, кв. 9",
+    "+7 900 111-22-33",
+    "+7 900 444-55-66",
+)
 
 
 # ─────────────────────────── заглушки ───────────────────────────
@@ -71,7 +106,7 @@ class FakeSession(BaseSession):
             user = User(id=method.user_id, is_bot=False, first_name="u")
             return (ChatMemberMember(user=user, status="member") if self.subscribed
                     else ChatMemberLeft(user=user, status="left"))
-        if isinstance(method, (SendMessage, SendPhoto)):
+        if isinstance(method, (SendMessage, SendPhoto, SendDocument)):
             return Message(
                 message_id=len(self.calls), date=datetime.now(timezone.utc),
                 chat=Chat(id=method.chat_id, type="private"),
@@ -87,17 +122,21 @@ class FakeSession(BaseSession):
         for m in self.calls:
             if isinstance(m, SendMessage):
                 out.append(m.text)
-            elif isinstance(m, SendPhoto):
-                out.append(m.caption or "<фото>")
+            elif isinstance(m, (SendPhoto, SendDocument)):
+                out.append(m.caption or "<файл>")
         return out
 
     def sent_to(self, chat_id: int) -> list:
         return [m for m in self.calls
-                if isinstance(m, (SendMessage, SendPhoto)) and m.chat_id == chat_id]
+                if isinstance(m, (SendMessage, SendPhoto, SendDocument))
+                and m.chat_id == chat_id]
+
+    def documents(self) -> list:
+        return [m for m in self.calls if isinstance(m, SendDocument)]
 
     def last_markup(self):
         for m in reversed(self.calls):
-            if isinstance(m, (SendMessage, SendPhoto)) and m.reply_markup:
+            if isinstance(m, (SendMessage, SendPhoto, SendDocument)) and m.reply_markup:
                 return m.reply_markup
         return None
 
@@ -126,7 +165,10 @@ class FakeDB:
             "status": logic.ST_NEW, "rl_count": 0, "full_name": None, "phone": None,
             "doc_file_id": None, "selfie_file_id": None, "doc_path": None,
             "selfie_path": None, "doc_ocr": None, "name_match": None, "ocr_at": None,
-            "purge_after": None,
+            "purge_after": None, "anketa_enc": None,
+            "contract_no": None, "contract_path": None, "contract_sha256": None,
+            "contract_status": logic.CT_NONE, "contract_issued_at": None,
+            "contract_signed_at": None, "mod_chat_id": None, "mod_message_id": None,
         })
         row["rl_count"] += 1
         return dict(row)
@@ -155,17 +197,38 @@ class FakeDB:
     async def count_duplicate_docs(self, tg_id, sha256):
         return 0
 
+    async def next_contract_seq(self):
+        self.contract_seq = getattr(self, "contract_seq", 0) + 1
+        return self.contract_seq
+
+    async def user_by_mod_message(self, chat_id, message_id):
+        for row in self.users.values():
+            if row.get("mod_chat_id") == chat_id and row.get("mod_message_id") == message_id:
+                return dict(row)
+        return None
+
+    async def clear_anketa(self, tg_id):
+        self.users[tg_id]["anketa_enc"] = None
+
+
+TEMPLATE = Path(__file__).resolve().parent.parent / "app" / "contract_template.md"
+
 
 def make_config(**overrides) -> Config:
     base = dict(
         bot_token="123:abc", channel_id=CHANNEL_ID, admin_chat_id=ADMIN_CHAT,
         admins=(ADMIN_ID,), pg={}, storage_dir=Path("/tmp/kyc"),
+        pdn_key=generate_key(), contract_chat_id=ADMIN_CHAT,
+        fix_chat_id=FIX_CHAT, fix_topic_id=FIX_TOPIC, contract_template=TEMPLATE,
         channel_url="https://t.me/test", oferta_url="https://e.ru/o",
         oferta_version="2026-01-15", pdn_url="", pdn_version="2026-01-15",
         video_url="https://e.ru/v", ocr_enabled=False, ocr_url="", ocr_model="",
         ocr_api_key="", ocr_folder_id="", ocr_processor="Обработчик",
         purge_approved_days=90, purge_rejected_days=3, updates_log_days=7,
-        rate_soft=20, rate_hard=25,
+        # Рейт-лимит здесь снят намеренно: FakeDB не двигает окно, а один
+        # сценарный тест прогоняет две полные регистрации подряд. Сами пороги
+        # проверяются в test_logic, где для этого не нужен Dispatcher.
+        rate_soft=10_000, rate_hard=10_000,
     )
     base.update(overrides)
     return Config(**base)
@@ -177,19 +240,21 @@ def build(cfg: Config | None = None):
     # Router - объект уровня модуля, и aiogram запрещает подключать его
     # ко второму Dispatcher. Перезагружаем модули, чтобы каждый тест получил
     # собственные роутеры с теми же обработчиками.
-    for module in (registration, moderation, menu):
+    for module in (contract, registration, moderation, menu):
         importlib.reload(module)
 
     cfg = cfg or make_config()
     db = FakeDB()
     session = FakeSession()
     bot = Bot("123:abc", session=session)
+    vault = Vault.from_raw(cfg.pdn_key)
     dp = Dispatcher()
-    dp.update.outer_middleware(PipelineMiddleware(db, cfg))
+    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault))
     dp.include_router(moderation.router)
+    dp.include_router(contract.router)
     dp.include_router(registration.router)
     dp.include_router(menu.router)
-    return dp, bot, db, session, cfg
+    return dp, bot, db, session, cfg, vault
 
 
 _seq = [0]
@@ -201,7 +266,7 @@ def _next_id() -> int:
 
 
 def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
-        photo=False, contact_user_id=None) -> Update:
+        photo=False, contact_user_id=None, reply_to=None) -> Update:
     kwargs = {}
     if photo:
         kwargs["photo"] = [PhotoSize(file_id="f1", file_unique_id="u1",
@@ -209,6 +274,11 @@ def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
     if contact_user_id is not None:
         kwargs["contact"] = Contact(phone_number="79990000000", first_name="U",
                                     user_id=contact_user_id)
+    if reply_to is not None:
+        kwargs["reply_to_message"] = Message(
+            message_id=reply_to, date=datetime.now(timezone.utc),
+            chat=Chat(id=chat_id, type=chat_type),
+        )
     return Update(update_id=_next_id(), message=Message(
         message_id=_next_id(), date=datetime.now(timezone.utc),
         chat=Chat(id=chat_id, type=chat_type),
@@ -237,11 +307,12 @@ async def settle() -> None:
 class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
-        self.dp, self.bot, self.db, self.session, self.cfg = build()
+        self.dp, self.bot, self.db, self.session, self.cfg, self.vault = build()
         # скачивание и укладка файлов - не предмет этого теста
         self._orig_download, self._orig_store = files.download, files.store
         files.download = lambda bot, file_id, max_bytes: _async(b"bytes")
-        files.store = lambda d, tg, slot, data: (Path(f"/tmp/{tg}-{slot}.jpg"), "hash")
+        files.store = lambda d, tg, slot, data: (
+            Path(f"/tmp/{tg}-{slot}.{files.SLOT_EXT[slot]}"), "hash")
 
     async def asyncTearDown(self):
         files.download, files.store = self._orig_download, self._orig_store
@@ -251,21 +322,100 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.dp.feed_update(self.bot, update)
         await settle()
 
+    def anketa(self, tg_id: int = USER_ID) -> dict:
+        return self.vault.decrypt(self.db.users[tg_id]["anketa_enc"])
+
+    async def fill_anketa(self):
+        for answer in ANKETA_ANSWERS:
+            await self.feed(msg(answer))
+
     async def register_up_to_confirm(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
+        await self.fill_anketa()
         await self.feed(msg(photo=True))
         await self.feed(msg(photo=True))
+
+    async def submit(self):
+        await self.register_up_to_confirm()
+        await self.feed(cb("confirm"))
+
+    def approve(self):
+        return self.feed(cb(f"approve:{USER_ID}", chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup"))
 
     # ─── сам сценарий ───
 
     async def test_full_registration_reaches_confirm(self):
         await self.register_up_to_confirm()
-        self.assertEqual(self.db.users[USER_ID]["state"], logic.CONFIRM)
-        self.assertEqual(self.db.users[USER_ID]["full_name"], "Иванов Иван Иванович")
-        self.assertEqual(self.db.users[USER_ID]["phone"], "79990000000")
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM)
+        self.assertEqual(row["full_name"], "Иванов Иван Иванович")
+        self.assertEqual(row["phone"], "+79990000000")
+
+    async def test_anketa_collected_and_normalized(self):
+        await self.register_up_to_confirm()
+        anketa = self.anketa()
+        self.assertEqual(anketa["passport_number"], "1234 567890")
+        self.assertEqual(anketa["passport_code"], "160-002")
+        # Телефоны приводятся к одному виду: в договоре три номера
+        # не должны выглядеть по-разному.
+        self.assertEqual(anketa["phone2"], "+79001112233")
+        self.assertEqual(anketa["phone3"], "+79004445566")
+        self.assertTrue(logic.anketa_complete(anketa))
+
+    async def test_anketa_is_encrypted_at_rest(self):
+        """Паспортные данные не должны читаться из строки, лежащей в базе."""
+        await self.register_up_to_confirm()
+        stored = self.db.users[USER_ID]["anketa_enc"]
+        self.assertIsInstance(stored, str)
+        for secret in ("1234 567890", "160-002", "Баумана"):
+            self.assertNotIn(secret, stored)
+
+    async def test_bad_passport_does_not_advance(self):
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.feed(msg("07.03.1990"))
+        await self.feed(msg("гор. Казань"))
+        await self.feed(msg("12345"))                    # не 10 цифр
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT)
+        self.assertIn("10 цифр", " ".join(self.session.sent()))
+
+    async def test_underage_rejected_at_birth_date(self):
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.feed(msg("01.01.2020"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_BIRTH)
+        self.assertIn("18 лет", " ".join(self.session.sent()))
+
+    async def test_same_address_button_copies_registration(self):
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        for answer in ANKETA_ANSWERS[:7]:
+            await self.feed(msg(answer))
+        await self.feed(msg("Совпадает с регистрацией"))
+        anketa = self.anketa()
+        self.assertEqual(anketa["live_address"], anketa["reg_address"])
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE2)
+
+    async def test_duplicate_phone_rejected(self):
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        for answer in ANKETA_ANSWERS[:8]:
+            await self.feed(msg(answer))
+        await self.feed(msg("+7 999 000-00-00"))         # это основной номер
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE2)
+        self.assertIn("уже указан", " ".join(self.session.sent()))
 
     async def test_consent_screen_names_the_data(self):
         await self.feed(msg("/start"))
@@ -283,44 +433,154 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_CONTACT)
 
     async def test_moderation_card_goes_to_admin_chat(self):
-        await self.register_up_to_confirm()
-        await self.feed(cb("confirm"))
+        await self.submit()
         self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_PENDING)
         self.assertTrue(self.session.sent_to(ADMIN_CHAT),
                         "карточка модерации не ушла в служебный чат")
 
+    async def test_moderation_card_lists_contract_fields(self):
+        """Утверждающий сверяет карточку с документом глазами - в ней должны
+        быть все реквизиты будущего договора."""
+        await self.submit()
+        card = " ".join(m.caption or "" for m in self.session.sent_to(ADMIN_CHAT))
+        for expected in ("1234 567890", "160-002", "Баумана", "+79001112233"):
+            self.assertIn(expected, card)
+
     async def test_approve_from_group_chat_works(self):
         """Главная регрессия: раньше middleware отбрасывал всё непубличное,
         и нажатие «Одобрить» в группе модерации не доходило до обработчика."""
-        await self.register_up_to_confirm()
-        await self.feed(cb("confirm"))
-        await self.feed(cb(f"approve:{USER_ID}", chat_id=ADMIN_CHAT,
-                           user_id=ADMIN_ID, chat_type="supergroup"))
-        self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_APPROVED)
-        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        await self.submit()
+        await self.approve()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["status"], logic.ST_APPROVED)
+        # Одобрение не завершает историю: договор выдан, но ещё не подписан.
+        self.assertEqual(row["state"], logic.WAIT_SIGN)
+        self.assertEqual(row["contract_status"], logic.CT_ISSUED)
 
-    async def test_reject_from_group_chat_works(self):
-        await self.register_up_to_confirm()
-        await self.feed(cb("confirm"))
+    async def test_approve_issues_contract_to_user(self):
+        await self.submit()
+        await self.approve()
+        to_user = [m for m in self.session.documents() if m.chat_id == USER_ID]
+        self.assertTrue(to_user, "договор не отправлен пользователю")
+        number = self.db.users[USER_ID]["contract_no"]
+        self.assertRegex(number, r"^АВ-\d{4}-\d{6}$")
+        self.assertIn(number, to_user[0].caption)
+
+    async def test_sign_fixes_contract_in_topic(self):
+        await self.submit()
+        await self.approve()
+        await self.feed(cb("sign"))
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertEqual(row["contract_status"], logic.CT_SIGNED)
+        self.assertIsNotNone(row["contract_signed_at"])
+
+        to_fix = [m for m in self.session.documents() if m.chat_id == FIX_CHAT]
+        self.assertTrue(to_fix, "подписанный договор не ушёл в чат фиксации")
+        self.assertEqual(to_fix[0].message_thread_id, FIX_TOPIC,
+                         "договор должен попадать в подгруппу фиксации сдачи")
+        self.assertIn(row["contract_sha256"], to_fix[0].caption)
+
+    async def test_signing_wipes_passport_data(self):
+        """После подписи паспортные данные боту не нужны и стираются."""
+        await self.submit()
+        await self.approve()
+        self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"])
+        await self.feed(cb("sign"))
+        self.assertIsNone(self.db.users[USER_ID]["anketa_enc"])
+        # Реквизиты договора остаются: без них нечем доказать, что подписано.
+        self.assertIsNotNone(self.db.users[USER_ID]["contract_sha256"])
+
+    async def test_contract_mistake_restarts_anketa(self):
+        await self.submit()
+        await self.approve()
+        await self.feed(cb("contract_mistake"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_FIO)
+        self.assertIsNone(row["anketa_enc"])
+
+    async def test_reject_asks_for_reason_first(self):
+        """«Отклонить» само по себе решение не принимает: без указания ошибки
+        человек присылает то же самое второй раз."""
+        await self.submit()
         await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
                            user_id=ADMIN_ID, chat_type="supergroup"))
-        self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_REJECTED)
+        self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_PENDING)
+
+    async def test_reject_with_reason_returns_to_that_step(self):
+        await self.submit()
+        await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        await self.feed(cb(f"rj:{USER_ID}:selfie", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["status"], logic.ST_REJECTED)
+        # Возврат на шаг селфи, а не в начало анкеты: переигрывать паспортные
+        # данные из-за нечитаемого селфи незачем.
+        self.assertEqual(row["state"], logic.WAIT_SELFIE)
+        self.assertIn("селфи", " ".join(self.session.sent()).lower())
+
+    async def test_fixing_only_the_selfie_clears_purge_deadline(self):
+        """Отказ ставит дату удаления на 3 дня вперёд, а причина «селфи»
+        возвращает человека мимо шага документа. Без сброса ретеншен снёс бы
+        фото паспорта посреди исправления, и заявка ушла бы без документа."""
+        await self.submit()
+        await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        await self.feed(cb(f"rj:{USER_ID}:selfie", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        self.assertIsNotNone(self.db.users[USER_ID]["purge_after"])
+        await self.feed(msg(photo=True))                 # новое селфи
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM)
+        self.assertIsNone(row["purge_after"],
+                          "дата удаления должна сбрасываться и на шаге селфи")
+
+    async def test_reject_by_reply_sends_moderator_text(self):
+        await self.submit()
+        card = self.db.users[USER_ID]["mod_message_id"]
+        self.assertIsNotNone(card, "карточка модерации не запомнена")
+        await self.feed(msg("Паспорт засвечен, переснимите при дневном свете",
+                            chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
+                            chat_type="supergroup", reply_to=card))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["status"], logic.ST_REJECTED)
+        self.assertIn("засвечен", row["reject_reason"])
+        self.assertIn("засвечен", " ".join(self.session.sent()))
+
+    async def test_user_reply_in_private_chat_is_not_swallowed(self):
+        """Роутер модерации подключается первым. С фильтром «любой реплай»
+        он ловил бы и обычного пользователя, ответившего на сообщение бота:
+        человек посреди анкеты не получал бы ничего в ответ."""
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        before = len(self.session.sent())
+        await self.feed(msg("07.03.1990", reply_to=1))    # ответ на сообщение бота
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_BIRTH_PLACE,
+                         "ответ реплаем должен обрабатываться как обычный шаг анкеты")
+        self.assertGreater(len(self.session.sent()), before)
+
+    async def test_reply_from_non_admin_ignored(self):
+        await self.submit()
+        card = self.db.users[USER_ID]["mod_message_id"]
+        await self.feed(msg("отклоняю", chat_id=ADMIN_CHAT, user_id=777777,
+                            chat_type="supergroup", reply_to=card))
+        self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_PENDING)
 
     async def test_non_admin_cannot_approve(self):
-        await self.register_up_to_confirm()
-        await self.feed(cb("confirm"))
+        await self.submit()
         await self.feed(cb(f"approve:{USER_ID}", chat_id=ADMIN_CHAT,
                            user_id=777777, chat_type="supergroup"))
         self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_PENDING)
 
     async def test_second_moderator_click_is_noop(self):
-        await self.register_up_to_confirm()
-        await self.feed(cb("confirm"))
-        first = cb(f"approve:{USER_ID}", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
-                   chat_type="supergroup")
-        await self.feed(first)
+        await self.submit()
+        await self.approve()
         notifications = len(self.session.sent_to(USER_ID))
-        await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
+        await self.feed(cb(f"rj:{USER_ID}:doc", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
                            chat_type="supergroup"))
         self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_APPROVED)
         self.assertEqual(len(self.session.sent_to(USER_ID)), notifications,
@@ -367,9 +627,18 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("Петров Пётр Петрович"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
+        await self.fill_anketa()
         await self.feed(msg(photo=True))
         self.assertIsNone(self.db.users[USER_ID]["purge_after"],
                           "дата удаления должна сбрасываться при новой загрузке")
+
+    async def test_restart_clears_anketa(self):
+        """«Заполнить повторно» означает и новые паспортные данные тоже:
+        оставленная анкета молча уехала бы в договор старой."""
+        await self.register_up_to_confirm()
+        self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"])
+        await self.feed(cb("restart"))
+        self.assertIsNone(self.db.users[USER_ID]["anketa_enc"])
 
     async def test_legacy_state_recovers(self):
         await self.feed(msg("/start"))
@@ -382,6 +651,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
+        await self.fill_anketa()
         await self.feed(msg("просто текст"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_DOC)
 

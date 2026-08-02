@@ -42,9 +42,12 @@ if unused_in_compose:
 config_vars = set(re.findall(r'_env\(\s*"([A-Z_][A-Z0-9_]*)"', config))
 config_vars |= set(re.findall(r'_int\(\s*"([A-Z_][A-Z0-9_]*)"', config))
 config_secrets = set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', config))
-not_passed = (config_vars - compose_vars - {"POSTGRES_HOST", "POSTGRES_PORT",
-                                            "STORAGE_DIR", "OCR_URL", "OCR_MODEL",
-                                            "AUTO_APPROVE", "RATE_SOFT", "RATE_HARD"})
+# Переменные, которые compose задаёт литералом, а не через ${}: подставлять
+# их из .env незачем, значение фиксировано устройством контейнера.
+LITERAL_IN_COMPOSE = {"POSTGRES_HOST", "POSTGRES_PORT", "STORAGE_DIR",
+                      "CONTRACT_TEMPLATE", "OCR_URL", "OCR_MODEL",
+                      "AUTO_APPROVE", "RATE_SOFT", "RATE_HARD"}
+not_passed = config_vars - compose_vars - LITERAL_IN_COMPOSE
 if not_passed:
     problems.append(
         f"config.py читает переменные, которых compose не передаёт: {sorted(not_passed)}")
@@ -54,8 +57,12 @@ for secret in config_secrets:
         problems.append(f"секрет {secret} не пробрасывается через {secret}_FILE в compose")
 
 # ── 3. состав пакета ↔ список заливки в deploy.ps1 ───────────────────────
+# Служебные каталоги в состав пакета не входят. Без исключения .git проверка
+# требовала заливать на сервер всю историю репозитория и выдавала полсотни
+# «файлов», которых в проекте нет.
+SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", ".ruff_cache", ".pytest_cache"}
 shipped = {p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*")
-           if p.is_file() and "__pycache__" not in p.parts}
+           if p.is_file() and not SKIP_DIRS & set(p.parts)}
 # Берём только то, что похоже на имя файла в проекте: с точкой или Dockerfile
 # (у него нет расширения). Абсолютные пути - это каталог развёртывания, не файл.
 listed = {m for m in re.findall(r"'([\w./-]+)'", deploy)

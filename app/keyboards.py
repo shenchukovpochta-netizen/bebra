@@ -53,6 +53,35 @@ def moderation(tg_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
+def reject_reasons(tg_id: int, reasons: dict[str, tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Второй экран кнопки «Отклонить»: за что именно.
+
+    Готовые причины, а не только свободный текст: у каждой из них есть шаг,
+    на который человека вернут. Переигрывать всю анкету из-за нечитаемого
+    селфи - верный способ получить брошенную заявку вместо исправленной.
+    """
+    rows = [[InlineKeyboardButton(text=title, callback_data=f"rj:{tg_id}:{code}")]
+            for code, (title, _state) in reasons.items()]
+    rows.append([InlineKeyboardButton(text="✍️ Свой текст", callback_data=f"rjc:{tg_id}")])
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"rjx:{tg_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def same_address() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Совпадает с регистрацией")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def sign_contract() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Подписываю", callback_data="sign")],
+        [InlineKeyboardButton(text="Есть ошибка", callback_data="contract_mistake")],
+    ])
+
+
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[

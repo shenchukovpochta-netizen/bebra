@@ -8,6 +8,10 @@ secrets:
     file: ./secrets/bot_token
   ocr_api_key:
     file: ./secrets/ocr_api_key
+  # Ключ шифрования анкеты. Отдельным файлом, чтобы дамп базы без него
+  # ничего не давал: паспортные данные лежат в bot.users зашифрованными.
+  pdn_key:
+    file: ./secrets/pdn_key
 
 services:
   postgres:
@@ -35,13 +39,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    secrets: [db_password, bot_token, ocr_api_key]
+    secrets: [db_password, bot_token, ocr_api_key, pdn_key]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
       BOT_TOKEN_FILE: /run/secrets/bot_token
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       OCR_API_KEY_FILE: /run/secrets/ocr_api_key
+      PDN_KEY_FILE: /run/secrets/pdn_key
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
@@ -51,6 +56,14 @@ services:
       CHANNEL_URL: ${CHANNEL_URL}
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID}
       ADMINS: ${ADMINS}
+
+      # Кому уходит договор на утверждение и куда - подписанный.
+      CONTRACT_CHAT_ID: ${CONTRACT_CHAT_ID}
+      FIX_CHAT_ID: ${FIX_CHAT_ID}
+      FIX_TOPIC_ID: ${FIX_TOPIC_ID}
+      # Шаблон монтируется файлом, а не запекается в образ: текст договора
+      # правят юрист и владелец проката, пересборка образа для этого не нужна.
+      CONTRACT_TEMPLATE: /srv/app/contract_template.md
 
       OFERTA_URL: ${OFERTA_URL}
       OFERTA_VERSION: ${OFERTA_VERSION}
@@ -70,6 +83,8 @@ services:
       TZ: ${TZ:-Europe/Moscow}
     volumes:
       - kycfiles:/files
+      # Правка текста договора не должна требовать пересборки образа.
+      - ./app/contract_template.md:/srv/app/contract_template.md:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }

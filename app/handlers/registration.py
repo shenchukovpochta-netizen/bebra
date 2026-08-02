@@ -8,28 +8,19 @@ from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import BaseFilter, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from .. import keyboards as kb
 from .. import logic, tasks, texts
 from ..config import Config
 from ..db import Database, utcnow
+from ..filters import StateIs
 from ..services import files, ocr
+from ..services.crypto import Vault
 
 log = logging.getLogger(__name__)
 router = Router(name="registration")
-
-
-class StateIs(BaseFilter):
-    def __init__(self, *states: str) -> None:
-        self.states = set(states)
-
-    # user приходит из middleware, но для апдейтов модерации его нет:
-    # у админа анкеты не заводится. Значение по умолчанию обязательно,
-    # иначе фильтр упадёт с TypeError на чужом апдейте.
-    async def __call__(self, event: Any, user: dict | None = None) -> bool:
-        return bool(user) and user.get("state") in self.states
 
 
 def _file_id(message: Message) -> str | None:
@@ -144,16 +135,111 @@ async def st_contact(message: Message, db: Database, user: dict) -> None:
     if not logic.contact_belongs_to_sender(contact.user_id, message.from_user.id):
         await message.answer(texts.CONTACT_FOREIGN)
         return
+    phone = logic.normalize_phone(contact.phone_number) or contact.phone_number
+    following = logic.next_state(logic.WAIT_CONTACT)
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_CONTACT,
-                          phone=contact.phone_number, state=logic.WAIT_DOC):
+                          phone=phone, state=following):
         return
     await db.log_event(user["tg_id"], "contact_set")
-    await message.answer(texts.ASK_DOC, reply_markup=kb.remove())
+    await message.answer(texts.ANKETA_INTRO, reply_markup=kb.remove())
+    await message.answer(PROMPTS[following])
 
 
 @router.message(StateIs(logic.WAIT_CONTACT))
 async def st_contact_wrong(message: Message) -> None:
     await message.answer(texts.CONTACT_USE_BUTTON)
+
+
+# ─────────────────────────── анкета для договора ───────────────────────────
+
+# Вопрос к каждому шагу. Словарь, а не поле в logic.Step: logic.py намеренно
+# не знает про тексты, туда смотрят тесты без установленного окружения.
+PROMPTS: dict[str, str] = {
+    logic.WAIT_BIRTH: texts.ASK_BIRTH,
+    logic.WAIT_BIRTH_PLACE: texts.ASK_BIRTH_PLACE,
+    logic.WAIT_PASSPORT: texts.ASK_PASSPORT,
+    logic.WAIT_PASSPORT_DATE: texts.ASK_PASSPORT_DATE,
+    logic.WAIT_PASSPORT_CODE: texts.ASK_PASSPORT_CODE,
+    logic.WAIT_PASSPORT_ISSUER: texts.ASK_PASSPORT_ISSUER,
+    logic.WAIT_REG_ADDR: texts.ASK_REG_ADDR,
+    logic.WAIT_LIVE_ADDR: texts.ASK_LIVE_ADDR,
+    logic.WAIT_PHONE2: texts.ASK_PHONE2,
+    logic.WAIT_PHONE3: texts.ASK_PHONE3,
+    logic.WAIT_DOC: texts.ASK_DOC,
+}
+
+SAME_ADDRESS_ANSWER = "совпадает с регистрацией"
+
+
+def _markup_for(state: str) -> Any:
+    """Клавиатура шага. У большинства её нет - только у тех, где кнопка
+    экономит человеку ввод длинной строки."""
+    if state == logic.WAIT_LIVE_ADDR:
+        return kb.same_address()
+    return kb.remove()
+
+
+async def _advance(message: Message, db: Database, vault: Vault, user: dict,
+                   step: logic.Step, value: str) -> None:
+    """Записать ответ шага и задать следующий вопрос.
+
+    Анкета читается и пишется целиком: полей десяток, они лежат в одном
+    зашифрованном столбце, и частичное обновление тут невозможно в принципе.
+    Гонку закрывает expected_state - параллельный апдейт получит False
+    и молча выйдет, не затерев соседнее поле.
+    """
+    anketa = vault.decrypt(user.get("anketa_enc"))
+    anketa[step.field] = value
+    following = logic.next_state(step.state)
+    if not await db.patch(user["tg_id"], expected_state=step.state,
+                          anketa_enc=vault.encrypt(anketa), state=following):
+        return
+    await message.answer(PROMPTS[following], reply_markup=_markup_for(following))
+
+
+@router.message(StateIs(*logic.ANKETA_BY_STATE), F.text)
+async def st_anketa(message: Message, db: Database, vault: Vault, user: dict) -> None:
+    """Один обработчик на все шаги анкеты.
+
+    Десять почти одинаковых функций разъезжаются при первой же вставке поля
+    в середину: какой-нибудь переход неизбежно остаётся указывать на старого
+    соседа. Порядок и проверки лежат в таблице logic.ANKETA_STEPS.
+    """
+    step = logic.ANKETA_BY_STATE[user["state"]]
+    anketa = vault.decrypt(user.get("anketa_enc"))
+
+    if step.state == logic.WAIT_LIVE_ADDR and \
+            message.text.strip().lower() == SAME_ADDRESS_ANSWER:
+        await message.answer(texts.SAME_AS_REG)
+        await _advance(message, db, vault, user, step, anketa.get("reg_address", ""))
+        return
+
+    if step.state in (logic.WAIT_PHONE2, logic.WAIT_PHONE3):
+        taken = [p for p in (logic.normalize_phone(user.get("phone")),
+                             anketa.get("phone2")) if p]
+        result = step.validate(message.text, taken=taken)
+    else:
+        result = step.validate(message.text)
+
+    if not result.ok:
+        await message.answer(result.error)
+        return
+
+    # Сверка двух дат возможна только когда известны обе, поэтому она живёт
+    # здесь, а не в валидаторе одного поля.
+    if step.state == logic.WAIT_PASSPORT_DATE and not logic.passport_date_consistent(
+            {**anketa, "passport_date": result.value}):
+        await message.answer(texts.PASSPORT_DATE_BEFORE_BIRTH)
+        await db.patch(user["tg_id"], expected_state=step.state, state=logic.WAIT_BIRTH)
+        await message.answer(PROMPTS[logic.WAIT_BIRTH])
+        return
+
+    await _advance(message, db, vault, user, step, result.value)
+
+
+@router.message(StateIs(*logic.ANKETA_BY_STATE))
+async def st_anketa_wrong(message: Message) -> None:
+    await message.answer(texts.ANKETA_AS_TEXT)
 
 
 # ─────────────────────────── документ ───────────────────────────
@@ -202,9 +288,15 @@ async def st_selfie(message: Message, bot: Bot, db: Database, cfg: Config, user:
         return
 
     file_id = _file_id(message)
+    # purge_after сбрасывается по той же причине, что и в шаге документа:
+    # отказ модератора ставит дату удаления на 3 дня вперёд, а отказ с причиной
+    # «селфи не подходит» возвращает человека сюда, минуя шаг документа. Без
+    # сброса ретеншен снёс бы фото паспорта прямо посреди исправления, и заявка
+    # ушла бы на модерацию без документа.
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_SELFIE,
                           selfie_file_id=file_id, selfie_path=None,
-                          selfie_sha256=None, state=logic.CONFIRM):
+                          selfie_sha256=None, purge_after=None,
+                          state=logic.CONFIRM):
         return
     await db.log_event(user["tg_id"], "selfie_uploaded")
     await message.answer_photo(
@@ -228,12 +320,14 @@ async def st_selfie_wrong(message: Message) -> None:
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "restart")
 async def cb_restart(callback: CallbackQuery, db: Database, cfg: Config, user: dict) -> None:
     # Ссылки на старые сканы обнуляются, purge_after ставится в прошлое -
-    # ретеншен подберёт файлы и удалит их с диска.
+    # ретеншен подберёт файлы и удалит их с диска. Анкета стирается вместе
+    # с ними: «Заполнить повторно» означает и новые паспортные данные тоже,
+    # а оставленная анкета молча уехала бы в договор старой.
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
                           state=logic.WAIT_FIO, doc_file_id=None, doc_sha256=None,
                           selfie_file_id=None, selfie_sha256=None,
                           doc_ocr=None, name_match=None, ocr_at=None,
-                          purge_after=utcnow()):
+                          anketa_enc=None, purge_after=utcnow()):
         await callback.answer()
         return
     await db.log_event(user["tg_id"], "restart")
@@ -243,7 +337,7 @@ async def cb_restart(callback: CallbackQuery, db: Database, cfg: Config, user: d
 
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "confirm")
 async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
-                     cfg: Config, user: dict) -> None:
+                     cfg: Config, vault: Vault, user: dict) -> None:
     if cfg.auto_approve:
         if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
                               state=logic.APPROVED, status=logic.ST_APPROVED):
@@ -266,10 +360,12 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
     # заявка становится невидимой: пользователь ждёт, модератор не знает.
     # Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
     try:
-        await send_moderation_card(bot, db, cfg, user["tg_id"])
+        await send_moderation_card(bot, db, cfg, vault, user["tg_id"])
     except (TelegramAPIError, CardNotReady):
         log.exception("КАРТОЧКА МОДЕРАЦИИ НЕ ОТПРАВЛЕНА для %s - заявка невидима "
-                      "для модераторов, проверьте ADMIN_CHAT_ID и права бота", user["tg_id"])
+                      "для модераторов. Проверьте CONTRACT_CHAT_ID и то, что "
+                      "владелец аккаунта нажал /start у бота: написать первым "
+                      "в личку бот не может", user["tg_id"])
         await db.log_event(user["tg_id"], "moderation_card_failed")
         await callback.message.answer(texts.SUBMIT_PROBLEM)
 
@@ -301,7 +397,29 @@ class CardNotReady(Exception):
     """Нечего показывать модератору - отправлять карточку без документа нельзя."""
 
 
-async def send_moderation_card(bot: Bot, db: Database, cfg: Config, tg_id: int) -> None:
+def anketa_lines(data: dict, anketa: dict) -> str:
+    """Реквизиты будущего договора построчно, в том же порядке, что в договоре.
+
+    Утверждающий сверяет карточку с фотографией документа глазами, и порядок
+    полей обязан совпадать с порядком в договоре - иначе сверка превращается
+    в поиск по списку.
+    """
+    ctx = logic.contract_context(data, anketa, number="")
+    return "\n".join(
+        f"{label}: <b>{logic.esc(ctx.get(field, '—'))}</b>"
+        for field, label in logic.CONTRACT_LABELS
+    )
+
+
+async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault,
+                               tg_id: int) -> None:
+    """Карточка на утверждение договора.
+
+    Уходит в cfg.contract_chat_id - личку того, кто утверждает договоры.
+    Telegram не позволяет боту написать первым, поэтому владелец аккаунта
+    обязан один раз нажать /start; пока этого не произошло, отправка падает
+    с 403, и вызывающий обязан это обработать.
+    """
     row = await db.get_user(tg_id)
     if row is None:
         raise CardNotReady(f"нет записи о пользователе {tg_id}")
@@ -311,19 +429,32 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, tg_id: int) 
     # пользователю сказано «отправлено».
     if not data.get("doc_file_id"):
         raise CardNotReady(f"у {tg_id} нет doc_file_id")
-    await bot.send_photo(
-        cfg.admin_chat_id,
+
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    missing = logic.missing_anketa_fields(anketa)
+    if missing:
+        # Договор из неполной анкеты собрать нельзя, а карточка без части
+        # реквизитов выглядит как полная - утвердят не глядя.
+        raise CardNotReady(f"у {tg_id} не заполнено: {', '.join(missing)}")
+
+    sent = await bot.send_photo(
+        cfg.contract_chat_id,
         data["doc_file_id"],
-        caption=texts.MOD_CARD.format(
-            fio=logic.esc(data["full_name"]),
-            phone=logic.esc(str(data["phone"] or "").lstrip("+")),
+        caption=texts.CONTRACT_CARD.format(
+            number=logic.esc(data.get("contract_no") or "будет присвоен"),
+            fields=anketa_lines(data, anketa),
             tg_id=tg_id,
             ocr=_ocr_summary(data),
         ),
         reply_markup=kb.moderation(tg_id),
     )
+    # Запоминаем, где лежит карточка: отказ «с указанием ошибок» пишется
+    # ответом на неё, и найти пользователя надо по message_id, а не разбором
+    # текста подписи.
+    await db.patch(tg_id, mod_chat_id=sent.chat.id, mod_message_id=sent.message_id)
     if data["selfie_file_id"]:
-        await bot.send_photo(cfg.admin_chat_id, data["selfie_file_id"], caption=texts.MOD_SELFIE)
+        await bot.send_photo(cfg.contract_chat_id, data["selfie_file_id"],
+                             caption=texts.MOD_SELFIE)
 
 
 async def _process_doc(bot: Bot, db: Database, cfg: Config, tg_id: int,

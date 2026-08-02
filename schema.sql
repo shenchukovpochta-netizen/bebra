@@ -27,6 +27,27 @@ create table if not exists bot.users (
   pdn_version        text,
   pdn_consent_at     timestamptz,
 
+  -- Анкета для договора: паспортные данные, адреса, дополнительные телефоны.
+  -- Один столбец с шифротекстом (AES-256-GCM), а не колонка на поле:
+  -- открытым текстом эти данные в базе быть не должны, а дамп базы делается
+  -- руками и складывается рядом с ней. Ключ - отдельным docker secret.
+  anketa_enc         text,
+
+  -- Договор живёт своим циклом: заявка может быть одобрена, а договор
+  -- ещё не подписан, и выдавать по нему велосипед нельзя.
+  contract_no        text,
+  contract_path      text,
+  contract_sha256    text,
+  contract_status    text        not null default 'none',  -- none|issued|signed
+  contract_issued_at timestamptz,
+  contract_signed_at timestamptz,
+
+  -- Где лежит карточка модерации. Нужно, чтобы отказ «с указанием ошибок»,
+  -- написанный ответом на карточку, нашёл своего пользователя: разбирать
+  -- tg_id из текста подписи - значит сломаться от любой правки формулировки.
+  mod_chat_id        bigint,
+  mod_message_id     bigint,
+
   status             text        not null default 'new',  -- new|pending|approved|rejected
   reject_reason      text,
   reviewed_by        bigint,
@@ -58,6 +79,20 @@ alter table bot.users add column if not exists reviewed_by    bigint;
 alter table bot.users add column if not exists reviewed_at    timestamptz;
 alter table bot.users add column if not exists rl_window      timestamptz not null default now();
 alter table bot.users add column if not exists rl_count       integer     not null default 0;
+alter table bot.users add column if not exists anketa_enc         text;
+alter table bot.users add column if not exists contract_no        text;
+alter table bot.users add column if not exists contract_path      text;
+alter table bot.users add column if not exists contract_sha256    text;
+alter table bot.users add column if not exists contract_status    text not null default 'none';
+alter table bot.users add column if not exists contract_issued_at timestamptz;
+alter table bot.users add column if not exists contract_signed_at timestamptz;
+alter table bot.users add column if not exists mod_chat_id        bigint;
+alter table bot.users add column if not exists mod_message_id     bigint;
+
+-- Сквозная нумерация договоров. Последовательность, а не «максимум плюс один»:
+-- два одновременных подтверждения иначе получают один и тот же номер, и в двух
+-- разных бумажных договорах оказывается одинаковый реквизит.
+create sequence if not exists bot.contract_seq as bigint start with 1;
 
 -- Согласие на обработку данных переехало внутрь оферты, состояние wait_pdn
 -- больше не обрабатывается. Без этой строки застрявшие в нём пользователи
@@ -69,6 +104,9 @@ create index if not exists users_state_idx    on bot.users (state);
 create index if not exists users_status_idx   on bot.users (status);
 create index if not exists users_purge_idx    on bot.users (purge_after) where purge_after is not null;
 create index if not exists users_doc_hash_idx on bot.users (doc_sha256)  where doc_sha256 is not null;
+-- По этому индексу ищется пользователь при ответе на карточку модерации.
+create index if not exists users_mod_msg_idx on bot.users (mod_chat_id, mod_message_id)
+  where mod_message_id is not null;
 
 -- Журнал апдейтов как двухфазный клейм: processing -> done.
 -- Упавшая обработка оставляет запись в processing, и повторная доставка

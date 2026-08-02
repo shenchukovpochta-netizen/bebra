@@ -6,6 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /srv
 
+# Шрифт с кириллицей для договора. Встроенные в PDF шрифты - latin-1,
+# без внешнего файла весь договор вышел бы вопросительными знаками.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # Только список зависимостей: слой не пересобирается при правке кода.
 # Единственный источник версий - requirements.txt, pyproject тянет его же.
 COPY requirements.txt ./
