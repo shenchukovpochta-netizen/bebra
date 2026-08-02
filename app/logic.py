@@ -1,7 +1,7 @@
 """Чистая логика без внешних зависимостей.
 
 Здесь живут все решения, которые можно проверить без Telegram и без базы:
-валидация, экранирование, сверка ФИО с документом, разбор ответа OCR.
+валидация, экранирование, порядок шагов анкеты, реквизиты договора.
 Модуль намеренно не импортирует aiogram и asyncpg - тесты гоняются
 на голом stdlib, без установки окружения.
 """
@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable
@@ -40,7 +40,6 @@ WAIT_PHONE2 = "wait_phone2"
 WAIT_PHONE3 = "wait_phone3"
 
 WAIT_DOC = "wait_doc"
-WAIT_SELFIE = "wait_selfie"
 CONFIRM = "confirm"
 PENDING = "pending"
 # Договор сформирован и одобрен, ждём нажатия «Подписываю». Отдельное
@@ -66,7 +65,7 @@ KNOWN_STATES = frozenset({
     WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
-    WAIT_DOC, WAIT_SELFIE, CONFIRM, PENDING, WAIT_SIGN, APPROVED,
+    WAIT_DOC, CONFIRM, PENDING, WAIT_SIGN, APPROVED,
 })
 
 
@@ -103,8 +102,8 @@ class Validation:
 def validate_fio(raw: str | None) -> Validation:
     """Проверка ФИО.
 
-    Правильность написания здесь не проверяется - сверка идёт с документом
-    на этапе OCR и модерации. Отсекаем только явный мусор и разметку.
+    Правильность написания здесь не проверяется - ФИО сверяет с документом
+    модератор по фотографии. Отсекаем только явный мусор и разметку.
     """
     fio = re.sub(r"\s+", " ", (raw or "").strip())
     if not 5 <= len(fio) <= 120:
@@ -318,7 +317,7 @@ ANKETA_FIELDS = tuple(step.field for step in ANKETA_STEPS)
 FLOW: tuple[str, ...] = (
     WAIT_FIO, WAIT_OFERTA, WAIT_CONTACT,
     *(step.state for step in ANKETA_STEPS),
-    WAIT_DOC, WAIT_SELFIE, CONFIRM,
+    WAIT_DOC, CONFIRM,
 )
 
 
@@ -367,8 +366,8 @@ def validate_upload(is_photo: bool, mime: str | None, size: int | None) -> Valid
     """Проверка присланного файла.
 
     Без неё документом проходил любой файл: PDF или архив сохранялся с
-    расширением .jpg, уходил в OCR, а send_photo с его file_id падал с 400 -
-    карточка модерации не приходила, и заявка терялась молча.
+    расширением .jpg, а send_photo с его file_id падал с 400 - карточка
+    модерации не приходила, и заявка терялась молча.
     """
     if size is not None and size > MAX_UPLOAD_BYTES:
         return Validation(False, error="Файл слишком большой. Пришлите фото до 12 МБ.")
@@ -436,99 +435,9 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
     return m.group(1), target
 
 
-# ─────────────────────────── сверка ФИО с документом ───────────────────────────
-
-MIN_TOKEN = 3          # «оглы», предлоги и инициалы в сравнении не участвуют
-NAME_MATCH_MIN = 0.67  # 2 совпавших токена из 3
-
-
-def normalize_name(value: str | None) -> str:
-    return re.sub(
-        r"\s+", " ",
-        re.sub(r"[^А-ЯA-Z]+", " ", str(value or "").upper().replace("Ё", "Е")),
-    ).strip()
-
-
-@dataclass(frozen=True)
-class OcrResult:
-    entities: dict[str, str] = field(default_factory=dict)
-    matched: tuple[str, ...] = ()
-    tokens_total: int = 0
-    score: float = 0.0
-    recognized: bool = False
-
-    @property
-    def mismatch(self) -> bool:
-        return not self.recognized or self.score < NAME_MATCH_MIN
-
-
-def extract_yandex_vision(payload: Any) -> tuple[list[str], dict[str, str]]:
-    """Единственное вендор-зависимое место.
-
-    Ответ Yandex Vision: result.textAnnotation.{blocks[].lines[].text, entities[]}.
-    Для SmartEngines / Cloud.ru / VK Cloud / PaddleOCR заменяется только эта
-    функция - остальному коду нужны лишь строки и словарь полей.
-    """
-    if not isinstance(payload, dict):
-        return [], {}
-    ta = (payload.get("result") or {}).get("textAnnotation") or {}
-    lines: list[str] = []
-    for block in ta.get("blocks") or []:
-        for line in (block or {}).get("lines") or []:
-            text = (line or {}).get("text")
-            if text:
-                lines.append(str(text))
-    entities: dict[str, str] = {}
-    for ent in ta.get("entities") or []:
-        name = (ent or {}).get("name")
-        if name:
-            entities[str(name)] = str((ent or {}).get("text") or "")
-    return lines, entities
-
-
-MAX_SUFFIX_DIFF = 2
-
-
-def token_matches(token: str, words: Iterable[str]) -> bool:
-    """Совпадение по слову целиком, а не по подстроке.
-
-    Подстрочное сравнение засчитывало бы «ПЕТР» внутри «ПЕТРОВНА» - то есть
-    мужское имя подтверждалось бы женским отчеством. Допуск на хвост оставлен
-    для склонений и обрезки распознавания: «ИВАН» ↔ «ИВАНОВ» проходит,
-    «ПЕТР» ↔ «ПЕТРОВНА» уже нет.
-    """
-    for word in words:
-        if word == token:
-            return True
-        if word.startswith(token) and len(word) - len(token) <= MAX_SUFFIX_DIFF:
-            return True
-    return False
-
-
-def match_name(full_name: str | None, payload: Any) -> OcrResult:
-    """Насколько введённое ФИО совпало с тем, что видно в документе.
-
-    Сырой текст документа наружу не отдаётся: только структурные поля и доля
-    совпадения. Меньше ПДн в хранении при том же контроле.
-    """
-    lines, entities = extract_yandex_vision(payload)
-    recognized = bool(lines or entities)
-    words = [w for w in normalize_name(" ".join([*lines, *entities.values()])).split(" ") if w]
-    tokens = [t for t in normalize_name(full_name).split(" ") if len(t) >= MIN_TOKEN]
-    matched = tuple(t for t in tokens if token_matches(t, words))
-    score = round(len(matched) / len(tokens), 2) if tokens else 0.0
-    return OcrResult(
-        entities=entities,
-        matched=matched,
-        tokens_total=len(tokens),
-        score=score,
-        recognized=recognized,
-    )
-
-
 # ─────────────────────────── прочее ───────────────────────────
 
-STORE_FILE_NAME = re.compile(r"^\d+-(?:(?:doc|selfie)-\d+\.jpg|contract-\d+\.pdf)$")
+STORE_FILE_NAME = re.compile(r"^\d+-(?:doc-\d+\.jpg|contract-\d+\.pdf)$")
 
 
 def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:
@@ -610,7 +519,6 @@ REJECT_REASONS: dict[str, tuple[str, str]] = {
     "addr": ("Адрес указан не полностью", WAIT_REG_ADDR),
     "phones": ("Телефоны не подходят", WAIT_PHONE2),
     "doc": ("Фото документа не читается", WAIT_DOC),
-    "selfie": ("Селфи с документом не подходит", WAIT_SELFIE),
 }
 
 

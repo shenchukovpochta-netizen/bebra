@@ -105,13 +105,6 @@ class Config:
     pdn_version: str
     video_url: str
 
-    ocr_enabled: bool
-    ocr_url: str
-    ocr_model: str
-    ocr_api_key: str
-    ocr_folder_id: str
-    ocr_processor: str
-
     purge_approved_days: int
     purge_rejected_days: int
     updates_log_days: int
@@ -125,23 +118,15 @@ class Config:
     def consent_version(self) -> str:
         """Редакция согласия, которая пишется в базу.
 
-        Включение OCR меняет её автоматически. Это не косметика: экран согласия
-        называет обработчика распознавания только когда OCR включён, значит те,
-        кто согласился при выключенном, про передачу данных наружу не знали.
-        Без отметки в версии таких людей потом не отличить от остальных.
+        Совпадает с редакцией документа: данные никуда за пределы проката
+        не передаются, отличать «согласился до подключения обработчика»
+        от «после» больше не нужно. Фиксировать редакцию всё равно надо -
+        иначе не доказать, под какой человек подписался.
         """
-        return f"{self.pdn_version}+ocr" if self.ocr_enabled else self.pdn_version
+        return self.pdn_version
 
     @classmethod
     def load(cls) -> "Config":
-        ocr_key = _secret("OCR_API_KEY", required=False)
-        ocr_enabled = bool(ocr_key) and _env("OCR_ENABLED", "1") == "1"
-        ocr_folder_id = _env("OCR_FOLDER_ID")
-        # Без folder id Yandex Vision отвечает ошибкой на каждый запрос, а бот
-        # молча пишет «не распознан». Лучше не стартовать, чем делать вид.
-        if ocr_enabled and not ocr_folder_id:
-            raise RuntimeError("OCR включён, но не задан OCR_FOLDER_ID")
-
         return cls(
             bot_token=_secret("BOT_TOKEN"),
             channel_id=_int("CHANNEL_ID", required=True),
@@ -176,12 +161,6 @@ class Config:
             # иначе не доказать, под какой редакцией человек подписался.
             pdn_version=_env("PDN_VERSION", _env("OFERTA_VERSION", "2026-01-15")),
             video_url=_env("VIDEO_URL", "https://youtu.be/CyZzskq8o0o"),
-            ocr_enabled=ocr_enabled,
-            ocr_url=_env("OCR_URL", "https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText"),
-            ocr_model=_env("OCR_MODEL", "passport"),
-            ocr_api_key=ocr_key,
-            ocr_folder_id=ocr_folder_id,
-            ocr_processor=_env("OCR_PROCESSOR", "ООО «ЯНДЕКС.ОБЛАКО» (распознавание, Россия)"),
             purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
             purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
             updates_log_days=_int("UPDATES_LOG_DAYS", "7"),

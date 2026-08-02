@@ -63,7 +63,7 @@ async def run() -> None:
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
 
     # docker stop шлёт SIGTERM. Без обработчика процесс умирает мгновенно:
-    # фоновые задачи (сохранение скана, OCR) обрываются на полуслове,
+    # фоновые задачи (сохранение скана, хэш) обрываются на полуслове,
     # а finally не выполняется.
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

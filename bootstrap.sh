@@ -61,8 +61,6 @@ fi
 if [ ! -s secrets/bot_token ]; then
   die "нет secrets/bot_token. Создайте: printf '%s' '<токен>' > secrets/bot_token"
 fi
-# Пустой файл допустим - это просто выключённый OCR
-touch secrets/ocr_api_key
 chmod 600 secrets/* .env
 
 # ─── 4. Запуск ───────────────────────────────────────────────────────────────

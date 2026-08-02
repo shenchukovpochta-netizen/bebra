@@ -12,15 +12,6 @@ create table if not exists bot.users (
   doc_file_id        text,
   doc_path           text,
   doc_sha256         text,
-  selfie_file_id     text,
-  selfie_path        text,
-  selfie_sha256      text,
-
-  -- OCR: сырой текст документа не храним, только структурные поля и долю
-  -- совпадения ФИО. Живёт до purge_after вместе со сканами.
-  doc_ocr            jsonb,
-  name_match         numeric(3,2),
-  ocr_at             timestamptz,
 
   oferta_version     text,
   oferta_accepted_at timestamptz,
@@ -66,11 +57,6 @@ create table if not exists bot.users (
 -- полей. Повторный прогон безвреден.
 alter table bot.users add column if not exists doc_path       text;
 alter table bot.users add column if not exists doc_sha256     text;
-alter table bot.users add column if not exists selfie_path    text;
-alter table bot.users add column if not exists selfie_sha256  text;
-alter table bot.users add column if not exists doc_ocr        jsonb;
-alter table bot.users add column if not exists name_match     numeric(3,2);
-alter table bot.users add column if not exists ocr_at         timestamptz;
 alter table bot.users add column if not exists pdn_version    text;
 alter table bot.users add column if not exists pdn_consent_at timestamptz;
 alter table bot.users add column if not exists purge_after    timestamptz;
@@ -99,6 +85,22 @@ create sequence if not exists bot.contract_seq as bigint start with 1;
 -- не получили бы ни одного обработчика: их сообщения проваливались бы
 -- в меню, а выйти можно было бы только угадав /start.
 update bot.users set state = 'wait_oferta' where state = 'wait_pdn';
+
+-- Шаг селфи убран. Застрявшие в нём переводятся на подтверждение: документ
+-- у них уже загружен, а обработчика для wait_selfie больше нет.
+update bot.users set state = 'confirm' where state = 'wait_selfie';
+
+-- Селфи и распознавание убраны целиком. Колонки удаляются, а не оставляются
+-- пустыми: мёртвая колонка в схеме - это вопрос «а что это?» на каждом
+-- следующем чтении и риск, что кто-то начнёт её заполнять.
+-- ВНИМАНИЕ: удаление необратимо. Если в базе есть боевые данные и они нужны,
+-- снимите дамп ДО первого запуска этой версии.
+alter table bot.users drop column if exists selfie_file_id;
+alter table bot.users drop column if exists selfie_path;
+alter table bot.users drop column if exists selfie_sha256;
+alter table bot.users drop column if exists doc_ocr;
+alter table bot.users drop column if exists name_match;
+alter table bot.users drop column if exists ocr_at;
 
 create index if not exists users_state_idx    on bot.users (state);
 create index if not exists users_status_idx   on bot.users (status);

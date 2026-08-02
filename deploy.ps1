@@ -44,7 +44,7 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
               'app/handlers/contract.py')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
-              'app/services/files.py', 'app/services/ocr.py',
+              'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py')

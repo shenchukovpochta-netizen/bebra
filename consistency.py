@@ -45,7 +45,7 @@ config_secrets = set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', config))
 # Переменные, которые compose задаёт литералом, а не через ${}: подставлять
 # их из .env незачем, значение фиксировано устройством контейнера.
 LITERAL_IN_COMPOSE = {"POSTGRES_HOST", "POSTGRES_PORT", "STORAGE_DIR",
-                      "CONTRACT_TEMPLATE", "OCR_URL", "OCR_MODEL",
+                      "CONTRACT_TEMPLATE",
                       "AUTO_APPROVE", "RATE_SOFT", "RATE_HARD"}
 not_passed = config_vars - compose_vars - LITERAL_IN_COMPOSE
 if not_passed:

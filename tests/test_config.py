@@ -100,19 +100,6 @@ class TestPgParams(unittest.TestCase):
         self.assertGreater(broken, 100, "ожидали заметную долю сломанных DSN")
 
 
-class TestOcrConfig(unittest.TestCase):
-    def test_folder_id_required_when_enabled(self):
-        with self.assertRaises(RuntimeError):
-            load(OCR_API_KEY="key", OCR_ENABLED="1", OCR_FOLDER_ID="")
-
-    def test_disabled_without_key(self):
-        self.assertFalse(load(OCR_ENABLED="1").ocr_enabled)
-
-    def test_enabled_with_key_and_folder(self):
-        cfg = load(OCR_API_KEY="key", OCR_FOLDER_ID="b1gxxx")
-        self.assertTrue(cfg.ocr_enabled)
-
-
 class TestRequiredValues(unittest.TestCase):
     def test_missing_admins_raises(self):
         with self.assertRaises(RuntimeError):
@@ -152,16 +139,8 @@ class TestUpdateRouting(unittest.TestCase):
 
 
 class TestConsentVersion(unittest.TestCase):
-    """Включение OCR обязано менять редакцию согласия: без OCR экран не
-    называет обработчика, значит согласие было дано на другой набор условий."""
-
-    def test_without_ocr(self):
-        self.assertEqual(load(OFERTA_VERSION="2026-01-15").consent_version, "2026-01-15")
-
-    def test_with_ocr_differs(self):
-        cfg = load(OFERTA_VERSION="2026-01-15", OCR_API_KEY="k", OCR_FOLDER_ID="b1g")
-        self.assertNotEqual(cfg.consent_version, "2026-01-15")
-        self.assertIn("ocr", cfg.consent_version)
+    """Редакция согласия обязана фиксироваться отдельно от факта: доказывать
+    придётся не «принял оферту», а «дал согласие под такой-то редакцией»."""
 
     def test_follows_oferta_version_by_default(self):
         self.assertEqual(load(OFERTA_VERSION="2027-03-01").consent_version, "2027-03-01")
@@ -182,12 +161,15 @@ class TestKnownStates(unittest.TestCase):
 
     def test_every_live_state_is_known(self):
         for state in (logic.NEW, logic.WAIT_FIO, logic.WAIT_OFERTA, logic.WAIT_CONTACT,
-                      logic.WAIT_DOC, logic.WAIT_SELFIE, logic.CONFIRM,
-                      logic.PENDING, logic.APPROVED):
+                      logic.WAIT_DOC, logic.CONFIRM,
+                      logic.PENDING, logic.WAIT_SIGN, logic.APPROVED):
             self.assertTrue(logic.is_known_state(state), state)
 
     def test_no_stale_state_left_in_set(self):
         self.assertNotIn("wait_pdn", logic.KNOWN_STATES)
+        # Шаг селфи убран: значение из прошлой версии должно распознаваться
+        # как неизвестное, иначе человек застрянет без единого обработчика.
+        self.assertNotIn("wait_selfie", logic.KNOWN_STATES)
 
 
 class TestUploadValidation(unittest.TestCase):

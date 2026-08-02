@@ -111,22 +111,5 @@ class TestPatchSql(unittest.TestCase):
         self.assertIn(None, self.pool.args)
 
 
-@unittest.skipUnless(HAVE_ASYNCPG, "asyncpg не установлен")
-class TestNumericAndJson(unittest.TestCase):
-    def setUp(self):
-        self.pool = RecordingPool()
-        self.db = Database(self.pool)
-
-    def test_numeric_converted_to_decimal(self):
-        from decimal import Decimal
-        run(self.db.patch(1, name_match=0.67))
-        self.assertTrue(any(isinstance(a, Decimal) for a in self.pool.args),
-                        "asyncpg отвергает float для numeric")
-
-    def test_json_column_gets_cast(self):
-        run(self.db.patch(1, doc_ocr={"a": 1}))
-        self.assertIn("::jsonb", self.pool.query)
-
-
 if __name__ == "__main__":
     unittest.main()

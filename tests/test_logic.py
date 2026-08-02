@@ -108,80 +108,10 @@ class TestModerationCallback(unittest.TestCase):
         self.assertIsNone(logic.parse_moderation_callback(None))
 
 
-def vision(lines=(), entities=None):
-    return {"result": {"textAnnotation": {
-        "blocks": [{"lines": [{"text": t} for t in lines]}] if lines else [],
-        "entities": [{"name": k, "text": v} for k, v in (entities or {}).items()],
-    }}}
-
-
-class TestNameMatch(unittest.TestCase):
-    def test_full_match(self):
-        r = logic.match_name("Иванов Иван Иванович",
-                             vision(["ИВАНОВ", "ИВАН ИВАНОВИЧ", "паспорт"]))
-        self.assertTrue(r.recognized)
-        self.assertEqual(r.score, 1.0)
-        self.assertFalse(r.mismatch)
-
-    def test_yo_normalised(self):
-        r = logic.match_name("Пётр Селёзнёв Артёмович",
-                             vision(["ПЕТР СЕЛЕЗНЕВ АРТЕМОВИЧ"]))
-        self.assertEqual(r.score, 1.0)
-
-    def test_foreign_document(self):
-        r = logic.match_name("Иванов Иван Иванович", vision(["ПЕТРОВ ПЕТР ПЕТРОВИЧ"]))
-        self.assertEqual(r.score, 0.0)
-        self.assertTrue(r.mismatch)
-
-    def test_partial_two_of_three(self):
-        r = logic.match_name("Иванов Иван Сергеевич", vision(["ИВАНОВ ИВАН ПЕТРОВИЧ"]))
-        self.assertEqual(r.score, 0.67)
-        self.assertFalse(r.mismatch)      # 0.67 - проходной минимум
-
-    def test_one_of_three_is_mismatch(self):
-        r = logic.match_name("Иванов Пётр Сергеевич", vision(["ИВАНОВ АННА ПЕТРОВНА"]))
-        self.assertLess(r.score, logic.NAME_MATCH_MIN)
-        self.assertTrue(r.mismatch)
-
-    def test_substring_does_not_count(self):
-        # Мужское имя не должно подтверждаться женским отчеством:
-        # при сравнении по подстроке «ПЕТР» находился внутри «ПЕТРОВНА».
-        self.assertFalse(logic.token_matches("ПЕТР", ["АННА", "ПЕТРОВНА"]))
-        self.assertTrue(logic.token_matches("ИВАН", ["ИВАНОВ"]))
-        self.assertTrue(logic.token_matches("ИВАНОВ", ["ИВАНОВ"]))
-
-    def test_entities_without_blocks(self):
-        r = logic.match_name("Иванов Иван Иванович",
-                             vision(entities={"surname": "Иванов", "name": "Иван",
-                                              "patronymic": "Иванович"}))
-        self.assertTrue(r.recognized)
-        self.assertEqual(r.score, 1.0)
-
-    def test_empty_response_is_not_mismatch_but_unrecognised(self):
-        r = logic.match_name("Иванов Иван Иванович", vision())
-        self.assertFalse(r.recognized)
-        self.assertTrue(r.mismatch)
-
-    def test_broken_payload_does_not_raise(self):
-        for payload in (None, "", [], {"result": None}, {"result": {"textAnnotation": None}}):
-            r = logic.match_name("Иванов Иван Иванович", payload)
-            self.assertFalse(r.recognized)
-
-    def test_raw_text_is_not_exposed(self):
-        # Наружу отдаются только структурные поля и доля совпадения:
-        # серия и номер паспорта в базе не оседают.
-        r = logic.match_name("Иванов Иван", vision(["ИВАНОВ ИВАН", "4509 123456"]))
-        self.assertNotIn("123456", repr(r))
-
-    def test_short_tokens_ignored(self):
-        r = logic.match_name("Ли Ван Чжан", vision(["ВАН ЧЖАН"]))
-        self.assertEqual(r.tokens_total, 2)      # «Ли» короче трёх букв
-
-
 class TestStorePath(unittest.TestCase):
     def test_valid(self):
-        self.assertTrue(logic.is_safe_store_path("/files/kyc/12345-doc-1700000000000.jpg", "/files/kyc"))
-        self.assertTrue(logic.is_safe_store_path("/files/kyc/1-selfie-1.jpg", "/files/kyc"))
+        self.assertTrue(
+            logic.is_safe_store_path("/files/kyc/12345-doc-1700000000000.jpg", "/files/kyc"))
 
     def test_traversal_and_foreign_paths(self):
         for path in ("/files/kyc/../../etc/passwd", "/etc/passwd", "/files/kyc/x-doc-1.jpg",
@@ -200,6 +130,13 @@ class TestStorePath(unittest.TestCase):
                     "/files/kyc/7-doc-1.jpg.sh"):
             self.assertFalse(logic.is_safe_store_path(bad, "/files/kyc"), bad)
 
+    def test_contract_pdf_recognised(self):
+        self.assertTrue(logic.is_safe_store_path("/files/kyc/1-contract-17.pdf", "/files/kyc"))
+
+    def test_removed_selfie_slot_rejected(self):
+        """Слот селфи убран. Файл с таким именем ретеншен опознавать не должен:
+        иначе он подметает то, чего бот больше не создаёт."""
+        self.assertFalse(logic.is_safe_store_path("/files/kyc/1-selfie-1.jpg", "/files/kyc"))
 
 
 class TestDates(unittest.TestCase):

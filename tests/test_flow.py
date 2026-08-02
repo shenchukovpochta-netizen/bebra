@@ -163,8 +163,7 @@ class FakeDB:
         row = self.users.setdefault(tg_id, {
             "tg_id": tg_id, "username": username, "state": logic.NEW,
             "status": logic.ST_NEW, "rl_count": 0, "full_name": None, "phone": None,
-            "doc_file_id": None, "selfie_file_id": None, "doc_path": None,
-            "selfie_path": None, "doc_ocr": None, "name_match": None, "ocr_at": None,
+            "doc_file_id": None, "doc_path": None,
             "purge_after": None, "anketa_enc": None,
             "contract_no": None, "contract_path": None, "contract_sha256": None,
             "contract_status": logic.CT_NONE, "contract_issued_at": None,
@@ -222,8 +221,7 @@ def make_config(**overrides) -> Config:
         fix_chat_id=FIX_CHAT, fix_topic_id=FIX_TOPIC, contract_template=TEMPLATE,
         channel_url="https://t.me/test", oferta_url="https://e.ru/o",
         oferta_version="2026-01-15", pdn_url="", pdn_version="2026-01-15",
-        video_url="https://e.ru/v", ocr_enabled=False, ocr_url="", ocr_model="",
-        ocr_api_key="", ocr_folder_id="", ocr_processor="Обработчик",
+        video_url="https://e.ru/v",
         purge_approved_days=90, purge_rejected_days=3, updates_log_days=7,
         # Рейт-лимит здесь снят намеренно: FakeDB не двигает окно, а один
         # сценарный тест прогоняет две полные регистрации подряд. Сами пороги
@@ -297,7 +295,7 @@ def cb(data, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private") -> Update
 
 
 async def settle() -> None:
-    """Дать фоновым задачам (скачивание, OCR) доработать."""
+    """Дать фоновым задачам (скачивание, хэш) доработать."""
     for _ in range(5):
         await asyncio.sleep(0)
     await tasks.drain(timeout=2)
@@ -335,7 +333,6 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()
-        await self.feed(msg(photo=True))
         await self.feed(msg(photo=True))
 
     async def submit(self):
@@ -418,11 +415,24 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("уже указан", " ".join(self.session.sent()))
 
     async def test_consent_screen_names_the_data(self):
+        """Экран согласия - единственное место, где человеку перечисляют,
+        что именно у него берут. Он обязан называть весь состав: анкета
+        собирает заметно больше, чем ФИО и телефон."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
         text = " ".join(self.session.sent())
-        for expected in ("ФИО", "номер телефона", "документа", "фотографию"):
+        for expected in ("ФИО", "дату и место рождения", "паспортные данные",
+                         "адреса регистрации", "телефон", "документа"):
             self.assertIn(expected, text)
+
+    async def test_consent_screen_does_not_promise_removed_processing(self):
+        """Селфи и распознавание убраны. Обещать в согласии обработку,
+        которой нет, - такое же расхождение, как и обратное."""
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        text = " ".join(self.session.sent()).lower()
+        for gone in ("селфи", "фотографию с этим документом", "распознавани"):
+            self.assertNotIn(gone, text)
 
     async def test_foreign_contact_rejected(self):
         await self.feed(msg("/start"))
@@ -512,30 +522,30 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.submit()
         await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
                            user_id=ADMIN_ID, chat_type="supergroup"))
-        await self.feed(cb(f"rj:{USER_ID}:selfie", chat_id=ADMIN_CHAT,
+        await self.feed(cb(f"rj:{USER_ID}:doc", chat_id=ADMIN_CHAT,
                            user_id=ADMIN_ID, chat_type="supergroup"))
         row = self.db.users[USER_ID]
         self.assertEqual(row["status"], logic.ST_REJECTED)
-        # Возврат на шаг селфи, а не в начало анкеты: переигрывать паспортные
-        # данные из-за нечитаемого селфи незачем.
-        self.assertEqual(row["state"], logic.WAIT_SELFIE)
-        self.assertIn("селфи", " ".join(self.session.sent()).lower())
+        # Возврат на шаг документа, а не в начало анкеты: переигрывать
+        # паспортные данные из-за нечитаемого фото незачем.
+        self.assertEqual(row["state"], logic.WAIT_DOC)
+        self.assertIn("документа", " ".join(self.session.sent()).lower())
 
-    async def test_fixing_only_the_selfie_clears_purge_deadline(self):
-        """Отказ ставит дату удаления на 3 дня вперёд, а причина «селфи»
-        возвращает человека мимо шага документа. Без сброса ретеншен снёс бы
-        фото паспорта посреди исправления, и заявка ушла бы без документа."""
+    async def test_reupload_after_reject_clears_purge_deadline(self):
+        """Отказ ставит дату удаления на 3 дня вперёд. Без сброса при новой
+        загрузке ретеншен снёс бы свежий скан вместе со старым, и заявка ушла
+        бы на утверждение без документа."""
         await self.submit()
         await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
                            user_id=ADMIN_ID, chat_type="supergroup"))
-        await self.feed(cb(f"rj:{USER_ID}:selfie", chat_id=ADMIN_CHAT,
+        await self.feed(cb(f"rj:{USER_ID}:doc", chat_id=ADMIN_CHAT,
                            user_id=ADMIN_ID, chat_type="supergroup"))
         self.assertIsNotNone(self.db.users[USER_ID]["purge_after"])
-        await self.feed(msg(photo=True))                 # новое селфи
+        await self.feed(msg(photo=True))                 # новое фото документа
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.CONFIRM)
         self.assertIsNone(row["purge_after"],
-                          "дата удаления должна сбрасываться и на шаге селфи")
+                          "дата удаления должна сбрасываться при новой загрузке")
 
     async def test_reject_by_reply_sends_moderator_text(self):
         await self.submit()

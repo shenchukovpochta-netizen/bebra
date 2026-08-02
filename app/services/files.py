@@ -37,7 +37,7 @@ async def download(bot: Bot, file_id: str, max_bytes: int) -> bytes:
 # имя файла на диске сверяется с шаблоном перед удалением (logic.STORE_FILE_NAME),
 # и произвольное расширение означало бы, что ретеншен такой файл не опознает
 # и не удалит - скан или договор останется на диске навсегда.
-SLOT_EXT = {"doc": "jpg", "selfie": "jpg", "contract": "pdf"}
+SLOT_EXT = {"doc": "jpg", "contract": "pdf"}
 
 
 def store(storage_dir: Path, tg_id: int, slot: str, data: bytes) -> tuple[Path, str]:
@@ -50,7 +50,7 @@ def store(storage_dir: Path, tg_id: int, slot: str, data: bytes) -> tuple[Path, 
         raise ValueError(f"неизвестный слот {slot!r}")
     storage_dir.mkdir(parents=True, exist_ok=True)
     # mkdir применяет umask, поэтому права выставляем явно: в каталоге лежат
-    # изображения паспортов, чужим процессам в контейнере там делать нечего.
+    # изображения паспортов и договоры, чужим процессам там делать нечего.
     storage_dir.chmod(0o700)
 
     digest = hashlib.sha256(data).hexdigest()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +14,6 @@ import asyncpg
 PATCHABLE = frozenset({
     "state", "full_name", "phone",
     "doc_file_id", "doc_path", "doc_sha256",
-    "selfie_file_id", "selfie_path", "selfie_sha256",
-    "doc_ocr", "name_match", "ocr_at",
     "oferta_version", "oferta_accepted_at", "pdn_version", "pdn_consent_at",
     "status", "reject_reason", "reviewed_by", "reviewed_at", "purge_after",
     "anketa_enc",
@@ -24,11 +21,6 @@ PATCHABLE = frozenset({
     "contract_issued_at", "contract_signed_at",
     "mod_chat_id", "mod_message_id",
 })
-
-JSON_COLUMNS = frozenset({"doc_ocr"})
-# numeric в asyncpg - это Decimal. Питоновский float сюда передать нельзя:
-# драйвер отвергнет аргумент, а не округлит его.
-NUMERIC_COLUMNS = frozenset({"name_match"})
 
 
 def utcnow() -> datetime:
@@ -138,17 +130,8 @@ class Database:
         # ложным «да»: вызывающий решил бы, что блокировка прошла проверку.
 
         cols = list(fields)
-        sets, values = [], []
-        for i, col in enumerate(cols, start=2):
-            value = fields[col]
-            if col in JSON_COLUMNS:
-                sets.append(f"{col} = ${i}::jsonb")   # dict сериализует кодек пула
-            elif col in NUMERIC_COLUMNS:
-                sets.append(f"{col} = ${i}")
-                value = None if value is None else Decimal(str(value))
-            else:
-                sets.append(f"{col} = ${i}")
-            values.append(value)
+        sets = [f"{col} = ${i}" for i, col in enumerate(cols, start=2)]
+        values = [fields[col] for col in cols]
 
         guards = ""
         if expected_state is not None:
@@ -174,12 +157,12 @@ class Database:
             tg_id, type_, payload or {},
         )
 
-    # ─────────────────────── файлы и OCR ───────────────────────
+    # ─────────────────────── файлы ───────────────────────
 
     async def count_duplicate_docs(self, tg_id: int, sha256: str) -> int:
         return await self.pool.fetchval(
             "select count(*) from bot.users "
-            "where tg_id <> $1 and (doc_sha256 = $2 or selfie_sha256 = $2)",
+            "where tg_id <> $1 and doc_sha256 = $2",
             tg_id, sha256,
         ) or 0
 
@@ -232,10 +215,9 @@ class Database:
 
     async def rows_to_purge(self, limit: int = 200) -> list[asyncpg.Record]:
         return await self.pool.fetch(
-            "select tg_id, doc_path, selfie_path, contract_path from bot.users "
+            "select tg_id, doc_path, contract_path from bot.users "
             "where purge_after is not null and purge_after < now() "
-            "  and (doc_path is not null or selfie_path is not null "
-            "       or contract_path is not null) "
+            "  and (doc_path is not null or contract_path is not null) "
             "limit $1",
             limit,
         )
@@ -243,8 +225,8 @@ class Database:
     async def clear_files(self, tg_id: int) -> None:
         """Стирает сканы и результаты распознавания.
 
-        Хэши doc_sha256/selfie_sha256 переживают удаление намеренно: это
-        единственное, чем ловится повторная регистрация того же документа
+        Хэш doc_sha256 переживает удаление намеренно: это единственное,
+        чем ловится повторная регистрация того же документа
         с нового аккаунта. Хэш не позволяет восстановить изображение, но
         остаётся псевдонимным идентификатором - и это должно быть описано
         в политике обработки, а не подразумеваться.
@@ -256,8 +238,6 @@ class Database:
         """
         await self.pool.execute(
             "update bot.users set doc_file_id = null, doc_path = null, "
-            "selfie_file_id = null, selfie_path = null, "
-            "doc_ocr = null, name_match = null, ocr_at = null, "
             "contract_path = null, anketa_enc = null, "
             "purge_after = null, updated_at = now() where tg_id = $1",
             tg_id,

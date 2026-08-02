@@ -1,5 +1,5 @@
-"""Шаги регистрации: ФИО → оферта → согласие на ПДн → контакт → документ →
-селфи → подтверждение."""
+"""Шаги регистрации: ФИО → оферта и согласие → контакт → анкета для договора
+→ фото документа → подтверждение."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .. import logic, tasks, texts
 from ..config import Config
 from ..db import Database, utcnow
 from ..filters import StateIs
-from ..services import files, ocr
+from ..services import files
 from ..services.crypto import Vault
 
 log = logging.getLogger(__name__)
@@ -85,13 +85,8 @@ async def st_fio(message: Message, db: Database, cfg: Config, user: dict) -> Non
 
 
 def _oferta_text(cfg: Config, fio: str) -> str:
-    processor_line = ""
-    if cfg.ocr_enabled:
-        processor_line = texts.OFERTA_PROCESSOR_LINE.format(
-            processor=logic.esc(cfg.ocr_processor))
     return texts.OFERTA.format(
         fio=logic.esc(fio),
-        processor_line=processor_line,
         purge_days=cfg.purge_approved_days,
     )
 
@@ -257,62 +252,24 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config, user: di
     # окажется в confirm без doc_file_id, а карточка модерации не отправится.
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_DOC,
                           doc_file_id=file_id, doc_path=None, doc_sha256=None,
-                          doc_ocr=None, name_match=None, ocr_at=None,
-                          purge_after=None, state=logic.WAIT_SELFIE):
+                          purge_after=None, state=logic.CONFIRM):
         return
     await db.log_event(user["tg_id"], "doc_uploaded")
-    await message.answer(texts.PROCESSING_AND_ASK_SELFIE)
-    # Скачивание и OCR - в фоне: пользователь не должен ждать сеть.
-    tasks.spawn(_process_doc(bot, db, cfg, user["tg_id"], file_id, user["full_name"]))
-
-
-@router.message(StateIs(logic.WAIT_DOC))
-async def st_doc_wrong(message: Message) -> None:
-    await message.answer(texts.DOC_NEED_PHOTO)
-
-
-# ─────────────────────────── селфи ───────────────────────────
-
-@router.message(StateIs(logic.WAIT_SELFIE), F.photo | F.document)
-async def st_selfie(message: Message, bot: Bot, db: Database, cfg: Config, user: dict) -> None:
-    # При рассинхроне состояния sendPhoto с пустым file_id даёт 400,
-    # и пользователь застрял бы в confirm вообще без сообщений.
-    if not user["doc_file_id"]:
-        await db.patch(user["tg_id"], state=logic.WAIT_DOC)
-        await message.answer(texts.DOC_LOST)
-        return
-
-    check = _check_upload(message)
-    if not check.ok:
-        await message.answer(check.error)
-        return
-
-    file_id = _file_id(message)
-    # purge_after сбрасывается по той же причине, что и в шаге документа:
-    # отказ модератора ставит дату удаления на 3 дня вперёд, а отказ с причиной
-    # «селфи не подходит» возвращает человека сюда, минуя шаг документа. Без
-    # сброса ретеншен снёс бы фото паспорта прямо посреди исправления, и заявка
-    # ушла бы на модерацию без документа.
-    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_SELFIE,
-                          selfie_file_id=file_id, selfie_path=None,
-                          selfie_sha256=None, purge_after=None,
-                          state=logic.CONFIRM):
-        return
-    await db.log_event(user["tg_id"], "selfie_uploaded")
     await message.answer_photo(
-        user["doc_file_id"],
+        file_id,
         caption=texts.CONFIRM_CAPTION.format(
             fio=logic.esc(user["full_name"]),
             phone=logic.esc(str(user["phone"] or "").lstrip("+")),
         ),
         reply_markup=kb.confirm(),
     )
-    tasks.spawn(_process_selfie(bot, db, cfg, user["tg_id"], file_id))
+    # Скачивание и хэш - в фоне: пользователь не должен ждать сеть.
+    tasks.spawn(_process_doc(bot, db, cfg, user["tg_id"], file_id))
 
 
-@router.message(StateIs(logic.WAIT_SELFIE))
-async def st_selfie_wrong(message: Message) -> None:
-    await message.answer(texts.SELFIE_NEED_PHOTO)
+@router.message(StateIs(logic.WAIT_DOC))
+async def st_doc_wrong(message: Message) -> None:
+    await message.answer(texts.DOC_NEED_PHOTO)
 
 
 # ─────────────────────────── подтверждение ───────────────────────────
@@ -325,8 +282,6 @@ async def cb_restart(callback: CallbackQuery, db: Database, cfg: Config, user: d
     # а оставленная анкета молча уехала бы в договор старой.
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
                           state=logic.WAIT_FIO, doc_file_id=None, doc_sha256=None,
-                          selfie_file_id=None, selfie_sha256=None,
-                          doc_ocr=None, name_match=None, ocr_at=None,
                           anketa_enc=None, purge_after=utcnow()):
         await callback.answer()
         return
@@ -382,17 +337,6 @@ async def st_pending(message: Message) -> None:
 
 # ─────────────────────────── фоновые задачи ───────────────────────────
 
-def _ocr_summary(row: dict) -> str:
-    if row.get("ocr_at") is None:
-        return texts.OCR_PENDING
-    score = row.get("name_match")
-    if score is None:
-        return texts.OCR_FAILED
-    total = (row.get("doc_ocr") or {}).get("tokens_total", 0)
-    matched = len((row.get("doc_ocr") or {}).get("matched", []))
-    return texts.OCR_SCORE.format(percent=round(float(score) * 100), matched=matched, total=total)
-
-
 class CardNotReady(Exception):
     """Нечего показывать модератору - отправлять карточку без документа нельзя."""
 
@@ -444,7 +388,6 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
             number=logic.esc(data.get("contract_no") or "будет присвоен"),
             fields=anketa_lines(data, anketa),
             tg_id=tg_id,
-            ocr=_ocr_summary(data),
         ),
         reply_markup=kb.moderation(tg_id),
     )
@@ -452,13 +395,16 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
     # ответом на неё, и найти пользователя надо по message_id, а не разбором
     # текста подписи.
     await db.patch(tg_id, mod_chat_id=sent.chat.id, mod_message_id=sent.message_id)
-    if data["selfie_file_id"]:
-        await bot.send_photo(cfg.contract_chat_id, data["selfie_file_id"],
-                             caption=texts.MOD_SELFIE)
 
 
 async def _process_doc(bot: Bot, db: Database, cfg: Config, tg_id: int,
-                       file_id: str | None, full_name: str | None) -> None:
+                       file_id: str | None) -> None:
+    """Скачать документ, положить на диск и посчитать хэш.
+
+    Хэш нужен для антифрода: один и тот же документ не должен проходить
+    регистрацию с разных аккаунтов. Всё это в фоне - пользователь не должен
+    ждать сеть, стоя на экране подтверждения.
+    """
     try:
         if not file_id:
             return
@@ -469,45 +415,7 @@ async def _process_doc(bot: Bot, db: Database, cfg: Config, tg_id: int,
         duplicates = await db.count_duplicate_docs(tg_id, digest)
         if duplicates:
             await db.log_event(tg_id, "duplicate_document", {"count": duplicates})
-            await bot.send_message(cfg.admin_chat_id, texts.ALERT_DUPLICATE.format(
+            await bot.send_message(cfg.contract_chat_id, texts.ALERT_DUPLICATE.format(
                 tg_id=tg_id, count=duplicates))
-
-        result = await ocr.recognize_and_match(cfg, data, full_name)
-        if result is None:
-            await db.patch(tg_id, ocr_at=utcnow(), name_match=None)
-        else:
-            await db.patch(
-                tg_id, ocr_at=utcnow(), name_match=result.score,
-                doc_ocr={"entities": result.entities, "matched": list(result.matched),
-                         "tokens_total": result.tokens_total, "recognized": result.recognized},
-            )
-        await _alert_if_late(bot, db, cfg, tg_id, result)
     except Exception:                                   # noqa: BLE001
         log.exception("обработка документа %s не удалась", tg_id)
-
-
-async def _alert_if_late(bot: Bot, db: Database, cfg: Config, tg_id: int,
-                         result: logic.OcrResult | None) -> None:
-    """Если OCR закончился уже после отправки карточки, модератор о результате
-    сам не узнает - в карточке было «ещё не готов». Досылаем отдельно."""
-    row = await db.get_user(tg_id)
-    if row is None or row["status"] != logic.ST_PENDING:
-        return
-    if result is None:
-        await bot.send_message(cfg.admin_chat_id, texts.ALERT_OCR_FAILED.format(tg_id=tg_id))
-    elif result.mismatch:
-        await bot.send_message(cfg.admin_chat_id, texts.ALERT_MISMATCH.format(
-            tg_id=tg_id, matched=len(result.matched), total=result.tokens_total,
-            percent=round(result.score * 100)))
-
-
-async def _process_selfie(bot: Bot, db: Database, cfg: Config, tg_id: int,
-                          file_id: str | None) -> None:
-    try:
-        if not file_id:
-            return
-        data = await files.download(bot, file_id, logic.MAX_UPLOAD_BYTES)
-        path, digest = files.store(cfg.storage_dir, tg_id, "selfie", data)
-        await db.patch(tg_id, selfie_path=str(path), selfie_sha256=digest)
-    except Exception:                                   # noqa: BLE001
-        log.exception("обработка селфи %s не удалась", tg_id)

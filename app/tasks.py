@@ -1,4 +1,4 @@
-"""Ретеншен: удаление сканов по сроку и чистка журнала апдейтов."""
+"""Ретеншен: удаление сканов и договоров по сроку, чистка журнала апдейтов."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ INTERVAL_SECONDS = 6 * 3600
 
 # Ссылки на живые фоновые задачи. Без них сборщик мусора вправе уничтожить
 # задачу на середине: событийный цикл держит только слабую ссылку. Симптом -
-# скан не сохранился, OCR не отработал, и ни строчки в логах.
+# скан не сохранился, договор не собрался, и ни строчки в логах.
 _background: set[asyncio.Task] = set()
 
 
@@ -39,7 +39,7 @@ async def purge_once(db: Database, cfg: Config) -> tuple[int, int]:
     """Возвращает (удалено файлов, удалено записей журнала)."""
     removed = 0
     for row in await db.rows_to_purge():
-        paths = [p for p in (row["doc_path"], row["selfie_path"], row["contract_path"]) if p]
+        paths = [p for p in (row["doc_path"], row["contract_path"]) if p]
         # Путь пришёл из своей же базы, но перед удалением всё равно сверяется
         # с шаблоном: одна опечатка в запросе - и rm уедет не туда.
         unsafe = [p for p in paths if not logic.is_safe_store_path(p, cfg.storage_dir)]

@@ -6,8 +6,6 @@ secrets:
     file: ./secrets/db_password
   bot_token:
     file: ./secrets/bot_token
-  ocr_api_key:
-    file: ./secrets/ocr_api_key
   # Ключ шифрования анкеты. Отдельным файлом, чтобы дамп базы без него
   # ничего не давал: паспортные данные лежат в bot.users зашифрованными.
   pdn_key:
@@ -34,18 +32,17 @@ services:
     build: .
     restart: unless-stopped
     # По умолчанию docker даёт на остановку 10 секунд, а бот при SIGTERM ещё
-    # доводит фоновые задачи (сохранение скана, OCR) - иначе их прибьёт SIGKILL.
+    # доводит фоновые задачи (сохранение скана, договор) - иначе их прибьёт SIGKILL.
     stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
-    secrets: [db_password, bot_token, ocr_api_key, pdn_key]
+    secrets: [db_password, bot_token, pdn_key]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
       BOT_TOKEN_FILE: /run/secrets/bot_token
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
-      OCR_API_KEY_FILE: /run/secrets/ocr_api_key
       PDN_KEY_FILE: /run/secrets/pdn_key
 
       POSTGRES_HOST: postgres
@@ -70,10 +67,6 @@ services:
       PDN_URL: ${PDN_URL}
       PDN_VERSION: ${PDN_VERSION}
       VIDEO_URL: ${VIDEO_URL}
-
-      OCR_ENABLED: ${OCR_ENABLED:-1}
-      OCR_FOLDER_ID: ${OCR_FOLDER_ID}
-      OCR_PROCESSOR: ${OCR_PROCESSOR}
 
       PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
       PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
