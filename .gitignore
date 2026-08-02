@@ -1,0 +1,17 @@
+# Секреты. Любой из этих файлов в репозитории = компрометация.
+.env
+secrets/
+*.pem
+*.key
+
+# ПДн пользователей
+files/
+*.sql.gz
+backup*/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/

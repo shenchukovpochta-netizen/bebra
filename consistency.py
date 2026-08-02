@@ -1,0 +1,101 @@
+"""Сверка файлов проекта между собой.
+
+Ищет расхождения, которые не видит ни один тест: переменная объявлена в одном
+месте и забыта в другом, файл есть в проекте но не заливается на сервер,
+колонка используется в коде но отсутствует в схеме.
+"""
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
+problems = []
+
+
+def read(name):
+    p = ROOT / name
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+compose = read("docker-compose.yml")
+env_example = read(".env.example")
+schema = read("schema.sql")
+deploy = read("deploy.ps1")
+config = read("app/config.py")
+
+# ── 1. переменные: compose ↔ .env.example ────────────────────────────────
+compose_vars = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)", compose))
+env_vars = set(re.findall(r"^([A-Z_][A-Z0-9_]*)=", env_example, re.M))
+missing_in_env = compose_vars - env_vars
+if missing_in_env:
+    problems.append(
+        f"compose подставляет ${{}} для переменных, которых нет в .env.example: "
+        f"{sorted(missing_in_env)} -> контейнер получит пустую строку")
+
+unused_in_compose = env_vars - compose_vars - {"POSTGRES_PASSWORD"}
+if unused_in_compose:
+    problems.append(
+        f".env.example объявляет переменные, которые compose не передаёт в контейнер: "
+        f"{sorted(unused_in_compose)} -> заполнение ничего не изменит")
+
+# ── 2. переменные, которые читает config.py ──────────────────────────────
+config_vars = set(re.findall(r'_env\(\s*"([A-Z_][A-Z0-9_]*)"', config))
+config_vars |= set(re.findall(r'_int\(\s*"([A-Z_][A-Z0-9_]*)"', config))
+config_secrets = set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', config))
+not_passed = (config_vars - compose_vars - {"POSTGRES_HOST", "POSTGRES_PORT",
+                                            "STORAGE_DIR", "OCR_URL", "OCR_MODEL",
+                                            "AUTO_APPROVE", "RATE_SOFT", "RATE_HARD"})
+if not_passed:
+    problems.append(
+        f"config.py читает переменные, которых compose не передаёт: {sorted(not_passed)}")
+
+for secret in config_secrets:
+    if f"{secret}_FILE" not in compose:
+        problems.append(f"секрет {secret} не пробрасывается через {secret}_FILE в compose")
+
+# ── 3. состав пакета ↔ список заливки в deploy.ps1 ───────────────────────
+shipped = {p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*")
+           if p.is_file() and "__pycache__" not in p.parts}
+# Берём только то, что похоже на имя файла в проекте: с точкой или Dockerfile
+# (у него нет расширения). Абсолютные пути - это каталог развёртывания, не файл.
+listed = {m for m in re.findall(r"'([\w./-]+)'", deploy)
+          if not m.startswith("/") and ("." in m or m == "Dockerfile")}
+listed |= {".env.example", ".gitignore"}
+not_uploaded = {f for f in shipped - listed
+                if not f.endswith((".zip",)) and f != "deploy.ps1"}
+if not_uploaded:
+    problems.append(f"файлы есть в проекте, но deploy.ps1 их не заливает: {sorted(not_uploaded)}")
+
+ghost = {f for f in listed - shipped if f not in {".env.example", ".gitignore"}}
+if ghost:
+    problems.append(f"deploy.ps1 ждёт файлы, которых нет: {sorted(ghost)} -> заливка упадёт")
+
+# ── 4. колонки, используемые в коде, против схемы ────────────────────────
+code = "\n".join(read(p.relative_to(ROOT).as_posix())
+                 for p in (ROOT / "app").rglob("*.py"))
+schema_cols = set(re.findall(r"^\s{2,}(\w+)\s+(?:bigint|text|jsonb|numeric|timestamptz|integer|bigserial)",
+                             schema, re.M))
+schema_cols |= set(re.findall(r"add column if not exists\s+(\w+)", schema))
+used = set(re.findall(r'"(\w+)"\s*:', "")) | set(re.findall(r"bot\.users\s+set\s+(\w+)", code))
+for col in re.findall(r"(\w+)\s*=\s*(?:null|\$\d+)", code):
+    used.add(col)
+unknown_cols = {c for c in used if c not in schema_cols and c.islower() and "_" in c}
+if unknown_cols:
+    problems.append(f"в коде встречаются колонки, которых нет в schema.sql: {sorted(unknown_cols)}")
+
+# ── 5. значения-заглушки, которые проверяет bootstrap ────────────────────
+boot = read("bootstrap.sh")
+for var in re.findall(r'if \[ "\$(\w+)" = "([^"]+)" \]', boot):
+    name, placeholder = var
+    if f"{name}={placeholder}" not in env_example:
+        problems.append(
+            f"bootstrap.sh считает заглушкой {name}={placeholder}, "
+            f"но в .env.example другое значение -> проверка не сработает")
+
+# ── итог ─────────────────────────────────────────────────────────────────
+if problems:
+    print(f"НАЙДЕНО РАСХОЖДЕНИЙ: {len(problems)}\n")
+    for i, p in enumerate(problems, 1):
+        print(f"{i}. {p}\n")
+    sys.exit(1)
+print("расхождений между файлами не найдено")

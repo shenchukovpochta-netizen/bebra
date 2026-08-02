@@ -1,0 +1,28 @@
+[project]
+name = "mybike-bot"
+version = "1.0.0"
+description = "Telegram-бот регистрации с проверкой подписки, KYC и модерацией"
+requires-python = ">=3.11"
+# Список лежит в requirements.txt: Dockerfile ставит его напрямую, и держать
+# те же строки ещё и здесь - гарантированный источник расхождений.
+dynamic = ["dependencies"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools]
+packages = ["app", "app.handlers", "app.services"]
+
+[project.scripts]
+bot = "app.main:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC"]

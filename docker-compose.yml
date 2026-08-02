@@ -1,0 +1,79 @@
+# Ни портов наружу, ни веб-сервера, ни сертификата: бот работает на long polling,
+# входящие соединения ему не нужны вообще.
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  bot_token:
+    file: ./secrets/bot_token
+  ocr_api_key:
+    file: ./secrets/ocr_api_key
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    secrets: [db_password]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mybike}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: ${POSTGRES_DB:-mybike}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-mybike} -d $${POSTGRES_DB:-mybike}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    # По умолчанию docker даёт на остановку 10 секунд, а бот при SIGTERM ещё
+    # доводит фоновые задачи (сохранение скана, OCR) - иначе их прибьёт SIGKILL.
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets: [db_password, bot_token, ocr_api_key]
+    environment:
+      # Секреты - через файлы: содержимое окружения видно в docker inspect,
+      # в дампах процесса и в трейсбеках при падении.
+      BOT_TOKEN_FILE: /run/secrets/bot_token
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      OCR_API_KEY_FILE: /run/secrets/ocr_api_key
+
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-mybike}
+      POSTGRES_DB: ${POSTGRES_DB:-mybike}
+
+      CHANNEL_ID: ${CHANNEL_ID}
+      CHANNEL_URL: ${CHANNEL_URL}
+      ADMIN_CHAT_ID: ${ADMIN_CHAT_ID}
+      ADMINS: ${ADMINS}
+
+      OFERTA_URL: ${OFERTA_URL}
+      OFERTA_VERSION: ${OFERTA_VERSION}
+      PDN_URL: ${PDN_URL}
+      PDN_VERSION: ${PDN_VERSION}
+      VIDEO_URL: ${VIDEO_URL}
+
+      OCR_ENABLED: ${OCR_ENABLED:-1}
+      OCR_FOLDER_ID: ${OCR_FOLDER_ID}
+      OCR_PROCESSOR: ${OCR_PROCESSOR}
+
+      PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
+      PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
+      UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
+
+      STORAGE_DIR: /files/kyc
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      - kycfiles:/files
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  pgdata:
+  kycfiles:
