@@ -13,7 +13,7 @@ import asyncpg
 # они подставляются в SQL как текст - поэтому только из этого множества.
 PATCHABLE = frozenset({
     "state", "full_name", "phone",
-    "doc_file_id", "doc_path", "doc_sha256",
+    "doc_file_id", "doc_path", "doc_sha256", "doc_is_photo",
     "oferta_version", "oferta_accepted_at", "pdn_version", "pdn_consent_at",
     "status", "reject_reason", "reviewed_by", "reviewed_at", "purge_after",
     "anketa_enc",

@@ -35,7 +35,7 @@ if (-not $SkipTests) {
 # Явные списки вместо scp -r: так .env, secrets/ и __pycache__
 # не уедут на сервер по случайности.
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
-          'schema.sql', 'bootstrap.sh', '.env.example', '.gitignore',
+          'schema.sql', 'bootstrap.sh', 'install.sh', '.env.example', '.gitignore',
           'README.md', 'INSTALL.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/config.py', 'app/db.py',
          'app/logic.py', 'app/texts.py', 'app/keyboards.py', 'app/middlewares.py',
@@ -71,11 +71,12 @@ if ($LASTEXITCODE -ne 0) { throw 'scp (tests) не удался' }
 
 # CRLF в .sh ломает shebang: bash ругается на «\r: команда не найдена»
 Step 'нормализую переводы строк'
-ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh && chmod +x bootstrap.sh"
+ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh && chmod +x bootstrap.sh install.sh"
 
 Write-Host "`nФайлы на сервере. Дальше:" -ForegroundColor Green
 Write-Host "  ssh $Server"
 Write-Host "  cd $Path"
-Write-Host "  cp .env.example .env && nano .env"
-Write-Host "  mkdir -p secrets && printf '%s' '<токен>' > secrets/bot_token"
-Write-Host "  bash bootstrap.sh"
+Write-Host "  bash install.sh"
+Write-Host ""
+Write-Host "install.sh задаст вопросы, проверит каждый ответ через Telegram," -ForegroundColor DarkGray
+Write-Host "сам сгенерирует секреты и запустит бота. Править .env не нужно." -ForegroundColor DarkGray

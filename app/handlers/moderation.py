@@ -169,7 +169,13 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> No
     """
     if not _is_admin(message.from_user.id, cfg):
         return
-    row = await db.user_by_mod_message(message.chat.id, message.reply_to_message.message_id)
+    replied = message.reply_to_message
+    # Ответ не на сообщение бота - это переписка модераторов между собой.
+    # Без этой проверки бот вклинивался в каждый их разговор с «это сообщение
+    # не привязано к заявке», и служебный чат становился неюзабельным.
+    if not (replied.from_user and replied.from_user.is_bot):
+        return
+    row = await db.user_by_mod_message(message.chat.id, replied.message_id)
     if row is None:
         await message.reply(texts.MOD_REPLY_NOT_A_CARD)
         return
@@ -205,7 +211,7 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> No
     try:
         await bot.edit_message_reply_markup(
             chat_id=message.chat.id,
-            message_id=message.reply_to_message.message_id,
+            message_id=replied.message_id,
             reply_markup=None,
         )
     except TelegramAPIError:

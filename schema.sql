@@ -12,6 +12,10 @@ create table if not exists bot.users (
   doc_file_id        text,
   doc_path           text,
   doc_sha256         text,
+  -- Чем документ прислан: сжатым фото или файлом. file_id несёт в себе тип,
+  -- и sendPhoto с file_id документа Telegram отвергает с 400 - значит знать
+  -- это надо в момент отправки, а угадать по самому file_id нельзя.
+  doc_is_photo       boolean     not null default true,
 
   oferta_version     text,
   oferta_accepted_at timestamptz,
@@ -57,6 +61,7 @@ create table if not exists bot.users (
 -- полей. Повторный прогон безвреден.
 alter table bot.users add column if not exists doc_path       text;
 alter table bot.users add column if not exists doc_sha256     text;
+alter table bot.users add column if not exists doc_is_photo   boolean not null default true;
 alter table bot.users add column if not exists pdn_version    text;
 alter table bot.users add column if not exists pdn_consent_at timestamptz;
 alter table bot.users add column if not exists purge_after    timestamptz;

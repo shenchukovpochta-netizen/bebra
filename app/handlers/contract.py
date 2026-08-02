@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -38,8 +39,14 @@ class ContractProblem(Exception):
 
 
 def _context(cfg: Config, data: dict, anketa: dict, *, number: str,
-             signed_at: str) -> dict[str, Any]:
-    ctx = logic.contract_context(data, anketa, number=number)
+             signed_at: str, issued_at: datetime | None) -> dict[str, Any]:
+    # Дата договора берётся из момента выдачи, а не из «сегодня». Договор
+    # пересобирается ещё дважды - при переотправке и при подписании, - и без
+    # фиксации даты подписанный экземпляр отличался бы от прочитанного:
+    # другая дата в шапке, другой отпечаток, и сохранённый при выдаче хэш
+    # переставал бы соответствовать чему бы то ни было.
+    ctx = logic.contract_context(data, anketa, number=number,
+                                 today=issued_at.date() if issued_at else None)
     # purge_days идёт из конфигурации, а не из шаблона: сроки в договоре
     # обязаны совпадать с тем, по которым ретеншен реально удаляет сканы.
     ctx["purge_days"] = str(cfg.purge_approved_days)
@@ -52,8 +59,9 @@ def _filename(number: str) -> str:
 
 
 async def _build(cfg: Config, data: dict, anketa: dict, *, number: str,
-                 signed_at: str) -> tuple[bytes, str]:
-    ctx = _context(cfg, data, anketa, number=number, signed_at=signed_at)
+                 signed_at: str, issued_at: datetime | None) -> tuple[bytes, str]:
+    ctx = _context(cfg, data, anketa, number=number, signed_at=signed_at,
+                   issued_at=issued_at)
     try:
         return contract_service.build(cfg.contract_template, ctx)
     except (contract_service.TemplateProblem, OSError) as exc:
@@ -78,14 +86,19 @@ async def issue(bot: Bot, db: Database, cfg: Config, vault: Vault, tg_id: int) -
         raise ContractProblem(f"не заполнено: {', '.join(missing)}")
 
     number = data.get("contract_no") or logic.contract_number(await db.next_contract_seq())
-    pdf, digest = await _build(cfg, data, anketa, number=number, signed_at=UNSIGNED)
+    # Момент выдачи фиксируется до сборки и тем же значением уходит в базу:
+    # дата в шапке договора и contract_issued_at обязаны совпадать, иначе
+    # пересборка при подписании даст другой документ.
+    issued_at = data.get("contract_issued_at") or utcnow()
+    pdf, digest = await _build(cfg, data, anketa, number=number,
+                               signed_at=UNSIGNED, issued_at=issued_at)
     path, _ = files.store(cfg.storage_dir, tg_id, "contract", pdf)
 
     if not await db.patch(
         tg_id, expected_status=logic.ST_APPROVED,
         state=logic.WAIT_SIGN,
         contract_no=number, contract_path=str(path), contract_sha256=digest,
-        contract_status=logic.CT_ISSUED, contract_issued_at=utcnow(),
+        contract_status=logic.CT_ISSUED, contract_issued_at=issued_at,
     ):
         # Статус успел уехать - договор уже неактуален, файл на диске не нужен.
         files.remove(path)
@@ -129,15 +142,17 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
 
     try:
-        pdf, digest = await _build(cfg, data, anketa, number=number, signed_at=stamp)
+        pdf, digest = await _build(cfg, data, anketa, number=number, signed_at=stamp,
+                                   issued_at=data.get("contract_issued_at"))
     except ContractProblem:
         # Подпись уже зафиксирована в базе, откатывать её нельзя. Человеку
         # отдаём меню, а разбираться с шаблоном будут по алерту.
         log.exception("подписанный экземпляр %s не собрался", tg_id)
         await bot.send_message(cfg.contract_chat_id, texts.CONTRACT_ALERT_FAILED.format(
             tg_id=tg_id, reason="не удалось пересобрать подписанный экземпляр"))
-        await callback.message.answer(
-            texts.REGISTERED.format(video_url=cfg.video_url), reply_markup=kb.main_menu())
+        await bot.send_message(
+            tg_id, texts.REGISTERED.format(video_url=cfg.video_url),
+            reply_markup=kb.main_menu())
         return
 
     old_path = data.get("contract_path")
@@ -149,9 +164,13 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     await db.log_event(tg_id, "contract_signed", {"number": number})
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
 
-    document = BufferedInputFile(pdf, filename=_filename(number))
-    await callback.message.answer_document(
-        document,
+    # Отправка идёт через bot по tg_id, а не через callback.message: кнопка
+    # подписи живёт в чате сутками, а у старого сообщения Telegram отдаёт
+    # недоступный объект без метода answer - подпись уже зафиксирована в базе,
+    # и падение здесь оставило бы человека без экземпляра договора.
+    await bot.send_document(
+        tg_id,
+        BufferedInputFile(pdf, filename=_filename(number)),
         caption=texts.CONTRACT_SIGNED_USER.format(
             number=logic.esc(number), signed_at=stamp, video_url=cfg.video_url),
         reply_markup=kb.main_menu(),
@@ -207,7 +226,7 @@ def _fix_fields(data: dict, anketa: dict) -> str:
 
 
 @router.callback_query(StateIs(logic.WAIT_SIGN), F.data == "contract_mistake")
-async def cb_mistake(callback: CallbackQuery, db: Database, vault: Vault,
+async def cb_mistake(callback: CallbackQuery, bot: Bot, db: Database,
                      user: dict) -> None:
     """Пользователь нашёл ошибку в своём договоре.
 
@@ -225,10 +244,35 @@ async def cb_mistake(callback: CallbackQuery, db: Database, vault: Vault,
         return
     await db.log_event(user["tg_id"], "contract_mistake")
     await callback.answer()
-    await callback.message.answer(texts.CONTRACT_MISTAKE)
-    await callback.message.answer(texts.WELCOME, reply_markup=kb.remove())
+    await bot.send_message(user["tg_id"], texts.CONTRACT_MISTAKE)
+    await bot.send_message(user["tg_id"], texts.WELCOME, reply_markup=kb.remove())
 
 
 @router.message(StateIs(logic.WAIT_SIGN))
-async def st_wait_sign(message: Message) -> None:
-    await message.answer(texts.CONTRACT_PRESS_BUTTON)
+async def st_wait_sign(message: Message, bot: Bot, db: Database, cfg: Config,
+                       vault: Vault, user: dict) -> None:
+    """Любое сообщение в ожидании подписи возвращает договор с кнопками.
+
+    Кнопки живут только на том сообщении, где лежит PDF. Если человек очистил
+    переписку или потерял его в ленте, подписать становится нечем: /start сюда
+    же и упирается, а никакого другого выхода из состояния нет. Поэтому
+    договор пересобирается и отправляется заново - это дешевле, чем тупик,
+    из которого выводить придётся руками.
+    """
+    row = await db.get_user(user["tg_id"])
+    data = dict(row) if row else dict(user)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    try:
+        pdf, _ = await _build(cfg, data, anketa, number=number, signed_at=UNSIGNED,
+                              issued_at=data.get("contract_issued_at"))
+    except ContractProblem:
+        log.exception("не удалось переотправить договор %s", user["tg_id"])
+        await message.answer(texts.CONTRACT_PRESS_BUTTON)
+        return
+    await bot.send_document(
+        user["tg_id"],
+        BufferedInputFile(pdf, filename=_filename(number)),
+        caption=texts.CONTRACT_RESEND.format(number=logic.esc(number)),
+        reply_markup=kb.sign_contract(),
+    )

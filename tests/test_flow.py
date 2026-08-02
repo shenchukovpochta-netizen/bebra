@@ -39,6 +39,7 @@ try:
         ChatMemberLeft,
         ChatMemberMember,
         Contact,
+        Document,
         Message,
         PhotoSize,
         Update,
@@ -163,7 +164,7 @@ class FakeDB:
         row = self.users.setdefault(tg_id, {
             "tg_id": tg_id, "username": username, "state": logic.NEW,
             "status": logic.ST_NEW, "rl_count": 0, "full_name": None, "phone": None,
-            "doc_file_id": None, "doc_path": None,
+            "doc_file_id": None, "doc_path": None, "doc_is_photo": True,
             "purge_after": None, "anketa_enc": None,
             "contract_no": None, "contract_path": None, "contract_sha256": None,
             "contract_status": logic.CT_NONE, "contract_issued_at": None,
@@ -264,8 +265,13 @@ def _next_id() -> int:
 
 
 def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
-        photo=False, contact_user_id=None, reply_to=None) -> Update:
+        photo=False, document=False, contact_user_id=None, reply_to=None,
+        reply_from_bot=True) -> Update:
     kwargs = {}
+    if document:
+        kwargs["document"] = Document(file_id="d1", file_unique_id="du1",
+                                      file_name="passport.jpg",
+                                      mime_type="image/jpeg", file_size=2000)
     if photo:
         kwargs["photo"] = [PhotoSize(file_id="f1", file_unique_id="u1",
                                      width=100, height=100, file_size=1000)]
@@ -273,9 +279,13 @@ def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
         kwargs["contact"] = Contact(phone_number="79990000000", first_name="U",
                                     user_id=contact_user_id)
     if reply_to is not None:
+        # Автор отвечаемого сообщения важен: карточку присылает бот, а ответ
+        # модератора коллеге бот обязан пропустить молча.
+        author = (User(id=1, is_bot=True, first_name="bot") if reply_from_bot
+                  else User(id=user_id + 1, is_bot=False, first_name="admin2"))
         kwargs["reply_to_message"] = Message(
             message_id=reply_to, date=datetime.now(timezone.utc),
-            chat=Chat(id=chat_id, type=chat_type),
+            chat=Chat(id=chat_id, type=chat_type), from_user=author,
         )
     return Update(update_id=_next_id(), message=Message(
         message_id=_next_id(), date=datetime.now(timezone.utc),
@@ -531,6 +541,87 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["state"], logic.WAIT_DOC)
         self.assertIn("документа", " ".join(self.session.sent()).lower())
 
+    async def test_document_upload_is_sent_back_as_document(self):
+        """Паспорт, присланный файлом, нельзя показать через sendPhoto: file_id
+        несёт тип, и Telegram отвечает 400. Пользователь оставался бы после
+        загрузки вообще без сообщения, а карточка утверждения не уходила."""
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.fill_anketa()
+        await self.feed(msg(document=True))
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM)
+        self.assertFalse(row["doc_is_photo"])
+        to_user = self.session.sent_to(USER_ID)
+        self.assertTrue(any(isinstance(m, SendDocument) for m in to_user),
+                        "экран подтверждения должен уйти документом, а не фото")
+
+        await self.feed(cb("confirm"))
+        card = self.session.sent_to(ADMIN_CHAT)
+        self.assertTrue(any(isinstance(m, SendDocument) for m in card),
+                        "карточка утверждения тоже должна уйти документом")
+
+    async def test_photo_upload_still_goes_as_photo(self):
+        await self.register_up_to_confirm()
+        self.assertTrue(self.db.users[USER_ID]["doc_is_photo"])
+        to_user = self.session.sent_to(USER_ID)
+        self.assertTrue(any(isinstance(m, SendPhoto) for m in to_user))
+
+    async def test_fixing_phones_does_not_ask_for_document_again(self):
+        """Отказ по телефонам возвращает на шаг телефонов. Гонять человека
+        переснимать паспорт незачем - документ уже загружен и не менялся."""
+        await self.submit()
+        await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        await self.feed(cb(f"rj:{USER_ID}:phones", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE2)
+
+        await self.feed(msg("+7 900 777-11-22"))
+        await self.feed(msg("+7 900 777-33-44"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM,
+                         "после последнего телефона должно быть подтверждение")
+        # Отказ поставил дату удаления на 3 дня вперёд, а шаг документа
+        # пропущен - снять её больше негде.
+        self.assertIsNone(row["purge_after"])
+        self.assertEqual(self.anketa()["phone2"], "+79007771122")
+
+    async def test_contract_date_is_frozen_at_issue(self):
+        """Договор пересобирается при переотправке и при подписании. Дата
+        в шапке обязана быть датой выдачи, а не «сегодня»: иначе подписанный
+        экземпляр отличается от прочитанного, а сохранённый при выдаче
+        отпечаток перестаёт соответствовать чему бы то ни было."""
+        await self.submit()
+        await self.approve()
+        issued_at = self.db.users[USER_ID]["contract_issued_at"]
+        self.assertIsNotNone(issued_at)
+
+        await self.feed(msg("покажи ещё раз"))
+        self.assertEqual(self.db.users[USER_ID]["contract_issued_at"], issued_at,
+                         "переотправка не должна двигать дату выдачи")
+
+        # Текст, собранный «завтра», обязан нести дату выдачи, а не завтрашнюю.
+        data = dict(self.db.users[USER_ID])
+        anketa = self.anketa()
+        ctx = contract._context(self.cfg, data, anketa, number=data["contract_no"],
+                                signed_at=contract.UNSIGNED, issued_at=issued_at)
+        self.assertEqual(ctx["contract_date"], issued_at.strftime("%d.%m.%Y"))
+
+    async def test_lost_contract_is_resent_on_any_message(self):
+        """Кнопки живут только на сообщении с PDF. Потерял его - подписать
+        нечем, и /start упирается сюда же: выхода из состояния нет."""
+        await self.submit()
+        await self.approve()
+        before = len(self.session.documents())
+        await self.feed(msg("а где договор?"))
+        self.assertGreater(len(self.session.documents()), before,
+                           "договор должен прийти заново")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_SIGN)
+
     async def test_reupload_after_reject_clears_purge_deadline(self):
         """Отказ ставит дату удаления на 3 дня вперёд. Без сброса при новой
         загрузке ретеншен снёс бы свежий скан вместе со старым, и заявка ушла
@@ -572,6 +663,19 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_BIRTH_PLACE,
                          "ответ реплаем должен обрабатываться как обычный шаг анкеты")
         self.assertGreater(len(self.session.sent()), before)
+
+    async def test_reply_to_another_admin_is_ignored(self):
+        """Модераторы переписываются в том же чате. Без проверки автора бот
+        вклинивался в каждый их разговор с «это сообщение не привязано
+        к заявке» - служебный чат становился неюзабельным."""
+        await self.submit()
+        before = len(self.session.calls)
+        await self.feed(msg("да, согласен", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
+                            chat_type="supergroup", reply_to=999,
+                            reply_from_bot=False))
+        self.assertEqual(len(self.session.calls), before,
+                         "на реплай коллеге бот отвечать не должен")
+        self.assertEqual(self.db.users[USER_ID]["status"], logic.ST_PENDING)
 
     async def test_reply_from_non_admin_ignored(self):
         await self.submit()

@@ -39,6 +39,21 @@ def _check_upload(message: Message) -> logic.Validation:
                                  doc.file_size if doc else None)
 
 
+async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
+                   reply_markup: Any = None) -> Any:
+    """Показать документ пользователя тем же способом, каким он его прислал.
+
+    file_id несёт в себе тип файла, и sendPhoto с file_id документа Telegram
+    отвергает с 400. Пользователь, отправивший паспорт файлом (а так делают,
+    чтобы не терять качество), получал бы после загрузки пустоту: состояние
+    уже переехало на подтверждение, а сообщение с кнопками не ушло. Карточка
+    утверждения не отправлялась по той же причине.
+    """
+    send = bot.send_photo if data.get("doc_is_photo", True) else bot.send_document
+    return await send(chat_id, data["doc_file_id"], caption=caption,
+                      reply_markup=reply_markup)
+
+
 # ─────────────────────────── /start ───────────────────────────
 
 @router.message(CommandStart())
@@ -51,15 +66,22 @@ async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> 
 
 
 @router.callback_query(F.data == "check_sub")
-async def cb_check_sub(callback: CallbackQuery, db: Database, user: dict) -> None:
+async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: Database,
+                       user: dict) -> None:
     # Досюда доходят только подписанные: неподписанных разворачивает middleware.
+    # Ответы идут через bot по tg_id, а не через callback.message: у старого
+    # сообщения Telegram отдаёт недоступный объект без метода answer.
     await callback.answer("Подписка подтверждена")
-    if user["status"] == logic.ST_APPROVED:
-        await callback.message.answer(texts.ALREADY_REGISTERED, reply_markup=kb.main_menu())
+    # Проверяется состояние, а не статус: между «заявку одобрили» и «договор
+    # подписан» статус уже approved, и по нему человек с неподписанным
+    # договором получал бы «вы уже зарегистрированы» вместе с меню.
+    if user["state"] == logic.APPROVED:
+        await bot.send_message(user["tg_id"], texts.ALREADY_REGISTERED,
+                               reply_markup=kb.main_menu())
         return
     if user["state"] in (logic.NEW, logic.WAIT_FIO):
         await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-        await callback.message.answer(texts.WELCOME)
+        await bot.send_message(user["tg_id"], texts.WELCOME)
 
 
 # ─────────────────────────── ФИО ───────────────────────────
@@ -99,7 +121,8 @@ async def st_fio_wrong(message: Message) -> None:
 # ─────────────────────────── оферта и ПДн ───────────────────────────
 
 @router.callback_query(StateIs(logic.WAIT_OFERTA), F.data == "oferta_ok")
-async def cb_oferta(callback: CallbackQuery, db: Database, cfg: Config, user: dict) -> None:
+async def cb_oferta(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                    user: dict) -> None:
     now = utcnow()
     # Согласие на обработку ПДн живёт внутри оферты, но фиксируется отдельными
     # полями: если редакция оферты изменится, надо будет доказать, под какой
@@ -114,7 +137,8 @@ async def cb_oferta(callback: CallbackQuery, db: Database, cfg: Config, user: di
                        {"version": cfg.oferta_version,
                         "consent_version": cfg.consent_version})
     await callback.answer(texts.OFERTA_ACCEPTED)
-    await callback.message.answer(texts.ASK_CONTACT, reply_markup=kb.share_contact())
+    await bot.send_message(user["tg_id"], texts.ASK_CONTACT,
+                           reply_markup=kb.share_contact())
 
 
 @router.message(StateIs(logic.WAIT_OFERTA))
@@ -174,8 +198,8 @@ def _markup_for(state: str) -> Any:
     return kb.remove()
 
 
-async def _advance(message: Message, db: Database, vault: Vault, user: dict,
-                   step: logic.Step, value: str) -> None:
+async def _advance(message: Message, bot: Bot, db: Database, vault: Vault,
+                   user: dict, step: logic.Step, value: str) -> None:
     """Записать ответ шага и задать следующий вопрос.
 
     Анкета читается и пишется целиком: полей десяток, они лежат в одном
@@ -186,14 +210,30 @@ async def _advance(message: Message, db: Database, vault: Vault, user: dict,
     anketa = vault.decrypt(user.get("anketa_enc"))
     anketa[step.field] = value
     following = logic.next_state(step.state)
+
+    # Документ уже загружен - значит человек вернулся сюда после отказа
+    # с причиной вроде «телефоны не подходят». Гонять его переснимать паспорт
+    # незачем: шаг документа пропускается, идём сразу на подтверждение.
+    # purge_after при этом обязателен к сбросу - отказ поставил дату удаления
+    # на три дня вперёд, и мимо st_doc её снять больше негде.
+    skip_doc = following == logic.WAIT_DOC and bool(user.get("doc_file_id"))
+    if skip_doc:
+        following = logic.CONFIRM
+
     if not await db.patch(user["tg_id"], expected_state=step.state,
-                          anketa_enc=vault.encrypt(anketa), state=following):
+                          anketa_enc=vault.encrypt(anketa), state=following,
+                          **({"purge_after": None} if skip_doc else {})):
+        return
+
+    if skip_doc:
+        await send_confirm(bot, user)
         return
     await message.answer(PROMPTS[following], reply_markup=_markup_for(following))
 
 
 @router.message(StateIs(*logic.ANKETA_BY_STATE), F.text)
-async def st_anketa(message: Message, db: Database, vault: Vault, user: dict) -> None:
+async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
+                    user: dict) -> None:
     """Один обработчик на все шаги анкеты.
 
     Десять почти одинаковых функций разъезжаются при первой же вставке поля
@@ -206,7 +246,8 @@ async def st_anketa(message: Message, db: Database, vault: Vault, user: dict) ->
     if step.state == logic.WAIT_LIVE_ADDR and \
             message.text.strip().lower() == SAME_ADDRESS_ANSWER:
         await message.answer(texts.SAME_AS_REG)
-        await _advance(message, db, vault, user, step, anketa.get("reg_address", ""))
+        await _advance(message, bot, db, vault, user, step,
+                       anketa.get("reg_address", ""))
         return
 
     if step.state in (logic.WAIT_PHONE2, logic.WAIT_PHONE3):
@@ -229,7 +270,7 @@ async def st_anketa(message: Message, db: Database, vault: Vault, user: dict) ->
         await message.answer(PROMPTS[logic.WAIT_BIRTH])
         return
 
-    await _advance(message, db, vault, user, step, result.value)
+    await _advance(message, bot, db, vault, user, step, result.value)
 
 
 @router.message(StateIs(*logic.ANKETA_BY_STATE))
@@ -246,25 +287,32 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config, user: di
         await message.answer(check.error)
         return
     file_id = _file_id(message)
+    is_photo = bool(message.photo)
     # purge_after сбрасывается обязательно. «Заполнить повторно» и отказ
     # модератора ставят дату удаления в прошлое (или на 3 дня вперёд), и если
     # её не снять, ретеншен снесёт СВЕЖИЕ сканы вместе со старыми: пользователь
     # окажется в confirm без doc_file_id, а карточка модерации не отправится.
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_DOC,
-                          doc_file_id=file_id, doc_path=None, doc_sha256=None,
+                          doc_file_id=file_id, doc_is_photo=is_photo,
+                          doc_path=None, doc_sha256=None,
                           purge_after=None, state=logic.CONFIRM):
         return
     await db.log_event(user["tg_id"], "doc_uploaded")
-    await message.answer_photo(
-        file_id,
+    await send_confirm(bot, {**user, "doc_file_id": file_id, "doc_is_photo": is_photo})
+    # Скачивание и хэш - в фоне: пользователь не должен ждать сеть.
+    tasks.spawn(_process_doc(bot, db, cfg, user["tg_id"], file_id))
+
+
+async def send_confirm(bot: Bot, data: dict) -> None:
+    """Экран подтверждения: документ, введённые данные и кнопки."""
+    await send_doc(
+        bot, data["tg_id"], data,
         caption=texts.CONFIRM_CAPTION.format(
-            fio=logic.esc(user["full_name"]),
-            phone=logic.esc(str(user["phone"] or "").lstrip("+")),
+            fio=logic.esc(data["full_name"]),
+            phone=logic.esc(str(data["phone"] or "").lstrip("+")),
         ),
         reply_markup=kb.confirm(),
     )
-    # Скачивание и хэш - в фоне: пользователь не должен ждать сеть.
-    tasks.spawn(_process_doc(bot, db, cfg, user["tg_id"], file_id))
 
 
 @router.message(StateIs(logic.WAIT_DOC))
@@ -275,7 +323,8 @@ async def st_doc_wrong(message: Message) -> None:
 # ─────────────────────────── подтверждение ───────────────────────────
 
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "restart")
-async def cb_restart(callback: CallbackQuery, db: Database, cfg: Config, user: dict) -> None:
+async def cb_restart(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                     user: dict) -> None:
     # Ссылки на старые сканы обнуляются, purge_after ставится в прошлое -
     # ретеншен подберёт файлы и удалит их с диска. Анкета стирается вместе
     # с ними: «Заполнить повторно» означает и новые паспортные данные тоже,
@@ -287,7 +336,7 @@ async def cb_restart(callback: CallbackQuery, db: Database, cfg: Config, user: d
         return
     await db.log_event(user["tg_id"], "restart")
     await callback.answer(texts.RESTART_TOAST)
-    await callback.message.answer(texts.RESTART)
+    await bot.send_message(user["tg_id"], texts.RESTART, reply_markup=kb.remove())
 
 
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "confirm")
@@ -300,8 +349,9 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
             return
         await db.set_purge_after(user["tg_id"], cfg.purge_approved_days)
         await callback.answer("Готово")
-        await callback.message.answer(
-            texts.REGISTERED.format(video_url=cfg.video_url), reply_markup=kb.main_menu())
+        await bot.send_message(user["tg_id"],
+                               texts.REGISTERED.format(video_url=cfg.video_url),
+                               reply_markup=kb.main_menu())
         return
 
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
@@ -310,7 +360,7 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
         return
     await db.log_event(user["tg_id"], "submitted")
     await callback.answer(texts.SUBMITTED_TOAST)
-    await callback.message.answer(texts.SUBMITTED)
+    await bot.send_message(user["tg_id"], texts.SUBMITTED)
     # Если карточка не ушла (бот не в чате модерации, неверный ADMIN_CHAT_ID),
     # заявка становится невидимой: пользователь ждёт, модератор не знает.
     # Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
@@ -322,7 +372,7 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
                       "владелец аккаунта нажал /start у бота: написать первым "
                       "в личку бот не может", user["tg_id"])
         await db.log_event(user["tg_id"], "moderation_card_failed")
-        await callback.message.answer(texts.SUBMIT_PROBLEM)
+        await bot.send_message(user["tg_id"], texts.SUBMIT_PROBLEM)
 
 
 @router.message(StateIs(logic.CONFIRM))
@@ -381,9 +431,8 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
         # реквизитов выглядит как полная - утвердят не глядя.
         raise CardNotReady(f"у {tg_id} не заполнено: {', '.join(missing)}")
 
-    sent = await bot.send_photo(
-        cfg.contract_chat_id,
-        data["doc_file_id"],
+    sent = await send_doc(
+        bot, cfg.contract_chat_id, data,
         caption=texts.CONTRACT_CARD.format(
             number=logic.esc(data.get("contract_no") or "будет присвоен"),
             fields=anketa_lines(data, anketa),
