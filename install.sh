@@ -34,12 +34,21 @@ fi
 # Значения из прошлого запуска - чтобы при повторе просто жать Enter.
 # TZ берётся строкой из файла, а не из окружения: переменная часто приходит
 # по SSH с машины администратора, а от неё зависит дата в шапке договора.
-TZ_VALUE="$(sed -n 's/^TZ=//p' .env 2>/dev/null | head -1)"
+#
+# Чтение обёрнуто в проверку файла не для красоты: при set -o pipefail sed
+# на несуществующем .env возвращает 2, из-за чего присваивание считается
+# упавшим и set -e молча обрывает скрипт. На первой установке .env как раз
+# и нет - то есть падало ровно там, где важнее всего.
+TZ_VALUE=""
+if [ -f .env ]; then
+  TZ_VALUE="$(sed -n 's/^TZ=//p' .env | head -1)"
+  # shellcheck disable=SC1091
+  set -a; . ./.env; set +a
+fi
 : "${TZ_VALUE:=Europe/Moscow}"
-# shellcheck disable=SC1091
-if [ -f .env ]; then set -a; . ./.env; set +a; fi
+
 OLD_TOKEN=""
-[ -s secrets/bot_token ] && OLD_TOKEN="$(cat secrets/bot_token)"
+if [ -s secrets/bot_token ]; then OLD_TOKEN="$(cat secrets/bot_token)"; fi
 
 # ─── вспомогательное: спросить с проверкой ──────────────────────────────────
 # ask ПЕРЕМЕННАЯ "вопрос" "регулярка" "подсказка при ошибке" [можно_пусто]

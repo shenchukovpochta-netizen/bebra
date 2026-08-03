@@ -141,14 +141,14 @@ class PipelineMiddleware(BaseMiddleware):
         if verdict == "drop":
             return None      # молча: ответ на флуд сам становится флудом
         if verdict == "warn":
-            await self._reply(inner, texts.RATE_LIMITED)
+            await self._reply(data["bot"], user_id, texts.RATE_LIMITED)
             return None
 
         # Гейт подписки: без кэша, всегда живой запрос.
         if not await check_subscription(data["bot"], self.cfg.channel_id, user_id):
             await self._reply(
-                inner,
-                texts.NOT_SUBSCRIBED.format(channel_url=self.cfg.channel_url),
+                data["bot"], user_id,
+                texts.NOT_SUBSCRIBED.format(channel_url=logic.esc(self.cfg.channel_url)),
                 kb.subscribe(self.cfg.channel_url),
             )
             if isinstance(inner, CallbackQuery):
@@ -158,7 +158,13 @@ class PipelineMiddleware(BaseMiddleware):
         return await handler(event, data)
 
     @staticmethod
-    async def _reply(inner: Any, text: str, markup: Any = None) -> None:
-        target = inner.message if isinstance(inner, CallbackQuery) else inner
-        if target is not None:
-            await target.answer(text, reply_markup=markup)
+    async def _reply(bot: Any, tg_id: int, text: str, markup: Any = None) -> None:
+        """Ответ пользователю по его id, а не через объект апдейта.
+
+        Через callback.message было нельзя: у кнопки из старого сообщения
+        Telegram отдаёт недоступный объект, у которого нет метода answer.
+        Гейт подписки и предупреждение о флуде срабатывают в том числе
+        на такие нажатия, и падали бы именно на них - до всякого обработчика,
+        то есть с потерей апдейта целиком.
+        """
+        await bot.send_message(tg_id, text, reply_markup=markup)

@@ -590,6 +590,32 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row["purge_after"])
         self.assertEqual(self.anketa()["phone2"], "+79007771122")
 
+    async def test_config_urls_are_escaped_in_messages(self):
+        """Все сообщения уходят с parse_mode=HTML. Ссылка из конфигурации
+        с & (обычное дело для youtube) делает разметку невалидной, и Telegram
+        отвергает сообщение целиком - человек не получает подписанный договор
+        вообще, хотя подпись уже зафиксирована."""
+        self.dp, self.bot, self.db, self.session, self.cfg, self.vault = build(
+            make_config(video_url="https://youtu.be/x?si=a&t=10",
+                        channel_url="https://t.me/c?a=1&b=2"))
+        self._orig_download, self._orig_store = files.download, files.store
+        files.download = lambda bot, file_id, max_bytes: _async(b"bytes")
+        files.store = lambda d, tg, slot, data: (
+            Path(f"/tmp/{tg}-{slot}.{files.SLOT_EXT[slot]}"), "hash")
+
+        self.session.subscribed = False
+        await self.feed(msg("/start"))
+        gate = " ".join(self.session.sent())
+        self.assertIn("&amp;", gate)
+        self.assertNotIn("?a=1&b=2", gate)
+
+        self.session.subscribed = True
+        await self.submit()
+        await self.approve()
+        await self.feed(cb("sign"))
+        signed = " ".join(self.session.sent())
+        self.assertIn("si=a&amp;t=10", signed)
+
     async def test_contract_date_is_frozen_at_issue(self):
         """Договор пересобирается при переотправке и при подписании. Дата
         в шапке обязана быть датой выдачи, а не «сегодня»: иначе подписанный
@@ -610,6 +636,26 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         ctx = contract._context(self.cfg, data, anketa, number=data["contract_no"],
                                 signed_at=contract.UNSIGNED, issued_at=issued_at)
         self.assertEqual(ctx["contract_date"], issued_at.strftime("%d.%m.%Y"))
+
+    async def test_reentering_the_same_phone_after_reject_is_allowed(self):
+        """Возврат на шаг телефонов после отказа. Прошлый ответ хранится
+        в анкете, и без исключения собственного поля бот отвергал его как
+        дубликат самого себя - то есть верный ответ."""
+        await self.submit()
+        await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        await self.feed(cb(f"rj:{USER_ID}:phones", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE2)
+
+        # Тот же номер, что и был — человек уверен, что он правильный.
+        await self.feed(msg("+7 900 111-22-33"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE3,
+                         "повторный ввод своего же номера должен приниматься")
+        # А вот совпадение с основным номером по-прежнему отсекается.
+        await self.feed(msg("+7 999 000-00-00"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE3)
+        self.assertIn("уже указан", " ".join(self.session.sent()))
 
     async def test_lost_contract_is_resent_on_any_message(self):
         """Кнопки живут только на сообщении с PDF. Потерял его - подписать

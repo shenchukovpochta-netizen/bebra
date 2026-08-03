@@ -151,7 +151,7 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         await bot.send_message(cfg.contract_chat_id, texts.CONTRACT_ALERT_FAILED.format(
             tg_id=tg_id, reason="не удалось пересобрать подписанный экземпляр"))
         await bot.send_message(
-            tg_id, texts.REGISTERED.format(video_url=cfg.video_url),
+            tg_id, texts.REGISTERED.format(video_url=logic.esc(cfg.video_url)),
             reply_markup=kb.main_menu())
         return
 
@@ -172,7 +172,8 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         tg_id,
         BufferedInputFile(pdf, filename=_filename(number)),
         caption=texts.CONTRACT_SIGNED_USER.format(
-            number=logic.esc(number), signed_at=stamp, video_url=cfg.video_url),
+            number=logic.esc(number), signed_at=stamp,
+            video_url=logic.esc(cfg.video_url)),
         reply_markup=kb.main_menu(),
     )
 

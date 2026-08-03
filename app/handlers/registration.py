@@ -251,9 +251,13 @@ async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
         return
 
     if step.state in (logic.WAIT_PHONE2, logic.WAIT_PHONE3):
+        # Занятыми считаются все номера, кроме того, который сейчас и вводится.
+        # Без этого человек, вернувшийся на шаг телефонов после отказа, получал
+        # «этот номер уже указан» на свой же прошлый ответ - то есть на верный.
         taken = [p for p in (logic.normalize_phone(user.get("phone")),
-                             anketa.get("phone2")) if p]
-        result = step.validate(message.text, taken=taken)
+                             anketa.get("phone2"), anketa.get("phone3")) if p]
+        own = anketa.get(step.field)
+        result = step.validate(message.text, taken=[p for p in taken if p != own])
     else:
         result = step.validate(message.text)
 
@@ -350,7 +354,7 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
         await db.set_purge_after(user["tg_id"], cfg.purge_approved_days)
         await callback.answer("Готово")
         await bot.send_message(user["tg_id"],
-                               texts.REGISTERED.format(video_url=cfg.video_url),
+                               texts.REGISTERED.format(video_url=logic.esc(cfg.video_url)),
                                reply_markup=kb.main_menu())
         return
 
