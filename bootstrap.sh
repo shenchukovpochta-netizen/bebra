@@ -39,7 +39,18 @@ fi
 # наружу. Поэтому оставляем открытым исключительно SSH.
 if command -v ufw >/dev/null 2>&1; then
   say "настраиваю ufw (наружу открыт только SSH)"
-  ufw allow OpenSSH >/dev/null
+  # Порт берётся из конфигурации самого sshd, а не из профиля «OpenSSH»:
+  # профиль открывает ровно 22, и на сервере с перенесённым портом включение
+  # ufw отрезает доступ намертво - лечится потом только консолью хостера.
+  SSH_PORTS="$( { sshd -T 2>/dev/null || true; } | awk '/^port /{print $2}' )"
+  if [ -z "$SSH_PORTS" ]; then
+    SSH_PORTS="$( { grep -E '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null || true; } | awk '{print $2}' )"
+  fi
+  [ -n "$SSH_PORTS" ] || SSH_PORTS=22
+  for p in $SSH_PORTS; do
+    ufw allow "$p/tcp" >/dev/null
+    printf '    открыт %s/tcp — по нему вы сейчас и подключены\n' "$p"
+  done
   ufw --force enable >/dev/null
   ufw status | sed 's/^/    /'
 fi
