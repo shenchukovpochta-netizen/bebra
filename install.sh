@@ -218,30 +218,36 @@ ask PURGE_REJECTED_DAYS "Хранить после отказа, дней:" '^[0
 # ─── Запись .env ────────────────────────────────────────────────────────────
 bold "Записываю .env"
 umask 077
+# Значения пишутся в кавычках. Это не украшение: bootstrap.sh читает .env
+# через `. ./.env`, и строка ADMINS=111 222 без кавычек означает для shell
+# «присвоить ADMINS=111, затем выполнить команду 222». Результат - «222:
+# command not found», обрыв установки и потерянный второй администратор.
+# Docker compose кавычки понимает и снимает их сам.
 cat > .env <<EOF
 # Создан install.sh $(date '+%Y-%m-%d %H:%M'). Секреты лежат в ./secrets/.
-POSTGRES_USER=mybike
-POSTGRES_DB=mybike
-TZ=${TZ_VALUE}
+# Значения в кавычках: пробел внутри значения иначе ломает чтение файла.
+POSTGRES_USER="mybike"
+POSTGRES_DB="mybike"
+TZ="${TZ_VALUE}"
 
-CHANNEL_ID=${CHANNEL_ID}
-CHANNEL_URL=${CHANNEL_URL}
-ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
-ADMINS=${ADMINS}
+CHANNEL_ID="${CHANNEL_ID}"
+CHANNEL_URL="${CHANNEL_URL}"
+ADMIN_CHAT_ID="${ADMIN_CHAT_ID}"
+ADMINS="${ADMINS}"
 
-CONTRACT_CHAT_ID=${CONTRACT_CHAT_ID}
-FIX_CHAT_ID=${FIX_CHAT_ID}
-FIX_TOPIC_ID=${FIX_TOPIC_ID}
+CONTRACT_CHAT_ID="${CONTRACT_CHAT_ID}"
+FIX_CHAT_ID="${FIX_CHAT_ID}"
+FIX_TOPIC_ID="${FIX_TOPIC_ID}"
 
-OFERTA_URL=${OFERTA_URL}
-OFERTA_VERSION=${OFERTA_VERSION}
-PDN_URL=${PDN_URL:-}
-PDN_VERSION=${PDN_VERSION:-}
-VIDEO_URL=${VIDEO_URL:-https://youtu.be/CyZzskq8o0o}
+OFERTA_URL="${OFERTA_URL}"
+OFERTA_VERSION="${OFERTA_VERSION}"
+PDN_URL="${PDN_URL:-}"
+PDN_VERSION="${PDN_VERSION:-}"
+VIDEO_URL="${VIDEO_URL:-https://youtu.be/CyZzskq8o0o}"
 
-PURGE_APPROVED_DAYS=${PURGE_APPROVED_DAYS}
-PURGE_REJECTED_DAYS=${PURGE_REJECTED_DAYS}
-UPDATES_LOG_DAYS=${UPDATES_LOG_DAYS:-7}
+PURGE_APPROVED_DAYS="${PURGE_APPROVED_DAYS}"
+PURGE_REJECTED_DAYS="${PURGE_REJECTED_DAYS}"
+UPDATES_LOG_DAYS="${UPDATES_LOG_DAYS:-7}"
 EOF
 chmod 600 .env
 ok ".env готов"

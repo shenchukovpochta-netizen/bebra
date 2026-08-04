@@ -92,9 +92,12 @@ if unknown_cols:
 
 # ── 5. значения-заглушки, которые проверяет bootstrap ────────────────────
 boot = read("bootstrap.sh")
+# Значения в .env.example взяты в кавычки - иначе пробел внутри значения
+# ломает чтение файла. Для сравнения кавычки снимаем.
+env_plain = re.sub(r'^([A-Z_][A-Z0-9_]*)="(.*)"$', r"\1=\2", env_example, flags=re.M)
 for var in re.findall(r'if \[ "\$(\w+)" = "([^"]+)" \]', boot):
     name, placeholder = var
-    if f"{name}={placeholder}" not in env_example:
+    if f"{name}={placeholder}" not in env_plain:
         problems.append(
             f"bootstrap.sh считает заглушкой {name}={placeholder}, "
             f"но в .env.example другое значение -> проверка не сработает")
