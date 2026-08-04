@@ -137,7 +137,7 @@ async def cb_reject_comment(callback: CallbackQuery, cfg: Config) -> None:
 
 @router.callback_query(F.data.regexp(r"^rj:\d+:[a-z]+$"))
 async def cb_reject_reason(callback: CallbackQuery, bot: Bot, db: Database,
-                           cfg: Config) -> None:
+                           cfg: Config, vault: Vault) -> None:
     if not _is_admin(callback.from_user.id, cfg):
         await callback.answer(texts.MOD_NO_RIGHTS, show_alert=True)
         return
@@ -146,11 +146,16 @@ async def cb_reject_reason(callback: CallbackQuery, bot: Bot, db: Database,
         await callback.answer(texts.MOD_BROKEN_BUTTON, show_alert=True)
         return
     target, code = parsed
-    if await db.get_user(target) is None:
+    row = await db.get_user(target)
+    if row is None:
         await callback.answer(texts.MOD_BROKEN_BUTTON, show_alert=True)
         return
 
-    reason, back_to = logic.REJECT_REASONS[code]
+    reason = logic.REJECT_REASONS[code][0]
+    # Шаг возврата зависит от возраста: «согласие родителя» у взрослого -
+    # это промах модератора по кнопке, и отправлять взрослого за согласием
+    # нельзя - его сценарий такого шага не содержит.
+    back_to = logic.reject_back_to(code, vault.decrypt(dict(row).get("anketa_enc")))
     if not await _decide(db, callback, target, approved=False,
                          reason=reason, back_to=back_to):
         return

@@ -17,6 +17,14 @@ create table if not exists bot.users (
   -- это надо в момент отправки, а угадать по самому file_id нельзя.
   doc_is_photo       boolean     not null default true,
 
+  -- Письменное согласие законного представителя: только у арендаторов
+  -- 16-17 лет, у взрослых все четыре поля пусты. Хранится и удаляется
+  -- по тем же правилам, что скан документа.
+  parent_file_id     text,
+  parent_path        text,
+  parent_sha256      text,
+  parent_is_photo    boolean     not null default true,
+
   oferta_version     text,
   oferta_accepted_at timestamptz,
   pdn_version        text,
@@ -79,6 +87,10 @@ alter table bot.users add column if not exists contract_issued_at timestamptz;
 alter table bot.users add column if not exists contract_signed_at timestamptz;
 alter table bot.users add column if not exists mod_chat_id        bigint;
 alter table bot.users add column if not exists mod_message_id     bigint;
+alter table bot.users add column if not exists parent_file_id     text;
+alter table bot.users add column if not exists parent_path        text;
+alter table bot.users add column if not exists parent_sha256      text;
+alter table bot.users add column if not exists parent_is_photo    boolean not null default true;
 
 -- Сквозная нумерация договоров. Последовательность, а не «максимум плюс один»:
 -- два одновременных подтверждения иначе получают один и тот же номер, и в двух

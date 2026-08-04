@@ -15,7 +15,7 @@ import asyncio
 import importlib
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -65,6 +65,12 @@ except ImportError:                                    # pragma: no cover
 USER_ID, CHAT_ID = 5001, 5001
 ADMIN_ID, ADMIN_CHAT = 111, -1009876543210
 CHANNEL_ID = -1001234567890
+# 17 с половиной лет на момент прогона: гарантированно несовершеннолетний,
+# но уже старше 16. Абсолютной датой это не записать - тест состарился бы.
+MINOR_BIRTH = (date.today() - timedelta(days=int(17.5 * 365))).strftime("%d.%m.%Y")
+# Паспорт выдан год назад, то есть после его 14-летия: дата из взрослого
+# набора ответов (2015) не прошла бы сверку дат и вернула бы на дату рождения.
+MINOR_PASSPORT_DATE = (date.today() - timedelta(days=365)).strftime("%d.%m.%Y")
 # Чат фиксации сдачи и номер темы в нём - туда уходит подписанный договор.
 FIX_CHAT, FIX_TOPIC = -1005555555555, 42
 
@@ -165,6 +171,7 @@ class FakeDB:
             "tg_id": tg_id, "username": username, "state": logic.NEW,
             "status": logic.ST_NEW, "rl_count": 0, "full_name": None, "phone": None,
             "doc_file_id": None, "doc_path": None, "doc_is_photo": True,
+            "parent_file_id": None, "parent_path": None, "parent_is_photo": True,
             "purge_after": None, "anketa_enc": None,
             "contract_no": None, "contract_path": None, "contract_sha256": None,
             "contract_status": logic.CT_NONE, "contract_issued_at": None,
@@ -392,14 +399,71 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT)
         self.assertIn("10 цифр", " ".join(self.session.sent()))
 
-    async def test_underage_rejected_at_birth_date(self):
+    async def test_under_sixteen_rejected_at_birth_date(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.feed(msg("01.01.2020"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_BIRTH)
-        self.assertIn("18 лет", " ".join(self.session.sent()))
+        self.assertIn("16 лет", " ".join(self.session.sent()))
+
+    async def register_minor_up_to_doc(self):
+        """Регистрация 17-летнего до шага документа включительно."""
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        answers = (MINOR_BIRTH,) + ANKETA_ANSWERS[1:3] \
+            + (MINOR_PASSPORT_DATE,) + ANKETA_ANSWERS[4:]
+        for answer in answers:
+            await self.feed(msg(answer))
+        await self.feed(msg(photo=True))
+
+    async def test_minor_asked_for_parent_consent_after_doc(self):
+        await self.register_minor_up_to_doc()
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PARENT_CONSENT)
+        self.assertIn("согласие", " ".join(self.session.sent()).lower())
+
+    async def test_minor_reaches_confirm_after_parent_photo(self):
+        await self.register_minor_up_to_doc()
+        await self.feed(msg("а можно без этого?"))       # текст вместо фото
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PARENT_CONSENT)
+        await self.feed(msg(photo=True))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM)
+        self.assertTrue(row["parent_file_id"])
+
+    async def test_minor_card_carries_consent_and_warning(self):
+        """Утверждающий обязан увидеть возраст и согласие ДО кнопки
+        «Одобрить»: договор с 16-17-летним без согласия оспаривается целиком."""
+        await self.register_minor_up_to_doc()
+        await self.feed(msg(photo=True))
+        await self.feed(cb("confirm"))
+        captions = [m.caption or "" for m in self.session.sent_to(ADMIN_CHAT)
+                    if not isinstance(m, SendMessage)]
+        self.assertEqual(len(captions), 2, "ожидали фото согласия и карточку")
+        self.assertIn("законного представителя", captions[0])
+        self.assertIn("16–17", captions[1])
+
+    async def test_adult_card_has_no_minor_warning(self):
+        await self.submit()
+        captions = [m.caption or "" for m in self.session.sent_to(ADMIN_CHAT)
+                    if not isinstance(m, SendMessage)]
+        self.assertEqual(len(captions), 1, "у взрослого - только карточка")
+        self.assertNotIn("16–17", captions[0])
+
+    async def test_minor_contract_contains_parent_clause(self):
+        await self.register_minor_up_to_doc()
+        await self.feed(msg(photo=True))
+        await self.feed(cb("confirm"))
+        await self.approve()
+        # Договор уходит пользователю PDF-документом; сам факт выдачи
+        # проверяется в тестах взрослого сценария, здесь - оговорка.
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_SIGN)
+        ctx = logic.contract_context(row, self.anketa(), number=row["contract_no"])
+        self.assertEqual(ctx["minor_clause"], logic.MINOR_CLAUSE)
 
     async def test_same_address_button_copies_registration(self):
         await self.feed(msg("/start"))

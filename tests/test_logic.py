@@ -133,6 +133,11 @@ class TestStorePath(unittest.TestCase):
     def test_contract_pdf_recognised(self):
         self.assertTrue(logic.is_safe_store_path("/files/kyc/1-contract-17.pdf", "/files/kyc"))
 
+    def test_parent_consent_recognised(self):
+        """Файл согласия родителя обязан подходить под шаблон - иначе
+        ретеншен никогда его не удалит."""
+        self.assertTrue(logic.is_safe_store_path("/files/kyc/1-parent-17.jpg", "/files/kyc"))
+
     def test_removed_selfie_slot_rejected(self):
         """Слот селфи убран. Файл с таким именем ретеншен опознавать не должен:
         иначе он подметает то, чего бот больше не создаёт."""
@@ -160,16 +165,77 @@ class TestBirthDate(unittest.TestCase):
     def test_adult_accepted(self):
         self.assertTrue(logic.validate_birth_date("07.03.1990", today=TODAY).ok)
 
-    def test_underage_rejected(self):
-        """Договор проката с несовершеннолетним оспаривается целиком,
-        и узнать об этом на выдаче - значит уже завести на него договор."""
+    def test_under_sixteen_rejected(self):
+        """Сделка с тем, кому нет 16, ничтожна целиком, и узнать об этом
+        на выдаче - значит уже завести на ребёнка договор."""
         self.assertFalse(logic.validate_birth_date("01.01.2015", today=TODAY).ok)
 
-    def test_exactly_eighteen_today_accepted(self):
-        self.assertTrue(logic.validate_birth_date("02.08.2008", today=TODAY).ok)
+    def test_exactly_sixteen_today_accepted(self):
+        self.assertTrue(logic.validate_birth_date("02.08.2010", today=TODAY).ok)
 
-    def test_day_before_eighteenth_rejected(self):
-        self.assertFalse(logic.validate_birth_date("03.08.2008", today=TODAY).ok)
+    def test_day_before_sixteenth_rejected(self):
+        self.assertFalse(logic.validate_birth_date("03.08.2010", today=TODAY).ok)
+
+    def test_seventeen_accepted_as_minor(self):
+        """16-17 лет - не отказ: дальше появится шаг согласия родителя."""
+        result = logic.validate_birth_date("03.08.2008", today=TODAY)
+        self.assertTrue(result.ok)
+        self.assertTrue(logic.is_minor({"birth_date": result.value}, today=TODAY))
+
+
+class TestMinor(unittest.TestCase):
+    def test_eighteen_is_not_minor(self):
+        self.assertFalse(logic.is_minor({"birth_date": "02.08.2008"}, today=TODAY))
+
+    def test_no_birth_date_is_not_minor(self):
+        """Сбой разбора даты не должен навешивать взрослому лишний шаг:
+        это отказ в регистрации на ровном месте."""
+        self.assertFalse(logic.is_minor({}, today=TODAY))
+        self.assertFalse(logic.is_minor(None, today=TODAY))
+        self.assertFalse(logic.is_minor({"birth_date": "мусор"}, today=TODAY))
+
+    def test_minor_without_consent_goes_to_parent_step(self):
+        self.assertEqual(
+            logic.state_after_doc({"birth_date": "01.01.2009"},
+                                  has_parent_consent=False, today=TODAY),
+            logic.WAIT_PARENT_CONSENT)
+
+    def test_minor_with_consent_goes_to_confirm(self):
+        self.assertEqual(
+            logic.state_after_doc({"birth_date": "01.01.2009"},
+                                  has_parent_consent=True, today=TODAY),
+            logic.CONFIRM)
+
+    def test_adult_skips_parent_step(self):
+        self.assertEqual(
+            logic.state_after_doc({"birth_date": "07.03.1990"},
+                                  has_parent_consent=False, today=TODAY),
+            logic.CONFIRM)
+
+    def test_reject_parent_reason_for_adult_goes_to_doc(self):
+        """Промах модератора по кнопке «согласие родителя» на взрослом
+        не должен запирать его на шаге, которого нет в его сценарии."""
+        self.assertEqual(
+            logic.reject_back_to("parent", {"birth_date": "07.03.1990"},
+                                 today=TODAY),
+            logic.WAIT_DOC)
+
+    def test_reject_parent_reason_for_minor_goes_to_parent(self):
+        self.assertEqual(
+            logic.reject_back_to("parent", {"birth_date": "01.01.2009"},
+                                 today=TODAY),
+            logic.WAIT_PARENT_CONSENT)
+
+    def test_minor_clause_in_contract_context(self):
+        user = {"tg_id": 1, "full_name": "Иванов Иван", "phone": "+79001234567"}
+        minor = logic.contract_context(
+            user, {"birth_date": "01.01.2009"}, number="АВ-1", today=TODAY)
+        adult = logic.contract_context(
+            user, {"birth_date": "07.03.1990"}, number="АВ-1", today=TODAY)
+        self.assertEqual(minor["minor_clause"], logic.MINOR_CLAUSE)
+        # У взрослого - пустота, а не прочерк: «—» отдельным абзацем
+        # посреди договора выглядит браком.
+        self.assertEqual(adult["minor_clause"], "")
 
 
 class TestPassport(unittest.TestCase):

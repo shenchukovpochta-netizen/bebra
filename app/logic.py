@@ -40,6 +40,9 @@ WAIT_PHONE2 = "wait_phone2"
 WAIT_PHONE3 = "wait_phone3"
 
 WAIT_DOC = "wait_doc"
+# Фото письменного согласия законного представителя. Шаг только для тех,
+# кому от 16 до 18: у совершеннолетнего его в потоке нет вовсе.
+WAIT_PARENT_CONSENT = "wait_parent_consent"
 CONFIRM = "confirm"
 PENDING = "pending"
 # Договор сформирован и одобрен, ждём нажатия «Подписываю». Отдельное
@@ -65,7 +68,7 @@ KNOWN_STATES = frozenset({
     WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
-    WAIT_DOC, CONFIRM, PENDING, WAIT_SIGN, APPROVED,
+    WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN, APPROVED,
 })
 
 
@@ -122,7 +125,12 @@ def validate_fio(raw: str | None) -> Validation:
 # и «1234567890» в разных договорах - это уже разночтение в документе,
 # которое всплывёт при разборе спора.
 
-MIN_AGE, MAX_AGE = 18, 100
+# Прокат с 16 лет: арендатор 16-17 лет заключает договор с письменного
+# согласия законного представителя (фото согласия - отдельный шаг анкеты).
+# С 18 - без согласия. MIN_AGE ниже 16 не опускать: с 14 до 16 сделки такого
+# размера подросток совершать не вправе даже с согласия (ст. 26 ГК РФ
+# разрешает ему только мелкие бытовые), а младше 14 - ничтожны.
+MIN_AGE, ADULT_AGE, MAX_AGE = 16, 18, 100
 PASSPORT_MIN_AGE = 14      # паспорт РФ выдаётся с 14 лет
 
 
@@ -168,24 +176,55 @@ def parse_date(value: str | None) -> date | None:
         return None
 
 
-def validate_birth_date(raw: str | None, *, today: date | None = None) -> Validation:
-    """Дата рождения плюс проверка совершеннолетия.
+def age_years(born: date, on: date) -> int:
+    """Полных лет на дату. Вычитание годов с поправкой на «день рождения ещё
+    не наступил» - иначе возраст завышается на единицу почти полгода."""
+    return on.year - born.year - ((on.month, on.day) < (born.month, born.day))
 
-    Возраст считается здесь, а не в момент выдачи велосипеда: договор проката
-    с несовершеннолетним оспаривается целиком, и узнать об этом на выдаче -
+
+def validate_birth_date(raw: str | None, *, today: date | None = None) -> Validation:
+    """Дата рождения плюс проверка возраста.
+
+    Возраст считается здесь, а не в момент выдачи велосипеда: договор
+    с тем, кому нет 16, ничтожен целиком, и узнать об этом на выдаче -
     значит уже собрать паспортные данные ребёнка и завести на него договор.
+    16-17 лет - не отказ: дальше у таких появится шаг с фото согласия
+    законного представителя.
     """
     result = validate_date(raw, today=today, min_year=1900)
     if not result.ok:
         return result
-    born = parse_date(result.value)
-    now = today or date.today()
-    years = now.year - born.year - ((now.month, now.day) < (born.month, born.day))
+    years = age_years(parse_date(result.value), today or date.today())
     if years < MIN_AGE:
-        return Validation(False, error=f"Договор проката заключается с {MIN_AGE} лет.")
+        return Validation(
+            False,
+            error=f"Прокат доступен с {MIN_AGE} лет (до {ADULT_AGE} - "
+                  f"с письменного согласия родителя).")
     if years > MAX_AGE:
         return Validation(False, error="Похоже на опечатку в годе рождения. Проверьте, пожалуйста.")
     return Validation(True, value=result.value)
+
+
+def is_minor(anketa: dict | None, *, today: date | None = None) -> bool:
+    """Несовершеннолетний арендатор: 16-17 лет, нужен шаг согласия родителя.
+
+    Нечитаемая или отсутствующая дата рождения - НЕ несовершеннолетний:
+    до этой проверки дата уже прошла валидатор, а лишний шаг согласия
+    у взрослого из-за сбоя разбора - это отказ в регистрации на ровном месте.
+    """
+    born = parse_date((anketa or {}).get("birth_date"))
+    if born is None:
+        return False
+    return age_years(born, today or date.today()) < ADULT_AGE
+
+
+def state_after_doc(anketa: dict | None, *, has_parent_consent: bool,
+                    today: date | None = None) -> str:
+    """Куда идти после фото документа: взрослым - на подтверждение, 16-17-летним -
+    за фото согласия родителя, если оно ещё не загружено."""
+    if is_minor(anketa, today=today) and not has_parent_consent:
+        return WAIT_PARENT_CONSENT
+    return CONFIRM
 
 
 def validate_passport_number(raw: str | None) -> Validation:
@@ -314,10 +353,13 @@ ANKETA_FIELDS = tuple(step.field for step in ANKETA_STEPS)
 
 # Полный порядок шагов. next_state ходит по нему, поэтому переход появляется
 # автоматически, стоит вписать шаг в таблицу выше.
+# Шаг согласия родителя стоит в таблице, но проходят его только 16-17-летние:
+# обработчик документа выбирает следующий шаг через state_after_doc, а не
+# по этой таблице.
 FLOW: tuple[str, ...] = (
     WAIT_FIO, WAIT_OFERTA, WAIT_CONTACT,
     *(step.state for step in ANKETA_STEPS),
-    WAIT_DOC, CONFIRM,
+    WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM,
 )
 
 
@@ -437,7 +479,7 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
 
 # ─────────────────────────── прочее ───────────────────────────
 
-STORE_FILE_NAME = re.compile(r"^\d+-(?:doc-\d+\.jpg|contract-\d+\.pdf)$")
+STORE_FILE_NAME = re.compile(r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg|contract-\d+\.pdf)$")
 
 
 def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:
@@ -490,6 +532,17 @@ CONTRACT_LABELS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Абзац для договора с 16-17-летним. Подставляется в {{ minor_clause }}:
+# у взрослого на этом месте пустота, у несовершеннолетнего - оговорка,
+# без которой сделка с ним не имеет письменного следа согласия (ст. 26 ГК РФ).
+MINOR_CLAUSE = (
+    "Арендатор, не достигший 18 лет, заключает настоящий Договор с письменного "
+    "согласия своего законного представителя (родителя, усыновителя или "
+    "попечителя). Изображение письменного согласия передано Арендодателю "
+    "до заключения Договора и хранится у Арендодателя вместе с заявкой."
+)
+
+
 def contract_context(user: dict, anketa: dict | None, *, number: str,
                      today: date | None = None) -> dict[str, str]:
     """Значения для подстановки в шаблон договора.
@@ -504,10 +557,15 @@ def contract_context(user: dict, anketa: dict | None, *, number: str,
         "fio": str(user.get("full_name") or ""),
         "phone": normalize_phone(user.get("phone")) or str(user.get("phone") or ""),
         "tg_id": str(user.get("tg_id") or ""),
+        "username": f"@{user['username']}" if user.get("username") else "",
     }
     for field_name in ANKETA_FIELDS:
         ctx[field_name] = str(data.get(field_name) or "")
-    return {k: (v.strip() or "—") for k, v in ctx.items()}
+    result = {k: (v.strip() or "—") for k, v in ctx.items()}
+    # После прочерков, а не до: пустая оговорка у взрослого должна остаться
+    # пустой строкой, «—» отдельным абзацем посреди договора выглядит браком.
+    result["minor_clause"] = MINOR_CLAUSE if is_minor(data, today=today) else ""
+    return result
 
 
 # Готовые причины отказа. Каждая знает, на какой шаг вернуть человека:
@@ -519,7 +577,22 @@ REJECT_REASONS: dict[str, tuple[str, str]] = {
     "addr": ("Адрес указан не полностью", WAIT_REG_ADDR),
     "phones": ("Телефоны не подходят", WAIT_PHONE2),
     "doc": ("Фото документа не читается", WAIT_DOC),
+    "parent": ("Согласие родителя не читается", WAIT_PARENT_CONSENT),
 }
+
+
+def reject_back_to(code: str, anketa: dict | None, *,
+                   today: date | None = None) -> str:
+    """Шаг, на который возвращает отказ.
+
+    Причина «согласие родителя» у взрослого - это промах модератора по кнопке:
+    отправить совершеннолетнего за согласием родителя значит запереть его
+    на шаге, которого в его сценарии нет. Такому возвращаем шаг документа.
+    """
+    back_to = REJECT_REASONS[code][1]
+    if back_to == WAIT_PARENT_CONSENT and not is_minor(anketa, today=today):
+        return WAIT_DOC
+    return back_to
 
 
 MODERATION_DATA = re.compile(r"^(?:approve|reject|rj|rjc|rjx):-?\d+(?::[a-z]+)?$")

@@ -156,7 +156,10 @@ def to_pdf(text: str) -> bytes:
         if stripped.startswith("- "):
             pdf.set_font(FONT_NAME, size=10)
             pdf.set_x(pdf.l_margin + 5)
-            block(5.5, "• " + COLUMNS.sub(" ", stripped[2:].strip()))
+            # Слева, а не по ширине: в пунктах списков живут суммы штрафов
+            # и прайс, и растянутые выключкой пробелы внутри «10 000 рублей»
+            # выглядят как опечатка.
+            block(5.5, "• " + COLUMNS.sub(" ", stripped[2:].strip()), align="L")
             continue
 
         pdf.set_font(FONT_NAME, size=10)

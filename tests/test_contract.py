@@ -109,15 +109,35 @@ class TestTemplate(unittest.TestCase):
 
     def test_comments_are_not_printed(self):
         body = contract.strip_comments(self.template)
-        self.assertNotIn("ЗАМЕНИТЕ ЭТОТ РАЗДЕЛ", body)
+        self.assertNotIn("Согласуйте формулировку с юристом", body)
         self.assertNotIn("{{ contract_number }}  номер договора", body)
 
     def test_section_headings_survive_comment_stripping(self):
         """Регрессия: комментарий «#» съедал и заголовки «## », и договор
         собирался вообще без названий разделов."""
         body = contract.strip_comments(self.template)
-        for heading in ("## 1. Стороны", "## 5. Обработка персональных данных"):
+        for heading in ("## ПРЕДМЕТ ДОГОВОРА", "## ОТВЕТСТВЕННОСТЬ",
+                        "## ОБРАБОТКА ПЕРСОНАЛЬНЫХ ДАННЫХ",
+                        "## ПРИЛОЖЕНИЕ № 3. ПРАЙС-ЛИСТ"):
             self.assertIn(heading, body)
+
+    def test_real_contract_landed(self):
+        """Шаблон - договор ИП Галимзянова, а не рыба: реквизиты арендодателя
+        и ключевые суммы обязаны присутствовать."""
+        # В суммах стоят неразрывные пробелы - для сравнения сводим к обычным.
+        body = contract.strip_comments(self.template).replace(" ", " ")
+        for marker in ("Галимзянов", "165921923517", "324169000199701",
+                       "150 000 (сто пятьдесят тысяч)",
+                       "650 (Шестьсот) рублей",
+                       "ПРАВИЛА ЭКСПЛУАТАЦИИ ЭЛЕКТРОВЕЛОСИПЕДА"):
+            self.assertIn(marker, body)
+
+    def test_minor_clause_rendered_for_minor_only(self):
+        minor_ctx = make_ctx(minor_clause=logic.MINOR_CLAUSE)
+        text, _ = contract.render_text(self.template, minor_ctx)
+        self.assertIn("законного представителя", text)
+        adult, _ = contract.render_text(self.template, make_ctx())
+        self.assertNotIn(logic.MINOR_CLAUSE, adult)
 
     def test_every_placeholder_is_provided(self):
         """Опечатка в шаблоне не должна тихо выкидывать реквизит из договора."""

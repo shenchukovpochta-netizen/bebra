@@ -39,9 +39,9 @@ def _check_upload(message: Message) -> logic.Validation:
                                  doc.file_size if doc else None)
 
 
-async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
-                   reply_markup: Any = None) -> Any:
-    """Показать документ пользователя тем же способом, каким он его прислал.
+async def send_file(bot: Bot, chat_id: int, file_id: str, is_photo: bool, *,
+                    caption: str, reply_markup: Any = None) -> Any:
+    """Переслать файл тем же способом, каким пользователь его прислал.
 
     file_id несёт в себе тип файла, и sendPhoto с file_id документа Telegram
     отвергает с 400. Пользователь, отправивший паспорт файлом (а так делают,
@@ -49,9 +49,15 @@ async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
     уже переехало на подтверждение, а сообщение с кнопками не ушло. Карточка
     утверждения не отправлялась по той же причине.
     """
-    send = bot.send_photo if data.get("doc_is_photo", True) else bot.send_document
-    return await send(chat_id, data["doc_file_id"], caption=caption,
-                      reply_markup=reply_markup)
+    send = bot.send_photo if is_photo else bot.send_document
+    return await send(chat_id, file_id, caption=caption, reply_markup=reply_markup)
+
+
+async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
+                   reply_markup: Any = None) -> Any:
+    return await send_file(bot, chat_id, data["doc_file_id"],
+                           data.get("doc_is_photo", True),
+                           caption=caption, reply_markup=reply_markup)
 
 
 # ─────────────────────────── /start ───────────────────────────
@@ -185,6 +191,7 @@ PROMPTS: dict[str, str] = {
     logic.WAIT_PHONE2: texts.ASK_PHONE2,
     logic.WAIT_PHONE3: texts.ASK_PHONE3,
     logic.WAIT_DOC: texts.ASK_DOC,
+    logic.WAIT_PARENT_CONSENT: texts.ASK_PARENT_CONSENT,
 }
 
 SAME_ADDRESS_ANSWER = "совпадает с регистрацией"
@@ -213,19 +220,22 @@ async def _advance(message: Message, bot: Bot, db: Database, vault: Vault,
 
     # Документ уже загружен - значит человек вернулся сюда после отказа
     # с причиной вроде «телефоны не подходят». Гонять его переснимать паспорт
-    # незачем: шаг документа пропускается, идём сразу на подтверждение.
-    # purge_after при этом обязателен к сбросу - отказ поставил дату удаления
+    # незачем: шаг документа пропускается. Куда именно дальше, решает
+    # state_after_doc: 16-17-летнему без фото согласия родителя - за ним,
+    # остальным - сразу на подтверждение. purge_after при выходе на
+    # подтверждение обязателен к сбросу - отказ поставил дату удаления
     # на три дня вперёд, и мимо st_doc её снять больше негде.
-    skip_doc = following == logic.WAIT_DOC and bool(user.get("doc_file_id"))
-    if skip_doc:
-        following = logic.CONFIRM
+    if following == logic.WAIT_DOC and user.get("doc_file_id"):
+        following = logic.state_after_doc(
+            anketa, has_parent_consent=bool(user.get("parent_file_id")))
+    to_confirm = following == logic.CONFIRM
 
     if not await db.patch(user["tg_id"], expected_state=step.state,
                           anketa_enc=vault.encrypt(anketa), state=following,
-                          **({"purge_after": None} if skip_doc else {})):
+                          **({"purge_after": None} if to_confirm else {})):
         return
 
-    if skip_doc:
+    if to_confirm:
         await send_confirm(bot, user)
         return
     await message.answer(PROMPTS[following], reply_markup=_markup_for(following))
@@ -285,13 +295,19 @@ async def st_anketa_wrong(message: Message) -> None:
 # ─────────────────────────── документ ───────────────────────────
 
 @router.message(StateIs(logic.WAIT_DOC), F.photo | F.document)
-async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config, user: dict) -> None:
+async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
+                 vault: Vault, user: dict) -> None:
     check = _check_upload(message)
     if not check.ok:
         await message.answer(check.error)
         return
     file_id = _file_id(message)
     is_photo = bool(message.photo)
+    # 16-17-летнего после документа ждёт ещё фото согласия родителя,
+    # взрослого - сразу подтверждение.
+    following = logic.state_after_doc(
+        vault.decrypt(user.get("anketa_enc")),
+        has_parent_consent=bool(user.get("parent_file_id")))
     # purge_after сбрасывается обязательно. «Заполнить повторно» и отказ
     # модератора ставят дату удаления в прошлое (или на 3 дня вперёд), и если
     # её не снять, ретеншен снесёт СВЕЖИЕ сканы вместе со старыми: пользователь
@@ -299,12 +315,16 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config, user: di
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_DOC,
                           doc_file_id=file_id, doc_is_photo=is_photo,
                           doc_path=None, doc_sha256=None,
-                          purge_after=None, state=logic.CONFIRM):
+                          purge_after=None, state=following):
         return
     await db.log_event(user["tg_id"], "doc_uploaded")
-    await send_confirm(bot, {**user, "doc_file_id": file_id, "doc_is_photo": is_photo})
+    if following == logic.CONFIRM:
+        await send_confirm(bot, {**user, "doc_file_id": file_id,
+                                 "doc_is_photo": is_photo})
+    else:
+        await message.answer(PROMPTS[following], reply_markup=kb.remove())
     # Скачивание и хэш - в фоне: пользователь не должен ждать сеть.
-    tasks.spawn(_process_doc(bot, db, cfg, user["tg_id"], file_id))
+    tasks.spawn(_process_upload(bot, db, cfg, user["tg_id"], file_id, "doc"))
 
 
 async def send_confirm(bot: Bot, data: dict) -> None:
@@ -324,6 +344,41 @@ async def st_doc_wrong(message: Message) -> None:
     await message.answer(texts.DOC_NEED_PHOTO)
 
 
+# ─────────────────── согласие родителя (16-17 лет) ───────────────────
+
+@router.message(StateIs(logic.WAIT_PARENT_CONSENT), F.photo | F.document)
+async def st_parent(message: Message, bot: Bot, db: Database, cfg: Config,
+                    user: dict) -> None:
+    check = _check_upload(message)
+    if not check.ok:
+        await message.answer(check.error)
+        return
+    # Скан паспорта мог уйти под ретеншен, пока человек ходил за согласием:
+    # отказ ставит purge_after на три дня, а согласие родителя бывает
+    # и дольше. Подтверждение без документа отправить нельзя - сначала
+    # возвращаем на шаг документа, согласие примем следом.
+    if not user.get("doc_file_id"):
+        await db.patch(user["tg_id"], expected_state=logic.WAIT_PARENT_CONSENT,
+                       state=logic.WAIT_DOC)
+        await message.answer(PROMPTS[logic.WAIT_DOC])
+        return
+    file_id = _file_id(message)
+    is_photo = bool(message.photo)
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_PARENT_CONSENT,
+                          parent_file_id=file_id, parent_is_photo=is_photo,
+                          parent_path=None, parent_sha256=None,
+                          purge_after=None, state=logic.CONFIRM):
+        return
+    await db.log_event(user["tg_id"], "parent_consent_uploaded")
+    await send_confirm(bot, user)
+    tasks.spawn(_process_upload(bot, db, cfg, user["tg_id"], file_id, "parent"))
+
+
+@router.message(StateIs(logic.WAIT_PARENT_CONSENT))
+async def st_parent_wrong(message: Message) -> None:
+    await message.answer(texts.PARENT_NEED_PHOTO)
+
+
 # ─────────────────────────── подтверждение ───────────────────────────
 
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "restart")
@@ -335,6 +390,7 @@ async def cb_restart(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
     # а оставленная анкета молча уехала бы в договор старой.
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
                           state=logic.WAIT_FIO, doc_file_id=None, doc_sha256=None,
+                          parent_file_id=None, parent_sha256=None,
                           anketa_enc=None, purge_after=utcnow()):
         await callback.answer()
         return
@@ -435,13 +491,29 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
         # реквизитов выглядит как полная - утвердят не глядя.
         raise CardNotReady(f"у {tg_id} не заполнено: {', '.join(missing)}")
 
+    minor = logic.is_minor(anketa)
+    if minor and not data.get("parent_file_id"):
+        # Одобрить 16-17-летнего без согласия родителя нельзя, а карточка
+        # без него выглядит как обычная взрослая заявка.
+        raise CardNotReady(f"у {tg_id} (16-17 лет) нет фото согласия родителя")
+    if minor:
+        # Согласие уходит ПЕРЕД карточкой: утверждающий читает чат снизу
+        # вверх от карточки с кнопками, и фото согласия оказывается прямо
+        # над ней.
+        await send_file(bot, cfg.contract_chat_id, data["parent_file_id"],
+                        data.get("parent_is_photo", True),
+                        caption=texts.PARENT_CARD_CAPTION.format(tg_id=tg_id))
+
+    caption = texts.CONTRACT_CARD.format(
+        number=logic.esc(data.get("contract_no") or "будет присвоен"),
+        fields=anketa_lines(data, anketa),
+        tg_id=tg_id,
+    )
+    if minor:
+        caption += texts.CARD_MINOR_LINE
     sent = await send_doc(
         bot, cfg.contract_chat_id, data,
-        caption=texts.CONTRACT_CARD.format(
-            number=logic.esc(data.get("contract_no") or "будет присвоен"),
-            fields=anketa_lines(data, anketa),
-            tg_id=tg_id,
-        ),
+        caption=caption,
         reply_markup=kb.moderation(tg_id),
     )
     # Запоминаем, где лежит карточка: отказ «с указанием ошибок» пишется
@@ -450,19 +522,25 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
     await db.patch(tg_id, mod_chat_id=sent.chat.id, mod_message_id=sent.message_id)
 
 
-async def _process_doc(bot: Bot, db: Database, cfg: Config, tg_id: int,
-                       file_id: str | None) -> None:
-    """Скачать документ, положить на диск и посчитать хэш.
+async def _process_upload(bot: Bot, db: Database, cfg: Config, tg_id: int,
+                          file_id: str | None, slot: str) -> None:
+    """Скачать присланный файл, положить на диск и посчитать хэш.
 
-    Хэш нужен для антифрода: один и тот же документ не должен проходить
-    регистрацию с разных аккаунтов. Всё это в фоне - пользователь не должен
-    ждать сеть, стоя на экране подтверждения.
+    Слот «doc» - скан документа, «parent» - согласие родителя; лежат
+    и удаляются одинаково. Хэш у документа нужен для антифрода: один и тот же
+    паспорт не должен проходить регистрацию с разных аккаунтов. Согласие
+    на дубли не проверяется: одно и то же согласие у двух братьев - норма,
+    а не фрод. Всё это в фоне - пользователь не должен ждать сеть,
+    стоя на экране подтверждения.
     """
     try:
         if not file_id:
             return
         data = await files.download(bot, file_id, logic.MAX_UPLOAD_BYTES)
-        path, digest = files.store(cfg.storage_dir, tg_id, "doc", data)
+        path, digest = files.store(cfg.storage_dir, tg_id, slot, data)
+        if slot == "parent":
+            await db.patch(tg_id, parent_path=str(path), parent_sha256=digest)
+            return
         await db.patch(tg_id, doc_path=str(path), doc_sha256=digest)
 
         duplicates = await db.count_duplicate_docs(tg_id, digest)
@@ -471,4 +549,4 @@ async def _process_doc(bot: Bot, db: Database, cfg: Config, tg_id: int,
             await bot.send_message(cfg.contract_chat_id, texts.ALERT_DUPLICATE.format(
                 tg_id=tg_id, count=duplicates))
     except Exception:                                   # noqa: BLE001
-        log.exception("обработка документа %s не удалась", tg_id)
+        log.exception("обработка файла %s (%s) не удалась", tg_id, slot)

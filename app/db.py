@@ -14,6 +14,7 @@ import asyncpg
 PATCHABLE = frozenset({
     "state", "full_name", "phone",
     "doc_file_id", "doc_path", "doc_sha256", "doc_is_photo",
+    "parent_file_id", "parent_path", "parent_sha256", "parent_is_photo",
     "oferta_version", "oferta_accepted_at", "pdn_version", "pdn_consent_at",
     "status", "reject_reason", "reviewed_by", "reviewed_at", "purge_after",
     "anketa_enc",
@@ -215,9 +216,10 @@ class Database:
 
     async def rows_to_purge(self, limit: int = 200) -> list[asyncpg.Record]:
         return await self.pool.fetch(
-            "select tg_id, doc_path, contract_path from bot.users "
+            "select tg_id, doc_path, parent_path, contract_path from bot.users "
             "where purge_after is not null and purge_after < now() "
-            "  and (doc_path is not null or contract_path is not null) "
+            "  and (doc_path is not null or parent_path is not null "
+            "       or contract_path is not null) "
             "limit $1",
             limit,
         )
@@ -238,6 +240,7 @@ class Database:
         """
         await self.pool.execute(
             "update bot.users set doc_file_id = null, doc_path = null, "
+            "parent_file_id = null, parent_path = null, "
             "contract_path = null, anketa_enc = null, "
             "purge_after = null, updated_at = now() where tg_id = $1",
             tg_id,
