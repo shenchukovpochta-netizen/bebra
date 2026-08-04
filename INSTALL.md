@@ -239,11 +239,19 @@ apt-get update && apt-get install -y unzip
 ```
 
 ```bash
-mkdir -p /opt/mybike && unzip -o /root/mybike-bot.zip -d /opt/mybike && cd /opt/mybike
+unzip -o /root/mybike-bot.zip -d /opt && cd /opt/mybike-bot
 ```
 
-Если `unzip` распаковал во вложенную папку — зайдите в неё: файл
-`docker-compose.yml` должен лежать рядом, `ls` это покажет.
+Внутри архива всё лежит в папке `mybike-bot`, поэтому распаковываем в `/opt`,
+а заходим в `/opt/mybike-bot`. Проверьте, что попали куда надо:
+
+```bash
+ls install.sh docker-compose.yml
+```
+
+Обе строки должны отобразиться без ошибок. Если видите
+`No such file or directory` — вы не в той папке; `find /opt -name install.sh`
+покажет, где она.
 
 > Вместо `scp` можно перетащить архив мышкой через WinSCP или FileZilla —
 > протокол SFTP, тот же логин root и тот же пароль от SSH.
@@ -269,8 +277,13 @@ ssh root@ВАШ_IP
 ```
 
 ```bash
-cd /opt/mybike && bash install.sh
+cd /opt/mybike-bot && bash install.sh
 ```
+
+Каталог зависит от того, как вы заливали файлы: из архива это
+`/opt/mybike-bot`, через `deploy.ps1` — `/opt/mybike`. Если ошибётесь папкой,
+`bash` ответит `install.sh: No such file or directory` — тогда
+`find /opt -name install.sh` покажет верный путь.
 
 Скрипт задаст восемь вопросов и **проверит каждый ответ через Telegram**:
 токен — через `getMe`, каждый ID чата — через `getChat`, права бота в канале —
