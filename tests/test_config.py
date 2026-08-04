@@ -12,11 +12,13 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import logic  # noqa: E402
+from app import config as cfg_mod  # noqa: E402
 from app.config import Config  # noqa: E402
 
 BASE_ENV = {
@@ -111,6 +113,36 @@ class TestRequiredValues(unittest.TestCase):
 
     def test_admins_parsed_from_spaces_and_commas(self):
         self.assertEqual(load(ADMINS="1, 2  3").admins, (1, 2, 3))
+
+
+class TestSecretFileErrors(unittest.TestCase):
+    """Секрет читается из файла, и сорваться это чтение может по двум причинам.
+
+    Голый PermissionError на /run/secrets/bot_token не подсказывает ничего:
+    путь внутренний, на хосте такого файла нет, и владелец сервера видит
+    только трейсбек на десять кадров.
+    """
+
+    def test_unreadable_secret_names_the_fix(self):
+        real_read = cfg_mod.Path.read_text
+
+        def deny(self, *a, **kw):
+            if str(self).startswith("/run/secrets/"):
+                raise PermissionError(13, "Permission denied")
+            return real_read(self, *a, **kw)
+
+        with mock.patch.object(cfg_mod.Path, "read_text", deny), \
+                mock.patch.dict(os.environ, {"BOT_TOKEN_FILE": "/run/secrets/bot_token"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                cfg_mod._secret("BOT_TOKEN")
+        self.assertIn("chown 10001:10001", str(ctx.exception))
+
+    def test_missing_secret_file_names_the_fix(self):
+        with mock.patch.dict(os.environ,
+                             {"BOT_TOKEN_FILE": "/run/secrets/нет-такого"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                cfg_mod._secret("BOT_TOKEN")
+        self.assertIn("ls -l secrets/", str(ctx.exception))
 
 
 class TestUpdateRouting(unittest.TestCase):

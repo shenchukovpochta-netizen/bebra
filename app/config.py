@@ -35,7 +35,22 @@ def _secret(name: str, *, required: bool = True) -> str:
     """
     path = os.environ.get(f"{name}_FILE")
     if path:
-        value = Path(path).read_text(encoding="utf-8").strip()
+        try:
+            value = Path(path).read_text(encoding="utf-8").strip()
+        except PermissionError as exc:
+            # Вне swarm compose монтирует файл секрета как есть, с владельцем
+            # и правами хоста. Процесс бота работает под uid 10001, и файл
+            # root:root 600 он не откроет. Голый PermissionError на путь
+            # /run/secrets/... ничего не подсказывает: путь-то внутренний.
+            raise RuntimeError(
+                f"нет доступа к файлу секрета {name}: {path}. На сервере, "
+                f"в каталоге проекта: chown 10001:10001 secrets/*"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"файл секрета {name} не найден: {path}. Проверьте, что "
+                f"secrets/ не пуст: ls -l secrets/"
+            ) from exc
     else:
         value = os.environ.get(name, "").strip()
     if required and not value:

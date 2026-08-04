@@ -11,6 +11,12 @@ die() { printf '\n\033[31mОШИБКА: %s\033[0m\n' "$*" >&2; exit 1; }
 if [ "$(id -u)" -ne 0 ]; then die "запускать от root"; fi
 if [ ! -f .env ]; then die "нет .env. Сначала: cp .env.example .env и заполнить"; fi
 
+# uid процесса внутри контейнера. Читается из Dockerfile, а не пишется числом
+# в двух местах: разъехавшись, эти два числа дают отказ в доступе к секретам,
+# который виден только в трейсбеке при старте.
+BOT_UID="$( { awk '/--uid/{ for (i=1;i<NF;i++) if ($i=="--uid") { print $(i+1); exit } }' Dockerfile 2>/dev/null || true; } )"
+: "${BOT_UID:=10001}"
+
 set -a; . ./.env; set +a
 : "${CHANNEL_ID:?не задан в .env}" "${ADMIN_CHAT_ID:?не задан в .env}" "${ADMINS:?не задан в .env}"
 if [ "$CHANNEL_ID" = "-1001234567890" ]; then die "CHANNEL_ID в .env остался примером"; fi
@@ -73,6 +79,12 @@ if [ ! -s secrets/bot_token ]; then
   die "нет secrets/bot_token. Создайте: printf '%s' '<токен>' > secrets/bot_token"
 fi
 chmod 600 secrets/* .env
+# Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
+# Вне swarm docker compose не копирует файл секрета, а подключает хостовый как
+# есть, вместе с владельцем и правами. root:root 600 контейнер прочитать
+# не может и падает на старте с PermissionError: /run/secrets/bot_token.
+# Postgres это не задевало: его entrypoint читает пароль ещё под root.
+chown "$BOT_UID:$BOT_UID" secrets/*
 
 # ─── 4. Запуск ───────────────────────────────────────────────────────────────
 say "собираю образ и поднимаю контейнеры"
