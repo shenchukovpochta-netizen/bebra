@@ -179,6 +179,19 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 
     await _fix(bot, db, cfg, data, anketa, pdf=pdf, number=number,
                signed_at=stamp, digest=digest)
+    # Форма фиксации - утверждающему: он дозаполняет прочерки (вин-номера,
+    # сроки, оплату) и пересылает в тему фиксации, где её разбирает другой
+    # бот. Собрать её можно только СЕЙЧАС, до clear_anketa: адреса и телефоны
+    # живут в анкете, которая строкой ниже стирается.
+    try:
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.FIXATION_FORM_INTRO.format(number=logic.esc(number)))
+        await bot.send_message(cfg.contract_chat_id,
+                               logic.fixation_form(data, anketa))
+    except TelegramAPIError:
+        # Подпись уже состоялась, откатывать её из-за формы нельзя.
+        log.exception("форма фиксации по договору %s не доставлена", number)
+        await db.log_event(tg_id, "fixation_form_failed", {"number": number})
     # Паспортные данные дальше боту не нужны: договор сформирован, экземпляры
     # у сторон и в чате фиксации. Держать их «на всякий случай» - ровно то,
     # за что спрашивают при проверке.

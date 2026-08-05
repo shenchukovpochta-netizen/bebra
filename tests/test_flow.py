@@ -579,6 +579,22 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.approve()
         await self.feed(cb("sign"))
 
+    async def test_fixation_form_sent_after_signing(self):
+        """После подписи утверждающий получает форму фиксации: бот вписал
+        свои данные, прочерки дозаполняются руками и пересылаются в тему."""
+        await self.register_fully()
+        forms = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and (m.text or "").startswith("1. ФИО:")]
+        self.assertEqual(len(forms), 1, "форма должна уйти ровно один раз")
+        form = forms[0]
+        self.assertIn("1. ФИО: Иванов Иван Иванович", form)
+        self.assertIn("6. Номер телефона (основной): 89990000000", form)
+        self.assertIn("7. Номер телефона 2: 89001112233", form)
+        self.assertIn("11. Адрес прописки с квартирой в Казани: "
+                      "г. Казань, ул. Баумана, д. 1, кв. 2", form)
+        self.assertIn("2. Вин номер рамы: —", form)
+        self.assertIn("16. Подписка на тг: да", form)
+
     async def test_tariffs_button_shows_prices(self):
         await self.register_fully()
         await self.feed(msg("💰 Тарифы"))

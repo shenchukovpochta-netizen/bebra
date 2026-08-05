@@ -671,6 +671,71 @@ def support_question(raw: str | None) -> Validation:
     return Validation(True, value=text)
 
 
+# ─────────────────── форма фиксации сдачи ───────────────────
+#
+# Текст, который выдающий дозаполняет и пересылает в тему «Фиксация сдачи»,
+# где его разбирает другой бот и вносит в таблицу. Нумерация и написание
+# строк - ДОСЛОВНО как в согласованном формате: парсер завязан на них,
+# и «Тёплые» вместо «Теплые» - это уже другая колонка или потерянная строка.
+
+FORM_BLANK = "—"
+
+# Комплектация по умолчанию - стандартный набор выдачи: 2 АКБ (как в тарифах)
+# и зарядное устройство. Остальное - нули, выдающий правит по факту.
+FORM_KIT: tuple[tuple[str, int], ...] = (
+    ("АКБ", 2),
+    ("ЗУ", 1),
+    ("Зеркала", 0),
+    ("Теплые перчатки на руль (муфты)", 0),
+    ("Педали", 0),
+    ("Дождевик", 0),
+    ("Чехол на держатель для телефона", 0),
+    ("Троссовый замок", 0),
+    ("Курьерская сумка", 0),
+    ("Стяжка для крепления сумки", 0),
+)
+
+
+def phone_for_form(raw: str | None) -> str:
+    """+7XXXXXXXXXX -> 8XXXXXXXXXX: в форме номера пишутся с восьмёрки."""
+    text = (raw or "").strip()
+    if re.fullmatch(r"\+7\d{10}", text):
+        return "8" + text[2:]
+    return text or FORM_BLANK
+
+
+def fixation_form(user: dict, anketa: dict | None, *,
+                  subscribed: bool = True) -> str:
+    """Форма фиксации сдачи. Бот вписывает то, что знает; остальное - прочерки.
+
+    Экранирование под HTML здесь, а не при отправке: форма уходит одним
+    сообщением с parse_mode=HTML, и ФИО с амперсандом (валидаторы такое
+    режут, но пояс к подтяжкам дешёвый) не должно порвать отправку.
+    """
+    data = dict(anketa or {})
+    kit = "\n".join(f"  - {name}: {count}" for name, count in FORM_KIT)
+    username = user.get("username")
+    return (
+        f"1. ФИО: {esc(user.get('full_name') or FORM_BLANK)}\n"
+        f"2. Вин номер рамы: {FORM_BLANK}\n"
+        f"3. Вин номер мотор колеса: {FORM_BLANK}\n"
+        f"4. Комплектация: \n{kit}\n"
+        f"5. Сроки аренды: {FORM_BLANK}\n"
+        f"6. Номер телефона (основной): {phone_for_form(user.get('phone'))}\n"
+        f"7. Номер телефона 2: {phone_for_form(data.get('phone2'))}\n"
+        f"8. Номер телефона 3: {phone_for_form(data.get('phone3'))}\n"
+        f"9. Ник в Telegram: {esc('@' + username) if username else FORM_BLANK}\n"
+        f"10. Сумма и способ оплаты: {FORM_BLANK}\n"
+        f"11. Адрес прописки с квартирой в Казани: {esc(data.get('reg_address') or FORM_BLANK)}\n"
+        f"12. Адрес проживания с квартирой в Казани: {esc(data.get('live_address') or FORM_BLANK)}\n"
+        f"13. Подключен GPS-Трекер: {FORM_BLANK}\n"
+        f"14. Адрес сдачи: {FORM_BLANK}\n"
+        f"15. Кто выдал: {FORM_BLANK}\n"
+        f"16. Подписка на тг: {'да' if subscribed else 'нет'}\n"
+        f"17. Реф.программа: {FORM_BLANK}"
+    )
+
+
 RATE_SOFT_DEFAULT, RATE_HARD_DEFAULT = 40, 50
 
 

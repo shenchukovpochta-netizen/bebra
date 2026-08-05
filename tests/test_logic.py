@@ -226,6 +226,47 @@ class TestMinor(unittest.TestCase):
                                  today=TODAY),
             logic.WAIT_PARENT_CONSENT)
 
+    def test_fixation_form_exact_labels(self):
+        """Нумерация и написание строк - дословно: форму разбирает другой бот,
+        и любое расхождение в метке - потерянная колонка таблицы."""
+        user = {"tg_id": 1, "full_name": "Михайлов Данил Дамирович",
+                "phone": "+79991571094", "username": "sdafgaerg"}
+        anketa = {"phone2": "+79194485203", "phone3": "+79223051941",
+                  "reg_address": "пермский район",
+                  "live_address": "ботаническая 20 кв 17"}
+        form = logic.fixation_form(user, anketa)
+        lines = form.splitlines()
+        self.assertEqual(lines[0], "1. ФИО: Михайлов Данил Дамирович")
+        self.assertEqual(lines[1], "2. Вин номер рамы: —")
+        self.assertEqual(lines[2], "3. Вин номер мотор колеса: —")
+        self.assertEqual(lines[3], "4. Комплектация: ")
+        self.assertEqual(lines[4], "  - АКБ: 2")
+        self.assertEqual(lines[5], "  - ЗУ: 1")
+        self.assertIn("  - Теплые перчатки на руль (муфты): 0", lines)
+        self.assertIn("  - Стяжка для крепления сумки: 0", lines)
+        self.assertIn("5. Сроки аренды: —", lines)
+        self.assertIn("6. Номер телефона (основной): 89991571094", lines)
+        self.assertIn("7. Номер телефона 2: 89194485203", lines)
+        self.assertIn("8. Номер телефона 3: 89223051941", lines)
+        self.assertIn("9. Ник в Telegram: @sdafgaerg", lines)
+        self.assertIn("11. Адрес прописки с квартирой в Казани: пермский район", lines)
+        self.assertIn("12. Адрес проживания с квартирой в Казани: ботаническая 20 кв 17",
+                      lines)
+        self.assertIn("16. Подписка на тг: да", lines)
+        self.assertEqual(lines[-1], "17. Реф.программа: —")
+
+    def test_fixation_form_blanks_without_data(self):
+        form = logic.fixation_form({"tg_id": 1}, None, subscribed=False)
+        self.assertIn("1. ФИО: —", form)
+        self.assertIn("9. Ник в Telegram: —", form)
+        self.assertIn("16. Подписка на тг: нет", form)
+
+    def test_phone_for_form(self):
+        self.assertEqual(logic.phone_for_form("+79991571094"), "89991571094")
+        # иностранный номер не коверкаем
+        self.assertEqual(logic.phone_for_form("+4915112345678"), "+4915112345678")
+        self.assertEqual(logic.phone_for_form(None), "—")
+
     def test_minor_clause_in_contract_context(self):
         user = {"tg_id": 1, "full_name": "Иванов Иван", "phone": "+79001234567"}
         minor = logic.contract_context(
