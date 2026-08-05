@@ -60,7 +60,7 @@ services:
       FIX_TOPIC_ID: ${FIX_TOPIC_ID}
       # Шаблон монтируется файлом, а не запекается в образ: текст договора
       # правят юрист и владелец проката, пересборка образа для этого не нужна.
-      CONTRACT_TEMPLATE: /srv/app/contract_template.md
+      CONTRACT_TEMPLATE: /srv/app/contract_template.docx
 
       OFERTA_URL: ${OFERTA_URL}
       OFERTA_VERSION: ${OFERTA_VERSION}
@@ -77,7 +77,7 @@ services:
     volumes:
       - kycfiles:/files
       # Правка текста договора не должна требовать пересборки образа.
-      - ./app/contract_template.md:/srv/app/contract_template.md:ro
+      - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }

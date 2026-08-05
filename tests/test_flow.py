@@ -218,7 +218,7 @@ class FakeDB:
         self.users[tg_id]["anketa_enc"] = None
 
 
-TEMPLATE = Path(__file__).resolve().parent.parent / "app" / "contract_template.md"
+TEMPLATE = Path(__file__).resolve().parent.parent / "app" / "contract_template.docx"
 
 
 def make_config(**overrides) -> Config:
@@ -458,7 +458,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg(photo=True))
         await self.feed(cb("confirm"))
         await self.approve()
-        # Договор уходит пользователю PDF-документом; сам факт выдачи
+        # Договор уходит пользователю docx-документом; сам факт выдачи
         # проверяется в тестах взрослого сценария, здесь - оговорка.
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.WAIT_SIGN)
@@ -722,7 +722,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("уже указан", " ".join(self.session.sent()))
 
     async def test_lost_contract_is_resent_on_any_message(self):
-        """Кнопки живут только на сообщении с PDF. Потерял его - подписать
+        """Кнопки живут только на сообщении с договором. Потерял его - подписать
         нечем, и /start упирается сюда же: выхода из состояния нет."""
         await self.submit()
         await self.approve()

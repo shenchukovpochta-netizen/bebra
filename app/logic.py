@@ -479,7 +479,10 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
 
 # ─────────────────────────── прочее ───────────────────────────
 
-STORE_FILE_NAME = re.compile(r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg|contract-\d+\.pdf)$")
+# У договора два расширения: .docx - текущие, .pdf - выданные прошлой
+# версией бота. Убрать .pdf - значит навсегда оставить старые договоры
+# на диске: ретеншен перестанет их опознавать.
+STORE_FILE_NAME = re.compile(r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg|contract-\d+\.(?:pdf|docx))$")
 
 
 def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:

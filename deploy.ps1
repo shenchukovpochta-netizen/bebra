@@ -39,7 +39,7 @@ $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.tx
           'README.md', 'INSTALL.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/config.py', 'app/db.py',
          'app/logic.py', 'app/texts.py', 'app/keyboards.py', 'app/middlewares.py',
-         'app/filters.py', 'app/tasks.py', 'app/contract_template.md')
+         'app/filters.py', 'app/tasks.py', 'app/contract_template.docx')
 $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
               'app/handlers/contract.py')

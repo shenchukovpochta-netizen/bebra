@@ -1,8 +1,8 @@
 """Шифрование анкеты и сборка договора.
 
-Обе части требуют внешних библиотек (cryptography, fpdf2), поэтому набор
-пропускается там, где их нет, - остальные тесты должны оставаться
-запускаемыми на голом stdlib.
+Шифрование требует cryptography, поэтому его часть пропускается там, где
+библиотеки нет. Договор собирается голым stdlib: docx-шаблон заполняется
+через zipfile и re.
 """
 
 from __future__ import annotations
@@ -17,11 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from app import logic  # noqa: E402
 
-try:
-    from app.services import contract
-    HAVE_FPDF = True
-except ImportError:                                    # pragma: no cover
-    HAVE_FPDF = False
+from app.services import contract  # noqa: E402
 
 try:
     from app.services.crypto import KeyProblem, Vault, generate_key, load_key
@@ -29,7 +25,7 @@ try:
 except ImportError:                                    # pragma: no cover
     HAVE_CRYPTO = False
 
-TEMPLATE = ROOT / "app" / "contract_template.md"
+TEMPLATE = ROOT / "app" / "contract_template.docx"
 TODAY = date(2026, 8, 2)
 
 ANKETA = {
@@ -102,47 +98,32 @@ class TestVault(unittest.TestCase):
                 load_key(raw)
 
 
-@unittest.skipUnless(HAVE_FPDF, "fpdf2 не установлена")
+def document_text(docx: bytes) -> str:
+    """Видимый текст документа: содержимое всех <w:t> из word/document.xml."""
+    import io
+    import re
+    import zipfile
+    xml = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode("utf-8")
+    return "".join(re.findall(r"<w:t(?: [^>]*)?>(.*?)</w:t>", xml, re.S))
+
+
 class TestTemplate(unittest.TestCase):
     def setUp(self):
         self.template = contract.load_template(TEMPLATE)
 
-    def test_comments_are_not_printed(self):
-        body = contract.strip_comments(self.template)
-        self.assertNotIn("Согласуйте формулировку с юристом", body)
-        self.assertNotIn("{{ contract_number }}  номер договора", body)
-
-    def test_section_headings_survive_comment_stripping(self):
-        """Регрессия: комментарий «#» съедал и заголовки «## », и договор
-        собирался вообще без названий разделов."""
-        body = contract.strip_comments(self.template)
-        for heading in ("## ПРЕДМЕТ ДОГОВОРА", "## ОТВЕТСТВЕННОСТЬ",
-                        "## ОБРАБОТКА ПЕРСОНАЛЬНЫХ ДАННЫХ",
-                        "## ПРИЛОЖЕНИЕ № 3. ПРАЙС-ЛИСТ"):
-            self.assertIn(heading, body)
-
     def test_real_contract_landed(self):
-        """Шаблон - договор ИП Галимзянова, а не рыба: реквизиты арендодателя
-        и ключевые суммы обязаны присутствовать."""
-        # В суммах стоят неразрывные пробелы - для сравнения сводим к обычным.
-        body = contract.strip_comments(self.template).replace(" ", " ")
+        """Шаблон - настоящий docx договора ИП Галимзянова, а не рыба."""
+        docx, _ = contract.build(TEMPLATE, make_ctx())
+        text = document_text(docx).replace("\xa0", " ")
         for marker in ("Галимзянов", "165921923517", "324169000199701",
                        "150 000 (сто пятьдесят тысяч)",
-                       "650 (Шестьсот) рублей",
-                       "ПРАВИЛА ЭКСПЛУАТАЦИИ ЭЛЕКТРОВЕЛОСИПЕДА"):
-            self.assertIn(marker, body)
-
-    def test_minor_clause_rendered_for_minor_only(self):
-        minor_ctx = make_ctx(minor_clause=logic.MINOR_CLAUSE)
-        text, _ = contract.render_text(self.template, minor_ctx)
-        self.assertIn("законного представителя", text)
-        adult, _ = contract.render_text(self.template, make_ctx())
-        self.assertNotIn(logic.MINOR_CLAUSE, adult)
+                       "ПРАВИЛА ЭКСПЛУАТАЦИИ ЭЛЕКТРОВЕЛОСИПЕДА",
+                       "АКТ ВОЗВРАТА"):
+            self.assertIn(marker, text, marker)
 
     def test_every_placeholder_is_provided(self):
         """Опечатка в шаблоне не должна тихо выкидывать реквизит из договора."""
-        body = contract.strip_comments(self.template)
-        used = set(contract.PLACEHOLDER.findall(body))
+        used = contract.placeholders(self.template)
         provided = set(make_ctx()) | {contract.HASH_FIELD}
         self.assertEqual(used - provided, set())
 
@@ -150,53 +131,99 @@ class TestTemplate(unittest.TestCase):
         rendered = contract.substitute("а {{ нетполя }} б", {})
         self.assertIn("нет поля", rendered)
 
+    def test_values_are_xml_escaped(self):
+        """Амперсанд в «кем выдан» не должен ломать XML документа."""
+        ctx = make_ctx(passport_issuer="ОУФМС & Ко <тест>")
+        docx, _ = contract.build(TEMPLATE, ctx)
+        text = document_text(docx)
+        self.assertIn("ОУФМС &amp; Ко &lt;тест&gt;", text)
+
     def test_all_anketa_fields_reach_the_document(self):
-        text, _ = contract.render_text(self.template, make_ctx())
+        docx, _ = contract.build(TEMPLATE, make_ctx())
+        text = document_text(docx)
         for value in ANKETA.values():
             self.assertIn(value, text, value)
         self.assertIn(USER["full_name"], text)
 
+    def test_minor_clause_rendered_for_minor_only(self):
+        minor_docx, _ = contract.build(TEMPLATE, make_ctx(minor_clause=logic.MINOR_CLAUSE))
+        adult_docx, _ = contract.build(TEMPLATE, make_ctx())
+        self.assertIn("не достигший 18 лет", document_text(minor_docx))
+        adult_text = document_text(adult_docx)
+        self.assertNotIn("не достигший 18 лет", adult_text)
+        # абзац удаляется целиком, а не оставляет пустой оговорки
+        self.assertNotIn("minor_clause", adult_text)
+
     def test_hash_is_reproducible(self):
-        text, digest = contract.render_text(self.template, make_ctx())
-        again, digest2 = contract.render_text(self.template, make_ctx())
+        _, digest = contract.build(TEMPLATE, make_ctx())
+        _, digest2 = contract.build(TEMPLATE, make_ctx())
         self.assertEqual(digest, digest2)
-        self.assertIn(digest, text)
 
     def test_hash_covers_the_data(self):
-        _, digest = contract.render_text(self.template, make_ctx())
-        other = make_ctx()
-        other["passport_number"] = "9999 999999"
-        _, changed = contract.render_text(self.template, other)
+        _, digest = contract.build(TEMPLATE, make_ctx())
+        _, changed = contract.build(TEMPLATE, make_ctx(passport_number="9999 999999"))
         self.assertNotEqual(digest, changed)
 
     def test_signed_copy_differs_from_issued(self):
         """Подписанный экземпляр несёт свой отпечаток: в нём проставлен
         момент подписания."""
-        _, unsigned = contract.render_text(self.template, make_ctx())
-        _, signed = contract.render_text(
-            self.template, make_ctx(signed_at="02.08.2026 11:00 UTC"))
+        _, unsigned = contract.build(TEMPLATE, make_ctx())
+        _, signed = contract.build(TEMPLATE, make_ctx(signed_at="02.08.2026 11:00 UTC"))
         self.assertNotEqual(unsigned, signed)
 
+    def test_hash_verifiable_from_the_document(self):
+        """Правило проверки задним числом: стереть напечатанный отпечаток
+        из document.xml, посчитать SHA-256 заново - должно сойтись."""
+        import hashlib
+        import io
+        import zipfile
+        docx, digest = contract.build(TEMPLATE, make_ctx())
+        xml = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode("utf-8")
+        self.assertIn(digest, xml)
+        recomputed = hashlib.sha256(xml.replace(digest, "").encode("utf-8")).hexdigest()
+        self.assertEqual(digest, recomputed)
 
-@unittest.skipUnless(HAVE_FPDF, "fpdf2 не установлена")
-class TestPdf(unittest.TestCase):
-    def test_builds_a_pdf(self):
-        pdf, digest = contract.build(TEMPLATE, make_ctx())
-        self.assertTrue(pdf.startswith(b"%PDF"))
+
+class TestDocx(unittest.TestCase):
+    def test_builds_a_docx(self):
+        docx, digest = contract.build(TEMPLATE, make_ctx())
+        self.assertTrue(docx.startswith(b"PK"))
         self.assertEqual(len(digest), 64)
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(docx)) as zf:
+            self.assertIsNone(zf.testzip())
+            self.assertIn("word/document.xml", zf.namelist())
+            self.assertIn("[Content_Types].xml", zf.namelist())
 
-    def test_long_values_do_not_break_layout(self):
-        """Регрессия: строка с длинным пробельным отбивом уходила
-        в выравнивание по ширине и роняла сборку целиком."""
+    def test_only_document_xml_changes(self):
+        """Стили, шрифты и колонтитулы юриста копируются байт в байт."""
+        import io
+        import zipfile
+        template = TEMPLATE.read_bytes()
+        docx, _ = contract.build(TEMPLATE, make_ctx())
+        with zipfile.ZipFile(io.BytesIO(template)) as src, \
+                zipfile.ZipFile(io.BytesIO(docx)) as dst:
+            self.assertEqual(sorted(src.namelist()), sorted(dst.namelist()))
+            for name in src.namelist():
+                if name == "word/document.xml":
+                    continue
+                self.assertEqual(src.read(name), dst.read(name), name)
+
+    def test_long_values_do_not_break_build(self):
         ctx = make_ctx()
         ctx["passport_issuer"] = "ОТДЕЛОМ " + "ОЧЕНЬ ДЛИННОЕ НАЗВАНИЕ " * 8
         ctx["reg_address"] = "г. Казань, " + "ул. Очень Длинная, " * 10 + "д. 1"
-        pdf, _ = contract.build(TEMPLATE, ctx)
-        self.assertTrue(pdf.startswith(b"%PDF"))
+        docx, _ = contract.build(TEMPLATE, ctx)
+        self.assertTrue(docx.startswith(b"PK"))
 
     def test_missing_template_reports_clearly(self):
         with self.assertRaises(contract.TemplateProblem):
-            contract.load_template(TEMPLATE.parent / "нет-такого.md")
+            contract.load_template(TEMPLATE.parent / "нет-такого.docx")
+
+    def test_non_docx_template_reports_clearly(self):
+        with self.assertRaises(contract.TemplateProblem):
+            contract.load_template(ROOT / "README.md")
 
 
 if __name__ == "__main__":

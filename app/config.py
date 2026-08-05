@@ -163,7 +163,7 @@ class Config:
             fix_chat_id=_int("FIX_CHAT_ID", _env("ADMIN_CHAT_ID", required=True)),
             fix_topic_id=_int_or_none("FIX_TOPIC_ID"),
             contract_template=Path(
-                _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.md")),
+                _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.docx")),
             channel_url=_env("CHANNEL_URL", "https://t.me/mybike"),
             oferta_url=_env("OFERTA_URL", required=True),
             oferta_version=_env("OFERTA_VERSION", "2026-01-15"),
