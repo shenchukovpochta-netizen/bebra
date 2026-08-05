@@ -167,7 +167,7 @@ async def cb_reject_reason(callback: CallbackQuery, bot: Bot, db: Database,
 
 @router.message(ServiceChatReply())
 async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> None:
-    """Отказ свободным текстом: ответ на карточку модерации.
+    """Ответ на карточку в служебном чате: заявка или вопрос в поддержку.
 
     Пользователь ищется по (chat_id, message_id) карточки, а не разбором её
     подписи: разбор ломался бы от любой правки формулировки в texts.py.
@@ -180,6 +180,15 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> No
     # не привязано к заявке», и служебный чат становился неюзабельным.
     if not (replied.from_user and replied.from_user.is_bot):
         return
+
+    # Сначала карточки поддержки: ответ на них - это сообщение пользователю,
+    # а не отказ по заявке. Проверять первым делом обязательно, иначе ответ
+    # на вопрос одобренного клиента падал бы в «решение уже принято».
+    asked = await db.user_by_support_message(message.chat.id, replied.message_id)
+    if asked is not None:
+        await _support_reply(message, bot, db, dict(asked))
+        return
+
     row = await db.user_by_mod_message(message.chat.id, replied.message_id)
     if row is None:
         await message.reply(texts.MOD_REPLY_NOT_A_CARD)
@@ -221,6 +230,31 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> No
         )
     except TelegramAPIError:
         pass
+
+
+async def _support_reply(message: Message, bot: Bot, db: Database,
+                         asked: dict) -> None:
+    """Ответ модератора на вопрос в поддержку - пересылается пользователю.
+
+    Карточка остаётся привязанной: на неё можно ответить ещё раз, и каждое
+    сообщение уйдёт тому же человеку - диалог не обрывается на первом ответе.
+    """
+    answer = logic.reject_comment(message.text or message.caption)
+    if not answer.ok:
+        await message.reply(answer.error)
+        return
+    try:
+        await bot.send_message(
+            asked["tg_id"],
+            texts.SUPPORT_REPLY_USER.format(answer=logic.esc(answer.value)),
+        )
+    except TelegramAPIError as exc:
+        log.warning("ответ поддержки для %s не доставлен: %s", asked["tg_id"], exc)
+        await message.reply(texts.SUPPORT_REPLY_NOT_DELIVERED)
+        return
+    await db.log_event(asked["tg_id"], "support_answered",
+                       {"by": message.from_user.id})
+    await message.reply(texts.SUPPORT_REPLIED)
 
 
 async def _notify(bot: Bot, tg_id: int, text: str) -> None:

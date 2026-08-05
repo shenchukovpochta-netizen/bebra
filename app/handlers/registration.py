@@ -65,6 +65,12 @@ async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
 @router.message(CommandStart())
 async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> None:
     if user["status"] == logic.ST_APPROVED:
+        # /start посреди вопроса в поддержку - это «передумал»: не вернуть
+        # состояние - и следующее сообщение молча уедет карточкой в чат
+        # модерации, хотя человек уже смотрит на меню.
+        if user["state"] == logic.WAIT_SUPPORT:
+            await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
+                           state=logic.APPROVED)
         await message.answer(texts.ALREADY_REGISTERED, reply_markup=kb.main_menu())
         return
     await db.patch(user["tg_id"], state=logic.WAIT_FIO)

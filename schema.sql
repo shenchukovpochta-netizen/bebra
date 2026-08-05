@@ -51,6 +51,12 @@ create table if not exists bot.users (
   mod_chat_id        bigint,
   mod_message_id     bigint,
 
+  -- Где лежит последняя карточка вопроса в поддержку. Отдельно от mod_*:
+  -- карточка заявки живёт своей жизнью, и ответ на неё - это отказ,
+  -- а ответ на карточку вопроса - сообщение пользователю.
+  support_chat_id    bigint,
+  support_message_id bigint,
+
   status             text        not null default 'new',  -- new|pending|approved|rejected
   reject_reason      text,
   reviewed_by        bigint,
@@ -91,6 +97,8 @@ alter table bot.users add column if not exists parent_file_id     text;
 alter table bot.users add column if not exists parent_path        text;
 alter table bot.users add column if not exists parent_sha256      text;
 alter table bot.users add column if not exists parent_is_photo    boolean not null default true;
+alter table bot.users add column if not exists support_chat_id    bigint;
+alter table bot.users add column if not exists support_message_id bigint;
 
 -- Сквозная нумерация договоров. Последовательность, а не «максимум плюс один»:
 -- два одновременных подтверждения иначе получают один и тот же номер, и в двух
@@ -141,6 +149,9 @@ create index if not exists users_doc_hash_idx on bot.users (doc_sha256)  where d
 -- По этому индексу ищется пользователь при ответе на карточку модерации.
 create index if not exists users_mod_msg_idx on bot.users (mod_chat_id, mod_message_id)
   where mod_message_id is not null;
+-- А по этому - при ответе на карточку вопроса в поддержку.
+create index if not exists users_support_msg_idx on bot.users (support_chat_id, support_message_id)
+  where support_message_id is not null;
 
 -- Журнал апдейтов как двухфазный клейм: processing -> done.
 -- Упавшая обработка оставляет запись в processing, и повторная доставка

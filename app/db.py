@@ -21,6 +21,7 @@ PATCHABLE = frozenset({
     "contract_no", "contract_path", "contract_sha256", "contract_status",
     "contract_issued_at", "contract_signed_at",
     "mod_chat_id", "mod_message_id",
+    "support_chat_id", "support_message_id",
 })
 
 
@@ -188,6 +189,19 @@ class Database:
         """
         return await self.pool.fetchrow(
             "select * from bot.users where mod_chat_id = $1 and mod_message_id = $2",
+            chat_id, message_id,
+        )
+
+    async def user_by_support_message(self, chat_id: int,
+                                      message_id: int) -> asyncpg.Record | None:
+        """Пользователь по карточке его вопроса в поддержку.
+
+        Поиск по (chat_id, message_id), а не разбором текста карточки:
+        разбор ломался бы от любой правки формулировки в texts.py.
+        """
+        return await self.pool.fetchrow(
+            "select * from bot.users where support_chat_id = $1 "
+            "and support_message_id = $2",
             chat_id, message_id,
         )
 

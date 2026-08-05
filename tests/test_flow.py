@@ -214,6 +214,13 @@ class FakeDB:
                 return dict(row)
         return None
 
+    async def user_by_support_message(self, chat_id, message_id):
+        for row in self.users.values():
+            if row.get("support_chat_id") == chat_id \
+                    and row.get("support_message_id") == message_id:
+                return dict(row)
+        return None
+
     async def clear_anketa(self, tg_id):
         self.users[tg_id]["anketa_enc"] = None
 
@@ -565,6 +572,73 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(to_fix[0].message_thread_id, FIX_TOPIC,
                          "договор должен попадать в подгруппу фиксации сдачи")
         self.assertIn(row["contract_sha256"], to_fix[0].caption)
+
+    async def register_fully(self):
+        """До состояния approved: заявка, одобрение, подпись договора."""
+        await self.submit()
+        await self.approve()
+        await self.feed(cb("sign"))
+
+    async def test_tariffs_button_shows_prices(self):
+        await self.register_fully()
+        await self.feed(msg("💰 Тарифы"))
+        joined = " ".join(self.session.sent()).replace(" ", " ")
+        self.assertIn("11 000", joined)
+        self.assertIn("Kugoo V3 Pro", joined)
+
+    async def test_support_question_reaches_admin_chat(self):
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_SUPPORT)
+        await self.feed(msg("Когда можно забрать велосипед?"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED, "после вопроса - обратно в меню")
+        self.assertIsNotNone(row["support_message_id"])
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and "поддержку" in (m.text or "")]
+        self.assertTrue(cards, "карточка вопроса не дошла до чата модерации")
+        self.assertIn("Когда можно забрать велосипед?", cards[-1])
+        self.assertIn(str(USER_ID), cards[-1])
+
+    async def test_support_reply_goes_back_to_user(self):
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("Когда можно забрать велосипед?"))
+        card_id = self.db.users[USER_ID]["support_message_id"]
+        await self.feed(msg("Завтра с 10 до 19", chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup",
+                            reply_to=card_id))
+        to_user = [m.text for m in self.session.sent_to(USER_ID)
+                   if isinstance(m, SendMessage)]
+        self.assertTrue(any("Завтра с 10 до 19" in (t or "") for t in to_user),
+                        "ответ поддержки не дошёл до пользователя")
+
+    async def test_support_reply_does_not_touch_application(self):
+        """Ответ на карточку ВОПРОСА не должен превращаться в отказ по заявке."""
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("Вопрос про зарядку"))
+        card_id = self.db.users[USER_ID]["support_message_id"]
+        await self.feed(msg("Заряжайте дома", chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup",
+                            reply_to=card_id))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["status"], logic.ST_APPROVED, "статус заявки не трогаем")
+        self.assertEqual(row["state"], logic.APPROVED)
+
+    async def test_support_cancel_returns_to_menu(self):
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("Отмена"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        self.assertIsNone(self.db.users[USER_ID].get("support_message_id"))
+
+    async def test_start_escapes_support_state(self):
+        """/start посреди вопроса - «передумал», а не вопрос «/start»."""
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("/start"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
 
     async def test_signing_wipes_passport_data(self):
         """После подписи паспортные данные боту не нужны и стираются."""

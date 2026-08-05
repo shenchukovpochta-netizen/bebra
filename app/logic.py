@@ -50,6 +50,10 @@ PENDING = "pending"
 # по нему велосипед нельзя.
 WAIT_SIGN = "wait_sign"
 APPROVED = "approved"
+# Зарегистрированный пользователь нажал «Поддержка» и пишет вопрос.
+# Отдельное состояние обязательно: без него следующее сообщение провалилось бы
+# в ловушку меню, и вопрос ушёл бы в никуда.
+WAIT_SUPPORT = "wait_support"
 
 # статусы заявки
 ST_NEW, ST_PENDING, ST_APPROVED, ST_REJECTED = "new", "pending", "approved", "rejected"
@@ -69,6 +73,7 @@ KNOWN_STATES = frozenset({
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
     WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN, APPROVED,
+    WAIT_SUPPORT,
 })
 
 
@@ -635,6 +640,21 @@ def reject_comment(raw: str | None) -> Validation:
     text = _clean(raw)
     if not 3 <= len(text) <= 500:
         return Validation(False, error="Опишите ошибку текстом от 3 до 500 символов.")
+    return Validation(True, value=text)
+
+
+def support_question(raw: str | None) -> Validation:
+    """Вопрос пользователя в поддержку.
+
+    Ограничение сверху - чтобы карточка в чате модерации оставалась читаемой
+    и влезала в лимит Telegram на длину сообщения вместе со своей шапкой.
+    """
+    text = _clean(raw)
+    if len(text) < 3:
+        return Validation(False, error="Опишите вопрос текстом, хотя бы парой слов.")
+    if len(text) > 1500:
+        return Validation(
+            False, error="Слишком длинно. Уложите вопрос в 1500 символов.")
     return Validation(True, value=text)
 
 

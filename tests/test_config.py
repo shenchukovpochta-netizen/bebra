@@ -193,8 +193,9 @@ class TestKnownStates(unittest.TestCase):
 
     def test_every_live_state_is_known(self):
         for state in (logic.NEW, logic.WAIT_FIO, logic.WAIT_OFERTA, logic.WAIT_CONTACT,
-                      logic.WAIT_DOC, logic.CONFIRM,
-                      logic.PENDING, logic.WAIT_SIGN, logic.APPROVED):
+                      logic.WAIT_DOC, logic.WAIT_PARENT_CONSENT, logic.CONFIRM,
+                      logic.PENDING, logic.WAIT_SIGN, logic.APPROVED,
+                      logic.WAIT_SUPPORT):
             self.assertTrue(logic.is_known_state(state), state)
 
     def test_no_stale_state_left_in_set(self):
