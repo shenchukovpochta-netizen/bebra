@@ -643,6 +643,19 @@ def reject_comment(raw: str | None) -> Validation:
     return Validation(True, value=text)
 
 
+def support_answer(raw: str | None) -> Validation:
+    """Ответ модератора на вопрос в поддержку - уходит пользователю.
+
+    Отдельно от reject_comment из-за текста ошибки: «опишите ошибку»
+    в ответ на фото без подписи сбивал бы модератора с толку.
+    """
+    text = _clean(raw)
+    if not 1 <= len(text) <= 3500:
+        return Validation(
+            False, error="Ответ нужен текстом (или подписью к фото) до 3500 символов.")
+    return Validation(True, value=text)
+
+
 def support_question(raw: str | None) -> Validation:
     """Вопрос пользователя в поддержку.
 

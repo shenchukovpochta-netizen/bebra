@@ -173,7 +173,7 @@ SUPPORT_FAILED = (
 SUPPORT_CANCELLED = "Хорошо, вернулись в меню."
 SUPPORT_CARD = (
     "🆘 Вопрос в поддержку\n\n"
-    "От: <b>{fio}</b> (@{username})\n"
+    "От: <b>{fio}</b> ({handle})\n"
     "Telegram ID: {tg_id}\n\n"
     "{question}\n\n"
     "<i>Ответьте на ЭТО сообщение — текст уйдёт пользователю.</i>"

@@ -239,7 +239,7 @@ async def _support_reply(message: Message, bot: Bot, db: Database,
     Карточка остаётся привязанной: на неё можно ответить ещё раз, и каждое
     сообщение уйдёт тому же человеку - диалог не обрывается на первом ответе.
     """
-    answer = logic.reject_comment(message.text or message.caption)
+    answer = logic.support_answer(message.text or message.caption)
     if not answer.ok:
         await message.reply(answer.error)
         return

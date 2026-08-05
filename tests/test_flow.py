@@ -582,7 +582,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_tariffs_button_shows_prices(self):
         await self.register_fully()
         await self.feed(msg("💰 Тарифы"))
-        joined = " ".join(self.session.sent()).replace(" ", " ")
+        joined = " ".join(self.session.sent()).replace("\xa0", " ")
         self.assertIn("11 000", joined)
         self.assertIn("Kugoo V3 Pro", joined)
 
@@ -639,6 +639,28 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("🆘 Поддержка"))
         await self.feed(msg("/start"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+
+    async def test_menu_button_escapes_support_state(self):
+        """Кнопка меню, набранная в режиме вопроса, - «передумал», а не вопрос:
+        иначе человек молча оставался в режиме, и следующее сообщение
+        неожиданно уезжало карточкой в чат модерации."""
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("💰 Тарифы"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        joined = " ".join(self.session.sent()).replace("\xa0", " ")
+        self.assertIn("11 000", joined)
+        self.assertIsNone(self.db.users[USER_ID].get("support_message_id"),
+                          "кнопка не должна превращаться в вопрос")
+
+    async def test_support_button_twice_stays_in_support(self):
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("🆘 Поддержка"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_SUPPORT)
+        await self.feed(msg("Вопрос после двойного нажатия"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        self.assertIsNotNone(self.db.users[USER_ID]["support_message_id"])
 
     async def test_signing_wipes_passport_data(self):
         """После подписи паспортные данные боту не нужны и стираются."""
