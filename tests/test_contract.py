@@ -154,6 +154,23 @@ class TestTemplate(unittest.TestCase):
         # абзац удаляется целиком, а не оставляет пустой оговорки
         self.assertNotIn("minor_clause", adult_text)
 
+    def test_dropping_clause_spares_the_neighbours(self):
+        """Регрессия: поиск начала абзаца находил открытие СОСЕДНЕГО абзаца,
+        и у взрослых вместе с оговоркой вырезалась строка перед ней."""
+        adult_docx, _ = contract.build(TEMPLATE, make_ctx())
+        text = document_text(adult_docx)
+        self.assertIn("(номер телефона свой и второй)", text)
+        self.assertIn("заключили настоящий договор о нижеследующем:", text)
+
+    def test_drop_paragraph_is_well_formed(self):
+        """После удаления абзаца XML обязан остаться корректным."""
+        import io
+        import xml.etree.ElementTree as ET
+        import zipfile
+        adult_docx, _ = contract.build(TEMPLATE, make_ctx())
+        xml_text = zipfile.ZipFile(io.BytesIO(adult_docx)).read("word/document.xml")
+        ET.fromstring(xml_text)      # бросит ParseError, если разметка порвана
+
     def test_hash_is_reproducible(self):
         _, digest = contract.build(TEMPLATE, make_ctx())
         _, digest2 = contract.build(TEMPLATE, make_ctx())

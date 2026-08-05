@@ -95,9 +95,11 @@ def drop_paragraph_with(xml: str, marker: str) -> str:
     at = xml.find(marker)
     if at == -1:
         return xml
-    start = xml.rfind("<w:p ", 0, at)
-    if start == -1:
-        start = xml.rfind("<w:p>", 0, at)
+    # Из двух вариантов открытия абзаца - с атрибутами и без - берётся
+    # БЛИЖАЙШИЙ к маркеру. Предпочтение «<w:p » находило открытие соседнего
+    # абзаца (абзац оговорки записан без атрибутов), и у взрослых из договора
+    # вырезалась ещё и строка «(номер телефона свой и второй)» перед ней.
+    start = max(xml.rfind("<w:p ", 0, at), xml.rfind("<w:p>", 0, at))
     end = xml.find("</w:p>", at)
     if start == -1 or end == -1:
         return xml
