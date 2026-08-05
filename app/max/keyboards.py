@@ -23,11 +23,14 @@ def subscribe(channel_url: str) -> list:
     ]
 
 
-def oferta(url: str, pdn_url: str = "") -> list:
-    rows = [[_link("Читать оферту и правила проката", url)]]
+def oferta(url: str = "", pdn_url: str = "") -> list:
+    """Экран согласия на обработку ПДн; обе ссылки необязательны."""
+    rows = []
+    if url:
+        rows.append([_link("Правила проката", url)])
     if pdn_url:
         rows.append([_link("Политика обработки ПДн", pdn_url)])
-    rows.append([_cb("Принимаю", "oferta_ok")])
+    rows.append([_cb("✅ Даю согласие", "oferta_ok")])
     return rows
 
 

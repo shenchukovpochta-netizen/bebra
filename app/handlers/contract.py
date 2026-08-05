@@ -47,6 +47,10 @@ def _context(cfg: Config, data: dict, anketa: dict, *, number: str,
     # переставал бы соответствовать чему бы то ни было.
     ctx = logic.contract_context(data, anketa, number=number,
                                  today=issued_at.date() if issued_at else None)
+    # Данные выдачи (вин-номера, комплектация, срок, оплата) - из ответа
+    # оператора; до него в документ ушли бы прочерки, но issue() зовётся
+    # только после сохранения issue_data.
+    ctx.update(logic.issue_context(data.get("issue_data")))
     # purge_days идёт из конфигурации, а не из шаблона: сроки в договоре
     # обязаны совпадать с тем, по которым ретеншен реально удаляет сканы.
     ctx["purge_days"] = str(cfg.purge_approved_days)
@@ -128,8 +132,11 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         return
 
     signed_at = utcnow()
+    # Дальше не меню, а Акт приёма-передачи: по договору имущество
+    # передаётся именно актом, и без его подписи выдача не закрыта.
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_SIGN,
-                          state=logic.APPROVED, contract_status=logic.CT_SIGNED,
+                          state=logic.WAIT_ACT_SIGN,
+                          contract_status=logic.CT_SIGNED,
                           contract_signed_at=signed_at):
         await callback.answer()
         return
@@ -188,15 +195,14 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         await bot.send_message(cfg.contract_chat_id,
                                texts.FIXATION_FORM_INTRO.format(number=logic.esc(number)))
         await bot.send_message(cfg.contract_chat_id,
-                               logic.fixation_form(data, anketa))
+                               logic.fixation_form(data, anketa, data.get("issue_data")))
     except TelegramAPIError:
         # Подпись уже состоялась, откатывать её из-за формы нельзя.
         log.exception("форма фиксации по договору %s не доставлена", number)
         await db.log_event(tg_id, "fixation_form_failed", {"number": number})
-    # Паспортные данные дальше боту не нужны: договор сформирован, экземпляры
-    # у сторон и в чате фиксации. Держать их «на всякий случай» - ровно то,
-    # за что спрашивают при проверке.
-    await db.clear_anketa(tg_id)
+    # Анкета НЕ стирается здесь: паспортные данные печатаются ещё и в Акте
+    # приёма-передачи. Стирание - после его подписания (cb_act_sign).
+    await send_act_in(bot, db, cfg, data, anketa)
 
 
 async def _fix(bot: Bot, db: Database, cfg: Config, data: dict, anketa: dict, *,
@@ -291,3 +297,283 @@ async def st_wait_sign(message: Message, bot: Bot, db: Database, cfg: Config,
         caption=texts.CONTRACT_RESEND.format(number=logic.esc(number)),
         reply_markup=kb.sign_contract(),
     )
+
+
+# ─────────────────────── Акт приёма-передачи ───────────────────────
+
+def _act_filename(kind: str, number: str) -> str:
+    return f"akt-{kind}-{number}.docx"
+
+
+def _act_context(cfg: Config, data: dict, anketa: dict, *,
+                 signed_at: str) -> dict[str, Any]:
+    """Контекст актов: реквизиты договора + данные выдачи + даты акта."""
+    ctx = _context(cfg, data, anketa, number=data.get("contract_no") or "",
+                   signed_at=signed_at, issued_at=data.get("contract_issued_at"))
+    ctx["act_date"] = utcnow().strftime("%d.%m.%Y")
+    ret = dict(data.get("return_data") or {})
+    ctx["return_notes"] = str(ret.get("return_notes") or "—")
+    ctx["return_date"] = str(ret.get("return_date") or
+                             utcnow().strftime("%d.%m.%Y"))
+    return ctx
+
+
+def _build_act(cfg: Config, template: Any, ctx: dict) -> tuple[bytes, str]:
+    try:
+        return contract_service.build(template, ctx)
+    except (contract_service.TemplateProblem, OSError) as exc:
+        raise ContractProblem(str(exc)) from exc
+
+
+async def send_act_in(bot: Bot, db: Database, cfg: Config, data: dict,
+                      anketa: dict) -> None:
+    """Выдать Акт приёма-передачи на подпись.
+
+    Сбой сборки не должен запирать человека в wait_act_sign без документа:
+    состояние откатывается в approved, оператору уходит алерт.
+    """
+    tg_id = data["tg_id"]
+    number = data.get("contract_no") or ""
+    try:
+        docx, _ = _build_act(cfg, cfg.act_in_template,
+                             _act_context(cfg, data, anketa, signed_at=UNSIGNED))
+    except ContractProblem as exc:
+        log.exception("акт приёма для %s не собрался", tg_id)
+        await db.patch(tg_id, expected_state=logic.WAIT_ACT_SIGN,
+                       state=logic.APPROVED)
+        await db.log_event(tg_id, "act_in_failed", {"error": str(exc)})
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.CONTRACT_ALERT_FAILED.format(
+                                   tg_id=tg_id, reason=logic.esc(str(exc))))
+        await bot.send_message(tg_id,
+                               texts.REGISTERED.format(
+                                   video_url=logic.esc(cfg.video_url)),
+                               reply_markup=kb.main_menu())
+        return
+    await bot.send_document(
+        tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
+        caption=texts.ACT_IN_READY.format(number=logic.esc(number)),
+        reply_markup=kb.sign_act(),
+    )
+
+
+@router.callback_query(StateIs(logic.WAIT_ACT_SIGN), F.data == "act_sign")
+async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
+                      cfg: Config, vault: Vault, user: dict) -> None:
+    """Подпись Акта приёма-передачи: с этого момента имущество передано."""
+    signed_at = utcnow()
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_ACT_SIGN,
+                          state=logic.APPROVED, act_in_signed_at=signed_at):
+        await callback.answer()
+        return
+    await callback.answer(texts.CONTRACT_SIGN_TOAST)
+
+    tg_id = user["tg_id"]
+    row = await db.get_user(tg_id)
+    data = dict(row) if row else dict(user)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
+
+    try:
+        docx, digest = _build_act(cfg, cfg.act_in_template,
+                                  _act_context(cfg, data, anketa,
+                                               signed_at=stamp))
+    except ContractProblem:
+        # Подпись зафиксирована; без пересобранного экземпляра остаёмся,
+        # но прокат не блокируем.
+        log.exception("подписанный акт приёма %s не собрался", tg_id)
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.CONTRACT_ALERT_FAILED.format(
+                                   tg_id=tg_id,
+                                   reason="акт приёма не пересобрался"))
+        return
+
+    path, _ = files.store(cfg.storage_dir, tg_id, "actin", docx)
+    await db.patch(tg_id, act_in_path=str(path), act_in_sha256=digest)
+    await db.log_event(tg_id, "act_in_signed", {"number": number})
+
+    await bot.send_document(
+        tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
+        caption=texts.ACT_IN_SIGNED.format(
+            number=logic.esc(number), signed_at=stamp,
+            video_url=logic.esc(cfg.video_url)),
+        reply_markup=kb.main_menu(),
+    )
+    try:
+        await bot.send_document(
+            cfg.fix_chat_id,
+            BufferedInputFile(docx, filename=_act_filename("priema", number)),
+            caption=texts.ACT_FIX_CARD.format(
+                title="✅ Акт приёма-передачи", number=logic.esc(number),
+                fio=logic.esc(data.get("full_name")), tg_id=tg_id,
+                signed_at=stamp, sha256=digest),
+            message_thread_id=cfg.fix_topic_id,
+        )
+    except TelegramAPIError:
+        log.exception("акт приёма %s не доставлен в чат фиксации", number)
+        await db.log_event(tg_id, "act_in_fix_failed", {"number": number})
+
+    # Приглашение возврата: когда велосипед вернут, оператор ответит на это
+    # сообщение данными возврата, и бот соберёт Акт возврата.
+    try:
+        sent = await bot.send_message(
+            cfg.contract_chat_id,
+            texts.RETURN_PROMPT.format(number=logic.esc(number), tg_id=tg_id))
+        await db.patch(tg_id, return_chat_id=sent.chat.id,
+                       return_message_id=sent.message_id)
+    except TelegramAPIError:
+        log.exception("приглашение возврата по %s не доставлено", number)
+
+    # Паспортные данные дальше боту не нужны: договор и акт сформированы,
+    # экземпляры у сторон и в чате фиксации.
+    await db.clear_anketa(tg_id)
+
+
+@router.callback_query(StateIs(logic.WAIT_ACT_SIGN), F.data == "act_mistake")
+async def cb_act_mistake(callback: CallbackQuery, bot: Bot, db: Database,
+                         cfg: Config, user: dict) -> None:
+    """Ошибка в акте - чинится данными выдачи, а не переигрыванием анкеты:
+    оператор отвечает на приглашение выдачи ещё раз, бот пересобирает акт."""
+    await callback.answer()
+    await db.log_event(user["tg_id"], "act_in_mistake")
+    await bot.send_message(user["tg_id"], texts.ACT_MISTAKE_SENT)
+    try:
+        row = await db.get_user(user["tg_id"])
+        number = (dict(row).get("contract_no") if row else "") or ""
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.ACT_MISTAKE_ALERT.format(
+                                   tg_id=user["tg_id"],
+                                   number=logic.esc(number)))
+    except TelegramAPIError:
+        log.exception("алерт об ошибке акта не доставлен")
+
+
+@router.message(StateIs(logic.WAIT_ACT_SIGN))
+async def st_wait_act_sign(message: Message, bot: Bot, db: Database,
+                           cfg: Config, vault: Vault, user: dict) -> None:
+    """Потерянный акт переотправляется на любое сообщение - как договор."""
+    row = await db.get_user(user["tg_id"])
+    data = dict(row) if row else dict(user)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    try:
+        docx, _ = _build_act(cfg, cfg.act_in_template,
+                             _act_context(cfg, data, anketa,
+                                          signed_at=UNSIGNED))
+    except ContractProblem:
+        log.exception("не удалось переотправить акт %s", user["tg_id"])
+        await message.answer(texts.ACT_PRESS_BUTTON)
+        return
+    await bot.send_document(
+        user["tg_id"],
+        BufferedInputFile(docx, filename=_act_filename("priema", number)),
+        caption=texts.ACT_RESEND.format(number=logic.esc(number)),
+        reply_markup=kb.sign_act(),
+    )
+
+
+# ─────────────────────── Акт возврата ───────────────────────
+
+async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
+                       tg_id: int) -> None:
+    """Собрать Акт возврата по данным оператора и отдать на подтверждение.
+
+    Анкета к этому моменту уже стёрта - в акте только ФИО и номер договора,
+    паспортные данные заменяет отсылка к договору.
+    """
+    row = await db.get_user(tg_id)
+    if row is None:
+        raise ContractProblem(f"нет записи о пользователе {tg_id}")
+    data = dict(row)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    docx, _ = _build_act(cfg, cfg.act_out_template,
+                         _act_context(cfg, data, anketa, signed_at=UNSIGNED))
+    await bot.send_document(
+        tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
+        caption=texts.RETURN_READY.format(number=logic.esc(number)),
+        reply_markup=kb.sign_return(),
+    )
+
+
+@router.callback_query(StateIs(logic.WAIT_RETURN_SIGN), F.data == "return_sign")
+async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
+                         cfg: Config, vault: Vault, user: dict) -> None:
+    signed_at = utcnow()
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_RETURN_SIGN,
+                          state=logic.APPROVED, act_out_signed_at=signed_at):
+        await callback.answer()
+        return
+    await callback.answer(texts.CONTRACT_SIGN_TOAST)
+
+    tg_id = user["tg_id"]
+    row = await db.get_user(tg_id)
+    data = dict(row) if row else dict(user)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
+
+    try:
+        docx, digest = _build_act(cfg, cfg.act_out_template,
+                                  _act_context(cfg, data, anketa,
+                                               signed_at=stamp))
+    except ContractProblem:
+        log.exception("подписанный акт возврата %s не собрался", tg_id)
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.CONTRACT_ALERT_FAILED.format(
+                                   tg_id=tg_id,
+                                   reason="акт возврата не пересобрался"))
+        return
+
+    path, _ = files.store(cfg.storage_dir, tg_id, "actout", docx)
+    await db.patch(tg_id, act_out_path=str(path), act_out_sha256=digest)
+    await db.log_event(tg_id, "act_out_signed", {"number": number})
+
+    await bot.send_document(
+        tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
+        caption=texts.RETURN_SIGNED.format(number=logic.esc(number),
+                                           signed_at=stamp),
+        reply_markup=kb.main_menu(),
+    )
+    try:
+        await bot.send_document(
+            cfg.fix_chat_id,
+            BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
+            caption=texts.ACT_FIX_CARD.format(
+                title="↩️ Акт возврата", number=logic.esc(number),
+                fio=logic.esc(data.get("full_name")), tg_id=tg_id,
+                signed_at=stamp, sha256=digest),
+            message_thread_id=cfg.fix_topic_id,
+        )
+    except TelegramAPIError:
+        log.exception("акт возврата %s не доставлен в чат фиксации", number)
+        await db.log_event(tg_id, "act_out_fix_failed", {"number": number})
+
+
+@router.callback_query(StateIs(logic.WAIT_RETURN_SIGN), F.data == "return_mistake")
+async def cb_return_mistake(callback: CallbackQuery, bot: Bot, db: Database,
+                            cfg: Config, user: dict) -> None:
+    """Оператор пришлёт данные возврата заново ответом на то же приглашение."""
+    await callback.answer()
+    await db.log_event(user["tg_id"], "act_out_mistake")
+    await bot.send_message(user["tg_id"], texts.ACT_MISTAKE_SENT)
+    try:
+        row = await db.get_user(user["tg_id"])
+        number = (dict(row).get("contract_no") if row else "") or ""
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.ACT_MISTAKE_ALERT.format(
+                                   tg_id=user["tg_id"],
+                                   number=logic.esc(number)))
+    except TelegramAPIError:
+        log.exception("алерт об ошибке акта возврата не доставлен")
+
+
+@router.message(StateIs(logic.WAIT_RETURN_SIGN))
+async def st_wait_return_sign(message: Message, bot: Bot, db: Database,
+                              cfg: Config, vault: Vault, user: dict) -> None:
+    try:
+        await send_act_out(bot, db, cfg, vault, user["tg_id"])
+    except (ContractProblem, TelegramAPIError):
+        log.exception("не удалось переотправить акт возврата %s", user["tg_id"])
+        await message.answer(texts.ACT_PRESS_BUTTON)

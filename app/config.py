@@ -130,6 +130,10 @@ class Config:
     # последовательность - различимый префикс не даёт двум договорам
     # из разных мессенджеров получить одинаковый номер.
     contract_prefix: str = "АВ"
+    # Шаблоны актов: приёма-передачи и возврата. Заполняются теми же
+    # подстановками, что и договор.
+    act_in_template: Path = Path("/srv/app/act_priema_template.docx")
+    act_out_template: Path = Path("/srv/app/act_vozvrata_template.docx")
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -168,8 +172,14 @@ class Config:
             fix_topic_id=_int_or_none("FIX_TOPIC_ID"),
             contract_template=Path(
                 _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.docx")),
+            act_in_template=Path(
+                _env("ACT_IN_TEMPLATE", "/srv/app/act_priema_template.docx")),
+            act_out_template=Path(
+                _env("ACT_OUT_TEMPLATE", "/srv/app/act_vozvrata_template.docx")),
             channel_url=_env("CHANNEL_URL", "https://t.me/mybike"),
-            oferta_url=_env("OFERTA_URL", required=True),
+            # Оферты больше нет; ссылка на правила проката необязательна -
+            # если задана, на экране согласия появится кнопка.
+            oferta_url=_env("OFERTA_URL"),
             oferta_version=_env("OFERTA_VERSION", "2026-01-15"),
             # Необязателен: согласие на обработку данных включено в оферту.
             # Если политику опубликуют отдельным документом - заполните

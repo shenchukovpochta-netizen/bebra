@@ -114,12 +114,12 @@ async def st_fio(message: Message, db: Database, cfg: Config, user: dict) -> Non
                           full_name=result.value, state=logic.WAIT_OFERTA):
         return
     await db.log_event(user["tg_id"], "fio_set")
-    await message.answer(_oferta_text(cfg, result.value),
-                         reply_markup=kb.oferta(cfg.oferta_url, cfg.pdn_url))
+    await message.answer(_consent_text(cfg, result.value),
+                         reply_markup=kb.consent(cfg.oferta_url, cfg.pdn_url))
 
 
-def _oferta_text(cfg: Config, fio: str) -> str:
-    return texts.OFERTA.format(
+def _consent_text(cfg: Config, fio: str) -> str:
+    return texts.CONSENT.format(
         fio=logic.esc(fio),
         purge_days=cfg.purge_approved_days,
     )
@@ -130,15 +130,15 @@ async def st_fio_wrong(message: Message) -> None:
     await message.answer(texts.FIO_AS_TEXT)
 
 
-# ─────────────────────────── оферта и ПДн ───────────────────────────
+# ──────────────────── согласие на обработку ПДн ────────────────────
 
 @router.callback_query(StateIs(logic.WAIT_OFERTA), F.data == "oferta_ok")
 async def cb_oferta(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
                     user: dict) -> None:
     now = utcnow()
-    # Согласие на обработку ПДн живёт внутри оферты, но фиксируется отдельными
-    # полями: если редакция оферты изменится, надо будет доказать, под какой
-    # именно человек подписался. Одного «принял оферту» для этого мало.
+    # Колонки называются oferta_* исторически: сейчас это момент и редакция
+    # согласия на обработку ПДн. Переименование колонок на живой базе
+    # не окупает косметики. Одного «принял оферту» для этого мало.
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_OFERTA,
                           state=logic.WAIT_CONTACT,
                           oferta_version=cfg.oferta_version, oferta_accepted_at=now,
@@ -148,14 +148,14 @@ async def cb_oferta(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config
     await db.log_event(user["tg_id"], "oferta_accepted",
                        {"version": cfg.oferta_version,
                         "consent_version": cfg.consent_version})
-    await callback.answer(texts.OFERTA_ACCEPTED)
+    await callback.answer(texts.CONSENT_GIVEN)
     await bot.send_message(user["tg_id"], texts.ASK_CONTACT,
                            reply_markup=kb.share_contact())
 
 
 @router.message(StateIs(logic.WAIT_OFERTA))
 async def st_oferta_wrong(message: Message) -> None:
-    await message.answer(texts.OFERTA_PRESS_BUTTON)
+    await message.answer(texts.CONSENT_PRESS_BUTTON)
 
 
 # ─────────────────────────── контакт ───────────────────────────

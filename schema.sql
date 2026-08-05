@@ -57,6 +57,24 @@ create table if not exists bot.users (
   support_chat_id    bigint,
   support_message_id bigint,
 
+  -- Данные выдачи: вин-номера, комплектация, срок и оплата. Не ПДн, поэтому
+  -- открытым jsonb, а не в шифрованной анкете. Заполняет оператор ответом
+  -- на приглашение (issue_chat_id/issue_message_id).
+  issue_data         jsonb,
+  issue_chat_id      bigint,
+  issue_message_id   bigint,
+
+  -- Акт приёма-передачи и Акт возврата: файлы, отпечатки, моменты подписи.
+  act_in_path        text,
+  act_in_sha256      text,
+  act_in_signed_at   timestamptz,
+  return_data        jsonb,
+  return_chat_id     bigint,
+  return_message_id  bigint,
+  act_out_path       text,
+  act_out_sha256     text,
+  act_out_signed_at  timestamptz,
+
   status             text        not null default 'new',  -- new|pending|approved|rejected
   reject_reason      text,
   reviewed_by        bigint,
@@ -99,6 +117,24 @@ alter table bot.users add column if not exists parent_sha256      text;
 alter table bot.users add column if not exists parent_is_photo    boolean not null default true;
 alter table bot.users add column if not exists support_chat_id    bigint;
 alter table bot.users add column if not exists support_message_id bigint;
+alter table bot.users add column if not exists issue_data         jsonb;
+alter table bot.users add column if not exists issue_chat_id      bigint;
+alter table bot.users add column if not exists issue_message_id   bigint;
+alter table bot.users add column if not exists act_in_path        text;
+alter table bot.users add column if not exists act_in_sha256      text;
+alter table bot.users add column if not exists act_in_signed_at   timestamptz;
+alter table bot.users add column if not exists return_data        jsonb;
+alter table bot.users add column if not exists return_chat_id     bigint;
+alter table bot.users add column if not exists return_message_id  bigint;
+alter table bot.users add column if not exists act_out_path       text;
+alter table bot.users add column if not exists act_out_sha256     text;
+alter table bot.users add column if not exists act_out_signed_at  timestamptz;
+-- По этим индексам ищется заявка при ответе оператора на приглашения
+-- «данные выдачи» и «данные возврата».
+create index if not exists users_issue_msg_idx on bot.users (issue_chat_id, issue_message_id)
+  where issue_message_id is not null;
+create index if not exists users_return_msg_idx on bot.users (return_chat_id, return_message_id)
+  where return_message_id is not null;
 
 -- Сквозная нумерация договоров. Последовательность, а не «максимум плюс один»:
 -- два одновременных подтверждения иначе получают один и тот же номер, и в двух

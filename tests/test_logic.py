@@ -183,6 +183,58 @@ class TestBirthDate(unittest.TestCase):
         self.assertTrue(logic.is_minor({"birth_date": result.value}, today=TODAY))
 
 
+class TestIssueForm(unittest.TestCase):
+    FORM = ("рама: 264022410703084\n"
+            "мотор: 240W25021406\n"
+            "модель: Truck+\n"
+            "акб: 2\nзу: 1\n"
+            "срок: 03.08 - 10.08\n"
+            "оплата: 3000 qr")
+
+    def test_full_form_parses(self):
+        data, err = logic.parse_issue_form(self.FORM)
+        self.assertEqual(err, "")
+        self.assertEqual(data["vin_frame"], "264022410703084")
+        self.assertEqual(data["vin_motor"], "240W25021406")
+        self.assertEqual(data["bike_model"], "Truck+")
+        self.assertEqual(data["rent_term"], "03.08 - 10.08")
+        self.assertEqual(data["rent_price"], "3000 qr")
+        self.assertEqual(data["kit_akb"], "2")
+        self.assertEqual(data["kit_mirrors"], "0", "не названное - по умолчанию")
+
+    def test_missing_required_named(self):
+        data, err = logic.parse_issue_form("рама: 1\nмотор: 2\nсрок: x")
+        self.assertIsNone(data)
+        self.assertIn("оплата", err)
+
+    def test_unknown_key_is_error_not_silence(self):
+        """Опечатка в ключе не должна тихо терять значение."""
+        data, err = logic.parse_issue_form(self.FORM + "\nколесо: 2")
+        self.assertIsNone(data)
+        self.assertIn("колесо", err)
+
+    def test_kit_must_be_number(self):
+        data, err = logic.parse_issue_form(self.FORM.replace("акб: 2", "акб: два"))
+        self.assertIsNone(data)
+        self.assertIn("акб", err)
+
+    def test_markup_rejected(self):
+        data, err = logic.parse_issue_form(self.FORM + "\nмодель: <b>x</b>")
+        self.assertIsNone(data)
+
+    def test_issue_context_defaults_to_dashes(self):
+        ctx = logic.issue_context(None)
+        self.assertEqual(ctx["vin_frame"], "—")
+        self.assertEqual(ctx["kit_akb"], "2")
+        self.assertEqual(ctx["kit_helmet"], "0")
+
+    def test_return_form(self):
+        data, err = logic.parse_return_form("Царапина, штраф 500")
+        self.assertEqual(data["return_notes"], "Царапина, штраф 500")
+        self.assertIsNone(logic.parse_return_form("")[0])
+        self.assertIsNone(logic.parse_return_form("<b>x</b> длиннее трёх")[0])
+
+
 class TestMinor(unittest.TestCase):
     def test_eighteen_is_not_minor(self):
         self.assertFalse(logic.is_minor({"birth_date": "02.08.2008"}, today=TODAY))

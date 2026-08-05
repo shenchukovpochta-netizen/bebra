@@ -98,7 +98,7 @@ async def st_fio(ctx: Ctx, user: dict, text: str | None) -> None:
         return
     await ctx.db.log_event(user["tg_id"], "fio_set")
     await _say(ctx, user["tg_id"],
-               texts.OFERTA.format(fio=logic.esc(result.value),
+               texts.CONSENT.format(fio=logic.esc(result.value),
                                    purge_days=ctx.cfg.purge_approved_days),
                kb.oferta(ctx.cfg.oferta_url, ctx.cfg.pdn_url))
 
@@ -116,7 +116,7 @@ async def cb_oferta(ctx: Ctx, user: dict, callback_id: str) -> None:
     await ctx.db.log_event(user["tg_id"], "oferta_accepted",
                            {"version": ctx.cfg.oferta_version,
                             "consent_version": ctx.cfg.consent_version})
-    await ctx.cl.answer_callback(callback_id, texts.OFERTA_ACCEPTED)
+    await ctx.cl.answer_callback(callback_id, texts.CONSENT_GIVEN)
     await _say(ctx, user["tg_id"], texts.ASK_CONTACT, kb.share_contact())
 
 
@@ -373,6 +373,8 @@ def _contract_ctx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
     built = logic.contract_context(
         data, anketa, number=number,
         today=issued_at.date() if issued_at else None)
+    # Данные выдачи MAX-версия пока не собирает - в шаблон уходят прочерки.
+    built.update(logic.issue_context(data.get("issue_data")))
     built["purge_days"] = str(ctx.cfg.purge_approved_days)
     built["signed_at"] = signed_at
     return built

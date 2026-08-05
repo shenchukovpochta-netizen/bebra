@@ -221,11 +221,26 @@ class FakeDB:
                 return dict(row)
         return None
 
+    async def user_by_issue_message(self, chat_id, message_id):
+        for row in self.users.values():
+            if row.get("issue_chat_id") == chat_id \
+                    and row.get("issue_message_id") == message_id:
+                return dict(row)
+        return None
+
+    async def user_by_return_message(self, chat_id, message_id):
+        for row in self.users.values():
+            if row.get("return_chat_id") == chat_id \
+                    and row.get("return_message_id") == message_id:
+                return dict(row)
+        return None
+
     async def clear_anketa(self, tg_id):
         self.users[tg_id]["anketa_enc"] = None
 
 
-TEMPLATE = Path(__file__).resolve().parent.parent / "app" / "contract_template.docx"
+APP_DIR = Path(__file__).resolve().parent.parent / "app"
+TEMPLATE = APP_DIR / "contract_template.docx"
 
 
 def make_config(**overrides) -> Config:
@@ -234,6 +249,8 @@ def make_config(**overrides) -> Config:
         admins=(ADMIN_ID,), pg={}, storage_dir=Path("/tmp/kyc"),
         pdn_key=generate_key(), contract_chat_id=ADMIN_CHAT,
         fix_chat_id=FIX_CHAT, fix_topic_id=FIX_TOPIC, contract_template=TEMPLATE,
+        act_in_template=APP_DIR / "act_priema_template.docx",
+        act_out_template=APP_DIR / "act_vozvrata_template.docx",
         channel_url="https://t.me/test", oferta_url="https://e.ru/o",
         oferta_version="2026-01-15", pdn_url="", pdn_version="2026-01-15",
         video_url="https://e.ru/v",
@@ -367,6 +384,24 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         return self.feed(cb(f"approve:{USER_ID}", chat_id=ADMIN_CHAT,
                             user_id=ADMIN_ID, chat_type="supergroup"))
 
+    ISSUE_FORM = ("рама: 264022410703084\n"
+                  "мотор: 240W25021406\n"
+                  "модель: Truck+\n"
+                  "срок: 03.08 - 10.08\n"
+                  "оплата: 3000 qr")
+
+    async def provide_issue(self, form: str | None = None):
+        """Ответ оператора на приглашение выдачи - после него уходит договор."""
+        prompt_id = self.db.users[USER_ID]["issue_message_id"]
+        self.assertIsNotNone(prompt_id, "приглашение выдачи не отправлено")
+        await self.feed(msg(form or self.ISSUE_FORM, chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup",
+                            reply_to=prompt_id))
+
+    async def approve_fully(self):
+        await self.approve()
+        await self.provide_issue()
+
     # ─── сам сценарий ───
 
     async def test_full_registration_reaches_confirm(self):
@@ -464,7 +499,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.register_minor_up_to_doc()
         await self.feed(msg(photo=True))
         await self.feed(cb("confirm"))
-        await self.approve()
+        await self.approve_fully()
         # Договор уходит пользователю docx-документом; сам факт выдачи
         # проверяется в тестах взрослого сценария, здесь - оговорка.
         row = self.db.users[USER_ID]
@@ -541,7 +576,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Главная регрессия: раньше middleware отбрасывал всё непубличное,
         и нажатие «Одобрить» в группе модерации не доходило до обработчика."""
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         row = self.db.users[USER_ID]
         self.assertEqual(row["status"], logic.ST_APPROVED)
         # Одобрение не завершает историю: договор выдан, но ещё не подписан.
@@ -550,7 +585,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_approve_issues_contract_to_user(self):
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         to_user = [m for m in self.session.documents() if m.chat_id == USER_ID]
         self.assertTrue(to_user, "договор не отправлен пользователю")
         number = self.db.users[USER_ID]["contract_no"]
@@ -559,11 +594,12 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_sign_fixes_contract_in_topic(self):
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         await self.feed(cb("sign"))
 
         row = self.db.users[USER_ID]
-        self.assertEqual(row["state"], logic.APPROVED)
+        # после договора человек не в меню, а на подписи Акта приёма
+        self.assertEqual(row["state"], logic.WAIT_ACT_SIGN)
         self.assertEqual(row["contract_status"], logic.CT_SIGNED)
         self.assertIsNotNone(row["contract_signed_at"])
 
@@ -574,10 +610,12 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn(row["contract_sha256"], to_fix[0].caption)
 
     async def register_fully(self):
-        """До состояния approved: заявка, одобрение, подпись договора."""
+        """До состояния approved: заявка, одобрение, данные выдачи,
+        подпись договора и Акта приёма-передачи."""
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         await self.feed(cb("sign"))
+        await self.feed(cb("act_sign"))
 
     async def test_fixation_form_sent_after_signing(self):
         """После подписи утверждающий получает форму фиксации: бот вписал
@@ -592,8 +630,120 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("7. Номер телефона 2: 89001112233", form)
         self.assertIn("11. Адрес прописки с квартирой в Казани: "
                       "г. Казань, ул. Баумана, д. 1, кв. 2", form)
-        self.assertIn("2. Вин номер рамы: —", form)
+        # данные выдачи оператора уже в форме - прочерков не осталось
+        self.assertIn("2. Вин номер рамы: 264022410703084", form)
+        self.assertIn("5. Сроки аренды: 03.08 - 10.08", form)
+        self.assertIn("10. Сумма и способ оплаты: 3000 qr", form)
         self.assertIn("16. Подписка на тг: да", form)
+
+    async def test_approve_sends_issue_prompt_not_contract(self):
+        """«Одобрить» не выдаёт договор сразу: сначала оператор отвечает
+        данными выдачи - без них в документах прочерки под ручку."""
+        await self.submit()
+        await self.approve()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.PENDING)
+        self.assertIsNotNone(row["issue_message_id"])
+        self.assertEqual(len(self.session.documents()), 0,
+                         "договор не должен уйти до данных выдачи")
+        prompts = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                   if isinstance(m, SendMessage) and "данными выдачи" in (m.text or "")]
+        self.assertTrue(prompts, "приглашение выдачи не отправлено")
+        self.assertIn("рама:", prompts[-1])
+
+    async def test_issue_reply_delivers_contract_with_data(self):
+        await self.submit()
+        await self.approve_fully()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_SIGN)
+        self.assertEqual(row["issue_data"]["vin_frame"], "264022410703084")
+        self.assertEqual(row["issue_data"]["kit_akb"], "2")
+        docs = self.session.documents()
+        self.assertTrue(docs, "договор не ушёл клиенту")
+
+    async def test_bad_issue_form_is_rejected_with_reason(self):
+        await self.submit()
+        await self.approve()
+        await self.provide_issue("рама: 264\nмотор: 240\nсрок: 03.08 - 10.08")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.PENDING,
+                         "без оплаты договор выдаваться не должен")
+        replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
+                           if isinstance(m, SendMessage))
+        self.assertIn("Не хватает: оплата", replies)
+
+    async def test_unknown_issue_key_is_named(self):
+        await self.submit()
+        await self.approve()
+        await self.provide_issue(self.ISSUE_FORM + "\nколесо: 2")
+        replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
+                           if isinstance(m, SendMessage))
+        self.assertIn("Не понял строки: колесо", replies)
+
+    async def test_contract_sign_leads_to_act(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_ACT_SIGN)
+        acts = [m for m in self.session.documents()
+                if "Акт приёма-передачи" in (m.caption or "")]
+        self.assertTrue(acts, "акт приёма не ушёл клиенту")
+
+    async def test_act_sign_fixes_and_invites_return(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.feed(cb("act_sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertIsNotNone(row["act_in_signed_at"])
+        self.assertIsNotNone(row["act_in_sha256"])
+        self.assertIsNotNone(row["return_message_id"],
+                             "приглашение возврата не отправлено")
+        to_fix = [m for m in self.session.documents()
+                  if m.chat_id == FIX_CHAT and "Акт приёма" in (m.caption or "")]
+        self.assertTrue(to_fix, "акт приёма не в чате фиксации")
+        self.assertEqual(to_fix[0].message_thread_id, FIX_TOPIC)
+
+    async def provide_return(self, text="Без замечаний"):
+        prompt_id = self.db.users[USER_ID]["return_message_id"]
+        self.assertIsNotNone(prompt_id)
+        await self.feed(msg(text, chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
+                            chat_type="supergroup", reply_to=prompt_id))
+
+    async def test_return_flow_closes_rental(self):
+        await self.register_fully()
+        await self.provide_return("Царапина на крыле, штраф 500")
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_RETURN_SIGN)
+        await self.feed(cb("return_sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertIsNotNone(row["act_out_signed_at"])
+        to_fix = [m for m in self.session.documents()
+                  if m.chat_id == FIX_CHAT and "Акт возврата" in (m.caption or "")]
+        self.assertTrue(to_fix, "акт возврата не в чате фиксации")
+
+    async def test_return_before_act_signed_is_refused(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        # приглашения возврата ещё нет - но проверим и явный путь: подделаем
+        self.db.users[USER_ID]["return_chat_id"] = ADMIN_CHAT
+        self.db.users[USER_ID]["return_message_id"] = 424242
+        await self.feed(msg("Без замечаний", chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup",
+                            reply_to=424242))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_ACT_SIGN,
+                         "возврат до подписи акта приёма не должен проходить")
+
+    async def test_consent_screen_has_no_oferta(self):
+        """Оферты больше нет: экран - чистое согласие на обработку ПДн."""
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        joined = " ".join(self.session.sent())
+        self.assertIn("Согласие на обработку персональных данных", joined)
+        self.assertNotIn("принимаете оферту", joined)
 
     async def test_tariffs_button_shows_prices(self):
         await self.register_fully()
@@ -679,18 +829,22 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.db.users[USER_ID]["support_message_id"])
 
     async def test_signing_wipes_passport_data(self):
-        """После подписи паспортные данные боту не нужны и стираются."""
+        """Анкета стирается после подписи АКТА, а не договора: паспортные
+        данные печатаются ещё и в Акте приёма-передачи."""
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"])
         await self.feed(cb("sign"))
+        self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"],
+                             "до подписи акта анкета ещё нужна")
+        await self.feed(cb("act_sign"))
         self.assertIsNone(self.db.users[USER_ID]["anketa_enc"])
         # Реквизиты договора остаются: без них нечем доказать, что подписано.
         self.assertIsNotNone(self.db.users[USER_ID]["contract_sha256"])
 
     async def test_contract_mistake_restarts_anketa(self):
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         await self.feed(cb("contract_mistake"))
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.WAIT_FIO)
@@ -787,7 +941,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
         self.session.subscribed = True
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         await self.feed(cb("sign"))
         signed = " ".join(self.session.sent())
         self.assertIn("si=a&amp;t=10", signed)
@@ -798,7 +952,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         экземпляр отличается от прочитанного, а сохранённый при выдаче
         отпечаток перестаёт соответствовать чему бы то ни было."""
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         issued_at = self.db.users[USER_ID]["contract_issued_at"]
         self.assertIsNotNone(issued_at)
 
@@ -837,7 +991,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Кнопки живут только на сообщении с договором. Потерял его - подписать
         нечем, и /start упирается сюда же: выхода из состояния нет."""
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         before = len(self.session.documents())
         await self.feed(msg("а где договор?"))
         self.assertGreater(len(self.session.documents()), before,
@@ -914,7 +1068,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_second_moderator_click_is_noop(self):
         await self.submit()
-        await self.approve()
+        await self.approve_fully()
         notifications = len(self.session.sent_to(USER_ID))
         await self.feed(cb(f"rj:{USER_ID}:doc", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
                            chat_type="supergroup"))

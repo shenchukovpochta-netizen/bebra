@@ -16,17 +16,20 @@ def subscribe(channel_url: str) -> InlineKeyboardMarkup:
     ])
 
 
-def oferta(url: str, pdn_url: str = "") -> InlineKeyboardMarkup:
-    """Оферта и согласие на обработку данных одним экраном.
+def consent(rules_url: str = "", pdn_url: str = "") -> InlineKeyboardMarkup:
+    """Экран согласия на обработку персональных данных.
 
-    pdn_url необязателен: если политику обработки когда-нибудь опубликуют
-    отдельным документом, достаточно заполнить переменную - появится вторая
-    кнопка, трогать код не придётся.
+    Обе ссылки необязательны: правила проката и отдельная политика ПДн
+    появляются кнопками, как только заполнены переменные, - трогать код
+    не придётся. callback остался «oferta_ok» намеренно: старые кнопки
+    в открытых чатах продолжают работать.
     """
-    rows = [[InlineKeyboardButton(text="Читать оферту и правила проката", url=url)]]
+    rows = []
+    if rules_url:
+        rows.append([InlineKeyboardButton(text="Правила проката", url=rules_url)])
     if pdn_url:
         rows.append([InlineKeyboardButton(text="Политика обработки ПДн", url=pdn_url)])
-    rows.append([InlineKeyboardButton(text="Принимаю", callback_data="oferta_ok")])
+    rows.append([InlineKeyboardButton(text="✅ Даю согласие", callback_data="oferta_ok")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -79,6 +82,20 @@ def sign_contract() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Подписываю", callback_data="sign")],
         [InlineKeyboardButton(text="Есть ошибка", callback_data="contract_mistake")],
+    ])
+
+
+def sign_act() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Подписываю", callback_data="act_sign")],
+        [InlineKeyboardButton(text="Есть ошибка", callback_data="act_mistake")],
+    ])
+
+
+def sign_return() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Подтверждаю", callback_data="return_sign")],
+        [InlineKeyboardButton(text="Есть ошибка", callback_data="return_mistake")],
     ])
 
 

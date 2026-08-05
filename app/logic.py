@@ -49,6 +49,12 @@ PENDING = "pending"
 # состояние, а не сразу approved: до подписи договора нет, и выдавать
 # по нему велосипед нельзя.
 WAIT_SIGN = "wait_sign"
+# Договор подписан, клиент подписывает Акт приёма-передачи. Отдельное
+# состояние: по договору имущество передаётся именно актом, и без его
+# подписи выдача не закрыта.
+WAIT_ACT_SIGN = "wait_act_sign"
+# Оператор прислал данные возврата, клиент подтверждает Акт возврата.
+WAIT_RETURN_SIGN = "wait_return_sign"
 APPROVED = "approved"
 # Зарегистрированный пользователь нажал «Поддержка» и пишет вопрос.
 # Отдельное состояние обязательно: без него следующее сообщение провалилось бы
@@ -72,7 +78,8 @@ KNOWN_STATES = frozenset({
     WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
-    WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN, APPROVED,
+    WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
+    WAIT_ACT_SIGN, WAIT_RETURN_SIGN, APPROVED,
     WAIT_SUPPORT,
 })
 
@@ -487,7 +494,9 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
 # У договора два расширения: .docx - текущие, .pdf - выданные прошлой
 # версией бота. Убрать .pdf - значит навсегда оставить старые договоры
 # на диске: ретеншен перестанет их опознавать.
-STORE_FILE_NAME = re.compile(r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg|contract-\d+\.(?:pdf|docx))$")
+STORE_FILE_NAME = re.compile(
+    r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg"
+    r"|contract-\d+\.(?:pdf|docx)|actin-\d+\.docx|actout-\d+\.docx)$")
 
 
 def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:
@@ -676,6 +685,131 @@ def support_question(raw: str | None) -> Validation:
     return Validation(True, value=text)
 
 
+# ─────────────────── данные выдачи ───────────────────
+#
+# После «Одобрить» оператор отвечает на приглашение бота строками
+# «ключ: значение». Из них собираются договор и Акт приёма-передачи -
+# вин-номера, комплектация, срок и оплата попадают в документы,
+# а не остаются прочерками под ручку.
+
+# Ключи формы -> поле. Несколько написаний на ключ: форму заполняют
+# с телефона, и «зу»/«ЗУ»/«зарядка» - это одно и то же поле.
+ISSUE_ALIASES: dict[str, str] = {
+    "рама": "vin_frame", "vin рамы": "vin_frame", "вин рамы": "vin_frame",
+    "мотор": "vin_motor", "мотор-колесо": "vin_motor",
+    "вин мотора": "vin_motor", "vin мотора": "vin_motor",
+    "модель": "bike_model", "марка": "bike_model",
+    "акб": "kit_akb", "зу": "kit_zu", "зарядка": "kit_zu",
+    "зеркала": "kit_mirrors", "муфты": "kit_gloves",
+    "перчатки": "kit_gloves", "педали": "kit_pedals",
+    "дождевик": "kit_rain", "чехол": "kit_case",
+    "замок": "kit_lock", "сумка": "kit_bag", "стяжка": "kit_strap",
+    "шлем": "kit_helmet",
+    "срок": "rent_term", "сроки": "rent_term",
+    "оплата": "rent_price", "сумма": "rent_price",
+}
+
+KIT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("kit_akb", "АКБ"),
+    ("kit_zu", "ЗУ"),
+    ("kit_mirrors", "Зеркала"),
+    ("kit_gloves", "Теплые перчатки на руль (муфты)"),
+    ("kit_pedals", "Педали"),
+    ("kit_rain", "Дождевик"),
+    ("kit_case", "Чехол на держатель для телефона"),
+    ("kit_lock", "Троссовый замок"),
+    ("kit_bag", "Курьерская сумка"),
+    ("kit_strap", "Стяжка для крепления сумки"),
+)
+# Шлем есть в таблице договора, но в форму фиксации не входит - поэтому
+# отдельным полем, а не в KIT_FIELDS: формат формы разбирает чужой парсер.
+KIT_EXTRA = ("kit_helmet",)
+# Стандартный набор выдачи: 2 АКБ (как в тарифах) и зарядное устройство.
+KIT_DEFAULTS = {field: ("2" if field == "kit_akb" else
+                        "1" if field == "kit_zu" else "0")
+                for field, _ in KIT_FIELDS}
+KIT_DEFAULTS.update({field: "0" for field in KIT_EXTRA})
+
+ISSUE_REQUIRED = ("vin_frame", "vin_motor", "rent_term", "rent_price")
+ISSUE_LABELS = {"vin_frame": "рама", "vin_motor": "мотор",
+                "rent_term": "срок", "rent_price": "оплата"}
+
+# Шаблон, который оператор копирует и заполняет. Плейсхолдеров нет
+# намеренно: это текст сообщения, а не документа.
+ISSUE_FORM_TEMPLATE = (
+    "рама: \n"
+    "мотор: \n"
+    "модель: \n"
+    "акб: 2\n"
+    "зу: 1\n"
+    "срок: 03.08 - 10.08\n"
+    "оплата: 3000 qr"
+)
+
+
+def parse_issue_form(raw: str | None) -> tuple[dict[str, str] | None, str]:
+    """Разбор ответа оператора с данными выдачи.
+
+    Возвращает (данные, "") либо (None, текст ошибки). Неизвестные строки
+    не считаются ошибкой молча - о них говорится прямо: опечатка в ключе
+    иначе тихо теряла бы значение, и в договор уезжал прочерк.
+    """
+    data: dict[str, str] = dict(KIT_DEFAULTS)
+    unknown: list[str] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        field = ISSUE_ALIASES.get(_clean(key).lower())
+        if field is None:
+            unknown.append(key.strip())
+            continue
+        value = _clean(value)
+        if not _no_markup(value):
+            return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
+        if field.startswith("kit_"):
+            if not value.isdigit():
+                return None, f"«{key.strip()}» - нужно число, получено «{value}»."
+            data[field] = value
+        elif value:
+            data[field] = value
+    if unknown:
+        return None, ("Не понял строки: " + ", ".join(unknown[:5])
+                      + ". Ключи: " + ", ".join(sorted(set(ISSUE_ALIASES))) + ".")
+    missing = [ISSUE_LABELS[f] for f in ISSUE_REQUIRED if not data.get(f)]
+    if missing:
+        return None, "Не хватает: " + ", ".join(missing) + "."
+    return data, ""
+
+
+def issue_context(issue: dict | None) -> dict[str, str]:
+    """Значения выдачи для подстановки в договор и акты.
+
+    Пустое поле - видимый прочерк, как и в contract_context.
+    """
+    data = dict(issue or {})
+    ctx = {field: str(data.get(field) or "") for field in
+           ("vin_frame", "vin_motor", "bike_model", "rent_term", "rent_price")}
+    for field in [f for f, _ in KIT_FIELDS] + list(KIT_EXTRA):
+        ctx[field] = str(data.get(field, KIT_DEFAULTS[field]))
+    return {k: (v.strip() or "—") for k, v in ctx.items()}
+
+
+def parse_return_form(raw: str | None) -> tuple[dict[str, str] | None, str]:
+    """Данные возврата: свободный текст замечаний (или «без замечаний»).
+
+    Структура не навязывается: состояние, штрафы и суммы оператор пишет
+    как в бумажном акте. Ограничение только на разметку и длину.
+    """
+    text = _clean(raw)
+    if not 3 <= len(text) <= 2000:
+        return None, "Опишите возврат текстом от 3 до 2000 символов (или «без замечаний»)."
+    if not _no_markup(text):
+        return None, "Недопустимы символы < > и &."
+    return {"return_notes": text}, ""
+
+
 # ─────────────────── форма фиксации сдачи ───────────────────
 #
 # Текст, который выдающий дозаполняет и пересылает в тему «Фиксация сдачи»,
@@ -684,21 +818,6 @@ def support_question(raw: str | None) -> Validation:
 # и «Тёплые» вместо «Теплые» - это уже другая колонка или потерянная строка.
 
 FORM_BLANK = "—"
-
-# Комплектация по умолчанию - стандартный набор выдачи: 2 АКБ (как в тарифах)
-# и зарядное устройство. Остальное - нули, выдающий правит по факту.
-FORM_KIT: tuple[tuple[str, int], ...] = (
-    ("АКБ", 2),
-    ("ЗУ", 1),
-    ("Зеркала", 0),
-    ("Теплые перчатки на руль (муфты)", 0),
-    ("Педали", 0),
-    ("Дождевик", 0),
-    ("Чехол на держатель для телефона", 0),
-    ("Троссовый замок", 0),
-    ("Курьерская сумка", 0),
-    ("Стяжка для крепления сумки", 0),
-)
 
 
 def phone_for_form(raw: str | None) -> str:
@@ -709,28 +828,32 @@ def phone_for_form(raw: str | None) -> str:
     return text or FORM_BLANK
 
 
-def fixation_form(user: dict, anketa: dict | None, *,
+def fixation_form(user: dict, anketa: dict | None, issue: dict | None = None, *,
                   subscribed: bool = True) -> str:
     """Форма фиксации сдачи. Бот вписывает то, что знает; остальное - прочерки.
+
+    С появлением данных выдачи прочерков почти не осталось: вин-номера,
+    комплектация, сроки и оплата берутся из ответа оператора.
 
     Экранирование под HTML здесь, а не при отправке: форма уходит одним
     сообщением с parse_mode=HTML, и ФИО с амперсандом (валидаторы такое
     режут, но пояс к подтяжкам дешёвый) не должно порвать отправку.
     """
     data = dict(anketa or {})
-    kit = "\n".join(f"  - {name}: {count}" for name, count in FORM_KIT)
+    given = issue_context(issue)
+    kit = "\n".join(f"  - {name}: {given[field]}" for field, name in KIT_FIELDS)
     username = user.get("username")
     return (
         f"1. ФИО: {esc(user.get('full_name') or FORM_BLANK)}\n"
-        f"2. Вин номер рамы: {FORM_BLANK}\n"
-        f"3. Вин номер мотор колеса: {FORM_BLANK}\n"
+        f"2. Вин номер рамы: {esc(given['vin_frame'])}\n"
+        f"3. Вин номер мотор колеса: {esc(given['vin_motor'])}\n"
         f"4. Комплектация: \n{kit}\n"
-        f"5. Сроки аренды: {FORM_BLANK}\n"
+        f"5. Сроки аренды: {esc(given['rent_term'])}\n"
         f"6. Номер телефона (основной): {phone_for_form(user.get('phone'))}\n"
         f"7. Номер телефона 2: {phone_for_form(data.get('phone2'))}\n"
         f"8. Номер телефона 3: {phone_for_form(data.get('phone3'))}\n"
         f"9. Ник в Telegram: {esc('@' + username) if username else FORM_BLANK}\n"
-        f"10. Сумма и способ оплаты: {FORM_BLANK}\n"
+        f"10. Сумма и способ оплаты: {esc(given['rent_price'])}\n"
         f"11. Адрес прописки с квартирой в Казани: {esc(data.get('reg_address') or FORM_BLANK)}\n"
         f"12. Адрес проживания с квартирой в Казани: {esc(data.get('live_address') or FORM_BLANK)}\n"
         f"13. Подключен GPS-Трекер: {FORM_BLANK}\n"

@@ -62,9 +62,11 @@ services:
       CONTRACT_CHAT_ID: ${CONTRACT_CHAT_ID}
       FIX_CHAT_ID: ${FIX_CHAT_ID}
       FIX_TOPIC_ID: ${FIX_TOPIC_ID}
-      # Шаблон монтируется файлом, а не запекается в образ: текст договора
+      # Шаблоны монтируются файлами, а не запекаются в образ: документы
       # правят юрист и владелец проката, пересборка образа для этого не нужна.
       CONTRACT_TEMPLATE: /srv/app/contract_template.docx
+      ACT_IN_TEMPLATE: /srv/app/act_priema_template.docx
+      ACT_OUT_TEMPLATE: /srv/app/act_vozvrata_template.docx
 
       OFERTA_URL: ${OFERTA_URL}
       OFERTA_VERSION: ${OFERTA_VERSION}
@@ -80,8 +82,10 @@ services:
       TZ: ${TZ:-Europe/Moscow}
     volumes:
       - kycfiles:/files
-      # Правка текста договора не должна требовать пересборки образа.
+      # Правка документов не должна требовать пересборки образа.
       - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
+      - ./app/act_priema_template.docx:/srv/app/act_priema_template.docx:ro
+      - ./app/act_vozvrata_template.docx:/srv/app/act_vozvrata_template.docx:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }

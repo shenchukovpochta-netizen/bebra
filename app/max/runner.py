@@ -193,7 +193,7 @@ async def _dispatch_message(ctx: Ctx, user: dict, info: dict) -> None:
         else:
             await handlers._say(ctx, user["tg_id"], texts.FIO_AS_TEXT)
     elif state == logic.WAIT_OFERTA:
-        await handlers._say(ctx, user["tg_id"], texts.OFERTA_PRESS_BUTTON)
+        await handlers._say(ctx, user["tg_id"], texts.CONSENT_PRESS_BUTTON)
     elif state == logic.WAIT_CONTACT:
         await handlers.st_contact(ctx, user, attachments)
     elif state in logic.ANKETA_BY_STATE:

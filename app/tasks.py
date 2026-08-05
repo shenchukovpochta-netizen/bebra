@@ -40,7 +40,8 @@ async def purge_once(db: Database, cfg: Config) -> tuple[int, int]:
     removed = 0
     for row in await db.rows_to_purge():
         paths = [p for p in (row["doc_path"], row["parent_path"],
-                             row["contract_path"]) if p]
+                             row["contract_path"], row["act_in_path"],
+                             row["act_out_path"]) if p]
         # Путь пришёл из своей же базы, но перед удалением всё равно сверяется
         # с шаблоном: одна опечатка в запросе - и rm уедет не туда.
         unsafe = [p for p in paths if not logic.is_safe_store_path(p, cfg.storage_dir)]

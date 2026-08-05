@@ -22,6 +22,10 @@ PATCHABLE = frozenset({
     "contract_issued_at", "contract_signed_at",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
+    "issue_data", "issue_chat_id", "issue_message_id",
+    "act_in_path", "act_in_sha256", "act_in_signed_at",
+    "return_data", "return_chat_id", "return_message_id",
+    "act_out_path", "act_out_sha256", "act_out_signed_at",
 })
 
 
@@ -205,6 +209,24 @@ class Database:
             chat_id, message_id,
         )
 
+    async def user_by_issue_message(self, chat_id: int,
+                                    message_id: int) -> asyncpg.Record | None:
+        """Заявка по приглашению «данные выдачи», на которое ответил оператор."""
+        return await self.pool.fetchrow(
+            "select * from bot.users where issue_chat_id = $1 "
+            "and issue_message_id = $2",
+            chat_id, message_id,
+        )
+
+    async def user_by_return_message(self, chat_id: int,
+                                     message_id: int) -> asyncpg.Record | None:
+        """Заявка по приглашению «данные возврата»."""
+        return await self.pool.fetchrow(
+            "select * from bot.users where return_chat_id = $1 "
+            "and return_message_id = $2",
+            chat_id, message_id,
+        )
+
     async def clear_anketa(self, tg_id: int) -> None:
         """Стирает паспортные данные и адреса из базы.
 
@@ -230,10 +252,12 @@ class Database:
 
     async def rows_to_purge(self, limit: int = 200) -> list[asyncpg.Record]:
         return await self.pool.fetch(
-            "select tg_id, doc_path, parent_path, contract_path from bot.users "
+            "select tg_id, doc_path, parent_path, contract_path, "
+            "       act_in_path, act_out_path from bot.users "
             "where purge_after is not null and purge_after < now() "
             "  and (doc_path is not null or parent_path is not null "
-            "       or contract_path is not null) "
+            "       or contract_path is not null "
+            "       or act_in_path is not null or act_out_path is not null) "
             "limit $1",
             limit,
         )
@@ -255,7 +279,8 @@ class Database:
         await self.pool.execute(
             "update bot.users set doc_file_id = null, doc_path = null, "
             "parent_file_id = null, parent_path = null, "
-            "contract_path = null, anketa_enc = null, "
+            "contract_path = null, act_in_path = null, act_out_path = null, "
+            "anketa_enc = null, "
             "purge_after = null, updated_at = now() where tg_id = $1",
             tg_id,
         )

@@ -73,15 +73,22 @@ async def cb_approve(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
     await callback.answer(texts.CONTRACT_APPROVED_TOAST)
     await _mark_card(callback, True)
 
-    # Договор собирается уже после того, как решение зафиксировано: сорванная
-    # сборка не должна оставлять заявку в pending, иначе её будут утверждать
-    # второй раз. Пользователю при этом обязательно сказать - он ждёт договор.
+    # Договор НЕ выдаётся сразу: сначала оператор отвечает на приглашение
+    # данными выдачи (вин-номера, комплектация, срок, оплата) - без них
+    # в договоре и акте были бы прочерки под ручку.
+    await _notify(bot, target, texts.APPROVED_WAIT_ISSUE)
+    row = await db.get_user(target)
+    fio = (dict(row).get("full_name") if row else "") or "без имени"
     try:
-        await contract.issue(bot, db, cfg, vault, target)
-    except (contract.ContractProblem, TelegramAPIError) as exc:
-        log.exception("договор для %s не выдан", target)
-        await db.log_event(target, "contract_failed", {"error": str(exc)})
-        await _notify(bot, target, texts.CONTRACT_FAILED_USER)
+        sent = await bot.send_message(
+            cfg.contract_chat_id,
+            texts.ISSUE_PROMPT.format(fio=logic.esc(fio), tg_id=target,
+                                      form=logic.ISSUE_FORM_TEMPLATE))
+        await db.patch(target, issue_chat_id=sent.chat.id,
+                       issue_message_id=sent.message_id)
+    except TelegramAPIError as exc:
+        log.exception("приглашение выдачи для %s не доставлено", target)
+        await db.log_event(target, "issue_prompt_failed", {"error": str(exc)})
         await _alert(bot, cfg, texts.CONTRACT_ALERT_FAILED.format(
             tg_id=target, reason=logic.esc(str(exc))))
 
@@ -166,7 +173,8 @@ async def cb_reject_reason(callback: CallbackQuery, bot: Bot, db: Database,
 
 
 @router.message(ServiceChatReply())
-async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> None:
+async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
+                    vault: Vault) -> None:
     """Ответ на карточку в служебном чате: заявка или вопрос в поддержку.
 
     Пользователь ищется по (chat_id, message_id) карточки, а не разбором её
@@ -181,9 +189,18 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> No
     if not (replied.from_user and replied.from_user.is_bot):
         return
 
-    # Сначала карточки поддержки: ответ на них - это сообщение пользователю,
-    # а не отказ по заявке. Проверять первым делом обязательно, иначе ответ
-    # на вопрос одобренного клиента падал бы в «решение уже принято».
+    # Порядок веток важен: приглашения выдачи и возврата, затем поддержка,
+    # и только потом карточки заявок - у одного пользователя может быть
+    # живо несколько привязок сразу.
+    issued = await db.user_by_issue_message(message.chat.id, replied.message_id)
+    if issued is not None:
+        await _issue_reply(message, bot, db, cfg, vault, dict(issued))
+        return
+    returned = await db.user_by_return_message(message.chat.id, replied.message_id)
+    if returned is not None:
+        await _return_reply(message, bot, db, cfg, vault, dict(returned))
+        return
+
     asked = await db.user_by_support_message(message.chat.id, replied.message_id)
     if asked is not None:
         await _support_reply(message, bot, db, dict(asked))
@@ -230,6 +247,87 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config) -> No
         )
     except TelegramAPIError:
         pass
+
+
+async def _issue_reply(message: Message, bot: Bot, db: Database,
+                       cfg: Config, vault: Vault, target: dict) -> None:
+    """Данные выдачи от оператора: сохранить и выдать договор.
+
+    Повторный ответ на то же приглашение обновляет данные: до подписи
+    договора - переигрывает договор, после подписи, но до подписи акта -
+    пересобирает и переотправляет акт приёма.
+    """
+    parsed, err = logic.parse_issue_form(message.text or message.caption)
+    if parsed is None:
+        await message.reply(err)
+        return
+    tg_id = target["tg_id"]
+    if not await db.patch(tg_id, expected_status=logic.ST_APPROVED,
+                          issue_data=parsed):
+        await message.reply(texts.MOD_REPLY_NOT_PENDING)
+        return
+    await db.log_event(tg_id, "issue_data_set", {"by": message.from_user.id})
+
+    if target.get("contract_status") == logic.CT_SIGNED:
+        # Договор уже подписан - переигрывать его нельзя, обновляется акт.
+        if target.get("act_in_signed_at"):
+            await message.reply("Акт приёма уже подписан - данные не применить.")
+            return
+        row = await db.get_user(tg_id)
+        data = dict(row) if row else dict(target)
+        await db.patch(tg_id, state=logic.WAIT_ACT_SIGN)
+        await contract.send_act_in(bot, db, cfg, data,
+                                   vault.decrypt(data.get("anketa_enc")))
+        await message.reply("Акт приёма пересобран и отправлен клиенту.")
+        return
+
+    try:
+        await contract.issue(bot, db, cfg, vault, tg_id)
+    except (contract.ContractProblem, TelegramAPIError) as exc:
+        log.exception("договор для %s не выдан", tg_id)
+        await db.log_event(tg_id, "contract_failed", {"error": str(exc)})
+        await _notify(bot, tg_id, texts.CONTRACT_FAILED_USER)
+        await message.reply(texts.CONTRACT_ALERT_FAILED.format(
+            tg_id=tg_id, reason=logic.esc(str(exc))))
+        return
+    await message.reply(texts.ISSUE_SAVED)
+
+
+async def _return_reply(message: Message, bot: Bot, db: Database,
+                        cfg: Config, vault: Vault, target: dict) -> None:
+    """Данные возврата: собрать Акт возврата и отдать клиенту на подтверждение.
+
+    Повторный ответ на то же приглашение перезаписывает данные и переотправляет
+    акт - «Есть ошибка» у клиента чинится именно так.
+    """
+    if not target.get("act_in_signed_at"):
+        await message.reply(texts.RETURN_NOT_READY)
+        return
+    parsed, err = logic.parse_return_form(message.text or message.caption)
+    if parsed is None:
+        await message.reply(err)
+        return
+    parsed["return_date"] = utcnow().strftime("%d.%m.%Y")
+    tg_id = target["tg_id"]
+    # Из approved или из wait_return_sign (повторные данные) - но не из
+    # состояний, где человек ещё что-то подписывает или спрашивает поддержку.
+    if target["state"] not in (logic.APPROVED, logic.WAIT_SUPPORT,
+                               logic.WAIT_RETURN_SIGN):
+        await message.reply(texts.RETURN_NOT_READY)
+        return
+    if not await db.patch(tg_id, expected_status=logic.ST_APPROVED,
+                          return_data=parsed, state=logic.WAIT_RETURN_SIGN):
+        await message.reply(texts.MOD_REPLY_NOT_PENDING)
+        return
+    await db.log_event(tg_id, "return_data_set", {"by": message.from_user.id})
+    try:
+        await contract.send_act_out(bot, db, cfg, vault, tg_id)
+    except (contract.ContractProblem, TelegramAPIError) as exc:
+        log.exception("акт возврата для %s не выдан", tg_id)
+        await message.reply(texts.CONTRACT_ALERT_FAILED.format(
+            tg_id=tg_id, reason=logic.esc(str(exc))))
+        return
+    await message.reply(texts.RETURN_SAVED)
 
 
 async def _support_reply(message: Message, bot: Bot, db: Database,

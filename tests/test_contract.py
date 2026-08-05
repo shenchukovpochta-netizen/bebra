@@ -45,7 +45,14 @@ USER = {"tg_id": 5001, "full_name": "Иванов Иван Иванович", "p
 
 def make_ctx(**extra) -> dict:
     ctx = logic.contract_context(USER, ANKETA, number="АВ-2026-000042", today=TODAY)
-    ctx.update(purge_days="90", signed_at="не подписан")
+    # Данные выдачи: без ответа оператора - прочерки из issue_context.
+    ctx.update(logic.issue_context({"vin_frame": "264022410703084",
+                                    "vin_motor": "240W25021406",
+                                    "rent_term": "03.08 - 10.08",
+                                    "rent_price": "3000 qr"}))
+    ctx.update(purge_days="90", signed_at="не подписан",
+               act_date="02.08.2026", return_date="02.08.2026",
+               return_notes="Без замечаний")
     ctx.update(extra)
     return ctx
 
