@@ -10,6 +10,10 @@ secrets:
   # ничего не давал: паспортные данные лежат в bot.users зашифрованными.
   pdn_key:
     file: ./secrets/pdn_key
+  # Токен бота в MAX. Нужен только сервису bot-max (профиль max);
+  # без него профиль просто не поднимается.
+  max_bot_token:
+    file: ./secrets/max_bot_token
 
 services:
   postgres:
@@ -77,6 +81,63 @@ services:
     volumes:
       - kycfiles:/files
       # Правка текста договора не должна требовать пересборки образа.
+      - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # Бот в MAX. Не поднимается обычным `docker compose up` - только явно:
+  #   printf '%s' '<токен от @MasterBot>' > secrets/max_bot_token
+  #   docker compose --profile max up -d --build
+  # У него свой токен, свои чаты и своя база mybike_max (создаёт сам);
+  # Telegram-бот и его данные не затрагиваются.
+  bot-max:
+    build: .
+    profiles: [max]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: ["python", "-m", "app.max_main"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets: [db_password, max_bot_token, pdn_key]
+    environment:
+      MAX_BOT_TOKEN_FILE: /run/secrets/max_bot_token
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      PDN_KEY_FILE: /run/secrets/pdn_key
+
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-mybike}
+      POSTGRES_DB: ${POSTGRES_DB:-mybike}
+      MAX_POSTGRES_DB: mybike_max
+
+      # Адрес Bot API MAX. Меняется только если dev.max.ru объявит другой.
+      MAX_API_BASE: ${MAX_API_BASE:-https://botapi.max.ru}
+
+      MAX_CHANNEL_ID: ${MAX_CHANNEL_ID}
+      MAX_CHANNEL_URL: ${MAX_CHANNEL_URL}
+      MAX_ADMIN_CHAT_ID: ${MAX_ADMIN_CHAT_ID}
+      MAX_ADMINS: ${MAX_ADMINS}
+      MAX_CONTRACT_CHAT_ID: ${MAX_CONTRACT_CHAT_ID}
+      MAX_FIX_CHAT_ID: ${MAX_FIX_CHAT_ID}
+      MAX_CONTRACT_PREFIX: ${MAX_CONTRACT_PREFIX:-АВМ}
+
+      CONTRACT_TEMPLATE: /srv/app/contract_template.docx
+      OFERTA_URL: ${OFERTA_URL}
+      OFERTA_VERSION: ${OFERTA_VERSION}
+      PDN_URL: ${PDN_URL}
+      PDN_VERSION: ${PDN_VERSION}
+      VIDEO_URL: ${VIDEO_URL}
+
+      PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
+      PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
+      UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
+
+      # Отдельный каталог: сканы из MAX не смешиваются со сканами из Telegram
+      MAX_STORAGE_DIR: /files/kyc-max
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      - kycfiles:/files
       - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
     logging:
       driver: json-file

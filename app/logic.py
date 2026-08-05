@@ -512,14 +512,19 @@ def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:
 CONTRACT_PREFIX = "АВ"
 
 
-def contract_number(seq: int, *, today: date | None = None) -> str:
+def contract_number(seq: int, *, today: date | None = None,
+                    prefix: str = CONTRACT_PREFIX) -> str:
     """Номер договора вида АВ-2026-000042.
 
     Сквозная нумерация из последовательности в базе, а не «tg_id + дата»:
     номер попадает в бумажный документ и в журнал выдачи, и он обязан быть
     уникальным и не подсказывать, сколько у проката клиентов в Telegram.
+
+    Префикс - параметр: у бота в MAX своя база и своя последовательность,
+    и без различимого префикса два договора из разных мессенджеров получили
+    бы одинаковый номер.
     """
-    return f"{CONTRACT_PREFIX}-{(today or date.today()).year}-{int(seq):06d}"
+    return f"{prefix}-{(today or date.today()).year}-{int(seq):06d}"
 
 
 # Поля, которые подставляются в шаблон договора. Порядок задаёт и вид

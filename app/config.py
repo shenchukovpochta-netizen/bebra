@@ -126,6 +126,10 @@ class Config:
     rate_soft: int
     rate_hard: int
 
+    # Префикс номера договора. У бота в MAX своя база и своя
+    # последовательность - различимый префикс не даёт двум договорам
+    # из разных мессенджеров получить одинаковый номер.
+    contract_prefix: str = "АВ"
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 

@@ -85,7 +85,8 @@ async def issue(bot: Bot, db: Database, cfg: Config, vault: Vault, tg_id: int) -
     if missing:
         raise ContractProblem(f"не заполнено: {', '.join(missing)}")
 
-    number = data.get("contract_no") or logic.contract_number(await db.next_contract_seq())
+    number = data.get("contract_no") or logic.contract_number(
+        await db.next_contract_seq(), prefix=cfg.contract_prefix)
     # Момент выдачи фиксируется до сборки и тем же значением уходит в базу:
     # дата в шапке договора и contract_issued_at обязаны совпадать, иначе
     # пересборка при подписании даст другой документ.

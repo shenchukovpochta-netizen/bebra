@@ -78,6 +78,10 @@ fi
 if [ ! -s secrets/bot_token ]; then
   die "нет secrets/bot_token. Создайте: printf '%s' '<токен>' > secrets/bot_token"
 fi
+# Пустой файл-заглушка: compose объявляет секрет max_bot_token на уровне
+# файла, и отсутствие файла ломало бы запуск даже тем, кто MAX не включал.
+# Реальный токен кладётся сюда только при включении профиля max.
+[ -f secrets/max_bot_token ] || : > secrets/max_bot_token
 chmod 600 secrets/* .env
 # Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
 # Вне swarm docker compose не копирует файл секрета, а подключает хостовый как
