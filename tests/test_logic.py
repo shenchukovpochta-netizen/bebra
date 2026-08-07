@@ -132,6 +132,8 @@ class TestStorePath(unittest.TestCase):
 
     def test_contract_pdf_recognised(self):
         self.assertTrue(logic.is_safe_store_path("/files/kyc/1-contract-17.pdf", "/files/kyc"))
+        self.assertTrue(logic.is_safe_store_path("/files/kyc/1-soglasie-17.docx",
+                                                 "/files/kyc"))
 
     def test_parent_consent_recognised(self):
         """Файл согласия родителя обязан подходить под шаблон - иначе
@@ -412,7 +414,7 @@ class TestFlowOrder(unittest.TestCase):
         self.assertEqual(seen, list(logic.FLOW))
 
     def test_unknown_state_has_no_successor(self):
-        self.assertIsNone(logic.next_state("wait_pdn"))
+        self.assertIsNone(logic.next_state("wait_selfie"))
         self.assertIsNone(logic.next_state(None))
 
     def test_fields_are_unique(self):
@@ -469,14 +471,26 @@ class TestModerationCallbacks(unittest.TestCase):
 
     def test_all_moderation_buttons_pass_the_gate(self):
         """Регрессия: middleware пускал в служебный чат только approve/reject,
-        и кнопки выбора причины отказа там не доходили до обработчика."""
+        и кнопки выбора причины отказа там не доходили до обработчика.
+        «pay» - кнопка «Оплата получена» на карточке оплаты."""
         for data in ("approve:5001", "reject:5001", "rj:5001:doc",
-                     "rjc:5001", "rjx:5001"):
+                     "rjc:5001", "rjx:5001", "pay:5001"):
             self.assertTrue(logic.is_moderation_data(data), data)
 
     def test_user_buttons_do_not_pass_the_gate(self):
-        for data in ("confirm", "restart", "sign", "oferta_ok", None):
+        for data in ("confirm", "restart", "sign", "oferta_ok", "pdn_ok",
+                     "paid", None):
             self.assertFalse(logic.is_moderation_data(data), repr(data))
+
+
+class TestPayCallback(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(logic.parse_pay_callback("pay:5001"), 5001)
+
+    def test_malformed_rejected(self):
+        for raw in ("pay:abc", "pay:-5", "pay:0", "pay:", "paid",
+                    "approve:5001", "", None):
+            self.assertIsNone(logic.parse_pay_callback(raw), repr(raw))
 
     def test_moderator_reply_passes_only_from_service_chat(self):
         self.assertTrue(logic.should_process(

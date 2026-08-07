@@ -67,6 +67,10 @@ services:
       CONTRACT_TEMPLATE: /srv/app/contract_template.docx
       ACT_IN_TEMPLATE: /srv/app/act_priema_template.docx
       ACT_OUT_TEMPLATE: /srv/app/act_vozvrata_template.docx
+      # Согласие на обработку ПДн (приложение к договору) и Политика ПДн
+      # (уходит файлом на шаге ознакомления, как есть, без подстановок).
+      SOGLASIE_TEMPLATE: /srv/app/soglasie_template.docx
+      PDN_POLICY_FILE: /srv/app/pdn_policy.docx
 
       OFERTA_URL: ${OFERTA_URL}
       OFERTA_VERSION: ${OFERTA_VERSION}
@@ -86,6 +90,8 @@ services:
       - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
       - ./app/act_priema_template.docx:/srv/app/act_priema_template.docx:ro
       - ./app/act_vozvrata_template.docx:/srv/app/act_vozvrata_template.docx:ro
+      - ./app/soglasie_template.docx:/srv/app/soglasie_template.docx:ro
+      - ./app/pdn_policy.docx:/srv/app/pdn_policy.docx:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }

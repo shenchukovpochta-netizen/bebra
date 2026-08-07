@@ -251,6 +251,8 @@ def make_config(**overrides) -> Config:
         fix_chat_id=FIX_CHAT, fix_topic_id=FIX_TOPIC, contract_template=TEMPLATE,
         act_in_template=APP_DIR / "act_priema_template.docx",
         act_out_template=APP_DIR / "act_vozvrata_template.docx",
+        soglasie_template=APP_DIR / "soglasie_template.docx",
+        pdn_policy_file=APP_DIR / "pdn_policy.docx",
         channel_url="https://t.me/test", oferta_url="https://e.ru/o",
         oferta_version="2026-01-15", pdn_url="", pdn_version="2026-01-15",
         video_url="https://e.ru/v",
@@ -371,6 +373,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def register_up_to_confirm(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()
@@ -401,6 +404,11 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def approve_fully(self):
         await self.approve()
         await self.provide_issue()
+
+    def confirm_pay(self):
+        """Оператор нажимает «Оплата получена» на карточке оплаты."""
+        return self.feed(cb(f"pay:{USER_ID}", chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup"))
 
     # ─── сам сценарий ───
 
@@ -433,6 +441,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_bad_passport_does_not_advance(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.feed(msg("07.03.1990"))
@@ -444,6 +453,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_under_sixteen_rejected_at_birth_date(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.feed(msg("01.01.2020"))
@@ -454,6 +464,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Регистрация 17-летнего до шага документа включительно."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         answers = (MINOR_BIRTH,) + ANKETA_ANSWERS[1:3] \
@@ -510,6 +521,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_same_address_button_copies_registration(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         for answer in ANKETA_ANSWERS[:7]:
@@ -522,6 +534,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_phone_rejected(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         for answer in ANKETA_ANSWERS[:8]:
@@ -536,6 +549,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         собирает заметно больше, чем ФИО и телефон."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         text = " ".join(self.session.sent())
         for expected in ("ФИО", "дату и место рождения", "паспортные данные",
                          "адреса регистрации", "телефон", "документа"):
@@ -546,6 +560,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         которой нет, - такое же расхождение, как и обратное."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         text = " ".join(self.session.sent()).lower()
         for gone in ("селфи", "фотографию с этим документом", "распознавани"):
             self.assertNotIn(gone, text)
@@ -553,6 +568,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_foreign_contact_rejected(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=999999))     # чужой контакт
         self.assertIsNone(self.db.users[USER_ID]["phone"])
@@ -590,7 +606,9 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(to_user, "договор не отправлен пользователю")
         number = self.db.users[USER_ID]["contract_no"]
         self.assertRegex(number, r"^АВ-\d{4}-\d{6}$")
-        self.assertIn(number, to_user[0].caption)
+        # среди документов пользователю (политика, приложение, договор)
+        # договор с номером обязан быть
+        self.assertTrue(any(number in (m.caption or "") for m in to_user))
 
     async def test_sign_fixes_contract_in_topic(self):
         await self.submit()
@@ -598,8 +616,9 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("sign"))
 
         row = self.db.users[USER_ID]
-        # после договора человек не в меню, а на подписи Акта приёма
-        self.assertEqual(row["state"], logic.WAIT_ACT_SIGN)
+        # после договора человек не в меню, а на оплате: порядок
+        # «подписание - оплата - получение»
+        self.assertEqual(row["state"], logic.WAIT_PAYMENT)
         self.assertEqual(row["contract_status"], logic.CT_SIGNED)
         self.assertIsNotNone(row["contract_signed_at"])
 
@@ -611,10 +630,11 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def register_fully(self):
         """До состояния approved: заявка, одобрение, данные выдачи,
-        подпись договора и Акта приёма-передачи."""
+        подпись договора, подтверждение оплаты и Акт приёма-передачи."""
         await self.submit()
         await self.approve_fully()
         await self.feed(cb("sign"))
+        await self.confirm_pay()
         await self.feed(cb("act_sign"))
 
     async def test_fixation_form_sent_after_signing(self):
@@ -644,7 +664,10 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.PENDING)
         self.assertIsNotNone(row["issue_message_id"])
-        self.assertEqual(len(self.session.documents()), 0,
+        # файл политики на шаге ознакомления - не договор, его не считаем
+        contracts = [m for m in self.session.documents()
+                     if "Политика" not in (m.caption or "")]
+        self.assertEqual(len(contracts), 0,
                          "договор не должен уйти до данных выдачи")
         prompts = [m.text for m in self.session.sent_to(ADMIN_CHAT)
                    if isinstance(m, SendMessage) and "данными выдачи" in (m.text or "")]
@@ -660,6 +683,28 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["issue_data"]["kit_akb"], "2")
         docs = self.session.documents()
         self.assertTrue(docs, "договор не ушёл клиенту")
+
+    async def test_issue_delivers_soglasie_annex_too(self):
+        """Вместе с договором уходит приложение - Согласие на обработку ПДн."""
+        await self.submit()
+        await self.approve_fully()
+        row = self.db.users[USER_ID]
+        self.assertIsNotNone(row["soglasie_sha256"])
+        annexes = [m for m in self.session.documents()
+                   if m.chat_id == USER_ID
+                   and "Согласие на обработку" in (m.caption or "")]
+        self.assertTrue(annexes, "приложение-согласие не ушло клиенту")
+        # отпечатки у договора и приложения свои
+        self.assertNotEqual(row["soglasie_sha256"], row["contract_sha256"])
+
+    async def test_signed_soglasie_reaches_fix_chat(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        to_fix = [m for m in self.session.documents()
+                  if m.chat_id == FIX_CHAT
+                  and "Согласие на обработку" in (m.caption or "")]
+        self.assertTrue(to_fix, "подписанное согласие не ушло в чат фиксации")
 
     async def test_bad_issue_form_is_rejected_with_reason(self):
         await self.submit()
@@ -679,20 +724,68 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                            if isinstance(m, SendMessage))
         self.assertIn("Не понял строки: колесо", replies)
 
-    async def test_contract_sign_leads_to_act(self):
+    async def test_contract_sign_leads_to_payment_then_act(self):
         await self.submit()
         await self.approve_fully()
         await self.feed(cb("sign"))
         row = self.db.users[USER_ID]
-        self.assertEqual(row["state"], logic.WAIT_ACT_SIGN)
+        self.assertEqual(row["state"], logic.WAIT_PAYMENT)
         acts = [m for m in self.session.documents()
                 if "Акт приёма-передачи" in (m.caption or "")]
-        self.assertTrue(acts, "акт приёма не ушёл клиенту")
+        self.assertFalse(acts, "акт не должен уходить до подтверждения оплаты")
+        # клиенту - сумма из данных выдачи, оператору - карточка с кнопкой
+        to_user = [m.text for m in self.session.sent_to(USER_ID)
+                   if isinstance(m, SendMessage)]
+        self.assertTrue(any("3000 qr" in (t or "") for t in to_user),
+                        "клиент не увидел сумму оплаты")
+        self.assertIsNotNone(row["pay_message_id"], "карточка оплаты не ушла")
+
+        await self.confirm_pay()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_ACT_SIGN)
+        self.assertIsNotNone(row["pay_confirmed_at"])
+        acts = [m for m in self.session.documents()
+                if "Акт приёма-передачи" in (m.caption or "")]
+        self.assertTrue(acts, "после оплаты акт приёма не ушёл клиенту")
+
+    async def test_pay_confirm_from_non_admin_refused(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.feed(cb(f"pay:{USER_ID}", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID + 1, chat_type="supergroup"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PAYMENT,
+                         "оплату подтверждает только админ")
+
+    async def test_paid_button_pings_operator_without_state_change(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.feed(cb("paid"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PAYMENT)
+        nudges = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                  if isinstance(m, SendMessage) and "сообщает об оплате" in (m.text or "")]
+        self.assertTrue(nudges, "сигнал клиента об оплате не дошёл до оператора")
+
+    async def test_issue_update_during_payment_keeps_payment_stage(self):
+        """Новые данные выдачи, пока клиент на оплате, не должны
+        перескакивать оплату и слать акт."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.provide_issue(self.ISSUE_FORM.replace("3000 qr", "3400 нал"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_PAYMENT)
+        self.assertEqual(row["issue_data"]["rent_price"], "3400 нал")
+        acts = [m for m in self.session.documents()
+                if "Акт приёма-передачи" in (m.caption or "")]
+        self.assertFalse(acts, "акт не должен уходить до подтверждения оплаты")
 
     async def test_act_sign_fixes_and_invites_return(self):
         await self.submit()
         await self.approve_fully()
         await self.feed(cb("sign"))
+        await self.confirm_pay()
         await self.feed(cb("act_sign"))
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.APPROVED)
@@ -728,6 +821,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.submit()
         await self.approve_fully()
         await self.feed(cb("sign"))
+        await self.confirm_pay()
         # приглашения возврата ещё нет - но проверим и явный путь: подделаем
         self.db.users[USER_ID]["return_chat_id"] = ADMIN_CHAT
         self.db.users[USER_ID]["return_message_id"] = 424242
@@ -741,9 +835,39 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Оферты больше нет: экран - чистое согласие на обработку ПДн."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         joined = " ".join(self.session.sent())
         self.assertIn("Согласие на обработку персональных данных", joined)
         self.assertNotIn("принимаете оферту", joined)
+
+    async def test_policy_step_precedes_consent(self):
+        """Отдельная галочка ознакомления: после ФИО - файл политики,
+        согласие появляется только после «Ознакомлен(а)»."""
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_PDN)
+        policy_docs = [m for m in self.session.documents()
+                       if "Политика" in (m.caption or "")]
+        self.assertTrue(policy_docs, "файл политики не отправлен")
+        joined = " ".join(self.session.sent())
+        self.assertNotIn("Нажимая «Даю согласие»", joined,
+                         "согласие не должно показываться до ознакомления")
+
+        await self.feed(cb("pdn_ok"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_OFERTA)
+        self.assertIsNotNone(row["policy_ack_at"], "момент ознакомления не записан")
+        self.assertEqual(row["policy_version"], "2026-01-15")
+
+    async def test_policy_step_ignores_text_and_resends(self):
+        await self.feed(msg("/start"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(msg("ок, читать не буду"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PDN)
+        policy_docs = [m for m in self.session.documents()
+                       if "Политика" in (m.caption or "")]
+        self.assertEqual(len(policy_docs), 2, "политика должна переотправиться")
 
     async def test_tariffs_button_shows_prices(self):
         await self.register_fully()
@@ -837,6 +961,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("sign"))
         self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"],
                              "до подписи акта анкета ещё нужна")
+        await self.confirm_pay()
         await self.feed(cb("act_sign"))
         self.assertIsNone(self.db.users[USER_ID]["anketa_enc"])
         # Реквизиты договора остаются: без них нечем доказать, что подписано.
@@ -877,6 +1002,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         загрузки вообще без сообщения, а карточка утверждения не уходила."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()
@@ -1032,6 +1158,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         человек посреди анкеты не получал бы ничего в ответ."""
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         before = len(self.session.sent())
@@ -1115,6 +1242,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("restart"))
         self.assertIsNotNone(self.db.users[USER_ID]["purge_after"])
         await self.feed(msg("Петров Пётр Петрович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()
@@ -1132,13 +1260,14 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_state_recovers(self):
         await self.feed(msg("/start"))
-        self.db.users[USER_ID]["state"] = "wait_pdn"      # состояние старой версии
+        self.db.users[USER_ID]["state"] = "wait_selfie"   # состояние старой версии
         await self.feed(msg("что-то"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO)
 
     async def test_document_of_wrong_type_rejected(self):
         await self.feed(msg("/start"))
         await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()

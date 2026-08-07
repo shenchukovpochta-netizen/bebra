@@ -134,6 +134,27 @@ class TestTemplate(unittest.TestCase):
         provided = set(make_ctx()) | {contract.HASH_FIELD}
         self.assertEqual(used - provided, set())
 
+    def test_annex_and_act_placeholders_are_provided(self):
+        """Согласие-приложение и оба акта заполняются тем же контекстом,
+        что договор: неизвестное поле осталось бы в документе пометкой."""
+        provided = set(make_ctx()) | {contract.HASH_FIELD}
+        for name in ("soglasie_template.docx", "act_priema_template.docx",
+                     "act_vozvrata_template.docx"):
+            tpl = contract.load_template(ROOT / "app" / name)
+            self.assertEqual(contract.placeholders(tpl) - provided, set(), name)
+
+    def test_soglasie_annex_builds_with_own_digest(self):
+        """Приложение-согласие: собственный текст 152-ФЗ и свой отпечаток."""
+        path = ROOT / "app" / "soglasie_template.docx"
+        docx, digest = contract.build(path, make_ctx())
+        text = document_text(docx).replace("\xa0", " ")
+        for marker in ("СОГЛАСИЕ НА ОБРАБОТКУ ПЕРСОНАЛЬНЫХ ДАННЫХ",
+                       "АВ-2026-000042", "152-ФЗ", "Иванов Иван Иванович",
+                       "1234 567890", "5 (пяти) лет", digest):
+            self.assertIn(marker, text, marker)
+        _, contract_digest = contract.build(TEMPLATE, make_ctx())
+        self.assertNotEqual(digest, contract_digest)
+
     def test_unknown_placeholder_is_visible(self):
         rendered = contract.substitute("а {{ нетполя }} б", {})
         self.assertIn("нет поля", rendered)

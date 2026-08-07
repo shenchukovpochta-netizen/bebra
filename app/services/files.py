@@ -38,7 +38,7 @@ async def download(bot: Bot, file_id: str, max_bytes: int) -> bytes:
 # и произвольное расширение означало бы, что ретеншен такой файл не опознает
 # и не удалит - скан или договор останется на диске навсегда.
 SLOT_EXT = {"doc": "jpg", "parent": "jpg", "contract": "docx",
-            "actin": "docx", "actout": "docx"}
+            "soglasie": "docx", "actin": "docx", "actout": "docx"}
 
 
 def store(storage_dir: Path, tg_id: int, slot: str, data: bytes) -> tuple[Path, str]:

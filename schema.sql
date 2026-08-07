@@ -29,6 +29,10 @@ create table if not exists bot.users (
   oferta_accepted_at timestamptz,
   pdn_version        text,
   pdn_consent_at     timestamptz,
+  -- Ознакомление с Политикой обработки ПДн - отдельный юридический факт,
+  -- он фиксируется до согласия и со своей редакцией документа.
+  policy_version     text,
+  policy_ack_at      timestamptz,
 
   -- Анкета для договора: паспортные данные, адреса, дополнительные телефоны.
   -- Один столбец с шифротекстом (AES-256-GCM), а не колонка на поле:
@@ -44,6 +48,19 @@ create table if not exists bot.users (
   contract_status    text        not null default 'none',  -- none|issued|signed
   contract_issued_at timestamptz,
   contract_signed_at timestamptz,
+
+  -- Согласие на обработку ПДн - приложение к договору. Подписывается той же
+  -- кнопкой и в тот же момент, что договор (contract_signed_at), поэтому
+  -- своего момента подписи у него нет - только файл и отпечаток.
+  soglasie_path      text,
+  soglasie_sha256    text,
+
+  -- Оплата аренды: между подписанием договора и Актом приёма-передачи.
+  -- pay_chat_id/pay_message_id - карточка «ожидание оплаты» в служебном
+  -- чате: к ней привязывается «Я оплатил(а)» клиента.
+  pay_chat_id        bigint,
+  pay_message_id     bigint,
+  pay_confirmed_at   timestamptz,
 
   -- Где лежит карточка модерации. Нужно, чтобы отказ «с указанием ошибок»,
   -- написанный ответом на карточку, нашёл своего пользователя: разбирать
@@ -129,6 +146,13 @@ alter table bot.users add column if not exists return_message_id  bigint;
 alter table bot.users add column if not exists act_out_path       text;
 alter table bot.users add column if not exists act_out_sha256     text;
 alter table bot.users add column if not exists act_out_signed_at  timestamptz;
+alter table bot.users add column if not exists policy_version     text;
+alter table bot.users add column if not exists policy_ack_at      timestamptz;
+alter table bot.users add column if not exists soglasie_path      text;
+alter table bot.users add column if not exists soglasie_sha256    text;
+alter table bot.users add column if not exists pay_chat_id        bigint;
+alter table bot.users add column if not exists pay_message_id     bigint;
+alter table bot.users add column if not exists pay_confirmed_at   timestamptz;
 -- По этим индексам ищется заявка при ответе оператора на приглашения
 -- «данные выдачи» и «данные возврата».
 create index if not exists users_issue_msg_idx on bot.users (issue_chat_id, issue_message_id)
@@ -141,11 +165,10 @@ create index if not exists users_return_msg_idx on bot.users (return_chat_id, re
 -- разных бумажных договорах оказывается одинаковый реквизит.
 create sequence if not exists bot.contract_seq as bigint start with 1;
 
--- Согласие на обработку данных переехало внутрь оферты, состояние wait_pdn
--- больше не обрабатывается. Без этой строки застрявшие в нём пользователи
--- не получили бы ни одного обработчика: их сообщения проваливались бы
--- в меню, а выйти можно было бы только угадав /start.
-update bot.users set state = 'wait_oferta' where state = 'wait_pdn';
+-- Состояние wait_pdn снова живое: это экран ознакомления с Политикой
+-- обработки ПДн. Прежняя миграция wait_pdn -> wait_oferta удалена
+-- намеренно - она телепортировала бы людей с экрана политики на согласие
+-- при каждом рестарте бота, и ознакомление оставалось бы незафиксированным.
 
 -- Шаг селфи убран. Застрявшие в нём переводятся на подтверждение: документ
 -- у них уже загружен, а обработчика для wait_selfie больше нет.

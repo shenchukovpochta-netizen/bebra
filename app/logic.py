@@ -18,10 +18,11 @@ from typing import Any, Callable, Iterable
 
 NEW = "new"
 WAIT_FIO = "wait_fio"
-# Один экран согласия вместо двух: согласие на обработку ПДн включено в оферту,
-# отдельного документа политики нет. Состояние wait_pdn убрано, но колонки
-# pdn_version/pdn_consent_at в базе сохранены - момент и редакция согласия
-# фиксируются по-прежнему, иначе доказать его нечем.
+# Ознакомление с Политикой обработки ПДн - отдельный шаг ПЕРЕД согласием:
+# политика (п. 15.4) обязательна к ознакомлению каждым арендатором до
+# договора, и «ознакомлен» и «даю согласие» - это два разных юридических
+# факта с двумя разными отметками в базе (policy_ack_at и pdn_consent_at).
+WAIT_PDN = "wait_pdn"
 WAIT_OFERTA = "wait_oferta"
 WAIT_CONTACT = "wait_contact"
 
@@ -49,7 +50,11 @@ PENDING = "pending"
 # состояние, а не сразу approved: до подписи договора нет, и выдавать
 # по нему велосипед нельзя.
 WAIT_SIGN = "wait_sign"
-# Договор подписан, клиент подписывает Акт приёма-передачи. Отдельное
+# Договор подписан, ждём оплату аренды. Порядок «ознакомление - подписание -
+# оплата - получение»: Акт приёма-передачи уходит клиенту только после того,
+# как оператор подтвердил поступление денег кнопкой «Оплата получена».
+WAIT_PAYMENT = "wait_payment"
+# Оплата подтверждена, клиент подписывает Акт приёма-передачи. Отдельное
 # состояние: по договору имущество передаётся именно актом, и без его
 # подписи выдача не закрыта.
 WAIT_ACT_SIGN = "wait_act_sign"
@@ -74,12 +79,12 @@ SUBSCRIBED_STATUSES = frozenset({"creator", "administrator", "member"})
 # не сработает ни один StateIs, и человек будет получать ответы из меню
 # посреди регистрации.
 KNOWN_STATES = frozenset({
-    NEW, WAIT_FIO, WAIT_OFERTA, WAIT_CONTACT,
+    NEW, WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
     WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
     WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
-    WAIT_ACT_SIGN, WAIT_RETURN_SIGN, APPROVED,
+    WAIT_PAYMENT, WAIT_ACT_SIGN, WAIT_RETURN_SIGN, APPROVED,
     WAIT_SUPPORT,
 })
 
@@ -369,7 +374,7 @@ ANKETA_FIELDS = tuple(step.field for step in ANKETA_STEPS)
 # обработчик документа выбирает следующий шаг через state_after_doc, а не
 # по этой таблице.
 FLOW: tuple[str, ...] = (
-    WAIT_FIO, WAIT_OFERTA, WAIT_CONTACT,
+    WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
     *(step.state for step in ANKETA_STEPS),
     WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM,
 )
@@ -496,7 +501,8 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
 # на диске: ретеншен перестанет их опознавать.
 STORE_FILE_NAME = re.compile(
     r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg"
-    r"|contract-\d+\.(?:pdf|docx)|actin-\d+\.docx|actout-\d+\.docx)$")
+    r"|contract-\d+\.(?:pdf|docx)|soglasie-\d+\.docx"
+    r"|actin-\d+\.docx|actout-\d+\.docx)$")
 
 
 def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:
@@ -617,7 +623,7 @@ def reject_back_to(code: str, anketa: dict | None, *,
     return back_to
 
 
-MODERATION_DATA = re.compile(r"^(?:approve|reject|rj|rjc|rjx):-?\d+(?::[a-z]+)?$")
+MODERATION_DATA = re.compile(r"^(?:approve|reject|rj|rjc|rjx|pay):-?\d+(?::[a-z]+)?$")
 
 
 def is_moderation_data(data: str | None) -> bool:
@@ -626,9 +632,25 @@ def is_moderation_data(data: str | None) -> bool:
     Отдельная проверка нужна middleware: по ней апдейт пускается в служебный
     чат мимо пользовательского конвейера. Пока здесь стоял разбор только
     approve/reject, кнопки выбора причины отказа отбрасывались как чужие -
-    в группе они не доходили до обработчика вообще.
+    в группе они не доходили до обработчика вообще. «pay» - кнопка
+    «Оплата получена» на карточке оплаты: живёт в тех же служебных чатах.
     """
     return bool(data) and MODERATION_DATA.fullmatch(data) is not None
+
+
+def parse_pay_callback(data: str | None) -> int | None:
+    """Разбор pay:<tg_id> с кнопки «Оплата получена».
+
+    Некорректный id отсекается здесь, как и в parse_moderation_callback:
+    иначе UPDATE уходит вхолостую, а оператор видит «подтверждено».
+    """
+    if not data:
+        return None
+    m = re.fullmatch(r"pay:(\d+)", data)
+    if not m:
+        return None
+    target = int(m.group(1))
+    return target if target > 0 else None
 
 
 def parse_reject_callback(data: str | None) -> tuple[int, str] | None:

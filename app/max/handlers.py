@@ -10,6 +10,12 @@
 - нет тем в группах: подписанный договор уходит в чат фиксации общим потоком;
 - id сообщений (mid) - строки, а не числа: в базе для них текстовые колонки;
 - фото приходит вложением image с url для скачивания и token для пересылки.
+
+ВНИМАНИЕ: MAX-бот сознательно отстаёт от Telegram-версии. Здесь СТАРЫЙ
+порядок: нет шага ознакомления с Политикой ПДн, нет этапа оплаты, нет
+Согласия-приложения и актов - договор уходит сразу после одобрения
+и подписывается одной кнопкой. Догонять - по мере надобности, начиная
+с логики wait_pdn/wait_payment из app/handlers/*.
 """
 
 from __future__ import annotations
@@ -98,8 +104,8 @@ async def st_fio(ctx: Ctx, user: dict, text: str | None) -> None:
         return
     await ctx.db.log_event(user["tg_id"], "fio_set")
     await _say(ctx, user["tg_id"],
-               texts.CONSENT.format(fio=logic.esc(result.value),
-                                   purge_days=ctx.cfg.purge_approved_days),
+               texts.MAX_CONSENT.format(fio=logic.esc(result.value),
+                                        purge_days=ctx.cfg.purge_approved_days),
                kb.oferta(ctx.cfg.oferta_url, ctx.cfg.pdn_url))
 
 
@@ -422,7 +428,7 @@ async def issue(ctx: Ctx, tg_id: int) -> str:
         raise ContractProblem(f"статус {tg_id} изменился, договор не выдан")
     await ctx.db.log_event(tg_id, "contract_issued", {"number": number})
     await _send_contract(ctx, tg_id, docx, number,
-                         texts.CONTRACT_READY_USER.format(number=logic.esc(number)),
+                         texts.MAX_CONTRACT_READY.format(number=logic.esc(number)),
                          kb.sign_contract())
     return number
 

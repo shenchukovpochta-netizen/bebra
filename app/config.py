@@ -134,6 +134,13 @@ class Config:
     # подстановками, что и договор.
     act_in_template: Path = Path("/srv/app/act_priema_template.docx")
     act_out_template: Path = Path("/srv/app/act_vozvrata_template.docx")
+    # Согласие на обработку ПДн - приложение к договору, подписывается
+    # вместе с ним той же кнопкой.
+    soglasie_template: Path = Path("/srv/app/soglasie_template.docx")
+    # Политика обработки ПДн - готовый документ, отправляется на шаге
+    # ознакомления КАК ЕСТЬ, без подстановок. Файла нет - шаг работает
+    # текстом, без вложения.
+    pdn_policy_file: Path = Path("/srv/app/pdn_policy.docx")
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -176,18 +183,23 @@ class Config:
                 _env("ACT_IN_TEMPLATE", "/srv/app/act_priema_template.docx")),
             act_out_template=Path(
                 _env("ACT_OUT_TEMPLATE", "/srv/app/act_vozvrata_template.docx")),
+            soglasie_template=Path(
+                _env("SOGLASIE_TEMPLATE", "/srv/app/soglasie_template.docx")),
+            pdn_policy_file=Path(
+                _env("PDN_POLICY_FILE", "/srv/app/pdn_policy.docx")),
             channel_url=_env("CHANNEL_URL", "https://t.me/mybike"),
             # Оферты больше нет; ссылка на правила проката необязательна -
             # если задана, на экране согласия появится кнопка.
             oferta_url=_env("OFERTA_URL"),
             oferta_version=_env("OFERTA_VERSION", "2026-01-15"),
-            # Необязателен: согласие на обработку данных включено в оферту.
-            # Если политику опубликуют отдельным документом - заполните
-            # переменную, и на экране согласия появится вторая кнопка.
+            # Необязательна: политика и так уходит файлом на шаге
+            # ознакомления. Если её опубликуют ещё и в вебе - заполните
+            # переменную, и на экранах появится кнопка со ссылкой.
             pdn_url=_env("PDN_URL"),
-            # Редакция согласия. По умолчанию совпадает с редакцией оферты,
-            # потому что согласие лежит внутри неё. Фиксировать всё равно надо:
-            # иначе не доказать, под какой редакцией человек подписался.
+            # Редакция Политики обработки ПДн и согласия. Пишется в базу
+            # и при ознакомлении (policy_version), и при согласии
+            # (pdn_version): иначе не доказать, под какой редакцией
+            # человек подписался.
             pdn_version=_env("PDN_VERSION", _env("OFERTA_VERSION", "2026-01-15")),
             video_url=_env("VIDEO_URL", "https://youtu.be/CyZzskq8o0o"),
             purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),

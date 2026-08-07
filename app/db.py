@@ -16,10 +16,13 @@ PATCHABLE = frozenset({
     "doc_file_id", "doc_path", "doc_sha256", "doc_is_photo",
     "parent_file_id", "parent_path", "parent_sha256", "parent_is_photo",
     "oferta_version", "oferta_accepted_at", "pdn_version", "pdn_consent_at",
+    "policy_version", "policy_ack_at",
     "status", "reject_reason", "reviewed_by", "reviewed_at", "purge_after",
     "anketa_enc",
     "contract_no", "contract_path", "contract_sha256", "contract_status",
     "contract_issued_at", "contract_signed_at",
+    "soglasie_path", "soglasie_sha256",
+    "pay_chat_id", "pay_message_id", "pay_confirmed_at",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
     "issue_data", "issue_chat_id", "issue_message_id",
@@ -252,11 +255,11 @@ class Database:
 
     async def rows_to_purge(self, limit: int = 200) -> list[asyncpg.Record]:
         return await self.pool.fetch(
-            "select tg_id, doc_path, parent_path, contract_path, "
+            "select tg_id, doc_path, parent_path, contract_path, soglasie_path, "
             "       act_in_path, act_out_path from bot.users "
             "where purge_after is not null and purge_after < now() "
             "  and (doc_path is not null or parent_path is not null "
-            "       or contract_path is not null "
+            "       or contract_path is not null or soglasie_path is not null "
             "       or act_in_path is not null or act_out_path is not null) "
             "limit $1",
             limit,
@@ -279,7 +282,8 @@ class Database:
         await self.pool.execute(
             "update bot.users set doc_file_id = null, doc_path = null, "
             "parent_file_id = null, parent_path = null, "
-            "contract_path = null, act_in_path = null, act_out_path = null, "
+            "contract_path = null, soglasie_path = null, "
+            "act_in_path = null, act_out_path = null, "
             "anketa_enc = null, "
             "purge_after = null, updated_at = now() where tg_id = $1",
             tg_id,

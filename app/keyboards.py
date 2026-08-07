@@ -16,6 +16,21 @@ def subscribe(channel_url: str) -> InlineKeyboardMarkup:
     ])
 
 
+def policy_ack(pdn_url: str = "") -> InlineKeyboardMarkup:
+    """Экран ознакомления с Политикой обработки ПДн.
+
+    Отдельная «галочка» ПЕРЕД согласием: ознакомление с политикой и согласие
+    на обработку - два разных юридических факта, и каждый фиксируется своей
+    кнопкой со своим моментом в базе.
+    """
+    rows = []
+    if pdn_url:
+        rows.append([InlineKeyboardButton(text="Политика (веб-версия)", url=pdn_url)])
+    rows.append([InlineKeyboardButton(
+        text="✔️ Ознакомлен(а) с Политикой", callback_data="pdn_ok")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def consent(rules_url: str = "", pdn_url: str = "") -> InlineKeyboardMarkup:
     """Экран согласия на обработку персональных данных.
 
@@ -82,6 +97,23 @@ def sign_contract() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Подписываю", callback_data="sign")],
         [InlineKeyboardButton(text="Есть ошибка", callback_data="contract_mistake")],
+    ])
+
+
+def paid() -> InlineKeyboardMarkup:
+    """Кнопка клиента на этапе оплаты: сообщить оператору, что деньги ушли.
+
+    Сама по себе состояние не меняет - оплату подтверждает оператор
+    кнопкой «Оплата получена» на своей карточке.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data="paid")],
+    ])
+
+
+def pay_confirm(tg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Оплата получена", callback_data=f"pay:{tg_id}")],
     ])
 
 

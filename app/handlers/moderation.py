@@ -93,6 +93,64 @@ async def cb_approve(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
             tg_id=target, reason=logic.esc(str(exc))))
 
 
+@router.callback_query(F.data.regexp(r"^pay:-?\d+$"))
+async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                 vault: Vault) -> None:
+    """«Оплата получена»: перевести клиента с оплаты на Акт приёма-передачи.
+
+    Кнопка живёт на карточке оплаты в служебном чате. Подтверждение - только
+    от админов: это финансовое решение, и случайный участник чата не должен
+    выдавать имущество нажатием.
+    """
+    if not _is_admin(callback.from_user.id, cfg):
+        await callback.answer(texts.MOD_NO_RIGHTS, show_alert=True)
+        return
+    target = logic.parse_pay_callback(callback.data)
+    if target is None:
+        await callback.answer(texts.MOD_BROKEN_BUTTON, show_alert=True)
+        return
+    row = await db.get_user(target)
+    if row is None:
+        await callback.answer(texts.MOD_BROKEN_BUTTON, show_alert=True)
+        return
+    before = dict(row)
+
+    # expected_state закрывает и двойное нажатие, и второй экземпляр карточки:
+    # повторное подтверждение получит False и честное «не ждёт оплату».
+    if not await db.patch(target, expected_state=logic.WAIT_PAYMENT,
+                          state=logic.WAIT_ACT_SIGN,
+                          pay_confirmed_at=utcnow()):
+        await callback.answer(texts.PAY_NOT_WAITING, show_alert=True)
+        return
+    await db.log_event(target, "payment_confirmed", {"by": callback.from_user.id})
+    await callback.answer(texts.PAY_CONFIRMED_TOAST)
+
+    # Пометить карточку и снять кнопку. Текст собирается заново из шаблона:
+    # у старого сообщения Telegram может отдать недоступный объект без текста.
+    who = callback.from_user.username or callback.from_user.id
+    price = str((before.get("issue_data") or {}).get("rent_price") or "—")
+    if before.get("pay_chat_id") and before.get("pay_message_id"):
+        try:
+            await bot.edit_message_text(
+                chat_id=before["pay_chat_id"],
+                message_id=before["pay_message_id"],
+                text=texts.PAY_CARD.format(
+                    number=logic.esc(before.get("contract_no") or ""),
+                    fio=logic.esc(before.get("full_name")), tg_id=target,
+                    price=logic.esc(price))
+                + f"\n\n{texts.PAY_CONFIRMED_MARK} — @{who}",
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+
+    await _notify(bot, target, texts.PAY_CONFIRMED_USER)
+    row = await db.get_user(target)
+    data = dict(row) if row else before
+    await contract.send_act_in(bot, db, cfg, data,
+                               vault.decrypt(data.get("anketa_enc")))
+
+
 @router.callback_query(F.data.regexp(r"^reject:-?\d+$"))
 async def cb_reject_menu(callback: CallbackQuery, cfg: Config) -> None:
     """Первый экран отказа: за что именно.
@@ -272,6 +330,13 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
         # Договор уже подписан - переигрывать его нельзя, обновляется акт.
         if target.get("act_in_signed_at"):
             await message.reply("Акт приёма уже подписан - данные не применить.")
+            return
+        if target["state"] == logic.WAIT_PAYMENT:
+            # Клиент ещё на оплате: пересобирать и слать акт рано - он уйдёт
+            # после «Оплата получена» уже с обновлёнными данными. Перевести
+            # состояние здесь значило бы перескочить оплату.
+            await message.reply(texts.ISSUE_UPDATED_WAIT_PAY.format(
+                price=logic.esc(str(parsed.get("rent_price") or "—"))))
             return
         row = await db.get_user(tg_id)
         data = dict(row) if row else dict(target)

@@ -185,21 +185,20 @@ class TestConsentVersion(unittest.TestCase):
 class TestKnownStates(unittest.TestCase):
     """Состояние, оставшееся от прошлой версии бота, не должно быть тупиком."""
 
-    def test_removed_state_is_unknown(self):
-        self.assertFalse(logic.is_known_state("wait_pdn"))
-
     def test_none_is_unknown(self):
         self.assertFalse(logic.is_known_state(None))
 
     def test_every_live_state_is_known(self):
-        for state in (logic.NEW, logic.WAIT_FIO, logic.WAIT_OFERTA, logic.WAIT_CONTACT,
+        # wait_pdn снова живое состояние: экран ознакомления с Политикой ПДн.
+        for state in (logic.NEW, logic.WAIT_FIO, logic.WAIT_PDN,
+                      logic.WAIT_OFERTA, logic.WAIT_CONTACT,
                       logic.WAIT_DOC, logic.WAIT_PARENT_CONSENT, logic.CONFIRM,
-                      logic.PENDING, logic.WAIT_SIGN, logic.APPROVED,
+                      logic.PENDING, logic.WAIT_SIGN, logic.WAIT_PAYMENT,
+                      logic.WAIT_ACT_SIGN, logic.APPROVED,
                       logic.WAIT_SUPPORT):
             self.assertTrue(logic.is_known_state(state), state)
 
     def test_no_stale_state_left_in_set(self):
-        self.assertNotIn("wait_pdn", logic.KNOWN_STATES)
         # Шаг селфи убран: значение из прошлой версии должно распознаваться
         # как неизвестное, иначе человек застрянет без единого обработчика.
         self.assertNotIn("wait_selfie", logic.KNOWN_STATES)

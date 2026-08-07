@@ -1,5 +1,5 @@
-"""Шаги регистрации: ФИО → оферта и согласие → контакт → анкета для договора
-→ фото документа → подтверждение."""
+"""Шаги регистрации: ФИО → ознакомление с Политикой ПДн → согласие →
+контакт → анкета для договора → фото документа → подтверждение."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from .. import keyboards as kb
 from .. import logic, tasks, texts
@@ -105,17 +105,17 @@ async def st_new(message: Message, db: Database, user: dict) -> None:
 
 
 @router.message(StateIs(logic.WAIT_FIO), F.text)
-async def st_fio(message: Message, db: Database, cfg: Config, user: dict) -> None:
+async def st_fio(message: Message, bot: Bot, db: Database, cfg: Config,
+                 user: dict) -> None:
     result = logic.validate_fio(message.text)
     if not result.ok:
         await message.answer(result.error)
         return
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_FIO,
-                          full_name=result.value, state=logic.WAIT_OFERTA):
+                          full_name=result.value, state=logic.WAIT_PDN):
         return
     await db.log_event(user["tg_id"], "fio_set")
-    await message.answer(_consent_text(cfg, result.value),
-                         reply_markup=kb.consent(cfg.oferta_url, cfg.pdn_url))
+    await send_policy(bot, cfg, user["tg_id"])
 
 
 def _consent_text(cfg: Config, fio: str) -> str:
@@ -128,6 +128,58 @@ def _consent_text(cfg: Config, fio: str) -> str:
 @router.message(StateIs(logic.WAIT_FIO))
 async def st_fio_wrong(message: Message) -> None:
     await message.answer(texts.FIO_AS_TEXT)
+
+
+# ─────────────── ознакомление с Политикой обработки ПДн ───────────────
+
+async def send_policy(bot: Bot, cfg: Config, tg_id: int) -> None:
+    """Экран ознакомления: файл политики с кнопкой «Ознакомлен(а)».
+
+    Политика уходит документом как есть, без подстановок - это готовый
+    файл оператора, и предоставлять его через бота требует её же п. 3.2.
+    Файл читается с диска на каждый показ: он маленький, а кэш file_id
+    пережил бы замену файла и продолжил слать старую редакцию.
+    """
+    try:
+        data = cfg.pdn_policy_file.read_bytes()
+    except OSError:
+        log.warning("файл политики ПДн %s не читается - шаг работает "
+                    "текстом без вложения", cfg.pdn_policy_file)
+        await bot.send_message(tg_id, texts.POLICY_NO_FILE,
+                               reply_markup=kb.policy_ack(cfg.pdn_url))
+        return
+    await bot.send_document(
+        tg_id,
+        BufferedInputFile(data, filename="politika-obrabotki-pdn.docx"),
+        caption=texts.POLICY_CAPTION,
+        reply_markup=kb.policy_ack(cfg.pdn_url),
+    )
+
+
+@router.callback_query(StateIs(logic.WAIT_PDN), F.data == "pdn_ok")
+async def cb_policy(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                    user: dict) -> None:
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_PDN,
+                          state=logic.WAIT_OFERTA,
+                          policy_version=cfg.pdn_version,
+                          policy_ack_at=utcnow()):
+        await callback.answer()
+        return
+    await db.log_event(user["tg_id"], "policy_acknowledged",
+                       {"version": cfg.pdn_version})
+    await callback.answer(texts.POLICY_ACK_TOAST)
+    await bot.send_message(user["tg_id"],
+                           _consent_text(cfg, user.get("full_name") or ""),
+                           reply_markup=kb.consent(cfg.oferta_url, cfg.pdn_url))
+
+
+@router.message(StateIs(logic.WAIT_PDN))
+async def st_policy_wrong(message: Message, bot: Bot, cfg: Config,
+                          user: dict) -> None:
+    """Любое сообщение на шаге ознакомления возвращает политику с кнопкой:
+    кнопка живёт на сообщении с файлом, и потерянное в ленте сообщение
+    без переотправки становится тупиком."""
+    await send_policy(bot, cfg, user["tg_id"])
 
 
 # ──────────────────── согласие на обработку ПДн ────────────────────

@@ -36,11 +36,17 @@ async def run() -> None:
     )
     cfg = Config.load()
     vault = Vault.from_raw(cfg.pdn_key)
-    # Шаблон читается на старте, хотя нужен только при выдаче договора:
+    # Шаблоны читаются на старте, хотя нужны только при выдаче договора:
     # опечатка в пути обнаружилась бы иначе в момент, когда пользователю уже
-    # сказано «заявка одобрена», а договора нет.
+    # сказано «заявка одобрена», а договора нет. Согласие проверяется наравне
+    # с договором: без него issue() не соберёт пакет документов.
     load_template(cfg.contract_template)
-    log.info("шаблон договора на месте: %s", cfg.contract_template)
+    load_template(cfg.soglasie_template)
+    log.info("шаблоны договора и согласия на месте: %s, %s",
+             cfg.contract_template, cfg.soglasie_template)
+    if not cfg.pdn_policy_file.exists():
+        log.warning("файл политики ПДн %s не найден - шаг ознакомления "
+                    "будет работать текстом, без вложения", cfg.pdn_policy_file)
 
     db = await Database.connect(cfg.pg)
     await db.apply_schema(Path(__file__).resolve().parent.parent / "schema.sql")

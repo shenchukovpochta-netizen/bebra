@@ -62,6 +62,26 @@ def _filename(number: str) -> str:
     return f"dogovor-{number}.docx"
 
 
+def _soglasie_filename(number: str) -> str:
+    return f"soglasie-pdn-{number}.docx"
+
+
+def _build_soglasie(cfg: Config, data: dict, anketa: dict, *, number: str,
+                    signed_at: str, issued_at: datetime | None) -> tuple[bytes, str]:
+    """Согласие на обработку ПДн - приложение к договору.
+
+    Собирается из того же контекста, что договор: реквизиты арендатора,
+    номер и дата договора, момент подписи. Отпечаток у приложения свой -
+    build() вписывает в плашку хэш самого приложения, а не договора.
+    """
+    ctx = _context(cfg, data, anketa, number=number, signed_at=signed_at,
+                   issued_at=issued_at)
+    try:
+        return contract_service.build(cfg.soglasie_template, ctx)
+    except (contract_service.TemplateProblem, OSError) as exc:
+        raise ContractProblem(str(exc)) from exc
+
+
 async def _build(cfg: Config, data: dict, anketa: dict, *, number: str,
                  signed_at: str, issued_at: datetime | None) -> tuple[bytes, str]:
     ctx = _context(cfg, data, anketa, number=number, signed_at=signed_at,
@@ -97,19 +117,31 @@ async def issue(bot: Bot, db: Database, cfg: Config, vault: Vault, tg_id: int) -
     issued_at = data.get("contract_issued_at") or utcnow()
     pdf, digest = await _build(cfg, data, anketa, number=number,
                                signed_at=UNSIGNED, issued_at=issued_at)
+    sog, sog_digest = _build_soglasie(cfg, data, anketa, number=number,
+                                      signed_at=UNSIGNED, issued_at=issued_at)
     path, _ = files.store(cfg.storage_dir, tg_id, "contract", pdf)
+    sog_path, _ = files.store(cfg.storage_dir, tg_id, "soglasie", sog)
 
     if not await db.patch(
         tg_id, expected_status=logic.ST_APPROVED,
         state=logic.WAIT_SIGN,
         contract_no=number, contract_path=str(path), contract_sha256=digest,
+        soglasie_path=str(sog_path), soglasie_sha256=sog_digest,
         contract_status=logic.CT_ISSUED, contract_issued_at=issued_at,
     ):
-        # Статус успел уехать - договор уже неактуален, файл на диске не нужен.
+        # Статус успел уехать - договор уже неактуален, файлы на диске не нужны.
         files.remove(path)
+        files.remove(sog_path)
         raise ContractProblem(f"статус {tg_id} изменился, договор не выдан")
 
     await db.log_event(tg_id, "contract_issued", {"number": number})
+    # Приложение уходит ПЕРВЫМ, договор с кнопками - последним: кнопки
+    # подписи должны оказаться на нижнем сообщении, у самого экрана.
+    await bot.send_document(
+        tg_id,
+        BufferedInputFile(sog, filename=_soglasie_filename(number)),
+        caption=texts.SOGLASIE_CAPTION.format(number=logic.esc(number)),
+    )
     await bot.send_document(
         tg_id,
         BufferedInputFile(pdf, filename=_filename(number)),
@@ -132,10 +164,11 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         return
 
     signed_at = utcnow()
-    # Дальше не меню, а Акт приёма-передачи: по договору имущество
-    # передаётся именно актом, и без его подписи выдача не закрыта.
+    # Дальше не Акт, а оплата: порядок «ознакомление - подписание - оплата -
+    # получение». Акт приёма-передачи уйдёт после того, как оператор
+    # подтвердит поступление денег.
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_SIGN,
-                          state=logic.WAIT_ACT_SIGN,
+                          state=logic.WAIT_PAYMENT,
                           contract_status=logic.CT_SIGNED,
                           contract_signed_at=signed_at):
         await callback.answer()
@@ -149,48 +182,73 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     number = data.get("contract_no") or ""
     stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
 
+    docs_ok = True
     try:
         pdf, digest = await _build(cfg, data, anketa, number=number, signed_at=stamp,
                                    issued_at=data.get("contract_issued_at"))
+        sog, sog_digest = _build_soglasie(cfg, data, anketa, number=number,
+                                          signed_at=stamp,
+                                          issued_at=data.get("contract_issued_at"))
     except ContractProblem:
-        # Подпись уже зафиксирована в базе, откатывать её нельзя. Человеку
-        # отдаём меню, а разбираться с шаблоном будут по алерту.
+        # Подпись уже зафиксирована в базе, откатывать её нельзя. Этап оплаты
+        # идёт дальше и без экземпляров, а с шаблоном разберутся по алерту.
         log.exception("подписанный экземпляр %s не собрался", tg_id)
         await bot.send_message(cfg.contract_chat_id, texts.CONTRACT_ALERT_FAILED.format(
             tg_id=tg_id, reason="не удалось пересобрать подписанный экземпляр"))
-        await bot.send_message(
-            tg_id, texts.REGISTERED.format(video_url=logic.esc(cfg.video_url)),
-            reply_markup=kb.main_menu())
-        return
-
-    old_path = data.get("contract_path")
-    path, _ = files.store(cfg.storage_dir, tg_id, "contract", pdf)
-    await db.patch(tg_id, contract_path=str(path), contract_sha256=digest)
-    if old_path and old_path != str(path):
-        files.remove(old_path)          # неподписанный экземпляр больше не нужен
+        docs_ok = False
 
     await db.log_event(tg_id, "contract_signed", {"number": number})
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
 
-    # Отправка идёт через bot по tg_id, а не через callback.message: кнопка
-    # подписи живёт в чате сутками, а у старого сообщения Telegram отдаёт
-    # недоступный объект без метода answer - подпись уже зафиксирована в базе,
-    # и падение здесь оставило бы человека без экземпляра договора.
-    await bot.send_document(
-        tg_id,
-        BufferedInputFile(pdf, filename=_filename(number)),
-        caption=texts.CONTRACT_SIGNED_USER.format(
-            number=logic.esc(number), signed_at=stamp,
-            video_url=logic.esc(cfg.video_url)),
-        reply_markup=kb.main_menu(),
-    )
+    if docs_ok:
+        old_path = data.get("contract_path")
+        old_sog = data.get("soglasie_path")
+        path, _ = files.store(cfg.storage_dir, tg_id, "contract", pdf)
+        sog_path, _ = files.store(cfg.storage_dir, tg_id, "soglasie", sog)
+        await db.patch(tg_id, contract_path=str(path), contract_sha256=digest,
+                       soglasie_path=str(sog_path), soglasie_sha256=sog_digest)
+        if old_path and old_path != str(path):
+            files.remove(old_path)      # неподписанный экземпляр больше не нужен
+        if old_sog and old_sog != str(sog_path):
+            files.remove(old_sog)
 
-    await _fix(bot, db, cfg, data, anketa, pdf=pdf, number=number,
-               signed_at=stamp, digest=digest)
-    # Форма фиксации - утверждающему: он дозаполняет прочерки (вин-номера,
-    # сроки, оплату) и пересылает в тему фиксации, где её разбирает другой
-    # бот. Собрать её можно только СЕЙЧАС, до clear_anketa: адреса и телефоны
-    # живут в анкете, которая строкой ниже стирается.
+        # Отправка идёт через bot по tg_id, а не через callback.message: кнопка
+        # подписи живёт в чате сутками, а у старого сообщения Telegram отдаёт
+        # недоступный объект без метода answer - подпись уже зафиксирована в базе,
+        # и падение здесь оставило бы человека без экземпляра договора.
+        await bot.send_document(
+            tg_id,
+            BufferedInputFile(sog, filename=_soglasie_filename(number)),
+            caption=texts.SOGLASIE_SIGNED_CAPTION.format(
+                number=logic.esc(number), signed_at=stamp),
+        )
+        await bot.send_document(
+            tg_id,
+            BufferedInputFile(pdf, filename=_filename(number)),
+            caption=texts.CONTRACT_SIGNED_USER.format(
+                number=logic.esc(number), signed_at=stamp,
+                video_url=logic.esc(cfg.video_url)),
+            reply_markup=kb.main_menu(),
+        )
+
+        await _fix(bot, db, cfg, data, anketa, pdf=pdf, number=number,
+                   signed_at=stamp, digest=digest)
+        try:
+            await bot.send_document(
+                cfg.fix_chat_id,
+                BufferedInputFile(sog, filename=_soglasie_filename(number)),
+                caption=texts.SOGLASIE_FIX_CARD.format(
+                    number=logic.esc(number), signed_at=stamp, sha256=sog_digest),
+                message_thread_id=cfg.fix_topic_id,
+            )
+        except TelegramAPIError:
+            log.exception("согласие по договору %s не доставлено в чат фиксации",
+                          number)
+            await db.log_event(tg_id, "soglasie_fix_failed", {"number": number})
+
+    # Форма фиксации - утверждающему: он дозаполняет прочерки и пересылает
+    # в тему фиксации, где её разбирает другой бот. Собрать её можно только
+    # пока жива анкета: адреса и телефоны стираются после подписи Акта приёма.
     try:
         await bot.send_message(cfg.contract_chat_id,
                                texts.FIXATION_FORM_INTRO.format(number=logic.esc(number)))
@@ -200,9 +258,26 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         # Подпись уже состоялась, откатывать её из-за формы нельзя.
         log.exception("форма фиксации по договору %s не доставлена", number)
         await db.log_event(tg_id, "fixation_form_failed", {"number": number})
-    # Анкета НЕ стирается здесь: паспортные данные печатаются ещё и в Акте
-    # приёма-передачи. Стирание - после его подписания (cb_act_sign).
-    await send_act_in(bot, db, cfg, data, anketa)
+
+    # Этап оплаты: клиенту - сумма и кнопка «Я оплатил(а)», оператору -
+    # карточка с кнопкой «Оплата получена». Анкета НЕ стирается: паспортные
+    # данные печатаются ещё и в Акте приёма-передачи.
+    price = str((data.get("issue_data") or {}).get("rent_price") or "—")
+    await bot.send_message(tg_id, texts.PAY_PROMPT.format(price=logic.esc(price)),
+                           reply_markup=kb.paid())
+    try:
+        sent = await bot.send_message(
+            cfg.contract_chat_id,
+            texts.PAY_CARD.format(number=logic.esc(number),
+                                  fio=logic.esc(data.get("full_name")),
+                                  tg_id=tg_id, price=logic.esc(price)),
+            reply_markup=kb.pay_confirm(tg_id))
+        await db.patch(tg_id, pay_chat_id=sent.chat.id,
+                       pay_message_id=sent.message_id)
+    except TelegramAPIError:
+        # Без карточки оператор не подтвердит оплату кнопкой - молчать нельзя.
+        log.exception("карточка оплаты по договору %s не доставлена", number)
+        await db.log_event(tg_id, "pay_card_failed", {"number": number})
 
 
 async def _fix(bot: Bot, db: Database, cfg: Config, data: dict, anketa: dict, *,
@@ -287,16 +362,70 @@ async def st_wait_sign(message: Message, bot: Bot, db: Database, cfg: Config,
     try:
         pdf, _ = await _build(cfg, data, anketa, number=number, signed_at=UNSIGNED,
                               issued_at=data.get("contract_issued_at"))
+        sog, _ = _build_soglasie(cfg, data, anketa, number=number,
+                                 signed_at=UNSIGNED,
+                                 issued_at=data.get("contract_issued_at"))
     except ContractProblem:
         log.exception("не удалось переотправить договор %s", user["tg_id"])
         await message.answer(texts.CONTRACT_PRESS_BUTTON)
         return
     await bot.send_document(
         user["tg_id"],
+        BufferedInputFile(sog, filename=_soglasie_filename(number)),
+        caption=texts.SOGLASIE_CAPTION.format(number=logic.esc(number)),
+    )
+    await bot.send_document(
+        user["tg_id"],
         BufferedInputFile(pdf, filename=_filename(number)),
         caption=texts.CONTRACT_RESEND.format(number=logic.esc(number)),
         reply_markup=kb.sign_contract(),
     )
+
+
+# ─────────────────────────── оплата ───────────────────────────
+
+@router.callback_query(StateIs(logic.WAIT_PAYMENT), F.data == "paid")
+async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                  user: dict) -> None:
+    """Клиент сообщает, что перевёл деньги.
+
+    Состояние НЕ меняется: поступление проверяет оператор и подтверждает
+    кнопкой «Оплата получена» на своей карточке - клиентская кнопка лишь
+    зовёт его проверить. Ответом на карточку оплаты, чтобы сигнал оказался
+    в чате рядом с кнопкой подтверждения.
+    """
+    await callback.answer(texts.PAY_NUDGE_TOAST)
+    await db.log_event(user["tg_id"], "client_paid_claim")
+    row = await db.get_user(user["tg_id"])
+    data = dict(row) if row else dict(user)
+    price = str((data.get("issue_data") or {}).get("rent_price") or "—")
+    card = texts.PAY_NUDGE_CARD.format(
+        fio=logic.esc(data.get("full_name")), tg_id=user["tg_id"],
+        number=logic.esc(data.get("contract_no") or ""),
+        price=logic.esc(price))
+    reply_to = (data.get("pay_message_id")
+                if data.get("pay_chat_id") == cfg.contract_chat_id else None)
+    try:
+        await bot.send_message(cfg.contract_chat_id, card,
+                               reply_to_message_id=reply_to)
+    except TelegramAPIError:
+        if reply_to is None:
+            log.exception("сигнал об оплате %s не доставлен", user["tg_id"])
+            return
+        # Карточку оплаты могли удалить из чата - шлём без привязки.
+        try:
+            await bot.send_message(cfg.contract_chat_id, card)
+        except TelegramAPIError:
+            log.exception("сигнал об оплате %s не доставлен", user["tg_id"])
+
+
+@router.message(StateIs(logic.WAIT_PAYMENT))
+async def st_wait_payment(message: Message, user: dict) -> None:
+    """Любое сообщение на этапе оплаты возвращает сумму и кнопку:
+    потерянное в ленте сообщение с кнопкой - это тупик без переотправки."""
+    price = str((user.get("issue_data") or {}).get("rent_price") or "—")
+    await message.answer(texts.PAY_WAIT.format(price=logic.esc(price)),
+                         reply_markup=kb.paid())
 
 
 # ─────────────────────── Акт приёма-передачи ───────────────────────
