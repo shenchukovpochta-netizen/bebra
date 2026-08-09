@@ -128,6 +128,55 @@ class TestTemplate(unittest.TestCase):
                        "АКТ ВОЗВРАТА"):
             self.assertIn(marker, text, marker)
 
+    def test_redaction_of_the_lawyer_is_in_place(self):
+        """Разделы редакции юриста: передача по Акту приёма-передачи, признание
+        ПЭП и блок подписи. Подмена шаблона на старую редакцию их потеряет,
+        а бот продолжит слать «подписанный» документ без этих условий."""
+        docx, _ = contract.build(TEMPLATE, make_ctx())
+        # NBSP в тексте юриста нормализуем: он ставится Word'ом произвольно
+        # и не должен ломать проверку формулировки.
+        text = document_text(docx).replace("\xa0", " ")
+        for marker in ("Порядок подписания Акта приема-передачи",
+                       "Без нажатия кнопки «Подписываю» Имущество Арендатору "
+                       "не передается",
+                       "простая электронная подпись (ПЭП)",
+                       "Акта возврата Имущества;",
+                       "Срок проката начинается с момента подписания Акта "
+                       "приема-передачи",
+                       "Подписано в электронном виде:",
+                       "Telegram ID Арендатора:",
+                       "Отпечаток документа (SHA-256):"):
+            self.assertIn(marker, text, marker)
+
+    def test_signature_block_carries_data_not_blanks(self):
+        """Блок ПЭП заполняется ботом: момент подписи, Telegram ID и отпечаток.
+        Незаполненный блок - это документ без единого следа подписания."""
+        docx, digest = contract.build(
+            TEMPLATE, make_ctx(signed_at="02.08.2026 11:00 UTC"))
+        text = document_text(docx)
+        self.assertIn("Подписано в электронном виде: 02.08.2026 11:00 UTC", text)
+        self.assertIn(f"Telegram ID Арендатора: {USER['tg_id']}", text)
+        self.assertIn(f"Отпечаток документа (SHA-256): {digest}", text)
+
+    def test_retention_term_follows_configuration(self):
+        """Срок хранения изображений в договоре - из PURGE_APPROVED_DAYS.
+        Цифра, зашитая в шаблон, разъехалась бы с реальным удалением."""
+        docx, _ = contract.build(TEMPLATE, make_ctx(purge_days="120"))
+        text = document_text(docx)
+        self.assertIn("удаляются через 120 дней", text)
+        self.assertNotIn("удаляются через 365 дней", text)
+
+    def test_no_leftovers_from_the_filled_sample(self):
+        """Бланк пришёл из заполненного образца: тестовые ФИО, адрес и дата
+        не должны были уехать в шаблон вместе с вёрсткой."""
+        text = document_text(contract.build(TEMPLATE, make_ctx())[0]).lower()
+        for junk in ("зубенко", "анимешников", "5252 525252", "79030654411",
+                     "ciri_love4ever"):
+            self.assertNotIn(junk, text, junk)
+        # дата договора берётся из контекста, а не из даты образца
+        self.assertIn("05.08.2026", document_text(
+            contract.build(TEMPLATE, make_ctx(contract_date="05.08.2026"))[0]))
+
     def test_every_placeholder_is_provided(self):
         """Опечатка в шаблоне не должна тихо выкидывать реквизит из договора."""
         used = contract.placeholders(self.template)
@@ -187,7 +236,7 @@ class TestTemplate(unittest.TestCase):
         и у взрослых вместе с оговоркой вырезалась строка перед ней."""
         adult_docx, _ = contract.build(TEMPLATE, make_ctx())
         text = document_text(adult_docx)
-        self.assertIn("(номер телефона свой и второй)", text)
+        self.assertIn("(номер телефона свой и второй, третий)", text)
         self.assertIn("заключили настоящий договор о нижеследующем:", text)
 
     def test_drop_paragraph_is_well_formed(self):

@@ -781,6 +781,30 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                 if "Акт приёма-передачи" in (m.caption or "")]
         self.assertFalse(acts, "акт не должен уходить до подтверждения оплаты")
 
+    async def test_changed_price_reaches_the_client(self):
+        """Регрессия: сумму поменяли, пока клиент на оплате, — у него на экране
+        осталась прежняя, и он заплатил бы её."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.provide_issue(self.ISSUE_FORM.replace("3000 qr", "3400 нал"))
+        to_user = [m.text for m in self.session.sent_to(USER_ID)
+                   if isinstance(m, SendMessage)]
+        self.assertTrue(any("3400 нал" in (t or "") for t in to_user),
+                        "клиенту не сообщили новую сумму")
+
+    async def test_same_price_does_not_spam_the_client(self):
+        """Повтор тех же данных выдачи — не повод писать клиенту второй раз."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        before = len([m for m in self.session.sent_to(USER_ID)
+                      if isinstance(m, SendMessage) and "3000 qr" in (m.text or "")])
+        await self.provide_issue()
+        after = len([m for m in self.session.sent_to(USER_ID)
+                     if isinstance(m, SendMessage) and "3000 qr" in (m.text or "")])
+        self.assertEqual(before, after)
+
     async def test_act_sign_fixes_and_invites_return(self):
         await self.submit()
         await self.approve_fully()

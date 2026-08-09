@@ -262,15 +262,12 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     # Этап оплаты: клиенту - сумма и кнопка «Я оплатил(а)», оператору -
     # карточка с кнопкой «Оплата получена». Анкета НЕ стирается: паспортные
     # данные печатаются ещё и в Акте приёма-передачи.
-    price = str((data.get("issue_data") or {}).get("rent_price") or "—")
-    await bot.send_message(tg_id, texts.PAY_PROMPT.format(price=logic.esc(price)),
-                           reply_markup=kb.paid())
+    await bot.send_message(
+        tg_id, texts.PAY_PROMPT.format(price=logic.esc(rent_price(data))),
+        reply_markup=kb.paid())
     try:
         sent = await bot.send_message(
-            cfg.contract_chat_id,
-            texts.PAY_CARD.format(number=logic.esc(number),
-                                  fio=logic.esc(data.get("full_name")),
-                                  tg_id=tg_id, price=logic.esc(price)),
+            cfg.contract_chat_id, pay_card({**data, "contract_no": number}),
             reply_markup=kb.pay_confirm(tg_id))
         await db.patch(tg_id, pay_chat_id=sent.chat.id,
                        pay_message_id=sent.message_id)
@@ -384,6 +381,26 @@ async def st_wait_sign(message: Message, bot: Bot, db: Database, cfg: Config,
 
 # ─────────────────────────── оплата ───────────────────────────
 
+def rent_price(data: dict) -> str:
+    """Сумма и способ оплаты из данных выдачи оператора."""
+    return str((data.get("issue_data") or {}).get("rent_price") or "—")
+
+
+def pay_card(data: dict, price: str | None = None) -> str:
+    """Карточка ожидания оплаты для служебного чата.
+
+    Одна функция на все три места (выдача карточки, обновление суммы,
+    пометка «оплачено»): три копии формата разъезжались бы, и оператор
+    сверял бы поступление с суммой из устаревшей карточки.
+    """
+    return texts.PAY_CARD.format(
+        number=logic.esc(data.get("contract_no") or ""),
+        fio=logic.esc(data.get("full_name")),
+        tg_id=data.get("tg_id"),
+        price=logic.esc(price if price is not None else rent_price(data)),
+    )
+
+
 @router.callback_query(StateIs(logic.WAIT_PAYMENT), F.data == "paid")
 async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
                   user: dict) -> None:
@@ -398,11 +415,10 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     await db.log_event(user["tg_id"], "client_paid_claim")
     row = await db.get_user(user["tg_id"])
     data = dict(row) if row else dict(user)
-    price = str((data.get("issue_data") or {}).get("rent_price") or "—")
     card = texts.PAY_NUDGE_CARD.format(
         fio=logic.esc(data.get("full_name")), tg_id=user["tg_id"],
         number=logic.esc(data.get("contract_no") or ""),
-        price=logic.esc(price))
+        price=logic.esc(rent_price(data)))
     reply_to = (data.get("pay_message_id")
                 if data.get("pay_chat_id") == cfg.contract_chat_id else None)
     try:
@@ -423,8 +439,7 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 async def st_wait_payment(message: Message, user: dict) -> None:
     """Любое сообщение на этапе оплаты возвращает сумму и кнопку:
     потерянное в ленте сообщение с кнопкой - это тупик без переотправки."""
-    price = str((user.get("issue_data") or {}).get("rent_price") or "—")
-    await message.answer(texts.PAY_WAIT.format(price=logic.esc(price)),
+    await message.answer(texts.PAY_WAIT.format(price=logic.esc(rent_price(user))),
                          reply_markup=kb.paid())
 
 

@@ -128,16 +128,12 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     # Пометить карточку и снять кнопку. Текст собирается заново из шаблона:
     # у старого сообщения Telegram может отдать недоступный объект без текста.
     who = callback.from_user.username or callback.from_user.id
-    price = str((before.get("issue_data") or {}).get("rent_price") or "—")
     if before.get("pay_chat_id") and before.get("pay_message_id"):
         try:
             await bot.edit_message_text(
                 chat_id=before["pay_chat_id"],
                 message_id=before["pay_message_id"],
-                text=texts.PAY_CARD.format(
-                    number=logic.esc(before.get("contract_no") or ""),
-                    fio=logic.esc(before.get("full_name")), tg_id=target,
-                    price=logic.esc(price))
+                text=contract.pay_card(before)
                 + f"\n\n{texts.PAY_CONFIRMED_MARK} — @{who}",
                 reply_markup=None,
             )
@@ -335,8 +331,11 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
             # Клиент ещё на оплате: пересобирать и слать акт рано - он уйдёт
             # после «Оплата получена» уже с обновлёнными данными. Перевести
             # состояние здесь значило бы перескочить оплату.
+            price = str(parsed.get("rent_price") or "—")
+            if price != contract.rent_price(target):
+                await _repeat_payment(bot, db, cfg, target, price)
             await message.reply(texts.ISSUE_UPDATED_WAIT_PAY.format(
-                price=logic.esc(str(parsed.get("rent_price") or "—"))))
+                price=logic.esc(price)))
             return
         row = await db.get_user(tg_id)
         data = dict(row) if row else dict(target)
@@ -356,6 +355,35 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
             tg_id=tg_id, reason=logic.esc(str(exc))))
         return
     await message.reply(texts.ISSUE_SAVED)
+
+
+async def _repeat_payment(bot: Bot, db: Database, cfg: Config, target: dict,
+                          price: str) -> None:
+    """Сумма изменилась, пока клиент на оплате: сказать ему новую и обновить
+    карточку оператора.
+
+    Молчать нельзя: у клиента на экране висит прошлое сообщение с прежней
+    суммой, и он заплатит именно её. Карточка обновляется по той же причине -
+    оператор сверяет поступление с суммой на ней.
+    """
+    tg_id = target["tg_id"]
+    try:
+        await bot.send_message(tg_id, texts.PAY_PROMPT.format(price=logic.esc(price)),
+                               reply_markup=kb.paid())
+    except TelegramAPIError:
+        log.warning("новая сумма оплаты не доставлена клиенту %s", tg_id)
+    await db.log_event(tg_id, "payment_amount_changed", {"price": price})
+    if not (target.get("pay_chat_id") and target.get("pay_message_id")):
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=target["pay_chat_id"], message_id=target["pay_message_id"],
+            text=contract.pay_card(target, price),
+            reply_markup=kb.pay_confirm(tg_id))
+    except TelegramAPIError:
+        # Карточку могли удалить или текст совпал - подтверждать оплату
+        # оператор всё равно сможет, новая сумма у него в ответе бота.
+        log.info("карточка оплаты %s не обновлена", tg_id)
 
 
 async def _return_reply(message: Message, bot: Bot, db: Database,

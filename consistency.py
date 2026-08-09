@@ -60,8 +60,10 @@ for secret in config_secrets:
 # ── 3. состав пакета ↔ список заливки в deploy.ps1 ───────────────────────
 # Служебные каталоги в состав пакета не входят. Без исключения .git проверка
 # требовала заливать на сервер всю историю репозитория и выдавала полсотни
-# «файлов», которых в проекте нет.
-SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", ".ruff_cache", ".pytest_cache"}
+# «файлов», которых в проекте нет. .claude - локальные настройки редактора,
+# они в .gitignore и на сервере не нужны.
+SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", ".ruff_cache",
+             ".pytest_cache", ".claude"}
 shipped = {p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*")
            if p.is_file() and not SKIP_DIRS & set(p.parts)}
 # Берём только то, что похоже на имя файла в проекте: с точкой или Dockerfile
