@@ -48,9 +48,10 @@ try:
 
     # app.tasks тянет app.db, а тот - asyncpg, поэтому обе зависимости
     # проверяются одной попыткой: иначе набор падает на машине без asyncpg.
-    from app import logic, tasks
+    from app import faq, logic, tasks
     from app.config import Config
     from app.handlers import contract, menu, moderation, registration
+    from app.handlers import faq as faq_handlers
     from app.middlewares import PipelineMiddleware
     from app.services import files
     from app.services.crypto import Vault, generate_key
@@ -272,7 +273,9 @@ def build(cfg: Config | None = None):
     # Router - объект уровня модуля, и aiogram запрещает подключать его
     # ко второму Dispatcher. Перезагружаем модули, чтобы каждый тест получил
     # собственные роутеры с теми же обработчиками.
-    for module in (contract, registration, moderation, menu):
+    # menu перезагружается последним: он берёт кнопку и ответы из ветки
+    # частых вопросов, и ссылки должны указывать на свежий модуль.
+    for module in (contract, registration, moderation, faq_handlers, menu):
         importlib.reload(module)
 
     cfg = cfg or make_config()
@@ -285,6 +288,7 @@ def build(cfg: Config | None = None):
     dp.include_router(moderation.router)
     dp.include_router(contract.router)
     dp.include_router(registration.router)
+    dp.include_router(faq_handlers.router)
     dp.include_router(menu.router)
     return dp, bot, db, session, cfg, vault
 
@@ -966,6 +970,93 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("11 000", joined)
         self.assertIsNone(self.db.users[USER_ID].get("support_message_id"),
                           "кнопка не должна превращаться в вопрос")
+
+    # ─── ветка частых вопросов ───
+
+    async def test_faq_button_lists_topics(self):
+        await self.register_fully()
+        await self.feed(msg(faq.MENU_BUTTON))
+        last = self.session.calls[-1]
+        self.assertIn("Выберите тему", last.text)
+        codes = [b[0].callback_data for b in last.reply_markup.inline_keyboard]
+        self.assertIn("faq:ADDR", codes)
+        # красные линии темой не предлагаются: по ним бот молчит
+        self.assertNotIn("faq:DEBT", codes)
+
+    async def test_faq_topic_answers_without_touching_operator(self):
+        await self.register_fully()
+        before = len(self.session.sent_to(ADMIN_CHAT))
+        await self.feed(cb("faq:ADDR"))
+        answer = self.session.sent_to(USER_ID)[-1].text
+        self.assertIn("Адоратского", answer)
+        self.assertIn("Павлюхина", answer)
+        self.assertEqual(len(self.session.sent_to(ADMIN_CHAT)), before,
+                         "простой вопрос не должен дёргать менеджера")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+
+    async def test_faq_topic_needing_human_opens_the_question_mode(self):
+        """Возврат, забор, выкуп: после ответа нужны подробности, и человек
+        должен оказаться в режиме вопроса, а не в ловушке меню."""
+        await self.register_fully()
+        await self.feed(cb("faq:RETURN"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_SUPPORT)
+        texts_sent = [m.text for m in self.session.sent_to(USER_ID)
+                      if isinstance(m, SendMessage)]
+        self.assertIn("перерасчёт", texts_sent[-2])
+        self.assertIn("передам менеджеру", texts_sent[-1])
+        # и следующее сообщение уходит карточкой человеку
+        await self.feed(msg("Сдам завтра в 12, велик целый"))
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and "Вопрос в поддержку" in (m.text or "")]
+        self.assertTrue(cards)
+        self.assertIn("Сдам завтра", cards[-1])
+
+    async def test_support_question_gets_instant_answer_and_topic_label(self):
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("а где вы находитесь?"))
+        to_user = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
+                           if isinstance(m, SendMessage))
+        self.assertIn("Адоратского", to_user, "бот не ответил сам")
+        card = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                if isinstance(m, SendMessage) and "Вопрос в поддержку" in (m.text or "")][-1]
+        self.assertIn("Адреса точек", card, "в карточке нет темы")
+        self.assertIn("Бот уже ответил", card)
+
+    async def test_red_line_question_gets_only_the_neutral_reply(self):
+        """Долг, угон, суд: бот не пишет по теме ничего, а карточка уходит
+        человеку с меткой - разбирать это должен он."""
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("я просрочил оплату, нет денег"))
+        to_user = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
+                           if isinstance(m, SendMessage))
+        self.assertIn("Передал ваш вопрос менеджеру", to_user)
+        for leak in ("qr.nspk", "3 000", "штраф"):
+            self.assertNotIn(leak, to_user, leak)
+        card = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                if isinstance(m, SendMessage) and "Вопрос в поддержку" in (m.text or "")][-1]
+        self.assertIn("ДОЛГ", card)
+        self.assertIn("Бот по теме не отвечал", card)
+
+    async def test_renter_asking_the_price_gets_renewal_not_the_tariff_list(self):
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("сколько стоит?"))
+        to_user = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
+                           if isinstance(m, SendMessage))
+        self.assertIn("qr.nspk.ru", to_user)
+        self.assertIn("3000 qr", to_user, "тариф берётся из данных выдачи")
+
+    async def test_faq_button_in_question_mode_cancels_it(self):
+        """Кнопка, набранная посреди вопроса, - «передумал», как и остальные:
+        иначе человек молча остаётся в режиме и его следующее сообщение
+        уезжает карточкой в чат модерации."""
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg(faq.MENU_BUTTON))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        self.assertIn("Выберите тему", self.session.calls[-1].text)
 
     async def test_support_button_twice_stays_in_support(self):
         await self.register_fully()

@@ -582,6 +582,9 @@ async def st_support(ctx: Ctx, user: dict, text: str | None) -> None:
         sent = await ctx.cl.send(
             chat_id=ctx.cfg.admin_chat_id,
             text=texts.SUPPORT_CARD.format(
+                # Ветки частых вопросов в MAX нет: темы бот не распознаёт,
+                # и выдумывать строку темы в карточке нечем.
+                topic="",
                 fio=logic.esc(user.get("full_name") or "без имени"),
                 handle=("@" + logic.esc(user["username"])
                         if user.get("username") else "без username"),

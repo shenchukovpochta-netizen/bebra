@@ -4,8 +4,11 @@
 месте и забыта в другом, файл есть в проекте но не заливается на сервер,
 колонка используется в коде но отсутствует в схеме.
 """
+import ast
+import importlib.util
 import pathlib
 import re
+import string
 import sys
 
 ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
@@ -104,6 +107,46 @@ for var in re.findall(r'if \[ "\$(\w+)" = "([^"]+)" \]', boot):
         problems.append(
             f"bootstrap.sh считает заглушкой {name}={placeholder}, "
             f"но в .env.example другое значение -> проверка не сработает")
+
+# ── 6. поля шаблонов texts.py против того, что подставляют вызовы ────────
+# Шаблон один, а ботов два: добавленное в texts.py поле легко подставить
+# в Telegram-боте и забыть в MAX - тот падает с KeyError уже в проде,
+# на живом клиенте. Проверка статическая: разбираем каждый вызов
+# texts.ИМЯ.format(...) и сверяем именованные аргументы с {полями} шаблона.
+texts_path = ROOT / "app" / "texts.py"
+if texts_path.exists():
+    spec = importlib.util.spec_from_file_location("_texts_check", texts_path)
+    texts_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(texts_mod)
+    for py in sorted((ROOT / "app").rglob("*.py")):
+        for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "format"
+                    and isinstance(node.func.value, ast.Attribute)
+                    and isinstance(node.func.value.value, ast.Name)
+                    and node.func.value.value.id == "texts"):
+                continue
+            # Позиционные аргументы и **kwargs статически не разобрать.
+            if node.args or any(kw.arg is None for kw in node.keywords):
+                continue
+            name = node.func.value.attr
+            template = getattr(texts_mod, name, None)
+            if not isinstance(template, str):
+                problems.append(f"{py.name}: texts.{name} - такого шаблона нет")
+                continue
+            need = {field for _, field, _, _ in string.Formatter().parse(template)
+                    if field}
+            got = {kw.arg for kw in node.keywords}
+            where = f"{py.relative_to(ROOT).as_posix()}:{node.lineno}"
+            if need - got:
+                problems.append(
+                    f"{where}: texts.{name}.format() не передаёт "
+                    f"{sorted(need - got)} -> KeyError при отправке")
+            if got - need:
+                problems.append(
+                    f"{where}: texts.{name}.format() передаёт лишние "
+                    f"{sorted(got - need)} -> подстановка молча пропадёт")
 
 # ── итог ─────────────────────────────────────────────────────────────────
 if problems:

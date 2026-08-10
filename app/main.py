@@ -20,7 +20,7 @@ from aiogram.enums import ParseMode
 from . import tasks
 from .config import Config
 from .db import Database
-from .handlers import contract, menu, moderation, registration
+from .handlers import contract, faq, menu, moderation, registration
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
@@ -64,6 +64,9 @@ async def run() -> None:
     dp.include_router(moderation.router)
     dp.include_router(contract.router)
     dp.include_router(registration.router)
+    # Частые вопросы - до меню: у меню последним обработчиком стоит ловушка
+    # на любое сообщение, и ветка вопросов до него бы не дожила.
+    dp.include_router(faq.router)
     dp.include_router(menu.router)
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))

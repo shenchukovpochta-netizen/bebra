@@ -39,13 +39,14 @@ $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.tx
           'README.md', 'INSTALL.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
-         'app/logic.py', 'app/texts.py', 'app/keyboards.py', 'app/middlewares.py',
+         'app/logic.py', 'app/faq.py', 'app/texts.py', 'app/keyboards.py',
+         'app/middlewares.py',
          'app/filters.py', 'app/tasks.py', 'app/contract_template.docx',
          'app/act_priema_template.docx', 'app/act_vozvrata_template.docx',
          'app/soglasie_template.docx', 'app/pdn_policy.docx')
 $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
-              'app/handlers/contract.py')
+              'app/handlers/contract.py', 'app/handlers/faq.py')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
@@ -53,7 +54,7 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
-          'tests/test_max.py')
+          'tests/test_max.py', 'tests/test_faq.py')
 
 foreach ($f in ($root + $app + $handlers + $services + $max + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }

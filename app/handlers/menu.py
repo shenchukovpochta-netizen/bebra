@@ -8,11 +8,13 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
 
+from .. import faq
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
 from ..db import Database
 from ..filters import StateIs
+from .faq import BTN_FAQ, reply_for
 
 log = logging.getLogger(__name__)
 router = Router(name="menu")
@@ -35,13 +37,20 @@ TRIPS_STUB = "Поездок пока нет."
 async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                      user: dict) -> None:
     text = message.text.strip()
-    if text.lower() == "отмена" or text in (BTN_RENT, BTN_TRIPS, BTN_TARIFFS):
+    if text.lower() == "отмена" or text in (BTN_RENT, BTN_TRIPS, BTN_TARIFFS,
+                                            BTN_FAQ):
         await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
                        state=logic.APPROVED)
         if text in (BTN_RENT, BTN_TARIFFS):
             await message.answer(texts.TARIFFS, reply_markup=kb.main_menu())
         elif text == BTN_TRIPS:
             await message.answer(TRIPS_STUB, reply_markup=kb.main_menu())
+        elif text == BTN_FAQ:
+            # Двумя сообщениями: клавиатуру меню и список тем в одном
+            # сообщении Telegram не отдаёт - разметка там только одна.
+            await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
+            await message.answer(texts.FAQ_MENU,
+                                 reply_markup=kb.faq_topics(faq.MENU_TOPICS))
         else:
             await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
         return
@@ -55,6 +64,11 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
         await message.answer(question.error)
         return
 
+    # Тема вопроса: по ней бот отвечает сам и по ней же руководитель
+    # разбирает поток карточек. Вопрос уходит человеку в любом случае -
+    # автоответ может промахнуться, а потерянный вопрос клиент не простит.
+    intent = faq.match(question.value)
+
     # Карточка уходит в чат модерации ДО ответа пользователю: если она
     # не дошла (бот выкинут из чата), человек должен узнать об этом сразу,
     # а не ждать ответа, которого никто не увидит.
@@ -62,6 +76,7 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
         sent = await bot.send_message(
             cfg.admin_chat_id,
             texts.SUPPORT_CARD.format(
+                topic=_topic_line(intent),
                 fio=logic.esc(user.get("full_name") or "без имени"),
                 handle=("@" + logic.esc(user["username"])
                         if user.get("username") else "без username"),
@@ -79,8 +94,29 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
     await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
                    state=logic.APPROVED,
                    support_chat_id=sent.chat.id, support_message_id=sent.message_id)
-    await db.log_event(user["tg_id"], "support_question")
-    await message.answer(texts.SUPPORT_SENT, reply_markup=kb.main_menu())
+    await db.log_event(user["tg_id"], "support_question",
+                       {"intent": intent.code if intent else None})
+
+    if intent is None:
+        await message.answer(texts.SUPPORT_SENT, reply_markup=kb.main_menu())
+        return
+    # Красная линия (долг, угон, суд, скидка, 18-): бот отдаёт нейтральную
+    # фразу и молчит по существу. Ответ на такую тему - это либо цена,
+    # которую бот не вправе назначать, либо юридический риск.
+    await message.answer(reply_for(intent, user), reply_markup=kb.main_menu())
+    if not intent.red:
+        await message.answer(texts.SUPPORT_SENT_ANSWERED)
+
+
+def _topic_line(intent: faq.Intent | None) -> str:
+    """Шапка карточки: тема, метка и отвечал ли бот."""
+    if intent is None:
+        return texts.SUPPORT_TOPIC_NONE
+    if intent.red:
+        return texts.SUPPORT_TOPIC_RED.format(title=intent.title,
+                                              label=intent.label)
+    label = f" · метка <b>{intent.label}</b>" if intent.label else ""
+    return texts.SUPPORT_TOPIC_BOT.format(title=intent.title, label=label)
 
 
 @router.message(StateIs(logic.WAIT_SUPPORT))

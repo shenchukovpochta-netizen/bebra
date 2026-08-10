@@ -8,6 +8,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
+from .faq import MENU_BUTTON as BTN_FAQ
+
 
 def subscribe(channel_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -139,11 +141,24 @@ def support_cancel() -> ReplyKeyboardMarkup:
     )
 
 
+def faq_topics(topics) -> InlineKeyboardMarkup:
+    """Темы частых вопросов - по кнопке на строку.
+
+    Заголовки длинные, по две в ряд Telegram обрезает их до многоточия,
+    и человек не понимает, куда жмёт.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=topic.title, callback_data=f"faq:{topic.code}")]
+        for topic in topics
+    ])
+
+
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🚲 Арендовать"), KeyboardButton(text="📋 Мои поездки")],
             [KeyboardButton(text="💰 Тарифы"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text=BTN_FAQ)],
         ],
         resize_keyboard=True,
     )
