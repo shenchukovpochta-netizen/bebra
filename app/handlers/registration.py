@@ -132,7 +132,8 @@ async def st_fio_wrong(message: Message) -> None:
 
 # ─────────────── ознакомление с Политикой обработки ПДн ───────────────
 
-async def send_policy(bot: Bot, cfg: Config, tg_id: int) -> None:
+async def send_policy(bot: Bot, cfg: Config, tg_id: int,
+                      caption: str | None = None) -> None:
     """Экран ознакомления: файл политики с кнопкой «Ознакомлен(а)».
 
     Политика уходит документом как есть, без подстановок - это готовый
@@ -151,7 +152,7 @@ async def send_policy(bot: Bot, cfg: Config, tg_id: int) -> None:
     await bot.send_document(
         tg_id,
         BufferedInputFile(data, filename="politika-obrabotki-pdn.docx"),
-        caption=texts.POLICY_CAPTION,
+        caption=caption or texts.POLICY_CAPTION,
         reply_markup=kb.policy_ack(cfg.pdn_url),
     )
 
@@ -178,8 +179,9 @@ async def st_policy_wrong(message: Message, bot: Bot, cfg: Config,
                           user: dict) -> None:
     """Любое сообщение на шаге ознакомления возвращает политику с кнопкой:
     кнопка живёт на сообщении с файлом, и потерянное в ленте сообщение
-    без переотправки становится тупиком."""
-    await send_policy(bot, cfg, user["tg_id"])
+    без переотправки становится тупиком. Подпись короткая: длинное описание
+    человек уже видел, а повторять его на каждое «ок» незачем."""
+    await send_policy(bot, cfg, user["tg_id"], texts.POLICY_PRESS_BUTTON)
 
 
 # ──────────────────── согласие на обработку ПДн ────────────────────

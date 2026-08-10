@@ -362,12 +362,18 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.dp, self.bot, self.db, self.session, self.cfg, self.vault = build()
         # скачивание и укладка файлов - не предмет этого теста
         self._orig_download, self._orig_store = files.download, files.store
+        # remove тоже подменяется: настоящий unlink в тесте не нужен, а факт
+        # удаления проверяется - без него утечка файлов при переигранной
+        # выдаче прошла бы мимо тестов.
+        self._orig_remove = files.remove
         files.download = lambda bot, file_id, max_bytes: _async(b"bytes")
         files.store = lambda d, tg, slot, data: (
             Path(f"/tmp/{tg}-{slot}.{files.SLOT_EXT[slot]}"), "hash")
+        files.remove = lambda path: True
 
     async def asyncTearDown(self):
         files.download, files.store = self._orig_download, self._orig_store
+        files.remove = self._orig_remove
         await self.bot.session.close()
 
     async def feed(self, update: Update):
@@ -800,6 +806,39 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qr.nspk.ru/NEW", prompt.text)
         self.assertNotIn("BS1A0050", prompt.text)
 
+    async def test_reissue_does_not_leave_files_behind(self):
+        """Регрессия: оператор поправил вин-номер и ответил ещё раз - старый
+        договор оставался на диске, а в базе его пути уже не было. Ретеншен
+        такой файл не находит никогда: документ с паспортом лежал бы вечно."""
+        stored: list[Path] = []
+        removed: list[str] = []
+        counter = [0]
+
+        def fake_store(d, tg, slot, data):
+            counter[0] += 1
+            path = Path(f"/tmp/{tg}-{slot}-{counter[0]}.{files.SLOT_EXT[slot]}")
+            stored.append(path)
+            return path, "hash"
+
+        files.store = fake_store
+        files.remove = lambda p: (removed.append(str(p)), True)[1]
+        try:
+            await self.submit()
+            await self.approve_fully()
+            first = self.db.users[USER_ID]["contract_path"]
+            first_sog = self.db.users[USER_ID]["soglasie_path"]
+            await self.provide_issue(self.ISSUE_FORM.replace("Truck+", "Kugoo"))
+        finally:
+            files.store = lambda d, tg, slot, data: (
+                Path(f"/tmp/{tg}-{slot}.{files.SLOT_EXT[slot]}"), "hash")
+            files.remove = self._orig_remove
+
+        row = self.db.users[USER_ID]
+        self.assertNotEqual(row["contract_path"], first, "выдача не переигралась")
+        self.assertIn(first, removed, "старый договор остался на диске")
+        self.assertIn(first_sog, removed, "старое согласие осталось на диске")
+        self.assertNotIn(row["contract_path"], removed, "удалили актуальный файл")
+
     async def test_receipt_photo_reaches_the_operator(self):
         """Регрессия: бот просил прислать чек «сюда в чат», а чек оседал
         в переписке с ботом, куда оператор не смотрит."""
@@ -1001,9 +1040,14 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(msg("ок, читать не буду"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PDN)
+        # Считаем по имени файла, а не по подписи: подпись у повторной
+        # отправки короткая, и по слову «Политика» она бы не нашлась.
         policy_docs = [m for m in self.session.documents()
-                       if "Политика" in (m.caption or "")]
+                       if "politika" in (m.document.filename or "")]
         self.assertEqual(len(policy_docs), 2, "политика должна переотправиться")
+        self.assertIn("нажмите", policy_docs[-1].caption,
+                      "повтор должен звать нажать кнопку, а не пересказывать документ")
+        self.assertLess(len(policy_docs[-1].caption), len(policy_docs[0].caption))
 
     async def test_tariffs_button_shows_prices(self):
         await self.register_fully()

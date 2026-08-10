@@ -134,6 +134,14 @@ async def issue(bot: Bot, db: Database, cfg: Config, vault: Vault, tg_id: int) -
         files.remove(sog_path)
         raise ContractProblem(f"статус {tg_id} изменился, договор не выдан")
 
+    # Предыдущая выдача (оператор поправил вин-номер и ответил ещё раз)
+    # оставляет свои файлы на диске, а в базе их путей уже нет - ретеншен
+    # такие не найдёт никогда, и договор с паспортными данными пролежит
+    # там вечно. Удаляем сразу после того, как база указала на новые.
+    for stale in (data.get("contract_path"), data.get("soglasie_path")):
+        if stale and stale not in (str(path), str(sog_path)):
+            files.remove(stale)
+
     await db.log_event(tg_id, "contract_issued", {"number": number})
     # Приложение уходит ПЕРВЫМ, договор с кнопками - последним: кнопки
     # подписи должны оказаться на нижнем сообщении, у самого экрана.
