@@ -970,6 +970,15 @@ def closure_report(user: dict, issue: dict | None, close: dict | None) -> str:
     )
 
 
+def rental_is_active(data: dict) -> bool:
+    """Аренда идёт: акт приёма подписан, акт возврата - ещё нет.
+
+    По одному лишь статусу approved этого не понять: он остаётся и после
+    возврата, и «Закрыть аренду» предлагалась бы человеку без велосипеда.
+    """
+    return bool(data.get("act_in_signed_at")) and not data.get("act_out_signed_at")
+
+
 def close_reason(raw: str | None) -> Validation:
     """Причина сдачи от клиента: одной строкой, без разметки."""
     text = _clean(raw)

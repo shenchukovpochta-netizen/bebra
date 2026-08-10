@@ -1049,6 +1049,25 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.db.users[USER_ID].get("support_message_id"),
                           "причина не должна уехать вопросом в поддержку")
 
+    async def test_menu_button_while_asked_for_the_reason_is_not_a_reason(self):
+        """Регрессия того же класса, что в поддержке: кнопка меню, набранная
+        в ответ на «почему сдаёте», уехала бы причиной в отчёт."""
+        await self.register_fully()
+        await self.feed(msg(texts.BTN_CLOSE_RENT))
+        await self.feed(msg("💰 Тарифы"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertIsNone(row.get("close_reason"), "тариф стал причиной сдачи")
+        joined = " ".join(self.session.sent()).replace("\xa0", " ")
+        self.assertIn("11 000", joined)
+
+    async def test_support_button_while_asked_for_the_reason_opens_support(self):
+        await self.register_fully()
+        await self.feed(msg(texts.BTN_CLOSE_RENT))
+        await self.feed(msg("🆘 Поддержка"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_SUPPORT)
+        self.assertIsNone(self.db.users[USER_ID].get("close_reason"))
+
     async def test_closure_without_active_rental_is_refused(self):
         await self.submit()
         await self.approve_fully()
