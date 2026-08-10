@@ -23,6 +23,7 @@ PATCHABLE = frozenset({
     "contract_issued_at", "contract_signed_at",
     "soglasie_path", "soglasie_sha256",
     "pay_chat_id", "pay_message_id", "pay_confirmed_at",
+    "close_reason", "close_requested_at",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
     "issue_data", "issue_chat_id", "issue_message_id",
@@ -228,6 +229,22 @@ class Database:
             "select * from bot.users where return_chat_id = $1 "
             "and return_message_id = $2",
             chat_id, message_id,
+        )
+
+    async def rentals_of(self, tg_id: int, limit: int = 10) -> list[asyncpg.Record]:
+        """История аренд клиента - из журнала событий.
+
+        Отдельной таблицы аренд нет намеренно: в bot.users живёт только
+        текущая аренда (следующая перезаписывает её поля), а закрытые
+        остаются событиями. В событие пишутся номер договора, модель
+        и сроки - ничего из паспортных данных, поэтому история переживает
+        ретеншен, а ПДн в ней не накапливаются.
+        """
+        return await self.pool.fetch(
+            "select payload, created_at from bot.events "
+            "where tg_id = $1 and type = 'rental_closed' "
+            "order by id desc limit $2",
+            tg_id, limit,
         )
 
     async def clear_anketa(self, tg_id: int) -> None:

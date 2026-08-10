@@ -533,3 +533,112 @@ class TestRateLimit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestCloseForm(unittest.TestCase):
+    """Форма закрытия аренды: из неё собираются акт возврата и отчёт."""
+
+    TODAY = date(2026, 8, 7)
+
+    def parse(self, raw, **kw):
+        return logic.parse_close_form(raw, today=self.TODAY, **kw)
+
+    def test_minimum_is_address_and_who_accepted(self):
+        data, err = self.parse("адрес: адоратского\nпринял: ирик")
+        self.assertEqual(err, "")
+        self.assertEqual(data["return_address"], "адоратского")
+        self.assertEqual(data["accepted_by"], "ирик")
+
+    def test_money_fields_default_to_zero(self):
+        """Оператор не должен писать четыре нуля руками: пустые поля
+        в отчёте читаются как «неизвестно», а не как «не платил»."""
+        data, _ = self.parse("адрес: а\nпринял: и")
+        for field in ("debt_paid", "damage", "repair_paid", "wash_paid"):
+            self.assertEqual(data[field], "0", field)
+        self.assertEqual(data["closed_at"], "07.08")
+
+    def test_client_reason_is_taken_without_retyping(self):
+        data, _ = self.parse("адрес: а\nпринял: и", reason="выхожу на работу")
+        self.assertEqual(data["reason"], "выхожу на работу")
+
+    def test_operator_can_override_the_reason(self):
+        data, _ = self.parse("адрес: а\nпринял: и\nпричина: сломал ногу",
+                             reason="выхожу на работу")
+        self.assertEqual(data["reason"], "сломал ногу")
+
+    def test_missing_required_is_named(self):
+        data, err = self.parse("принял: ирик")
+        self.assertIsNone(data)
+        self.assertIn("адрес", err)
+
+    def test_unknown_key_is_named(self):
+        data, err = self.parse("адрес: а\nпринял: и\nколесо: 2")
+        self.assertIsNone(data)
+        self.assertIn("колесо", err)
+
+    def test_markup_is_rejected(self):
+        data, err = self.parse("адрес: <b>а</b>\nпринял: и")
+        self.assertIsNone(data)
+        self.assertIn("< >", err)
+
+    def test_notes_for_the_act_mention_only_property(self):
+        """В акт возврата идут повреждения и суммы, а не причина и отзывы."""
+        data, _ = self.parse("адрес: а\nпринял: и\nпричина: надоело\n"
+                             "отзыв: оставил\nповреждения: царапина\nремонт: 500")
+        notes = logic.close_notes(data)
+        self.assertIn("царапина", notes)
+        self.assertIn("500", notes)
+        self.assertNotIn("надоело", notes)
+        self.assertNotIn("оставил", notes)
+
+    def test_clean_return_says_so(self):
+        data, _ = self.parse("адрес: а\nпринял: и")
+        self.assertEqual(logic.close_notes(data), "Без замечаний")
+
+    def test_report_is_verbatim(self):
+        """Отчёт разбирает чужой бот: строки сверяются дословно."""
+        data, _ = self.parse("адрес: адоратского\nпринял: ирик\nотзыв: оставил\n"
+                             "рекомендации: все ок", reason="на осн работу выходит")
+        report = logic.closure_report(
+            {"full_name": "Михеев Никита Владимирович"},
+            {"vin_frame": "264022410701350", "vin_motor": "240W2024081673"}, data)
+        self.assertEqual(report.splitlines(), [
+            "Когда сдал: 07.08",
+            "Сколько оплатил долгов: 0",
+            "Какие повреждения есть: 0",
+            "Сколько оплатил за ремонт: 0",
+            "Оплатил мойку велосипеда: 0",
+            "Причина сдачи: на осн работу выходит",
+            "Адрес сдачи: адоратского",
+            "Кто принял велик: ирик",
+            "Оставил отзыв: оставил",
+            "Какие рекомендации по улучшению сервиса/вело дали: все ок",
+            "1. ФИО: Михеев Никита Владимирович",
+            "2. Вин номер рамы: 264022410701350",
+            "3. Вин номер мотор колеса: 240W2024081673",
+        ])
+
+    def test_report_survives_missing_issue_data(self):
+        data, _ = self.parse("адрес: а\nпринял: и")
+        report = logic.closure_report({}, None, data)
+        self.assertIn("1. ФИО: —", report)
+        self.assertIn("2. Вин номер рамы: —", report)
+
+    def test_report_escapes_html(self):
+        data, _ = self.parse("адрес: а\nпринял: и")
+        report = logic.closure_report({"full_name": "Иванов & Со"}, None, data)
+        self.assertIn("&amp;", report)
+
+
+class TestCloseReason(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(logic.close_reason("  выхожу  на работу ").value,
+                         "выхожу на работу")
+
+    def test_too_short_and_too_long_rejected(self):
+        self.assertFalse(logic.close_reason("ок").ok)
+        self.assertFalse(logic.close_reason("x" * 301).ok)
+        self.assertFalse(logic.close_reason(None).ok)
+
+    def test_markup_rejected(self):
+        self.assertFalse(logic.close_reason("<b>работа</b>").ok)

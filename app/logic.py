@@ -65,6 +65,9 @@ APPROVED = "approved"
 # Отдельное состояние обязательно: без него следующее сообщение провалилось бы
 # в ловушку меню, и вопрос ушёл бы в никуда.
 WAIT_SUPPORT = "wait_support"
+# Клиент просит закрыть аренду и называет причину. Отдельное состояние:
+# причина уходит оператору в запрос и попадает в отчёт о закрытии.
+WAIT_CLOSE_REASON = "wait_close_reason"
 
 # статусы заявки
 ST_NEW, ST_PENDING, ST_APPROVED, ST_REJECTED = "new", "pending", "approved", "rejected"
@@ -85,7 +88,7 @@ KNOWN_STATES = frozenset({
     WAIT_PHONE2, WAIT_PHONE3,
     WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
     WAIT_PAYMENT, WAIT_ACT_SIGN, WAIT_RETURN_SIGN, APPROVED,
-    WAIT_SUPPORT,
+    WAIT_SUPPORT, WAIT_CLOSE_REASON,
 })
 
 
@@ -830,6 +833,151 @@ def parse_return_form(raw: str | None) -> tuple[dict[str, str] | None, str]:
     if not _no_markup(text):
         return None, "Недопустимы символы < > и &."
     return {"return_notes": text}, ""
+
+
+# ─────────────────── закрытие аренды ───────────────────
+#
+# Клиент просит закрыть аренду, оператор отвечает на его запрос формой -
+# из неё собираются Акт возврата и отчёт о закрытии. Ключи те же по духу,
+# что у формы выдачи: «ключ: значение», несколько написаний на ключ.
+
+CLOSE_ALIASES: dict[str, str] = {
+    "когда": "closed_at", "когда сдал": "closed_at", "дата": "closed_at",
+    "долг": "debt_paid", "долги": "debt_paid", "задолженность": "debt_paid",
+    "повреждения": "damage", "повреждение": "damage", "поломки": "damage",
+    "ремонт": "repair_paid", "за ремонт": "repair_paid",
+    "мойка": "wash_paid", "мойку": "wash_paid",
+    "причина": "reason", "причина сдачи": "reason",
+    "адрес": "return_address", "адрес сдачи": "return_address",
+    "принял": "accepted_by", "кто принял": "accepted_by",
+    "отзыв": "review",
+    "рекомендации": "feedback", "пожелания": "feedback",
+}
+
+# Нули по умолчанию: в отчёте «0» означает «ничего не платил», и заставлять
+# оператора писать четыре нуля руками - верный способ получить пустые поля.
+CLOSE_DEFAULTS = {"debt_paid": "0", "damage": "0", "repair_paid": "0",
+                  "wash_paid": "0", "review": "нет", "feedback": "—"}
+CLOSE_REQUIRED = ("return_address", "accepted_by")
+CLOSE_LABELS = {"return_address": "адрес", "accepted_by": "принял",
+                "closed_at": "когда", "reason": "причина"}
+
+CLOSE_FORM_TEMPLATE = (
+    "когда: {today}\n"
+    "долги: 0\n"
+    "повреждения: 0\n"
+    "ремонт: 0\n"
+    "мойка: 0\n"
+    "адрес: \n"
+    "принял: \n"
+    "отзыв: нет\n"
+    "рекомендации: —"
+)
+
+
+def close_form_template(today: date | None = None) -> str:
+    """Шаблон формы закрытия с проставленной сегодняшней датой."""
+    return CLOSE_FORM_TEMPLATE.format(today=(today or date.today()).strftime("%d.%m"))
+
+
+def parse_close_form(raw: str | None, *, reason: str = "",
+                     today: date | None = None) -> tuple[dict[str, str] | None, str]:
+    """Разбор формы закрытия аренды.
+
+    reason - причина, которую назвал сам клиент: оператору её переписывать
+    незачем, но своей строкой в форме он может её поправить.
+    """
+    data: dict[str, str] = dict(CLOSE_DEFAULTS)
+    data["closed_at"] = (today or date.today()).strftime("%d.%m")
+    if reason:
+        data["reason"] = reason
+    unknown: list[str] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        field = CLOSE_ALIASES.get(_clean(key).lower())
+        if field is None:
+            unknown.append(key.strip())
+            continue
+        value = _clean(value)
+        if not _no_markup(value):
+            return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
+        if value:
+            data[field] = value
+    if unknown:
+        return None, ("Не понял строки: " + ", ".join(unknown[:5])
+                      + ". Ключи: " + ", ".join(sorted(set(CLOSE_ALIASES))) + ".")
+    missing = [CLOSE_LABELS[f] for f in CLOSE_REQUIRED if not data.get(f)]
+    if missing:
+        return None, "Не хватает: " + ", ".join(missing) + "."
+    data.setdefault("reason", FORM_BLANK)
+    return data, ""
+
+
+def close_notes(close: dict | None) -> str:
+    """Замечания для Акта возврата - из формы закрытия.
+
+    Акт должен говорить о состоянии имущества, а не о причине сдачи
+    и отзывах: туда идут повреждения и оплаченные суммы.
+    """
+    data = dict(close or {})
+    damage = str(data.get("damage") or "0").strip()
+    parts = []
+    if damage and damage not in ("0", "-", "—", "нет"):
+        parts.append(f"Повреждения: {damage}")
+    for field, name in (("debt_paid", "Оплачено долгов"),
+                        ("repair_paid", "Оплачено за ремонт"),
+                        ("wash_paid", "Оплачена мойка")):
+        value = str(data.get(field) or "0").strip()
+        if value and value not in ("0", "-", "—", "нет"):
+            parts.append(f"{name}: {value}")
+    return "; ".join(parts) if parts else "Без замечаний"
+
+
+def closure_report(user: dict, issue: dict | None, close: dict | None) -> str:
+    """Отчёт о закрытии аренды.
+
+    Написание строк - ДОСЛОВНО как в согласованном формате: отчёт
+    пересылают в таблицу, и «Кто принял велосипед» вместо «Кто принял велик»
+    для чужого парсера означает потерянную колонку.
+
+    Паспортных данных здесь нет и быть не может: к моменту закрытия анкета
+    стёрта, а из личного в отчёте только ФИО - оно живёт в реквизитах
+    договора и нужно, чтобы отчёт вообще с кем-то соотносился.
+    """
+    data = dict(close or {})
+    given = issue_context(issue)
+
+    def value(field: str) -> str:
+        return esc(str(data.get(field) or FORM_BLANK).strip() or FORM_BLANK)
+
+    return (
+        f"Когда сдал: {value('closed_at')}\n"
+        f"Сколько оплатил долгов: {value('debt_paid')}\n"
+        f"Какие повреждения есть: {value('damage')}\n"
+        f"Сколько оплатил за ремонт: {value('repair_paid')}\n"
+        f"Оплатил мойку велосипеда: {value('wash_paid')}\n"
+        f"Причина сдачи: {value('reason')}\n"
+        f"Адрес сдачи: {value('return_address')}\n"
+        f"Кто принял велик: {value('accepted_by')}\n"
+        f"Оставил отзыв: {value('review')}\n"
+        f"Какие рекомендации по улучшению сервиса/вело дали: {value('feedback')}\n"
+        f"1. ФИО: {esc(user.get('full_name') or FORM_BLANK)}\n"
+        f"2. Вин номер рамы: {esc(given['vin_frame'])}\n"
+        f"3. Вин номер мотор колеса: {esc(given['vin_motor'])}"
+    )
+
+
+def close_reason(raw: str | None) -> Validation:
+    """Причина сдачи от клиента: одной строкой, без разметки."""
+    text = _clean(raw)
+    if not 3 <= len(text) <= 300:
+        return Validation(False, error="Напишите причину одной строкой, 3-300 символов.")
+    if not _no_markup(text):
+        return Validation(False, error="Недопустимы символы < > и &.")
+    return Validation(True, value=text)
 
 
 # ─────────────────── форма фиксации сдачи ───────────────────

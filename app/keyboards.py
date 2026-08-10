@@ -9,6 +9,7 @@ from aiogram.types import (
 )
 
 from .faq import MENU_BUTTON as BTN_FAQ
+from .texts import BTN_CLOSE_RENT
 
 
 def subscribe(channel_url: str) -> InlineKeyboardMarkup:
@@ -165,9 +166,9 @@ def faq_topics(topics) -> InlineKeyboardMarkup:
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🚲 Арендовать"), KeyboardButton(text="📋 Мои поездки")],
+            [KeyboardButton(text="🚲 Арендовать"), KeyboardButton(text="📋 Мои аренды")],
             [KeyboardButton(text="💰 Тарифы"), KeyboardButton(text="🆘 Поддержка")],
-            [KeyboardButton(text=BTN_FAQ)],
+            [KeyboardButton(text=BTN_FAQ), KeyboardButton(text=BTN_CLOSE_RENT)],
         ],
         resize_keyboard=True,
     )

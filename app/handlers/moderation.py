@@ -390,7 +390,7 @@ async def _repeat_payment(bot: Bot, db: Database, cfg: Config, target: dict,
 
 async def _return_reply(message: Message, bot: Bot, db: Database,
                         cfg: Config, vault: Vault, target: dict) -> None:
-    """Данные возврата: собрать Акт возврата и отдать клиенту на подтверждение.
+    """Форма закрытия: Акт возврата клиенту и отчёт о закрытии в фиксацию.
 
     Повторный ответ на то же приглашение перезаписывает данные и переотправляет
     акт - «Есть ошибка» у клиента чинится именно так.
@@ -398,10 +398,14 @@ async def _return_reply(message: Message, bot: Bot, db: Database,
     if not target.get("act_in_signed_at"):
         await message.reply(texts.RETURN_NOT_READY)
         return
-    parsed, err = logic.parse_return_form(message.text or message.caption)
+    parsed, err = logic.parse_close_form(message.text or message.caption,
+                                         reason=target.get("close_reason") or "")
     if parsed is None:
         await message.reply(err)
         return
+    # Замечания для акта собираются из формы: акт говорит о состоянии
+    # имущества, а причина сдачи и отзывы - это уже отчёт.
+    parsed["return_notes"] = logic.close_notes(parsed)
     parsed["return_date"] = utcnow().strftime("%d.%m.%Y")
     tg_id = target["tg_id"]
     # Из approved или из wait_return_sign (повторные данные) - но не из
@@ -423,6 +427,28 @@ async def _return_reply(message: Message, bot: Bot, db: Database,
             tg_id=tg_id, reason=logic.esc(str(exc))))
         return
     await message.reply(texts.RETURN_SAVED)
+    # Отчёт о закрытии - отдельным сообщением, чистым текстом: его
+    # пересылают в «Фиксацию сдачи», где разбирает другой бот.
+    row = await db.get_user(tg_id)
+    await _closure_report(message, bot, cfg, dict(row) if row else target, parsed)
+
+
+async def _closure_report(message: Message, bot: Bot, cfg: Config,
+                          data: dict, close: dict) -> None:
+    """Отчёт о закрытии: интро оператору и следом сам текст без шапки."""
+    number = data.get("contract_no") or ""
+    report = logic.closure_report(data, data.get("issue_data"), close)
+    try:
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.CLOSE_REPORT_INTRO.format(
+                                   number=logic.esc(number)))
+        await bot.send_message(cfg.contract_chat_id, report)
+    except TelegramAPIError:
+        # Акт уже ушёл клиенту, откатывать из-за отчёта нечего - но
+        # пересылать в фиксацию оператору будет нечего, и он должен знать.
+        log.exception("отчёт о закрытии %s не доставлен", number)
+        await message.reply(texts.CONTRACT_ALERT_NOT_DELIVERED.format(
+            number=logic.esc(number), tg_id=data.get("tg_id")))
 
 
 async def _support_reply(message: Message, bot: Bot, db: Database,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from aiogram import Bot, F, Router
@@ -14,6 +15,7 @@ from .. import logic, texts
 from ..config import Config
 from ..db import Database
 from ..filters import StateIs
+from . import contract
 from .faq import BTN_FAQ, reply_for
 
 log = logging.getLogger(__name__)
@@ -23,10 +25,8 @@ router = Router(name="menu")
 # Тексты кнопок меню. В режиме вопроса набранная кнопка означает «передумал
 # спрашивать, хочу вот это», а не текст вопроса - поэтому st_support ниже
 # сверяется с этим набором.
-BTN_RENT, BTN_TRIPS = "🚲 Арендовать", "📋 Мои поездки"
+BTN_RENT, BTN_TRIPS = "🚲 Арендовать", "📋 Мои аренды"
 BTN_TARIFFS, BTN_SUPPORT = "💰 Тарифы", "🆘 Поддержка"
-
-TRIPS_STUB = "Поездок пока нет."
 
 
 # Обработчик состояния поддержки регистрируется РАНЬШЕ кнопок меню: иначе
@@ -38,13 +38,20 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                      user: dict) -> None:
     text = message.text.strip()
     if text.lower() == "отмена" or text in (BTN_RENT, BTN_TRIPS, BTN_TARIFFS,
-                                            BTN_FAQ):
+                                            BTN_FAQ, texts.BTN_CLOSE_RENT):
         await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
                        state=logic.APPROVED)
         if text in (BTN_RENT, BTN_TARIFFS):
             await message.answer(texts.TARIFFS, reply_markup=kb.main_menu())
         elif text == BTN_TRIPS:
-            await message.answer(TRIPS_STUB, reply_markup=kb.main_menu())
+            await message.answer(await rentals_text(db, user),
+                                 reply_markup=kb.main_menu())
+        elif text == texts.BTN_CLOSE_RENT:
+            # Кнопка закрытия из режима вопроса: выходим в меню и просим
+            # нажать её ещё раз - запрос обязан начинаться с чистого
+            # состояния, иначе причина уедет карточкой в поддержку.
+            await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
+            await message.answer(texts.MENU_PROMPT, reply_markup=kb.main_menu())
         elif text == BTN_FAQ:
             # Двумя сообщениями: клавиатуру меню и список тем в одном
             # сообщении Telegram не отдаёт - разметка там только одна.
@@ -132,9 +139,31 @@ async def tariffs(message: Message) -> None:
     await message.answer(texts.TARIFFS)
 
 
+async def rentals_text(db: Database, user: dict) -> str:
+    """История аренд: текущая сверху, закрытые - из журнала событий."""
+    lines = []
+    if contract.rental_is_active(user):
+        given = logic.issue_context(user.get("issue_data"))
+        lines.append(texts.TRIPS_ACTIVE.format(
+            number=logic.esc(user.get("contract_no") or "—"),
+            bike=logic.esc(given["bike_model"]), term=logic.esc(given["rent_term"])))
+    for row in await db.rentals_of(user["tg_id"]):
+        payload = row["payload"] or {}
+        if isinstance(payload, str):        # база без кодека jsonb
+            payload = json.loads(payload)
+        lines.append(texts.TRIPS_CLOSED.format(
+            number=logic.esc(payload.get("number") or "—"),
+            bike=logic.esc(payload.get("bike") or "—"),
+            term=logic.esc(payload.get("term") or "—"),
+            closed_at=logic.esc(payload.get("closed_at") or "—")))
+    if not lines:
+        return texts.TRIPS_EMPTY
+    return texts.TRIPS_HEADER + "\n".join(lines)
+
+
 @router.message(F.text == BTN_TRIPS)
-async def trips(message: Message) -> None:
-    await message.answer(TRIPS_STUB)
+async def trips(message: Message, db: Database, user: dict) -> None:
+    await message.answer(await rentals_text(db, user))
 
 
 @router.message(F.text == BTN_SUPPORT)

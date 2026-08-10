@@ -92,6 +92,12 @@ create table if not exists bot.users (
   act_out_sha256     text,
   act_out_signed_at  timestamptz,
 
+  -- Запрос клиента на закрытие аренды: причина с его слов и момент запроса.
+  -- Причина попадает в отчёт о закрытии, поэтому хранится, а не только
+  -- пересылается оператору.
+  close_reason       text,
+  close_requested_at timestamptz,
+
   status             text        not null default 'new',  -- new|pending|approved|rejected
   reject_reason      text,
   reviewed_by        bigint,
@@ -153,6 +159,8 @@ alter table bot.users add column if not exists soglasie_sha256    text;
 alter table bot.users add column if not exists pay_chat_id        bigint;
 alter table bot.users add column if not exists pay_message_id     bigint;
 alter table bot.users add column if not exists pay_confirmed_at   timestamptz;
+alter table bot.users add column if not exists close_reason       text;
+alter table bot.users add column if not exists close_requested_at timestamptz;
 -- По этим индексам ищется заявка при ответе оператора на приглашения
 -- «данные выдачи» и «данные возврата».
 create index if not exists users_issue_msg_idx on bot.users (issue_chat_id, issue_message_id)

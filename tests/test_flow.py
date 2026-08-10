@@ -49,7 +49,7 @@ try:
 
     # app.tasks тянет app.db, а тот - asyncpg, поэтому обе зависимости
     # проверяются одной попыткой: иначе набор падает на машине без asyncpg.
-    from app import faq, logic, tasks
+    from app import faq, logic, tasks, texts
     from app.config import Config
     from app.handlers import contract, menu, moderation, registration
     from app.handlers import faq as faq_handlers
@@ -204,7 +204,7 @@ class FakeDB:
         return True
 
     async def log_event(self, tg_id, type_, payload=None):
-        self.events.append((tg_id, type_))
+        self.events.append((tg_id, type_, payload or {}))
 
     async def set_purge_after(self, tg_id, days):
         self.users[tg_id]["purge_after"] = days
@@ -242,6 +242,12 @@ class FakeDB:
                     and row.get("return_message_id") == message_id:
                 return dict(row)
         return None
+
+    async def rentals_of(self, tg_id, limit=10):
+        """История аренд: закрытые аренды живут событиями, новые сверху."""
+        return [{"payload": payload, "created_at": None}
+                for who, type_, payload in reversed(self.events)
+                if who == tg_id and type_ == "rental_closed"][:limit]
 
     async def clear_anketa(self, tg_id):
         self.users[tg_id]["anketa_enc"] = None
@@ -973,17 +979,29 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(to_fix, "акт приёма не в чате фиксации")
         self.assertEqual(to_fix[0].message_thread_id, FIX_TOPIC)
 
-    async def provide_return(self, text="Без замечаний"):
+    CLOSE_FORM = ("когда: 07.08\n"
+                  "адрес: адоратского\n"
+                  "принял: ирик\n"
+                  "отзыв: оставил\n"
+                  "рекомендации: все ок")
+
+    async def provide_return(self, text=None):
+        """Оператор отвечает формой закрытия - из неё акт и отчёт."""
         prompt_id = self.db.users[USER_ID]["return_message_id"]
         self.assertIsNotNone(prompt_id)
-        await self.feed(msg(text, chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
-                            chat_type="supergroup", reply_to=prompt_id))
+        await self.feed(msg(text or self.CLOSE_FORM, chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup",
+                            reply_to=prompt_id))
 
     async def test_return_flow_closes_rental(self):
         await self.register_fully()
-        await self.provide_return("Царапина на крыле, штраф 500")
+        await self.provide_return(self.CLOSE_FORM + "\nповреждения: царапина на крыле"
+                                                    "\nремонт: 500")
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.WAIT_RETURN_SIGN)
+        # замечания акта собираются из формы, а не из причины и отзывов
+        self.assertIn("царапина на крыле", row["return_data"]["return_notes"])
+        self.assertIn("500", row["return_data"]["return_notes"])
         await self.feed(cb("return_sign"))
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.APPROVED)
@@ -991,6 +1009,111 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         to_fix = [m for m in self.session.documents()
                   if m.chat_id == FIX_CHAT and "Акт возврата" in (m.caption or "")]
         self.assertTrue(to_fix, "акт возврата не в чате фиксации")
+
+    # ─── закрытие аренды по запросу клиента и история ───
+
+    async def request_close(self, reason="выхожу на основную работу"):
+        await self.feed(msg(texts.BTN_CLOSE_RENT))
+        await self.feed(msg(reason))
+
+    async def test_client_can_request_closure(self):
+        await self.register_fully()
+        await self.feed(msg(texts.BTN_CLOSE_RENT))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_CLOSE_REASON)
+        await self.feed(msg("выхожу на основную работу"))
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED, "после запроса - обратно в меню")
+        self.assertEqual(row["close_reason"], "выхожу на основную работу")
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and "Запрос на закрытие" in (m.text or "")]
+        self.assertTrue(cards, "запрос не дошёл до оператора")
+        self.assertIn("выхожу на основную работу", cards[-1])
+        self.assertIn("принял:", cards[-1], "в запросе нет формы закрытия")
+        # запрос перевязывает ответ оператора на себя: форму он пришлёт
+        # этой карточке, а не приглашению возврата месячной давности
+        self.assertIsNotNone(row["return_message_id"])
+        await self.provide_return()
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_RETURN_SIGN)
+
+    async def test_closure_without_active_rental_is_refused(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.confirm_pay()
+        await self.feed(cb("act_mistake"))          # акт ещё не подписан
+        self.db.users[USER_ID]["state"] = logic.APPROVED
+        await self.feed(msg(texts.BTN_CLOSE_RENT))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Активной аренды", last)
+
+    async def test_closure_report_matches_the_agreed_format(self):
+        """Отчёт пересылают в таблицу: формат строк проверяется дословно."""
+        await self.register_fully()
+        await self.request_close("на осн работу выходит")
+        await self.provide_return()
+
+        reports = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                   if isinstance(m, SendMessage) and (m.text or "").startswith("Когда сдал:")]
+        self.assertEqual(len(reports), 1, "отчёт должен уйти ровно один раз")
+        self.assertEqual(reports[0].splitlines(), [
+            "Когда сдал: 07.08",
+            "Сколько оплатил долгов: 0",
+            "Какие повреждения есть: 0",
+            "Сколько оплатил за ремонт: 0",
+            "Оплатил мойку велосипеда: 0",
+            "Причина сдачи: на осн работу выходит",
+            "Адрес сдачи: адоратского",
+            "Кто принял велик: ирик",
+            "Оставил отзыв: оставил",
+            "Какие рекомендации по улучшению сервиса/вело дали: все ок",
+            "1. ФИО: Иванов Иван Иванович",
+            "2. Вин номер рамы: 264022410703084",
+            "3. Вин номер мотор колеса: 240W25021406",
+        ])
+
+    async def test_closed_rental_appears_in_history(self):
+        await self.register_fully()
+        # пока аренда идёт - она в списке как активная
+        await self.feed(msg("📋 Мои аренды"))
+        active = [m.text for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage)][-1]
+        self.assertIn("сейчас в аренде", active)
+        self.assertIn(self.db.users[USER_ID]["contract_no"], active)
+
+        await self.request_close()
+        await self.provide_return()
+        await self.feed(cb("return_sign"))
+        await self.feed(msg("📋 Мои аренды"))
+        closed = [m.text for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage)][-1]
+        self.assertIn("закрыта 07.08", closed)
+        self.assertNotIn("сейчас в аренде", closed)
+
+    async def test_history_is_empty_for_a_fresh_client(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.confirm_pay()
+        await self.feed(cb("act_sign"))
+        self.db.events.clear()
+        self.db.users[USER_ID]["act_in_signed_at"] = None
+        await self.feed(msg("📋 Мои аренды"))
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Аренд пока не было", last)
+
+    async def test_bad_closure_form_is_rejected_with_reason(self):
+        await self.register_fully()
+        await self.request_close()
+        await self.provide_return("когда: 07.08\nпринял: ирик")   # без адреса
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED,
+                         "без адреса сдачи акт выпускать нельзя")
+        replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
+                           if isinstance(m, SendMessage))
+        self.assertIn("Не хватает: адрес", replies)
 
     async def test_return_before_act_signed_is_refused(self):
         await self.submit()
