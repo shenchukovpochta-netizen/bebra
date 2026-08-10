@@ -47,11 +47,11 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
             await message.answer(await rentals_text(db, user),
                                  reply_markup=kb.main_menu())
         elif text == texts.BTN_CLOSE_RENT:
-            # Кнопка закрытия из режима вопроса: выходим в меню и просим
-            # нажать её ещё раз - запрос обязан начинаться с чистого
-            # состояния, иначе причина уедет карточкой в поддержку.
-            await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
-            await message.answer(texts.MENU_PROMPT, reply_markup=kb.main_menu())
+            # Режим вопроса уже снят строкой выше, поэтому закрытие
+            # начинается сразу: заставлять нажимать кнопку второй раз -
+            # это ровно тот тупик, из-за которого набранные кнопки
+            # и обрабатываются здесь.
+            await contract.start_close(message, db, user)
         elif text == BTN_FAQ:
             # Двумя сообщениями: клавиатуру меню и список тем в одном
             # сообщении Telegram не отдаёт - разметка там только одна.

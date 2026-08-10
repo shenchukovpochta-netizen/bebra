@@ -1036,6 +1036,19 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.provide_return()
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_RETURN_SIGN)
 
+    async def test_close_button_in_question_mode_starts_the_closure(self):
+        """Кнопка, набранная посреди вопроса, обязана начинать закрытие,
+        а не выкидывать в меню с просьбой нажать ещё раз."""
+        await self.register_fully()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg(texts.BTN_CLOSE_RENT))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_CLOSE_REASON)
+        await self.feed(msg("продал машину, велик не нужен"))
+        self.assertEqual(self.db.users[USER_ID]["close_reason"],
+                         "продал машину, велик не нужен")
+        self.assertIsNone(self.db.users[USER_ID].get("support_message_id"),
+                          "причина не должна уехать вопросом в поддержку")
+
     async def test_closure_without_active_rental_is_refused(self):
         await self.submit()
         await self.approve_fully()

@@ -688,12 +688,15 @@ def rental_is_active(data: dict) -> bool:
     return bool(data.get("act_in_signed_at")) and not data.get("act_out_signed_at")
 
 
-@router.message(StateIs(logic.APPROVED), F.text == texts.BTN_CLOSE_RENT)
-async def close_request(message: Message, db: Database, user: dict) -> None:
+async def start_close(message: Message, db: Database, user: dict) -> None:
     """«Закрыть аренду»: спрашиваем причину и уходим в отдельное состояние.
 
     Причина нужна не из любопытства - она обязательная строка отчёта
     о закрытии, и спросить её у человека дешевле, чем выпытывать потом.
+
+    Вызывается и из меню, и из режима вопроса (menu.st_support): кнопка,
+    набранная посреди вопроса, должна начинать закрытие, а не заставлять
+    нажимать её второй раз.
     """
     if not rental_is_active(user):
         await message.answer(texts.CLOSE_NO_RENTAL, reply_markup=kb.main_menu())
@@ -703,6 +706,11 @@ async def close_request(message: Message, db: Database, user: dict) -> None:
         await message.answer(texts.MENU_PROMPT, reply_markup=kb.main_menu())
         return
     await message.answer(texts.CLOSE_ASK_REASON, reply_markup=kb.support_cancel())
+
+
+@router.message(StateIs(logic.APPROVED), F.text == texts.BTN_CLOSE_RENT)
+async def close_request(message: Message, db: Database, user: dict) -> None:
+    await start_close(message, db, user)
 
 
 @router.message(StateIs(logic.WAIT_CLOSE_REASON), F.text)
