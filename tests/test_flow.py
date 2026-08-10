@@ -752,6 +752,47 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                 if "Акт приёма-передачи" in (m.caption or "")]
         self.assertTrue(acts, "после оплаты акт приёма не ушёл клиенту")
 
+    async def test_payment_stage_gives_the_link_and_a_button(self):
+        """Оплата по расчётному счёту: клиент получает ссылку текстом
+        (её видно на десктопе) и кнопкой (с телефона открывает банк)."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        prompt = [m for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage) and "оплата аренды" in (m.text or "")][-1]
+        self.assertIn("qr.nspk.ru", prompt.text)
+        # «&» в параметрах ссылки обязан быть экранирован, иначе Telegram
+        # отвергает сообщение целиком и клиент остаётся без реквизитов.
+        self.assertIn("&amp;bank=", prompt.text)
+        self.assertNotIn("?type=01&bank", prompt.text)
+        buttons = [b for row in prompt.reply_markup.inline_keyboard for b in row]
+        pay = [b for b in buttons if b.url]
+        self.assertEqual(len(pay), 1, "нет кнопки оплаты")
+        self.assertEqual(pay[0].url, self.cfg.pay_url)
+        self.assertIn("paid", [b.callback_data for b in buttons if b.callback_data])
+
+    async def test_lost_payment_message_is_resent_with_the_link(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.feed(msg("а куда платить-то?"))
+        last = self.session.calls[-1]
+        self.assertIn("qr.nspk.ru", last.text)
+        self.assertTrue(any(b.url for row in last.reply_markup.inline_keyboard
+                            for b in row))
+
+    async def test_payment_link_comes_from_configuration(self):
+        """Счёт сменился - меняется одна переменная окружения, а не код."""
+        self.dp, self.bot, self.db, self.session, self.cfg, self.vault = build(
+            make_config(pay_url="https://qr.nspk.ru/NEW?type=01&bank=1"))
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        prompt = [m for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage) and "оплата аренды" in (m.text or "")][-1]
+        self.assertIn("qr.nspk.ru/NEW", prompt.text)
+        self.assertNotIn("BS1A0050", prompt.text)
+
     async def test_pay_confirm_from_non_admin_refused(self):
         await self.submit()
         await self.approve_fully()
@@ -1028,11 +1069,15 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         человеку с меткой - разбирать это должен он."""
         await self.register_fully()
         await self.feed(msg("🆘 Поддержка"))
+        # Считаем только то, что ушло В ОТВЕТ на сам вопрос: раньше в чате
+        # уже были и ссылка на оплату, и суммы - законно.
+        mark = len(self.session.calls)
         await self.feed(msg("я просрочил оплату, нет денег"))
-        to_user = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
-                           if isinstance(m, SendMessage))
+        to_user = " ".join(
+            m.text or "" for m in self.session.calls[mark:]
+            if isinstance(m, SendMessage) and m.chat_id == USER_ID)
         self.assertIn("Передал ваш вопрос менеджеру", to_user)
-        for leak in ("qr.nspk", "3 000", "штраф"):
+        for leak in ("qr.nspk", "3 000", "штраф", "оплат"):
             self.assertNotIn(leak, to_user, leak)
         card = [m.text for m in self.session.sent_to(ADMIN_CHAT)
                 if isinstance(m, SendMessage) and "Вопрос в поддержку" in (m.text or "")][-1]

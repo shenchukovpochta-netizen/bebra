@@ -368,8 +368,10 @@ async def _repeat_payment(bot: Bot, db: Database, cfg: Config, target: dict,
     """
     tg_id = target["tg_id"]
     try:
-        await bot.send_message(tg_id, texts.PAY_PROMPT.format(price=logic.esc(price)),
-                               reply_markup=kb.paid())
+        await bot.send_message(
+            tg_id, texts.PAY_PROMPT.format(price=logic.esc(price),
+                                           pay_url=logic.esc(cfg.pay_url)),
+            reply_markup=kb.paid(cfg.pay_url))
     except TelegramAPIError:
         log.warning("новая сумма оплаты не доставлена клиенту %s", tg_id)
     await db.log_event(tg_id, "payment_amount_changed", {"price": price})

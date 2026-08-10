@@ -20,6 +20,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import faq
 from .. import keyboards as kb
 from .. import logic, texts
+from ..config import Config
 from ..db import Database
 from ..filters import StateIs
 
@@ -29,15 +30,16 @@ router = Router(name="faq")
 BTN_FAQ = faq.MENU_BUTTON
 
 
-def reply_for(intent: faq.Intent, data: dict) -> str:
+def reply_for(intent: faq.Intent, data: dict, cfg: Config) -> str:
     """Ответ по теме с учётом того, кто спрашивает и который час.
 
     Действующему арендатору «сколько стоит» отвечается продлением, новому -
     тарифами; вне графика к ответам с приглашением приехать добавляется
-    приписка про часы работы.
+    приписка про часы работы. Ссылка оплаты - из настроек, чтобы смена
+    расчётного счёта не требовала правки кода.
     """
     return faq.answer(intent, now=datetime.now(), renter=faq.is_renter(data),
-                      plan=faq.plan_of(data))
+                      plan=faq.plan_of(data), pay_url=cfg.pay_url)
 
 
 # Меню тем доступно только из основного меню: в режиме вопроса кнопка,
@@ -52,7 +54,7 @@ async def faq_menu(message: Message) -> None:
 @router.callback_query(StateIs(logic.APPROVED, logic.WAIT_SUPPORT),
                        F.data.startswith("faq:"))
 async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
-                    user: dict) -> None:
+                    cfg: Config, user: dict) -> None:
     """Ответ по выбранной теме.
 
     Ответ уходит через bot по tg_id, а не через callback.message: список тем
@@ -72,7 +74,7 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
     tg_id = user["tg_id"]
     row = await db.get_user(tg_id)
     data = dict(row) if row else dict(user)
-    await bot.send_message(tg_id, reply_for(intent, data))
+    await bot.send_message(tg_id, reply_for(intent, data, cfg))
     await db.log_event(tg_id, "faq_answered", {"code": intent.code})
 
     if not intent.handoff:

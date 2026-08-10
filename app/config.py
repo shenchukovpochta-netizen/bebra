@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import logic
+from . import faq, logic
 
 
 def _env(name: str, default: str | None = None, *, required: bool = False) -> str:
@@ -126,6 +126,11 @@ class Config:
     rate_soft: int
     rate_hard: int
 
+    # Ссылка на оплату по расчётному счёту (СБП QR). Её бот показывает
+    # на этапе оплаты, при продлении и в ответах про реквизиты. Значение
+    # в переменной окружения, а не в коде: счёт меняется, и менять его
+    # владелец должен правкой .env, а не пересборкой образа.
+    pay_url: str = faq.PAY_URL
     # Префикс номера договора. У бота в MAX своя база и своя
     # последовательность - различимый префикс не даёт двум договорам
     # из разных мессенджеров получить одинаковый номер.
@@ -202,6 +207,7 @@ class Config:
             # человек подписался.
             pdn_version=_env("PDN_VERSION", _env("OFERTA_VERSION", "2026-01-15")),
             video_url=_env("VIDEO_URL", "https://youtu.be/CyZzskq8o0o"),
+            pay_url=_env("PAY_URL", faq.PAY_URL),
             purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
             purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
             updates_log_days=_int("UPDATES_LOG_DAYS", "7"),

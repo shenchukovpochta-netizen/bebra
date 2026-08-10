@@ -103,7 +103,7 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
     # Красная линия (долг, угон, суд, скидка, 18-): бот отдаёт нейтральную
     # фразу и молчит по существу. Ответ на такую тему - это либо цена,
     # которую бот не вправе назначать, либо юридический риск.
-    await message.answer(reply_for(intent, user), reply_markup=kb.main_menu())
+    await message.answer(reply_for(intent, user, cfg), reply_markup=kb.main_menu())
     if not intent.red:
         await message.answer(texts.SUPPORT_SENT_ANSWERED)
 

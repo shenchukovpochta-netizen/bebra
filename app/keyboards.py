@@ -102,15 +102,20 @@ def sign_contract() -> InlineKeyboardMarkup:
     ])
 
 
-def paid() -> InlineKeyboardMarkup:
-    """Кнопка клиента на этапе оплаты: сообщить оператору, что деньги ушли.
+def paid(pay_url: str = "") -> InlineKeyboardMarkup:
+    """Этап оплаты: ссылка на расчётный счёт и «я оплатил».
 
-    Сама по себе состояние не меняет - оплату подтверждает оператор
-    кнопкой «Оплата получена» на своей карточке.
+    Ссылка кнопкой, а не только текстом: с телефона по ней открывается
+    приложение банка, и человеку не нужно копировать длинный адрес.
+    Ссылка тем не менее дублируется в тексте - на десктопе кнопку СБП
+    открыть нечем. «Я оплатил(а)» сама по себе состояние не меняет:
+    поступление подтверждает оператор кнопкой на своей карточке.
     """
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data="paid")],
-    ])
+    rows = []
+    if pay_url:
+        rows.append([InlineKeyboardButton(text="💳 Оплатить", url=pay_url)])
+    rows.append([InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data="paid")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def pay_confirm(tg_id: int) -> InlineKeyboardMarkup:

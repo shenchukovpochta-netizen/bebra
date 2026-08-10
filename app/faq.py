@@ -34,11 +34,14 @@ POINT_2 = "Павлюхина, 97А — ГСК «Сокол», 9-й бокс"
 OPEN_HOUR, CLOSE_HOUR = 10, 19
 CONTACT_URL = "https://t.me/arenda_velo_kazan"
 CONTACT_PHONE = "+7 904 676-49-26"
-# Единственный расчётный счёт. Ссылку бот отдаёт как есть, поэтому она
-# экранируется под HTML: «&» в параметрах иначе ломает разбор сообщения.
+# Единственный расчётный счёт, оплата по СБП QR. Значение здесь - только
+# значение по умолчанию: рабочее берётся из PAY_URL в .env, чтобы смена
+# счёта не требовала пересборки образа. В текстах стоит подстановка
+# {pay_url}: её заполняет answer(), экранируя «&» - иначе Telegram
+# не разберёт сообщение и клиент останется без реквизитов.
 PAY_URL = ("https://qr.nspk.ru/BS1A0050UAJCK8MS89CR3TLN80KF48DJ"
            "?type=01&bank=100000000284&crc=3DC0")
-_PAY = esc(PAY_URL)
+PAY_FIELD = "{pay_url}"
 
 # Выкуп - оферта от 22.07.2026.
 BUYOUT_CASH_1 = "35 000 ₽"
@@ -237,7 +240,7 @@ ANSWERS: dict[str, str] = {
     ),
     "PAY": (
         "Оплата по ссылке ниже — это наш единственный расчётный счёт 👇\n"
-        f"{_PAY}\n"
+        f"{PAY_FIELD}\n"
         "После оплаты пришлите, пожалуйста, чек сюда в чат."
     ),
     "BATT_Q": (
@@ -268,7 +271,7 @@ ANSWERS: dict[str, str] = {
     ),
     "RENEW": (
         "Продлить можно онлайн, приезжать не нужно — оплатите по ссылке "
-        f"и пришлите чек:\n{_PAY}\n"
+        f"и пришлите чек:\n{PAY_FIELD}\n"
         "Продление оплачивается в день продления одной суммой."
     ),
     "LEAD": (
@@ -338,7 +341,7 @@ for _code in ("BRK_EL", "BRK_WHEEL", "BRK_MECH"):
 # - это про продление, а не про тарифы для новых.
 RENEWAL_HINT = (
     "Продление оплачивается в день продления одной суммой, приезжать "
-    f"не нужно:\n{_PAY}\n"
+    f"не нужно:\n{PAY_FIELD}\n"
     "После оплаты пришлите чек сюда в чат."
 )
 
@@ -352,12 +355,14 @@ FALLBACK = (
 
 
 def answer(intent: Intent, *, now: datetime | None = None,
-           renter: bool = False, plan: str = "") -> str:
+           renter: bool = False, plan: str = "",
+           pay_url: str = PAY_URL) -> str:
     """Готовый ответ по теме.
 
     renter - действующий арендатор: ему «сколько стоит» отвечается
     продлением, а не тарифами для новых клиентов. plan - его тариф
-    из данных выдачи, если известен.
+    из данных выдачи, если известен. pay_url - рабочая ссылка на оплату
+    из настроек; по умолчанию берётся из карточки фактов.
     """
     if intent.red:
         return RED_LINE_REPLY
@@ -367,7 +372,16 @@ def answer(intent: Intent, *, now: datetime | None = None,
         text = ANSWERS.get(intent.code, FALLBACK)
     if intent.visit and now is not None and not is_open(now):
         text += "\n" + AFTER_HOURS
-    return text
+    return with_pay_url(text, pay_url)
+
+
+def with_pay_url(text: str, pay_url: str = PAY_URL) -> str:
+    """Подставить ссылку оплаты, экранировав её под HTML.
+
+    replace, а не format: в ответах встречаются фигурные скобки сами
+    по себе, и format упал бы на них с KeyError уже на живом клиенте.
+    """
+    return text.replace(PAY_FIELD, esc(pay_url or PAY_URL))
 
 
 def _price_answer(*, renter: bool, plan: str) -> str:

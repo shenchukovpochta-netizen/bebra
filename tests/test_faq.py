@@ -151,6 +151,24 @@ class TestAnswers(unittest.TestCase):
             self.assertIn("&amp;", text)
             self.assertNotIn("?type=01&bank", text)
 
+    def test_payment_link_can_be_replaced_without_touching_the_texts(self):
+        """Расчётный счёт меняется настройкой: ссылка подставляется
+        в ответы, а не зашита в них."""
+        for code in ("PAY", "RENEW"):
+            text = faq.answer(self.by_code[code], now=DAY,
+                              pay_url="https://qr.nspk.ru/NEW?a=1&b=2")
+            self.assertIn("https://qr.nspk.ru/NEW?a=1&amp;b=2", text)
+            self.assertNotIn("BS1A0050", text)
+        renter = faq.answer(self.by_code["PRICE"], now=DAY, renter=True,
+                            pay_url="https://qr.nspk.ru/NEW?a=1")
+        self.assertIn("qr.nspk.ru/NEW", renter)
+
+    def test_no_answer_leaks_an_unfilled_link_placeholder(self):
+        for intent in faq.INTENTS:
+            for renter in (False, True):
+                text = faq.answer(intent, now=DAY, renter=renter, plan="3000")
+                self.assertNotIn(faq.PAY_FIELD, text, intent.code)
+
     def test_price_answer_depends_on_who_asks(self):
         price = self.by_code["PRICE"]
         lead = faq.answer(price, now=DAY, renter=False)

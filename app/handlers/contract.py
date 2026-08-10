@@ -263,8 +263,9 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     # карточка с кнопкой «Оплата получена». Анкета НЕ стирается: паспортные
     # данные печатаются ещё и в Акте приёма-передачи.
     await bot.send_message(
-        tg_id, texts.PAY_PROMPT.format(price=logic.esc(rent_price(data))),
-        reply_markup=kb.paid())
+        tg_id, texts.PAY_PROMPT.format(price=logic.esc(rent_price(data)),
+                                       pay_url=logic.esc(cfg.pay_url)),
+        reply_markup=kb.paid(cfg.pay_url))
     try:
         sent = await bot.send_message(
             cfg.contract_chat_id, pay_card({**data, "contract_no": number}),
@@ -436,11 +437,17 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 
 
 @router.message(StateIs(logic.WAIT_PAYMENT))
-async def st_wait_payment(message: Message, user: dict) -> None:
-    """Любое сообщение на этапе оплаты возвращает сумму и кнопку:
-    потерянное в ленте сообщение с кнопкой - это тупик без переотправки."""
-    await message.answer(texts.PAY_WAIT.format(price=logic.esc(rent_price(user))),
-                         reply_markup=kb.paid())
+async def st_wait_payment(message: Message, cfg: Config, user: dict) -> None:
+    """Любое сообщение на этапе оплаты возвращает сумму, ссылку и кнопку:
+    потерянное в ленте сообщение с кнопкой - это тупик без переотправки.
+
+    Сюда же попадает присланный чек: файл остаётся в переписке, а оплату
+    всё равно подтверждает оператор, сверив поступление на счёте.
+    """
+    await message.answer(
+        texts.PAY_WAIT.format(price=logic.esc(rent_price(user)),
+                              pay_url=logic.esc(cfg.pay_url)),
+        reply_markup=kb.paid(cfg.pay_url))
 
 
 # ─────────────────────── Акт приёма-передачи ───────────────────────
