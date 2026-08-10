@@ -402,6 +402,33 @@ def pay_card(data: dict, price: str | None = None) -> str:
     )
 
 
+async def to_operator(cfg: Config, data: dict, send: Any) -> bool:
+    """Отправить что-либо оператору ОТВЕТОМ на карточку оплаты.
+
+    Всё про оплату должно лежать в одной ветке чата: и сигнал «я оплатил»,
+    и чек, и кнопка подтверждения. Карточку могли удалить - тогда шлём
+    без привязки: потерять чек хуже, чем потерять красивую вложенность.
+    send получает reply_to и возвращает корутину отправки.
+    """
+    reply_to = (data.get("pay_message_id")
+                if data.get("pay_chat_id") == cfg.contract_chat_id else None)
+    try:
+        await send(reply_to)
+        return True
+    except TelegramAPIError:
+        if reply_to is None:
+            log.exception("оплата %s: сообщение оператору не доставлено",
+                          data.get("tg_id"))
+            return False
+    try:
+        await send(None)
+        return True
+    except TelegramAPIError:
+        log.exception("оплата %s: сообщение оператору не доставлено",
+                      data.get("tg_id"))
+        return False
+
+
 @router.callback_query(StateIs(logic.WAIT_PAYMENT), F.data == "paid")
 async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
                   user: dict) -> None:
@@ -409,8 +436,7 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 
     Состояние НЕ меняется: поступление проверяет оператор и подтверждает
     кнопкой «Оплата получена» на своей карточке - клиентская кнопка лишь
-    зовёт его проверить. Ответом на карточку оплаты, чтобы сигнал оказался
-    в чате рядом с кнопкой подтверждения.
+    зовёт его проверить.
     """
     await callback.answer(texts.PAY_NUDGE_TOAST)
     await db.log_event(user["tg_id"], "client_paid_claim")
@@ -420,30 +446,52 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         fio=logic.esc(data.get("full_name")), tg_id=user["tg_id"],
         number=logic.esc(data.get("contract_no") or ""),
         price=logic.esc(rent_price(data)))
-    reply_to = (data.get("pay_message_id")
-                if data.get("pay_chat_id") == cfg.contract_chat_id else None)
-    try:
-        await bot.send_message(cfg.contract_chat_id, card,
-                               reply_to_message_id=reply_to)
-    except TelegramAPIError:
-        if reply_to is None:
-            log.exception("сигнал об оплате %s не доставлен", user["tg_id"])
-            return
-        # Карточку оплаты могли удалить из чата - шлём без привязки.
-        try:
-            await bot.send_message(cfg.contract_chat_id, card)
-        except TelegramAPIError:
-            log.exception("сигнал об оплате %s не доставлен", user["tg_id"])
+    await to_operator(cfg, data, lambda reply_to: bot.send_message(
+        cfg.contract_chat_id, card, reply_to_message_id=reply_to))
+
+
+@router.message(StateIs(logic.WAIT_PAYMENT), F.photo | F.document)
+async def st_payment_receipt(message: Message, bot: Bot, db: Database,
+                             cfg: Config, user: dict) -> None:
+    """Чек об оплате уходит оператору - так же, как данные выдачи.
+
+    Без этого чек оставался в переписке с ботом, куда оператор не смотрит:
+    бот просил прислать его «сюда в чат», и просьба была пустой.
+    Файл пересылается по file_id, без скачивания на диск: это платёжный
+    документ, хранить его у себя боту незачем.
+    """
+    row = await db.get_user(user["tg_id"])
+    data = dict(row) if row else dict(user)
+    caption = texts.PAY_RECEIPT_CARD.format(
+        fio=logic.esc(data.get("full_name")), tg_id=user["tg_id"],
+        number=logic.esc(data.get("contract_no") or ""),
+        price=logic.esc(rent_price(data)))
+    # Пересылаем тем же типом, каким прислали: sendPhoto с file_id документа
+    # Telegram отвергает с 400, и чек не дошёл бы вовсе.
+    is_photo = bool(message.photo)
+    file_id = (message.photo[-1].file_id if is_photo
+               else message.document.file_id)
+    send = bot.send_photo if is_photo else bot.send_document
+    delivered = await to_operator(cfg, data, lambda reply_to: send(
+        cfg.contract_chat_id, file_id, caption=caption,
+        reply_to_message_id=reply_to))
+
+    if delivered:
+        await db.log_event(user["tg_id"], "payment_receipt")
+        await message.answer(texts.PAY_RECEIPT_SENT,
+                             reply_markup=kb.paid(cfg.pay_url))
+        return
+    # Чек не дошёл - молчать нельзя: человек считает, что оплату уже видят.
+    await db.log_event(user["tg_id"], "payment_receipt_failed")
+    await message.answer(texts.PAY_RECEIPT_FAILED,
+                         reply_markup=kb.paid(cfg.pay_url))
 
 
 @router.message(StateIs(logic.WAIT_PAYMENT))
 async def st_wait_payment(message: Message, cfg: Config, user: dict) -> None:
-    """Любое сообщение на этапе оплаты возвращает сумму, ссылку и кнопку:
-    потерянное в ленте сообщение с кнопкой - это тупик без переотправки.
-
-    Сюда же попадает присланный чек: файл остаётся в переписке, а оплату
-    всё равно подтверждает оператор, сверив поступление на счёте.
-    """
+    """Любое другое сообщение на этапе оплаты возвращает сумму, ссылку
+    и кнопки: потерянное в ленте сообщение с кнопкой - это тупик
+    без переотправки."""
     await message.answer(
         texts.PAY_WAIT.format(price=logic.esc(rent_price(user)),
                               pay_url=logic.esc(cfg.pay_url)),

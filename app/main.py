@@ -47,6 +47,12 @@ async def run() -> None:
     if not cfg.pdn_policy_file.exists():
         log.warning("файл политики ПДн %s не найден - шаг ознакомления "
                     "будет работать текстом, без вложения", cfg.pdn_policy_file)
+    # Ссылку оплаты бот отдаёт кнопкой, а Telegram отвергает сообщение
+    # целиком из-за кнопки с битым url. Проверяем на старте, а не в момент,
+    # когда клиент уже подписал договор и ждёт реквизиты.
+    if not cfg.pay_url.startswith(("http://", "https://")):
+        log.warning("PAY_URL=%r не похож на ссылку - кнопки «Оплатить» "
+                    "не будет, останется только текст", cfg.pay_url)
 
     db = await Database.connect(cfg.pg)
     await db.apply_schema(Path(__file__).resolve().parent.parent / "schema.sql")

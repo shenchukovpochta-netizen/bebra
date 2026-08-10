@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     from aiogram import Bot, Dispatcher
     from aiogram.client.session.base import BaseSession
+    from aiogram.exceptions import TelegramBadRequest
     from aiogram.methods import (
         AnswerCallbackQuery,
         EditMessageCaption,
@@ -99,6 +100,9 @@ class FakeSession(BaseSession):
         super().__init__()
         self.calls: list = []
         self.subscribed = True
+        # Чат, отправка фото в который должна падать: так проверяется
+        # поведение бота, когда чек до оператора не дошёл.
+        self.fail_photo_to: int | None = None
 
     async def close(self) -> None:
         pass
@@ -108,6 +112,9 @@ class FakeSession(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
+        if (isinstance(method, SendPhoto)
+                and method.chat_id == self.fail_photo_to):
+            raise TelegramBadRequest(method=method, message="chat not found")
         if isinstance(method, GetMe):
             return User(id=1, is_bot=True, first_name="bot", username="testbot")
         if isinstance(method, GetChatMember):
@@ -792,6 +799,66 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                   if isinstance(m, SendMessage) and "оплата аренды" in (m.text or "")][-1]
         self.assertIn("qr.nspk.ru/NEW", prompt.text)
         self.assertNotIn("BS1A0050", prompt.text)
+
+    async def test_receipt_photo_reaches_the_operator(self):
+        """Регрессия: бот просил прислать чек «сюда в чат», а чек оседал
+        в переписке с ботом, куда оператор не смотрит."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        card_id = self.db.users[USER_ID]["pay_message_id"]
+        await self.feed(msg(photo=True))
+
+        receipts = [m for m in self.session.sent_to(ADMIN_CHAT)
+                    if isinstance(m, SendPhoto) and "Чек" in (m.caption or "")]
+        self.assertEqual(len(receipts), 1, "чек не ушёл оператору")
+        self.assertIn("3000 qr", receipts[0].caption, "не видно ожидаемой суммы")
+        self.assertEqual(receipts[0].reply_to_message_id, card_id,
+                         "чек должен лежать под карточкой оплаты")
+        to_user = [m.text for m in self.session.sent_to(USER_ID)
+                   if isinstance(m, SendMessage)]
+        self.assertIn("Чек передали оператору", to_user[-1])
+        # состояние не меняется: поступление подтверждает оператор
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PAYMENT)
+
+    async def test_receipt_document_is_sent_as_a_document(self):
+        """Чек из банка приходит файлом: sendPhoto с file_id документа
+        Telegram отвергает, и чек не дошёл бы вовсе."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.feed(msg(document=True))
+        receipts = [m for m in self.session.sent_to(ADMIN_CHAT)
+                    if isinstance(m, SendDocument) and "Чек" in (m.caption or "")]
+        self.assertEqual(len(receipts), 1)
+
+    async def test_undelivered_receipt_is_admitted_to_the_client(self):
+        """Если чек не ушёл, человек обязан узнать: иначе он уверен,
+        что оплату уже проверяют."""
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        self.session.fail_photo_to = ADMIN_CHAT
+        await self.feed(msg(photo=True))
+        self.session.fail_photo_to = None
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Не получилось передать чек", last)
+
+    async def test_broken_pay_url_does_not_kill_the_whole_message(self):
+        """Кнопка с битым url - это отказ Telegram принять СООБЩЕНИЕ целиком,
+        то есть клиент без реквизитов. Опечатка в PAY_URL стоит кнопки,
+        но не сообщения."""
+        self.dp, self.bot, self.db, self.session, self.cfg, self.vault = build(
+            make_config(pay_url="qr.nspk.ru/без-схемы"))
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        prompt = [m for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage) and "оплата аренды" in (m.text or "")][-1]
+        buttons = [b for row in prompt.reply_markup.inline_keyboard for b in row]
+        self.assertFalse([b for b in buttons if b.url], "кнопки с битым url быть не должно")
+        self.assertIn("paid", [b.callback_data for b in buttons if b.callback_data])
 
     async def test_pay_confirm_from_non_admin_refused(self):
         await self.submit()

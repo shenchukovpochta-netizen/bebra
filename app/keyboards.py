@@ -112,7 +112,11 @@ def paid(pay_url: str = "") -> InlineKeyboardMarkup:
     поступление подтверждает оператор кнопкой на своей карточке.
     """
     rows = []
-    if pay_url:
+    # Кнопка добавляется, только если это похоже на ссылку: Telegram
+    # отвергает СООБЩЕНИЕ ЦЕЛИКОМ из-за кнопки с битым url, и опечатка
+    # в PAY_URL оставила бы клиента вообще без реквизитов. Сама ссылка
+    # при этом остаётся в тексте - там она безобидна.
+    if pay_url.startswith(("http://", "https://")):
         rows.append([InlineKeyboardButton(text="💳 Оплатить", url=pay_url)])
     rows.append([InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data="paid")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
