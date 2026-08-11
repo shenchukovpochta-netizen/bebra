@@ -340,6 +340,19 @@ class TestI18n(unittest.TestCase):
                 self.assertNotIn("&", value.replace("&amp;", ""),
                                  f"{code}/{key}")
 
+    def test_working_hours_are_the_same_in_every_language(self):
+        """10:00–19:00 - факт, а не формулировка: перевод не имеет права
+        назвать другие часы или потерять их."""
+        for code in i18n.LANGS:
+            text = faq.answer(faq.BY_CODE["HOURS"], now=DAY, lang=code)
+            self.assertIn("10:00", text, code)
+            self.assertIn("19:00", text, code)
+
+    def test_contact_key_carries_the_contact_url(self):
+        for code in self.FOREIGN:
+            self.assertIn("t.me/arenda_velo_kazan",
+                          i18n.T[code]["contact"], code)
+
     def test_renter_price_in_foreign_language_talks_renewal(self):
         for code in self.FOREIGN:
             text = faq.answer(faq.BY_CODE["PRICE"], now=DAY, lang=code,

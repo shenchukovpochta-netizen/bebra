@@ -105,7 +105,11 @@ async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: Database,
         return
     if user["state"] in (logic.NEW, logic.WAIT_FIO):
         await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-        await bot.send_message(user["tg_id"], texts.WELCOME)
+        # То же приветствие, что и на /start, - с кнопкой частых вопросов:
+        # человек, прошедший проверку подписки, не должен получать урезанный
+        # вариант старта.
+        await send_welcome(lambda text, **kw: bot.send_message(
+            user["tg_id"], text, **kw))
 
 
 # ─────────────────────────── ФИО ───────────────────────────

@@ -1334,6 +1334,15 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(last.reply_markup.inline_keyboard[0][0].callback_data,
                          "faq:open")
 
+    async def test_check_sub_welcome_also_offers_faq(self):
+        """Регрессия: после «Проверить подписку» приветствие уходило без
+        кнопки вопросов - урезанный старт по сравнению с /start."""
+        await self.feed(cb("check_sub"))
+        last = self.session.calls[-1]
+        self.assertIn("частые вопросы", last.text)
+        self.assertEqual(last.reply_markup.inline_keyboard[0][0].callback_data,
+                         "faq:open")
+
     async def test_faq_works_before_registration(self):
         """Лид до анкеты получает язык, темы и ответ; регистрация не сбита."""
         await self.feed(msg("/start"))
