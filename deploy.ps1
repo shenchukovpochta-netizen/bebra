@@ -39,7 +39,8 @@ $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.tx
           'README.md', 'INSTALL.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
-         'app/logic.py', 'app/faq.py', 'app/texts.py', 'app/keyboards.py',
+         'app/logic.py', 'app/faq.py', 'app/faq_i18n.py', 'app/texts.py',
+         'app/keyboards.py',
          'app/middlewares.py',
          'app/filters.py', 'app/tasks.py', 'app/contract_template.docx',
          'app/act_priema_template.docx', 'app/act_vozvrata_template.docx',

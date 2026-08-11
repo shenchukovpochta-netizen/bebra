@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import faq  # noqa: E402
+from app import faq_i18n as i18n  # noqa: E402
 from app import texts  # noqa: E402
 
 DAY = datetime(2026, 8, 10, 12, 0)      # рабочее время
@@ -243,6 +244,109 @@ class TestMenuTopics(unittest.TestCase):
     def test_callback_data_fits_telegram_limit(self):
         for intent in faq.MENU_TOPICS:
             self.assertLessEqual(len(f"faq:{intent.code}".encode()), 64)
+
+
+class TestI18n(unittest.TestCase):
+    """Переводы ветки: полнота, ссылки и совпадение цен с русским прайсом."""
+
+    FOREIGN = tuple(code for code in i18n.LANGS if code != "ru")
+
+    def test_requested_languages_are_supported(self):
+        # русский, английский, узбекский, туркменский, египетский (арабский),
+        # иранский (фарси), хинди, чувашский - список заказчика
+        self.assertEqual(set(i18n.LANGS),
+                         {"ru", "en", "uz", "tk", "ar", "fa", "hi", "cv"})
+        for code in i18n.LANGS:
+            self.assertIn(code, i18n.LANG_TITLES)
+
+    def test_every_language_has_every_key(self):
+        """Пропущенный ключ молча уронил бы клиента на русский - лучше
+        узнать об этом здесь, чем от клиента."""
+        answer_keys = {"a_" + i.code for i in faq.MENU_TOPICS
+                       if i.code != "PRICE"}
+        title_keys = {"t_" + i.code for i in faq.MENU_TOPICS}
+        need = set(i18n.REQUIRED_KEYS) | answer_keys | title_keys
+        for code in self.FOREIGN:
+            missing = need - set(i18n.T[code])
+            self.assertFalse(missing, f"{code}: нет ключей {sorted(missing)}")
+
+    def test_every_topic_answers_in_every_language(self):
+        for code in i18n.LANGS:
+            for intent in faq.MENU_TOPICS:
+                text = faq.answer(intent, now=DAY, lang=code)
+                self.assertTrue(text.strip(), f"{code}/{intent.code}")
+                self.assertNotIn("{pay_url}", text, f"{code}/{intent.code}")
+                self.assertNotIn("нет поля", text, f"{code}/{intent.code}")
+
+    def test_payment_link_lands_in_every_language(self):
+        for code in i18n.LANGS:
+            for topic in ("PAY", "RENEW"):
+                text = faq.answer(faq.BY_CODE[topic], now=DAY, lang=code,
+                                  pay_url="https://qr.nspk.ru/X?a=1&b=2")
+                self.assertIn("qr.nspk.ru/X", text, f"{code}/{topic}")
+                self.assertIn("&amp;", text, f"{code}/{topic}")
+
+    def test_prices_match_the_russian_price_list(self):
+        """Числа в TARIFF_ROWS обязаны совпадать с texts.TARIFFS: два прайса
+        в двух местах разъезжаются при первой же правке цен."""
+        tariffs = texts.TARIFFS.replace("\xa0", " ")
+        for name, w1, w2, mo in faq.TARIFF_ROWS:
+            for price in (w1, w2, mo):
+                self.assertIn(price, tariffs, f"{name}: {price}")
+
+    def test_buyout_prices_are_the_same_in_every_language(self):
+        for code in i18n.LANGS:
+            text = faq.answer(faq.BY_CODE["BUYOUT"], now=DAY, lang=code)
+            self.assertIn("35 000", text, code)
+            self.assertIn("45 000", text, code)
+
+    def test_foreign_price_answer_carries_all_rates(self):
+        for code in self.FOREIGN:
+            text = faq.answer(faq.BY_CODE["PRICE"], now=DAY, lang=code)
+            for price in ("3 000", "3 400", "3 500", "5 400", "6 400",
+                          "11 000", "12 000", "650"):
+                self.assertIn(price, text, f"{code}: нет цены {price}")
+
+    def test_unknown_language_falls_back_to_russian(self):
+        text = faq.answer(faq.BY_CODE["ADDR"], now=DAY, lang="xx")
+        self.assertIn("Адоратского", text)
+        self.assertEqual(faq.topic_title(faq.BY_CODE["ADDR"], "xx"),
+                         faq.BY_CODE["ADDR"].title)
+
+    def test_after_hours_note_is_translated(self):
+        for code in self.FOREIGN:
+            night = faq.answer(faq.BY_CODE["ADDR"], now=NIGHT, lang=code)
+            day = faq.answer(faq.BY_CODE["ADDR"], now=DAY, lang=code)
+            self.assertNotEqual(night, day, code)
+            self.assertNotIn(faq.AFTER_HOURS, night,
+                             f"{code}: приписка осталась русской")
+
+    def test_lang_callbacks_fit_telegram_limit(self):
+        for code in i18n.LANGS:
+            self.assertLessEqual(len(f"faqlang:{code}".encode()), 64)
+
+    def test_addresses_survive_translation(self):
+        """Адрес - то, что человек покажет таксисту: кириллический оригинал
+        обязан присутствовать в каждом переводе ответа про адреса."""
+        for code in i18n.LANGS:
+            text = faq.answer(faq.BY_CODE["ADDR"], now=DAY, lang=code)
+            self.assertIn("11А", text, code)
+            self.assertIn("97А", text, code)
+
+    def test_no_html_markup_hazards_in_translations(self):
+        for code in self.FOREIGN:
+            for key, value in i18n.T[code].items():
+                self.assertNotIn("<", value, f"{code}/{key}")
+                self.assertNotIn("&", value.replace("&amp;", ""),
+                                 f"{code}/{key}")
+
+    def test_renter_price_in_foreign_language_talks_renewal(self):
+        for code in self.FOREIGN:
+            text = faq.answer(faq.BY_CODE["PRICE"], now=DAY, lang=code,
+                              renter=True, plan="3000 qr")
+            self.assertIn("3000 qr", text, code)
+            self.assertIn("qr.nspk.ru", text, code)
+            self.assertNotIn("Truck+", text, code)
 
 
 class TestRenterDetection(unittest.TestCase):

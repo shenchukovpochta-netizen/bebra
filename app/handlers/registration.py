@@ -62,6 +62,18 @@ async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
 
 # ─────────────────────────── /start ───────────────────────────
 
+async def send_welcome(answer) -> None:
+    """Приветствие + вход в частые вопросы.
+
+    Кнопка вопросов - отдельным сообщением: на приветствии стоит
+    ReplyKeyboardRemove, а две разметки в одно сообщение Telegram
+    не принимает. Ответы доступны ДО регистрации: ночному лиду нужны
+    адрес и тарифы сейчас, а не после анкеты.
+    """
+    await answer(texts.WELCOME, reply_markup=kb.remove())
+    await answer(texts.FAQ_ENTRY_HINT, reply_markup=kb.faq_entry())
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> None:
     if user["status"] == logic.ST_APPROVED:
@@ -74,7 +86,7 @@ async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> 
         await message.answer(texts.ALREADY_REGISTERED, reply_markup=kb.main_menu())
         return
     await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-    await message.answer(texts.WELCOME, reply_markup=kb.remove())
+    await send_welcome(message.answer)
 
 
 @router.callback_query(F.data == "check_sub")
@@ -101,7 +113,7 @@ async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: Database,
 @router.message(StateIs(logic.NEW))
 async def st_new(message: Message, db: Database, user: dict) -> None:
     await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-    await message.answer(texts.WELCOME)
+    await send_welcome(message.answer)
 
 
 @router.message(StateIs(logic.WAIT_FIO), F.text)

@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from . import faq_i18n as i18n
 from . import texts
 from .logic import esc
 
@@ -49,7 +50,16 @@ BUYOUT_CASH_2 = "45 000 ₽"
 
 # Кнопка входа в ветку. Живёт здесь, а не в handlers: её же рисует
 # клавиатура меню, и две копии строки разъехались бы при первой правке.
-MENU_BUTTON = "❓ Частые вопросы"
+MENU_BUTTON = "❓ Ответы на частые вопросы"
+
+# Тарифные строки для переводов: (название, неделя, 2 недели, месяц).
+# Числа живут ЗДЕСЬ один раз; русский текст тарифов - texts.TARIFFS,
+# и тест сверяет числа между ними, чтобы прайсы не разъехались.
+TARIFF_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("Truck+", "3 000", "5 400", "11 000"),
+    ("Truck+ (аморт.)", "3 400", "5 400", "11 000"),
+    ("Kugoo V3 Pro / V3 Pro+", "3 500", "6 400", "12 000"),
+)
 
 WORKING_HOURS = f"ежедневно с {OPEN_HOUR}:00 до {CLOSE_HOUR}:00, без выходных"
 POINTS_LINE = f"📍 {POINT_1}\n📍 {POINT_2}"
@@ -356,23 +366,59 @@ FALLBACK = (
 
 def answer(intent: Intent, *, now: datetime | None = None,
            renter: bool = False, plan: str = "",
-           pay_url: str = PAY_URL) -> str:
+           pay_url: str = PAY_URL, lang: str = "ru") -> str:
     """Готовый ответ по теме.
 
     renter - действующий арендатор: ему «сколько стоит» отвечается
     продлением, а не тарифами для новых клиентов. plan - его тариф
     из данных выдачи, если известен. pay_url - рабочая ссылка на оплату
-    из настроек; по умолчанию берётся из карточки фактов.
+    из настроек. lang - язык ветки кнопок; нет перевода - молча
+    по-русски: пропущенный ключ не должен оставлять клиента без ответа.
     """
     if intent.red:
         return RED_LINE_REPLY
+    t = i18n.T.get(lang, {})
     if intent.code == "PRICE":
-        text = _price_answer(renter=renter, plan=plan)
+        text = (_price_i18n(t, renter=renter, plan=plan) if t
+                else _price_answer(renter=renter, plan=plan))
     else:
-        text = ANSWERS.get(intent.code, FALLBACK)
+        text = t.get("a_" + intent.code) or ANSWERS.get(intent.code, FALLBACK)
     if intent.visit and now is not None and not is_open(now):
-        text += "\n" + AFTER_HOURS
+        text += "\n" + t.get("after_hours", AFTER_HOURS)
     return with_pay_url(text, pay_url)
+
+
+def _price_i18n(t: dict[str, str], *, renter: bool, plan: str) -> str:
+    """Тарифы на языке клиента: подписи из перевода, числа из TARIFF_ROWS."""
+    if renter:
+        head = (t["your_rate"].format(plan=esc(plan)) + "\n") if plan else ""
+        return head + t.get("a_RENEW", ANSWERS["RENEW"])
+    rows = "\n".join(
+        f"{name} — {w1} ₽/{t['week']} · {w2} ₽/{t['weeks2']} "
+        f"· {mo} ₽/{t['month']}"
+        for name, w1, w2, mo in TARIFF_ROWS)
+    return "\n".join((t["price_head"], rows, t["price_ext"],
+                      t["price_incl"], t["price_next"]))
+
+
+def topic_title(intent: Intent, lang: str = "ru") -> str:
+    """Заголовок темы для кнопки меню - на языке клиента."""
+    return i18n.T.get(lang, {}).get("t_" + intent.code) or intent.title
+
+
+def menu_text(lang: str = "ru", *, registered: bool = True) -> str:
+    """Текст над списком тем.
+
+    Незарегистрированному кнопка «Поддержка» недоступна - вместо неё
+    даётся прямой контакт.
+    """
+    t = i18n.T.get(lang, {})
+    if not t:
+        return texts.FAQ_MENU if registered else texts.FAQ_MENU_GUEST
+    text = t["menu"]
+    if not registered:
+        text += "\n" + t["contact"]
+    return text
 
 
 def with_pay_url(text: str, pay_url: str = PAY_URL) -> str:

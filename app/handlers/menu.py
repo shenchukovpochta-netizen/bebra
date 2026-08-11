@@ -15,7 +15,7 @@ from .. import logic, texts
 from ..config import Config
 from ..db import Database, utcnow
 from ..filters import StateIs
-from .faq import BTN_FAQ, reply_for
+from .faq import BTN_FAQ, home, reply_for
 
 log = logging.getLogger(__name__)
 router = Router(name="menu")
@@ -55,8 +55,8 @@ async def menu_shortcut(message: Message, db: Database, user: dict, text: str, *
         # Двумя сообщениями: клавиатуру меню и список тем в одном
         # сообщении Telegram не отдаёт - разметка там только одна.
         await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
-        await message.answer(texts.FAQ_MENU,
-                             reply_markup=kb.faq_topics(faq.MENU_TOPICS))
+        faq_text, faq_kb = home(fresh)
+        await message.answer(faq_text, reply_markup=faq_kb)
     else:
         await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
     return True

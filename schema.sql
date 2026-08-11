@@ -92,6 +92,10 @@ create table if not exists bot.users (
   act_out_sha256     text,
   act_out_signed_at  timestamptz,
 
+  -- Язык ветки частых вопросов. Выбирается первым вопросом ветки
+  -- и запоминается; на остальной сценарий бота не влияет.
+  faq_lang           text,
+
   -- Запрос клиента на закрытие аренды: причина с его слов и момент запроса.
   -- Причина попадает в отчёт о закрытии, поэтому хранится, а не только
   -- пересылается оператору.
@@ -161,6 +165,7 @@ alter table bot.users add column if not exists pay_message_id     bigint;
 alter table bot.users add column if not exists pay_confirmed_at   timestamptz;
 alter table bot.users add column if not exists close_reason       text;
 alter table bot.users add column if not exists close_requested_at timestamptz;
+alter table bot.users add column if not exists faq_lang           text;
 -- По этим индексам ищется заявка при ответе оператора на приглашения
 -- «данные выдачи» и «данные возврата».
 create index if not exists users_issue_msg_idx on bot.users (issue_chat_id, issue_message_id)

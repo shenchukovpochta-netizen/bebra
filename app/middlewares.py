@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 
+from . import faq
 from . import keyboards as kb
 from . import logic, texts
 from .config import Config
@@ -20,6 +21,15 @@ from .services.subscription import check_subscription
 log = logging.getLogger(__name__)
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
+
+
+def _is_faq(inner: Any) -> bool:
+    """Апдейт ветки частых вопросов: кнопки faq*/faqlang* и кнопка меню."""
+    if isinstance(inner, CallbackQuery):
+        return (inner.data or "").startswith(("faq:", "faqlang:"))
+    if isinstance(inner, Message):
+        return (inner.text or "").strip() == faq.MENU_BUTTON
+    return False
 
 
 def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
@@ -144,8 +154,12 @@ class PipelineMiddleware(BaseMiddleware):
             await self._reply(data["bot"], user_id, texts.RATE_LIMITED)
             return None
 
-        # Гейт подписки: без кэша, всегда живой запрос.
-        if not await check_subscription(data["bot"], self.cfg.channel_id, user_id):
+        # Гейт подписки: без кэша, всегда живой запрос. Ветка частых
+        # вопросов идёт МИМО гейта: это справка (адреса, тарифы, график),
+        # и ночной лид должен получить её до подписки на канал -
+        # регистрация при этом остаётся за гейтом, как и была.
+        if not _is_faq(inner) and \
+                not await check_subscription(data["bot"], self.cfg.channel_id, user_id):
             await self._reply(
                 data["bot"], user_id,
                 texts.NOT_SUBSCRIBED.format(channel_url=logic.esc(self.cfg.channel_url)),

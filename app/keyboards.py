@@ -151,15 +151,42 @@ def support_cancel() -> ReplyKeyboardMarkup:
     )
 
 
-def faq_topics(topics) -> InlineKeyboardMarkup:
-    """Темы частых вопросов - по кнопке на строку.
+def faq_topics(topics, lang: str = "ru") -> InlineKeyboardMarkup:
+    """Темы частых вопросов - по кнопке на строку, на языке клиента.
 
     Заголовки длинные, по две в ряд Telegram обрезает их до многоточия,
-    и человек не понимает, куда жмёт.
+    и человек не понимает, куда жмёт. Последней строкой - смена языка:
+    первый выбор запоминается, и без этой кнопки ошибившийся человек
+    остался бы с чужим языком навсегда.
     """
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=topic.title, callback_data=f"faq:{topic.code}")]
+    from . import faq
+    from .faq_i18n import T
+    rows = [
+        [InlineKeyboardButton(text=faq.topic_title(topic, lang),
+                              callback_data=f"faq:{topic.code}")]
         for topic in topics
+    ]
+    rows.append([InlineKeyboardButton(
+        text=T.get(lang, {}).get("change", "🌐 Сменить язык"),
+        callback_data="faq:lang")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def faq_langs() -> InlineKeyboardMarkup:
+    """Выбор языка ветки вопросов - по две кнопки в ряд."""
+    from .faq_i18n import LANG_TITLES, LANGS
+    buttons = [InlineKeyboardButton(text=LANG_TITLES[code],
+                                    callback_data=f"faqlang:{code}")
+               for code in LANGS]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        buttons[i:i + 2] for i in range(0, len(buttons), 2)
+    ])
+
+
+def faq_entry() -> InlineKeyboardMarkup:
+    """Кнопка входа в частые вопросы под приветствием - до регистрации."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=BTN_FAQ, callback_data="faq:open")],
     ])
 
 

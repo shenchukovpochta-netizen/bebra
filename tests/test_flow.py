@@ -1280,15 +1280,105 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     # ─── ветка частых вопросов ───
 
-    async def test_faq_button_lists_topics(self):
+    async def test_faq_button_asks_language_first_then_lists_topics(self):
+        """Первый вопрос ветки - язык; выбор запоминается."""
         await self.register_fully()
         await self.feed(msg(faq.MENU_BUTTON))
-        last = self.session.calls[-1]
-        self.assertIn("Выберите тему", last.text)
-        codes = [b[0].callback_data for b in last.reply_markup.inline_keyboard]
+        picker = self.session.calls[-1]
+        self.assertIn("Выберите язык", picker.text)
+        langs = [b.callback_data for row in picker.reply_markup.inline_keyboard
+                 for b in row]
+        for code in ("ru", "en", "uz", "tk", "ar", "fa", "hi", "cv"):
+            self.assertIn(f"faqlang:{code}", langs)
+
+        await self.feed(cb("faqlang:ru"))
+        topics = self.session.calls[-1]
+        self.assertIn("Выберите тему", topics.text)
+        codes = [b[0].callback_data for b in topics.reply_markup.inline_keyboard]
         self.assertIn("faq:ADDR", codes)
+        self.assertIn("faq:lang", codes, "нет кнопки смены языка")
         # красные линии темой не предлагаются: по ним бот молчит
         self.assertNotIn("faq:DEBT", codes)
+        self.assertEqual(self.db.users[USER_ID]["faq_lang"], "ru")
+
+        # повторное открытие - сразу темы, без вопроса о языке
+        await self.feed(msg(faq.MENU_BUTTON))
+        self.assertIn("Выберите тему", self.session.calls[-1].text)
+
+    async def test_faq_answers_in_the_chosen_language(self):
+        await self.register_fully()
+        await self.feed(msg(faq.MENU_BUTTON))
+        await self.feed(cb("faqlang:en"))
+        topics = self.session.calls[-1]
+        titles = [b[0].text for b in topics.reply_markup.inline_keyboard]
+        self.assertIn("Working hours", titles)
+        await self.feed(cb("faq:ADDR"))
+        answer = self.session.sent_to(USER_ID)[-1].text
+        self.assertIn("Kazan", answer)
+        self.assertIn("Адоратского", answer, "адрес обязан остаться и кириллицей")
+
+    async def test_faq_change_language_button_reopens_the_picker(self):
+        await self.register_fully()
+        await self.feed(msg(faq.MENU_BUTTON))
+        await self.feed(cb("faqlang:uz"))
+        await self.feed(cb("faq:lang"))
+        self.assertIn("Выберите язык", self.session.calls[-1].text)
+        await self.feed(cb("faqlang:ru"))
+        self.assertEqual(self.db.users[USER_ID]["faq_lang"], "ru")
+
+    async def test_faq_entry_offered_right_at_start(self):
+        """Кнопка «Ответы на частые вопросы» - под приветствием, до анкеты."""
+        await self.feed(msg("/start"))
+        last = self.session.calls[-1]
+        self.assertIn("частые вопросы", last.text)
+        self.assertEqual(last.reply_markup.inline_keyboard[0][0].callback_data,
+                         "faq:open")
+
+    async def test_faq_works_before_registration(self):
+        """Лид до анкеты получает язык, темы и ответ; регистрация не сбита."""
+        await self.feed(msg("/start"))
+        await self.feed(cb("faq:open"))
+        self.assertIn("Выберите язык", self.session.calls[-1].text)
+        await self.feed(cb("faqlang:en"))
+        await self.feed(cb("faq:PRICE"))
+        answer = [m.text for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage)][-1]
+        self.assertIn("3 000", answer.replace("\xa0", " "))
+        self.assertIn("week", answer)
+        # состояние регистрации не тронуто, ФИО принимается как обычно
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO)
+        await self.feed(msg("Иванов Иван Иванович"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PDN)
+
+    async def test_faq_handoff_before_registration_gives_contact_not_state(self):
+        """До регистрации режима вопроса нет: тема «нужен человек» даёт
+        контакт и не трогает состояние анкеты."""
+        await self.feed(msg("/start"))
+        await self.feed(cb("faq:open"))
+        await self.feed(cb("faqlang:ru"))
+        await self.feed(cb("faq:BATT_SWAP"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO,
+                         "handoff не должен утаскивать лида из анкеты")
+        to_user = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
+                           if isinstance(m, SendMessage))
+        self.assertIn("t.me/arenda_velo_kazan", to_user)
+
+    async def test_faq_open_for_unsubscribed_lead(self):
+        """Справка работает до подписки на канал: адреса и тарифы ночному
+        лиду важнее гейта. Регистрация при этом остаётся за гейтом."""
+        self.session.subscribed = False
+        await self.feed(cb("faq:open"))
+        self.assertIn("Выберите язык", self.session.calls[-1].text)
+        await self.feed(cb("faqlang:ru"))
+        await self.feed(cb("faq:ADDR"))
+        answer = [m.text for m in self.session.sent_to(USER_ID)
+                  if isinstance(m, SendMessage)][-1]
+        self.assertIn("Адоратского", answer)
+        # а вот анкета без подписки не идёт
+        await self.feed(msg("Иванов Иван Иванович"))
+        joined = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
+                          if isinstance(m, SendMessage))
+        self.assertIn("подпишитесь", joined)
 
     async def test_faq_topic_answers_without_touching_operator(self):
         await self.register_fully()
@@ -1367,7 +1457,8 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("🆘 Поддержка"))
         await self.feed(msg(faq.MENU_BUTTON))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
-        self.assertIn("Выберите тему", self.session.calls[-1].text)
+        # язык ещё не выбирали - ветка начинается с вопроса о языке
+        self.assertIn("Выберите язык", self.session.calls[-1].text)
 
     async def test_support_button_twice_stays_in_support(self):
         await self.register_fully()
