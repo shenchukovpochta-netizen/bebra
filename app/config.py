@@ -155,6 +155,12 @@ class Config:
     # принимает только HTTPS, поэтому перед ботом нужен reverse-proxy
     # с сертификатом (см. INSTALL.md).
     miniapp_url: str = ""
+    # Токен доступа к CRM (/admin): случайная строка не короче 8 символов,
+    # install.sh генерирует сам. Пусто - CRM по токену выключена (вход
+    # остаётся только по initData админа из Telegram). Живёт в .env,
+    # а не в docker secret, сознательно: это пропуск в панель, а не ключ
+    # шифрования, и требовать файл секрета на каждом обновлении - дорого.
+    crm_token: str = ""
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -224,5 +230,6 @@ class Config:
             rate_hard=_int("RATE_HARD", str(logic.RATE_HARD_DEFAULT)),
             api_port=_int_or_none("API_PORT"),
             miniapp_url=_env("MINIAPP_URL"),
+            crm_token=_env("CRM_TOKEN"),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
         )

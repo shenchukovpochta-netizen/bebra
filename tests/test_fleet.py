@@ -195,6 +195,128 @@ class TestRefArgs(unittest.TestCase):
         self.assertEqual(fleet.parse_ref_args(None), ("", ""))
 
 
+SAMPLE_FIXATION = """1. ФИО: Дмитриев Арсений Андреевич
+2. Вин номер рамы: ZQV202483465602
+3. Вин номер мотор колеса: 240W25022083
+4. Комплектация:
+   - АКБ: 2
+   - ЗУ: 1
+   - Зеркала: 0
+   - Теплые перчатки на руль (муфты): 0
+   - Педали: 0
+   - Дождевик: 0
+   - Чехол на держатель для телефона: 0
+   - Троссовый замок: 0
+   - Курьерская сумка: 0
+   - Стяжка для крепления сумки: 0
+5. Сроки аренды: 11.08 - 18.08
+6. Номер телефона (основной): 89050238366
+7. Номер телефона 2: 89053731217 друг
+8. Номер телефона 3: 89050222012 мать
+Ник в Telegram: @BlaiseBolasie
+10. Сумма и способ оплаты: 3000qr
+11. Адрес прописки с квартирой в Казани: Ул, Чистопольская 97б, кв6
+12. Адрес проживания с квартирой в Казани: Ул. Лаврентьева д24а, кв 129
+13. Подключен GPS-Трекер: да
+14. Адрес сдачи: адо
+15. Кто выдал: ирик
+16. Подписка на тг: была
+17. Реф.программа: подумает"""
+
+
+class TestFixationForm(unittest.TestCase):
+    def test_sample_form_parses_fully(self):
+        data, warnings = fleet.parse_fixation_form(SAMPLE_FIXATION)
+        self.assertEqual(warnings, [])
+        self.assertEqual(data["fio"], "Дмитриев Арсений Андреевич")
+        self.assertEqual(data["vin_frame"], "ZQV202483465602")
+        self.assertEqual(data["vin_motor"], "240W25022083")
+        self.assertEqual(data["rent_term"], "11.08 - 18.08")
+        self.assertEqual(data["phone"], "+79050238366")
+        self.assertEqual(data["phone2"], "+79053731217")
+        self.assertEqual(data["phone2_note"], "друг")
+        self.assertEqual(data["phone3"], "+79050222012")
+        self.assertEqual(data["phone3_note"], "мать")
+        self.assertEqual(data["tg_username"], "BlaiseBolasie")
+        self.assertEqual(data["rent_price"], "3000qr")
+        self.assertEqual(data["reg_address"], "Ул, Чистопольская 97б, кв6")
+        self.assertEqual(data["live_address"], "Ул. Лаврентьева д24а, кв 129")
+        self.assertIs(data["gps"], True)
+        self.assertEqual(data["return_point"], "адо")
+        self.assertEqual(data["issued_by"], "ирик")
+        self.assertEqual(data["tg_subscribed"], "была")
+        self.assertEqual(data["ref_program"], "подумает")
+        self.assertEqual(data["kit"]["kit_akb"], 2)
+        self.assertEqual(data["kit"]["kit_zu"], 1)
+        self.assertEqual(data["kit"]["kit_lock"], 0)
+
+    def test_numbering_is_optional(self):
+        # «Ник в Telegram» в образце идёт без номера - и любые другие
+        # строки тоже могут: разбор держится за метки, не за номера.
+        data, _ = fleet.parse_fixation_form(
+            "ФИО: Иванов Иван\nВин номер рамы: A1\nСроки аренды: 01.01 - 08.01")
+        self.assertEqual(data["fio"], "Иванов Иван")
+        self.assertEqual(data["vin_frame"], "A1")
+
+    def test_matches_bot_generated_form(self):
+        # Форма, собранная самим ботом (logic.fixation_form), обязана
+        # разбираться обратно: это один формат, печатает его один код.
+        text = logic.fixation_form(
+            {"tg_id": 1, "full_name": "Петров Пётр", "phone": "+79001112233",
+             "username": "petrov"},
+            {"phone2": "+79002223344", "reg_address": "Казань, Баумана 1, кв 2",
+             "live_address": "Казань, Баумана 1, кв 2"},
+            {"vin_frame": "AB123", "vin_motor": "M9", "rent_term": "01.02 - 08.02",
+             "rent_price": "3000 qr"})
+        data, warnings = fleet.parse_fixation_form(text)
+        self.assertEqual(warnings, [])
+        self.assertEqual(data["fio"], "Петров Пётр")
+        self.assertEqual(data["vin_frame"], "AB123")
+        self.assertEqual(data["phone"], "+79001112233")
+        self.assertEqual(data["tg_username"], "petrov")
+        self.assertEqual(data["kit"]["kit_akb"], 2)
+
+    def test_no_fio_is_fatal(self):
+        data, errs = fleet.parse_fixation_form("Вин номер рамы: A1")
+        self.assertIsNone(data)
+        self.assertIn("ФИО", errs[0])
+
+    def test_no_vin_is_fatal(self):
+        data, errs = fleet.parse_fixation_form("ФИО: Иванов Иван")
+        self.assertIsNone(data)
+        self.assertIn("вин", errs[0])
+
+    def test_unknown_lines_warn_but_do_not_stop(self):
+        data, warnings = fleet.parse_fixation_form(
+            "ФИО: Иванов Иван\nВин номер рамы: A1\nЦвет рамы: красный")
+        self.assertIsNotNone(data)
+        self.assertTrue(any("Цвет рамы" in w for w in warnings))
+
+    def test_bad_phone_warns_and_keeps_text(self):
+        data, warnings = fleet.parse_fixation_form(
+            "ФИО: Иванов Иван\nВин номер рамы: A1\n"
+            "Номер телефона (основной): спросить у мамы")
+        self.assertNotIn("phone", data)
+        self.assertEqual(data["phone_note"], "спросить у мамы")
+        self.assertTrue(any("не похоже на номер" in w for w in warnings))
+
+    def test_gps_no_and_dash_values(self):
+        data, _ = fleet.parse_fixation_form(
+            "ФИО: И И\nВин номер рамы: A1\nПодключен GPS-Трекер: нет\n"
+            "Адрес сдачи: —")
+        self.assertIs(data["gps"], False)
+        self.assertNotIn("return_point", data)
+
+    def test_fixation_extra_collects_service_fields(self):
+        data, _ = fleet.parse_fixation_form(SAMPLE_FIXATION)
+        extra = fleet.fixation_extra(data)
+        self.assertEqual(extra["issued_by"], "ирик")
+        self.assertEqual(extra["return_point"], "адо")
+        self.assertIs(extra["gps"], True)
+        self.assertEqual(extra["phone2_note"], "друг")
+        self.assertNotIn("fio", extra)
+
+
 class TestPickup(unittest.TestCase):
     NOW = datetime(2026, 8, 12, 14, 0)
 
@@ -275,10 +397,17 @@ class TestDue(unittest.TestCase):
                          date(2026, 9, 10))
 
     def test_new_year_rollover(self):
-        # Выдано в декабре «28.12 - 04.01»: конец в прошлом текущего года -
+        # Выдано в декабре «28.12 - 04.01»: конец раньше начала срока -
         # значит, это уже следующий год.
         self.assertEqual(fleet.parse_due("28.12 - 04.01", today=date(2026, 12, 28)),
                          date(2027, 1, 4))
+
+    def test_expired_term_stays_this_year(self):
+        # «28.07 - 08.08» в середине августа - просрочка на этой неделе,
+        # а не срок до следующего лета: якорь переноса года - начало
+        # срока, не «сегодня».
+        self.assertEqual(fleet.parse_due("28.07 - 08.08", today=self.TODAY),
+                         date(2026, 8, 8))
 
     def test_explicit_year_kept(self):
         self.assertEqual(fleet.parse_due("до 10.01.2026", today=self.TODAY),

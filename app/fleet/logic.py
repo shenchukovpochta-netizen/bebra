@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta
 
-from ..logic import esc
+from ..logic import KIT_FIELDS, esc, normalize_phone
 
 # ─────────────────────────── статусы единицы ───────────────────────────
 
@@ -328,28 +328,167 @@ _TERM_DATE = re.compile(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?")
 def parse_due(rent_term: str | None, *, today: date) -> date | None:
     """Дата возврата из срока вида «03.08 - 10.08». None - не разобрать.
 
-    Берётся последняя дата строки. Год чаще опущен: если дата без года
-    оказалась в прошлом, это переход через Новый год - берём следующий.
+    Берётся последняя дата строки. Год чаще опущен: если конец срока
+    оказался раньше НАЧАЛА срока, это переход через Новый год - берём
+    следующий. Якорь - именно первая дата срока, а не «сегодня»: CRM
+    импортирует и просроченные аренды, и «28.07 - 08.08» в середине
+    августа - это просрочка на этой неделе, а не срок до следующего лета.
     Ошибка разбора - это None, а не исключение: срок пишет оператор
     свободным текстом, и «до конца месяца» не должно ронять выдачу.
     """
     matches = _TERM_DATE.findall(rent_term or "")
     if not matches:
         return None
-    day, month, year_raw = matches[-1]
-    year = int(year_raw) if year_raw else today.year
-    if year < 100:
-        year += 2000
-    try:
-        value = date(year, int(month), int(day))
-    except ValueError:
-        return None
-    if not year_raw and value < today:
+
+    def to_date(match, year_default: int) -> date | None:
+        day, month, year_raw = match
+        year = int(year_raw) if year_raw else year_default
+        if year < 100:
+            year += 2000
         try:
-            value = date(year + 1, int(month), int(day))
+            return date(year, int(month), int(day))
         except ValueError:
-            return None                       # 29.02 в невисокосный
+            return None
+
+    anchor = today
+    if len(matches) >= 2:
+        anchor = to_date(matches[0], today.year) or today
+    value = to_date(matches[-1], anchor.year)
+    if value is None:
+        return None
+    if not matches[-1][2] and value < anchor:
+        return to_date(matches[-1], anchor.year + 1)     # None на 29.02
     return value
+
+
+# ─────────────────── форма фиксации: разбор в CRM ───────────────────
+#
+# Заполненные формы фиксации (те самые «1. ФИО: ...», которые собирает
+# fixation_form в app/logic.py) годами копились в теме «Фиксация сдачи».
+# CRM разбирает их обратно в данные: клиент, единица, аренда.
+# Разбор по МЕТКАМ строк, а не по номерам: нумерация в живых формах
+# плавает - строка «Ник в Telegram» приходит и с «9.», и без него.
+
+# Метка (по началу строки, без учёта регистра) -> поле. Пустое поле -
+# заголовок, у которого значения ниже отдельными строками.
+FIXATION_LABELS: tuple[tuple[str, str], ...] = (
+    ("фио", "fio"),
+    ("вин номер рамы", "vin_frame"),
+    ("вин номер мотор", "vin_motor"),
+    ("комплектация", ""),
+    ("сроки аренды", "rent_term"),
+    ("номер телефона (основной)", "phone"),
+    ("номер телефона 2", "phone2"),
+    ("номер телефона 3", "phone3"),
+    ("ник в telegram", "tg_username"),
+    ("сумма и способ оплаты", "rent_price"),
+    ("адрес прописки", "reg_address"),
+    ("адрес проживания", "live_address"),
+    ("подключен gps", "gps"),
+    ("адрес сдачи", "return_point"),
+    ("кто выдал", "issued_by"),
+    ("подписка на тг", "tg_subscribed"),
+    ("реф", "ref_program"),
+)
+
+# Строки комплектации сверяются с подписями из формы (KIT_FIELDS в
+# app/logic.py) - это один и тот же текст, печатает его один код.
+_KIT_BY_LABEL = {label.lower(): field for field, label in KIT_FIELDS}
+
+_LINE_NUMBER = re.compile(r"^\d{1,2}[.)]\s*")
+_PHONE_HEAD = re.compile(r"[+\d][\d\s()\-]*")
+
+
+def _split_phone(raw: str) -> tuple[str | None, str]:
+    """Номер и приписка: «89053731217 друг» -> («+79053731217», «друг»)."""
+    text = _clean(raw)
+    m = _PHONE_HEAD.match(text)
+    if not m:
+        return None, text
+    return normalize_phone(m.group(0)), text[m.end():].strip(" ,;-")
+
+
+def parse_fixation_form(raw: str | None) -> tuple[dict | None, list[str]]:
+    """Разбор заполненной формы фиксации: (данные, предупреждения)
+    либо (None, [ошибка]).
+
+    Предупреждения разбор не останавливают: форму заполняют люди,
+    и «строка не распознана» должна быть видна оператору в предпросмотре,
+    а не превращаться в молчаливую потерю значения. Фатальны только
+    отсутствие ФИО и вин-номера рамы - без них записывать нечего
+    и не к чему привязать аренду.
+    """
+    data: dict = {"kit": {}}
+    warnings: list[str] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(("-", "•", "–")):
+            key, _, value = line.lstrip("-•– ").partition(":")
+            field = _KIT_BY_LABEL.get(_clean(key).lower())
+            if field is None:
+                warnings.append(f"комплектация: не понял строку «{key.strip()}»")
+                continue
+            value = _clean(value)
+            if value and not value.isdigit():
+                warnings.append(f"комплектация «{key.strip()}»: ожидалось число, "
+                                f"получено «{value}» - записан 0")
+            data["kit"][field] = int(value) if value.isdigit() else 0
+            continue
+
+        stripped = _LINE_NUMBER.sub("", line)
+        low = stripped.lower()
+        for label, field in FIXATION_LABELS:
+            if low.startswith(label):
+                break
+        else:
+            warnings.append(f"не распознана строка: «{stripped[:50]}»")
+            continue
+        if not field:
+            continue                       # заголовок «Комплектация»
+        value = _clean(stripped.partition(":")[2])
+        if not value or value in ("—", "-"):
+            continue
+        if field in ("phone", "phone2", "phone3"):
+            phone, note = _split_phone(value)
+            if phone is None:
+                warnings.append(f"«{label}»: не похоже на номер - «{value}»")
+                note = value
+            else:
+                data[field] = phone
+            if note:
+                data[field + "_note"] = note
+        elif field in ("vin_frame", "vin_motor"):
+            data[field] = normalize_vin(value)
+        elif field == "tg_username":
+            username = value.lstrip("@").strip()
+            if re.fullmatch(r"[A-Za-z0-9_]{4,32}", username):
+                data[field] = username
+            else:
+                warnings.append(f"ник в Telegram не распознан: «{value}»")
+        elif field == "gps":
+            data[field] = value.lower() in ("да", "есть", "подключен",
+                                            "подключён", "+", "1")
+        else:
+            data[field] = value
+
+    if not str(data.get("fio") or "").strip():
+        return None, ["в форме нет строки «ФИО» - записывать некого"]
+    if not data.get("vin_frame"):
+        return None, ["в форме нет вин-номера рамы - не к чему привязать аренду"]
+    return data, warnings
+
+
+def fixation_extra(parsed: dict) -> dict:
+    """Служебные поля аренды из формы - в один jsonb.
+
+    Отдельные колонки им не положены: это заметки о выдаче (кто выдал,
+    куда сдавать, подписка, реф), по ним не ищут и не строят инвариантов.
+    """
+    keep = ("gps", "issued_by", "return_point", "tg_subscribed",
+            "ref_program", "phone_note", "phone2_note", "phone3_note")
+    return {k: parsed[k] for k in keep if parsed.get(k) not in (None, "")}
 
 
 # ─────────────────────────── сводки ───────────────────────────

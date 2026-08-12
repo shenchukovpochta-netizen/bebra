@@ -382,6 +382,186 @@ class FleetDB:
                     row["bike_id"])
         return row["bike_id"]
 
+    # ─────────────────────── CRM ───────────────────────
+
+    async def ingest_fixation(self, parsed: dict, *, due_at: date | None) -> dict:
+        """Записать разобранную форму фиксации: клиент, единица, аренда.
+
+        Клиент узнаётся по основному телефону, потом по нику в Telegram;
+        не нашёлся - заводится. Повторный импорт той же формы обновляет
+        запись, а не плодит дубли. Незакрытые хвосты (другая аренда этой
+        рамы или этого клиента) закрываются с пометкой - как в open_rental:
+        форма фиксации описывает свершившуюся выдачу, учёт догоняет.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                client_id, client_created = await self._upsert_client(conn, parsed)
+                tg_id = None
+                if parsed.get("tg_username"):
+                    tg_id = await conn.fetchval(
+                        "select tg_id from bot.users where lower(username) = lower($1)",
+                        parsed["tg_username"])
+                    if tg_id is not None:
+                        await conn.execute(
+                            "update fleet.clients set tg_id = $2, updated_at = now() "
+                            "where id = $1", client_id, tg_id)
+
+                bike = await self.upsert_bike(
+                    str(parsed["vin_frame"]),
+                    vin_motor=str(parsed.get("vin_motor") or "") or None,
+                    status=logic.RENTED, conn=conn)
+                bike_created = bike["created_at"] == bike["updated_at"]
+
+                closed = await conn.fetch(
+                    "update fleet.rentals set closed_at = now(), "
+                    "close_notes = 'закрыта автоматически: импорт формы фиксации' "
+                    "where closed_at is null "
+                    "  and (bike_id = $1 or client_id = $2 "
+                    "       or ($3::bigint is not null and tg_id = $3)) "
+                    "returning id", bike["id"], client_id, tg_id)
+                await conn.execute(
+                    "update fleet.bookings set status = 'issued', updated_at = now() "
+                    "where bike_id = $1 and status = 'held'", bike["id"])
+                rental_id = await conn.fetchval(
+                    "insert into fleet.rentals "
+                    "  (bike_id, tg_id, client_id, rent_term, rent_price, "
+                    "   due_at, kit, extra) "
+                    "values ($1, $2, $3, $4, $5, $6, $7, $8) returning id",
+                    bike["id"], tg_id, client_id,
+                    str(parsed.get("rent_term") or "") or None,
+                    str(parsed.get("rent_price") or "") or None,
+                    due_at, parsed.get("kit") or {},
+                    logic.fixation_extra(parsed))
+        return {"client_id": client_id, "client_created": client_created,
+                "bike_id": bike["id"], "bike_created": bike_created,
+                "rental_id": rental_id, "auto_closed": len(closed)}
+
+    @staticmethod
+    async def _upsert_client(conn: asyncpg.Connection,
+                             parsed: dict) -> tuple[int, bool]:
+        row = None
+        if parsed.get("phone"):
+            row = await conn.fetchrow(
+                "select id from fleet.clients where phone = $1", parsed["phone"])
+        if row is None and parsed.get("tg_username"):
+            row = await conn.fetchrow(
+                "select id from fleet.clients where lower(tg_username) = lower($1)",
+                parsed["tg_username"])
+        values = (str(parsed.get("fio") or "").strip(),
+                  parsed.get("phone"), parsed.get("phone2"), parsed.get("phone3"),
+                  parsed.get("tg_username"),
+                  parsed.get("reg_address"), parsed.get("live_address"))
+        if row is not None:
+            # Новое значение главнее старого, пустое - не затирает:
+            # свежая форма уточняет карточку, а не обнуляет её.
+            await conn.execute(
+                "update fleet.clients set full_name = $2, "
+                "  phone = coalesce($3, phone), phone2 = coalesce($4, phone2), "
+                "  phone3 = coalesce($5, phone3), "
+                "  tg_username = coalesce($6, tg_username), "
+                "  reg_address = coalesce($7, reg_address), "
+                "  live_address = coalesce($8, live_address), "
+                "  updated_at = now() where id = $1",
+                row["id"], *values)
+            return row["id"], False
+        client_id = await conn.fetchval(
+            "insert into fleet.clients "
+            "  (full_name, phone, phone2, phone3, tg_username, "
+            "   reg_address, live_address) "
+            "values ($1, $2, $3, $4, $5, $6, $7) returning id", *values)
+        return client_id, True
+
+    async def rentals_admin(self, *, active: bool, limit: int = 50) -> list[asyncpg.Record]:
+        """Аренды для CRM: с единицей, моделью и тем, что известно о клиенте.
+
+        ФИО берётся из карточки CRM, а если аренду открыл бот - из
+        bot.users; телефоны так же. Один запрос на обе жизни аренды.
+        """
+        return await self.pool.fetch(
+            f"""
+            select r.id, r.rent_term, r.rent_price, r.due_at, r.opened_at,
+                   r.closed_at, r.close_notes, r.contract_no, r.kit, r.extra,
+                   b.id as bike_id, b.vin_frame, m.title as model,
+                   p.title as point,
+                   coalesce(c.full_name, u.full_name) as client_name,
+                   coalesce(c.phone, u.phone) as client_phone,
+                   coalesce(c.tg_username, u.username) as client_username,
+                   r.client_id, r.tg_id
+            from fleet.rentals r
+            left join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.points p on p.id = b.point_id
+            left join fleet.clients c on c.id = r.client_id
+            left join bot.users u on u.tg_id = r.tg_id
+            where r.closed_at is {"null" if active else "not null"}
+            order by r.opened_at desc limit $1
+            """, limit)
+
+    async def bookings_admin(self) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            """
+            select bk.id, bk.note, bk.pickup_at, bk.hold_expires_at, bk.source,
+                   bk.tg_id, b.id as bike_id, b.vin_frame,
+                   m.title as model, p.title as point,
+                   u.full_name as client_name, u.username as client_username
+            from fleet.bookings bk
+            join fleet.bikes b on b.id = bk.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.points p on p.id = b.point_id
+            left join bot.users u on u.tg_id = bk.tg_id
+            where bk.status = 'held' order by bk.hold_expires_at
+            """)
+
+    async def clients_admin(self, query: str = "", limit: int = 50) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            """
+            select c.id, c.full_name, c.phone, c.phone2, c.phone3,
+                   c.tg_username, c.tg_id, c.live_address, c.created_at,
+                   r.id as rental_id, m.title as rental_model, r.due_at
+            from fleet.clients c
+            left join fleet.rentals r on r.client_id = c.id and r.closed_at is null
+            left join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            where $1 = '' or c.full_name ilike '%' || $1 || '%'
+               or c.phone like '%' || $1 || '%'
+               or c.tg_username ilike '%' || $1 || '%'
+            order by c.updated_at desc limit $2
+            """, (query or "").strip(), limit)
+
+    async def close_rental_by_id(self, rental_id: int, *, notes: str | None,
+                                 to_service: bool) -> int | None:
+        """Закрытие аренды из CRM - по id, а не по tg: у аренды из формы
+        фиксации tg может не быть вовсе. Возвращает bike_id либо None."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "update fleet.rentals set closed_at = now(), close_notes = $2 "
+                    "where id = $1 and closed_at is null returning bike_id",
+                    rental_id, notes or None)
+                if row is None:
+                    return None
+                if row["bike_id"] is not None:
+                    await conn.execute(
+                        "update fleet.bikes set status = $2, updated_at = now() "
+                        "where id = $1 and status = 'rented'",
+                        row["bike_id"], logic.SERVICE if to_service else logic.FREE)
+        return row["bike_id"]
+
+    async def cancel_booking_by_id(self, booking_id: int) -> int | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "update fleet.bookings set status = 'cancelled', "
+                    "updated_at = now() "
+                    "where id = $1 and status = 'held' returning bike_id",
+                    booking_id)
+                if row is None:
+                    return None
+                await conn.execute(
+                    "update fleet.bikes set status = 'free', updated_at = now() "
+                    "where id = $1 and status = 'booked'", row["bike_id"])
+        return row["bike_id"]
+
     # ─────────────────────── хуки проката ───────────────────────
 
     async def open_rental(self, tg_id: int, *, vin_frame: str,

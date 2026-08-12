@@ -107,6 +107,28 @@ alter table fleet.bookings add column if not exists source text not null default
 create unique index if not exists bookings_active_tg_idx
   on fleet.bookings (tg_id) where status = 'held' and tg_id is not null;
 
+-- Клиенты CRM. Появляются из разобранных форм фиксации: выдача могла
+-- пройти и мимо бота, и такому клиенту не к чему привязаться в bot.users.
+-- Здесь ФИО, телефоны и адреса - это ПДн, но ровно те, что оператор
+-- и так видит в теме «Фиксация сдачи»; паспортных данных здесь НЕТ
+-- и быть не должно - они живут только шифрованными в bot.users.anketa_enc.
+create table if not exists fleet.clients (
+  id           serial primary key,
+  full_name    text not null,
+  phone        text unique,               -- ключ узнавания при повторном импорте
+  phone2       text,
+  phone3       text,
+  tg_username  text,
+  tg_id        bigint,                    -- если нашёлся в bot.users
+  reg_address  text,
+  live_address text,
+  notes        text,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists clients_tg_username_idx
+  on fleet.clients (lower(tg_username)) where tg_username is not null;
+
 -- Аренда: от подписанного Акта приёма-передачи до Акта возврата.
 -- bike_id допускает NULL у исторических строк: закрытая аренда из старого
 -- события bot.events может не знать раму, а история важнее полноты.
@@ -125,6 +147,14 @@ create table if not exists fleet.rentals (
   -- события rental_closed, помнит его id и второй раз не вставится.
   source_event_id bigint unique
 );
+-- Аренда из CRM: выдача могла пройти мимо бота, у неё нет tg_id -
+-- клиентом владеет fleet.clients. kit - комплектация из формы фиксации,
+-- extra - служебные заметки выдачи (кто выдал, GPS, куда сдавать...).
+alter table fleet.rentals alter column tg_id drop not null;
+alter table fleet.rentals add column if not exists client_id integer references fleet.clients (id);
+alter table fleet.rentals add column if not exists kit   jsonb;
+alter table fleet.rentals add column if not exists extra jsonb;
+
 -- Одна активная аренда на единицу и одна на клиента - те же инварианты,
 -- что и у брони: нарушение любого из них означает две выдачи одной рамы
 -- или два велосипеда на руках у одного договора без следа в учёте.
@@ -132,4 +162,6 @@ create unique index if not exists rentals_active_bike_idx
   on fleet.rentals (bike_id) where closed_at is null and bike_id is not null;
 create unique index if not exists rentals_active_tg_idx
   on fleet.rentals (tg_id) where closed_at is null;
+create unique index if not exists rentals_active_client_idx
+  on fleet.rentals (client_id) where closed_at is null and client_id is not null;
 create index if not exists rentals_tg_idx on fleet.rentals (tg_id, opened_at desc);

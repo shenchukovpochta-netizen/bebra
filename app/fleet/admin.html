@@ -1,0 +1,378 @@
+<!doctype html>
+<!-- CRM проката: обзор, парк, аренды, брони, клиенты, импорт форм фиксации.
+     Один файл без сборки, как webapp.html. Доступ - по токену CRM_TOKEN
+     из .env (или initData админа, если открыто из Telegram): страница
+     отдаётся всем, но каждый запрос данных проверяется на сервере. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Bike — CRM</title>
+<style>
+  :root{
+    --bg:#f2f4f6; --panel:#ffffff; --ink:#141a20; --hint:#7d8a94;
+    --line:#e3e7ea; --accent:#a96c09; --accent-soft:#f5ecdc;
+    --ok:#2c7a4c; --warn:#a96c09; --bad:#a93526; --bad-soft:#f8e7e4;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f1418; --panel:#161c22; --ink:#e2e8ed; --hint:#8b98a2;
+           --line:#242c34; --accent:#d99b31; --accent-soft:#2b2312;
+           --ok:#5fb783; --bad:#e17362; --bad-soft:#3a1f1b; }
+  }
+  *{box-sizing:border-box; margin:0}
+  body{background:var(--bg); color:var(--ink);
+       font:14px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif}
+  a{color:var(--accent)}
+  header{display:flex; align-items:center; gap:18px; padding:12px 22px;
+         background:var(--panel); border-bottom:1px solid var(--line);
+         position:sticky; top:0; z-index:5}
+  header b{font-size:16px}
+  nav{display:flex; gap:4px; flex-wrap:wrap}
+  nav button{border:0; background:none; color:var(--hint); font:inherit;
+             padding:8px 14px; border-radius:8px; cursor:pointer}
+  nav button.on{background:var(--accent-soft); color:var(--accent); font-weight:700}
+  main{padding:20px 22px; max-width:1280px; margin:0 auto}
+  .cards{display:flex; gap:14px; flex-wrap:wrap; margin-bottom:20px}
+  .stat{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+        padding:14px 20px; min-width:130px}
+  .stat b{font-size:26px; font-variant-numeric:tabular-nums; display:block}
+  .stat span{color:var(--hint); font-size:12.5px}
+  .stat.bad b{color:var(--bad)}
+  h2{font-size:15px; margin:22px 0 10px; color:var(--hint);
+     text-transform:uppercase; letter-spacing:.05em}
+  table{width:100%; border-collapse:collapse; background:var(--panel);
+        border:1px solid var(--line); border-radius:12px; overflow:hidden}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--line);
+        vertical-align:top}
+  th{font-size:11.5px; text-transform:uppercase; letter-spacing:.05em;
+     color:var(--hint); background:color-mix(in srgb, var(--panel) 60%, var(--bg))}
+  tr:last-child td{border-bottom:0}
+  .num{font-variant-numeric:tabular-nums; white-space:nowrap}
+  .hint{color:var(--hint); font-size:12.5px}
+  .pill{display:inline-block; font-size:11.5px; font-weight:700;
+        padding:2px 9px; border-radius:12px; white-space:nowrap}
+  .st-free{background:rgba(44,122,76,.14); color:var(--ok)}
+  .st-booked{background:rgba(169,108,9,.14); color:var(--warn)}
+  .st-rented{background:rgba(40,90,160,.14); color:#4a7fc0}
+  .st-service{background:rgba(125,138,148,.18); color:var(--hint)}
+  .st-lost{background:var(--bad-soft); color:var(--bad)}
+  .overdue{background:var(--bad-soft)}
+  .overdue td:first-child{border-left:3px solid var(--bad)}
+  button.act{border:1px solid var(--line); background:var(--panel); color:var(--ink);
+             font:inherit; font-size:12.5px; padding:4px 10px; border-radius:8px;
+             cursor:pointer; margin:1px 2px}
+  button.act:hover{border-color:var(--accent); color:var(--accent)}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff;
+                 font-weight:700; padding:9px 18px; font-size:14px}
+  textarea, input[type=text], input[type=password]{
+    width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px;
+    background:var(--panel); color:var(--ink); font:inherit}
+  textarea{min-height:300px; font:13px/1.5 ui-monospace,Consolas,monospace}
+  .cols{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+  @media (max-width:900px){ .cols{grid-template-columns:1fr} }
+  .panel{background:var(--panel); border:1px solid var(--line);
+         border-radius:12px; padding:16px 18px}
+  .msg{margin-top:10px; padding:9px 13px; border-radius:9px; font-size:13px}
+  .msg.err{background:var(--bad-soft); color:var(--bad)}
+  .msg.ok{background:rgba(44,122,76,.12); color:var(--ok)}
+  .msg.warn{background:rgba(169,108,9,.12); color:var(--warn)}
+  dl.kv{display:grid; grid-template-columns:max-content 1fr; gap:3px 14px; margin:8px 0}
+  dl.kv dt{color:var(--hint)}
+  #gate{position:fixed; inset:0; background:var(--bg); display:flex;
+        align-items:center; justify-content:center; z-index:50}
+  #gate .panel{width:340px}
+  .sect{display:none} .sect.on{display:block}
+  .toolbar{display:flex; gap:10px; margin-bottom:12px; align-items:center}
+  .toolbar input{max-width:340px}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="panel">
+    <b>My Bike — CRM</b>
+    <p class="hint" style="margin:8px 0 12px">Введите токен доступа
+       (CRM_TOKEN из <code>.env</code> на сервере).</p>
+    <input type="password" id="token" placeholder="токен" autocomplete="current-password">
+    <button class="primary" style="width:100%; margin-top:10px" id="enter">Войти</button>
+    <div id="gate-msg"></div>
+  </div>
+</div>
+
+<header>
+  <b>🚲 My Bike CRM</b>
+  <nav>
+    <button data-s="overview" class="on">Обзор</button>
+    <button data-s="bikes">Парк</button>
+    <button data-s="rentals">Аренды</button>
+    <button data-s="bookings">Брони</button>
+    <button data-s="clients">Клиенты</button>
+    <button data-s="import">Импорт формы</button>
+  </nav>
+</header>
+
+<main>
+  <div id="s-overview" class="sect on"></div>
+  <div id="s-bikes" class="sect"></div>
+  <div id="s-rentals" class="sect"></div>
+  <div id="s-bookings" class="sect"></div>
+  <div id="s-clients" class="sect">
+    <div class="toolbar"><input type="text" id="client-q"
+         placeholder="поиск: имя, телефон, ник"></div>
+    <div id="clients-out"></div>
+  </div>
+  <div id="s-import" class="sect">
+    <div class="cols">
+      <div class="panel">
+        <b>Форма фиксации сдачи</b>
+        <p class="hint" style="margin:6px 0 10px">Вставьте заполненную форму
+           («1. ФИО: …») — бот разберёт её в клиента, единицу и аренду.
+           Сначала «Разобрать»: запись только после предпросмотра.</p>
+        <textarea id="form-text" placeholder="1. ФИО: …"></textarea>
+        <div style="margin-top:10px">
+          <button class="act" id="parse">Разобрать</button>
+          <button class="primary" id="ingest" disabled>Записать в базу</button>
+        </div>
+        <div id="import-msg"></div>
+      </div>
+      <div class="panel"><b>Предпросмотр</b><div id="preview">
+        <p class="hint" style="margin-top:8px">Здесь появится разобранная форма.</p>
+      </div></div>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const ST = {free:["свободен","st-free"], booked:["бронь","st-booked"],
+            rented:["в аренде","st-rented"], service:["сервис","st-service"],
+            lost:["утерян","st-lost"]};
+const pill = s => { const [t,c] = ST[s] || [s,"st-service"];
+                    return `<span class="pill ${c}">${t}</span>`; };
+
+let TOKEN = localStorage.getItem("crm_token") || "";
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({
+    headers: {"Content-Type":"application/json", "X-CRM-Token": TOKEN},
+  }, opts));
+  let body = {};
+  try { body = await r.json(); } catch (e) {}
+  if (r.status === 401) { showGate(); throw "нужен токен"; }
+  if (!r.ok) throw body.error || "ошибка";
+  return body;
+}
+
+function showGate(){ $("gate").style.display = "flex"; }
+$("enter").onclick = async () => {
+  TOKEN = $("token").value.trim();
+  try {
+    await api("/api/admin/ping");
+    localStorage.setItem("crm_token", TOKEN);
+    $("gate").style.display = "none";
+    load("overview");
+  } catch (e) {
+    $("gate-msg").innerHTML =
+      `<div class="msg err">Токен не подошёл. Проверьте CRM_TOKEN в .env
+       (не короче 8 символов) и перезапустите бота.</div>`;
+  }
+};
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
+  document.querySelectorAll(".sect").forEach(x => x.classList.remove("on"));
+  b.classList.add("on");
+  $("s-" + b.dataset.s).classList.add("on");
+  load(b.dataset.s);
+});
+
+// ─── обзор ───
+async function drawOverview(){
+  const o = await api("/api/admin/overview");
+  const s = k => o.bikes[k] || 0;
+  let html = `<div class="cards">
+    <div class="stat"><b>${o.total}</b><span>единиц в парке</span></div>
+    <div class="stat"><b>${s("free")}</b><span>свободно</span></div>
+    <div class="stat"><b>${s("booked")}</b><span>в брони</span></div>
+    <div class="stat"><b>${s("rented")}</b><span>в аренде</span></div>
+    <div class="stat"><b>${s("service")}</b><span>в сервисе</span></div>
+    <div class="stat"><b>${o.rentals_active}</b><span>активных аренд</span></div>
+    <div class="stat ${o.overdue.length ? "bad" : ""}"><b>${o.overdue.length}</b><span>просрочено</span></div>
+    <div class="stat"><b>${o.bookings_active}</b><span>живых броней</span></div>
+  </div>`;
+  if (o.overdue.length) {
+    html += `<h2>Просроченные аренды</h2>` + rentalTable(o.overdue);
+  }
+  $("s-overview").innerHTML = html;
+}
+
+// ─── парк ───
+async function drawBikes(){
+  const rows = await api("/api/admin/bikes");
+  $("s-bikes").innerHTML = `<table><tr><th>#</th><th>Модель</th><th>Рама</th>
+    <th>Точка</th><th>Статус</th><th>Кто держит</th><th></th></tr>` +
+    rows.map(b => `<tr><td class="num">${b.id}</td>
+      <td>${esc(b.model || "—")}</td>
+      <td class="num">${esc(b.vin_frame)}${b.vin_motor ? `<div class="hint">мотор ${esc(b.vin_motor)}</div>` : ""}</td>
+      <td>${esc(b.point || "—")}</td>
+      <td>${pill(b.status)}${b.notes ? `<div class="hint">${esc(b.notes)}</div>` : ""}</td>
+      <td>${esc(b.renter_name || b.hold_note || "")}` +
+      (b.renter_username ? ` <span class="hint">@${esc(b.renter_username)}</span>` : "") + `</td>
+      <td>` + (b.status === "service"
+        ? `<button class="act" onclick="bikeStatus(${b.id},'free')">на витрину</button>`
+        : b.status === "free"
+        ? `<button class="act" onclick="bikeStatus(${b.id},'service')">в сервис</button>`
+        : "") + `</td></tr>`).join("") + `</table>`;
+}
+window.bikeStatus = async (id, status) => {
+  const note = status === "service" ? (prompt("Заметка (что с единицей)?") || "") : "";
+  await api("/api/admin/bike/status", {method:"POST",
+    body: JSON.stringify({bike_id:id, status, note})});
+  drawBikes();
+};
+
+// ─── аренды ───
+function rentalTable(list){
+  if (!list.length) return `<p class="hint">пусто</p>`;
+  return `<table><tr><th>Клиент</th><th>Телефон</th><th>Единица</th>
+    <th>Срок</th><th>Вернуть до</th><th>Оплата</th><th></th></tr>` +
+    list.map(r => `<tr class="${r.overdue ? "overdue" : ""}">
+      <td>${esc(r.client_name || "—")}` +
+      (r.client_username ? ` <span class="hint">@${esc(r.client_username)}</span>` : "") + `</td>
+      <td class="num">${esc(r.client_phone || "—")}</td>
+      <td>${esc(r.model || "—")} <span class="hint num">${esc(r.vin_frame || "")}</span></td>
+      <td class="num">${esc(r.term || "—")}</td>
+      <td class="num">${esc(r.due_at || "—")}${r.overdue ? ` <span class="pill st-lost">просрочено</span>` : ""}</td>
+      <td>${esc(r.price || "—")}</td>
+      <td>${r.closed_at
+        ? `<span class="hint">закрыта ${esc(r.closed_at)}</span>`
+        : `<button class="act" onclick="closeRental(${r.id})">закрыть</button>`}</td>
+      </tr>`).join("") + `</table>`;
+}
+async function drawRentals(){
+  const d = await api("/api/admin/rentals");
+  $("s-rentals").innerHTML =
+    `<h2>Активные (${d.active.length})</h2>` + rentalTable(d.active) +
+    `<h2>Недавно закрытые</h2>` + rentalTable(d.closed);
+}
+window.closeRental = async id => {
+  const note = prompt("Замечания по возврату (пусто — без замечаний):") ?? null;
+  if (note === null) return;
+  const toService = confirm("Отправить единицу в сервис? (Отмена — на витрину)");
+  await api("/api/admin/rental/close", {method:"POST",
+    body: JSON.stringify({rental_id:id, note, to_service:toService})});
+  drawRentals();
+};
+
+// ─── брони ───
+async function drawBookings(){
+  const rows = await api("/api/admin/bookings");
+  $("s-bookings").innerHTML = !rows.length ? `<p class="hint">живых броней нет</p>` :
+    `<table><tr><th>Клиент</th><th>Единица</th><th>Приедет</th>
+     <th>Держится до</th><th>Источник</th><th></th></tr>` +
+    rows.map(b => `<tr>
+      <td>${esc(b.client_name || b.note || "—")}` +
+      (b.client_username ? ` <span class="hint">@${esc(b.client_username)}</span>` : "") + `</td>
+      <td>${esc(b.model || "—")} <span class="hint num">#${b.bike_id} ${esc(b.vin_frame || "")}</span></td>
+      <td class="num">${esc(b.pickup_at || "—")}</td>
+      <td class="num">${esc(b.expires_at)}</td>
+      <td class="hint">${b.source === "app" ? "приложение" : "оператор"}</td>
+      <td><button class="act" onclick="cancelBooking(${b.id})">снять</button></td>
+      </tr>`).join("") + `</table>`;
+}
+window.cancelBooking = async id => {
+  await api("/api/admin/booking/cancel", {method:"POST",
+    body: JSON.stringify({booking_id:id})});
+  drawBookings();
+};
+
+// ─── клиенты ───
+async function drawClients(){
+  const q = $("client-q").value.trim();
+  const rows = await api("/api/admin/clients?q=" + encodeURIComponent(q));
+  $("clients-out").innerHTML = !rows.length ? `<p class="hint">никого не нашлось</p>` :
+    `<table><tr><th>ФИО</th><th>Телефоны</th><th>Telegram</th>
+     <th>Адрес проживания</th><th>Сейчас в аренде</th></tr>` +
+    rows.map(c => `<tr><td>${esc(c.full_name)}</td>
+      <td class="num">${esc(c.phone || "—")}` +
+      (c.phone2 ? `<div class="hint">${esc(c.phone2)}</div>` : "") +
+      (c.phone3 ? `<div class="hint">${esc(c.phone3)}</div>` : "") + `</td>
+      <td>${c.tg_username ? "@" + esc(c.tg_username) : "—"}` +
+      (c.tg_id ? `<div class="hint num">id ${c.tg_id}</div>` : "") + `</td>
+      <td class="hint">${esc(c.live_address || "—")}</td>
+      <td>${c.rental_model
+        ? esc(c.rental_model) + (c.rental_due ? ` <span class="hint num">до ${esc(c.rental_due)}</span>` : "")
+        : "—"}</td></tr>`).join("") + `</table>`;
+}
+let searchTimer;
+$("client-q").oninput = () => { clearTimeout(searchTimer);
+                                searchTimer = setTimeout(drawClients, 300); };
+
+// ─── импорт формы ───
+const FIELD_TITLES = {fio:"ФИО", vin_frame:"Вин рамы", vin_motor:"Вин мотора",
+  rent_term:"Срок", phone:"Телефон", phone2:"Телефон 2", phone3:"Телефон 3",
+  tg_username:"Ник", rent_price:"Оплата", reg_address:"Прописка",
+  live_address:"Проживание", gps:"GPS", return_point:"Адрес сдачи",
+  issued_by:"Кто выдал", tg_subscribed:"Подписка на ТГ", ref_program:"Реф"};
+$("parse").onclick = async () => {
+  $("import-msg").innerHTML = "";
+  try {
+    const d = await api("/api/admin/parse-form", {method:"POST",
+      body: JSON.stringify({text: $("form-text").value})});
+    const p = d.parsed;
+    let kv = "";
+    for (const [k, title] of Object.entries(FIELD_TITLES)) {
+      if (p[k] === undefined) continue;
+      let v = p[k];
+      if (k === "gps") v = v ? "да" : "нет";
+      const note = p[k + "_note"] ? ` <span class="hint">(${esc(p[k+"_note"])})</span>` : "";
+      kv += `<dt>${title}</dt><dd>${esc(v)}${note}</dd>`;
+    }
+    if (d.due_at) kv += `<dt>Вернуть до</dt><dd><b>${esc(d.due_at)}</b></dd>`;
+    const kit = Object.entries(p.kit || {}).filter(([,v]) => v > 0)
+      .map(([k,v]) => `${k.replace("kit_","")}: ${v}`).join(", ");
+    if (kit) kv += `<dt>Комплект</dt><dd>${esc(kit)}</dd>`;
+    $("preview").innerHTML = `<dl class="kv">${kv}</dl>` +
+      (d.warnings.length
+        ? `<div class="msg warn">⚠ ${d.warnings.map(esc).join("<br>⚠ ")}</div>`
+        : `<div class="msg ok">Всё распозналось.</div>`);
+    $("ingest").disabled = false;
+  } catch (e) {
+    $("preview").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+    $("ingest").disabled = true;
+  }
+};
+$("ingest").onclick = async () => {
+  $("ingest").disabled = true;
+  try {
+    const d = await api("/api/admin/ingest-form", {method:"POST",
+      body: JSON.stringify({text: $("form-text").value})});
+    const r = d.result;
+    $("import-msg").innerHTML = `<div class="msg ok">Записано:
+      клиент ${r.client_created ? "создан" : "обновлён"} (#${r.client_id}),
+      единица ${r.bike_created ? "заведена" : "найдена"} (#${r.bike_id}),
+      аренда открыта (#${r.rental_id})` +
+      (r.auto_closed ? `, закрыто хвостов: ${r.auto_closed}` : "") + `.</div>`;
+  } catch (e) {
+    $("import-msg").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+    $("ingest").disabled = false;
+  }
+};
+
+// ─── загрузка ───
+const LOADERS = {overview: drawOverview, bikes: drawBikes, rentals: drawRentals,
+                 bookings: drawBookings, clients: drawClients, import: () => {}};
+async function load(name){
+  try { await LOADERS[name](); }
+  catch (e) { /* 401 уже показал гейт */ }
+}
+(async () => {
+  try { await api("/api/admin/ping"); $("gate").style.display = "none"; load("overview"); }
+  catch (e) { /* гейт остался */ }
+})();
+</script>
+</body>
+</html>

@@ -262,6 +262,9 @@ UPDATES_LOG_DAYS="${UPDATES_LOG_DAYS:-7}"
 # Витрина парка и Mini App; пусто - выключены.
 API_PORT="${API_PORT:-}"
 MINIAPP_URL="${MINIAPP_URL:-}"
+# Токен CRM (/admin). Сгенерирован установщиком; прежнее значение
+# переживает переустановку.
+CRM_TOKEN="${CRM_TOKEN:-$(openssl rand -hex 12)}"
 EOF
 chmod 600 .env
 ok ".env готов"

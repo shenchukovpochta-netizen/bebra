@@ -517,6 +517,7 @@ docker compose logs -f bot-max
 | Витрина парка для приложения | заполнить `API_PORT` в `.env`, раскомментировать `ports` у сервиса `bot` в `docker-compose.yml`, затем `docker compose up -d` — появятся `/api/points`, `/api/models`, `/api/availability` |
 | Mini App «🚲 Бронь» | см. раздел «Mini App» ниже: нужен домен с HTTPS перед ботом |
 | Фото моделей в Mini App | положить jpg в `app/fleet/static/` (имена — в `app/fleet/catalog.py`), перезапустить бота |
+| CRM | открыть `https://ваш-домен/admin`, токен — `CRM_TOKEN` из `.env` (install.sh генерирует сам). Вкладка «Импорт формы» разбирает заполненные формы фиксации в клиента, единицу и аренду |
 | Переспросить настройки | `bash install.sh` |
 
 Сканы и договоры лежат в отдельном томе `kycfiles` и в дамп базы не попадают.
