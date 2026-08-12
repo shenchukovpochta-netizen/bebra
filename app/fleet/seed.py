@@ -73,14 +73,14 @@ async def _backfill(fleet: FleetDB) -> None:
     """
     pool = fleet.pool
     vin = _VIN_SQL.format(expr="u.issue_data->>'vin_frame'")
-    vin_motor = _VIN_SQL.format(expr="u.issue_data->>'vin_motor'")
+    vin_motor = _VIN_SQL.format(expr="v.issue_data->>'vin_motor'")
 
     # Одна рама могла пройти через несколько клиентов: предпочитается
     # строка с действующей арендой, затем самая свежая.
     bikes = await pool.execute(f"""
         insert into fleet.bikes (vin_frame, vin_motor, model_id, status)
         select distinct on (v.vin)
-               v.vin, nullif({vin_motor.replace("u.", "v.")}, ''), m.id,
+               v.vin, nullif({vin_motor}, ''), m.id,
                case when v.act_in_signed_at is not null
                          and v.act_out_signed_at is null
                     then 'rented' else 'free' end

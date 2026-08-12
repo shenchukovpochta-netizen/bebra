@@ -64,7 +64,13 @@ async def run() -> None:
     # у MAX своя база, а техника одна, и учёт у неё должен быть один.
     fleet_db = FleetDB(db.pool)
     await fleet_db.apply_schema(root / "fleet_schema.sql")
-    await fleet_seed.ensure_seed(fleet_db)
+    try:
+        # Посев и бэкфилл - не повод не запуститься: учёт догоняет жизнь,
+        # а не блокирует прокат. Сломанная схема выше - повод: без таблиц
+        # не работают ни хуки, ни команды.
+        await fleet_seed.ensure_seed(fleet_db)
+    except Exception:                                   # noqa: BLE001
+        log.exception("посев/бэкфилл парка не удался - продолжаю без него")
     log.info("схемы применены, справочники парка посеяны")
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
