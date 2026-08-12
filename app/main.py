@@ -16,6 +16,8 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import MenuButtonWebApp, WebAppInfo
 
 from . import tasks
 from .config import Config
@@ -64,6 +66,7 @@ async def run() -> None:
     # у MAX своя база, а техника одна, и учёт у неё должен быть один.
     fleet_db = FleetDB(db.pool)
     await fleet_db.apply_schema(root / "fleet_schema.sql")
+    log.info("схемы применены")
     try:
         # Посев и бэкфилл - не повод не запуститься: учёт догоняет жизнь,
         # а не блокирует прокат. Сломанная схема выше - повод: без таблиц
@@ -71,7 +74,6 @@ async def run() -> None:
         await fleet_seed.ensure_seed(fleet_db)
     except Exception:                                   # noqa: BLE001
         log.exception("посев/бэкфилл парка не удался - продолжаю без него")
-    log.info("схемы применены, справочники парка посеяны")
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
@@ -95,8 +97,22 @@ async def run() -> None:
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
     holds = asyncio.create_task(tasks.fleet_loop(fleet_db))
-    # Витрина парка (точки, каталог, наличие) - только при заданном порте.
-    api_runner = await start_api(fleet_db, cfg.api_port) if cfg.api_port else None
+    # Витрина парка и Mini App - только при заданном порте. Боту и токен,
+    # и служебный чат нужны для карточек «бронь из приложения».
+    api_runner = None
+    if cfg.api_port:
+        api_runner = await start_api(
+            fleet_db, cfg.api_port, bot=bot,
+            admin_chat_id=cfg.contract_chat_id, bot_token=cfg.bot_token)
+    # Кнопка меню «🚲 Бронь» во всех личных чатах: появляется, как только
+    # владелец опубликовал Mini App по HTTPS и заполнил MINIAPP_URL.
+    if cfg.miniapp_url:
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
+                text="🚲 Бронь", web_app=WebAppInfo(url=cfg.miniapp_url)))
+        except TelegramAPIError:
+            log.exception("кнопка Mini App не установилась - проверьте "
+                          "MINIAPP_URL (нужен публичный HTTPS-адрес)")
 
     # docker stop шлёт SIGTERM. Без обработчика процесс умирает мгновенно:
     # фоновые задачи (сохранение скана, хэш) обрываются на полуслове,

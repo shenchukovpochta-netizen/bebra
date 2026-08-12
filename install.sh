@@ -259,8 +259,9 @@ PURGE_APPROVED_DAYS="${PURGE_APPROVED_DAYS}"
 PURGE_REJECTED_DAYS="${PURGE_REJECTED_DAYS}"
 UPDATES_LOG_DAYS="${UPDATES_LOG_DAYS:-7}"
 
-# Витрина парка для будущего приложения; пусто - выключена.
+# Витрина парка и Mini App; пусто - выключены.
 API_PORT="${API_PORT:-}"
+MINIAPP_URL="${MINIAPP_URL:-}"
 EOF
 chmod 600 .env
 ok ".env готов"

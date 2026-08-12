@@ -150,6 +150,11 @@ class Config:
     # Не задан - витрина не поднимается: у бота без приложения лишний
     # открытый порт не нужен.
     api_port: int | None = None
+    # Публичный HTTPS-адрес Mini App (витрина + бронь). Задан - у бота
+    # появляется кнопка меню «🚲 Бронь», открывающая приложение. Telegram
+    # принимает только HTTPS, поэтому перед ботом нужен reverse-proxy
+    # с сертификатом (см. INSTALL.md).
+    miniapp_url: str = ""
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -218,5 +223,6 @@ class Config:
             rate_soft=_int("RATE_SOFT", str(logic.RATE_SOFT_DEFAULT)),
             rate_hard=_int("RATE_HARD", str(logic.RATE_HARD_DEFAULT)),
             api_port=_int_or_none("API_PORT"),
+            miniapp_url=_env("MINIAPP_URL"),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
         )

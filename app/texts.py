@@ -599,6 +599,17 @@ FLEET_UNHOLD_OK = "🟢 #{id} снова свободна."
 FLEET_UNHOLD_NONE = "На #{id} нет живой брони."
 FLEET_SERVICE_OK = "🔧 #{id} переведена в сервис{note}."
 FLEET_FREE_OK = "🟢 #{id} переведена в «свободен»."
+FLEET_BOOKING_CARD = (
+    "📲 Бронь из приложения\n\n"
+    "Клиент: <b>{name}</b> ({handle}, ID {tg_id})\n"
+    "Модель: <b>{model}</b>, точка: {point}\n"
+    "Обещал приехать: <b>{pickup}</b>\n"
+    "Единица #{bike_id} удержана до {expires}.\n\n"
+    "<i>Не приедет — бронь снимется сама. Снять раньше: /unhold {bike_id}</i>"
+)
+FLEET_BOOKING_CANCELLED = (
+    "📲 {name} (ID {tg_id}) отменил(а) бронь — единица #{bike_id} снова свободна."
+)
 
 # ─── MAX-бот ───
 # MAX сознательно отстаёт от Telegram-версии: там старый порядок без шага

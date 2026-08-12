@@ -54,7 +54,8 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/contract.py', 'app/handlers/faq.py',
               'app/handlers/fleet.py')
 $fleet = @('app/fleet/__init__.py', 'app/fleet/logic.py', 'app/fleet/db.py',
-           'app/fleet/seed.py', 'app/fleet/api.py')
+           'app/fleet/seed.py', 'app/fleet/api.py', 'app/fleet/webauth.py',
+           'app/fleet/webapp.html')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
@@ -63,7 +64,8 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
           'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
-          'tests/test_fleet.py', 'tests/test_fleet_sql.py')
+          'tests/test_fleet.py', 'tests/test_fleet_sql.py',
+          'tests/test_webauth.py')
 
 foreach ($f in ($root + $app + $handlers + $services + $fleet + $max + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }

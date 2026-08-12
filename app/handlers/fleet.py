@@ -51,7 +51,12 @@ async def fleet_command(message: Message, cfg: Config,
                         fleet: FleetDB | None = None) -> None:
     if fleet is None:
         return                    # парк не подключён (сборка без main.run)
-    if message.from_user is None or message.from_user.id not in cfg.admins:
+    # Кроме админов, команды доступны утверждающему в его личке: писать
+    # в личный чат может только он сам, а в ADMINS он входить не обязан.
+    from_owner_private = (message.chat.type == "private"
+                          and message.chat.id == cfg.contract_chat_id)
+    if message.from_user is None or not (
+            message.from_user.id in cfg.admins or from_owner_private):
         return                    # молча, как в модерации: команда не наша
     name = fl.command_name(message.text)
     args = fl.command_args(message.text)
@@ -107,6 +112,10 @@ async def _bike(message: Message, fleet: FleetDB, args: str) -> None:
         battery_count=data.get("battery_count"),
         status=str(data.get("status") or "") or None,
         notes=str(data.get("notes") or "") or None)
+    if data.get("status") and data["status"] != fl.BOOKED:
+        # Явная смена статуса снимает живую бронь, как в /service и /free:
+        # оставленная held-бронь на свободной единице - мина под /hold.
+        await fleet.cancel_holds(row["id"])
     card = await fleet.bike_card(row["id"])
     await message.answer(texts.FLEET_BIKE_SAVED.format(
         bike=fl.bike_line(dict(card or row))))

@@ -46,6 +46,7 @@ if unused_in_compose:
 # ── 2. переменные, которые читает config.py ──────────────────────────────
 config_vars = set(re.findall(r'_env\(\s*"([A-Z_][A-Z0-9_]*)"', config))
 config_vars |= set(re.findall(r'_int\(\s*"([A-Z_][A-Z0-9_]*)"', config))
+config_vars |= set(re.findall(r'_int_or_none\(\s*"([A-Z_][A-Z0-9_]*)"', config))
 config_secrets = set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', config))
 # Переменные, которые compose задаёт литералом, а не через ${}: подставлять
 # их из .env незачем, значение фиксировано устройством контейнера.

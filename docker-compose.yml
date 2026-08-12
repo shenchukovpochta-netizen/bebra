@@ -93,6 +93,8 @@ services:
       # чтобы порт был виден с хоста (только localhost - наружу его должен
       # отдавать reverse-proxy с TLS, а не docker напрямую).
       API_PORT: ${API_PORT}
+      # Публичный HTTPS-адрес Mini App: включает кнопку меню «🚲 Бронь».
+      MINIAPP_URL: ${MINIAPP_URL}
     # ports:
     #   - "127.0.0.1:${API_PORT}:${API_PORT}"
     volumes:

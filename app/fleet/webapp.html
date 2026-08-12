@@ -1,0 +1,303 @@
+<!doctype html>
+<!-- Mini App проката: витрина, бронь, «моё». Один файл без сборки -
+     в духе проекта: код читается, диффится и правится без node_modules.
+     Открывается кнопкой меню бота (MINIAPP_URL); вне Telegram работает
+     как витрина без входа. Личные запросы подписаны initData - сервер
+     проверяет подпись, заголовку с одним лишь tg_id он не верит. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Аренда велосипедов</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --fg: var(--tg-theme-text-color, #141a20);
+    --hint: var(--tg-theme-hint-color, #7d8a94);
+    --link: var(--tg-theme-link-color, #a96c09);
+    --btn: var(--tg-theme-button-color, #a96c09);
+    --btn-fg: var(--tg-theme-button-text-color, #ffffff);
+    --card: var(--tg-theme-secondary-bg-color, #f2f4f6);
+    --ok:#2c7a4c; --warn:#a96c09; --bad:#a93526;
+  }
+  *{box-sizing:border-box; margin:0}
+  body{background:var(--bg); color:var(--fg);
+       font:16px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+       padding:12px 14px 90px}
+  h1{font-size:20px; margin:6px 0 14px}
+  h2{font-size:15px; margin:18px 0 8px; color:var(--hint);
+     text-transform:uppercase; letter-spacing:.04em; font-weight:600}
+  .card{background:var(--card); border-radius:12px; padding:12px 14px; margin-bottom:10px}
+  .row{display:flex; justify-content:space-between; gap:10px; align-items:baseline}
+  .hint{color:var(--hint); font-size:13px}
+  .num{font-variant-numeric:tabular-nums}
+  .free{color:var(--ok); font-weight:600}
+  .none{color:var(--hint)}
+  a{color:var(--link); text-decoration:none}
+  .tabs{position:fixed; left:0; right:0; bottom:0; display:flex;
+        background:var(--card); border-top:1px solid rgba(125,138,148,.25)}
+  .tabs button{flex:1; padding:12px 4px calc(12px + env(safe-area-inset-bottom));
+        border:0; background:none; color:var(--hint); font:inherit; font-size:13px}
+  .tabs button.on{color:var(--link); font-weight:700}
+  .pick{display:flex; flex-direction:column; gap:8px}
+  .pick label{background:var(--card); border-radius:12px; padding:12px 14px;
+        display:flex; justify-content:space-between; gap:10px; align-items:center;
+        border:2px solid transparent; cursor:pointer}
+  .pick input{position:absolute; opacity:0}
+  .pick label.on{border-color:var(--btn)}
+  select{width:100%; padding:12px 14px; border-radius:12px; border:0;
+         background:var(--card); color:var(--fg); font:inherit}
+  .big{display:block; width:100%; padding:14px; margin-top:14px; border:0;
+       border-radius:12px; background:var(--btn); color:var(--btn-fg);
+       font:inherit; font-size:16px; font-weight:700}
+  .big[disabled]{opacity:.5}
+  .ghost{background:none; color:var(--bad); font-weight:600; border:0;
+         font:inherit; padding:10px 0}
+  .msg{margin-top:12px; padding:10px 14px; border-radius:10px; font-size:14px}
+  .msg.err{background:rgba(169,53,38,.12); color:var(--bad)}
+  .msg.ok{background:rgba(44,122,76,.12); color:var(--ok)}
+  .badge{font-size:12px; font-weight:700; padding:2px 8px; border-radius:12px;
+         background:rgba(169,108,9,.15); color:var(--warn)}
+  .sect{display:none}
+  .sect.on{display:block}
+</style>
+</head>
+<body>
+<h1 id="title">🚲 Аренда велосипедов</h1>
+
+<div id="tab-vitrina" class="sect on">
+  <h2>Точки и наличие</h2>
+  <div id="points"></div>
+  <h2>Тарифы</h2>
+  <div id="models"></div>
+  <p class="hint">Продление после срока — по тарифу модели, ₽/сутки.
+     Оформление документов — в чате с ботом после брони.</p>
+</div>
+
+<div id="tab-bron" class="sect">
+  <h2>Модель</h2>
+  <div id="pick-model" class="pick"></div>
+  <h2>Точка</h2>
+  <div id="pick-point" class="pick"></div>
+  <h2>Когда приедете</h2>
+  <select id="pick-time"></select>
+  <button id="book" class="big">Забронировать</button>
+  <div id="book-msg"></div>
+</div>
+
+<div id="tab-moe" class="sect">
+  <div id="me"></div>
+</div>
+
+<nav class="tabs">
+  <button data-tab="vitrina" class="on">Витрина</button>
+  <button data-tab="bron">Бронь</button>
+  <button data-tab="moe">Моё</button>
+</nav>
+
+<script>
+"use strict";
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const initData = (tg && tg.initData) || "";
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const price = n => Number(n).toLocaleString("ru-RU") + " ₽";
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({
+    headers: Object.assign({"Content-Type": "application/json"},
+                           initData ? {"X-Telegram-Init-Data": initData} : {}),
+  }, opts));
+  let body = {};
+  try { body = await r.json(); } catch (e) { /* пустой ответ */ }
+  if (!r.ok) throw body.error || "Что-то пошло не так.";
+  return body;
+}
+
+// ─── вкладки ───
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("on"));
+  document.querySelectorAll(".sect").forEach(x => x.classList.remove("on"));
+  b.classList.add("on");
+  $("tab-" + b.dataset.tab).classList.add("on");
+  if (b.dataset.tab === "moe") loadMe();
+});
+
+// ─── витрина ───
+let POINTS = [], MODELS = [], AVAIL = [];
+
+function freeCount(pointTitle, modelTitle) {
+  return AVAIL.filter(a =>
+    (pointTitle == null || a.point === pointTitle) &&
+    (modelTitle == null || a.model === modelTitle))
+    .reduce((s, a) => s + a.free, 0);
+}
+
+function drawVitrina() {
+  $("points").innerHTML = POINTS.map(p => {
+    const lines = MODELS.map(m => {
+      const n = freeCount(p.title, m.title);
+      return `<div class="row"><span>${esc(m.title)}</span>` +
+             `<span class="${n ? "free" : "none"} num">${n ? "свободно " + n : "нет"}</span></div>`;
+    }).join("");
+    const mapsUrl = "https://yandex.ru/maps/?text=" +
+                    encodeURIComponent("Казань, " + (p.address || p.title));
+    return `<div class="card"><div class="row"><b>${esc(p.title)}</b>` +
+           `<span class="hint num">${p.open_hour}:00–${p.close_hour}:00</span></div>` +
+           `<a class="hint" href="${mapsUrl}" target="_blank">показать на карте</a>` +
+           `${lines}</div>`;
+  }).join("");
+
+  $("models").innerHTML = MODELS.map(m => {
+    const rows = (m.tariffs || []).map(t => {
+      const name = {7: "1 неделя", 14: "2 недели", 30: "1 месяц"}[t.period_days]
+                   || (t.period_days + " дн.");
+      return `<div class="row"><span class="hint">${name}</span>` +
+             `<span class="num">${price(t.price)}</span></div>`;
+    }).join("");
+    return `<div class="card"><b>${esc(m.title)}</b>${rows}` +
+           `<div class="row"><span class="hint">продление</span>` +
+           `<span class="num hint">${price(m.extend_price)}/сутки</span></div></div>`;
+  }).join("");
+}
+
+// ─── бронь ───
+function drawBooking() {
+  $("pick-model").innerHTML = MODELS.map(m => {
+    const week = (m.tariffs || []).find(t => t.period_days === 7);
+    const n = freeCount(null, m.title);
+    return `<label data-id="${m.id}"><span><b>${esc(m.title)}</b>` +
+           `<div class="hint">${n ? "свободно " + n : "нет свободных"}</div></span>` +
+           `<span class="num">${week ? "от " + price(week.price) + "/нед" : ""}</span>` +
+           `<input type="radio" name="model" value="${m.id}"></label>`;
+  }).join("");
+  $("pick-point").innerHTML = POINTS.map(p =>
+    `<label data-id="${p.id}"><span><b>${esc(p.title)}</b></span>` +
+    `<input type="radio" name="point" value="${p.id}"></label>`).join("");
+  document.querySelectorAll(".pick label").forEach(l => l.onclick = () => {
+    const group = l.parentElement;
+    group.querySelectorAll("label").forEach(x => x.classList.remove("on"));
+    l.classList.add("on");
+    l.querySelector("input").checked = true;
+  });
+  drawTimes();
+}
+
+function drawTimes() {
+  // Слоты - целые часы в рабочее время, сегодня и завтра. Точное «14:20»
+  // не обещаем: выдача занимает время.
+  const open = POINTS.length ? POINTS[0].open_hour : 10;
+  const close = POINTS.length ? POINTS[0].close_hour : 19;
+  const now = new Date(), opts = [];
+  for (const dayShift of [0, 1]) {
+    for (let h = open; h < close; h++) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayShift, h);
+      if (d.getTime() < now.getTime() + 15 * 60000) continue;
+      const label = (dayShift ? "завтра " : "сегодня ") + h + ":00";
+      opts.push(`<option value="${Math.floor(d.getTime() / 1000)}">${label}</option>`);
+    }
+  }
+  $("pick-time").innerHTML = opts.join("") ||
+    `<option value="">сегодня и завтра точки уже закрыты</option>`;
+}
+
+function msg(el, text, kind) {
+  el.innerHTML = text ? `<div class="msg ${kind}">${esc(text)}</div>` : "";
+}
+
+$("book").onclick = async () => {
+  if (!initData) {
+    msg($("book-msg"), "Откройте приложение из чата с ботом — кнопка «🚲 Бронь» в меню.", "err");
+    return;
+  }
+  const model = document.querySelector('input[name="model"]:checked');
+  const point = document.querySelector('input[name="point"]:checked');
+  const time = $("pick-time").value;
+  if (!model || !point || !time) {
+    msg($("book-msg"), "Выберите модель, точку и время визита.", "err");
+    return;
+  }
+  $("book").disabled = true;
+  try {
+    const r = await api("/api/book", {method: "POST", body: JSON.stringify({
+      model_id: +model.value, point_id: +point.value, pickup_at: +time})});
+    msg($("book-msg"),
+        `Забронировано: ${r.booking.model}, ${r.booking.point}. ` +
+        `Ждём вас ${r.booking.pickup_at}; бронь держится до ${r.booking.expires_at}. ` +
+        `Оформление документов — в чате с ботом.`, "ok");
+    if (tg) tg.HapticFeedback.notificationOccurred("success");
+    loadAll();
+  } catch (e) {
+    msg($("book-msg"), String(e), "err");
+  } finally {
+    $("book").disabled = false;
+  }
+};
+
+// ─── моё ───
+async function loadMe() {
+  if (!initData) {
+    $("me").innerHTML = `<div class="card">Откройте приложение из чата с ботом,
+      чтобы видеть свои брони и аренды.</div>`;
+    return;
+  }
+  try {
+    const me = await api("/api/me");
+    let html = "";
+    if (me.booking) {
+      html += `<div class="card"><div class="row"><b>Бронь</b>` +
+        `<span class="badge">до ${esc(me.booking.expires_at)}</span></div>` +
+        `${esc(me.booking.model || "")}, ${esc(me.booking.point || "")}` +
+        `<div class="hint">${esc(me.booking.address || "")}</div>` +
+        `<div class="hint">ждём вас ${esc(me.booking.pickup_at)}</div>` +
+        `<button class="ghost" id="cancel">Отменить бронь</button></div>`;
+    }
+    if (me.rental) {
+      html += `<div class="card"><div class="row"><b>Велосипед у вас</b>` +
+        (me.rental.due_at ? `<span class="badge">вернуть до ${esc(me.rental.due_at)}</span>` : "") +
+        `</div>${esc(me.rental.model || "")}` +
+        `<div class="hint">договор № ${esc(me.rental.contract_no || "—")}, ` +
+        `срок: ${esc(me.rental.term || "—")}</div>` +
+        `<div class="hint">Продлить или закрыть аренду — в чате с ботом.</div></div>`;
+    }
+    if (!me.booking && !me.rental) {
+      html += `<div class="card">Активных броней и аренд нет.</div>`;
+    }
+    if (me.history && me.history.length) {
+      html += `<h2>Прошлые аренды</h2>` + me.history.map(h =>
+        `<div class="card"><div class="row"><span>${esc(h.model || "—")}</span>` +
+        `<span class="hint num">${esc(h.closed_at)}</span></div>` +
+        `<div class="hint">№ ${esc(h.contract_no || "—")}, срок: ${esc(h.term || "—")}</div></div>`
+      ).join("");
+    }
+    $("me").innerHTML = html;
+    const cancel = $("cancel");
+    if (cancel) cancel.onclick = async () => {
+      try { await api("/api/cancel", {method: "POST", body: "{}"}); }
+      catch (e) { /* уже снята */ }
+      loadMe(); loadAll();
+    };
+  } catch (e) {
+    $("me").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+  }
+}
+
+// ─── загрузка ───
+async function loadAll() {
+  try {
+    [POINTS, MODELS, AVAIL] = await Promise.all(
+      [api("/api/points"), api("/api/models"), api("/api/availability")]);
+    drawVitrina();
+    drawBooking();
+  } catch (e) {
+    $("points").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+  }
+}
+loadAll();
+</script>
+</body>
+</html>

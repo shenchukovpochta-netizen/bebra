@@ -87,6 +87,15 @@ create unique index if not exists bookings_active_bike_idx
 create index if not exists bookings_expiry_idx
   on fleet.bookings (hold_expires_at) where status = 'held';
 
+-- Мини-приложение: бронь знает, когда клиент обещал приехать и откуда
+-- она пришла. Колонки добавляются идемпотентно, как миграции в schema.sql.
+alter table fleet.bookings add column if not exists pickup_at timestamptz;
+alter table fleet.bookings add column if not exists source text not null default 'operator';
+-- Одна живая бронь на клиента: два удержания под одного человека - это
+-- два велосипеда, снятые с витрины под один визит.
+create unique index if not exists bookings_active_tg_idx
+  on fleet.bookings (tg_id) where status = 'held' and tg_id is not null;
+
 -- Аренда: от подписанного Акта приёма-передачи до Акта возврата.
 -- bike_id допускает NULL у исторических строк: закрытая аренда из старого
 -- события bot.events может не знать раму, а история важнее полноты.

@@ -51,6 +51,17 @@ class TestBikeForm(unittest.TestCase):
         self.assertIsNone(data)
         self.assertIn("колесо", err)
 
+    def test_error_texts_escape_operator_input(self):
+        # Ошибка уходит в Telegram с parse_mode=HTML: сырое «<х>вилка»
+        # валило бы отправку, и оператор получал бы тишину.
+        data, err = fleet.parse_bike_form("рама: 1\n<х>вилка: 26")
+        self.assertIsNone(data)
+        self.assertNotIn("<х>", err)
+        self.assertIn("&lt;х&gt;", err)
+        data, err = fleet.parse_bike_form("рама: 1\nакб: <два>")
+        self.assertIsNone(data)
+        self.assertNotIn("<два>", err)
+
     def test_battery_must_be_digit(self):
         data, err = fleet.parse_bike_form("рама: 1\nакб: два")
         self.assertIsNone(data)
@@ -95,10 +106,18 @@ class TestHoldForm(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(data["minutes"], 270)
 
-    def test_until_past_rejected(self):
+    def test_until_past_means_tomorrow(self):
+        # «до 09:00» вечером - это до утра, а не ошибка.
         data, err = self.parse("велосипед: 3\nдо: 13:00")
+        self.assertEqual(err, "")
+        self.assertEqual(data["minutes"], 23 * 60)
+
+    def test_until_and_hours_together_rejected(self):
+        # Молчаливый победитель опасен: оператор думает про 5 часов,
+        # а бронь живёт до «до».
+        data, err = self.parse("велосипед: 3\nчасов: 5\nдо: 18:00")
         self.assertIsNone(data)
-        self.assertIn("прошло", err)
+        self.assertIn("не вместе", err)
 
     def test_until_bad_time(self):
         data, err = self.parse("велосипед: 3\nдо: 25:99")
@@ -174,6 +193,58 @@ class TestRefArgs(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(fleet.parse_ref_args(""), ("", ""))
         self.assertEqual(fleet.parse_ref_args(None), ("", ""))
+
+
+class TestPickup(unittest.TestCase):
+    NOW = datetime(2026, 8, 12, 14, 0)
+
+    def check(self, ts, **kw):
+        kw.setdefault("now", self.NOW)
+        kw.setdefault("open_hour", 10)
+        kw.setdefault("close_hour", 19)
+        return fleet.validate_pickup(ts, **kw)
+
+    def ts(self, dt: datetime) -> int:
+        return int(dt.timestamp())
+
+    def test_future_working_hour_ok(self):
+        pickup, err = self.check(self.ts(datetime(2026, 8, 12, 17, 0)))
+        self.assertEqual(err, "")
+        self.assertEqual((pickup.hour, pickup.minute), (17, 0))
+
+    def test_clock_skew_tolerated(self):
+        # «Сейчас» с телефона, часы которого отстают на пару минут.
+        pickup, err = self.check(self.ts(self.NOW) - 120)
+        self.assertEqual(err, "")
+
+    def test_past_rejected(self):
+        pickup, err = self.check(self.ts(datetime(2026, 8, 12, 11, 0)))
+        self.assertIsNone(pickup)
+        self.assertIn("прошло", err)
+
+    def test_too_far_rejected(self):
+        pickup, err = self.check(self.ts(datetime(2026, 8, 15, 12, 0)))
+        self.assertIsNone(pickup)
+        self.assertIn("вперёд", err)
+
+    def test_outside_working_hours_rejected(self):
+        pickup, err = self.check(self.ts(datetime(2026, 8, 13, 9, 0)))
+        self.assertIsNone(pickup)
+        self.assertIn("работают", err)
+
+    def test_garbage_is_error_not_traceback(self):
+        for raw in (None, "не число", 10**18, -1):
+            pickup, err = self.check(raw)
+            self.assertIsNone(pickup, raw)
+            self.assertTrue(err, raw)
+
+    def test_hold_minutes_cover_pickup_plus_grace(self):
+        pickup = datetime(2026, 8, 12, 17, 0)
+        minutes = fleet.hold_minutes_for_pickup(pickup, now=self.NOW)
+        self.assertEqual(minutes, 180 + fleet.BOOKING_GRACE_MINUTES)
+        # Визит «прямо сейчас» всё равно держит единицу на запас опоздания.
+        self.assertEqual(fleet.hold_minutes_for_pickup(self.NOW, now=self.NOW),
+                         fleet.BOOKING_GRACE_MINUTES)
 
 
 class TestNeedsService(unittest.TestCase):

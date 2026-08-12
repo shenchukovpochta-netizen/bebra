@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from ..logic import esc
 
@@ -45,6 +45,12 @@ HELD, ISSUED, EXPIRED, CANCELLED = "held", "issued", "expired", "cancelled"
 
 HOLD_DEFAULT_MINUTES = 120          # «клиент выехал» - пара часов запаса
 HOLD_MAX_MINUTES = 24 * 60          # дольше суток - это уже не удержание
+
+# Бронь из приложения: единица держится до обещанного визита плюс запас
+# на опоздание. Горизонт - двое суток: дальше это не бронь, а разговор
+# с оператором о планах.
+BOOKING_GRACE_MINUTES = 60
+BOOKING_HORIZON_HOURS = 48
 
 
 def _clean(raw: str | None) -> str:
@@ -111,11 +117,14 @@ def parse_bike_form(raw: str | None) -> tuple[dict[str, object] | None, str]:
         value = _clean(value)
         if not value:
             continue
+        # Ключ и значение в текстах ошибок экранируются: ответ уходит
+        # с parse_mode=HTML, и «<х>вилка» в сырой ошибке валила бы отправку.
         if not _no_markup(value):
-            return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
+            return None, f"В строке «{esc(key.strip())}» недопустимы символы < > и &."
         if field == "battery_count":
             if not value.isdigit():
-                return None, f"«{key.strip()}» - нужно число, получено «{value}»."
+                return None, (f"«{esc(key.strip())}» - нужно число, "
+                              f"получено «{esc(value)}».")
             data[field] = int(value)
         elif field == "status":
             status = RU_STATUS.get(value.lower())
@@ -128,7 +137,7 @@ def parse_bike_form(raw: str | None) -> tuple[dict[str, object] | None, str]:
         else:
             data[field] = value
     if unknown:
-        return None, ("Не понял строки: " + ", ".join(unknown[:5])
+        return None, ("Не понял строки: " + ", ".join(esc(k) for k in unknown[:5])
                       + ". Ключи: " + ", ".join(sorted(set(BIKE_ALIASES))) + ".")
     if not data.get("vin_frame"):
         return None, "Не хватает строки «рама: ...» - без вин-номера рамы единицу не завести."
@@ -182,16 +191,18 @@ def parse_hold_form(raw: str | None, *, now: datetime) -> tuple[dict[str, object
         if not value:
             continue
         if not _no_markup(value):
-            return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
+            return None, f"В строке «{esc(key.strip())}» недопустимы символы < > и &."
         if field == "bike":
             bike_ref = value
         elif field == "hours":
             if not value.isdigit():
-                return None, f"«{key.strip()}» - нужно число часов, получено «{value}»."
+                return None, (f"«{esc(key.strip())}» - нужно число часов, "
+                              f"получено «{esc(value)}».")
             hours = int(value)
         elif field == "minutes":
             if not value.isdigit():
-                return None, f"«{key.strip()}» - нужно число минут, получено «{value}»."
+                return None, (f"«{esc(key.strip())}» - нужно число минут, "
+                              f"получено «{esc(value)}».")
             minutes = int(value)
         elif field == "until":
             m = re.fullmatch(r"(\d{1,2})[:.](\d{2})", value)
@@ -203,14 +214,20 @@ def parse_hold_form(raw: str | None, *, now: datetime) -> tuple[dict[str, object
             except ValueError:
                 return None, "Такого времени не бывает. Проверьте часы и минуты."
             if until <= now:
-                return None, "«до " + value + "» уже прошло - укажите время впереди."
+                # «до 09:00» вечером - это до утра: время в прошлом
+                # означает следующий день, а не ошибку.
+                until += timedelta(days=1)
         else:
             note_parts.append(value)
     if unknown:
-        return None, ("Не понял строки: " + ", ".join(unknown[:5])
+        return None, ("Не понял строки: " + ", ".join(esc(k) for k in unknown[:5])
                       + ". Ключи: " + ", ".join(sorted(set(HOLD_ALIASES))) + ".")
     if not bike_ref:
         return None, "Не хватает строки «велосипед: ...» - номер из /bikes или вин рамы."
+    if until is not None and (hours or minutes):
+        # Молчаливый победитель здесь опасен: оператор думает, что удержал
+        # на 5 часов, а бронь живёт до «до». Пусть выберет что-то одно.
+        return None, "Либо «до: ЧЧ:ММ», либо «часов/минут» - не вместе."
     if until is not None:
         total = int((until - now).total_seconds() // 60)
     else:
@@ -262,6 +279,34 @@ def command_args(text: str | None) -> str:
     text = (text or "").strip()
     m = _CMD.match(text)
     return text[m.end():].strip() if m else text
+
+
+def validate_pickup(ts, *, now: datetime, open_hour: int,
+                    close_hour: int) -> tuple[datetime | None, str]:
+    """Время визита из Mini App: (datetime, "") либо (None, ошибка).
+
+    ts - unix-секунды; переводятся в местное время сервера (контейнер живёт
+    в TZ проката), и рабочие часы проверяются в нём же. Пять минут назад -
+    ещё не «прошло»: клиент жмёт «сейчас», а часы телефона спешат.
+    """
+    try:
+        pickup = datetime.fromtimestamp(int(ts), tz=now.tzinfo)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None, "Не понял время визита."
+    if (now - pickup).total_seconds() > 5 * 60:
+        return None, "Это время уже прошло. Выберите время впереди."
+    if (pickup - now).total_seconds() > BOOKING_HORIZON_HOURS * 3600:
+        return None, (f"Бронь принимается не дальше, чем на "
+                      f"{BOOKING_HORIZON_HOURS // 24} суток вперёд.")
+    if not open_hour <= pickup.hour < close_hour:
+        return None, f"Точки работают с {open_hour}:00 до {close_hour}:00."
+    return pickup, ""
+
+
+def hold_minutes_for_pickup(pickup: datetime, *, now: datetime) -> int:
+    """Сколько держать единицу: до визита плюс запас на опоздание."""
+    minutes = int((pickup - now).total_seconds() // 60) + BOOKING_GRACE_MINUTES
+    return max(minutes, BOOKING_GRACE_MINUTES)
 
 
 def needs_service(close: dict | None) -> bool:

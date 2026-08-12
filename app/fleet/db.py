@@ -207,11 +207,17 @@ class FleetDB:
                     bike_id)
                 if updated is None:
                     return False
-                await conn.execute(
-                    "insert into fleet.bookings "
-                    "  (bike_id, note, hold_expires_at, created_by) "
-                    "values ($1, $2, now() + ($3 || ' minutes')::interval, $4)",
-                    bike_id, note or None, str(int(minutes)), created_by)
+                try:
+                    await conn.execute(
+                        "insert into fleet.bookings "
+                        "  (bike_id, note, hold_expires_at, created_by) "
+                        "values ($1, $2, now() + ($3 || ' minutes')::interval, $4)",
+                        bike_id, note or None, str(int(minutes)), created_by)
+                except asyncpg.UniqueViolationError:
+                    # Осиротевшая живая бронь (единицу освободили мимо
+                    # /unhold). Честное «не свободна» вместо трейсбека:
+                    # транзакция откатится, статус вернётся как был.
+                    return False
         return True
 
     async def unhold(self, bike_id: int) -> bool:
@@ -245,20 +251,133 @@ class FleetDB:
                         [r["bike_id"] for r in rows])
         return len(rows)
 
+    async def cancel_holds(self, bike_id: int,
+                           conn: asyncpg.Connection | None = None) -> None:
+        """Снять живые брони единицы, не трогая её статус.
+
+        Вызывается при любой явной смене статуса оператором (set_status
+        и форма /bike): оставленная held-бронь на свободной единице -
+        это мина, о которую следующий /hold споткнётся об уникальный индекс.
+        """
+        await (conn or self.pool).execute(
+            "update fleet.bookings set status = 'cancelled', updated_at = now() "
+            "where bike_id = $1 and status = 'held'",
+            bike_id)
+
     async def set_status(self, bike_id: int, status: str,
                          note: str | None = None) -> None:
         """Перевод руками: /service, /free. Живая бронь при этом снимается -
         оператор, отправляющий единицу в ремонт, решил за бронь тоже."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
-                    "update fleet.bookings set status = 'cancelled', updated_at = now() "
-                    "where bike_id = $1 and status = 'held'",
-                    bike_id)
+                await self.cancel_holds(bike_id, conn=conn)
                 await conn.execute(
                     "update fleet.bikes set status = $2, "
                     "notes = coalesce($3, notes), updated_at = now() where id = $1",
                     bike_id, status, note or None)
+
+    # ─────────────────────── бронь из приложения ───────────────────────
+
+    async def active_rental_of(self, tg_id: int) -> asyncpg.Record | None:
+        return await self.pool.fetchrow(
+            """
+            select r.id, r.contract_no, r.rent_term, r.rent_price, r.due_at,
+                   r.opened_at, b.id as bike_id, m.title as model
+            from fleet.rentals r
+            left join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            where r.tg_id = $1 and r.closed_at is null
+            """, tg_id)
+
+    async def active_booking_of(self, tg_id: int) -> asyncpg.Record | None:
+        return await self.pool.fetchrow(
+            """
+            select bk.id, bk.pickup_at, bk.hold_expires_at, bk.created_at,
+                   b.id as bike_id, m.title as model, p.title as point,
+                   p.address
+            from fleet.bookings bk
+            join fleet.bikes b on b.id = bk.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.points p on p.id = b.point_id
+            where bk.tg_id = $1 and bk.status = 'held'
+            """, tg_id)
+
+    async def rentals_history(self, tg_id: int, limit: int = 10) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            """
+            select r.contract_no, r.rent_term, r.opened_at, r.closed_at,
+                   m.title as model
+            from fleet.rentals r
+            left join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            where r.tg_id = $1 and r.closed_at is not null
+            order by r.id desc limit $2
+            """, tg_id, limit)
+
+    async def book_model(self, tg_id: int, *, model_id: int,
+                         point_id: int | None, pickup_at, hold_minutes: int,
+                         note: str) -> tuple[asyncpg.Record | None, str]:
+        """Бронь из приложения: удержать свободную единицу нужной модели.
+
+        Возвращает (бронь, "") либо (None, код ошибки): rental_active -
+        велосипед уже на руках, booking_exists - живая бронь уже есть,
+        no_free - свободных единиц нет.
+
+        for update skip locked - от гонки двух клиентов за последнюю
+        единицу: второй не ждёт чужую транзакцию, а сразу берёт следующую
+        строку или честно получает no_free.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if await conn.fetchrow(
+                        "select 1 from fleet.rentals "
+                        "where tg_id = $1 and closed_at is null", tg_id):
+                    return None, "rental_active"
+                if await conn.fetchrow(
+                        "select 1 from fleet.bookings "
+                        "where tg_id = $1 and status = 'held'", tg_id):
+                    return None, "booking_exists"
+                bike = await conn.fetchrow(
+                    "select id from fleet.bikes "
+                    "where status = 'free' and model_id = $1 "
+                    "  and ($2::int is null or point_id = $2) "
+                    "order by id limit 1 for update skip locked",
+                    model_id, point_id)
+                if bike is None:
+                    return None, "no_free"
+                await conn.execute(
+                    "update fleet.bikes set status = 'booked', updated_at = now() "
+                    "where id = $1", bike["id"])
+                try:
+                    row = await conn.fetchrow(
+                        "insert into fleet.bookings "
+                        "  (bike_id, tg_id, note, pickup_at, hold_expires_at, source) "
+                        "values ($1, $2, $3, $4, "
+                        "        now() + ($5 || ' minutes')::interval, 'app') "
+                        "returning id, hold_expires_at",
+                        bike["id"], tg_id, note or None, pickup_at,
+                        str(int(hold_minutes)))
+                except asyncpg.UniqueViolationError:
+                    # Параллельная бронь того же клиента успела первой.
+                    return None, "booking_exists"
+        return row, ""
+
+    async def cancel_booking(self, tg_id: int) -> int | None:
+        """Клиент отменяет свою бронь. Возвращает bike_id либо None."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "update fleet.bookings set status = 'cancelled', "
+                    "updated_at = now() "
+                    "where tg_id = $1 and status = 'held' returning bike_id",
+                    tg_id)
+                if row is None:
+                    return None
+                await conn.execute(
+                    "update fleet.bikes set status = 'free', updated_at = now() "
+                    "where id = $1 and status = 'booked'",
+                    row["bike_id"])
+        return row["bike_id"]
 
     # ─────────────────────── хуки проката ───────────────────────
 
@@ -327,11 +446,3 @@ class FleetDB:
                     row["bike_id"], logic.SERVICE if to_service else logic.FREE)
         return row["bike_id"]
 
-    async def rentals_open(self) -> list[asyncpg.Record]:
-        return await self.pool.fetch(
-            "select id, rent_term from fleet.rentals "
-            "where closed_at is null and due_at is null and rent_term is not null")
-
-    async def set_due(self, rental_id: int, due_at: date) -> None:
-        await self.pool.execute(
-            "update fleet.rentals set due_at = $2 where id = $1", rental_id, due_at)

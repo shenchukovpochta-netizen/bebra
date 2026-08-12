@@ -1,21 +1,27 @@
 """Посев справочников парка и бэкфилл из bot.users и bot.events.
 
-Запускается при каждом старте бота, после применения fleet_schema.sql.
-Всё идемпотентно: справочники сеются insert on conflict do nothing, поэтому
-правки оператора в базе (переименовал точку, поменял цену) переживают
-рестарт; бэкфилл защищён ключами - вин-номером рамы у единиц, парой
-not exists у активных аренд, source_event_id у закрытых.
+Запускается при каждом старте бота, после применения fleet_schema.sql,
+и весь идемпотентен. Справочники (точки, модели, тарифы) сеются только
+в ПУСТЫЕ таблицы: дальше они живут в базе своей жизнью, и переименованная
+оператором точка не должна задваиваться при рестарте. Источник посева -
+app/faq.py: адреса и прайс живут там одним экземпляром.
 
-Источник справочников - app/faq.py: адреса точек и прайс живут там одним
-экземпляром, и сеять их из второй копии значило бы поменять цену в одном
-месте и забыть в другом.
+Бэкфилл восстанавливает парк из того, что бот уже накопил: единицы -
+из данных выдачи (ключ - вин-номер рамы), активные аренды - из подписанных
+актов, закрытые - из событий rental_closed. Повторный прогон защищён
+ключами: вин-номером, парой not exists, source_event_id.
+
+Вин-номера нормализуются в Python (logic.normalize_vin), а не в SQL:
+upper() в C-локали контейнерного Postgres не поднимает кириллицу, и
+«ав 123» с «АВ123» стали бы двумя разными рамами - двумя единицами
+в парке вместо одной.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from datetime import date
 
 from .. import faq
 from . import logic
@@ -26,11 +32,6 @@ log = logging.getLogger(__name__)
 # Столбцы faq.TARIFF_ROWS: (название, неделя, 2 недели, месяц).
 PERIODS: tuple[tuple[int, int], ...] = ((7, 1), (14, 2), (30, 3))
 
-# Нормализация вин-номера в SQL - та же, что logic.normalize_vin в Python:
-# пробельные символы вон, буквы прописные. Два написания одной рамы
-# обязаны совпасть и здесь, и там.
-_VIN_SQL = "regexp_replace(upper(coalesce({expr}, '')), '\\s', '', 'g')"
-
 
 def _price(raw: str) -> int:
     """«3 000» -> 3000. Прайс в faq.py набран с пробелами для людей."""
@@ -40,78 +41,103 @@ def _price(raw: str) -> int:
 async def ensure_seed(fleet: FleetDB) -> None:
     pool = fleet.pool
 
-    for title in (faq.POINT_1, faq.POINT_2):
-        await pool.execute(
-            "insert into fleet.points (title, address, open_hour, close_hour) "
-            "values ($1, $1, $2, $3) on conflict (title) do nothing",
-            title, faq.OPEN_HOUR, faq.CLOSE_HOUR)
-
-    for row in faq.TARIFF_ROWS:
-        # do update вместо do nothing - иначе на конфликте returning пуст
-        # и id существующей модели не узнать одним запросом.
-        model_id = await pool.fetchval(
-            "insert into fleet.models (title) values ($1) "
-            "on conflict (title) do update set title = excluded.title "
-            "returning id", row[0])
-        for days, col in PERIODS:
+    if not await pool.fetchval("select count(*) from fleet.points"):
+        for title in (faq.POINT_1, faq.POINT_2):
             await pool.execute(
-                "insert into fleet.tariffs (model_id, period_days, price) "
-                "values ($1, $2, $3) "
-                "on conflict (model_id, period_days) do nothing",
-                model_id, days, _price(row[col]))
+                "insert into fleet.points (title, address, open_hour, close_hour) "
+                "values ($1, $1, $2, $3) on conflict (title) do nothing",
+                title, faq.OPEN_HOUR, faq.CLOSE_HOUR)
+
+    if not await pool.fetchval("select count(*) from fleet.models"):
+        for row in faq.TARIFF_ROWS:
+            model_id = await pool.fetchval(
+                "insert into fleet.models (title) values ($1) "
+                "on conflict (title) do update set title = excluded.title "
+                "returning id", row[0])
+            for days, col in PERIODS:
+                await pool.execute(
+                    "insert into fleet.tariffs (model_id, period_days, price) "
+                    "values ($1, $2, $3) "
+                    "on conflict (model_id, period_days) do nothing",
+                    model_id, days, _price(row[col]))
 
     await _backfill(fleet)
 
 
-async def _backfill(fleet: FleetDB) -> None:
-    """Единицы и аренды из того, что бот уже знает.
+def _issue_of(row) -> dict:
+    """issue_data строки пользователя. Строкой, а не dict, она приходит
+    из базы без jsonb-кодека - бэкфилл не вправе на это упасть."""
+    data = row["issue_data"]
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return {}
+    return dict(data or {})
 
-    До появления парка велосипед существовал только строками в issue_data.
-    Отсюда восстанавливаются: единицы (по вин-номеру рамы), активные аренды
-    (акт приёма подписан, акт возврата - нет) и закрытые (события
-    rental_closed; у них может не быть рамы - история важнее полноты).
-    """
+
+async def _backfill(fleet: FleetDB) -> None:
     pool = fleet.pool
-    vin = _VIN_SQL.format(expr="u.issue_data->>'vin_frame'")
-    vin_motor = _VIN_SQL.format(expr="v.issue_data->>'vin_motor'")
+    rows = await pool.fetch(
+        "select tg_id, issue_data, contract_no, act_in_signed_at, "
+        "       act_out_signed_at, updated_at "
+        "from bot.users where issue_data is not null")
 
     # Одна рама могла пройти через несколько клиентов: предпочитается
     # строка с действующей арендой, затем самая свежая.
-    bikes = await pool.execute(f"""
-        insert into fleet.bikes (vin_frame, vin_motor, model_id, status)
-        select distinct on (v.vin)
-               v.vin, nullif({vin_motor}, ''), m.id,
-               case when v.act_in_signed_at is not null
-                         and v.act_out_signed_at is null
-                    then 'rented' else 'free' end
-        from (select u.*, {vin} as vin from bot.users u) v
-        left join fleet.models m
-               on lower(m.title) = lower(v.issue_data->>'bike_model')
-        where v.vin <> ''
-        order by v.vin,
-                 (v.act_in_signed_at is not null
-                  and v.act_out_signed_at is null) desc,
-                 v.updated_at desc
-        on conflict (vin_frame) do nothing
-        """)
+    by_vin: dict[str, dict] = {}
+    for row in rows:
+        data = _issue_of(row)
+        vin = logic.normalize_vin(data.get("vin_frame"))
+        if not vin:
+            continue
+        active = (row["act_in_signed_at"] is not None
+                  and row["act_out_signed_at"] is None)
+        current = by_vin.get(vin)
+        if current is None or ((active, row["updated_at"])
+                               > (current["active"], current["row"]["updated_at"])):
+            by_vin[vin] = {"vin": vin, "active": active, "row": row, "data": data}
 
-    rentals = await pool.execute(f"""
-        insert into fleet.rentals
-          (bike_id, tg_id, contract_no, rent_term, rent_price, opened_at)
-        select distinct on (b.id)
-               b.id, u.tg_id, u.contract_no,
-               nullif(u.issue_data->>'rent_term', ''),
-               nullif(u.issue_data->>'rent_price', ''),
-               u.act_in_signed_at
-        from bot.users u
-        join fleet.bikes b on b.vin_frame = {vin}
-        where u.act_in_signed_at is not null
-          and u.act_out_signed_at is null
-          and not exists (select 1 from fleet.rentals r
-                          where r.closed_at is null
-                            and (r.tg_id = u.tg_id or r.bike_id = b.id))
-        order by b.id, u.act_in_signed_at desc
-        """)
+    bikes = rentals = 0
+    for cand in by_vin.values():
+        data = cand["data"]
+        inserted = await pool.fetchval(
+            "insert into fleet.bikes (vin_frame, vin_motor, model_id, status) "
+            "values ($1, $2, $3, $4) on conflict (vin_frame) do nothing "
+            "returning id",
+            cand["vin"],
+            logic.normalize_vin(data.get("vin_motor")) or None,
+            await fleet.model_id_by_title(data.get("bike_model")),
+            logic.RENTED if cand["active"] else logic.FREE)
+        bikes += inserted is not None
+
+    for cand in by_vin.values():
+        if not cand["active"]:
+            continue
+        row, data = cand["row"], cand["data"]
+        # Срок возврата считается от даты ОТКРЫТИЯ аренды, а не от
+        # «сегодня»: иначе просроченный «01.05 - 01.06» при бэкфилле
+        # в августе уехал бы на следующий год.
+        inserted = await pool.fetchval(
+            """
+            insert into fleet.rentals
+              (bike_id, tg_id, contract_no, rent_term, rent_price,
+               opened_at, due_at)
+            select b.id, $2, $3, $4, $5, $6, $7
+            from fleet.bikes b
+            where b.vin_frame = $1
+              and not exists (select 1 from fleet.rentals r
+                              where r.closed_at is null
+                                and (r.tg_id = $2 or r.bike_id = b.id))
+            returning id
+            """,
+            cand["vin"], row["tg_id"], row["contract_no"],
+            (data.get("rent_term") or "").strip() or None,
+            (data.get("rent_price") or "").strip() or None,
+            row["act_in_signed_at"],
+            logic.parse_due(data.get("rent_term"),
+                            today=row["act_in_signed_at"].date()))
+        rentals += inserted is not None
 
     # Закрытые аренды: рама в payload не писалась, поэтому bike_id пуст.
     # opened_at неизвестен - берётся момент события, то есть закрытия:
@@ -130,19 +156,8 @@ async def _backfill(fleet: FleetDB) -> None:
         on conflict (source_event_id) do nothing
         """)
 
-    # Срок возврата активных аренд - из строки «03.08 - 10.08». Разбор
-    # в Python, а не в SQL: правила (год, переход через Новый год) уже
-    # написаны и оттестированы в logic.parse_due.
-    filled = 0
-    for row in await fleet.rentals_open():
-        due = logic.parse_due(row["rent_term"], today=date.today())
-        if due is not None:
-            await fleet.set_due(row["id"], due)
-            filled += 1
-
-    log.info("парк: бэкфилл - единиц %s, активных аренд %s, закрытых %s, "
-             "сроков проставлено %s",
-             _count(bikes), _count(rentals), _count(closed), filled)
+    log.info("парк: бэкфилл - единиц %s, активных аренд %s, закрытых %s",
+             bikes, rentals, _count(closed))
 
 
 def _count(result: str | None) -> int:
