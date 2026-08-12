@@ -8,18 +8,37 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from .faq import MENU_BUTTON as BTN_FAQ
-from .texts import BTN_CLOSE_RENT
+from . import i18n
+
+# Все подписи кнопок идут через i18n.t(lang, "BTN_*"): русский - источник,
+# перевод подхватывается по языку клиента. Обработчики, которые ловят
+# нажатия reply-кнопок текстом, сверяются с i18n.variants/button_key.
 
 
-def subscribe(channel_url: str) -> InlineKeyboardMarkup:
+def subscribe(channel_url: str, lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Подписаться на канал", url=channel_url)],
-        [InlineKeyboardButton(text="Проверить подписку", callback_data="check_sub")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_SUBSCRIBE"), url=channel_url)],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CHECK_SUB"),
+                              callback_data="check_sub")],
     ])
 
 
-def policy_ack(pdn_url: str = "") -> InlineKeyboardMarkup:
+def lang_pick() -> InlineKeyboardMarkup:
+    """Выбор языка диалога - первый вопрос /start, по две кнопки в ряд.
+
+    callback «lang:код» - отдельный от «faqlang:код»: этот меняет язык
+    всего диалога на шаге регистрации, тот - пришёл из ветки вопросов
+    (теперь тоже меняет общий язык, но живёт в своём обработчике).
+    """
+    buttons = [InlineKeyboardButton(text=i18n.LANG_TITLES[code],
+                                    callback_data=f"lang:{code}")
+               for code in i18n.LANGS]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        buttons[i:i + 2] for i in range(0, len(buttons), 2)
+    ])
+
+
+def policy_ack(pdn_url: str = "", lang: str = "ru") -> InlineKeyboardMarkup:
     """Экран ознакомления с Политикой обработки ПДн.
 
     Отдельная «галочка» ПЕРЕД согласием: ознакомление с политикой и согласие
@@ -28,13 +47,15 @@ def policy_ack(pdn_url: str = "") -> InlineKeyboardMarkup:
     """
     rows = []
     if pdn_url:
-        rows.append([InlineKeyboardButton(text="Политика (веб-версия)", url=pdn_url)])
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_POLICY_WEB"),
+                                          url=pdn_url)])
     rows.append([InlineKeyboardButton(
-        text="✔️ Ознакомлен(а) с Политикой", callback_data="pdn_ok")])
+        text=i18n.t(lang, "BTN_POLICY_ACK"), callback_data="pdn_ok")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def consent(rules_url: str = "", pdn_url: str = "") -> InlineKeyboardMarkup:
+def consent(rules_url: str = "", pdn_url: str = "",
+            lang: str = "ru") -> InlineKeyboardMarkup:
     """Экран согласия на обработку персональных данных.
 
     Обе ссылки необязательны: правила проката и отдельная политика ПДн
@@ -44,26 +65,32 @@ def consent(rules_url: str = "", pdn_url: str = "") -> InlineKeyboardMarkup:
     """
     rows = []
     if rules_url:
-        rows.append([InlineKeyboardButton(text="Правила проката", url=rules_url)])
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_RULES"),
+                                          url=rules_url)])
     if pdn_url:
-        rows.append([InlineKeyboardButton(text="Политика обработки ПДн", url=pdn_url)])
-    rows.append([InlineKeyboardButton(text="✅ Даю согласие", callback_data="oferta_ok")])
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PDN"),
+                                          url=pdn_url)])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CONSENT"),
+                                      callback_data="oferta_ok")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def share_contact() -> ReplyKeyboardMarkup:
+def share_contact(lang: str = "ru") -> ReplyKeyboardMarkup:
     # request_contact работает только в reply-клавиатуре и только в личном чате
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Поделиться контактом", request_contact=True)]],
+        keyboard=[[KeyboardButton(text=i18n.t(lang, "BTN_SHARE_CONTACT"),
+                                  request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def confirm() -> InlineKeyboardMarkup:
+def confirm(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Подтверждаю", callback_data="confirm")],
-        [InlineKeyboardButton(text="Заполнить повторно", callback_data="restart")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CONFIRM"),
+                              callback_data="confirm")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_RESTART"),
+                              callback_data="restart")],
     ])
 
 
@@ -88,22 +115,23 @@ def reject_reasons(tg_id: int, reasons: dict[str, tuple[str, str]]) -> InlineKey
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def same_address() -> ReplyKeyboardMarkup:
+def same_address(lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Совпадает с регистрацией")]],
+        keyboard=[[KeyboardButton(text=i18n.t(lang, "BTN_SAME_ADDRESS"))]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def sign_contract() -> InlineKeyboardMarkup:
+def sign_contract(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Подписываю", callback_data="sign")],
-        [InlineKeyboardButton(text="Есть ошибка", callback_data="contract_mistake")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_SIGN"), callback_data="sign")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_MISTAKE"),
+                              callback_data="contract_mistake")],
     ])
 
 
-def paid(pay_url: str = "") -> InlineKeyboardMarkup:
+def paid(pay_url: str = "", lang: str = "ru") -> InlineKeyboardMarkup:
     """Этап оплаты: ссылка на расчётный счёт и «я оплатил».
 
     Ссылка кнопкой, а не только текстом: с телефона по ней открывается
@@ -118,8 +146,10 @@ def paid(pay_url: str = "") -> InlineKeyboardMarkup:
     # в PAY_URL оставила бы клиента вообще без реквизитов. Сама ссылка
     # при этом остаётся в тексте - там она безобидна.
     if pay_url.startswith(("http://", "https://")):
-        rows.append([InlineKeyboardButton(text="💳 Оплатить", url=pay_url)])
-    rows.append([InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data="paid")])
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAY"),
+                                          url=pay_url)])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAID"),
+                                      callback_data="paid")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -129,23 +159,27 @@ def pay_confirm(tg_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def sign_act() -> InlineKeyboardMarkup:
+def sign_act(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Подписываю", callback_data="act_sign")],
-        [InlineKeyboardButton(text="Есть ошибка", callback_data="act_mistake")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_SIGN"),
+                              callback_data="act_sign")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_MISTAKE"),
+                              callback_data="act_mistake")],
     ])
 
 
-def sign_return() -> InlineKeyboardMarkup:
+def sign_return(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Подтверждаю", callback_data="return_sign")],
-        [InlineKeyboardButton(text="Есть ошибка", callback_data="return_mistake")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_RETURN_SIGN"),
+                              callback_data="return_sign")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_MISTAKE"),
+                              callback_data="return_mistake")],
     ])
 
 
-def support_cancel() -> ReplyKeyboardMarkup:
+def support_cancel(lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Отмена")]],
+        keyboard=[[KeyboardButton(text=i18n.t(lang, "BTN_CANCEL"))]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -173,29 +207,32 @@ def faq_topics(topics, lang: str = "ru") -> InlineKeyboardMarkup:
 
 
 def faq_langs() -> InlineKeyboardMarkup:
-    """Выбор языка ветки вопросов - по две кнопки в ряд."""
-    from .faq_i18n import LANG_TITLES, LANGS
-    buttons = [InlineKeyboardButton(text=LANG_TITLES[code],
+    """Выбор языка из ветки вопросов - по две кнопки в ряд."""
+    buttons = [InlineKeyboardButton(text=i18n.LANG_TITLES[code],
                                     callback_data=f"faqlang:{code}")
-               for code in LANGS]
+               for code in i18n.LANGS]
     return InlineKeyboardMarkup(inline_keyboard=[
         buttons[i:i + 2] for i in range(0, len(buttons), 2)
     ])
 
 
-def faq_entry() -> InlineKeyboardMarkup:
+def faq_entry(lang: str = "ru") -> InlineKeyboardMarkup:
     """Кнопка входа в частые вопросы под приветствием - до регистрации."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=BTN_FAQ, callback_data="faq:open")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_FAQ"),
+                              callback_data="faq:open")],
     ])
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def main_menu(lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🚲 Арендовать"), KeyboardButton(text="📋 Мои аренды")],
-            [KeyboardButton(text="💰 Тарифы"), KeyboardButton(text="🆘 Поддержка")],
-            [KeyboardButton(text=BTN_FAQ), KeyboardButton(text=BTN_CLOSE_RENT)],
+            [KeyboardButton(text=i18n.t(lang, "BTN_RENT")),
+             KeyboardButton(text=i18n.t(lang, "BTN_TRIPS"))],
+            [KeyboardButton(text=i18n.t(lang, "BTN_TARIFFS")),
+             KeyboardButton(text=i18n.t(lang, "BTN_SUPPORT"))],
+            [KeyboardButton(text=i18n.t(lang, "BTN_FAQ")),
+             KeyboardButton(text=i18n.t(lang, "BTN_CLOSE_RENT"))],
         ],
         resize_keyboard=True,
     )

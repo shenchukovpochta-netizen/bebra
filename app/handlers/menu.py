@@ -9,13 +9,13 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
 
-from .. import faq
+from .. import faq, i18n
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
 from ..db import Database, utcnow
 from ..filters import StateIs
-from .faq import BTN_FAQ, home, reply_for
+from .faq import home, reply_for
 
 log = logging.getLogger(__name__)
 router = Router(name="menu")
@@ -24,9 +24,11 @@ router = Router(name="menu")
 # Тексты кнопок меню. Набранная в диалоге кнопка означает «передумал,
 # хочу вот это», а не текст вопроса или причину сдачи - поэтому оба
 # состояния с ожиданием текста сверяются с этим набором.
+# Подписи кнопок переводятся, поэтому обработчики сверяются не с одной
+# русской строкой, а со всеми языковыми вариантами (i18n.variants) -
+# reply-кнопка приходит обычным текстом на языке клиента.
 BTN_RENT, BTN_TRIPS = "🚲 Арендовать", "📋 Мои аренды"
 BTN_TARIFFS, BTN_SUPPORT = "💰 Тарифы", "🆘 Поддержка"
-MENU_BUTTONS = (BTN_RENT, BTN_TRIPS, BTN_TARIFFS, BTN_SUPPORT, BTN_FAQ)
 
 
 async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
@@ -37,30 +39,36 @@ async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
     Без этого человек молча оставался в режиме, и следующее его сообщение
     уезжало не туда: вопросом в поддержку или причиной закрытия аренды.
     """
-    if text.lower() != "отмена" and text not in MENU_BUTTONS \
-            and text != texts.BTN_CLOSE_RENT:
-        return False
+    key = i18n.button_key(text)
+    if key is None and text.lower() == "отмена":
+        key = "BTN_CANCEL"      # русское «отмена» набирают и без кнопки
+    if key in (None, "BTN_SHARE_CONTACT", "BTN_SAME_ADDRESS"):
+        return False            # кнопки анкеты - не выход из диалога
     await db.patch(user["tg_id"], expected_state=state, state=logic.APPROVED)
     fresh = {**user, "state": logic.APPROVED}
-    if text == BTN_RENT:
+    lang = i18n.user_lang(user)
+    if key == "BTN_RENT":
         await start_rent(message, bot, db, cfg, fresh)
-    elif text == BTN_TARIFFS:
-        await message.answer(texts.TARIFFS, reply_markup=kb.main_menu())
-    elif text == BTN_TRIPS:
+    elif key == "BTN_TARIFFS":
+        await message.answer(i18n.t(lang, "TARIFFS"),
+                             reply_markup=kb.main_menu(lang))
+    elif key == "BTN_TRIPS":
         await message.answer(await rentals_text(db, fresh),
-                             reply_markup=kb.main_menu())
-    elif text == BTN_SUPPORT:
+                             reply_markup=kb.main_menu(lang))
+    elif key == "BTN_SUPPORT":
         await start_support(message, db, fresh)
-    elif text == texts.BTN_CLOSE_RENT:
+    elif key == "BTN_CLOSE_RENT":
         await start_close(message, db, fresh)
-    elif text == BTN_FAQ:
+    elif key == "BTN_FAQ":
         # Двумя сообщениями: клавиатуру меню и список тем в одном
         # сообщении Telegram не отдаёт - разметка там только одна.
-        await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "SUPPORT_CANCELLED"),
+                             reply_markup=kb.main_menu(lang))
         faq_text, faq_kb = home(fresh)
         await message.answer(faq_text, reply_markup=faq_kb)
     else:
-        await message.answer(texts.SUPPORT_CANCELLED, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "SUPPORT_CANCELLED"),
+                             reply_markup=kb.main_menu(lang))
     return True
 
 
@@ -72,9 +80,11 @@ async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
 async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                      user: dict) -> None:
     text = message.text.strip()
-    if text == BTN_SUPPORT:
+    lang = i18n.user_lang(user)
+    if i18n.button_key(text) == "BTN_SUPPORT":
         # Уже в режиме вопроса - просто напоминаем, чего ждём.
-        await message.answer(texts.SUPPORT_PROMPT, reply_markup=kb.support_cancel())
+        await message.answer(i18n.t(lang, "SUPPORT_PROMPT"),
+                             reply_markup=kb.support_cancel(lang))
         return
     if await menu_shortcut(message, bot, db, cfg, user, text,
                            state=logic.WAIT_SUPPORT):
@@ -82,7 +92,7 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
 
     question = logic.support_question(message.text)
     if not question.ok:
-        await message.answer(question.error)
+        await message.answer(i18n.err(user.get("lang"), question.error))
         return
 
     # Тема вопроса: по ней бот отвечает сам и по ней же руководитель
@@ -109,7 +119,8 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
         log.exception("вопрос в поддержку от %s не доставлен", user["tg_id"])
         await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
                        state=logic.APPROVED)
-        await message.answer(texts.SUPPORT_FAILED, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "SUPPORT_FAILED"),
+                             reply_markup=kb.main_menu(lang))
         return
 
     await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
@@ -119,14 +130,16 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                        {"intent": intent.code if intent else None})
 
     if intent is None:
-        await message.answer(texts.SUPPORT_SENT, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "SUPPORT_SENT"),
+                             reply_markup=kb.main_menu(lang))
         return
     # Красная линия (долг, угон, суд, скидка, 18-): бот отдаёт нейтральную
     # фразу и молчит по существу. Ответ на такую тему - это либо цена,
     # которую бот не вправе назначать, либо юридический риск.
-    await message.answer(reply_for(intent, user, cfg), reply_markup=kb.main_menu())
+    await message.answer(reply_for(intent, user, cfg),
+                         reply_markup=kb.main_menu(lang))
     if not intent.red:
-        await message.answer(texts.SUPPORT_SENT_ANSWERED)
+        await message.answer(i18n.t(lang, "SUPPORT_SENT_ANSWERED"))
 
 
 def _topic_line(intent: faq.Intent | None) -> str:
@@ -141,8 +154,8 @@ def _topic_line(intent: faq.Intent | None) -> str:
 
 
 @router.message(StateIs(logic.WAIT_SUPPORT))
-async def st_support_wrong(message: Message) -> None:
-    await message.answer(texts.SUPPORT_AS_TEXT)
+async def st_support_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "SUPPORT_AS_TEXT"))
 
 
 # ─────────────────── повторная аренда по запросу клиента ───────────────────
@@ -156,18 +169,19 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
     оператору, тот отвечает на неё данными выдачи (вин-номера, комплект,
     срок, оплата), дальше обычная цепочка «оплата -> Акт приёма-передачи».
     """
+    lang = i18n.user_lang(user)
     if (user.get("status") != logic.ST_APPROVED
             or user.get("contract_status") != logic.CT_SIGNED):
         # Регистрация не пройдена до конца - новую аренду начинать не с чего.
-        await message.answer(texts.TARIFFS)
+        await message.answer(i18n.t(lang, "TARIFFS"))
         return
     if logic.rental_is_active(user):
         given = logic.issue_context(user.get("issue_data"))
         await message.answer(
-            texts.RENT_ALREADY_ACTIVE.format(
+            i18n.t(lang, "RENT_ALREADY_ACTIVE").format(
                 bike=logic.esc(given["bike_model"]),
                 term=logic.esc(given["rent_term"])),
-            reply_markup=kb.main_menu())
+            reply_markup=kb.main_menu(lang))
         return
 
     tg_id = user["tg_id"]
@@ -184,15 +198,16 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
                 form=logic.ISSUE_FORM_TEMPLATE))
     except TelegramAPIError:
         log.exception("заявка на аренду от %s не доставлена", tg_id)
-        await message.answer(texts.RENT_REQUEST_FAILED,
-                             reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "RENT_REQUEST_FAILED"),
+                             reply_markup=kb.main_menu(lang))
         return
     # Карточка заявки перевязывает ответ оператора на себя: форма выдачи
     # придёт ей, а не приглашению первой выдачи месячной давности.
     await db.patch(tg_id, issue_chat_id=sent.chat.id,
                    issue_message_id=sent.message_id)
     await db.log_event(tg_id, "rent_requested")
-    await message.answer(texts.RENT_REQUEST_SENT, reply_markup=kb.main_menu())
+    await message.answer(i18n.t(lang, "RENT_REQUEST_SENT"),
+                         reply_markup=kb.main_menu(lang))
 
 
 # ─────────────────── закрытие аренды по запросу клиента ───────────────────
@@ -203,14 +218,18 @@ async def start_close(message: Message, db: Database, user: dict) -> None:
     Причина нужна не из любопытства - она обязательная строка отчёта
     о закрытии, и спросить её у человека дешевле, чем выпытывать потом.
     """
+    lang = i18n.user_lang(user)
     if not logic.rental_is_active(user):
-        await message.answer(texts.CLOSE_NO_RENTAL, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "CLOSE_NO_RENTAL"),
+                             reply_markup=kb.main_menu(lang))
         return
     if not await db.patch(user["tg_id"], expected_state=logic.APPROVED,
                           state=logic.WAIT_CLOSE_REASON):
-        await message.answer(texts.MENU_PROMPT, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "MENU_PROMPT"),
+                             reply_markup=kb.main_menu(lang))
         return
-    await message.answer(texts.CLOSE_ASK_REASON, reply_markup=kb.support_cancel())
+    await message.answer(i18n.t(lang, "CLOSE_ASK_REASON"),
+                         reply_markup=kb.support_cancel(lang))
 
 
 @router.message(StateIs(logic.WAIT_CLOSE_REASON), F.text)
@@ -223,7 +242,7 @@ async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
         return
     reason = logic.close_reason(text)
     if not reason.ok:
-        await message.answer(reason.error)
+        await message.answer(i18n.err(user.get("lang"), reason.error))
         return
 
     tg_id = user["tg_id"]
@@ -241,7 +260,8 @@ async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
         log.exception("запрос на закрытие от %s не доставлен", tg_id)
         await db.patch(tg_id, expected_state=logic.WAIT_CLOSE_REASON,
                        state=logic.APPROVED)
-        await message.answer(texts.CLOSE_REQUEST_FAILED, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(user.get("lang"), "CLOSE_REQUEST_FAILED"),
+                             reply_markup=kb.main_menu(i18n.user_lang(user)))
         return
 
     # Карточка запроса перевязывает на себя ответ оператора: форму он
@@ -251,55 +271,60 @@ async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
                    close_requested_at=utcnow(),
                    return_chat_id=sent.chat.id, return_message_id=sent.message_id)
     await db.log_event(tg_id, "close_requested")
-    await message.answer(texts.CLOSE_REQUESTED, reply_markup=kb.main_menu())
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, "CLOSE_REQUESTED"),
+                         reply_markup=kb.main_menu(lang))
 
 
 @router.message(StateIs(logic.WAIT_CLOSE_REASON))
-async def st_close_reason_wrong(message: Message) -> None:
-    await message.answer(texts.CLOSE_ASK_REASON, reply_markup=kb.support_cancel())
+async def st_close_reason_wrong(message: Message, user: dict) -> None:
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, "CLOSE_ASK_REASON"),
+                         reply_markup=kb.support_cancel(lang))
 
 
 # ─────────────────────────── кнопки меню ───────────────────────────
 
-@router.message(F.text == BTN_TARIFFS)
-async def tariffs(message: Message) -> None:
-    await message.answer(texts.TARIFFS)
+@router.message(F.text.in_(i18n.variants("BTN_TARIFFS")))
+async def tariffs(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "TARIFFS"))
 
 
-@router.message(F.text == BTN_RENT)
+@router.message(F.text.in_(i18n.variants("BTN_RENT")))
 async def rent(message: Message, bot: Bot, db: Database, cfg: Config,
                user: dict) -> None:
     await start_rent(message, bot, db, cfg, user)
 
 
 async def rentals_text(db: Database, user: dict) -> str:
+    lang = i18n.user_lang(user)
     """История аренд: текущая сверху, закрытые - из журнала событий."""
     lines = []
     if logic.rental_is_active(user):
         given = logic.issue_context(user.get("issue_data"))
-        lines.append(texts.TRIPS_ACTIVE.format(
+        lines.append(i18n.t(lang, "TRIPS_ACTIVE").format(
             number=logic.esc(user.get("contract_no") or "—"),
             bike=logic.esc(given["bike_model"]), term=logic.esc(given["rent_term"])))
     for row in await db.rentals_of(user["tg_id"]):
         payload = row["payload"] or {}
         if isinstance(payload, str):        # база без кодека jsonb
             payload = json.loads(payload)
-        lines.append(texts.TRIPS_CLOSED.format(
+        lines.append(i18n.t(lang, "TRIPS_CLOSED").format(
             number=logic.esc(payload.get("number") or "—"),
             bike=logic.esc(payload.get("bike") or "—"),
             term=logic.esc(payload.get("term") or "—"),
             closed_at=logic.esc(payload.get("closed_at") or "—")))
     if not lines:
-        return texts.TRIPS_EMPTY
-    return texts.TRIPS_HEADER + "\n".join(lines)
+        return i18n.t(lang, "TRIPS_EMPTY")
+    return i18n.t(lang, "TRIPS_HEADER") + "\n".join(lines)
 
 
-@router.message(F.text == texts.BTN_CLOSE_RENT)
+@router.message(F.text.in_(i18n.variants("BTN_CLOSE_RENT")))
 async def close_request(message: Message, db: Database, user: dict) -> None:
     await start_close(message, db, user)
 
 
-@router.message(F.text == BTN_TRIPS)
+@router.message(F.text.in_(i18n.variants("BTN_TRIPS")))
 async def trips(message: Message, db: Database, user: dict) -> None:
     await message.answer(await rentals_text(db, user))
 
@@ -310,14 +335,17 @@ async def start_support(message: Message, db: Database, user: dict) -> None:
     Отдельное состояние обязательно: без него следующее сообщение человека
     провалилось бы в ловушку меню, и вопрос ушёл бы в никуда.
     """
+    lang = i18n.user_lang(user)
     if not await db.patch(user["tg_id"], expected_state=logic.APPROVED,
                           state=logic.WAIT_SUPPORT):
-        await message.answer(texts.MENU_PROMPT, reply_markup=kb.main_menu())
+        await message.answer(i18n.t(lang, "MENU_PROMPT"),
+                             reply_markup=kb.main_menu(lang))
         return
-    await message.answer(texts.SUPPORT_PROMPT, reply_markup=kb.support_cancel())
+    await message.answer(i18n.t(lang, "SUPPORT_PROMPT"),
+                         reply_markup=kb.support_cancel(lang))
 
 
-@router.message(F.text == BTN_SUPPORT)
+@router.message(F.text.in_(i18n.variants("BTN_SUPPORT")))
 async def support(message: Message, db: Database, user: dict) -> None:
     # Сюда доходят только состояния, не перехваченные ранними роутерами, -
     # то есть approved; guard в start_support закрывает гонку двойного нажатия.
@@ -337,9 +365,12 @@ async def fallback(message: Message, db: Database, user: dict) -> None:
         log.warning("неизвестное состояние %r у %s - сбрасываю в начало",
                     user.get("state"), user["tg_id"])
         await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-        await message.answer(texts.WELCOME, reply_markup=kb.remove())
+        await message.answer(i18n.t(user.get("lang"), "WELCOME"),
+                             reply_markup=kb.remove())
         return
-    await message.answer(texts.MENU_PROMPT, reply_markup=kb.main_menu())
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, "MENU_PROMPT"),
+                         reply_markup=kb.main_menu(lang))
 
 
 # Кнопка из старого сообщения в состоянии, где её уже не ждут. Без ответа

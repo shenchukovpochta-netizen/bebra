@@ -17,6 +17,10 @@ from typing import Any, Callable, Iterable
 # ─────────────────────────── состояния FSM ───────────────────────────
 
 NEW = "new"
+# Первый вопрос до всего остального - язык диалога: бот отвечает клиенту
+# на выбранном языке (тексты и кнопки), а служебные карточки операторам
+# и юридические документы остаются русскими.
+WAIT_LANG = "wait_lang"
 WAIT_FIO = "wait_fio"
 # Ознакомление с Политикой обработки ПДн - отдельный шаг ПЕРЕД согласием:
 # политика (п. 15.4) обязательна к ознакомлению каждым арендатором до
@@ -82,7 +86,7 @@ SUBSCRIBED_STATUSES = frozenset({"creator", "administrator", "member"})
 # не сработает ни один StateIs, и человек будет получать ответы из меню
 # посреди регистрации.
 KNOWN_STATES = frozenset({
-    NEW, WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
+    NEW, WAIT_LANG, WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
     WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,

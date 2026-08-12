@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
+from .. import i18n
 from .. import keyboards as kb
 from .. import logic, tasks, texts
 from ..config import Config
@@ -62,16 +63,30 @@ async def send_doc(bot: Bot, chat_id: int, data: dict, *, caption: str,
 
 # ─────────────────────────── /start ───────────────────────────
 
-async def send_welcome(answer) -> None:
-    """Приветствие + вход в частые вопросы.
+async def send_welcome(answer, lang: str = "ru") -> None:
+    """Приветствие + вход в частые вопросы - на языке клиента.
 
     Кнопка вопросов - отдельным сообщением: на приветствии стоит
     ReplyKeyboardRemove, а две разметки в одно сообщение Telegram
     не принимает. Ответы доступны ДО регистрации: ночному лиду нужны
     адрес и тарифы сейчас, а не после анкеты.
     """
-    await answer(texts.WELCOME, reply_markup=kb.remove())
-    await answer(texts.FAQ_ENTRY_HINT, reply_markup=kb.faq_entry())
+    await answer(i18n.t(lang, "WELCOME"), reply_markup=kb.remove())
+    await answer(i18n.t(lang, "FAQ_ENTRY_HINT"), reply_markup=kb.faq_entry(lang))
+
+
+async def start_flow(answer, db: Database, user: dict) -> None:
+    """Начало регистрации: первый вопрос - язык диалога, потом ФИО.
+
+    Язык уже известен (повторный /start, возврат после отказа) - выбор
+    не показывается снова, человек сразу получает приветствие на своём.
+    """
+    if user.get("lang"):
+        await db.patch(user["tg_id"], state=logic.WAIT_FIO)
+        await send_welcome(answer, i18n.user_lang(user))
+        return
+    await db.patch(user["tg_id"], state=logic.WAIT_LANG)
+    await answer(i18n.pick_prompt(), reply_markup=kb.lang_pick())
 
 
 @router.message(CommandStart())
@@ -83,10 +98,11 @@ async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> 
         if user["state"] == logic.WAIT_SUPPORT:
             await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
                            state=logic.APPROVED)
-        await message.answer(texts.ALREADY_REGISTERED, reply_markup=kb.main_menu())
+        lang = i18n.user_lang(user)
+        await message.answer(i18n.t(lang, "ALREADY_REGISTERED"),
+                             reply_markup=kb.main_menu(lang))
         return
-    await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-    await send_welcome(message.answer)
+    await start_flow(message.answer, db, user)
 
 
 @router.callback_query(F.data == "check_sub")
@@ -99,25 +115,61 @@ async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: Database,
     # Проверяется состояние, а не статус: между «заявку одобрили» и «договор
     # подписан» статус уже approved, и по нему человек с неподписанным
     # договором получал бы «вы уже зарегистрированы» вместе с меню.
+    lang = i18n.user_lang(user)
     if user["state"] == logic.APPROVED:
-        await bot.send_message(user["tg_id"], texts.ALREADY_REGISTERED,
-                               reply_markup=kb.main_menu())
+        await bot.send_message(user["tg_id"], i18n.t(lang, "ALREADY_REGISTERED"),
+                               reply_markup=kb.main_menu(lang))
         return
-    if user["state"] in (logic.NEW, logic.WAIT_FIO):
-        await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-        # То же приветствие, что и на /start, - с кнопкой частых вопросов:
-        # человек, прошедший проверку подписки, не должен получать урезанный
-        # вариант старта.
-        await send_welcome(lambda text, **kw: bot.send_message(
-            user["tg_id"], text, **kw))
+    if user["state"] in (logic.NEW, logic.WAIT_LANG, logic.WAIT_FIO):
+        # Тот же старт, что и на /start: сперва язык, затем приветствие
+        # с кнопкой частых вопросов - без урезанных вариантов.
+        await start_flow(lambda text, **kw: bot.send_message(
+            user["tg_id"], text, **kw), db, user)
 
 
 # ─────────────────────────── ФИО ───────────────────────────
 
 @router.message(StateIs(logic.NEW))
 async def st_new(message: Message, db: Database, user: dict) -> None:
-    await db.patch(user["tg_id"], state=logic.WAIT_FIO)
-    await send_welcome(message.answer)
+    await start_flow(message.answer, db, user)
+
+
+# ─────────────────────────── язык диалога ───────────────────────────
+
+@router.callback_query(StateIs(logic.WAIT_LANG), F.data.startswith("lang:"))
+async def cb_lang(callback: CallbackQuery, bot: Bot, db: Database,
+                  user: dict) -> None:
+    code = callback.data.split(":", 1)[1]
+    if code not in i18n.LANGS:
+        await callback.answer()
+        return
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_LANG,
+                          lang=code, state=logic.WAIT_FIO):
+        await callback.answer()
+        return
+    await db.log_event(user["tg_id"], "lang_set", {"lang": code})
+    await callback.answer(i18n.LANG_TITLES[code])
+    await send_welcome(lambda text, **kw: bot.send_message(
+        user["tg_id"], text, **kw), i18n.norm(code))
+
+
+@router.message(StateIs(logic.WAIT_LANG))
+async def st_wait_lang(message: Message, bot: Bot, db: Database, cfg: Config,
+                       user: dict) -> None:
+    """Сообщение до выбора языка.
+
+    Язык уже известен (лид выбрал его в ветке частых вопросов, пока стоял
+    на этом шаге) - сообщение и есть ФИО, гонять человека по кругу выбора
+    незачем. Языка нет - переспросить выбором: подсказка сама многоязычная,
+    и понять её сможет любой.
+    """
+    if user.get("lang") and message.text:
+        if await db.patch(user["tg_id"], expected_state=logic.WAIT_LANG,
+                          state=logic.WAIT_FIO):
+            await st_fio(message, bot, db, cfg,
+                         {**user, "state": logic.WAIT_FIO})
+        return
+    await message.answer(i18n.pick_prompt(), reply_markup=kb.lang_pick())
 
 
 @router.message(StateIs(logic.WAIT_FIO), F.text)
@@ -125,31 +177,32 @@ async def st_fio(message: Message, bot: Bot, db: Database, cfg: Config,
                  user: dict) -> None:
     result = logic.validate_fio(message.text)
     if not result.ok:
-        await message.answer(result.error)
+        await message.answer(i18n.err(user.get("lang"), result.error))
         return
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_FIO,
                           full_name=result.value, state=logic.WAIT_PDN):
         return
     await db.log_event(user["tg_id"], "fio_set")
-    await send_policy(bot, cfg, user["tg_id"])
+    await send_policy(bot, cfg, user["tg_id"], lang=i18n.user_lang(user))
 
 
-def _consent_text(cfg: Config, fio: str) -> str:
-    return texts.CONSENT.format(
+def _consent_text(cfg: Config, fio: str, lang: str = "ru") -> str:
+    return i18n.t(lang, "CONSENT").format(
         fio=logic.esc(fio),
         purge_days=cfg.purge_approved_days,
     )
 
 
 @router.message(StateIs(logic.WAIT_FIO))
-async def st_fio_wrong(message: Message) -> None:
-    await message.answer(texts.FIO_AS_TEXT)
+async def st_fio_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "FIO_AS_TEXT"))
 
 
 # ─────────────── ознакомление с Политикой обработки ПДн ───────────────
 
 async def send_policy(bot: Bot, cfg: Config, tg_id: int,
-                      caption: str | None = None) -> None:
+                      caption: str | None = None, *,
+                      lang: str = "ru") -> None:
     """Экран ознакомления: файл политики с кнопкой «Ознакомлен(а)».
 
     Политика уходит документом как есть, без подстановок - это готовый
@@ -162,14 +215,14 @@ async def send_policy(bot: Bot, cfg: Config, tg_id: int,
     except OSError:
         log.warning("файл политики ПДн %s не читается - шаг работает "
                     "текстом без вложения", cfg.pdn_policy_file)
-        await bot.send_message(tg_id, texts.POLICY_NO_FILE,
-                               reply_markup=kb.policy_ack(cfg.pdn_url))
+        await bot.send_message(tg_id, i18n.t(lang, "POLICY_NO_FILE"),
+                               reply_markup=kb.policy_ack(cfg.pdn_url, lang))
         return
     await bot.send_document(
         tg_id,
         BufferedInputFile(data, filename="politika-obrabotki-pdn.docx"),
-        caption=caption or texts.POLICY_CAPTION,
-        reply_markup=kb.policy_ack(cfg.pdn_url),
+        caption=caption or i18n.t(lang, "POLICY_CAPTION"),
+        reply_markup=kb.policy_ack(cfg.pdn_url, lang),
     )
 
 
@@ -184,10 +237,12 @@ async def cb_policy(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config
         return
     await db.log_event(user["tg_id"], "policy_acknowledged",
                        {"version": cfg.pdn_version})
-    await callback.answer(texts.POLICY_ACK_TOAST)
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "POLICY_ACK_TOAST"))
     await bot.send_message(user["tg_id"],
-                           _consent_text(cfg, user.get("full_name") or ""),
-                           reply_markup=kb.consent(cfg.oferta_url, cfg.pdn_url))
+                           _consent_text(cfg, user.get("full_name") or "", lang),
+                           reply_markup=kb.consent(cfg.oferta_url, cfg.pdn_url,
+                                                   lang))
 
 
 @router.message(StateIs(logic.WAIT_PDN))
@@ -197,7 +252,9 @@ async def st_policy_wrong(message: Message, bot: Bot, cfg: Config,
     кнопка живёт на сообщении с файлом, и потерянное в ленте сообщение
     без переотправки становится тупиком. Подпись короткая: длинное описание
     человек уже видел, а повторять его на каждое «ок» незачем."""
-    await send_policy(bot, cfg, user["tg_id"], texts.POLICY_PRESS_BUTTON)
+    lang = i18n.user_lang(user)
+    await send_policy(bot, cfg, user["tg_id"],
+                      i18n.t(lang, "POLICY_PRESS_BUTTON"), lang=lang)
 
 
 # ──────────────────── согласие на обработку ПДн ────────────────────
@@ -218,14 +275,15 @@ async def cb_oferta(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config
     await db.log_event(user["tg_id"], "oferta_accepted",
                        {"version": cfg.oferta_version,
                         "consent_version": cfg.consent_version})
-    await callback.answer(texts.CONSENT_GIVEN)
-    await bot.send_message(user["tg_id"], texts.ASK_CONTACT,
-                           reply_markup=kb.share_contact())
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "CONSENT_GIVEN"))
+    await bot.send_message(user["tg_id"], i18n.t(lang, "ASK_CONTACT"),
+                           reply_markup=kb.share_contact(lang))
 
 
 @router.message(StateIs(logic.WAIT_OFERTA))
-async def st_oferta_wrong(message: Message) -> None:
-    await message.answer(texts.CONSENT_PRESS_BUTTON)
+async def st_oferta_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "CONSENT_PRESS_BUTTON"))
 
 
 # ─────────────────────────── контакт ───────────────────────────
@@ -234,7 +292,7 @@ async def st_oferta_wrong(message: Message) -> None:
 async def st_contact(message: Message, db: Database, user: dict) -> None:
     contact = message.contact
     if not logic.contact_belongs_to_sender(contact.user_id, message.from_user.id):
-        await message.answer(texts.CONTACT_FOREIGN)
+        await message.answer(i18n.t(user.get("lang"), "CONTACT_FOREIGN"))
         return
     phone = logic.normalize_phone(contact.phone_number) or contact.phone_number
     following = logic.next_state(logic.WAIT_CONTACT)
@@ -242,42 +300,47 @@ async def st_contact(message: Message, db: Database, user: dict) -> None:
                           phone=phone, state=following):
         return
     await db.log_event(user["tg_id"], "contact_set")
-    await message.answer(texts.ANKETA_INTRO, reply_markup=kb.remove())
-    await message.answer(PROMPTS[following])
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, "ANKETA_INTRO"), reply_markup=kb.remove())
+    await message.answer(i18n.t(lang, PROMPTS[following]))
 
 
 @router.message(StateIs(logic.WAIT_CONTACT))
-async def st_contact_wrong(message: Message) -> None:
-    await message.answer(texts.CONTACT_USE_BUTTON)
+async def st_contact_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "CONTACT_USE_BUTTON"))
 
 
 # ─────────────────────────── анкета для договора ───────────────────────────
 
-# Вопрос к каждому шагу. Словарь, а не поле в logic.Step: logic.py намеренно
-# не знает про тексты, туда смотрят тесты без установленного окружения.
+# Ключ i18n к каждому шагу: текст выбирается по языку клиента в момент
+# отправки. Словарь, а не поле в logic.Step: logic.py намеренно не знает
+# про тексты, туда смотрят тесты без установленного окружения.
 PROMPTS: dict[str, str] = {
-    logic.WAIT_BIRTH: texts.ASK_BIRTH,
-    logic.WAIT_BIRTH_PLACE: texts.ASK_BIRTH_PLACE,
-    logic.WAIT_PASSPORT: texts.ASK_PASSPORT,
-    logic.WAIT_PASSPORT_DATE: texts.ASK_PASSPORT_DATE,
-    logic.WAIT_PASSPORT_CODE: texts.ASK_PASSPORT_CODE,
-    logic.WAIT_PASSPORT_ISSUER: texts.ASK_PASSPORT_ISSUER,
-    logic.WAIT_REG_ADDR: texts.ASK_REG_ADDR,
-    logic.WAIT_LIVE_ADDR: texts.ASK_LIVE_ADDR,
-    logic.WAIT_PHONE2: texts.ASK_PHONE2,
-    logic.WAIT_PHONE3: texts.ASK_PHONE3,
-    logic.WAIT_DOC: texts.ASK_DOC,
-    logic.WAIT_PARENT_CONSENT: texts.ASK_PARENT_CONSENT,
+    logic.WAIT_BIRTH: "ASK_BIRTH",
+    logic.WAIT_BIRTH_PLACE: "ASK_BIRTH_PLACE",
+    logic.WAIT_PASSPORT: "ASK_PASSPORT",
+    logic.WAIT_PASSPORT_DATE: "ASK_PASSPORT_DATE",
+    logic.WAIT_PASSPORT_CODE: "ASK_PASSPORT_CODE",
+    logic.WAIT_PASSPORT_ISSUER: "ASK_PASSPORT_ISSUER",
+    logic.WAIT_REG_ADDR: "ASK_REG_ADDR",
+    logic.WAIT_LIVE_ADDR: "ASK_LIVE_ADDR",
+    logic.WAIT_PHONE2: "ASK_PHONE2",
+    logic.WAIT_PHONE3: "ASK_PHONE3",
+    logic.WAIT_DOC: "ASK_DOC",
+    logic.WAIT_PARENT_CONSENT: "ASK_PARENT_CONSENT",
 }
 
-SAME_ADDRESS_ANSWER = "совпадает с регистрацией"
+# Ответ «совпадает» принимается на любом языке: кнопка печатает подпись
+# reply-клавиатуры текстом сообщения.
+SAME_ADDRESS_ANSWERS = frozenset(
+    label.lower() for label in i18n.variants("BTN_SAME_ADDRESS"))
 
 
-def _markup_for(state: str) -> Any:
+def _markup_for(state: str, lang: str) -> Any:
     """Клавиатура шага. У большинства её нет - только у тех, где кнопка
     экономит человеку ввод длинной строки."""
     if state == logic.WAIT_LIVE_ADDR:
-        return kb.same_address()
+        return kb.same_address(lang)
     return kb.remove()
 
 
@@ -314,7 +377,9 @@ async def _advance(message: Message, bot: Bot, db: Database, vault: Vault,
     if to_confirm:
         await send_confirm(bot, user)
         return
-    await message.answer(PROMPTS[following], reply_markup=_markup_for(following))
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, PROMPTS[following]),
+                         reply_markup=_markup_for(following, lang))
 
 
 @router.message(StateIs(*logic.ANKETA_BY_STATE), F.text)
@@ -330,8 +395,8 @@ async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
     anketa = vault.decrypt(user.get("anketa_enc"))
 
     if step.state == logic.WAIT_LIVE_ADDR and \
-            message.text.strip().lower() == SAME_ADDRESS_ANSWER:
-        await message.answer(texts.SAME_AS_REG)
+            message.text.strip().lower() in SAME_ADDRESS_ANSWERS:
+        await message.answer(i18n.t(user.get("lang"), "SAME_AS_REG"))
         await _advance(message, bot, db, vault, user, step,
                        anketa.get("reg_address", ""))
         return
@@ -348,24 +413,25 @@ async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
         result = step.validate(message.text)
 
     if not result.ok:
-        await message.answer(result.error)
+        await message.answer(i18n.err(user.get("lang"), result.error))
         return
 
     # Сверка двух дат возможна только когда известны обе, поэтому она живёт
     # здесь, а не в валидаторе одного поля.
     if step.state == logic.WAIT_PASSPORT_DATE and not logic.passport_date_consistent(
             {**anketa, "passport_date": result.value}):
-        await message.answer(texts.PASSPORT_DATE_BEFORE_BIRTH)
+        lang = i18n.user_lang(user)
+        await message.answer(i18n.t(lang, "PASSPORT_DATE_BEFORE_BIRTH"))
         await db.patch(user["tg_id"], expected_state=step.state, state=logic.WAIT_BIRTH)
-        await message.answer(PROMPTS[logic.WAIT_BIRTH])
+        await message.answer(i18n.t(lang, PROMPTS[logic.WAIT_BIRTH]))
         return
 
     await _advance(message, bot, db, vault, user, step, result.value)
 
 
 @router.message(StateIs(*logic.ANKETA_BY_STATE))
-async def st_anketa_wrong(message: Message) -> None:
-    await message.answer(texts.ANKETA_AS_TEXT)
+async def st_anketa_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "ANKETA_AS_TEXT"))
 
 
 # ─────────────────────────── документ ───────────────────────────
@@ -375,7 +441,7 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
                  vault: Vault, user: dict) -> None:
     check = _check_upload(message)
     if not check.ok:
-        await message.answer(check.error)
+        await message.answer(i18n.err(user.get("lang"), check.error))
         return
     file_id = _file_id(message)
     is_photo = bool(message.photo)
@@ -398,26 +464,28 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
         await send_confirm(bot, {**user, "doc_file_id": file_id,
                                  "doc_is_photo": is_photo})
     else:
-        await message.answer(PROMPTS[following], reply_markup=kb.remove())
+        await message.answer(i18n.t(user.get("lang"), PROMPTS[following]),
+                             reply_markup=kb.remove())
     # Скачивание и хэш - в фоне: пользователь не должен ждать сеть.
     tasks.spawn(_process_upload(bot, db, cfg, user["tg_id"], file_id, "doc"))
 
 
 async def send_confirm(bot: Bot, data: dict) -> None:
     """Экран подтверждения: документ, введённые данные и кнопки."""
+    lang = i18n.user_lang(data)
     await send_doc(
         bot, data["tg_id"], data,
-        caption=texts.CONFIRM_CAPTION.format(
+        caption=i18n.t(lang, "CONFIRM_CAPTION").format(
             fio=logic.esc(data["full_name"]),
             phone=logic.esc(str(data["phone"] or "").lstrip("+")),
         ),
-        reply_markup=kb.confirm(),
+        reply_markup=kb.confirm(lang),
     )
 
 
 @router.message(StateIs(logic.WAIT_DOC))
-async def st_doc_wrong(message: Message) -> None:
-    await message.answer(texts.DOC_NEED_PHOTO)
+async def st_doc_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "DOC_NEED_PHOTO"))
 
 
 # ─────────────────── согласие родителя (16-17 лет) ───────────────────
@@ -427,7 +495,7 @@ async def st_parent(message: Message, bot: Bot, db: Database, cfg: Config,
                     user: dict) -> None:
     check = _check_upload(message)
     if not check.ok:
-        await message.answer(check.error)
+        await message.answer(i18n.err(user.get("lang"), check.error))
         return
     # Скан паспорта мог уйти под ретеншен, пока человек ходил за согласием:
     # отказ ставит purge_after на три дня, а согласие родителя бывает
@@ -436,7 +504,7 @@ async def st_parent(message: Message, bot: Bot, db: Database, cfg: Config,
     if not user.get("doc_file_id"):
         await db.patch(user["tg_id"], expected_state=logic.WAIT_PARENT_CONSENT,
                        state=logic.WAIT_DOC)
-        await message.answer(PROMPTS[logic.WAIT_DOC])
+        await message.answer(i18n.t(user.get("lang"), PROMPTS[logic.WAIT_DOC]))
         return
     file_id = _file_id(message)
     is_photo = bool(message.photo)
@@ -451,8 +519,8 @@ async def st_parent(message: Message, bot: Bot, db: Database, cfg: Config,
 
 
 @router.message(StateIs(logic.WAIT_PARENT_CONSENT))
-async def st_parent_wrong(message: Message) -> None:
-    await message.answer(texts.PARENT_NEED_PHOTO)
+async def st_parent_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "PARENT_NEED_PHOTO"))
 
 
 # ─────────────────────────── подтверждение ───────────────────────────
@@ -471,8 +539,10 @@ async def cb_restart(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
         await callback.answer()
         return
     await db.log_event(user["tg_id"], "restart")
-    await callback.answer(texts.RESTART_TOAST)
-    await bot.send_message(user["tg_id"], texts.RESTART, reply_markup=kb.remove())
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "RESTART_TOAST"))
+    await bot.send_message(user["tg_id"], i18n.t(lang, "RESTART"),
+                           reply_markup=kb.remove())
 
 
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "confirm")
@@ -484,10 +554,12 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
             await callback.answer()
             return
         await db.set_purge_after(user["tg_id"], cfg.purge_approved_days)
-        await callback.answer("Готово")
+        lang = i18n.user_lang(user)
+        await callback.answer("OK")
         await bot.send_message(user["tg_id"],
-                               texts.REGISTERED.format(video_url=logic.esc(cfg.video_url)),
-                               reply_markup=kb.main_menu())
+                               i18n.t(lang, "REGISTERED").format(
+                                   video_url=logic.esc(cfg.video_url)),
+                               reply_markup=kb.main_menu(lang))
         return
 
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
@@ -495,8 +567,9 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
         await callback.answer()
         return
     await db.log_event(user["tg_id"], "submitted")
-    await callback.answer(texts.SUBMITTED_TOAST)
-    await bot.send_message(user["tg_id"], texts.SUBMITTED)
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "SUBMITTED_TOAST"))
+    await bot.send_message(user["tg_id"], i18n.t(lang, "SUBMITTED"))
     # Если карточка не ушла (бот не в чате модерации, неверный ADMIN_CHAT_ID),
     # заявка становится невидимой: пользователь ждёт, модератор не знает.
     # Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
@@ -508,17 +581,18 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
                       "владелец аккаунта нажал /start у бота: написать первым "
                       "в личку бот не может", user["tg_id"])
         await db.log_event(user["tg_id"], "moderation_card_failed")
-        await bot.send_message(user["tg_id"], texts.SUBMIT_PROBLEM)
+        await bot.send_message(user["tg_id"],
+                               i18n.t(user.get("lang"), "SUBMIT_PROBLEM"))
 
 
 @router.message(StateIs(logic.CONFIRM))
-async def st_confirm_wrong(message: Message) -> None:
-    await message.answer(texts.CONFIRM_PRESS_BUTTON)
+async def st_confirm_wrong(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "CONFIRM_PRESS_BUTTON"))
 
 
 @router.message(StateIs(logic.PENDING))
-async def st_pending(message: Message) -> None:
-    await message.answer(texts.PENDING_WAIT)
+async def st_pending(message: Message, user: dict) -> None:
+    await message.answer(i18n.t(user.get("lang"), "PENDING_WAIT"))
 
 
 # ─────────────────────────── фоновые задачи ───────────────────────────

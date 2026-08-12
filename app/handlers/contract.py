@@ -19,6 +19,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
+from .. import i18n
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
@@ -145,16 +146,18 @@ async def issue(bot: Bot, db: Database, cfg: Config, vault: Vault, tg_id: int) -
     await db.log_event(tg_id, "contract_issued", {"number": number})
     # Приложение уходит ПЕРВЫМ, договор с кнопками - последним: кнопки
     # подписи должны оказаться на нижнем сообщении, у самого экрана.
+    lang = i18n.user_lang(data)
     await bot.send_document(
         tg_id,
         BufferedInputFile(sog, filename=_soglasie_filename(number)),
-        caption=texts.SOGLASIE_CAPTION.format(number=logic.esc(number)),
+        caption=i18n.t(lang, "SOGLASIE_CAPTION").format(number=logic.esc(number)),
     )
     await bot.send_document(
         tg_id,
         BufferedInputFile(pdf, filename=_filename(number)),
-        caption=texts.CONTRACT_READY_USER.format(number=logic.esc(number)),
-        reply_markup=kb.sign_contract(),
+        caption=i18n.t(lang, "CONTRACT_READY_USER").format(
+            number=logic.esc(number)),
+        reply_markup=kb.sign_contract(lang),
     )
     return number
 
@@ -168,7 +171,8 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     у подписанного экземпляра свой - именно он и уходит в чат фиксации.
     """
     if user["state"] != logic.WAIT_SIGN:
-        await callback.answer(texts.CONTRACT_PRESS_BUTTON, show_alert=True)
+        await callback.answer(i18n.t(user.get("lang"), "CONTRACT_PRESS_BUTTON"),
+                              show_alert=True)
         return
 
     signed_at = utcnow()
@@ -181,7 +185,8 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
                           contract_signed_at=signed_at):
         await callback.answer()
         return
-    await callback.answer(texts.CONTRACT_SIGN_TOAST)
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "CONTRACT_SIGN_TOAST"))
 
     tg_id = user["tg_id"]
     row = await db.get_user(tg_id)
@@ -227,16 +232,16 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         await bot.send_document(
             tg_id,
             BufferedInputFile(sog, filename=_soglasie_filename(number)),
-            caption=texts.SOGLASIE_SIGNED_CAPTION.format(
+            caption=i18n.t(lang, "SOGLASIE_SIGNED_CAPTION").format(
                 number=logic.esc(number), signed_at=stamp),
         )
         await bot.send_document(
             tg_id,
             BufferedInputFile(pdf, filename=_filename(number)),
-            caption=texts.CONTRACT_SIGNED_USER.format(
+            caption=i18n.t(lang, "CONTRACT_SIGNED_USER").format(
                 number=logic.esc(number), signed_at=stamp,
                 video_url=logic.esc(cfg.video_url)),
-            reply_markup=kb.main_menu(),
+            reply_markup=kb.main_menu(lang),
         )
 
         await _fix(bot, db, cfg, data, anketa, pdf=pdf, number=number,
@@ -281,10 +286,12 @@ async def start_payment(bot: Bot, db: Database, cfg: Config, data: dict) -> None
     """
     tg_id = data["tg_id"]
     number = data.get("contract_no") or ""
+    lang = i18n.user_lang(data)
     await bot.send_message(
-        tg_id, texts.PAY_PROMPT.format(price=logic.esc(rent_price(data)),
-                                       pay_url=logic.esc(cfg.pay_url)),
-        reply_markup=kb.paid(cfg.pay_url))
+        tg_id, i18n.t(lang, "PAY_PROMPT").format(
+            price=logic.esc(rent_price(data)),
+            pay_url=logic.esc(cfg.pay_url)),
+        reply_markup=kb.paid(cfg.pay_url, lang))
     try:
         sent = await bot.send_message(
             cfg.contract_chat_id, pay_card(data),
@@ -348,7 +355,8 @@ async def cb_mistake(callback: CallbackQuery, bot: Bot, db: Database,
     договоров с перепутанными реквизитами.
     """
     if user["state"] != logic.WAIT_SIGN:
-        await callback.answer(texts.CONTRACT_PRESS_BUTTON, show_alert=True)
+        await callback.answer(i18n.t(user.get("lang"), "CONTRACT_PRESS_BUTTON"),
+                              show_alert=True)
         return
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_SIGN,
                           state=logic.WAIT_FIO, status=logic.ST_NEW,
@@ -357,8 +365,10 @@ async def cb_mistake(callback: CallbackQuery, bot: Bot, db: Database,
         return
     await db.log_event(user["tg_id"], "contract_mistake")
     await callback.answer()
-    await bot.send_message(user["tg_id"], texts.CONTRACT_MISTAKE)
-    await bot.send_message(user["tg_id"], texts.WELCOME, reply_markup=kb.remove())
+    lang = i18n.user_lang(user)
+    await bot.send_message(user["tg_id"], i18n.t(lang, "CONTRACT_MISTAKE"))
+    await bot.send_message(user["tg_id"], i18n.t(lang, "WELCOME"),
+                           reply_markup=kb.remove())
 
 
 @router.message(StateIs(logic.WAIT_SIGN))
@@ -384,18 +394,19 @@ async def st_wait_sign(message: Message, bot: Bot, db: Database, cfg: Config,
                                  issued_at=data.get("contract_issued_at"))
     except ContractProblem:
         log.exception("не удалось переотправить договор %s", user["tg_id"])
-        await message.answer(texts.CONTRACT_PRESS_BUTTON)
+        await message.answer(i18n.t(user.get("lang"), "CONTRACT_PRESS_BUTTON"))
         return
+    lang = i18n.user_lang(user)
     await bot.send_document(
         user["tg_id"],
         BufferedInputFile(sog, filename=_soglasie_filename(number)),
-        caption=texts.SOGLASIE_CAPTION.format(number=logic.esc(number)),
+        caption=i18n.t(lang, "SOGLASIE_CAPTION").format(number=logic.esc(number)),
     )
     await bot.send_document(
         user["tg_id"],
         BufferedInputFile(pdf, filename=_filename(number)),
-        caption=texts.CONTRACT_RESEND.format(number=logic.esc(number)),
-        reply_markup=kb.sign_contract(),
+        caption=i18n.t(lang, "CONTRACT_RESEND").format(number=logic.esc(number)),
+        reply_markup=kb.sign_contract(lang),
     )
 
 
@@ -457,7 +468,7 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     кнопкой «Оплата получена» на своей карточке - клиентская кнопка лишь
     зовёт его проверить.
     """
-    await callback.answer(texts.PAY_NUDGE_TOAST)
+    await callback.answer(i18n.t(user.get("lang"), "PAY_NUDGE_TOAST"))
     await db.log_event(user["tg_id"], "client_paid_claim")
     row = await db.get_user(user["tg_id"])
     data = dict(row) if row else dict(user)
@@ -495,15 +506,16 @@ async def st_payment_receipt(message: Message, bot: Bot, db: Database,
         cfg.contract_chat_id, file_id, caption=caption,
         reply_to_message_id=reply_to))
 
+    lang = i18n.user_lang(user)
     if delivered:
         await db.log_event(user["tg_id"], "payment_receipt")
-        await message.answer(texts.PAY_RECEIPT_SENT,
-                             reply_markup=kb.paid(cfg.pay_url))
+        await message.answer(i18n.t(lang, "PAY_RECEIPT_SENT"),
+                             reply_markup=kb.paid(cfg.pay_url, lang))
         return
     # Чек не дошёл - молчать нельзя: человек считает, что оплату уже видят.
     await db.log_event(user["tg_id"], "payment_receipt_failed")
-    await message.answer(texts.PAY_RECEIPT_FAILED,
-                         reply_markup=kb.paid(cfg.pay_url))
+    await message.answer(i18n.t(lang, "PAY_RECEIPT_FAILED"),
+                         reply_markup=kb.paid(cfg.pay_url, lang))
 
 
 @router.message(StateIs(logic.WAIT_PAYMENT))
@@ -511,10 +523,11 @@ async def st_wait_payment(message: Message, cfg: Config, user: dict) -> None:
     """Любое другое сообщение на этапе оплаты возвращает сумму, ссылку
     и кнопки: потерянное в ленте сообщение с кнопкой - это тупик
     без переотправки."""
+    lang = i18n.user_lang(user)
     await message.answer(
-        texts.PAY_WAIT.format(price=logic.esc(rent_price(user)),
-                              pay_url=logic.esc(cfg.pay_url)),
-        reply_markup=kb.paid(cfg.pay_url))
+        i18n.t(lang, "PAY_WAIT").format(price=logic.esc(rent_price(user)),
+                                        pay_url=logic.esc(cfg.pay_url)),
+        reply_markup=kb.paid(cfg.pay_url, lang))
 
 
 # ─────────────────────── Акт приёма-передачи ───────────────────────
@@ -563,15 +576,17 @@ async def send_act_in(bot: Bot, db: Database, cfg: Config, data: dict,
         await bot.send_message(cfg.contract_chat_id,
                                texts.CONTRACT_ALERT_FAILED.format(
                                    tg_id=tg_id, reason=logic.esc(str(exc))))
+        lang = i18n.user_lang(data)
         await bot.send_message(tg_id,
-                               texts.REGISTERED.format(
+                               i18n.t(lang, "REGISTERED").format(
                                    video_url=logic.esc(cfg.video_url)),
-                               reply_markup=kb.main_menu())
+                               reply_markup=kb.main_menu(lang))
         return
+    lang = i18n.user_lang(data)
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
-        caption=texts.ACT_IN_READY.format(number=logic.esc(number)),
-        reply_markup=kb.sign_act(),
+        caption=i18n.t(lang, "ACT_IN_READY").format(number=logic.esc(number)),
+        reply_markup=kb.sign_act(lang),
     )
 
 
@@ -584,7 +599,8 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
                           state=logic.APPROVED, act_in_signed_at=signed_at):
         await callback.answer()
         return
-    await callback.answer(texts.CONTRACT_SIGN_TOAST)
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "CONTRACT_SIGN_TOAST"))
 
     tg_id = user["tg_id"]
     row = await db.get_user(tg_id)
@@ -620,10 +636,10 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
-        caption=texts.ACT_IN_SIGNED.format(
+        caption=i18n.t(lang, "ACT_IN_SIGNED").format(
             number=logic.esc(number), signed_at=stamp,
             video_url=logic.esc(cfg.video_url)),
-        reply_markup=kb.main_menu(),
+        reply_markup=kb.main_menu(lang),
     )
     try:
         await bot.send_document(
@@ -663,7 +679,8 @@ async def cb_act_mistake(callback: CallbackQuery, bot: Bot, db: Database,
     оператор отвечает на приглашение выдачи ещё раз, бот пересобирает акт."""
     await callback.answer()
     await db.log_event(user["tg_id"], "act_in_mistake")
-    await bot.send_message(user["tg_id"], texts.ACT_MISTAKE_SENT)
+    await bot.send_message(user["tg_id"],
+                           i18n.t(user.get("lang"), "ACT_MISTAKE_SENT"))
     try:
         row = await db.get_user(user["tg_id"])
         number = (dict(row).get("contract_no") if row else "") or ""
@@ -689,13 +706,14 @@ async def st_wait_act_sign(message: Message, bot: Bot, db: Database,
                                           signed_at=UNSIGNED))
     except ContractProblem:
         log.exception("не удалось переотправить акт %s", user["tg_id"])
-        await message.answer(texts.ACT_PRESS_BUTTON)
+        await message.answer(i18n.t(user.get("lang"), "ACT_PRESS_BUTTON"))
         return
+    lang = i18n.user_lang(user)
     await bot.send_document(
         user["tg_id"],
         BufferedInputFile(docx, filename=_act_filename("priema", number)),
-        caption=texts.ACT_RESEND.format(number=logic.esc(number)),
-        reply_markup=kb.sign_act(),
+        caption=i18n.t(lang, "ACT_RESEND").format(number=logic.esc(number)),
+        reply_markup=kb.sign_act(lang),
     )
 
 
@@ -705,8 +723,8 @@ async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
                        tg_id: int) -> None:
     """Собрать Акт возврата по данным оператора и отдать на подтверждение.
 
-    Анкета к этому моменту уже стёрта - в акте только ФИО и номер договора,
-    паспортные данные заменяет отсылка к договору.
+    В акте только ФИО и номер договора - паспортные данные заменяет
+    отсылка к договору, поэтому от анкеты он не зависит.
     """
     row = await db.get_user(tg_id)
     if row is None:
@@ -716,10 +734,11 @@ async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
     number = data.get("contract_no") or ""
     docx, _ = _build_act(cfg, cfg.act_out_template,
                          _act_context(cfg, data, anketa, signed_at=UNSIGNED))
+    lang = i18n.user_lang(data)
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
-        caption=texts.RETURN_READY.format(number=logic.esc(number)),
-        reply_markup=kb.sign_return(),
+        caption=i18n.t(lang, "RETURN_READY").format(number=logic.esc(number)),
+        reply_markup=kb.sign_return(lang),
     )
 
 
@@ -731,7 +750,8 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
                           state=logic.APPROVED, act_out_signed_at=signed_at):
         await callback.answer()
         return
-    await callback.answer(texts.CONTRACT_SIGN_TOAST)
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "CONTRACT_SIGN_TOAST"))
 
     tg_id = user["tg_id"]
     row = await db.get_user(tg_id)
@@ -773,9 +793,9 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
-        caption=texts.RETURN_SIGNED.format(number=logic.esc(number),
-                                           signed_at=stamp),
-        reply_markup=kb.main_menu(),
+        caption=i18n.t(lang, "RETURN_SIGNED").format(number=logic.esc(number),
+                                                     signed_at=stamp),
+        reply_markup=kb.main_menu(lang),
     )
     try:
         await bot.send_document(
@@ -798,7 +818,8 @@ async def cb_return_mistake(callback: CallbackQuery, bot: Bot, db: Database,
     """Оператор пришлёт данные возврата заново ответом на то же приглашение."""
     await callback.answer()
     await db.log_event(user["tg_id"], "act_out_mistake")
-    await bot.send_message(user["tg_id"], texts.ACT_MISTAKE_SENT)
+    await bot.send_message(user["tg_id"],
+                           i18n.t(user.get("lang"), "ACT_MISTAKE_SENT"))
     try:
         row = await db.get_user(user["tg_id"])
         number = (dict(row).get("contract_no") if row else "") or ""
@@ -817,4 +838,4 @@ async def st_wait_return_sign(message: Message, bot: Bot, db: Database,
         await send_act_out(bot, db, cfg, vault, user["tg_id"])
     except (ContractProblem, TelegramAPIError):
         log.exception("не удалось переотправить акт возврата %s", user["tg_id"])
-        await message.answer(texts.ACT_PRESS_BUTTON)
+        await message.answer(i18n.t(user.get("lang"), "ACT_PRESS_BUTTON"))

@@ -24,7 +24,7 @@ PATCHABLE = frozenset({
     "soglasie_path", "soglasie_sha256",
     "pay_chat_id", "pay_message_id", "pay_confirmed_at",
     "close_reason", "close_requested_at",
-    "faq_lang",
+    "lang", "faq_lang",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
     "issue_data", "issue_chat_id", "issue_message_id",

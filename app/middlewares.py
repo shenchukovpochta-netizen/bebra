@@ -10,9 +10,9 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 
-from . import faq
+from . import i18n
 from . import keyboards as kb
-from . import logic, texts
+from . import logic
 from .config import Config
 from .db import Database
 from .services.crypto import Vault
@@ -28,7 +28,8 @@ def _is_faq(inner: Any) -> bool:
     if isinstance(inner, CallbackQuery):
         return (inner.data or "").startswith(("faq:", "faqlang:"))
     if isinstance(inner, Message):
-        return (inner.text or "").strip() == faq.MENU_BUTTON
+        # Кнопка меню переводится - сверяемся со всеми языковыми вариантами.
+        return i18n.button_key(inner.text) == "BTN_FAQ"
     return False
 
 
@@ -151,7 +152,8 @@ class PipelineMiddleware(BaseMiddleware):
         if verdict == "drop":
             return None      # молча: ответ на флуд сам становится флудом
         if verdict == "warn":
-            await self._reply(data["bot"], user_id, texts.RATE_LIMITED)
+            await self._reply(data["bot"], user_id,
+                              i18n.t(user.get("lang"), "RATE_LIMITED"))
             return None
 
         # Гейт подписки: без кэша, всегда живой запрос. Ветка частых
@@ -160,13 +162,16 @@ class PipelineMiddleware(BaseMiddleware):
         # регистрация при этом остаётся за гейтом, как и была.
         if not _is_faq(inner) and \
                 not await check_subscription(data["bot"], self.cfg.channel_id, user_id):
+            lang = i18n.user_lang(user)
             await self._reply(
                 data["bot"], user_id,
-                texts.NOT_SUBSCRIBED.format(channel_url=logic.esc(self.cfg.channel_url)),
-                kb.subscribe(self.cfg.channel_url),
+                i18n.t(lang, "NOT_SUBSCRIBED").format(
+                    channel_url=logic.esc(self.cfg.channel_url)),
+                kb.subscribe(self.cfg.channel_url, lang),
             )
             if isinstance(inner, CallbackQuery):
-                await inner.answer(texts.SUB_NOT_FOUND, show_alert=True)
+                await inner.answer(i18n.t(lang, "SUB_NOT_FOUND"),
+                                   show_alert=True)
             return None
 
         return await handler(event, data)

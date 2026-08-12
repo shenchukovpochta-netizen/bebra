@@ -4,10 +4,11 @@
 нужны адрес и тарифы сейчас, а не после анкеты. Поэтому вход - и кнопкой
 под приветствием (callback faq:open), и кнопкой основного меню.
 
-Первый вопрос ветки - язык: выбор запоминается в faq_lang, дальше темы
-и ответы идут на нём. Сменить можно кнопкой «🌐» в списке тем. Язык
-действует только в ветке кнопок: распознавание свободного текста
-в поддержке - по русским триггерам, и автоответ там русский.
+Язык у бота общий: клиент выбирает его первым вопросом /start (колонка
+lang), и ветка вопросов говорит на нём же. Лид, вошедший в вопросы до
+выбора, получает выбор языка здесь - и этот выбор становится языком всего
+диалога. Сменить можно кнопкой «🌐» в списке тем. Распознавание свободного
+текста в поддержке - по русским триггерам, и автоответ там русский.
 
 Сами ответы и факты - в app/faq.py, переводы - в app/faq_i18n.py.
 """
@@ -20,8 +21,7 @@ from datetime import datetime
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, Message
 
-from .. import faq
-from .. import faq_i18n as i18n
+from .. import faq, faq_i18n, i18n
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
@@ -35,8 +35,8 @@ BTN_FAQ = faq.MENU_BUTTON
 
 
 def _lang_of(user: dict) -> str:
-    lang = user.get("faq_lang") or ""
-    return lang if lang in i18n.LANGS else ""
+    lang = user.get("lang") or ""
+    return lang if lang in faq_i18n.LANGS else ""
 
 
 def _registered(user: dict) -> bool:
@@ -52,7 +52,7 @@ def home(user: dict) -> tuple[str, object]:
     """
     lang = _lang_of(user)
     if not lang:
-        return i18n.pick_prompt(), kb.faq_langs()
+        return faq_i18n.pick_prompt(), kb.faq_langs()
     return (faq.menu_text(lang, registered=_registered(user)),
             kb.faq_topics(faq.MENU_TOPICS, lang))
 
@@ -66,7 +66,7 @@ def reply_for(intent: faq.Intent, data: dict, cfg: Config,
 
 # Кнопка меню видна только зарегистрированным (у остальных нет клавиатуры
 # меню), а вот callbacks ниже работают в любом состоянии.
-@router.message(StateIs(logic.APPROVED), F.text == BTN_FAQ)
+@router.message(StateIs(logic.APPROVED), F.text.in_(i18n.variants("BTN_FAQ")))
 async def faq_menu(message: Message, user: dict) -> None:
     text, markup = home(user)
     await message.answer(text, reply_markup=markup)
@@ -80,13 +80,15 @@ async def faq_set_lang(callback: CallbackQuery, bot: Bot, db: Database,
         await callback.answer()
         return
     code = (callback.data or "").split(":", 1)[-1]
-    if code not in i18n.LANGS:
-        await callback.answer(texts.FAQ_TOPIC_GONE, show_alert=True)
+    if code not in faq_i18n.LANGS:
+        await callback.answer(i18n.t(user.get("lang"), "FAQ_TOPIC_GONE"),
+                              show_alert=True)
         return
     await callback.answer()
-    await db.patch(user["tg_id"], faq_lang=code)
+    # Язык общий для всего диалога: выбор из ветки вопросов - тот же выбор.
+    await db.patch(user["tg_id"], lang=code)
     await db.log_event(user["tg_id"], "faq_lang_set", {"lang": code})
-    fresh = {**user, "faq_lang": code}
+    fresh = {**user, "lang": code}
     await bot.send_message(user["tg_id"],
                            faq.menu_text(code, registered=_registered(fresh)),
                            reply_markup=kb.faq_topics(faq.MENU_TOPICS, code))
@@ -109,7 +111,7 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
 
     if code in ("open", "lang"):
         await callback.answer()
-        shown = user if code == "open" else {**user, "faq_lang": ""}
+        shown = user if code == "open" else {**user, "lang": ""}
         text, markup = home(shown)
         await bot.send_message(tg_id, text, reply_markup=markup)
         return
@@ -119,7 +121,8 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
     # ничего. Кнопка с такой темой может прийти только из подделанного
     # callback - отвечаем как на устаревшую.
     if intent is None or intent.red or not intent.menu:
-        await callback.answer(texts.FAQ_TOPIC_GONE, show_alert=True)
+        await callback.answer(i18n.t(user.get("lang"), "FAQ_TOPIC_GONE"),
+                              show_alert=True)
         return
     await callback.answer()
 
@@ -135,7 +138,7 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
     if not _registered(data):
         # До регистрации режима вопроса нет - и трогать состояние анкеты
         # нельзя: человек стоит посреди неё. Вместо этого - прямой контакт.
-        t = i18n.T.get(lang, {})
+        t = faq_i18n.T.get(lang, {})
         await bot.send_message(tg_id, t.get("contact",
                                             texts.FAQ_GUEST_CONTACT))
         return
@@ -144,6 +147,6 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
     # («заберите с Баумана 1») провалится в ловушку меню.
     if data["state"] == logic.WAIT_SUPPORT or await db.patch(
             tg_id, expected_state=logic.APPROVED, state=logic.WAIT_SUPPORT):
-        t = i18n.T.get(lang, {})
+        t = faq_i18n.T.get(lang, {})
         await bot.send_message(tg_id, t.get("handoff", texts.FAQ_HANDOFF),
-                               reply_markup=kb.support_cancel())
+                               reply_markup=kb.support_cancel(i18n.norm(lang)))

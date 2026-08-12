@@ -180,7 +180,7 @@ class FakeDB:
             "status": logic.ST_NEW, "rl_count": 0, "full_name": None, "phone": None,
             "doc_file_id": None, "doc_path": None, "doc_is_photo": True,
             "parent_file_id": None, "parent_path": None, "parent_is_photo": True,
-            "purge_after": None, "anketa_enc": None,
+            "purge_after": None, "anketa_enc": None, "lang": None,
             "contract_no": None, "contract_path": None, "contract_sha256": None,
             "contract_status": logic.CT_NONE, "contract_issued_at": None,
             "contract_signed_at": None, "mod_chat_id": None, "mod_message_id": None,
@@ -395,6 +395,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def register_up_to_confirm(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -463,6 +464,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_bad_passport_does_not_advance(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -475,6 +477,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_under_sixteen_rejected_at_birth_date(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -486,6 +489,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def register_minor_up_to_doc(self):
         """Регистрация 17-летнего до шага документа включительно."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -543,6 +547,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_address_button_copies_registration(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -556,6 +561,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_phone_rejected(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -571,6 +577,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         что именно у него берут. Он обязан называть весь состав: анкета
         собирает заметно больше, чем ФИО и телефон."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         text = " ".join(self.session.sent())
@@ -582,6 +589,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Селфи и распознавание убраны. Обещать в согласии обработку,
         которой нет, - такое же расхождение, как и обратное."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         text = " ".join(self.session.sent()).lower()
@@ -590,6 +598,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_foreign_contact_rejected(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -1262,6 +1271,96 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Актуальные тарифы", last,
                       "без подписанного договора - только тарифы")
 
+    # ─── язык всего диалога ───
+
+    async def test_registration_speaks_uzbek_end_to_end(self):
+        """Клиент, выбравший узбекский первым вопросом, проходит весь путь
+        на нём: приветствие, политика, анкета, ошибка валидации, договор,
+        оплата, меню - и кнопки меню приходят подписанными по-узбекски."""
+        await self.feed(msg("/start"))
+        picker = self.session.calls[-1]
+        self.assertIn("Выберите язык", picker.text)
+        await self.feed(cb("lang:uz"))
+        self.assertEqual(self.db.users[USER_ID]["lang"], "uz")
+        sent = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)]
+        self.assertTrue(any("Xush kelibsiz" in (t or "") for t in sent),
+                        "приветствие не на узбекском")
+
+        await self.feed(msg("Иванов Иван Иванович"))
+        policy = [m for m in self.session.documents()
+                  if m.chat_id == USER_ID][-1]
+        self.assertIn("Shaxsiy ma'lumotlar", policy.caption,
+                      "подпись политики не на узбекском")
+        await self.feed(cb("pdn_ok"))
+        consent = [m.text for m in self.session.sent_to(USER_ID)
+                   if isinstance(m, SendMessage)][-1]
+        self.assertIn("rozilik", consent.lower())
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        ask = [m.text for m in self.session.sent_to(USER_ID)
+               if isinstance(m, SendMessage)][-1]
+        self.assertIn("Tug'ilgan sana", ask, "вопрос анкеты не на узбекском")
+
+        # ошибка валидации - тоже на узбекском
+        await self.feed(msg("31.02.1990"))
+        err = [m.text for m in self.session.sent_to(USER_ID)
+               if isinstance(m, SendMessage)][-1]
+        self.assertIn("Bunday sana mavjud emas", err)
+
+        await self.fill_anketa()
+        await self.feed(msg(photo=True))
+        await self.feed(cb("confirm"))
+        await self.approve_fully()
+        contract_doc = [m for m in self.session.documents()
+                        if m.chat_id == USER_ID][-1]
+        self.assertIn("shartnomasi tayyor", contract_doc.caption,
+                      "подпись договора не на узбекском")
+        await self.feed(cb("sign"))
+        pay = [m.text for m in self.session.sent_to(USER_ID)
+               if isinstance(m, SendMessage) and "3000 qr" in (m.text or "")]
+        self.assertTrue(any("to'lovi" in (t or "").lower() for t in pay),
+                        "запрос оплаты не на узбекском")
+        await self.confirm_pay()
+        await self.feed(cb("act_sign"))
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        # клавиатура меню - с узбекскими подписями
+        markup = self.session.last_markup()
+        labels = [b.text for r in markup.keyboard for b in r]
+        self.assertIn("🚲 Ijaraga olish", labels)
+        self.assertIn("🔚 Ijarani yopish", labels)
+        # карточка модерации оператору осталась русской
+        cards = [m.caption or "" for m in self.session.sent_to(ADMIN_CHAT)
+                 if getattr(m, "caption", None)]
+        self.assertTrue(any("Договор на утверждение" in c or "Иванов" in c
+                            for c in cards),
+                        "операторские карточки должны остаться русскими")
+
+    async def test_uzbek_menu_button_starts_rent_request(self):
+        """Нажатие переведённой кнопки меню распознаётся так же, как русской."""
+        await self.register_fully()
+        await self.close_rental()
+        self.db.users[USER_ID]["lang"] = "uz"
+        await self.feed(msg("🚲 Ijaraga olish"))
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage)
+                 and "повторную аренду" in (m.text or "")]
+        self.assertTrue(cards, "узбекская кнопка аренды не распознана")
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("operatorga", last, "ответ клиенту не на узбекском")
+
+    async def test_faq_language_switch_changes_dialog_language(self):
+        """Смена языка в ветке вопросов переключает весь диалог."""
+        await self.register_fully()
+        await self.feed(cb("faqlang:en"))
+        await self.feed(msg("💰 Тарифы"))     # русская кнопка всё ещё работает
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Current rental rates", last)
+
     async def test_rent_button_in_question_mode_starts_the_request(self):
         """Кнопка, набранная посреди вопроса, начинает аренду, а не
         выкидывает в меню с просьбой нажать ещё раз."""
@@ -1279,6 +1378,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_consent_screen_has_no_oferta(self):
         """Оферты больше нет: экран - чистое согласие на обработку ПДн."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         joined = " ".join(self.session.sent())
@@ -1289,6 +1389,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Отдельная галочка ознакомления: после ФИО - файл политики,
         согласие появляется только после «Ознакомлен(а)»."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.WAIT_PDN)
@@ -1307,6 +1408,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_policy_step_ignores_text_and_resends(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(msg("ок, читать не буду"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PDN)
@@ -1396,8 +1498,11 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     # ─── ветка частых вопросов ───
 
     async def test_faq_button_asks_language_first_then_lists_topics(self):
-        """Первый вопрос ветки - язык; выбор запоминается."""
+        """Язык выбран на старте - ветка сразу показывает темы на нём.
+        Клиент без языка (старые строки) получает выбор первым вопросом."""
         await self.register_fully()
+        # Клиент из прошлой версии: язык диалога ещё не выбирался.
+        self.db.users[USER_ID]["lang"] = None
         await self.feed(msg(faq.MENU_BUTTON))
         picker = self.session.calls[-1]
         self.assertIn("Выберите язык", picker.text)
@@ -1414,7 +1519,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("faq:lang", codes, "нет кнопки смены языка")
         # красные линии темой не предлагаются: по ним бот молчит
         self.assertNotIn("faq:DEBT", codes)
-        self.assertEqual(self.db.users[USER_ID]["faq_lang"], "ru")
+        self.assertEqual(self.db.users[USER_ID]["lang"], "ru")
 
         # повторное открытие - сразу темы, без вопроса о языке
         await self.feed(msg(faq.MENU_BUTTON))
@@ -1423,6 +1528,9 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     async def test_faq_answers_in_the_chosen_language(self):
         await self.register_fully()
         await self.feed(msg(faq.MENU_BUTTON))
+        topics = self.session.calls[-1]
+        self.assertIn("Выберите тему", topics.text,
+                      "язык выбран на старте - темы сразу, без вопроса")
         await self.feed(cb("faqlang:en"))
         topics = self.session.calls[-1]
         titles = [b[0].text for b in topics.reply_markup.inline_keyboard]
@@ -1434,16 +1542,23 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_faq_change_language_button_reopens_the_picker(self):
         await self.register_fully()
-        await self.feed(msg(faq.MENU_BUTTON))
         await self.feed(cb("faqlang:uz"))
+        self.assertEqual(self.db.users[USER_ID]["lang"], "uz",
+                         "выбор в ветке вопросов - язык всего диалога")
         await self.feed(cb("faq:lang"))
         self.assertIn("Выберите язык", self.session.calls[-1].text)
         await self.feed(cb("faqlang:ru"))
-        self.assertEqual(self.db.users[USER_ID]["faq_lang"], "ru")
+        self.assertEqual(self.db.users[USER_ID]["lang"], "ru")
 
     async def test_faq_entry_offered_right_at_start(self):
         """Кнопка «Ответы на частые вопросы» - под приветствием, до анкеты."""
         await self.feed(msg("/start"))
+        # Самый первый вопрос - язык диалога.
+        picker = self.session.calls[-1]
+        self.assertIn("Выберите язык", picker.text)
+        self.assertEqual(picker.reply_markup.inline_keyboard[0][0].callback_data,
+                         "lang:ru")
+        await self.feed(cb("lang:ru"))
         last = self.session.calls[-1]
         self.assertIn("частые вопросы", last.text)
         self.assertEqual(last.reply_markup.inline_keyboard[0][0].callback_data,
@@ -1453,6 +1568,8 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         """Регрессия: после «Проверить подписку» приветствие уходило без
         кнопки вопросов - урезанный старт по сравнению с /start."""
         await self.feed(cb("check_sub"))
+        self.assertIn("Выберите язык", self.session.calls[-1].text)
+        await self.feed(cb("lang:ru"))
         last = self.session.calls[-1]
         self.assertIn("частые вопросы", last.text)
         self.assertEqual(last.reply_markup.inline_keyboard[0][0].callback_data,
@@ -1469,8 +1586,10 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                   if isinstance(m, SendMessage)][-1]
         self.assertIn("3 000", answer.replace("\xa0", " "))
         self.assertIn("week", answer)
-        # состояние регистрации не тронуто, ФИО принимается как обычно
-        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO)
+        # состояние регистрации не тронуто; язык из ветки вопросов стал
+        # языком диалога, поэтому ФИО принимается без повторного выбора
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_LANG)
+        self.assertEqual(self.db.users[USER_ID]["lang"], "en")
         await self.feed(msg("Иванов Иван Иванович"))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PDN)
 
@@ -1481,8 +1600,8 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("faq:open"))
         await self.feed(cb("faqlang:ru"))
         await self.feed(cb("faq:BATT_SWAP"))
-        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO,
-                         "handoff не должен утаскивать лида из анкеты")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_LANG,
+                         "handoff не должен утаскивать лида из старта")
         to_user = " ".join(m.text or "" for m in self.session.sent_to(USER_ID)
                            if isinstance(m, SendMessage))
         self.assertIn("t.me/arenda_velo_kazan", to_user)
@@ -1581,8 +1700,8 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("🆘 Поддержка"))
         await self.feed(msg(faq.MENU_BUTTON))
         self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
-        # язык ещё не выбирали - ветка начинается с вопроса о языке
-        self.assertIn("Выберите язык", self.session.calls[-1].text)
+        # язык выбран на старте - сразу темы на нём
+        self.assertIn("Выберите тему", self.session.calls[-1].text)
 
     async def test_support_button_twice_stays_in_support(self):
         await self.register_fully()
@@ -1644,6 +1763,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         несёт тип, и Telegram отвечает 400. Пользователь оставался бы после
         загрузки вообще без сообщения, а карточка утверждения не уходила."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -1800,6 +1920,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         он ловил бы и обычного пользователя, ответившего на сообщение бота:
         человек посреди анкеты не получал бы ничего в ответ."""
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
@@ -1909,6 +2030,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
 
     async def test_document_of_wrong_type_rejected(self):
         await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
         await self.feed(msg("Иванов Иван Иванович"))
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))

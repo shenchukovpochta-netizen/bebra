@@ -13,6 +13,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
 
+from .. import i18n
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
@@ -76,7 +77,7 @@ async def cb_approve(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
     # Договор НЕ выдаётся сразу: сначала оператор отвечает на приглашение
     # данными выдачи (вин-номера, комплектация, срок, оплата) - без них
     # в договоре и акте были бы прочерки под ручку.
-    await _notify(bot, target, texts.APPROVED_WAIT_ISSUE)
+    await _notify(bot, db, target, "APPROVED_WAIT_ISSUE")
     row = await db.get_user(target)
     fio = (dict(row).get("full_name") if row else "") or "без имени"
     try:
@@ -140,7 +141,7 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         except TelegramAPIError:
             pass
 
-    await _notify(bot, target, texts.PAY_CONFIRMED_USER)
+    await _notify(bot, db, target, "PAY_CONFIRMED_USER")
     row = await db.get_user(target)
     data = dict(row) if row else before
     await contract.send_act_in(bot, db, cfg, data,
@@ -223,7 +224,8 @@ async def cb_reject_reason(callback: CallbackQuery, bot: Bot, db: Database,
     await db.set_purge_after(target, cfg.purge_rejected_days)
     await callback.answer(texts.MOD_REJECTED)
     await _mark_card(callback, False)
-    await _notify(bot, target, texts.REJECTED_WITH_REASON.format(reason=logic.esc(reason)))
+    await _notify(bot, db, target, "REJECTED_WITH_REASON",
+                  reason=logic.esc(reason))
 
 
 @router.message(ServiceChatReply())
@@ -289,8 +291,8 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
                        {"by": message.from_user.id, "reason": comment.value})
     await db.set_purge_after(tg_id, cfg.purge_rejected_days)
     await message.reply(texts.MOD_COMMENT_SAVED)
-    await _notify(bot, tg_id,
-                  texts.REJECTED_WITH_REASON.format(reason=logic.esc(comment.value)))
+    await _notify(bot, db, tg_id, "REJECTED_WITH_REASON",
+                  reason=logic.esc(comment.value))
     # Кнопки с карточки снимаем: заявка решена, второй модератор не должен
     # видеть живой «Одобрить».
     try:
@@ -355,7 +357,7 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     except (contract.ContractProblem, TelegramAPIError) as exc:
         log.exception("договор для %s не выдан", tg_id)
         await db.log_event(tg_id, "contract_failed", {"error": str(exc)})
-        await _notify(bot, tg_id, texts.CONTRACT_FAILED_USER)
+        await _notify(bot, db, tg_id, "CONTRACT_FAILED_USER")
         await message.reply(texts.CONTRACT_ALERT_FAILED.format(
             tg_id=tg_id, reason=logic.esc(str(exc))))
         return
@@ -422,11 +424,12 @@ async def _repeat_payment(bot: Bot, db: Database, cfg: Config, target: dict,
     оператор сверяет поступление с суммой на ней.
     """
     tg_id = target["tg_id"]
+    lang = i18n.user_lang(target)
     try:
         await bot.send_message(
-            tg_id, texts.PAY_PROMPT.format(price=logic.esc(price),
-                                           pay_url=logic.esc(cfg.pay_url)),
-            reply_markup=kb.paid(cfg.pay_url))
+            tg_id, i18n.t(lang, "PAY_PROMPT").format(
+                price=logic.esc(price), pay_url=logic.esc(cfg.pay_url)),
+            reply_markup=kb.paid(cfg.pay_url, lang))
     except TelegramAPIError:
         log.warning("новая сумма оплаты не доставлена клиенту %s", tg_id)
     await db.log_event(tg_id, "payment_amount_changed", {"price": price})
@@ -520,7 +523,8 @@ async def _support_reply(message: Message, bot: Bot, db: Database,
     try:
         await bot.send_message(
             asked["tg_id"],
-            texts.SUPPORT_REPLY_USER.format(answer=logic.esc(answer.value)),
+            i18n.t(asked.get("lang"), "SUPPORT_REPLY_USER").format(
+                answer=logic.esc(answer.value)),
         )
     except TelegramAPIError as exc:
         log.warning("ответ поддержки для %s не доставлен: %s", asked["tg_id"], exc)
@@ -531,12 +535,16 @@ async def _support_reply(message: Message, bot: Bot, db: Database,
     await message.reply(texts.SUPPORT_REPLIED)
 
 
-async def _notify(bot: Bot, tg_id: int, text: str) -> None:
-    """Уведомление пользователя о решении.
+async def _notify(bot: Bot, db: Database, tg_id: int, key: str, **fmt) -> None:
+    """Уведомление пользователя о решении - на его языке.
 
     Пользователь мог заблокировать бота - решение модератора при этом уже
     сохранено, откатывать его не за чем.
     """
+    row = await db.get_user(tg_id)
+    text = i18n.t(i18n.user_lang(dict(row) if row else None), key)
+    if fmt:
+        text = text.format(**fmt)
     try:
         await bot.send_message(tg_id, text, reply_markup=kb.remove())
     except TelegramAPIError as exc:

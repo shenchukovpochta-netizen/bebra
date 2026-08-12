@@ -40,6 +40,9 @@ $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.tx
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
          'app/logic.py', 'app/faq.py', 'app/faq_i18n.py', 'app/texts.py',
+         'app/i18n/__init__.py', 'app/i18n/en.py', 'app/i18n/uz.py',
+         'app/i18n/tk.py', 'app/i18n/ar.py', 'app/i18n/fa.py',
+         'app/i18n/hi.py', 'app/i18n/cv.py',
          'app/keyboards.py',
          'app/middlewares.py',
          'app/filters.py', 'app/tasks.py', 'app/contract_template.docx',
@@ -55,7 +58,7 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
-          'tests/test_max.py', 'tests/test_faq.py')
+          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py')
 
 foreach ($f in ($root + $app + $handlers + $services + $max + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
