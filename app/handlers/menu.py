@@ -376,5 +376,6 @@ async def fallback(message: Message, db: Database, user: dict) -> None:
 # Кнопка из старого сообщения в состоянии, где её уже не ждут. Без ответа
 # на callback Telegram крутит часики у пользователя до таймаута.
 @router.callback_query()
-async def stale_callback(callback: CallbackQuery) -> None:
-    await callback.answer("Кнопка устарела, отправьте /start")
+async def stale_callback(callback: CallbackQuery,
+                         user: dict | None = None) -> None:
+    await callback.answer(i18n.t((user or {}).get("lang"), "STALE_BUTTON"))

@@ -1352,6 +1352,20 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                 if isinstance(m, SendMessage)][-1]
         self.assertIn("operatorga", last, "ответ клиенту не на узбекском")
 
+    async def test_old_lang_picker_switches_dialog_after_registration(self):
+        """Пикер /start остаётся в ленте: нажатие по нему после регистрации
+        переключает весь диалог, а не отвечает «кнопка устарела»."""
+        await self.register_fully()
+        await self.feed(cb("lang:en"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["lang"], "en")
+        self.assertEqual(row["state"], logic.APPROVED, "состояние не тронуто")
+        last = [m for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Choose an action", last.text)
+        labels = [b.text for r in last.reply_markup.keyboard for b in r]
+        self.assertIn("🚲 Rent", labels, "клавиатура меню не перерисована")
+
     async def test_faq_language_switch_changes_dialog_language(self):
         """Смена языка в ветке вопросов переключает весь диалог."""
         await self.register_fully()

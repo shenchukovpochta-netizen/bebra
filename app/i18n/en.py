@@ -11,6 +11,8 @@ T: dict[str, str] = {
         "To use the bot, please subscribe to our news channel: {channel_url}"
     ),
     "SUB_NOT_FOUND": "Subscription not found. Please try again.",
+    "SUB_CONFIRMED_TOAST": "Subscription confirmed",
+    "STALE_BUTTON": "This button has expired, send /start",
     "WELCOME": "👋 Welcome! To begin, please enter your full name:",
     "FIO_AS_TEXT": "Please type your full name as text.",
     "FAQ_ENTRY_HINT": (

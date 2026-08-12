@@ -111,7 +111,7 @@ async def cb_check_sub(callback: CallbackQuery, bot: Bot, db: Database,
     # Досюда доходят только подписанные: неподписанных разворачивает middleware.
     # Ответы идут через bot по tg_id, а не через callback.message: у старого
     # сообщения Telegram отдаёт недоступный объект без метода answer.
-    await callback.answer("Подписка подтверждена")
+    await callback.answer(i18n.t(user.get("lang"), "SUB_CONFIRMED_TOAST"))
     # Проверяется состояние, а не статус: между «заявку одобрили» и «договор
     # подписан» статус уже approved, и по нему человек с неподписанным
     # договором получал бы «вы уже зарегистрированы» вместе с меню.
@@ -136,21 +136,39 @@ async def st_new(message: Message, db: Database, user: dict) -> None:
 
 # ─────────────────────────── язык диалога ───────────────────────────
 
-@router.callback_query(StateIs(logic.WAIT_LANG), F.data.startswith("lang:"))
+@router.callback_query(F.data.startswith("lang:"))
 async def cb_lang(callback: CallbackQuery, bot: Bot, db: Database,
                   user: dict) -> None:
+    """Выбор языка диалога.
+
+    На шаге выбора - двигает к ФИО. В любом другом состоянии пикер
+    из ленты работает переключателем: человек, зарегистрировавшийся
+    по-русски, вправе вернуться к старому сообщению и перещёлкнуть весь
+    диалог - «кнопка устарела» здесь была бы враньём.
+    """
     code = callback.data.split(":", 1)[1]
     if code not in i18n.LANGS:
         await callback.answer()
         return
-    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_LANG,
-                          lang=code, state=logic.WAIT_FIO):
-        await callback.answer()
+    if user["state"] == logic.WAIT_LANG:
+        if not await db.patch(user["tg_id"], expected_state=logic.WAIT_LANG,
+                              lang=code, state=logic.WAIT_FIO):
+            await callback.answer()
+            return
+        await db.log_event(user["tg_id"], "lang_set", {"lang": code})
+        await callback.answer(i18n.LANG_TITLES[code])
+        await send_welcome(lambda text, **kw: bot.send_message(
+            user["tg_id"], text, **kw), i18n.norm(code))
         return
+    await db.patch(user["tg_id"], lang=code)
     await db.log_event(user["tg_id"], "lang_set", {"lang": code})
     await callback.answer(i18n.LANG_TITLES[code])
-    await send_welcome(lambda text, **kw: bot.send_message(
-        user["tg_id"], text, **kw), i18n.norm(code))
+    if user["state"] == logic.APPROVED:
+        # Человек в меню: reply-клавиатура сама не перерисуется, поэтому
+        # подсказка с меню на новом языке уходит отдельным сообщением.
+        lang = i18n.norm(code)
+        await bot.send_message(user["tg_id"], i18n.t(lang, "MENU_PROMPT"),
+                               reply_markup=kb.main_menu(lang))
 
 
 @router.message(StateIs(logic.WAIT_LANG))

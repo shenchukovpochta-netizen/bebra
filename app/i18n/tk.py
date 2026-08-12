@@ -13,6 +13,8 @@ T: dict[str, str] = {
         "Bot bilen işlemek üçin habarlar kanalymyza agza boluň: {channel_url}"
     ),
     "SUB_NOT_FOUND": "Agzalyk tapylmady. Ýene bir gezek synanyşyň.",
+    "SUB_CONFIRMED_TOAST": "Agzalyk tassyklandy",
+    "STALE_BUTTON": "Bu düwme könelipdir, /start iberiň",
     "WELCOME": "👋 Hoş geldiňiz! Başlamak üçin doly adyňyzy (F.A.A.) ýazyň:",
     "FIO_AS_TEXT": "Doly adyňyzy tekst bilen ýazyň.",
     "FAQ_ENTRY_HINT": (

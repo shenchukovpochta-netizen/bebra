@@ -14,6 +14,8 @@ T: dict[str, str] = {
         "{channel_url}"
     ),
     "SUB_NOT_FOUND": "Obuna topilmadi. Yana bir bor urinib ko'ring.",
+    "SUB_CONFIRMED_TOAST": "Obuna tasdiqlandi",
+    "STALE_BUTTON": "Bu tugma eskirgan, /start yuboring",
     "WELCOME": "👋 Xush kelibsiz! Boshlash uchun to'liq ism-sharifingizni (F.I.O.) yozing:",
     "FIO_AS_TEXT": "Iltimos, F.I.O.ni matn bilan yozing.",
     "FAQ_ENTRY_HINT": (
