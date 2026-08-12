@@ -29,8 +29,8 @@ BTN_TARIFFS, BTN_SUPPORT = "💰 Тарифы", "🆘 Поддержка"
 MENU_BUTTONS = (BTN_RENT, BTN_TRIPS, BTN_TARIFFS, BTN_SUPPORT, BTN_FAQ)
 
 
-async def menu_shortcut(message: Message, db: Database, user: dict, text: str, *,
-                        state: str) -> bool:
+async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
+                        user: dict, text: str, *, state: str) -> bool:
     """Кнопка меню, набранная посреди диалога: выйти и сделать, что просят.
 
     True - сообщение было кнопкой (или «Отмена») и уже обработано.
@@ -42,7 +42,9 @@ async def menu_shortcut(message: Message, db: Database, user: dict, text: str, *
         return False
     await db.patch(user["tg_id"], expected_state=state, state=logic.APPROVED)
     fresh = {**user, "state": logic.APPROVED}
-    if text in (BTN_RENT, BTN_TARIFFS):
+    if text == BTN_RENT:
+        await start_rent(message, bot, db, cfg, fresh)
+    elif text == BTN_TARIFFS:
         await message.answer(texts.TARIFFS, reply_markup=kb.main_menu())
     elif text == BTN_TRIPS:
         await message.answer(await rentals_text(db, fresh),
@@ -74,7 +76,8 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
         # Уже в режиме вопроса - просто напоминаем, чего ждём.
         await message.answer(texts.SUPPORT_PROMPT, reply_markup=kb.support_cancel())
         return
-    if await menu_shortcut(message, db, user, text, state=logic.WAIT_SUPPORT):
+    if await menu_shortcut(message, bot, db, cfg, user, text,
+                           state=logic.WAIT_SUPPORT):
         return
 
     question = logic.support_question(message.text)
@@ -142,6 +145,56 @@ async def st_support_wrong(message: Message) -> None:
     await message.answer(texts.SUPPORT_AS_TEXT)
 
 
+# ─────────────────── повторная аренда по запросу клиента ───────────────────
+
+async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
+                     user: dict) -> None:
+    """«Арендовать»: у действующего клиента - заявка на повторную выдачу.
+
+    Первую аренду оформляет регистрация. Эта ветка - для клиента
+    с подписанным договором и без велосипеда на руках: заявка уходит
+    оператору, тот отвечает на неё данными выдачи (вин-номера, комплект,
+    срок, оплата), дальше обычная цепочка «оплата -> Акт приёма-передачи».
+    """
+    if (user.get("status") != logic.ST_APPROVED
+            or user.get("contract_status") != logic.CT_SIGNED):
+        # Регистрация не пройдена до конца - новую аренду начинать не с чего.
+        await message.answer(texts.TARIFFS)
+        return
+    if logic.rental_is_active(user):
+        given = logic.issue_context(user.get("issue_data"))
+        await message.answer(
+            texts.RENT_ALREADY_ACTIVE.format(
+                bike=logic.esc(given["bike_model"]),
+                term=logic.esc(given["rent_term"])),
+            reply_markup=kb.main_menu())
+        return
+
+    tg_id = user["tg_id"]
+    # Заявка уходит ДО ответа клиенту: не дошла - он должен узнать сразу,
+    # а не ждать оператора, которого никто не позвал.
+    try:
+        sent = await bot.send_message(
+            cfg.contract_chat_id,
+            texts.RENT_REQUEST_CARD.format(
+                fio=logic.esc(user.get("full_name") or "без имени"),
+                handle=("@" + logic.esc(user["username"])
+                        if user.get("username") else "без username"),
+                tg_id=tg_id, number=logic.esc(user.get("contract_no") or ""),
+                form=logic.ISSUE_FORM_TEMPLATE))
+    except TelegramAPIError:
+        log.exception("заявка на аренду от %s не доставлена", tg_id)
+        await message.answer(texts.RENT_REQUEST_FAILED,
+                             reply_markup=kb.main_menu())
+        return
+    # Карточка заявки перевязывает ответ оператора на себя: форма выдачи
+    # придёт ей, а не приглашению первой выдачи месячной давности.
+    await db.patch(tg_id, issue_chat_id=sent.chat.id,
+                   issue_message_id=sent.message_id)
+    await db.log_event(tg_id, "rent_requested")
+    await message.answer(texts.RENT_REQUEST_SENT, reply_markup=kb.main_menu())
+
+
 # ─────────────────── закрытие аренды по запросу клиента ───────────────────
 
 async def start_close(message: Message, db: Database, user: dict) -> None:
@@ -165,7 +218,8 @@ async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
                           user: dict) -> None:
     """Причина от клиента -> запрос оператору с формой закрытия."""
     text = message.text.strip()
-    if await menu_shortcut(message, db, user, text, state=logic.WAIT_CLOSE_REASON):
+    if await menu_shortcut(message, bot, db, cfg, user, text,
+                           state=logic.WAIT_CLOSE_REASON):
         return
     reason = logic.close_reason(text)
     if not reason.ok:
@@ -207,10 +261,15 @@ async def st_close_reason_wrong(message: Message) -> None:
 
 # ─────────────────────────── кнопки меню ───────────────────────────
 
-@router.message(F.text.in_({BTN_RENT, BTN_TARIFFS}))
+@router.message(F.text == BTN_TARIFFS)
 async def tariffs(message: Message) -> None:
-    # Аренда оформляется людьми, а не ботом: показываем тарифы и куда писать.
     await message.answer(texts.TARIFFS)
+
+
+@router.message(F.text == BTN_RENT)
+async def rent(message: Message, bot: Bot, db: Database, cfg: Config,
+               user: dict) -> None:
+    await start_rent(message, bot, db, cfg, user)
 
 
 async def rentals_text(db: Database, user: dict) -> str:

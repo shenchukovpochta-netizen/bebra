@@ -1161,6 +1161,121 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_ACT_SIGN,
                          "возврат до подписи акта приёма не должен проходить")
 
+    # ─── повторная аренда ───
+
+    async def close_rental(self):
+        """Полное закрытие текущей аренды: запрос, форма, подпись акта."""
+        await self.request_close()
+        await self.provide_return()
+        await self.feed(cb("return_sign"))
+
+    REPEAT_FORM = ("рама: 999888777\n"
+                   "мотор: 240W999\n"
+                   "модель: Kugoo V3 Pro\n"
+                   "срок: 12.08 - 19.08\n"
+                   "оплата: 3500 наличными")
+
+    async def test_rent_button_with_active_rental_points_to_closure(self):
+        await self.register_fully()
+        await self.feed(msg("🚲 Арендовать"))
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("уже есть активная аренда", last)
+        self.assertIn("Truck+", last)
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage)
+                 and "повторную аренду" in (m.text or "")]
+        self.assertFalse(cards, "заявка не должна уходить оператору")
+
+    async def test_rent_button_after_closure_sends_request_card(self):
+        await self.register_fully()
+        await self.close_rental()
+        await self.feed(msg("🚲 Арендовать"))
+        row = self.db.users[USER_ID]
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage)
+                 and "повторную аренду" in (m.text or "")]
+        self.assertTrue(cards, "заявка не дошла до оператора")
+        self.assertIn("рама:", cards[-1], "в заявке нет формы выдачи")
+        self.assertIn(row["contract_no"], cards[-1])
+        # Заявка перевязала приглашение выдачи на себя: форма оператора
+        # придёт ей, а не приглашению первой выдачи.
+        self.assertIsNotNone(row["issue_message_id"])
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Заявка на аренду передана", last)
+        self.assertEqual(row["state"], logic.APPROVED,
+                         "до ответа оператора клиент остаётся в меню")
+
+    async def test_repeat_rent_full_cycle(self):
+        await self.register_fully()
+        await self.close_rental()
+        await self.feed(msg("🚲 Арендовать"))
+        await self.provide_issue(self.REPEAT_FORM)
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_PAYMENT,
+                         "повторная аренда начинается с оплаты")
+        self.assertIsNone(row["act_in_signed_at"])
+        self.assertIsNone(row["pay_confirmed_at"])
+        self.assertEqual(row["issue_data"]["vin_frame"], "999888777")
+        pay = [m.text for m in self.session.sent_to(USER_ID)
+               if isinstance(m, SendMessage)
+               and "3500 наличными" in (m.text or "")]
+        self.assertTrue(pay, "клиент не увидел сумму новой аренды")
+
+        await self.confirm_pay()
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_ACT_SIGN)
+        acts = [m for m in self.session.documents()
+                if m.chat_id == USER_ID and "Акт приёма" in (m.caption or "")]
+        self.assertTrue(acts, "акт приёма повторной аренды не отправлен")
+
+        await self.feed(cb("act_sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertTrue(logic.rental_is_active(row))
+
+        # Повторная аренда живёт на том же договоре, а история — по циклу
+        # на запись: закрываем вторую и убеждаемся, что в списке обе.
+        await self.close_rental()
+        rentals = await self.db.rentals_of(USER_ID)
+        self.assertEqual(len(rentals), 2, "в истории должны быть обе аренды")
+        self.assertEqual(rentals[0]["payload"]["bike"], "Kugoo V3 Pro")
+
+    async def test_issue_form_while_rental_active_is_refused(self):
+        await self.register_fully()   # аренда активна, приглашение выдачи живо
+        await self.provide_issue(self.REPEAT_FORM)
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED,
+                         "активную аренду нельзя перезаписать новой выдачей")
+        self.assertIsNotNone(row["act_in_signed_at"])
+        replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
+                           if isinstance(m, SendMessage))
+        self.assertIn("активная аренда", replies)
+
+    async def test_rent_button_without_signed_contract_shows_tariffs(self):
+        await self.register_fully()
+        self.db.users[USER_ID]["contract_status"] = logic.CT_ISSUED
+        await self.feed(msg("🚲 Арендовать"))
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Актуальные тарифы", last,
+                      "без подписанного договора - только тарифы")
+
+    async def test_rent_button_in_question_mode_starts_the_request(self):
+        """Кнопка, набранная посреди вопроса, начинает аренду, а не
+        выкидывает в меню с просьбой нажать ещё раз."""
+        await self.register_fully()
+        await self.close_rental()
+        await self.feed(msg("🆘 Поддержка"))
+        await self.feed(msg("🚲 Арендовать"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage)
+                 and "повторную аренду" in (m.text or "")]
+        self.assertTrue(cards, "заявка из режима вопроса не дошла")
+
     async def test_consent_screen_has_no_oferta(self):
         """Оферты больше нет: экран - чистое согласие на обработку ПДн."""
         await self.feed(msg("/start"))
@@ -1478,18 +1593,20 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
         self.assertIsNotNone(self.db.users[USER_ID]["support_message_id"])
 
-    async def test_signing_wipes_passport_data(self):
-        """Анкета стирается после подписи АКТА, а не договора: паспортные
-        данные печатаются ещё и в Акте приёма-передачи."""
+    async def test_anketa_survives_act_for_repeat_rentals(self):
+        """Анкета живёт и после подписи акта: повторная аренда печатает
+        паспортные данные в новом Акте приёма-передачи. Стирает её ретеншен
+        (clear_files) - и отсчёт продлевается при каждом подписании."""
         await self.submit()
         await self.approve_fully()
         self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"])
         await self.feed(cb("sign"))
-        self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"],
-                             "до подписи акта анкета ещё нужна")
         await self.confirm_pay()
         await self.feed(cb("act_sign"))
-        self.assertIsNone(self.db.users[USER_ID]["anketa_enc"])
+        self.assertIsNotNone(self.db.users[USER_ID]["anketa_enc"],
+                             "анкета нужна актам повторной аренды")
+        self.assertIsNotNone(self.db.users[USER_ID]["purge_after"],
+                             "срок хранения обязан быть назначен")
         # Реквизиты договора остаются: без них нечем доказать, что подписано.
         self.assertIsNotNone(self.db.users[USER_ID]["contract_sha256"])
 

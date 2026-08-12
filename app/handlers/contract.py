@@ -267,16 +267,27 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         log.exception("форма фиксации по договору %s не доставлена", number)
         await db.log_event(tg_id, "fixation_form_failed", {"number": number})
 
-    # Этап оплаты: клиенту - сумма и кнопка «Я оплатил(а)», оператору -
-    # карточка с кнопкой «Оплата получена». Анкета НЕ стирается: паспортные
-    # данные печатаются ещё и в Акте приёма-передачи.
+    # Этап оплаты. Анкета НЕ стирается: паспортные данные печатаются
+    # ещё и в Акте приёма-передачи.
+    await start_payment(bot, db, cfg, {**data, "contract_no": number})
+
+
+async def start_payment(bot: Bot, db: Database, cfg: Config, data: dict) -> None:
+    """Этап оплаты: клиенту - сумма и кнопка «Я оплатил(а)», оператору -
+    карточка с кнопкой «Оплата получена».
+
+    Общий для первой аренды (после подписи договора) и повторной (после
+    данных выдачи от оператора): состояние wait_payment выставляет вызывающий.
+    """
+    tg_id = data["tg_id"]
+    number = data.get("contract_no") or ""
     await bot.send_message(
         tg_id, texts.PAY_PROMPT.format(price=logic.esc(rent_price(data)),
                                        pay_url=logic.esc(cfg.pay_url)),
         reply_markup=kb.paid(cfg.pay_url))
     try:
         sent = await bot.send_message(
-            cfg.contract_chat_id, pay_card({**data, "contract_no": number}),
+            cfg.contract_chat_id, pay_card(data),
             reply_markup=kb.pay_confirm(tg_id))
         await db.patch(tg_id, pay_chat_id=sent.chat.id,
                        pay_message_id=sent.message_id)
@@ -596,9 +607,16 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
                                    reason="акт приёма не пересобрался"))
         return
 
+    old_path = data.get("act_in_path")
     path, _ = files.store(cfg.storage_dir, tg_id, "actin", docx)
     await db.patch(tg_id, act_in_path=str(path), act_in_sha256=digest)
+    if old_path and old_path != str(path):
+        # Акт прошлого цикла аренды: ссылка в базе уже указывает на новый
+        # файл, и старый без удаления пролежал бы на диске мимо ретеншена.
+        files.remove(old_path)
     await db.log_event(tg_id, "act_in_signed", {"number": number})
+    # Аренда началась - отсчёт хранения заново, от последней активности.
+    await db.set_purge_after(tg_id, cfg.purge_approved_days)
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
@@ -633,9 +651,9 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
     except TelegramAPIError:
         log.exception("приглашение возврата по %s не доставлено", number)
 
-    # Паспортные данные дальше боту не нужны: договор и акт сформированы,
-    # экземпляры у сторон и в чате фиксации.
-    await db.clear_anketa(tg_id)
+    # Анкета остаётся (зашифрованной): повторная аренда печатает паспортные
+    # данные в новом Акте приёма-передачи. Стирает её ретеншен - purge_after
+    # отсчитывается от последней активности и чистит и файлы, и анкету.
 
 
 @router.callback_query(StateIs(logic.WAIT_ACT_SIGN), F.data == "act_mistake")
@@ -734,9 +752,15 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
                                    reason="акт возврата не пересобрался"))
         return
 
+    old_path = data.get("act_out_path")
     path, _ = files.store(cfg.storage_dir, tg_id, "actout", docx)
     await db.patch(tg_id, act_out_path=str(path), act_out_sha256=digest)
+    if old_path and old_path != str(path):
+        files.remove(old_path)      # акт прошлого цикла, ссылки на него уже нет
     await db.log_event(tg_id, "act_out_signed", {"number": number})
+    # Аренда закрыта - хранение отсчитывается от закрытия, а не от подписи
+    # договора: иначе долгая аренда пережила бы собственные документы.
+    await db.set_purge_after(tg_id, cfg.purge_approved_days)
     # Запись в историю аренд. Строка пользователя переиспользуется следующей
     # арендой, поэтому закрытая живёт событием - и только тем, что не ПДн:
     # номер договора, модель и сроки. Ни ФИО, ни адресов.

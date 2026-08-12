@@ -323,9 +323,14 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     await db.log_event(tg_id, "issue_data_set", {"by": message.from_user.id})
 
     if target.get("contract_status") == logic.CT_SIGNED:
-        # Договор уже подписан - переигрывать его нельзя, обновляется акт.
+        # Договор уже подписан - переигрывать его нельзя. Данные выдачи
+        # либо обновляют текущий цикл, либо начинают повторную аренду.
         if target.get("act_in_signed_at"):
-            await message.reply("Акт приёма уже подписан - данные не применить.")
+            if not target.get("act_out_signed_at"):
+                # Велосипед на руках - сначала возврат, потом новая выдача.
+                await message.reply(texts.RENT_ACTIVE_MOD)
+                return
+            await _repeat_rent(message, bot, db, cfg, vault, target)
             return
         if target["state"] == logic.WAIT_PAYMENT:
             # Клиент ещё на оплате: пересобирать и слать акт рано - он уйдёт
@@ -355,6 +360,56 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
             tg_id=tg_id, reason=logic.esc(str(exc))))
         return
     await message.reply(texts.ISSUE_SAVED)
+
+
+async def _repeat_rent(message: Message, bot: Bot, db: Database, cfg: Config,
+                       vault: Vault, target: dict) -> None:
+    """Повторная аренда: прошлый цикл закрыт, оператор прислал новую выдачу.
+
+    Поля прошлого цикла очищаются, клиент переводится на оплату - дальше
+    цепочка та же, что после подписи договора: чек, «Оплата получена»,
+    Акт приёма-передачи на подпись. Сам договор не переигрывается.
+    """
+    tg_id = target["tg_id"]
+    cycle = dict(state=logic.WAIT_PAYMENT,
+                 act_in_signed_at=None, act_out_signed_at=None,
+                 pay_confirmed_at=None, return_data=None,
+                 close_reason=None, close_requested_at=None)
+    # Из меню или из недописанного вопроса в поддержку - но не из состояний,
+    # где человек что-то подписывает. expected_state закрывает и гонку двух
+    # операторов: второй ответ получит честный отказ.
+    for state in (logic.APPROVED, logic.WAIT_SUPPORT):
+        if await db.patch(tg_id, expected_state=state, **cycle):
+            break
+    else:
+        await message.reply(texts.MOD_REPLY_NOT_PENDING)
+        return
+    await db.log_event(tg_id, "rent_repeat_started",
+                       {"by": message.from_user.id})
+    # Новый цикл - новый отсчёт хранения: клиент действующий.
+    await db.set_purge_after(tg_id, cfg.purge_approved_days)
+
+    row = await db.get_user(tg_id)
+    data = dict(row) if row else dict(target)
+    await contract.start_payment(bot, db, cfg, data)
+
+    # Форма фиксации выдачи - как при первой аренде: утверждающий дозаполняет
+    # прочерки и пересылает в тему фиксации.
+    number = data.get("contract_no") or ""
+    try:
+        await bot.send_message(
+            cfg.contract_chat_id,
+            texts.FIXATION_FORM_INTRO.format(number=logic.esc(number)))
+        await bot.send_message(
+            cfg.contract_chat_id,
+            logic.fixation_form(data, vault.decrypt(data.get("anketa_enc")),
+                                data.get("issue_data")))
+    except TelegramAPIError:
+        log.exception("форма фиксации по договору %s не доставлена", number)
+        await db.log_event(tg_id, "fixation_form_failed", {"number": number})
+
+    await message.reply(texts.RENT_ISSUE_SAVED.format(
+        price=logic.esc(contract.rent_price(data))))
 
 
 async def _repeat_payment(bot: Bot, db: Database, cfg: Config, target: dict,
