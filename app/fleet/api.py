@@ -24,12 +24,15 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import logic, webauth
+from . import catalog, logic, webauth
 from .db import FleetDB
 
 log = logging.getLogger(__name__)
 
 WEBAPP_FILE = Path(__file__).resolve().parent / "webapp.html"
+# Фото моделей: файлы кладутся сюда владельцем (имена - в catalog.py)
+# и отдаются с нашего же сервера, без внешних CDN.
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Коды ошибок брони -> текст клиенту. Тексты здесь, а не в texts.py:
 # это ответы HTTP-API, у них нет .format-подстановок, и живут они
@@ -84,12 +87,16 @@ class Api:
         rows = await self.fleet.points()
         return _json([
             {"id": r["id"], "title": r["title"], "address": r["address"],
+             "lat": r["lat"], "lon": r["lon"], "phone": r["phone"],
              "open_hour": r["open_hour"], "close_hour": r["close_hour"]}
             for r in rows
         ])
 
     async def models(self, _request: web.Request) -> web.Response:
-        return _json(await self.fleet.models_with_tariffs())
+        # perks - общий блок «что входит»: текст один на все модели,
+        # и в каждой карточке он был бы шумом.
+        return _json({"models": await self.fleet.models_with_tariffs(),
+                      "perks": catalog.PERKS})
 
     async def availability(self, _request: web.Request) -> web.Response:
         rows = await self.fleet.park_counts()
@@ -243,6 +250,8 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/book", api.book),
         web.post("/api/cancel", api.cancel),
     ])
+    if STATIC_DIR.is_dir():
+        app.add_routes([web.static("/static", STATIC_DIR)])
     return app
 
 

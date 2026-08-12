@@ -60,14 +60,15 @@ class FleetDB:
 
     async def points(self) -> list[asyncpg.Record]:
         return await self.pool.fetch(
-            "select id, title, address, open_hour, close_hour "
+            "select id, title, address, lat, lon, phone, open_hour, close_hour "
             "from fleet.points where is_active order by id")
 
     async def models_with_tariffs(self) -> list[dict]:
         """Каталог для API: модели с тарифами одной структурой."""
         models = await self.pool.fetch(
-            "select id, title, extend_price from fleet.models "
-            "where is_active order by id")
+            "select id, title, extend_price, photo_url, photo_page, "
+            "       description, specs "
+            "from fleet.models where is_active order by id")
         tariffs = await self.pool.fetch(
             "select model_id, period_days, price from fleet.tariffs "
             "where is_active order by model_id, period_days")
@@ -77,6 +78,8 @@ class FleetDB:
                 {"period_days": t["period_days"], "price": t["price"]})
         return [{"id": m["id"], "title": m["title"],
                  "extend_price": m["extend_price"],
+                 "photo": m["photo_url"], "photo_page": m["photo_page"],
+                 "description": m["description"], "specs": m["specs"] or [],
                  "tariffs": by_model.get(m["id"], [])} for m in models]
 
     # ─────────────────────── единицы ───────────────────────

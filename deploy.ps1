@@ -55,7 +55,12 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/fleet.py')
 $fleet = @('app/fleet/__init__.py', 'app/fleet/logic.py', 'app/fleet/db.py',
            'app/fleet/seed.py', 'app/fleet/api.py', 'app/fleet/webauth.py',
-           'app/fleet/webapp.html')
+           'app/fleet/webapp.html', 'app/fleet/catalog.py')
+# Фото моделей (имена - в catalog.py). Добавили файл - впишите сюда.
+$fleetStatic = @('app/fleet/static/README.txt')
+foreach ($f in (Get-ChildItem 'app/fleet/static' -Filter '*.jpg' -ErrorAction SilentlyContinue)) {
+  $fleetStatic += "app/fleet/static/$($f.Name)"
+}
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
@@ -67,12 +72,12 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_fleet.py', 'tests/test_fleet_sql.py',
           'tests/test_webauth.py')
 
-foreach ($f in ($root + $app + $handlers + $services + $fleet + $max + $tests)) {
+foreach ($f in ($root + $app + $handlers + $services + $fleet + $fleetStatic + $max + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/fleet' '$Path/app/max' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/fleet/static' '$Path/app/max' '$Path/tests'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -86,6 +91,8 @@ scp $services  "${Server}:${Path}/app/services/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (services) не удался' }
 scp $fleet     "${Server}:${Path}/app/fleet/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (fleet) не удался' }
+scp $fleetStatic "${Server}:${Path}/app/fleet/static/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (fleet/static) не удался' }
 scp $max       "${Server}:${Path}/app/max/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (max) не удался' }
 scp $tests     "${Server}:${Path}/tests/"

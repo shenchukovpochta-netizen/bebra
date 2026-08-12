@@ -57,6 +57,12 @@
   .msg{margin-top:12px; padding:10px 14px; border-radius:10px; font-size:14px}
   .msg.err{background:rgba(169,53,38,.12); color:var(--bad)}
   .msg.ok{background:rgba(44,122,76,.12); color:var(--ok)}
+  .photo{width:100%; aspect-ratio:16/10; object-fit:cover; border-radius:10px;
+         margin:8px 0 4px; background:rgba(125,138,148,.15); display:block}
+  .chips{display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 4px}
+  .chip{font-size:12px; padding:3px 9px; border-radius:14px;
+        background:rgba(125,138,148,.16); white-space:nowrap}
+  .plinks{display:flex; gap:18px; margin:4px 0 6px; font-size:14px}
   .badge{font-size:12px; font-weight:700; padding:2px 8px; border-radius:12px;
          background:rgba(169,108,9,.15); color:var(--warn)}
   .sect{display:none}
@@ -69,8 +75,9 @@
 <div id="tab-vitrina" class="sect on">
   <h2>Точки и наличие</h2>
   <div id="points"></div>
-  <h2>Тарифы</h2>
+  <h2>Модели и тарифы</h2>
   <div id="models"></div>
+  <div id="perks"></div>
   <p class="hint">Продление после срока — по тарифу модели, ₽/сутки.
      Оформление документов — в чате с ботом после брони.</p>
 </div>
@@ -128,7 +135,7 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
 });
 
 // ─── витрина ───
-let POINTS = [], MODELS = [], AVAIL = [];
+let POINTS = [], MODELS = [], AVAIL = [], PERKS = "";
 
 function freeCount(pointTitle, modelTitle) {
   return AVAIL.filter(a =>
@@ -144,25 +151,46 @@ function drawVitrina() {
       return `<div class="row"><span>${esc(m.title)}</span>` +
              `<span class="${n ? "free" : "none"} num">${n ? "свободно " + n : "нет"}</span></div>`;
     }).join("");
-    const mapsUrl = "https://yandex.ru/maps/?text=" +
-                    encodeURIComponent("Казань, " + (p.address || p.title));
+    // Координаты из таблицы владельца точнее текстового поиска.
+    const mapsUrl = (p.lat && p.lon)
+      ? `https://yandex.ru/maps/?pt=${p.lon},${p.lat}&z=16&l=map`
+      : "https://yandex.ru/maps/?text=" +
+        encodeURIComponent("Казань, " + (p.address || p.title));
+    const phone = p.phone
+      ? `<a href="tel:${p.phone.replace(/[^+\d]/g, "")}">${esc(p.phone)}</a>` : "";
     return `<div class="card"><div class="row"><b>${esc(p.title)}</b>` +
            `<span class="hint num">${p.open_hour}:00–${p.close_hour}:00</span></div>` +
-           `<a class="hint" href="${mapsUrl}" target="_blank">показать на карте</a>` +
+           (p.address ? `<div class="hint">${esc(p.address)}</div>` : "") +
+           `<div class="plinks"><a href="${mapsUrl}" target="_blank">на карте</a>${phone}</div>` +
            `${lines}</div>`;
   }).join("");
 
   $("models").innerHTML = MODELS.map(m => {
+    let photo = "";
+    if (m.photo && m.photo.startsWith("/")) {
+      photo = `<img class="photo" src="${m.photo}" alt="${esc(m.title)}" loading="lazy">`;
+    } else if (m.photo) {
+      photo = `<div class="plinks"><a href="${m.photo}" target="_blank">посмотреть фото</a></div>`;
+    }
+    const chips = (m.specs || []).length
+      ? `<div class="chips">` + m.specs.map(s =>
+          `<span class="chip">${esc(s[1])}</span>`).join("") + `</div>`
+      : "";
     const rows = (m.tariffs || []).map(t => {
       const name = {7: "1 неделя", 14: "2 недели", 30: "1 месяц"}[t.period_days]
                    || (t.period_days + " дн.");
       return `<div class="row"><span class="hint">${name}</span>` +
              `<span class="num">${price(t.price)}</span></div>`;
     }).join("");
-    return `<div class="card"><b>${esc(m.title)}</b>${rows}` +
+    return `<div class="card"><b>${esc(m.title)}</b>${photo}${chips}${rows}` +
            `<div class="row"><span class="hint">продление</span>` +
            `<span class="num hint">${price(m.extend_price)}/сутки</span></div></div>`;
   }).join("");
+
+  $("perks").innerHTML = PERKS
+    ? `<div class="card"><b>Что входит в аренду</b>
+       <div class="hint" style="margin-top:6px">${esc(PERKS)}</div></div>`
+    : "";
 }
 
 // ─── бронь ───
@@ -289,8 +317,11 @@ async function loadMe() {
 // ─── загрузка ───
 async function loadAll() {
   try {
-    [POINTS, MODELS, AVAIL] = await Promise.all(
+    let modelsResp;
+    [POINTS, modelsResp, AVAIL] = await Promise.all(
       [api("/api/points"), api("/api/models"), api("/api/availability")]);
+    MODELS = modelsResp.models;
+    PERKS = modelsResp.perks || "";
     drawVitrina();
     drawBooking();
   } catch (e) {

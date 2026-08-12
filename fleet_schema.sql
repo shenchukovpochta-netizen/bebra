@@ -25,6 +25,10 @@ create table if not exists fleet.points (
   is_active  boolean     not null default true,
   created_at timestamptz not null default now()
 );
+-- Данные из таблицы владельца: координаты для карты и телефон точки.
+alter table fleet.points add column if not exists lat   double precision;
+alter table fleet.points add column if not exists lon   double precision;
+alter table fleet.points add column if not exists phone text;
 
 create table if not exists fleet.models (
   id           serial primary key,
@@ -36,6 +40,13 @@ create table if not exists fleet.models (
   is_active    boolean     not null default true,
   created_at   timestamptz not null default now()
 );
+-- Карточка модели для приложения: фото, характеристики, описание.
+-- photo_url - что показывать (локальный /static/... или внешняя ссылка),
+-- photo_page - страница фото на Яндекс.Диске как запасной вариант.
+alter table fleet.models add column if not exists photo_url   text;
+alter table fleet.models add column if not exists photo_page  text;
+alter table fleet.models add column if not exists description text;
+alter table fleet.models add column if not exists specs       jsonb;
 
 create table if not exists fleet.tariffs (
   id          serial primary key,

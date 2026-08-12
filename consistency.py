@@ -77,8 +77,12 @@ shipped = {p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*")
 listed = {m for m in re.findall(r"'([\w./-]+)'", deploy)
           if not m.startswith("/") and ("." in m or m == "Dockerfile")}
 listed |= {".env.example", ".gitignore"}
+# Фото парка (app/fleet/static/) deploy.ps1 собирает динамически,
+# через Get-ChildItem - в списке литералов их искать бессмысленно.
 not_uploaded = {f for f in shipped - listed
-                if not f.endswith((".zip",)) and f != "deploy.ps1"}
+                if not f.endswith((".zip",)) and f != "deploy.ps1"
+                and not (f.startswith("app/fleet/static/")
+                         and f.endswith((".jpg", ".jpeg", ".png")))}
 if not_uploaded:
     problems.append(f"файлы есть в проекте, но deploy.ps1 их не заливает: {sorted(not_uploaded)}")
 

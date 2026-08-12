@@ -22,9 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 from .. import faq
-from . import logic
+from . import catalog, logic
 from .db import FleetDB
 
 log = logging.getLogger(__name__)
@@ -32,28 +33,42 @@ log = logging.getLogger(__name__)
 # Столбцы faq.TARIFF_ROWS: (название, неделя, 2 недели, месяц).
 PERIODS: tuple[tuple[int, int], ...] = ((7, 1), (14, 2), (30, 3))
 
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 
 def _price(raw: str) -> int:
     """«3 000» -> 3000. Прайс в faq.py набран с пробелами для людей."""
     return int(re.sub(r"\D", "", raw or "") or 0)
 
 
+def photo_url(model: dict) -> str | None:
+    """Что показывать как фото: локальный файл, если он положен
+    в app/fleet/static/, иначе страница на Яндекс.Диске."""
+    if (STATIC_DIR / model["photo_file"]).exists():
+        return "/static/" + model["photo_file"]
+    return model.get("photo_page") or None
+
+
 async def ensure_seed(fleet: FleetDB) -> None:
     pool = fleet.pool
 
     if not await pool.fetchval("select count(*) from fleet.points"):
-        for title in (faq.POINT_1, faq.POINT_2):
+        for point in catalog.POINTS:
             await pool.execute(
-                "insert into fleet.points (title, address, open_hour, close_hour) "
-                "values ($1, $1, $2, $3) on conflict (title) do nothing",
-                title, faq.OPEN_HOUR, faq.CLOSE_HOUR)
+                "insert into fleet.points "
+                "  (title, address, lat, lon, phone, open_hour, close_hour) "
+                "values ($1, $2, $3, $4, $5, $6, $7) "
+                "on conflict (title) do nothing",
+                point["title"], point["address"], point["lat"], point["lon"],
+                point["phone"], point["open_hour"], point["close_hour"])
 
     if not await pool.fetchval("select count(*) from fleet.models"):
-        for row in faq.TARIFF_ROWS:
+        for model in catalog.MODELS:
+            row = faq.TARIFF_ROWS[model["faq_row"]]
             model_id = await pool.fetchval(
                 "insert into fleet.models (title) values ($1) "
                 "on conflict (title) do update set title = excluded.title "
-                "returning id", row[0])
+                "returning id", model["title"])
             for days, col in PERIODS:
                 await pool.execute(
                     "insert into fleet.tariffs (model_id, period_days, price) "
@@ -61,7 +76,39 @@ async def ensure_seed(fleet: FleetDB) -> None:
                     "on conflict (model_id, period_days) do nothing",
                     model_id, days, _price(row[col]))
 
+    await _enrich(fleet)
     await _backfill(fleet)
+
+
+async def _enrich(fleet: FleetDB) -> None:
+    """Карточки каталога поверх уже существующих строк.
+
+    Координаты, телефон и адрес точки заполняются только в пустые поля -
+    правки оператора в базе главнее каталога. Фото и характеристики
+    модели наоборот пишутся всегда: их источник - файл в static/
+    и каталог в коде, а не база, и положенный на сервер файл обязан
+    подхватиться на ближайшем рестарте.
+    """
+    pool = fleet.pool
+    for point in catalog.POINTS:
+        await pool.execute(
+            "update fleet.points set "
+            "  address = coalesce(address, $2), lat = coalesce(lat, $3), "
+            "  lon = coalesce(lon, $4), phone = coalesce(phone, $5) "
+            "where title = $1",
+            point["title"], point["address"], point["lat"], point["lon"],
+            point["phone"])
+    for model in catalog.MODELS:
+        # specs уходит объектом, а не строкой: jsonb-кодек пула сам
+        # сериализует, и строка здесь превратилась бы в дважды
+        # закодированный JSON.
+        await pool.execute(
+            "update fleet.models set "
+            "  photo_url = $2, photo_page = $3, "
+            "  specs = coalesce(specs, $4) "
+            "where title = $1",
+            model["title"], photo_url(model), model.get("photo_page"),
+            [list(pair) for pair in model["specs"]])
 
 
 def _issue_of(row) -> dict:
