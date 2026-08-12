@@ -1,0 +1,238 @@
+{
+  "name": "Telegram: проверка по чёрному списку",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "a1e2c3d4-0001-4000-8000-000000000001",
+      "name": "Telegram: входящее сообщение",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -560,
+        0
+      ],
+      "webhookId": "b7f1a2c3-d4e5-4f60-8a91-b2c3d4e5f601",
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Разбор входящего сообщения Telegram.\n// На выходе: chat_id, query (поисковые слова), is_search (искать или показать подсказку).\nconst msg = $json.message || {};\nconst chatId = msg.chat ? msg.chat.id : undefined;\nconst raw = String(msg.text || '').trim();\n\n// Команды (/start, /help и т.п.) не считаем поиском — на них уйдёт подсказка.\nconst isCommand = raw.startsWith('/');\n\n// Минимум 2 символа, чтобы по одной букве не вываливать всю таблицу.\nconst isSearch = Boolean(chatId) && !isCommand && raw.length >= 2;\n\nreturn [{\n  json: {\n    chat_id: chatId,\n    query: isSearch ? raw : '',\n    is_search: isSearch,\n  },\n}];"
+      },
+      "id": "a1e2c3d4-0002-4000-8000-000000000002",
+      "name": "Разбор запроса",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -340,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c0nd0001-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.is_search }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1e2c3d4-0003-4000-8000-000000000003",
+      "name": "Это поиск?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "← выберите свою Google-таблицу"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "← выберите лист"
+        },
+        "options": {}
+      },
+      "id": "a1e2c3d4-0004-4000-8000-000000000004",
+      "name": "Google Sheets: таблица людей",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        120,
+        -100
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Поиск человека по таблице и проверка на чёрный список.\n//\n// ─── НАСТРОЙКИ ─── поменяйте под свою таблицу ───────────────────────────\nconst CONFIG = {\n  // Колонка со статусом ЧС (заголовок в первой строке таблицы).\n  blacklistColumn: 'ЧС',\n  // Какие значения в этой колонке значат «в чёрном списке».\n  positiveValues: ['да', 'yes', 'true', '1', '+', 'чс', 'в чс', 'blacklist'],\n  // Колонка с именем — показывается первой строкой в карточке.\n  nameColumn: 'ФИО',\n  // Сколько совпадений максимум показывать в одном ответе.\n  maxResults: 10,\n};\n// ────────────────────────────────────────────────────────────────────────\n\nconst request = $('Разбор запроса').first().json;\nconst chatId = request.chat_id;\nconst query = String(request.query || '');\n\n// Все слова запроса должны встретиться в строке таблицы (в любых колонках).\nconst words = query.toLowerCase().split(/\\s+/).filter(Boolean);\n\n// Строки таблицы; выкидываем служебный row_number и полностью пустые строки.\nconst rows = $input.all()\n  .map((item) => item.json)\n  .filter((row) => Object.entries(row)\n    .some(([key, value]) => key !== 'row_number' && String(value ?? '').trim() !== ''));\n\nconst matches = rows.filter((row) => {\n  const haystack = Object.entries(row)\n    .filter(([key]) => key !== 'row_number')\n    .map(([, value]) => String(value ?? '').toLowerCase())\n    .join(' ');\n  return words.every((word) => haystack.includes(word));\n});\n\nconst inBlacklist = (row) => {\n  const value = String(row[CONFIG.blacklistColumn] ?? '').trim().toLowerCase();\n  return CONFIG.positiveValues.includes(value);\n};\n\nlet reply;\nif (matches.length === 0) {\n  reply = `🔍 По запросу «${query}» никого не нашёл.\\n`\n    + 'Проверьте написание или попробуйте другое слово: фамилию, имя, телефон.';\n} else {\n  const shown = matches.slice(0, CONFIG.maxResults);\n  const cards = shown.map((row) => {\n    const status = inBlacklist(row) ? '⛔ В ЧЁРНОМ СПИСКЕ' : '✅ Не в чёрном списке';\n    const name = String(row[CONFIG.nameColumn] ?? '').trim() || '(без имени)';\n    const details = Object.entries(row)\n      .filter(([key, value]) => key !== 'row_number'\n        && key !== CONFIG.nameColumn\n        && key !== CONFIG.blacklistColumn\n        && String(value ?? '').trim() !== '')\n      .map(([key, value]) => `· ${key}: ${value}`)\n      .join('\\n');\n    return `${status}\\n👤 ${name}${details ? '\\n' + details : ''}`;\n  });\n  const header = matches.length > CONFIG.maxResults\n    ? `Найдено совпадений: ${matches.length}, показываю первые ${CONFIG.maxResults}.\\n\\n`\n    : `Найдено совпадений: ${matches.length}\\n\\n`;\n  reply = header + cards.join('\\n\\n————————————\\n\\n');\n}\n\nreturn [{ json: { chat_id: chatId, reply } }];"
+      },
+      "id": "a1e2c3d4-0005-4000-8000-000000000005",
+      "name": "Поиск и проверка ЧС",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.reply }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1e2c3d4-0006-4000-8000-000000000006",
+      "name": "Telegram: результат",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        560,
+        -100
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "👋 Я бот проверки по чёрному списку.\n\nПришлите фамилию, имя или телефон (можно несколько слов через пробел) — я найду человека в таблице и скажу, в ЧС он или нет.\n\nПримеры запросов:\n• Иванов\n• Иванов Иван\n• 79001234567\n\nЕсли слов несколько, ищу строки, где встречаются все сразу.",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1e2c3d4-0007-4000-8000-000000000007",
+      "name": "Telegram: подсказка",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        120,
+        120
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ME",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram: входящее сообщение": {
+      "main": [
+        [
+          {
+            "node": "Разбор запроса",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разбор запроса": {
+      "main": [
+        [
+          {
+            "node": "Это поиск?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Это поиск?": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets: таблица людей",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram: подсказка",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets: таблица людей": {
+      "main": [
+        [
+          {
+            "node": "Поиск и проверка ЧС",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Поиск и проверка ЧС": {
+      "main": [
+        [
+          {
+            "node": "Telegram: результат",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "placeholder"
+  }
+}
