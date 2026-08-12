@@ -91,7 +91,8 @@ REMIND_TEXT = {
 }
 
 
-async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str) -> bool:
+async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str, *,
+                           today: date | None = None) -> bool:
     """Одно напоминание клиенту. False - не доставлено (бот заблокирован).
 
     Отметка о напоминании ставится в любом случае: иначе заблокировавший
@@ -104,7 +105,7 @@ async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str) -> boo
     text = i18n.t(lang, REMIND_TEXT[stage]).format(
         bike=logic.esc(given["bike_model"]),
         until=until.strftime("%d.%m.%Y"),
-        days=max(logic.days_left(until) or 0, 0),
+        days=max(logic.days_left(until, today=today) or 0, 0),
     )
     delivered = True
     try:
@@ -134,28 +135,38 @@ async def remind_once(bot: Any, db: Database, cfg: Config, *,
                                    today=today)
         if stage is None:
             continue
-        await _notify_deadline(bot, db, row, stage)
+        await _notify_deadline(bot, db, row, stage, today=today)
         sent += 1
     return sent, logic.deadline_digest(rows, today=today)
+
+
+def due_today(now: datetime, last_run_on: date | None, hour: int) -> bool:
+    """Пора ли делать дневной проход напоминаний.
+
+    Не «ровно в этот час», а «в этот час или позже, если сегодня ещё
+    не делали»: бота перезапускают среди дня, и привязка к одному часу
+    молча съедала бы напоминания за целые сутки.
+    """
+    return now.hour >= hour and last_run_on != now.date()
 
 
 async def reminders_loop(bot: Any, db: Database, cfg: Config) -> None:
     """Напоминания клиентам и ежедневная сводка оператору.
 
-    Клиентские напоминания идут в «рабочий» час: сообщение о конце аренды
-    в три ночи бесит и не читается. Сводка уходит раз в сутки, в тот же час
-    и только если в ней есть строки.
+    Раз в сутки, в «рабочий» час: сообщение о конце аренды в три ночи
+    бесит и не читается. Сводка уходит тем же проходом и только если
+    в ней есть строки.
     """
-    digest_sent_on: date | None = None
+    last_run_on: date | None = None
     while True:
         try:
             now = datetime.now(timezone.utc)
-            if now.hour == cfg.remind_hour_utc:
+            if due_today(now, last_run_on, cfg.remind_hour_utc):
+                last_run_on = now.date()
                 sent, digest = await remind_once(bot, db, cfg, today=now.date())
                 if sent:
                     log.info("напоминаний о сроке отправлено: %s", sent)
-                if digest and digest_sent_on != now.date():
-                    digest_sent_on = now.date()
+                if digest:
                     await _send_digest(bot, cfg, digest, now.date())
         except asyncio.CancelledError:
             raise

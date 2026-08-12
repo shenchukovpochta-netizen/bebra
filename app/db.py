@@ -254,7 +254,7 @@ class Database:
         """
         return await self.pool.fetch(
             "select tg_id, lang, full_name, contract_no, issue_data, "
-            "       rent_until, extend_until, "
+            "       rent_until, extend_until, close_requested_at, "
             "       remind_soon_at, remind_last_at, remind_overdue_at "
             "from bot.users "
             "where rent_until is not null "

@@ -1362,6 +1362,18 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, 0, "закрытая аренда не должна напоминать о себе")
         self.assertEqual(digest, "")
 
+    async def test_no_reminders_after_closure_request(self):
+        """Клиент попросил закрыть аренду - «продлите или сдайте» ему
+        больше не приходит, но у оператора она остаётся в сводке."""
+        await self.register_fully()
+        await self.request_close()
+        until = self.db.users[USER_ID]["rent_until"]
+        before = len(self.session.sent_to(USER_ID))
+        sent, digest = await self.remind(until + timedelta(days=2))
+        self.assertEqual(sent, 0)
+        self.assertEqual(len(self.session.sent_to(USER_ID)), before)
+        self.assertIn("просрочка", digest, "оператор должен видеть просрочку")
+
     EXTEND_FORM = "до: 17.08.2026\nоплата: 3500 qr"
 
     async def extend_request(self):
@@ -1409,6 +1421,14 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(acts_after, acts_before,
                          "продление не должно слать новый акт")
         self.assertTrue(logic.rental_is_active(row))
+
+    async def test_no_reminders_while_extension_awaits_payment(self):
+        await self.register_fully()
+        await self.extend_request()
+        await self.provide_extend()
+        until = self.db.users[USER_ID]["rent_until"]
+        sent, _ = await self.remind(until + timedelta(days=1))
+        self.assertEqual(sent, 0, "клиент уже платит за продление")
 
     async def test_extension_resets_reminders(self):
         """После продления напоминания должны сработать заново - иначе

@@ -763,6 +763,23 @@ class TestReminders(unittest.TestCase):
                        remind_last_at="было")
         self.assertEqual(self.due(row), logic.REMIND_OVERDUE)
 
+    def test_no_reminders_while_closure_requested(self):
+        """Клиент уже попросил закрыть аренду: «продлите или сдайте»
+        в ответ выглядит так, будто его не услышали."""
+        row = self.row(date(2026, 8, 10), close_requested_at="вчера")
+        self.assertIsNone(self.due(row))
+
+    def test_no_reminders_while_extension_awaits_payment(self):
+        """Заявка на продление принята, клиент платит - напоминать нечего."""
+        row = self.row(date(2026, 8, 10), extend_until=date(2026, 8, 20))
+        self.assertIsNone(self.due(row))
+
+    def test_operator_still_sees_such_rentals_in_the_digest(self):
+        """Клиента не трогаем, но у оператора аренда обязана остаться
+        на виду: велосипед всё ещё не вернули."""
+        rows = [self.row(date(2026, 8, 10), close_requested_at="вчера")]
+        self.assertIn("просрочка", logic.deadline_digest(rows, today=self.TODAY))
+
     def test_digest_lists_overdue_and_ending(self):
         rows = [self.row(date(2026, 8, 10)),
                 {**self.row(date(2026, 8, 12)), "tg_id": 2},
@@ -781,3 +798,29 @@ class TestReminders(unittest.TestCase):
         self.assertEqual(
             logic.deadline_digest([self.row(date(2026, 9, 1))], today=self.TODAY),
             "")
+
+
+class TestReminderSchedule(unittest.TestCase):
+    """Когда фоновый цикл делает дневной проход."""
+
+    def now(self, hour):
+        from datetime import datetime, timezone
+        return datetime(2026, 8, 12, hour, 30, tzinfo=timezone.utc)
+
+    def due(self, hour, last_run_on):
+        from app import tasks
+        return tasks.due_today(self.now(hour), last_run_on, 7)
+
+    def test_fires_at_the_configured_hour(self):
+        self.assertTrue(self.due(7, None))
+
+    def test_silent_before_the_hour(self):
+        self.assertFalse(self.due(6, None))
+
+    def test_catches_up_after_a_midday_restart(self):
+        """Бота перезапустили в 15:00 - напоминания за сегодня всё равно
+        должны уйти, а не пропасть на сутки."""
+        self.assertTrue(self.due(15, date(2026, 8, 11)))
+
+    def test_once_a_day(self):
+        self.assertFalse(self.due(9, date(2026, 8, 12)))
