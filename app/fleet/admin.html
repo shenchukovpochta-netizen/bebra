@@ -107,6 +107,7 @@
     <button data-s="rentals">Аренды</button>
     <button data-s="bookings">Брони</button>
     <button data-s="clients">Клиенты</button>
+    <button data-s="payments">Расчёты</button>
     <button data-s="import">Импорт формы</button>
   </nav>
 </header>
@@ -121,6 +122,7 @@
          placeholder="поиск: имя, телефон, ник"></div>
     <div id="clients-out"></div>
   </div>
+  <div id="s-payments" class="sect"></div>
   <div id="s-import" class="sect">
     <div class="cols">
       <div class="panel">
@@ -287,12 +289,29 @@ function rentalTable(list, starline){
       <td>${esc(r.price || "—")}</td>
       <td>${r.closed_at
         ? `<span class="hint">закрыта ${esc(r.closed_at)}</span>`
-        : `<button class="act" onclick="closeRental(${r.id})">закрыть</button>` +
+        : (r.pending_amount
+            ? `<span class="pill st-booked">ждёт ${r.pending_amount} ₽</span> `
+            : `<button class="act" onclick="invoice(${r.id},'${esc(r.price || "")}')">💳 счёт</button> `) +
+          `<button class="act" onclick="closeRental(${r.id})">закрыть</button>` +
           (canBlock && r.bike_id
             ? ` <button class="act" title="Заблокировать за неоплату" onclick="blockBike(${r.bike_id},true)">🔒 неоплата</button>`
             : "")}</td>
       </tr>`).join("") + `</table>`;
 }
+window.invoice = async (rentalId, priceHint) => {
+  const digits = (priceHint || "").replace(/\D/g, "");
+  const raw = prompt("Сумма счёта, ₽ (СБП, Точка):", digits || "");
+  if (raw === null) return;
+  const amount = parseInt(raw.replace(/\D/g, ""), 10);
+  if (!amount) { alert("Нужна сумма в рублях."); return; }
+  try {
+    const d = await api("/api/admin/payment/create", {method:"POST",
+      body: JSON.stringify({rental_id: rentalId, amount})});
+    alert(`Счёт на ${d.payment.amount} ₽ выставлен. Ссылка отправлена клиенту` +
+          ` и доступна во вкладке «Расчёты».`);
+  } catch (e) { alert(String(e)); }
+  refreshActive();
+};
 async function drawRentals(){
   const d = await api("/api/admin/rentals");
   $("s-rentals").innerHTML =
@@ -352,6 +371,52 @@ let searchTimer;
 $("client-q").oninput = () => { clearTimeout(searchTimer);
                                 searchTimer = setTimeout(drawClients, 300); };
 
+// ─── расчёты ───
+const PAY_ST = {pending:["ожидает","st-booked"], paid:["оплачен","st-free"],
+                cancelled:["отменён","st-service"], expired:["просрочен","st-lost"]};
+async function drawPayments(){
+  const d = await api("/api/admin/payments");
+  const s = d.summary;
+  let html = `<div class="cards">
+    <div class="stat"><b>${s.paid_today}</b><span>₽ оплачено сегодня</span></div>
+    <div class="stat"><b>${s.paid_week}</b><span>₽ за 7 дней</span></div>
+    <div class="stat"><b>${s.paid_month}</b><span>₽ за 30 дней</span></div>
+    <div class="stat ${s.pending_count ? "" : ""}"><b>${s.pending_sum}</b><span>₽ ожидает (${s.pending_count} сч.)</span></div>
+    <div class="stat ${s.expired_count ? "bad" : ""}"><b>${s.expired_count}</b><span>счетов просрочено</span></div>
+  </div>
+  <p class="hint">${d.tochka
+    ? "Точка подключена: счёт выставляется кнопкой «💳 счёт» на активной аренде, оплата подтверждается банком автоматически (опрос раз в минуту)."
+    : "Оплата СБП не настроена — заполните TOCHKA_TOKEN, TOCHKA_MERCHANT_ID и TOCHKA_ACCOUNT_ID в .env."}</p>`;
+  if (d.payments.length) {
+    html += `<h2>Счета</h2><table><tr><th>#</th><th>Клиент</th><th>Договор</th>
+      <th>Сумма</th><th>Статус</th><th>Выставлен</th><th>Оплачен</th><th></th></tr>` +
+      d.payments.map(p => {
+        const [t, c] = PAY_ST[p.status] || [p.status, "st-service"];
+        return `<tr><td class="num">${p.id}</td>
+          <td>${esc(p.client_name || "—")}</td>
+          <td class="num">${esc(p.contract_no || "—")}
+              <div class="hint">${esc(p.model || "")}</div></td>
+          <td class="num"><b>${p.amount} ₽</b></td>
+          <td><span class="pill ${c}">${esc(t)}</span></td>
+          <td class="num hint">${esc(p.created_at)}</td>
+          <td class="num hint">${esc(p.paid_at || "—")}</td>
+          <td>${p.status === "pending"
+            ? `<a href="${p.link}" target="_blank">ссылка</a>
+               <button class="act" onclick="cancelPayment(${p.id})">отменить</button>`
+            : ""}</td></tr>`;
+      }).join("") + `</table>`;
+  } else {
+    html += `<p class="hint">Счетов ещё не было.</p>`;
+  }
+  $("s-payments").innerHTML = html;
+}
+window.cancelPayment = async id => {
+  if (!confirm("Отменить счёт? Ссылка оплаты перестанет действовать в учёте.")) return;
+  try { await api("/api/admin/payment/cancel", {method:"POST",
+    body: JSON.stringify({payment_id:id})}); } catch (e) { alert(String(e)); }
+  drawPayments();
+};
+
 // ─── импорт формы ───
 const FIELD_TITLES = {fio:"ФИО", vin_frame:"Вин рамы", vin_motor:"Вин мотора",
   rent_term:"Срок", phone:"Телефон", phone2:"Телефон 2", phone3:"Телефон 3",
@@ -405,7 +470,8 @@ $("ingest").onclick = async () => {
 
 // ─── загрузка ───
 const LOADERS = {overview: drawOverview, bikes: drawBikes, rentals: drawRentals,
-                 bookings: drawBookings, clients: drawClients, import: () => {}};
+                 bookings: drawBookings, clients: drawClients,
+                 payments: drawPayments, import: () => {}};
 async function load(name){
   try { await LOADERS[name](); }
   catch (e) { /* 401 уже показал гейт */ }

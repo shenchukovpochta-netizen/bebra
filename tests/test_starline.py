@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.fleet.starline import StarLine, md5_hex
+from app.fleet.starline import StarLine, extract_voltage, md5_hex
 
 
 def run(coro):
@@ -124,6 +124,35 @@ class TestControl(unittest.TestCase):
         class Cfg:
             starline_enabled = False
         self.assertIsNone(StarLine.from_config(Cfg()))
+
+
+class TestVoltage(unittest.TestCase):
+    def test_finds_traction_battery_in_nested_data(self):
+        payload = {"data": {"common": {"battery": 12.4},   # бортовые 12 В - мимо
+                            "obd": {"voltage": 62.1}}}
+        self.assertEqual(extract_voltage(payload), 62.1)
+
+    def test_only_car_battery_is_none(self):
+        # Одни бортовые 12 В: тяговой батареи в телеметрии нет - None,
+        # а не 0% из чужого датчика.
+        self.assertIsNone(extract_voltage({"data": {"battery": 12.4}}))
+
+    def test_garbage_is_none(self):
+        for payload in ({}, None, {"data": {"battery": "err"}}, [1, 2]):
+            self.assertIsNone(extract_voltage(payload), payload)
+
+    def test_voltage_cached(self):
+        sl = FakeStarLine()
+
+        async def fake_get(url, params, cookies=None):
+            sl.calls.append(("GET", url, params))
+            return {"data": {"voltage": 60.7}}
+        sl._get_json = fake_get
+        sl._slnet = "SLNET1"
+        self.assertEqual(run(sl.voltage("DEV1")), 60.7)
+        self.assertEqual(run(sl.voltage("DEV1")), 60.7)
+        data_calls = [c for c in sl.calls if "device/DEV1/data" in c[1]]
+        self.assertEqual(len(data_calls), 1)   # второй ответ - из кэша
 
 
 if __name__ == "__main__":

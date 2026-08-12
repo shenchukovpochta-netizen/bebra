@@ -177,6 +177,19 @@ class Config:
     def starline_enabled(self) -> bool:
         return all((self.starline_app_id, self.starline_secret,
                     self.starline_login, self.starline_password))
+
+    # Оплата СБП через API Точка-банка: динамические QR-счета из CRM.
+    # Токен доступа к API, merchantId СБП и accountId (счёт/БИК) - из
+    # личного кабинета Точки. Пусто хотя бы у одного - оплата выключена,
+    # остаётся статичная ссылка PAY_URL.
+    tochka_token: str = ""
+    tochka_merchant_id: str = ""
+    tochka_account_id: str = ""
+
+    @property
+    def tochka_enabled(self) -> bool:
+        return all((self.tochka_token, self.tochka_merchant_id,
+                    self.tochka_account_id))
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -252,5 +265,8 @@ class Config:
             starline_login=_env("STARLINE_LOGIN"),
             starline_password=_env("STARLINE_PASSWORD"),
             starline_auto_block=_env("STARLINE_AUTO_BLOCK", "0") == "1",
+            tochka_token=_env("TOCHKA_TOKEN"),
+            tochka_merchant_id=_env("TOCHKA_MERCHANT_ID"),
+            tochka_account_id=_env("TOCHKA_ACCOUNT_ID"),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
         )

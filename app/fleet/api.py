@@ -73,12 +73,14 @@ class Api:
 
     def __init__(self, fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
                  bot_token: str = "", crm_token: str = "",
-                 admins: tuple[int, ...] = (), starline=None) -> None:
+                 admins: tuple[int, ...] = (), starline=None,
+                 tochka=None) -> None:
         self.fleet = fleet
         self.bot = bot
         self.admin_chat_id = admin_chat_id
         self.bot_token = bot_token
         self.starline = starline
+        self.tochka = tochka
         self.crm_token = crm_token if len(crm_token or "") >= CRM_TOKEN_MIN_LEN else ""
         if crm_token and not self.crm_token:
             log.warning("CRM_TOKEN короче %s символов - CRM по токену выключена",
@@ -133,6 +135,21 @@ class Api:
         booking = await self.fleet.active_booking_of(tg_id)
         rental = await self.fleet.active_rental_of(tg_id)
         history = await self.fleet.rentals_history(tg_id)
+        rental_json = None
+        if rental:
+            rental_json = {
+                "model": rental["model"], "contract_no": rental["contract_no"],
+                "term": rental["rent_term"], "price": rental["rent_price"],
+                "due_at": str(rental["due_at"] or ""),
+                # closed_at здесь всегда null: запрос отдаёт только живую
+                # аренду, поэтому просрочка меряется по одному due_at.
+                "overdue": logic.overdue(rental["due_at"], None,
+                                         today=date.today()),
+                "blocked": bool(rental["blocked"]),
+                "battery": await self._battery(rental["starline_device_id"]),
+                "payment": self._payment_json(
+                    await self.fleet.pending_payment_of_tg(tg_id)),
+            }
         return _json({
             "booking": booking and {
                 "bike_id": booking["bike_id"], "model": booking["model"],
@@ -140,17 +157,45 @@ class Api:
                 "pickup_at": _fmt(booking["pickup_at"]),
                 "expires_at": _fmt(booking["hold_expires_at"]),
             },
-            "rental": rental and {
-                "model": rental["model"], "contract_no": rental["contract_no"],
-                "term": rental["rent_term"], "price": rental["rent_price"],
-                "due_at": str(rental["due_at"] or ""),
-            },
+            "rental": rental_json,
             "history": [
                 {"model": h["model"], "contract_no": h["contract_no"],
                  "term": h["rent_term"], "closed_at": _fmt(h["closed_at"])}
                 for h in history
             ],
         })
+
+    async def _battery(self, device_id: str | None) -> dict | None:
+        """Заряд тяговой АКБ из телеметрии StarLine - для карточки клиента.
+        Нет трекера, нет связи или мусор в данных - None, а не выдумка."""
+        if not device_id or self.starline is None:
+            return None
+        try:
+            volts = await self.starline.voltage(device_id)
+        except Exception:                               # noqa: BLE001
+            log.exception("телеметрия %s не получена", device_id)
+            return None
+        percent = logic.battery_percent(volts)
+        if percent is None:
+            return None
+        return {"percent": percent, "voltage": round(float(volts), 1)}
+
+    @staticmethod
+    def _payment_json(payment) -> dict | None:
+        if payment is None:
+            return None
+        age_hours = 0.0
+        created = payment["created_at"]
+        if isinstance(created, datetime):
+            now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+            age_hours = (now - created).total_seconds() / 3600
+        return {
+            "id": payment["id"], "amount": payment["amount"],
+            "link": payment["qr_payload"], "created_at": _fmt(payment["created_at"]),
+            # «Просрочка оплаты»: счёту больше суток, а денег нет. Ровно
+            # столько же живёт сам QR - дальше и платить уже не по чему.
+            "overdue": age_hours > 24,
+        }
 
     async def book(self, request: web.Request) -> web.Response:
         user = self._client(request)
@@ -296,9 +341,16 @@ class Api:
         today = date.today()
         active = [self._rental_json(r, today)
                   for r in await self.fleet.rentals_admin(active=True, limit=200)]
+        # Неоплаченные счета - бейджем на активных арендах: оператор видит
+        # «ожидает N ₽», не уходя во вкладку расчётов.
+        pending = await self.fleet.pending_by_rentals([r["id"] for r in active])
+        for r in active:
+            p = pending.get(r["id"])
+            r["pending_amount"] = p["amount"] if p else None
         closed = [self._rental_json(r)
                   for r in await self.fleet.rentals_admin(active=False, limit=30)]
-        return _json({"active": active, "closed": closed})
+        return _json({"active": active, "closed": closed,
+                      "tochka": self.tochka is not None})
 
     async def admin_bookings(self, request: web.Request) -> web.Response:
         if not self._is_admin(request):
@@ -478,6 +530,95 @@ class Api:
                                     str(body.get("note") or "").strip() or None)
         return _json({"ok": True})
 
+    # ─────────────────────── расчёты (СБП, Точка) ───────────────────────
+
+    @staticmethod
+    def _payment_row(p) -> dict:
+        return {
+            "id": p["id"], "rental_id": p["rental_id"], "amount": p["amount"],
+            "purpose": p["purpose"], "status": p["status"],
+            "link": p["qr_payload"], "client_name": p["client_name"],
+            "model": p["model"], "contract_no": p["contract_no"],
+            "created_at": _fmt(p["created_at"]), "paid_at": _fmt(p["paid_at"]),
+        }
+
+    async def admin_payments(self, request: web.Request) -> web.Response:
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        summary = await self.fleet.payments_summary()
+        rows = await self.fleet.payments_admin()
+        return _json({"summary": summary, "tochka": self.tochka is not None,
+                      "payments": [self._payment_row(p) for p in rows]})
+
+    async def admin_payment_create(self, request: web.Request) -> web.Response:
+        """Выставить СБП-счёт по аренде: динамический QR Точки на точную
+        сумму. Клиенту (если он из бота) сразу уходит ссылка оплаты."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        if self.tochka is None:
+            return _json({"error": "Оплата СБП не настроена: заполните "
+                          "TOCHKA_* в .env."}, status=400)
+        try:
+            body = await request.json()
+            rental_id = int(body["rental_id"])
+            amount = int(body["amount"])
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Нужны rental_id и сумма в рублях."},
+                         status=400)
+        if not 1 <= amount <= 1_000_000:
+            return _json({"error": "Сумма выглядит неправдоподобно."}, status=400)
+        rental = await self.fleet.rental_brief(rental_id)
+        if rental is None or rental["closed_at"] is not None:
+            return _json({"error": "Аренда не найдена или уже закрыта."},
+                         status=409)
+        purpose = ("Аренда электровелосипеда"
+                   + (f", договор {rental['contract_no']}"
+                      if rental["contract_no"] else ""))
+        try:
+            qr = await self.tochka.create_qr(amount, purpose)
+        except Exception:                               # noqa: BLE001
+            log.exception("Точка: счёт по аренде %s не зарегистрирован", rental_id)
+            return _json({"error": "Точка не приняла счёт. Проверьте "
+                          "реквизиты TOCHKA_* и попробуйте ещё раз."},
+                         status=502)
+        try:
+            payment = await self.fleet.create_payment(
+                rental_id, tg_id=rental["tg_id"], client_id=rental["client_id"],
+                amount=amount, purpose=purpose, qrc_id=qr["qrc_id"],
+                qr_payload=qr["payload"], created_by=self._admin_id(request))
+        except asyncpg.UniqueViolationError:
+            return _json({"error": "По этой аренде уже висит неоплаченный "
+                          "счёт - отмените его или дождитесь оплаты."},
+                         status=409)
+        await self._notify_invoice(rental, payment)
+        return _json({"ok": True, "payment": {
+            "id": payment["id"], "amount": amount, "link": qr["payload"]}})
+
+    async def _notify_invoice(self, rental, payment) -> None:
+        if self.bot is None or not rental["tg_id"]:
+            return
+        from .. import texts
+        try:
+            await self.bot.send_message(rental["tg_id"],
+                                        texts.FLEET_INVOICE_CLIENT.format(
+                                            amount=payment["amount"],
+                                            link=payment["qr_payload"]))
+        except Exception:                               # noqa: BLE001
+            log.exception("клиент %s не получил счёт", rental["tg_id"])
+
+    async def admin_payment_cancel(self, request: web.Request) -> web.Response:
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        try:
+            body = await request.json()
+            payment_id = int(body["payment_id"])
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        row = await self.fleet.mark_payment(payment_id, "cancelled")
+        if row is None:
+            return _json({"error": "Счёт уже не в ожидании."}, status=409)
+        return _json({"ok": True})
+
     # ─────────────────────── карточки операторам ───────────────────────
 
     async def _notify_operators(self, user: dict, booking, pickup) -> None:
@@ -518,9 +659,11 @@ class Api:
 
 def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
               bot_token: str = "", crm_token: str = "",
-              admins: tuple[int, ...] = (), starline=None) -> web.Application:
+              admins: tuple[int, ...] = (), starline=None,
+              tochka=None) -> web.Application:
     api = Api(fleet, bot=bot, admin_chat_id=admin_chat_id, bot_token=bot_token,
-              crm_token=crm_token, admins=admins, starline=starline)
+              crm_token=crm_token, admins=admins, starline=starline,
+              tochka=tochka)
     app = web.Application()
     app.add_routes([
         web.get("/", api.index),
@@ -547,6 +690,9 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/admin/bike/status", api.admin_bike_status),
         web.post("/api/admin/bike/starline", api.admin_bike_starline),
         web.post("/api/admin/bike/block", api.admin_bike_block),
+        web.get("/api/admin/payments", api.admin_payments),
+        web.post("/api/admin/payment/create", api.admin_payment_create),
+        web.post("/api/admin/payment/cancel", api.admin_payment_cancel),
     ])
     if STATIC_DIR.is_dir():
         app.add_routes([web.static("/static", STATIC_DIR)])
@@ -556,11 +702,12 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
 async def start_api(fleet: FleetDB, port: int, *, bot=None,
                     admin_chat_id: int | None = None,
                     bot_token: str = "", crm_token: str = "",
-                    admins: tuple[int, ...] = (), starline=None) -> web.AppRunner:
+                    admins: tuple[int, ...] = (), starline=None,
+                    tochka=None) -> web.AppRunner:
     """Поднимает витрину и возвращает runner - его гасит main() при остановке."""
     runner = web.AppRunner(build_app(
         fleet, bot=bot, admin_chat_id=admin_chat_id, bot_token=bot_token,
-        crm_token=crm_token, admins=admins, starline=starline))
+        crm_token=crm_token, admins=admins, starline=starline, tochka=tochka))
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()

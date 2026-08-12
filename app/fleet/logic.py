@@ -309,6 +309,45 @@ def hold_minutes_for_pickup(pickup: datetime, *, now: datetime) -> int:
     return max(minutes, BOOKING_GRACE_MINUTES)
 
 
+# ─────────────────────────── заряд АКБ ───────────────────────────
+#
+# Проценты считаются из напряжения тяговой батареи (телеметрия StarLine).
+# Границы задал владелец: 54.2 В - батарея пуста, 67.2 В - полна.
+# Шкала линейная: точнее кривой разряда бот не знает, а клиенту нужен
+# ориентир «сколько осталось», а не лабораторная точность.
+
+BATTERY_V_EMPTY = 54.2
+BATTERY_V_FULL = 67.2
+
+
+def battery_percent(voltage) -> int | None:
+    """Процент заряда из напряжения. None - напряжение не похоже на правду
+    (нет данных, датчик отдал мусор или бортовые 12 В вместо тяговой)."""
+    try:
+        volts = float(voltage)
+    except (TypeError, ValueError):
+        return None
+    # Здравый диапазон тяговой батареи: сильно ниже «нуля» или выше
+    # «сотни» - это не заряд, а чужой датчик.
+    if not BATTERY_V_EMPTY - 5 <= volts <= BATTERY_V_FULL + 3:
+        return None
+    share = (volts - BATTERY_V_EMPTY) / (BATTERY_V_FULL - BATTERY_V_EMPTY)
+    return max(0, min(100, round(share * 100)))
+
+
+def price_amount(raw: str | None) -> int | None:
+    """Сумма в рублях из строки оплаты: «3000qr» -> 3000, «3 000 нал» -> 3000.
+
+    None - цифр нет или сумма неправдоподобна: предзаполнить поле счёта
+    нечем, оператор впишет руками.
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    if not digits:
+        return None
+    amount = int(digits)
+    return amount if 1 <= amount <= 1_000_000 else None
+
+
 def overdue(due_at, closed_at, *, today: date) -> bool:
     """Аренда просрочена: срок возврата прошёл, а возврата не было.
 
@@ -468,7 +507,7 @@ def parse_fixation_form(raw: str | None) -> tuple[dict | None, list[str]]:
 
         stripped = _LINE_NUMBER.sub("", line)
         low = stripped.lower()
-        for label, field in FIXATION_LABELS:
+        for label, field in FIXATION_LABELS:      # noqa: B007 - field нужен после break
             # Граница слова обязательна: голый startswith дал бы «фио…»
             # для «Фиокрест» и молча затёр настоящее ФИО, а «реф» -
             # для «Рефлектор». Следующий за меткой символ - не буква.

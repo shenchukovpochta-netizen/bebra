@@ -87,6 +87,30 @@ alter table fleet.bikes add column if not exists blocked        boolean not null
 alter table fleet.bikes add column if not exists blocked_at     timestamptz;
 alter table fleet.bikes add column if not exists blocked_reason text;
 
+-- Счета СБП (динамические QR Точка-банка). Счёт живёт своей строкой,
+-- а не колонками аренды: у одной аренды счетов может быть несколько
+-- (продление, долг), а оплаченные - это уже история расчётов.
+create table if not exists fleet.payments (
+  id         bigserial primary key,
+  rental_id  bigint references fleet.rentals (id),
+  tg_id      bigint,
+  client_id  integer references fleet.clients (id),
+  amount     integer     not null,               -- рубли
+  purpose    text,
+  qrc_id     text unique,                        -- id QR в НСПК
+  qr_payload text,                               -- ссылка оплаты СБП
+  status     text        not null default 'pending',  -- pending|paid|cancelled|expired
+  created_by bigint,                             -- оператор
+  created_at timestamptz not null default now(),
+  paid_at    timestamptz,
+  updated_at timestamptz not null default now()
+);
+-- Один неоплаченный счёт на аренду: два счёта на одну аренду - это два
+-- списания с клиента за одно и то же.
+create unique index if not exists payments_pending_rental_idx
+  on fleet.payments (rental_id) where status = 'pending';
+create index if not exists payments_status_idx on fleet.payments (status);
+
 -- Журнал команд StarLine: кто, когда, чем закончилось. Блокировка чужого
 -- (пусть и своего же) имущества - действие, за которое надо отвечать,
 -- поэтому каждый вызов оставляет след, включая неудачный (ok=false).

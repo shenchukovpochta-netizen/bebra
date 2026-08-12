@@ -26,6 +26,7 @@ from .fleet import seed as fleet_seed
 from .fleet.api import start_api
 from .fleet.db import FleetDB
 from .fleet.starline import StarLine
+from .fleet.tochka import Tochka
 from .handlers import contract, faq, fleet, menu, moderation, registration
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
@@ -111,6 +112,13 @@ async def run() -> None:
     elif cfg.starline_auto_block:
         log.warning("STARLINE_AUTO_BLOCK=1, но реквизиты StarLine не заданы - "
                     "автоблокировка не работает")
+    # Оплата СБП через Точку: счета из CRM + минутный опрос статусов.
+    tochka = Tochka.from_config(cfg)
+    payments = None
+    if tochka is not None:
+        log.info("Точка подключена: счета СБП доступны в CRM")
+        payments = asyncio.create_task(tasks.payments_loop(
+            fleet_db, tochka, bot, cfg.contract_chat_id, starline))
     # Витрина парка и Mini App - только при заданном порте. Боту и токен,
     # и служебный чат нужны для карточек «бронь из приложения».
     api_runner = None
@@ -118,7 +126,8 @@ async def run() -> None:
         api_runner = await start_api(
             fleet_db, cfg.api_port, bot=bot,
             admin_chat_id=cfg.contract_chat_id, bot_token=cfg.bot_token,
-            crm_token=cfg.crm_token, admins=cfg.admins, starline=starline)
+            crm_token=cfg.crm_token, admins=cfg.admins, starline=starline,
+            tochka=tochka)
     # Кнопка меню «🚲 Бронь» во всех личных чатах: появляется, как только
     # владелец опубликовал Mini App по HTTPS и заполнил MINIAPP_URL.
     if cfg.miniapp_url:
@@ -152,6 +161,9 @@ async def run() -> None:
         if autoblock is not None:
             autoblock.cancel()
             background.append(autoblock)
+        if payments is not None:
+            payments.cancel()
+            background.append(payments)
         await asyncio.gather(*background, return_exceptions=True)
         await tasks.drain()
         if api_runner is not None:

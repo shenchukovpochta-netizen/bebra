@@ -93,6 +93,86 @@ async def fleet_loop(fleet) -> None:
         await asyncio.sleep(FLEET_INTERVAL_SECONDS)
 
 
+PAYMENTS_INTERVAL_SECONDS = 60
+PAYMENT_MAX_AGE_HOURS = 24        # столько же живёт QR в Точке (ttl)
+
+
+async def check_payments_once(fleet, tochka, bot=None, admin_chat_id=None,
+                              starline=None) -> int:
+    """Один проход по неоплаченным счетам. Возвращает число оплаченных.
+
+    Оплата подтверждается банком, а не словами клиента: статус QR
+    спрашивается у Точки. Оплаченный счёт снимает блокировку StarLine,
+    если единица была обездвижена за неоплату, - клиент не должен ждать
+    оператора, чтобы поехать после оплаты.
+    """
+    paid = 0
+    for p in await fleet.pending_payments(max_age_hours=PAYMENT_MAX_AGE_HOURS):
+        status = await tochka.payment_status(p["qrc_id"])
+        if status == "pending":
+            continue
+        row = await fleet.mark_payment(p["id"], "paid" if status == "paid"
+                                       else "cancelled")
+        if row is None or status != "paid":
+            continue
+        paid += 1
+        log.info("оплата: счёт #%s на %s ₽ оплачен", p["id"], p["amount"])
+        await _after_paid(fleet, row, bot, admin_chat_id, starline)
+    for p in await fleet.stale_payments(max_age_hours=PAYMENT_MAX_AGE_HOURS):
+        await fleet.mark_payment(p["id"], "expired")
+    return paid
+
+
+async def _after_paid(fleet, payment, bot, admin_chat_id, starline) -> None:
+    """Всё, что следует за оплатой: карточка оператору, сообщение клиенту,
+    разблокировка. Каждый шаг сам по себе: сбой одного не съедает остальные."""
+    rental = (await fleet.rental_brief(payment["rental_id"])
+              if payment["rental_id"] else None)
+    if bot is not None and admin_chat_id is not None:
+        try:
+            await bot.send_message(admin_chat_id, texts.FLEET_PAID_CARD.format(
+                amount=payment["amount"],
+                client=logic.esc((rental and rental["client_name"]) or "—"),
+                number=logic.esc((rental and rental["contract_no"]) or "—")))
+        except Exception:                               # noqa: BLE001
+            log.exception("карточка оплаты #%s не доставлена", payment["id"])
+    if bot is not None and payment["tg_id"]:
+        try:
+            await bot.send_message(payment["tg_id"],
+                                   texts.FLEET_PAID_CLIENT.format(
+                                       amount=payment["amount"]))
+        except Exception:                               # noqa: BLE001
+            log.exception("клиент %s не узнал об оплате", payment["tg_id"])
+    if (starline is not None and rental is not None
+            and rental["bike_id"] and rental["blocked"]):
+        bike = await fleet.get_bike(str(rental["bike_id"]))
+        device = bike and bike["starline_device_id"]
+        if device:
+            ok = await starline.unblock(device)
+            await fleet.log_starline(rental["bike_id"], device, "unblock", ok,
+                                     "оплата счёта" if ok
+                                     else "команда StarLine не прошла", None)
+            if ok:
+                await fleet.mark_blocked(rental["bike_id"], blocked=False,
+                                         reason=None)
+                log.info("StarLine: единица %s разблокирована после оплаты",
+                         rental["bike_id"])
+
+
+async def payments_loop(fleet, tochka, bot=None, admin_chat_id=None,
+                        starline=None) -> None:
+    """Опрос статусов СБП-счетов раз в минуту - вебхуку нужен публичный
+    адрес, а минутный опрос платежей не теряет и устроен как весь бот."""
+    while True:
+        try:
+            await check_payments_once(fleet, tochka, bot, admin_chat_id, starline)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                               # noqa: BLE001
+            log.exception("прогон проверки оплат не удался")
+        await asyncio.sleep(PAYMENTS_INTERVAL_SECONDS)
+
+
 # Автоблокировка реже броней: просрочка меряется сутками, и минутный такт
 # здесь только зря дёргал бы StarLine и базу.
 STARLINE_INTERVAL_SECONDS = 5 * 60

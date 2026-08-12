@@ -59,6 +59,19 @@
   .msg.ok{background:rgba(44,122,76,.12); color:var(--ok)}
   .photo{width:100%; aspect-ratio:16/10; object-fit:cover; border-radius:10px;
          margin:8px 0 4px; background:rgba(125,138,148,.15); display:block}
+  .alert{border-radius:12px; padding:12px 14px; margin:0 0 12px; font-size:14px}
+  .alert b{display:block; margin-bottom:2px}
+  .alert.warn{background:rgba(169,108,9,.14); color:var(--warn)}
+  .alert.bad{background:rgba(169,53,38,.14); color:var(--bad)}
+  .alert a.paybtn{display:inline-block; margin-top:8px; padding:9px 16px;
+         border-radius:10px; background:var(--btn); color:var(--btn-fg);
+         font-weight:700; text-decoration:none}
+  .batt{margin-top:10px}
+  .batt .bar{height:10px; border-radius:6px; background:rgba(125,138,148,.22);
+             overflow:hidden; margin-top:4px}
+  .batt .fill{height:100%; border-radius:6px; background:var(--ok)}
+  .batt .fill.low{background:var(--bad)}
+  .batt .fill.mid{background:var(--warn)}
   .chips{display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 4px}
   .chip{font-size:12px; padding:3px 9px; border-radius:14px;
         background:rgba(125,138,148,.16); white-space:nowrap}
@@ -71,6 +84,7 @@
 </head>
 <body>
 <h1 id="title">🚲 Аренда велосипедов</h1>
+<div id="alerts"></div>
 
 <div id="tab-vitrina" class="sect on">
   <h2>Точки и наличие</h2>
@@ -266,6 +280,39 @@ $("book").onclick = async () => {
   }
 };
 
+// ─── баннеры: висят над всеми вкладками, пока не решён вопрос ───
+function drawAlerts(me) {
+  const r = me && me.rental;
+  let html = "";
+  if (r && r.payment) {
+    const kind = (r.payment.overdue || r.overdue) ? "bad" : "warn";
+    const title = (r.payment.overdue || r.overdue)
+      ? "❗ Оплата просрочена" : "💳 Ожидает оплаты";
+    html += `<div class="alert ${kind}"><b>${title}</b>
+      Счёт на ${r.payment.amount} ₽ за аренду${r.model ? " " + esc(r.model) : ""}.
+      ${r.blocked ? "Велосипед заблокирован до оплаты." : ""}
+      ${r.payment.link ? `<a class="paybtn" href="${r.payment.link}" target="_blank">Оплатить по СБП</a>` : ""}
+    </div>`;
+  } else if (r && r.blocked) {
+    html += `<div class="alert bad"><b>🔒 Велосипед заблокирован</b>
+      Свяжитесь с нами через чат с ботом («🆘 Поддержка»), чтобы решить вопрос.</div>`;
+  } else if (r && r.overdue) {
+    html += `<div class="alert bad"><b>❗ Срок аренды истёк</b>
+      Вернуть велосипед нужно было до ${esc(r.due_at)}. Продлить или сдать —
+      через чат с ботом.</div>`;
+  }
+  $("alerts").innerHTML = html;
+}
+
+function batteryHtml(b) {
+  if (!b) return "";
+  const cls = b.percent <= 20 ? "low" : b.percent <= 45 ? "mid" : "";
+  return `<div class="batt"><div class="row">
+      <span class="hint">🔋 Заряд АКБ</span>
+      <span class="num"><b>${b.percent}%</b> <span class="hint">(${b.voltage} В)</span></span>
+    </div><div class="bar"><div class="fill ${cls}" style="width:${b.percent}%"></div></div></div>`;
+}
+
 // ─── моё ───
 async function loadMe() {
   if (!initData) {
@@ -275,6 +322,7 @@ async function loadMe() {
   }
   try {
     const me = await api("/api/me");
+    drawAlerts(me);
     let html = "";
     if (me.booking) {
       html += `<div class="card"><div class="row"><b>Бронь</b>` +
@@ -290,7 +338,8 @@ async function loadMe() {
         `</div>${esc(me.rental.model || "")}` +
         `<div class="hint">договор № ${esc(me.rental.contract_no || "—")}, ` +
         `срок: ${esc(me.rental.term || "—")}</div>` +
-        `<div class="hint">Продлить или закрыть аренду — в чате с ботом.</div></div>`;
+        batteryHtml(me.rental.battery) +
+        `<div class="hint" style="margin-top:8px">Продлить или закрыть аренду — в чате с ботом.</div></div>`;
     }
     if (!me.booking && !me.rental) {
       html += `<div class="card">Активных броней и аренд нет.</div>`;
@@ -329,6 +378,9 @@ async function loadAll() {
   }
 }
 loadAll();
+// Баннеры об оплате и просрочке должны висеть с первого экрана,
+// а не появляться только на вкладке «Моё».
+if (initData) loadMe();
 </script>
 </body>
 </html>

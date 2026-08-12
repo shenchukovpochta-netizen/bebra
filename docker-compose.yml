@@ -104,6 +104,10 @@ services:
       STARLINE_PASSWORD: ${STARLINE_PASSWORD}
       # 1 - автоблокировать просроченные аренды. По умолчанию 0 (только руками).
       STARLINE_AUTO_BLOCK: ${STARLINE_AUTO_BLOCK}
+      # Оплата СБП через API Точка-банка. Пусто - счета выключены.
+      TOCHKA_TOKEN: ${TOCHKA_TOKEN}
+      TOCHKA_MERCHANT_ID: ${TOCHKA_MERCHANT_ID}
+      TOCHKA_ACCOUNT_ID: ${TOCHKA_ACCOUNT_ID}
     # ports:
     #   - "127.0.0.1:${API_PORT}:${API_PORT}"
     volumes:

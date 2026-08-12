@@ -34,6 +34,7 @@ ID_BASE = "https://id.starline.ru/apiV3"
 DEV_BASE = "https://developer.starline.ru/json"
 APP_TOKEN_TTL = 3 * 3600          # StarLine отдаёт app-токен на 4 часа
 TIMEOUT_SECONDS = 15
+VOLTAGE_TTL_SECONDS = 300         # заряд меняется медленно, телеметрию кэшируем
 
 
 class StarLineError(Exception):
@@ -42,6 +43,37 @@ class StarLineError(Exception):
 
 def md5_hex(value: str) -> str:
     return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+
+# Ключи телеметрии, в которых устройства отдают напряжение батареи.
+# У разных блоков поле называется по-разному; ищем рекурсивно первое
+# значение, похожее на напряжение ТЯГОВОЙ батареи (диапазон отсекает
+# бортовые 12 В, которые тоже зовутся battery).
+_VOLTAGE_KEYS = frozenset({"battery", "voltage", "battery_voltage", "power_v"})
+_VOLTAGE_MIN, _VOLTAGE_MAX = 30.0, 100.0
+
+
+def extract_voltage(payload) -> float | None:
+    """Первое похожее на напряжение тяговой батареи значение из телеметрии."""
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if str(key).lower() in _VOLTAGE_KEYS:
+                try:
+                    volts = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if _VOLTAGE_MIN <= volts <= _VOLTAGE_MAX:
+                    return volts
+        for value in payload.values():
+            found = extract_voltage(value)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = extract_voltage(item)
+            if found is not None:
+                return found
+    return None
 
 
 class StarLine:
@@ -61,9 +93,10 @@ class StarLine:
         self._slnet: str | None = None
         self._app_token: str | None = None
         self._app_token_at: float = 0.0
+        self._voltage_cache: dict[str, tuple[float, float | None]] = {}
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "StarLine | None":
+    def from_config(cls, cfg: Any) -> StarLine | None:
         """Клиент либо None, если StarLine в конфиге не настроен."""
         if not getattr(cfg, "starline_enabled", False):
             return None
@@ -88,6 +121,34 @@ class StarLine:
         except Exception:                               # noqa: BLE001
             log.exception("StarLine: проверка связи не удалась")
             return False
+
+    async def voltage(self, device_id: str) -> float | None:
+        """Напряжение тяговой батареи из телеметрии устройства.
+
+        None - данных нет или они не похожи на напряжение: клиент увидит
+        «заряд неизвестен», а не выдуманный процент. Ответ кэшируется
+        на VOLTAGE_TTL: заряд меняется медленно, а каждый вход в Mini App
+        не должен превращаться в запрос к StarLine.
+        """
+        cached = self._voltage_cache.get(device_id)
+        if cached and time.monotonic() - cached[0] < VOLTAGE_TTL_SECONDS:
+            return cached[1]
+        data: dict = {}
+        for attempt in (1, 2):
+            try:
+                if not self._slnet:
+                    await self._authenticate()
+                data = await self._get_json(
+                    f"{DEV_BASE}/v3/device/{device_id}/data", {},
+                    cookies={"slnet": self._slnet})
+                break
+            except Exception:                           # noqa: BLE001
+                log.exception("StarLine: телеметрия %s не получена (попытка %s)",
+                              device_id, attempt)
+                self._slnet = None
+        volts = extract_voltage(data)
+        self._voltage_cache[device_id] = (time.monotonic(), volts)
+        return volts
 
     # ─────────────────────── авторизация ───────────────────────
 
@@ -156,10 +217,11 @@ class StarLine:
 
     # ─────────────────────── сеть (подменяется в тестах) ───────────────────────
 
-    async def _get_json(self, url: str, params: dict) -> dict:
+    async def _get_json(self, url: str, params: dict,
+                        cookies: dict | None = None) -> dict:
         import aiohttp
         timeout = aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, cookies=cookies) as session:
             async with session.get(url, params=params) as resp:
                 return await resp.json(content_type=None)
 

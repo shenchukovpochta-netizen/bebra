@@ -287,7 +287,8 @@ class FleetDB:
         return await self.pool.fetchrow(
             """
             select r.id, r.contract_no, r.rent_term, r.rent_price, r.due_at,
-                   r.opened_at, b.id as bike_id, m.title as model
+                   r.opened_at, b.id as bike_id, m.title as model,
+                   b.starline_device_id, b.blocked
             from fleet.rentals r
             left join fleet.bikes b on b.id = r.bike_id
             left join fleet.models m on m.id = b.model_id
@@ -593,6 +594,116 @@ class FleetDB:
                     "update fleet.bikes set status = 'free', updated_at = now() "
                     "where id = $1 and status = 'booked'", row["bike_id"])
         return row["bike_id"]
+
+    # ─────────────────────── счета СБП ───────────────────────
+
+    async def rental_brief(self, rental_id: int) -> asyncpg.Record | None:
+        """Аренда с тем, что нужно счёту: кому выставлять и как подписать."""
+        return await self.pool.fetchrow(
+            """
+            select r.id, r.tg_id, r.client_id, r.contract_no, r.rent_price,
+                   r.closed_at, b.id as bike_id, b.blocked,
+                   m.title as model,
+                   coalesce(c.full_name, u.full_name) as client_name
+            from fleet.rentals r
+            left join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.clients c on c.id = r.client_id
+            left join bot.users u on u.tg_id = r.tg_id
+            where r.id = $1
+            """, rental_id)
+
+    async def create_payment(self, rental_id: int, *, tg_id: int | None,
+                             client_id: int | None, amount: int, purpose: str,
+                             qrc_id: str, qr_payload: str,
+                             created_by: int | None) -> asyncpg.Record:
+        """Счёт на аренду. Второй неоплаченный на ту же аренду отсечёт
+        частичный уникальный индекс - это два списания за одно и то же."""
+        return await self.pool.fetchrow(
+            """
+            insert into fleet.payments
+              (rental_id, tg_id, client_id, amount, purpose, qrc_id,
+               qr_payload, created_by)
+            values ($1, $2, $3, $4, $5, $6, $7, $8) returning *
+            """, rental_id, tg_id, client_id, amount, purpose, qrc_id,
+            qr_payload, created_by)
+
+    async def mark_payment(self, payment_id: int, status: str) -> asyncpg.Record | None:
+        """Перевод счёта из pending. None - счёт уже не pending (гонка
+        опроса и ручной отмены разрешается guard-условием, как всюду)."""
+        return await self.pool.fetchrow(
+            """
+            update fleet.payments
+            set status = $2,
+                paid_at = case when $2 = 'paid' then now() else paid_at end,
+                updated_at = now()
+            where id = $1 and status = 'pending'
+            returning *
+            """, payment_id, status)
+
+    async def pending_payments(self, *, max_age_hours: int) -> list[asyncpg.Record]:
+        """Неоплаченные счета для опроса. Старьё не опрашивается вечно:
+        просроченный QR помечает pay-цикл, а не этот запрос."""
+        return await self.pool.fetch(
+            "select * from fleet.payments where status = 'pending' "
+            "and created_at > now() - ($1 || ' hours')::interval "
+            "order by id", str(int(max_age_hours)))
+
+    async def stale_payments(self, *, max_age_hours: int) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            "select * from fleet.payments where status = 'pending' "
+            "and created_at <= now() - ($1 || ' hours')::interval",
+            str(int(max_age_hours)))
+
+    async def pending_payment_of_tg(self, tg_id: int) -> asyncpg.Record | None:
+        """Неоплаченный счёт клиента - для баннера в Mini App."""
+        return await self.pool.fetchrow(
+            "select * from fleet.payments "
+            "where tg_id = $1 and status = 'pending' order by id desc limit 1",
+            tg_id)
+
+    async def payments_admin(self, limit: int = 100) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            """
+            select p.*, r.contract_no, r.rent_term, m.title as model,
+                   b.vin_frame,
+                   coalesce(c.full_name, u.full_name) as client_name
+            from fleet.payments p
+            left join fleet.rentals r on r.id = p.rental_id
+            left join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.clients c on c.id = p.client_id
+            left join bot.users u on u.tg_id = p.tg_id
+            order by p.id desc limit $1
+            """, limit)
+
+    async def payments_summary(self) -> dict:
+        """Сводка расчётов для CRM: оплачено за периоды, ожидает, просрочено."""
+        row = await self.pool.fetchrow(
+            """
+            select
+              coalesce(sum(amount) filter (where status = 'paid'
+                  and paid_at >= date_trunc('day', now())), 0)   as paid_today,
+              coalesce(sum(amount) filter (where status = 'paid'
+                  and paid_at >= now() - interval '7 days'), 0)  as paid_week,
+              coalesce(sum(amount) filter (where status = 'paid'
+                  and paid_at >= now() - interval '30 days'), 0) as paid_month,
+              coalesce(sum(amount) filter (where status = 'pending'), 0)
+                                                                 as pending_sum,
+              count(*)   filter (where status = 'pending')       as pending_count,
+              count(*)   filter (where status = 'expired')       as expired_count
+            from fleet.payments
+            """)
+        return dict(row)
+
+    async def pending_by_rentals(self, rental_ids: list[int]) -> dict[int, asyncpg.Record]:
+        if not rental_ids:
+            return {}
+        rows = await self.pool.fetch(
+            "select * from fleet.payments "
+            "where status = 'pending' and rental_id = any($1::bigint[])",
+            rental_ids)
+        return {r["rental_id"]: r for r in rows}
 
     # ─────────────────────── StarLine ───────────────────────
 
