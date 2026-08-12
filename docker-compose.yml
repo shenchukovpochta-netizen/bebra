@@ -87,6 +87,14 @@ services:
 
       STORAGE_DIR: /files/kyc
       TZ: ${TZ:-Europe/Moscow}
+
+      # Порт HTTP-витрины парка (/api/points, /api/models, /api/availability).
+      # Пусто - витрина выключена. Заполнив, раскомментируйте ports ниже,
+      # чтобы порт был виден с хоста (только localhost - наружу его должен
+      # отдавать reverse-proxy с TLS, а не docker напрямую).
+      API_PORT: ${API_PORT}
+    # ports:
+    #   - "127.0.0.1:${API_PORT}:${API_PORT}"
     volumes:
       - kycfiles:/files
       # Правка документов не должна требовать пересборки образа.

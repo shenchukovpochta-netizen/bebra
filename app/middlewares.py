@@ -15,6 +15,7 @@ from . import keyboards as kb
 from . import logic
 from .config import Config
 from .db import Database
+from .fleet import logic as fleet_logic
 from .services.crypto import Vault
 from .services.subscription import check_subscription
 
@@ -66,10 +67,14 @@ def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
 
 
 class PipelineMiddleware(BaseMiddleware):
-    def __init__(self, db: Database, cfg: Config, vault: Vault) -> None:
+    # fleet необязателен: тесты собирают middleware без парка, и хуки
+    # в обработчиках при None просто молчат.
+    def __init__(self, db: Database, cfg: Config, vault: Vault,
+                 fleet: Any = None) -> None:
         self.db = db
         self.cfg = cfg
         self.vault = vault
+        self.fleet = fleet
 
     def _is_service_chat(self, chat_id: int) -> bool:
         """Служебные чаты: модерация заявок и утверждение договоров.
@@ -100,11 +105,18 @@ class PipelineMiddleware(BaseMiddleware):
         is_moderation_reply = (
             isinstance(inner, Message) and inner.reply_to_message is not None
         )
+        # Команды парка (/park, /bikes, /hold...) - обычные сообщения без
+        # реплая: без своего флага они отбрасывались бы в группе, как
+        # когда-то кнопки «Одобрить».
+        is_service_command = (
+            isinstance(inner, Message) and fleet_logic.is_fleet_command(inner.text)
+        )
         if not logic.should_process(
             payload.get("chat_type"),
             from_admin_chat=self._is_service_chat(chat_id),
             is_moderation_callback=is_moderation,
             is_moderation_reply=is_moderation_reply,
+            is_service_command=is_service_command,
         ):
             return None
 
@@ -115,8 +127,10 @@ class PipelineMiddleware(BaseMiddleware):
         # Мимо пользовательского конвейера идёт только то, что пришло
         # из служебного чата. Чат утверждения договоров - это личка, и без
         # проверки чата владелец @arenda_velo_kazan попадал бы под гейт
-        # подписки и рейт-лимит наравне с клиентами.
-        service = self._is_service_chat(chat_id) and (is_moderation or is_moderation_reply)
+        # подписки и рейт-лимит наравне с клиентами. Команды парка - тем же
+        # служебным путём: оператор здесь работает, а не регистрируется.
+        service = self._is_service_chat(chat_id) and (
+            is_moderation or is_moderation_reply or is_service_command)
 
         try:
             result = await self._dispatch(handler, event, data, inner, user_id, service)
@@ -134,6 +148,7 @@ class PipelineMiddleware(BaseMiddleware):
         data["db"] = self.db
         data["cfg"] = self.cfg
         data["vault"] = self.vault
+        data["fleet"] = self.fleet
 
         # Модерация идёт мимо всего пользовательского конвейера: у админа нет
         # анкеты, рейт-лимит и подписка к нему не относятся.

@@ -35,7 +35,8 @@ if (-not $SkipTests) {
 # Явные списки вместо scp -r: так .env, secrets/ и __pycache__
 # не уедут на сервер по случайности.
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
-          'schema.sql', 'bootstrap.sh', 'install.sh', '.env.example', '.gitignore',
+          'schema.sql', 'fleet_schema.sql', 'bootstrap.sh', 'install.sh',
+          '.env.example', '.gitignore',
           'README.md', 'INSTALL.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
@@ -50,7 +51,10 @@ $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/soglasie_template.docx', 'app/pdn_policy.docx')
 $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
-              'app/handlers/contract.py', 'app/handlers/faq.py')
+              'app/handlers/contract.py', 'app/handlers/faq.py',
+              'app/handlers/fleet.py')
+$fleet = @('app/fleet/__init__.py', 'app/fleet/logic.py', 'app/fleet/db.py',
+           'app/fleet/seed.py', 'app/fleet/api.py')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
@@ -58,14 +62,15 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
-          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py')
+          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
+          'tests/test_fleet.py', 'tests/test_fleet_sql.py')
 
-foreach ($f in ($root + $app + $handlers + $services + $max + $tests)) {
+foreach ($f in ($root + $app + $handlers + $services + $fleet + $max + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/fleet' '$Path/app/max' '$Path/tests'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -77,6 +82,8 @@ scp $handlers  "${Server}:${Path}/app/handlers/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (handlers) не удался' }
 scp $services  "${Server}:${Path}/app/services/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (services) не удался' }
+scp $fleet     "${Server}:${Path}/app/fleet/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (fleet) не удался' }
 scp $max       "${Server}:${Path}/app/max/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (max) не удался' }
 scp $tests     "${Server}:${Path}/tests/"

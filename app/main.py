@@ -20,7 +20,10 @@ from aiogram.enums import ParseMode
 from . import tasks
 from .config import Config
 from .db import Database
-from .handlers import contract, faq, menu, moderation, registration
+from .fleet import seed as fleet_seed
+from .fleet.api import start_api
+from .fleet.db import FleetDB
+from .handlers import contract, faq, fleet, menu, moderation, registration
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
@@ -55,18 +58,27 @@ async def run() -> None:
                     "не будет, останется только текст", cfg.pay_url)
 
     db = await Database.connect(cfg.pg)
-    await db.apply_schema(Path(__file__).resolve().parent.parent / "schema.sql")
-    log.info("схема применена")
+    root = Path(__file__).resolve().parent.parent
+    await db.apply_schema(root / "schema.sql")
+    # Парк и брони - поверх того же пула. Схему применяет только этот бот:
+    # у MAX своя база, а техника одна, и учёт у неё должен быть один.
+    fleet_db = FleetDB(db.pool)
+    await fleet_db.apply_schema(root / "fleet_schema.sql")
+    await fleet_seed.ensure_seed(fleet_db)
+    log.info("схемы применены, справочники парка посеяны")
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
     log.info("бот @%s готов", me.username)
 
     dp = Dispatcher()
-    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault))
+    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault, fleet_db))
     # Порядок важен: модерация раньше регистрации, иначе клик админа
     # провалится в пользовательский сценарий. Договор - до регистрации,
     # чтобы «Подписываю» не поймала ловушка шага. menu - последним.
+    # Команды парка - первыми: в личке утверждающего они иначе дошли бы
+    # до ловушки меню и получили клиентский ответ.
+    dp.include_router(fleet.router)
     dp.include_router(moderation.router)
     dp.include_router(contract.router)
     dp.include_router(registration.router)
@@ -76,6 +88,9 @@ async def run() -> None:
     dp.include_router(menu.router)
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
+    holds = asyncio.create_task(tasks.fleet_loop(fleet_db))
+    # Витрина парка (точки, каталог, наличие) - только при заданном порте.
+    api_runner = await start_api(fleet_db, cfg.api_port) if cfg.api_port else None
 
     # docker stop шлёт SIGTERM. Без обработчика процесс умирает мгновенно:
     # фоновые задачи (сохранение скана, хэш) обрываются на полуслове,
@@ -95,8 +110,11 @@ async def run() -> None:
     finally:
         log.info("останавливаюсь")
         retention.cancel()
-        await asyncio.gather(retention, return_exceptions=True)
+        holds.cancel()
+        await asyncio.gather(retention, holds, return_exceptions=True)
         await tasks.drain()
+        if api_runner is not None:
+            await api_runner.cleanup()
         await bot.session.close()
         await db.close()
         log.info("остановлен")

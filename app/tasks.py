@@ -71,3 +71,22 @@ async def retention_loop(db: Database, cfg: Config) -> None:
         except Exception:                               # noqa: BLE001
             log.exception("прогон ретеншена не удался")
         await asyncio.sleep(INTERVAL_SECONDS)
+
+
+# Просроченные удержания снимаются раз в минуту: бронь живёт часами,
+# и минута опоздания никому не мешает, а чаще - лишние запросы к базе.
+FLEET_INTERVAL_SECONDS = 60
+
+
+async def fleet_loop(fleet) -> None:
+    """Снятие просроченных броней парка: held -> expired, единица свободна."""
+    while True:
+        try:
+            expired = await fleet.expire_holds()
+            if expired:
+                log.info("парк: снято просроченных броней: %s", expired)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                               # noqa: BLE001
+            log.exception("снятие просроченных броней не удалось")
+        await asyncio.sleep(FLEET_INTERVAL_SECONDS)

@@ -146,6 +146,10 @@ class Config:
     # ознакомления КАК ЕСТЬ, без подстановок. Файла нет - шаг работает
     # текстом, без вложения.
     pdn_policy_file: Path = Path("/srv/app/pdn_policy.docx")
+    # Порт HTTP-витрины парка (/api/points, /api/models, /api/availability).
+    # Не задан - витрина не поднимается: у бота без приложения лишний
+    # открытый порт не нужен.
+    api_port: int | None = None
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -213,5 +217,6 @@ class Config:
             updates_log_days=_int("UPDATES_LOG_DAYS", "7"),
             rate_soft=_int("RATE_SOFT", str(logic.RATE_SOFT_DEFAULT)),
             rate_hard=_int("RATE_HARD", str(logic.RATE_HARD_DEFAULT)),
+            api_port=_int_or_none("API_PORT"),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
         )

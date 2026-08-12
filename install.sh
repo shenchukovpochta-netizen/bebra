@@ -258,6 +258,9 @@ PAY_URL="${PAY_URL}"
 PURGE_APPROVED_DAYS="${PURGE_APPROVED_DAYS}"
 PURGE_REJECTED_DAYS="${PURGE_REJECTED_DAYS}"
 UPDATES_LOG_DAYS="${UPDATES_LOG_DAYS:-7}"
+
+# Витрина парка для будущего приложения; пусто - выключена.
+API_PORT="${API_PORT:-}"
 EOF
 chmod 600 .env
 ok ".env готов"

@@ -25,6 +25,8 @@ from .. import logic, texts
 from ..config import Config
 from ..db import Database, utcnow
 from ..filters import StateIs
+from ..fleet import logic as fleet_logic
+from ..fleet.db import FleetDB
 from ..services import contract as contract_service
 from ..services import files
 from ..services.crypto import Vault
@@ -592,7 +594,8 @@ async def send_act_in(bot: Bot, db: Database, cfg: Config, data: dict,
 
 @router.callback_query(StateIs(logic.WAIT_ACT_SIGN), F.data == "act_sign")
 async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
-                      cfg: Config, vault: Vault, user: dict) -> None:
+                      cfg: Config, vault: Vault, user: dict,
+                      fleet: FleetDB | None = None) -> None:
     """Подпись Акта приёма-передачи: с этого момента имущество передано."""
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_ACT_SIGN,
@@ -633,6 +636,27 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
     await db.log_event(tg_id, "act_in_signed", {"number": number})
     # Аренда началась - отсчёт хранения заново, от последней активности.
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
+
+    # Учёт парка: единица заводится по вин-номеру из данных выдачи и
+    # помечается арендованной. Сбой учёта прокат не останавливает - акт
+    # уже подписан, велосипед в руках клиента, и учёт обязан догонять
+    # жизнь, а не блокировать её.
+    if fleet is not None:
+        try:
+            issue = dict(data.get("issue_data") or {})
+            await fleet.open_rental(
+                tg_id,
+                vin_frame=issue.get("vin_frame") or "",
+                vin_motor=issue.get("vin_motor"),
+                model_title=issue.get("bike_model"),
+                contract_no=number or None,
+                rent_term=issue.get("rent_term"),
+                rent_price=issue.get("rent_price"),
+                due_at=fleet_logic.parse_due(issue.get("rent_term"),
+                                             today=signed_at.date()),
+            )
+        except Exception:                               # noqa: BLE001
+            log.exception("аренда %s не попала в учёт парка", tg_id)
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
@@ -744,7 +768,8 @@ async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
 
 @router.callback_query(StateIs(logic.WAIT_RETURN_SIGN), F.data == "return_sign")
 async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
-                         cfg: Config, vault: Vault, user: dict) -> None:
+                         cfg: Config, vault: Vault, user: dict,
+                         fleet: FleetDB | None = None) -> None:
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_RETURN_SIGN,
                           state=logic.APPROVED, act_out_signed_at=signed_at):
@@ -790,6 +815,15 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
         "number": number, "bike": given["bike_model"], "term": given["rent_term"],
         "closed_at": closed.get("closed_at") or stamp[:5],
     })
+    # Учёт парка: единица возвращается на витрину, а с повреждениями
+    # из формы закрытия - в сервис. Сбой учёта возврат не останавливает.
+    if fleet is not None:
+        try:
+            await fleet.close_rental(
+                tg_id, notes=logic.close_notes(closed),
+                to_service=fleet_logic.needs_service(closed))
+        except Exception:                               # noqa: BLE001
+            log.exception("возврат %s не попал в учёт парка", tg_id)
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),

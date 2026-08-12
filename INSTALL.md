@@ -484,6 +484,8 @@ docker compose logs -f bot-max
 | Правка договора | скачать `app/contract_template.docx`, поправить в Word, залить обратно, `docker compose restart bot` |
 | Правка ответов на частые вопросы | поправить `app/faq.py` (адреса, график, тексты ответов), залить, `docker compose up -d --build` |
 | Смена расчётного счёта | поменять `PAY_URL` в `.env`, затем `docker compose up -d` |
+| Учёт парка | в чате операторов: `/park` — сводка, `/bikes` — список, `/bike` — завести/поправить единицу, `/hold` — удержать под клиента. Парк наполняется сам из выдач; команды доступны только админам |
+| Витрина парка для приложения | заполнить `API_PORT` в `.env`, раскомментировать `ports` у сервиса `bot` в `docker-compose.yml`, затем `docker compose up -d` — появятся `/api/points`, `/api/models`, `/api/availability` |
 | Переспросить настройки | `bash install.sh` |
 
 Сканы и договоры лежат в отдельном томе `kycfiles` и в дамп базы не попадают.

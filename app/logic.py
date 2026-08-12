@@ -449,7 +449,8 @@ def validate_upload(is_photo: bool, mime: str | None, size: int | None) -> Valid
 
 def should_process(chat_type: str | None, *, from_admin_chat: bool,
                    is_moderation_callback: bool,
-                   is_moderation_reply: bool = False) -> bool:
+                   is_moderation_reply: bool = False,
+                   is_service_command: bool = False) -> bool:
     """Пускать ли апдейт дальше.
 
     Личные чаты - да: там идёт вся регистрация. Групповые - только если это
@@ -461,10 +462,15 @@ def should_process(chat_type: str | None, *, from_admin_chat: bool,
     Отдельно пропускается ответ на карточку: отказ «с указанием ошибок»
     модератор пишет реплаем, и без этой ветки его сообщение отбрасывалось бы
     здесь - кнопка «Свой текст» просила бы ответ, которого бот не увидит.
+
+    is_service_command - операторские команды парка (/park, /bikes, /hold...):
+    это обычные сообщения без реплая, и без своего флага они отбрасывались бы
+    ровно так же, как когда-то кнопки «Одобрить».
     """
     if chat_type == "private":
         return True
-    return from_admin_chat and (is_moderation_callback or is_moderation_reply)
+    return from_admin_chat and (is_moderation_callback or is_moderation_reply
+                                or is_service_command)
 
 
 def is_subscribed(status: str | None, is_member: bool | None = None) -> bool:

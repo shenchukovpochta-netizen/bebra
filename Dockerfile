@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY schema.sql ./schema.sql
+COPY fleet_schema.sql ./fleet_schema.sql
 
 # Не root: контейнер держит сканы паспортов, лишние права тут ни к чему
 RUN useradd --system --uid 10001 --create-home bot \
