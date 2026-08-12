@@ -110,9 +110,13 @@ class Api:
 
     async def models(self, _request: web.Request) -> web.Response:
         # perks - общий блок «что входит»: текст один на все модели,
-        # и в каждой карточке он был бы шумом.
+        # и в каждой карточке он был бы шумом. contacts - телефон
+        # и Telegram проката для блока «Контакты» и напоминаний о ТО.
+        from .. import texts
         return _json({"models": await self.fleet.models_with_tariffs(),
-                      "perks": catalog.PERKS})
+                      "perks": catalog.PERKS,
+                      "contacts": {"phone": catalog.PHONE,
+                                   "telegram": texts.SUPPORT_CONTACT_URL}})
 
     async def availability(self, _request: web.Request) -> web.Response:
         rows = await self.fleet.park_counts()
@@ -149,6 +153,9 @@ class Api:
                 "battery": await self._battery(rental["starline_device_id"]),
                 "payment": self._payment_json(
                     await self.fleet.pending_payment_of_tg(tg_id)),
+                # Плановое ТО раз в две недели: клиент видит, когда пора.
+                "service_days": logic.service_days_left(
+                    rental["last_service_at"], now=datetime.now()),
             }
         return _json({
             "booking": booking and {
@@ -299,12 +306,21 @@ class Api:
         today = date.today()
         overdue = [self._rental_json(r, today) for r in rentals
                    if r["due_at"] and r["due_at"] < today]
+        service_due = [{
+            "bike_id": r["bike_id"], "model": r["model"],
+            "vin_frame": r["vin_frame"], "client_name": r["client_name"],
+            "client_phone": r["client_phone"],
+            "client_username": r["client_username"],
+            "days_overdue": -(logic.service_days_left(
+                r["last_service_at"], now=datetime.now()) or 0),
+        } for r in await self.fleet.bikes_service_due()]
         return _json({
             "bikes": by_status, "total": sum(by_status.values()),
             "rentals_active": len(rentals), "overdue": overdue,
             "bookings_active": len(await self.fleet.bookings_admin()),
             "blocked": await self.fleet.count_blocked(),
             "starline": self.starline is not None,
+            "service_due": service_due,
         })
 
     @staticmethod
@@ -333,6 +349,8 @@ class Api:
             "notes": r["notes"], "renter_name": r["renter_name"],
             "renter_username": r["renter_username"], "hold_note": r["hold_note"],
             "starline_device_id": r["starline_device_id"], "blocked": r["blocked"],
+            "service_days": logic.service_days_left(r["last_service_at"],
+                                                    now=datetime.now()),
         } for r in rows])
 
     async def admin_rentals(self, request: web.Request) -> web.Response:
@@ -530,6 +548,18 @@ class Api:
                                     str(body.get("note") or "").strip() or None)
         return _json({"ok": True})
 
+    async def admin_bike_serviced(self, request: web.Request) -> web.Response:
+        """Отметка «ТО проведено»: отсчёт двух недель заново."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        try:
+            body = await request.json()
+            bike_id = int(body["bike_id"])
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        await self.fleet.mark_serviced(bike_id)
+        return _json({"ok": True})
+
     # ─────────────────────── расчёты (СБП, Точка) ───────────────────────
 
     @staticmethod
@@ -690,6 +720,7 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/admin/bike/status", api.admin_bike_status),
         web.post("/api/admin/bike/starline", api.admin_bike_starline),
         web.post("/api/admin/bike/block", api.admin_bike_block),
+        web.post("/api/admin/bike/serviced", api.admin_bike_serviced),
         web.get("/api/admin/payments", api.admin_payments),
         web.post("/api/admin/payment/create", api.admin_payment_create),
         web.post("/api/admin/payment/cancel", api.admin_payment_cancel),

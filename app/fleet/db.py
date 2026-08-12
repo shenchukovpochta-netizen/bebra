@@ -180,7 +180,7 @@ class FleetDB:
         return await self.pool.fetch(
             """
             select b.id, b.vin_frame, b.vin_motor, b.status, b.notes,
-                   b.starline_device_id, b.blocked,
+                   b.starline_device_id, b.blocked, b.last_service_at,
                    m.title as model, p.title as point,
                    u.full_name as renter_name, u.username as renter_username,
                    bk.note as hold_note
@@ -288,7 +288,7 @@ class FleetDB:
             """
             select r.id, r.contract_no, r.rent_term, r.rent_price, r.due_at,
                    r.opened_at, b.id as bike_id, m.title as model,
-                   b.starline_device_id, b.blocked
+                   b.starline_device_id, b.blocked, b.last_service_at
             from fleet.rentals r
             left join fleet.bikes b on b.id = r.bike_id
             left join fleet.models m on m.id = b.model_id
@@ -414,6 +414,7 @@ class FleetDB:
                     vin_motor=str(parsed.get("vin_motor") or "") or None,
                     status=logic.RENTED, conn=conn)
                 bike_created = bike["created_at"] == bike["updated_at"]
+                await self.reset_service_clock(bike["id"], conn=conn)
 
                 # Закрываем незакрытые хвосты этой рамы и этого клиента,
                 # но НЕ по tg_id: он получен по нику из bot.users, а ники
@@ -705,6 +706,47 @@ class FleetDB:
             rental_ids)
         return {r["rental_id"]: r for r in rows}
 
+    # ─────────────────────── плановое ТО ───────────────────────
+
+    async def mark_serviced(self, bike_id: int) -> None:
+        """Оператор провёл ТО: отсчёт двух недель заново, зов снят."""
+        await self.pool.execute(
+            "update fleet.bikes set last_service_at = now(), "
+            "service_notified_at = null, updated_at = now() where id = $1",
+            bike_id)
+
+    async def reset_service_clock(self, bike_id: int,
+                                  conn: asyncpg.Connection | None = None) -> None:
+        """Выдача = проверка перед передачей: ТО отсчитывается от неё."""
+        await (conn or self.pool).execute(
+            "update fleet.bikes set last_service_at = now(), "
+            "service_notified_at = null, updated_at = now() where id = $1",
+            bike_id)
+
+    async def bikes_service_due(self) -> list[asyncpg.Record]:
+        """Выданные единицы, у которых подошло плановое ТО, - для CRM."""
+        return await self.pool.fetch(
+            """
+            select b.id as bike_id, b.last_service_at, b.service_notified_at,
+                   m.title as model, b.vin_frame,
+                   coalesce(c.full_name, u.full_name) as client_name,
+                   coalesce(c.phone, u.phone) as client_phone,
+                   coalesce(c.tg_username, u.username) as client_username
+            from fleet.rentals r
+            join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.clients c on c.id = r.client_id
+            left join bot.users u on u.tg_id = r.tg_id
+            where r.closed_at is null
+              and b.last_service_at < now() - interval '14 days'
+            order by b.last_service_at
+            """)
+
+    async def mark_service_notified(self, bike_id: int) -> None:
+        await self.pool.execute(
+            "update fleet.bikes set service_notified_at = now(), "
+            "updated_at = now() where id = $1", bike_id)
+
     # ─────────────────────── StarLine ───────────────────────
 
     async def mark_blocked(self, bike_id: int, *, blocked: bool,
@@ -773,6 +815,9 @@ class FleetDB:
                 bike = await self.upsert_bike(
                     vin, vin_motor=logic.normalize_vin(vin_motor) or None,
                     model_id=model_id, status=logic.RENTED, conn=conn)
+                # Выдача = проверка перед передачей: плановое ТО отсчитывается
+                # от неё, а не от прошлой жизни единицы.
+                await self.reset_service_clock(bike["id"], conn=conn)
                 closed = await conn.fetch(
                     "update fleet.rentals set closed_at = now(), "
                     "close_notes = 'закрыта автоматически: новая выдача' "

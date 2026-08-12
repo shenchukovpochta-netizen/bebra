@@ -214,8 +214,27 @@ async function drawOverview(){
   if (o.overdue.length) {
     html += `<h2>Просроченные аренды</h2>` + rentalTable(o.overdue, o.starline);
   }
+  if (o.service_due && o.service_due.length) {
+    html += `<h2>Пора на плановое ТО (раз в 2 недели)</h2>
+      <table><tr><th>Единица</th><th>Клиент</th><th>Телефон</th>
+      <th>Просрочено</th><th></th></tr>` +
+      o.service_due.map(s => `<tr>
+        <td>#${s.bike_id} ${esc(s.model || "—")}
+            <span class="hint num">${esc(s.vin_frame || "")}</span></td>
+        <td>${esc(s.client_name || "—")}` +
+        (s.client_username ? ` <span class="hint">@${esc(s.client_username)}</span>` : "") + `</td>
+        <td class="num">${esc(s.client_phone || "—")}</td>
+        <td class="num">${s.days_overdue} дн.</td>
+        <td><button class="act" onclick="serviced(${s.bike_id})">✅ ТО проведено</button></td>
+        </tr>`).join("") + `</table>`;
+  }
   $("s-overview").innerHTML = html;
 }
+window.serviced = async id => {
+  await api("/api/admin/bike/serviced", {method:"POST",
+    body: JSON.stringify({bike_id:id})});
+  refreshActive();
+};
 
 // ─── парк ───
 async function drawBikes(){
@@ -226,7 +245,10 @@ async function drawBikes(){
       <td>${esc(b.model || "—")}</td>
       <td class="num">${esc(b.vin_frame)}${b.vin_motor ? `<div class="hint">мотор ${esc(b.vin_motor)}</div>` : ""}</td>
       <td>${esc(b.point || "—")}</td>
-      <td>${pill(b.status)}${b.notes ? `<div class="hint">${esc(b.notes)}</div>` : ""}</td>
+      <td>${pill(b.status)}${b.notes ? `<div class="hint">${esc(b.notes)}</div>` : ""}` +
+      (b.status === "rented" && b.service_days != null && b.service_days <= 0
+        ? `<div><span class="pill st-lost">🔧 ТО просрочено ${-b.service_days} дн.</span></div>`
+        : "") + `</td>
       <td>${esc(b.renter_name || b.hold_note || "")}` +
       (b.renter_username ? ` <span class="hint">@${esc(b.renter_username)}</span>` : "") + `</td>
       <td>${b.blocked
@@ -246,6 +268,8 @@ async function drawBikes(){
           ? `<button class="act" onclick="blockBike(${b.id},true)">🔒 блок</button>
              <button class="act" onclick="bindStarline(${b.id},'${esc(b.starline_device_id)}')">StarLine…</button>`
           : `<button class="act" onclick="bindStarline(${b.id},'')">привязать StarLine</button>`) +
+        (b.status === "rented" && b.service_days != null && b.service_days <= 2
+          ? ` <button class="act" onclick="serviced(${b.id})">✅ ТО</button>` : "") +
       `</td></tr>`).join("") + `</table>`;
 }
 window.bikeStatus = async (id, status) => {

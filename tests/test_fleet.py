@@ -439,6 +439,29 @@ class TestDue(unittest.TestCase):
                          date(2027, 1, 4))
 
 
+class TestService(unittest.TestCase):
+    NOW = datetime(2026, 8, 12, 14, 0)
+
+    def test_fresh_issue_has_full_interval(self):
+        self.assertEqual(fleet.service_days_left(self.NOW, now=self.NOW), 14)
+        self.assertFalse(fleet.service_due(self.NOW, now=self.NOW))
+
+    def test_two_weeks_later_is_due(self):
+        last = datetime(2026, 7, 29, 10, 0)
+        self.assertLessEqual(fleet.service_days_left(last, now=self.NOW), 0)
+        self.assertTrue(fleet.service_due(last, now=self.NOW))
+
+    def test_overdue_is_negative(self):
+        last = datetime(2026, 7, 23, 14, 0)          # 20 дней назад
+        self.assertEqual(fleet.service_days_left(last, now=self.NOW), -6)
+
+    def test_unknown_last_service_is_none(self):
+        # Старые строки без даты ТО: напоминать не о чем, а не «просрочено
+        # с начала времён».
+        self.assertIsNone(fleet.service_days_left(None, now=self.NOW))
+        self.assertFalse(fleet.service_due(None, now=self.NOW))
+
+
 class TestOverdue(unittest.TestCase):
     TODAY = date(2026, 8, 12)
 

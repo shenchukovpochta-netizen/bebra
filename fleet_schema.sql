@@ -86,6 +86,12 @@ alter table fleet.bikes add column if not exists starline_device_id text;
 alter table fleet.bikes add column if not exists blocked        boolean not null default false;
 alter table fleet.bikes add column if not exists blocked_at     timestamptz;
 alter table fleet.bikes add column if not exists blocked_reason text;
+-- Плановое ТО: раз в две недели аренды («бесплатное обслуживание» из
+-- тарифа). Отсчёт от выдачи или последнего ТО; service_notified_at
+-- помнит, что операторов уже позвали, - иначе карточка приходила бы
+-- каждый прогон фоновой задачи.
+alter table fleet.bikes add column if not exists last_service_at     timestamptz not null default now();
+alter table fleet.bikes add column if not exists service_notified_at timestamptz;
 
 -- Счета СБП (динамические QR Точка-банка). Счёт живёт своей строкой,
 -- а не колонками аренды: у одной аренды счетов может быть несколько

@@ -98,7 +98,8 @@ async def run() -> None:
     dp.include_router(menu.router)
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
-    holds = asyncio.create_task(tasks.fleet_loop(fleet_db))
+    holds = asyncio.create_task(tasks.fleet_loop(fleet_db, bot,
+                                                 cfg.contract_chat_id))
     # StarLine: блокировка единиц при неоплате. Клиент один на процесс;
     # None, если реквизиты не заданы.
     starline = StarLine.from_config(cfg)

@@ -20,19 +20,24 @@ from __future__ import annotations
 
 from .. import faq
 
+# Контакты проката - для блока «Контакты» в приложении и напоминаний
+# о плановом ТО. Телефон один на обе точки; Telegram - из texts.py
+# (SUPPORT_CONTACT_URL), второй копии ссылки здесь нет намеренно.
+PHONE = "+7 (904) 676-49-26"
+
 POINTS: tuple[dict, ...] = (
     {
         "title": faq.POINT_1,                     # Адоратского, 11А
         "address": "г. Казань, ул. Адоратского, 11А",
         "lat": 55.824319, "lon": 49.147018,
-        "phone": "+7 (904) 676-49-26",
+        "phone": PHONE,
         "open_hour": faq.OPEN_HOUR, "close_hour": faq.CLOSE_HOUR,
     },
     {
         "title": faq.POINT_2,                     # Павлюхина, 97А — ГСК «Сокол»
         "address": "г. Казань, ул. Павлюхина, 97А",
         "lat": 55.766900, "lon": 49.148580,
-        "phone": "+7 (904) 676-49-26",
+        "phone": PHONE,
         "open_hour": faq.OPEN_HOUR, "close_hour": faq.CLOSE_HOUR,
     },
 )

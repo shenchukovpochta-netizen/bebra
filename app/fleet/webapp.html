@@ -92,6 +92,8 @@
   <h2>Модели и тарифы</h2>
   <div id="models"></div>
   <div id="perks"></div>
+  <h2>Контакты</h2>
+  <div id="contacts"></div>
   <p class="hint">Продление после срока — по тарифу модели, ₽/сутки.
      Оформление документов — в чате с ботом после брони.</p>
 </div>
@@ -149,7 +151,18 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
 });
 
 // ─── витрина ───
-let POINTS = [], MODELS = [], AVAIL = [], PERKS = "";
+let POINTS = [], MODELS = [], AVAIL = [], PERKS = "", CONTACTS = {};
+
+function contactLinks() {
+  const parts = [];
+  if (CONTACTS.phone) {
+    parts.push(`<a href="tel:${CONTACTS.phone.replace(/[^+\d]/g, "")}">📞 ${esc(CONTACTS.phone)}</a>`);
+  }
+  if (CONTACTS.telegram) {
+    parts.push(`<a href="${CONTACTS.telegram}" target="_blank">✈️ Telegram</a>`);
+  }
+  return parts.join(" · ");
+}
 
 function freeCount(pointTitle, modelTitle) {
   return AVAIL.filter(a =>
@@ -205,6 +218,12 @@ function drawVitrina() {
     ? `<div class="card"><b>Что входит в аренду</b>
        <div class="hint" style="margin-top:6px">${esc(PERKS)}</div></div>`
     : "";
+
+  $("contacts").innerHTML = `<div class="card">
+    <div class="plinks" style="margin:0">${contactLinks() || "<span class='hint'>—</span>"}</div>
+    <div class="hint" style="margin-top:6px">Ежедневно
+      ${POINTS.length ? POINTS[0].open_hour + ":00–" + POINTS[0].close_hour + ":00" : ""},
+      обе точки. Плановое ТО — бесплатно, раз в 2 недели.</div></div>`;
 }
 
 // ─── бронь ───
@@ -301,6 +320,12 @@ function drawAlerts(me) {
       Вернуть велосипед нужно было до ${esc(r.due_at)}. Продлить или сдать —
       через чат с ботом.</div>`;
   }
+  if (r && r.service_days != null && r.service_days <= 2) {
+    const when = r.service_days <= 0 ? "уже пора" : `через ${r.service_days} дн.`;
+    html += `<div class="alert warn"><b>🔧 Плановое ТО — ${when}</b>
+      Бесплатное обслуживание раз в 2 недели входит в тариф. Запишитесь:
+      ${contactLinks()}</div>`;
+  }
   $("alerts").innerHTML = html;
 }
 
@@ -339,6 +364,10 @@ async function loadMe() {
         `<div class="hint">договор № ${esc(me.rental.contract_no || "—")}, ` +
         `срок: ${esc(me.rental.term || "—")}</div>` +
         batteryHtml(me.rental.battery) +
+        (me.rental.service_days != null
+          ? `<div class="hint" style="margin-top:8px">🔧 Плановое ТО: ` +
+            (me.rental.service_days <= 0 ? `<b>уже пора</b>`
+              : `через ${me.rental.service_days} дн.`) + `</div>` : "") +
         `<div class="hint" style="margin-top:8px">Продлить или закрыть аренду — в чате с ботом.</div></div>`;
     }
     if (!me.booking && !me.rental) {
@@ -371,16 +400,17 @@ async function loadAll() {
       [api("/api/points"), api("/api/models"), api("/api/availability")]);
     MODELS = modelsResp.models;
     PERKS = modelsResp.perks || "";
+    CONTACTS = modelsResp.contacts || {};
     drawVitrina();
     drawBooking();
   } catch (e) {
     $("points").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
   }
 }
-loadAll();
-// Баннеры об оплате и просрочке должны висеть с первого экрана,
-// а не появляться только на вкладке «Моё».
-if (initData) loadMe();
+// Баннеры об оплате, просрочке и ТО должны висеть с первого экрана,
+// а не появляться только на вкладке «Моё». После витрины, а не параллельно:
+// баннеру ТО нужны контакты из каталога.
+loadAll().then(() => { if (initData) loadMe(); });
 </script>
 </body>
 </html>

@@ -348,6 +348,34 @@ def price_amount(raw: str | None) -> int | None:
     return amount if 1 <= amount <= 1_000_000 else None
 
 
+# ─────────────────────────── плановое ТО ───────────────────────────
+#
+# Раз в две недели аренды - «бесплатное обслуживание» из тарифа.
+# Отсчёт от выдачи (велосипед проверен перед передачей) или от
+# последнего проведённого ТО.
+
+SERVICE_INTERVAL_DAYS = 14
+
+
+def service_days_left(last_service_at, *, now: datetime) -> int | None:
+    """Сколько дней осталось до планового ТО. Отрицательное - просрочено.
+
+    None - момент последнего ТО неизвестен (старые строки до колонки):
+    напоминать не о чем, пока оператор не отметит первое ТО или не выдаст
+    единицу заново.
+    """
+    if last_service_at is None:
+        return None
+    if last_service_at.tzinfo is not None and now.tzinfo is None:
+        now = now.astimezone(last_service_at.tzinfo)
+    return SERVICE_INTERVAL_DAYS - (now - last_service_at).days
+
+
+def service_due(last_service_at, *, now: datetime) -> bool:
+    days = service_days_left(last_service_at, now=now)
+    return days is not None and days <= 0
+
+
 def overdue(due_at, closed_at, *, today: date) -> bool:
     """Аренда просрочена: срок возврата прошёл, а возврата не было.
 

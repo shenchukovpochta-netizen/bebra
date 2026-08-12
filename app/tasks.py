@@ -79,18 +79,48 @@ async def retention_loop(db: Database, cfg: Config) -> None:
 FLEET_INTERVAL_SECONDS = 60
 
 
-async def fleet_loop(fleet) -> None:
-    """Снятие просроченных броней парка: held -> expired, единица свободна."""
+async def fleet_loop(fleet, bot=None, admin_chat_id=None) -> None:
+    """Снятие просроченных броней парка и зов на плановое ТО."""
     while True:
         try:
             expired = await fleet.expire_holds()
             if expired:
                 log.info("парк: снято просроченных броней: %s", expired)
+            await _service_calls(fleet, bot, admin_chat_id)
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001
-            log.exception("снятие просроченных броней не удалось")
+            log.exception("прогон задач парка не удался")
         await asyncio.sleep(FLEET_INTERVAL_SECONDS)
+
+
+async def _service_calls(fleet, bot, admin_chat_id) -> None:
+    """Карточка «пора на плановое ТО» оператору - один раз на цикл ТО.
+
+    service_notified_at не даёт слать её каждый прогон: повторный зов
+    случится только после отметки «ТО проведено» и нового цикла.
+    """
+    if bot is None or admin_chat_id is None:
+        return
+    from datetime import datetime
+    for row in await fleet.bikes_service_due():
+        if (row["service_notified_at"] is not None
+                and row["service_notified_at"] >= row["last_service_at"]):
+            continue
+        last = row["last_service_at"]
+        now = datetime.now(last.tzinfo) if last.tzinfo else datetime.now()
+        overdue_days = (now - last).days
+        try:
+            await bot.send_message(admin_chat_id, texts.FLEET_SERVICE_CARD.format(
+                bike_id=row["bike_id"],
+                model=logic.esc(row["model"] or "без модели"),
+                client=logic.esc(row["client_name"] or "—"),
+                phone=logic.esc(row["client_phone"] or "—"),
+                days=overdue_days))
+            await fleet.mark_service_notified(row["bike_id"])
+        except Exception:                               # noqa: BLE001
+            log.exception("карточка ТО по единице %s не доставлена",
+                          row["bike_id"])
 
 
 PAYMENTS_INTERVAL_SECONDS = 60
