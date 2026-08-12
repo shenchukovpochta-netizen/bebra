@@ -300,6 +300,28 @@ class TestFixationForm(unittest.TestCase):
         self.assertEqual(data["phone_note"], "спросить у мамы")
         self.assertTrue(any("не похоже на номер" in w for w in warnings))
 
+    def test_phone_with_spaces_and_digit_note(self):
+        # Голова номера жадно ест пробелы и цифры; приписка с цифрой
+        # («2 симка») не должна ломать распознавание номера.
+        data, _ = fleet.parse_fixation_form(
+            "ФИО: И И\nВин номер рамы: A1\n"
+            "Номер телефона (основной): 8 905 023 83 66\n"
+            "Номер телефона 2: 89053731217 2 симка")
+        self.assertEqual(data["phone"], "+79050238366")
+        self.assertEqual(data["phone2"], "+79053731217")
+        self.assertEqual(data["phone2_note"], "2 симка")
+
+    def test_label_prefix_does_not_swallow_other_lines(self):
+        # «Рефлектор» не должен уехать в реф-программу, а «Фиокрест» -
+        # затереть настоящее ФИО: метка требует границы слова.
+        data, warnings = fleet.parse_fixation_form(
+            "ФИО: Иванов Иван\nВин номер рамы: A1\n"
+            "Рефлектор: сломан\nФиокрест: чей-то")
+        self.assertEqual(data["fio"], "Иванов Иван")
+        self.assertNotIn("ref_program", data)
+        self.assertTrue(any("Рефлектор" in w for w in warnings))
+        self.assertTrue(any("Фиокрест" in w for w in warnings))
+
     def test_gps_no_and_dash_values(self):
         data, _ = fleet.parse_fixation_form(
             "ФИО: И И\nВин номер рамы: A1\nПодключен GPS-Трекер: нет\n"
@@ -408,6 +430,30 @@ class TestDue(unittest.TestCase):
         # срока, не «сегодня».
         self.assertEqual(fleet.parse_due("28.07 - 08.08", today=self.TODAY),
                          date(2026, 8, 8))
+
+    def test_winter_form_imported_in_january(self):
+        # Зимнюю форму «28.12 - 04.01» разбирают уже в январе: начало
+        # срока не может быть позже импорта - значит, декабрь прошлого года,
+        # а конец - январь текущего, а не через год.
+        self.assertEqual(fleet.parse_due("28.12 - 04.01", today=date(2027, 1, 10)),
+                         date(2027, 1, 4))
+
+
+class TestOverdue(unittest.TestCase):
+    TODAY = date(2026, 8, 12)
+
+    def test_past_due_open_is_overdue(self):
+        self.assertTrue(fleet.overdue(date(2026, 8, 8), None, today=self.TODAY))
+
+    def test_future_due_is_not(self):
+        self.assertFalse(fleet.overdue(date(2026, 8, 20), None, today=self.TODAY))
+
+    def test_closed_is_not(self):
+        self.assertFalse(fleet.overdue(date(2026, 8, 1), object(), today=self.TODAY))
+
+    def test_no_due_is_not(self):
+        # Срок не распознан - блокировать по незнанию нельзя.
+        self.assertFalse(fleet.overdue(None, None, today=self.TODAY))
 
     def test_explicit_year_kept(self):
         self.assertEqual(fleet.parse_due("до 10.01.2026", today=self.TODAY),

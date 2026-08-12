@@ -25,6 +25,7 @@ from .db import Database
 from .fleet import seed as fleet_seed
 from .fleet.api import start_api
 from .fleet.db import FleetDB
+from .fleet.starline import StarLine
 from .handlers import contract, faq, fleet, menu, moderation, registration
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
@@ -97,6 +98,19 @@ async def run() -> None:
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
     holds = asyncio.create_task(tasks.fleet_loop(fleet_db))
+    # StarLine: блокировка единиц при неоплате. Клиент один на процесс;
+    # None, если реквизиты не заданы.
+    starline = StarLine.from_config(cfg)
+    if starline is not None:
+        log.info("StarLine подключён (блокировка при неоплате доступна в CRM)")
+    autoblock = None
+    if cfg.starline_auto_block and starline is not None:
+        log.warning("StarLine: АВТОБЛОКИРОВКА просроченных аренд ВКЛЮЧЕНА")
+        autoblock = asyncio.create_task(
+            tasks.starline_loop(fleet_db, starline, bot, cfg.contract_chat_id))
+    elif cfg.starline_auto_block:
+        log.warning("STARLINE_AUTO_BLOCK=1, но реквизиты StarLine не заданы - "
+                    "автоблокировка не работает")
     # Витрина парка и Mini App - только при заданном порте. Боту и токен,
     # и служебный чат нужны для карточек «бронь из приложения».
     api_runner = None
@@ -104,7 +118,7 @@ async def run() -> None:
         api_runner = await start_api(
             fleet_db, cfg.api_port, bot=bot,
             admin_chat_id=cfg.contract_chat_id, bot_token=cfg.bot_token,
-            crm_token=cfg.crm_token, admins=cfg.admins)
+            crm_token=cfg.crm_token, admins=cfg.admins, starline=starline)
     # Кнопка меню «🚲 Бронь» во всех личных чатах: появляется, как только
     # владелец опубликовал Mini App по HTTPS и заполнил MINIAPP_URL.
     if cfg.miniapp_url:
@@ -134,7 +148,11 @@ async def run() -> None:
         log.info("останавливаюсь")
         retention.cancel()
         holds.cancel()
-        await asyncio.gather(retention, holds, return_exceptions=True)
+        background = [retention, holds]
+        if autoblock is not None:
+            autoblock.cancel()
+            background.append(autoblock)
+        await asyncio.gather(*background, return_exceptions=True)
         await tasks.drain()
         if api_runner is not None:
             await api_runner.cleanup()

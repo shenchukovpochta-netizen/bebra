@@ -161,6 +161,22 @@ class Config:
     # а не в docker secret, сознательно: это пропуск в панель, а не ключ
     # шифрования, и требовать файл секрета на каждом обновлении - дорого.
     crm_token: str = ""
+
+    # StarLine: облачное управление сигнализациями парка (блокировка
+    # единицы при неоплате). Четыре реквизита из личного кабинета StarLine;
+    # пусто хотя бы у одного - интеграция выключена. starline_auto_block
+    # включает автоблокировку просроченных аренд (по умолчанию нет:
+    # обездвиживать клиента должен человек, а не таймер).
+    starline_app_id: str = ""
+    starline_secret: str = ""
+    starline_login: str = ""
+    starline_password: str = ""
+    starline_auto_block: bool = False
+
+    @property
+    def starline_enabled(self) -> bool:
+        return all((self.starline_app_id, self.starline_secret,
+                    self.starline_login, self.starline_password))
     auto_approve: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -231,5 +247,10 @@ class Config:
             api_port=_int_or_none("API_PORT"),
             miniapp_url=_env("MINIAPP_URL"),
             crm_token=_env("CRM_TOKEN"),
+            starline_app_id=_env("STARLINE_APP_ID"),
+            starline_secret=_env("STARLINE_SECRET"),
+            starline_login=_env("STARLINE_LOGIN"),
+            starline_password=_env("STARLINE_PASSWORD"),
+            starline_auto_block=_env("STARLINE_AUTO_BLOCK", "0") == "1",
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
         )

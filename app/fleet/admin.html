@@ -151,7 +151,9 @@ const ST = {free:["свободен","st-free"], booked:["бронь","st-booked
             rented:["в аренде","st-rented"], service:["сервис","st-service"],
             lost:["утерян","st-lost"]};
 const pill = s => { const [t,c] = ST[s] || [s,"st-service"];
-                    return `<span class="pill ${c}">${t}</span>`; };
+                    return `<span class="pill ${c}">${esc(t)}</span>`; };
+function refreshActive(){ const b = document.querySelector("nav button.on");
+                          if (b) load(b.dataset.s); }
 
 let TOKEN = localStorage.getItem("crm_token") || "";
 
@@ -201,10 +203,14 @@ async function drawOverview(){
     <div class="stat"><b>${s("service")}</b><span>в сервисе</span></div>
     <div class="stat"><b>${o.rentals_active}</b><span>активных аренд</span></div>
     <div class="stat ${o.overdue.length ? "bad" : ""}"><b>${o.overdue.length}</b><span>просрочено</span></div>
-    <div class="stat"><b>${o.bookings_active}</b><span>живых броней</span></div>
-  </div>`;
+    <div class="stat"><b>${o.bookings_active}</b><span>живых броней</span></div>` +
+    (o.blocked ? `<div class="stat bad"><b>${o.blocked}</b><span>🔒 заблокировано</span></div>` : "") +
+  `</div>` +
+    `<p class="hint">StarLine: ${o.starline
+      ? "подключён — блокировка при неоплате доступна на вкладке «Парк»"
+      : "не настроен (заполните STARLINE_* в .env, чтобы блокировать неплательщиков)"}</p>`;
   if (o.overdue.length) {
-    html += `<h2>Просроченные аренды</h2>` + rentalTable(o.overdue);
+    html += `<h2>Просроченные аренды</h2>` + rentalTable(o.overdue, o.starline);
   }
   $("s-overview").innerHTML = html;
 }
@@ -213,7 +219,7 @@ async function drawOverview(){
 async function drawBikes(){
   const rows = await api("/api/admin/bikes");
   $("s-bikes").innerHTML = `<table><tr><th>#</th><th>Модель</th><th>Рама</th>
-    <th>Точка</th><th>Статус</th><th>Кто держит</th><th></th></tr>` +
+    <th>Точка</th><th>Статус</th><th>Кто держит</th><th>StarLine</th><th></th></tr>` +
     rows.map(b => `<tr><td class="num">${b.id}</td>
       <td>${esc(b.model || "—")}</td>
       <td class="num">${esc(b.vin_frame)}${b.vin_motor ? `<div class="hint">мотор ${esc(b.vin_motor)}</div>` : ""}</td>
@@ -221,11 +227,24 @@ async function drawBikes(){
       <td>${pill(b.status)}${b.notes ? `<div class="hint">${esc(b.notes)}</div>` : ""}</td>
       <td>${esc(b.renter_name || b.hold_note || "")}` +
       (b.renter_username ? ` <span class="hint">@${esc(b.renter_username)}</span>` : "") + `</td>
-      <td>` + (b.status === "service"
-        ? `<button class="act" onclick="bikeStatus(${b.id},'free')">на витрину</button>`
-        : b.status === "free"
-        ? `<button class="act" onclick="bikeStatus(${b.id},'service')">в сервис</button>`
-        : "") + `</td></tr>`).join("") + `</table>`;
+      <td>${b.blocked
+        ? `<span class="pill st-lost">🔒 заблокирован</span>`
+        : b.starline_device_id
+        ? `<span class="hint num">${esc(b.starline_device_id)}</span>`
+        : `<span class="hint">—</span>`}</td>
+      <td>` +
+        (b.status === "service"
+          ? `<button class="act" onclick="bikeStatus(${b.id},'free')">на витрину</button>`
+          : b.status === "free"
+          ? `<button class="act" onclick="bikeStatus(${b.id},'service')">в сервис</button>`
+          : "") +
+        (b.blocked
+          ? `<button class="act" onclick="blockBike(${b.id},false)">разблокировать</button>`
+          : b.starline_device_id
+          ? `<button class="act" onclick="blockBike(${b.id},true)">🔒 блок</button>
+             <button class="act" onclick="bindStarline(${b.id},'${esc(b.starline_device_id)}')">StarLine…</button>`
+          : `<button class="act" onclick="bindStarline(${b.id},'')">привязать StarLine</button>`) +
+      `</td></tr>`).join("") + `</table>`;
 }
 window.bikeStatus = async (id, status) => {
   const note = status === "service" ? (prompt("Заметка (что с единицей)?") || "") : "";
@@ -233,10 +252,29 @@ window.bikeStatus = async (id, status) => {
     body: JSON.stringify({bike_id:id, status, note})});
   drawBikes();
 };
+window.bindStarline = async (id, current) => {
+  const dev = prompt("ID устройства StarLine (пусто — отвязать):", current || "");
+  if (dev === null) return;
+  await api("/api/admin/bike/starline", {method:"POST",
+    body: JSON.stringify({bike_id:id, device_id:dev.trim()})});
+  refreshActive();
+};
+window.blockBike = async (id, on) => {
+  const reason = on ? (prompt("Причина блокировки:", "неоплата") ?? null) : "";
+  if (on && reason === null) return;
+  if (on && !confirm("Заблокировать единицу через StarLine? "
+      + "Она будет обездвижена до разблокировки.")) return;
+  try {
+    await api("/api/admin/bike/block", {method:"POST",
+      body: JSON.stringify({bike_id:id, on, reason})});
+  } catch (e) { alert(String(e)); }
+  refreshActive();
+};
 
 // ─── аренды ───
-function rentalTable(list){
+function rentalTable(list, starline){
   if (!list.length) return `<p class="hint">пусто</p>`;
+  const canBlock = starline !== false;
   return `<table><tr><th>Клиент</th><th>Телефон</th><th>Единица</th>
     <th>Срок</th><th>Вернуть до</th><th>Оплата</th><th></th></tr>` +
     list.map(r => `<tr class="${r.overdue ? "overdue" : ""}">
@@ -249,7 +287,10 @@ function rentalTable(list){
       <td>${esc(r.price || "—")}</td>
       <td>${r.closed_at
         ? `<span class="hint">закрыта ${esc(r.closed_at)}</span>`
-        : `<button class="act" onclick="closeRental(${r.id})">закрыть</button>`}</td>
+        : `<button class="act" onclick="closeRental(${r.id})">закрыть</button>` +
+          (canBlock && r.bike_id
+            ? ` <button class="act" title="Заблокировать за неоплату" onclick="blockBike(${r.bike_id},true)">🔒 неоплата</button>`
+            : "")}</td>
       </tr>`).join("") + `</table>`;
 }
 async function drawRentals(){

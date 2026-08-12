@@ -91,13 +91,18 @@ async def _enrich(fleet: FleetDB) -> None:
     """
     pool = fleet.pool
     for point in catalog.POINTS:
+        # Адрес/координаты/телефон - только в пустые поля (правки оператора
+        # в базе главнее). Часы - наоборот, всегда из faq.py: график
+        # у проката один, и это его единственный источник; иначе старые
+        # установки навсегда остались бы с прежним расписанием.
         await pool.execute(
             "update fleet.points set "
             "  address = coalesce(address, $2), lat = coalesce(lat, $3), "
-            "  lon = coalesce(lon, $4), phone = coalesce(phone, $5) "
+            "  lon = coalesce(lon, $4), phone = coalesce(phone, $5), "
+            "  open_hour = $6, close_hour = $7 "
             "where title = $1",
             point["title"], point["address"], point["lat"], point["lon"],
-            point["phone"])
+            point["phone"], point["open_hour"], point["close_hour"])
     for model in catalog.MODELS:
         # specs уходит объектом, а не строкой: jsonb-кодек пула сам
         # сериализует, и строка здесь превратилась бы в дважды

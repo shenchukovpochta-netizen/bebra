@@ -265,6 +265,14 @@ MINIAPP_URL="${MINIAPP_URL:-}"
 # Токен CRM (/admin). Сгенерирован установщиком; прежнее значение
 # переживает переустановку.
 CRM_TOKEN="${CRM_TOKEN:-$(openssl rand -hex 12)}"
+
+# StarLine (блокировка при неоплате). Заполняется вручную в .env; пусто -
+# интеграция выключена. Прежние значения переживают переустановку.
+STARLINE_APP_ID="${STARLINE_APP_ID:-}"
+STARLINE_SECRET="${STARLINE_SECRET:-}"
+STARLINE_LOGIN="${STARLINE_LOGIN:-}"
+STARLINE_PASSWORD="${STARLINE_PASSWORD:-}"
+STARLINE_AUTO_BLOCK="${STARLINE_AUTO_BLOCK:-0}"
 EOF
 chmod 600 .env
 ok ".env готов"

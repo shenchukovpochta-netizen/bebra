@@ -309,6 +309,16 @@ def hold_minutes_for_pickup(pickup: datetime, *, now: datetime) -> int:
     return max(minutes, BOOKING_GRACE_MINUTES)
 
 
+def overdue(due_at, closed_at, *, today: date) -> bool:
+    """Аренда просрочена: срок возврата прошёл, а возврата не было.
+
+    Пороговое условие для автоблокировки и для красной строки в CRM.
+    Без due (срок не распознан) - не просрочена: блокировать по незнанию
+    нельзя.
+    """
+    return bool(due_at) and closed_at is None and due_at < today
+
+
 def needs_service(close: dict | None) -> bool:
     """Повреждения в форме закрытия - единица уходит в сервис, не на витрину.
 
@@ -352,7 +362,13 @@ def parse_due(rent_term: str | None, *, today: date) -> date | None:
 
     anchor = today
     if len(matches) >= 2:
-        anchor = to_date(matches[0], today.year) or today
+        start = to_date(matches[0], today.year)
+        # Начало срока не может быть позже импорта. Если дата без года
+        # оказалась в будущем - это прошлый год: «28.12 - 04.01»,
+        # разбираемое в январе, началось в декабре ПРОШЛОГО года.
+        if start is not None and not matches[0][2] and start > today:
+            start = to_date(matches[0], today.year - 1) or start
+        anchor = start or today
     value = to_date(matches[-1], anchor.year)
     if value is None:
         return None
@@ -400,12 +416,25 @@ _PHONE_HEAD = re.compile(r"[+\d][\d\s()\-]*")
 
 
 def _split_phone(raw: str) -> tuple[str | None, str]:
-    """Номер и приписка: «89053731217 друг» -> («+79053731217», «друг»)."""
+    """Номер и приписка: «89053731217 друг» -> («+79053731217», «друг»).
+
+    Голова регулярки жадно ест и цифры, и пробелы, поэтому «...17 2 симка»
+    захватила бы лишнюю цифру приписки. Отрезаем хвостовые слова головы,
+    пока остаток не станет похож на номер: «8 905 023 83 66» разбирается
+    целиком, а «...17 2 симка» отдаёт номер и оставляет «2 симка» припиской.
+    """
     text = _clean(raw)
     m = _PHONE_HEAD.match(text)
     if not m:
         return None, text
-    return normalize_phone(m.group(0)), text[m.end():].strip(" ,;-")
+    head, tail = m.group(0).strip(), text[m.end():]
+    while normalize_phone(head) is None and " " in head:
+        head, _, dropped = head.rpartition(" ")
+        tail = f"{dropped} {tail}"
+    phone = normalize_phone(head)
+    if phone is None:
+        return None, text
+    return phone, tail.strip(" ,;-")
 
 
 def parse_fixation_form(raw: str | None) -> tuple[dict | None, list[str]]:
@@ -440,7 +469,10 @@ def parse_fixation_form(raw: str | None) -> tuple[dict | None, list[str]]:
         stripped = _LINE_NUMBER.sub("", line)
         low = stripped.lower()
         for label, field in FIXATION_LABELS:
-            if low.startswith(label):
+            # Граница слова обязательна: голый startswith дал бы «фио…»
+            # для «Фиокрест» и молча затёр настоящее ФИО, а «реф» -
+            # для «Рефлектор». Следующий за меткой символ - не буква.
+            if low.startswith(label) and not low[len(label):len(label) + 1].isalpha():
                 break
         else:
             warnings.append(f"не распознана строка: «{stripped[:50]}»")

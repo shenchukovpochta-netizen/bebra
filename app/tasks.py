@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date
 
-from . import logic
+from . import logic, texts
 from .config import Config
 from .db import Database
 from .services import files
@@ -90,3 +91,48 @@ async def fleet_loop(fleet) -> None:
         except Exception:                               # noqa: BLE001
             log.exception("снятие просроченных броней не удалось")
         await asyncio.sleep(FLEET_INTERVAL_SECONDS)
+
+
+# Автоблокировка реже броней: просрочка меряется сутками, и минутный такт
+# здесь только зря дёргал бы StarLine и базу.
+STARLINE_INTERVAL_SECONDS = 5 * 60
+
+
+async def starline_loop(fleet, starline, bot=None, admin_chat_id=None) -> None:
+    """Автоблокировка просроченных аренд через StarLine.
+
+    Запускается ТОЛЬКО при STARLINE_AUTO_BLOCK=1. Блокирует единицу один
+    раз (флаг blocked это гарантирует) и зовёт оператора карточкой -
+    обездвиживание клиента не должно происходить бесшумно.
+    """
+    while True:
+        try:
+            for row in await fleet.bikes_to_autoblock(date.today()):
+                device = row["starline_device_id"]
+                ok = await starline.block(device)
+                await fleet.log_starline(
+                    row["bike_id"], device, "block", ok,
+                    "автоблокировка: просрочка" if ok else "авто: команда не прошла",
+                    None)
+                if not ok:
+                    log.warning("StarLine: автоблок единицы %s не прошёл", row["bike_id"])
+                    continue
+                await fleet.mark_blocked(row["bike_id"], blocked=True,
+                                         reason="автоблокировка: просрочка")
+                log.info("StarLine: автоблок единицы %s (просрочка)", row["bike_id"])
+                if bot is not None and admin_chat_id is not None:
+                    try:
+                        await bot.send_message(
+                            admin_chat_id, texts.FLEET_AUTOBLOCK_CARD.format(
+                                bike_id=row["bike_id"],
+                                model=logic.esc(row["model"] or "без модели"),
+                                client=logic.esc(row["client_name"] or "—"),
+                                due=str(row["due_at"] or "")))
+                    except Exception:                   # noqa: BLE001
+                        log.exception("карточка автоблока %s не доставлена",
+                                      row["bike_id"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:                               # noqa: BLE001
+            log.exception("прогон автоблокировки StarLine не удался")
+        await asyncio.sleep(STARLINE_INTERVAL_SECONDS)

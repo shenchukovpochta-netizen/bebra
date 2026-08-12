@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 # PATCHABLE в app/db.py: имена колонок подставляются в SQL текстом.
 BIKE_PATCHABLE = frozenset({
     "model_id", "point_id", "vin_motor", "status", "battery_count", "notes",
+    "starline_device_id",
 })
 
 
@@ -179,6 +180,7 @@ class FleetDB:
         return await self.pool.fetch(
             """
             select b.id, b.vin_frame, b.vin_motor, b.status, b.notes,
+                   b.starline_device_id, b.blocked,
                    m.title as model, p.title as point,
                    u.full_name as renter_name, u.username as renter_username,
                    bk.note as hold_note
@@ -412,13 +414,15 @@ class FleetDB:
                     status=logic.RENTED, conn=conn)
                 bike_created = bike["created_at"] == bike["updated_at"]
 
+                # Закрываем незакрытые хвосты этой рамы и этого клиента,
+                # но НЕ по tg_id: он получен по нику из bot.users, а ники
+                # переиспользуются - можно закрыть аренду постороннего.
                 closed = await conn.fetch(
                     "update fleet.rentals set closed_at = now(), "
                     "close_notes = 'закрыта автоматически: импорт формы фиксации' "
-                    "where closed_at is null "
-                    "  and (bike_id = $1 or client_id = $2 "
-                    "       or ($3::bigint is not null and tg_id = $3)) "
-                    "returning id", bike["id"], client_id, tg_id)
+                    "where closed_at is null and (bike_id = $1 or client_id = $2) "
+                    "returning bike_id", bike["id"], client_id)
+                await self._free_closed_bikes(conn, closed, keep=bike["id"])
                 await conn.execute(
                     "update fleet.bookings set status = 'issued', updated_at = now() "
                     "where bike_id = $1 and status = 'held'", bike["id"])
@@ -437,6 +441,22 @@ class FleetDB:
                 "rental_id": rental_id, "auto_closed": len(closed)}
 
     @staticmethod
+    async def _free_closed_bikes(conn: asyncpg.Connection, closed_rows,
+                                 *, keep: int) -> None:
+        """Единицы автозакрытых аренд вернуть на витрину.
+
+        Без этого рама остаётся 'rented' навсегда - активной аренды нет,
+        а в парке единица числится выданной без арендатора. keep - новая
+        рама, её трогать нельзя: она только что стала арендованной.
+        """
+        freed = [r["bike_id"] for r in closed_rows
+                 if r["bike_id"] and r["bike_id"] != keep]
+        if freed:
+            await conn.execute(
+                "update fleet.bikes set status = 'free', updated_at = now() "
+                "where id = any($1::int[]) and status = 'rented'", freed)
+
+    @staticmethod
     async def _upsert_client(conn: asyncpg.Connection,
                              parsed: dict) -> tuple[int, bool]:
         row = None
@@ -447,6 +467,12 @@ class FleetDB:
             row = await conn.fetchrow(
                 "select id from fleet.clients where lower(tg_username) = lower($1)",
                 parsed["tg_username"])
+        if row is None and not parsed.get("phone") and not parsed.get("tg_username"):
+            # Ни телефона, ни ника - иначе каждый импорт плодил бы дубль.
+            # Совпадение по ФИО грубее (тёзки), но лучше, чем гора клонов.
+            row = await conn.fetchrow(
+                "select id from fleet.clients where lower(full_name) = lower($1)",
+                str(parsed.get("fio") or "").strip())
         values = (str(parsed.get("fio") or "").strip(),
                   parsed.get("phone"), parsed.get("phone2"), parsed.get("phone3"),
                   parsed.get("tg_username"),
@@ -513,6 +539,11 @@ class FleetDB:
             """)
 
     async def clients_admin(self, query: str = "", limit: int = 50) -> list[asyncpg.Record]:
+        # Телефоны хранятся нормализованными (+7…), а ищут их как в форме
+        # («8905…»): приводим запрос к тому же виду, иначе поиск по номеру
+        # молча ничего не находит при живом клиенте.
+        q = (query or "").strip()
+        qn = logic.normalize_phone(q) or ""
         return await self.pool.fetch(
             """
             select c.id, c.full_name, c.phone, c.phone2, c.phone3,
@@ -525,8 +556,9 @@ class FleetDB:
             where $1 = '' or c.full_name ilike '%' || $1 || '%'
                or c.phone like '%' || $1 || '%'
                or c.tg_username ilike '%' || $1 || '%'
+               or ($3 <> '' and (c.phone = $3 or c.phone2 = $3 or c.phone3 = $3))
             order by c.updated_at desc limit $2
-            """, (query or "").strip(), limit)
+            """, q, limit, qn)
 
     async def close_rental_by_id(self, rental_id: int, *, notes: str | None,
                                  to_service: bool) -> int | None:
@@ -562,6 +594,47 @@ class FleetDB:
                     "where id = $1 and status = 'booked'", row["bike_id"])
         return row["bike_id"]
 
+    # ─────────────────────── StarLine ───────────────────────
+
+    async def mark_blocked(self, bike_id: int, *, blocked: bool,
+                           reason: str | None) -> None:
+        """Отметка блокировки в карточке единицы. Меняется ТОЛЬКО после
+        того, как StarLine принял команду: пишем факт, а не намерение."""
+        await self.pool.execute(
+            "update fleet.bikes set blocked = $2, "
+            "blocked_at = case when $2 then now() else null end, "
+            "blocked_reason = case when $2 then $3 else null end, "
+            "updated_at = now() where id = $1",
+            bike_id, blocked, reason)
+
+    async def log_starline(self, bike_id: int, device_id: str | None, action: str,
+                           ok: bool, detail: str | None, by_admin: int | None) -> None:
+        await self.pool.execute(
+            "insert into fleet.starline_log "
+            "  (bike_id, device_id, action, ok, detail, by_admin) "
+            "values ($1, $2, $3, $4, $5, $6)",
+            bike_id, device_id, action, ok, detail, by_admin)
+
+    async def count_blocked(self) -> int:
+        return await self.pool.fetchval(
+            "select count(*) from fleet.bikes where blocked") or 0
+
+    async def bikes_to_autoblock(self, today: date) -> list[asyncpg.Record]:
+        """Единицы под автоблокировку: аренда просрочена, единица с трекером
+        и ещё не заблокирована. Отдаётся и имя клиента - для карточки."""
+        return await self.pool.fetch(
+            """
+            select b.id as bike_id, b.starline_device_id, m.title as model,
+                   r.due_at, coalesce(c.full_name, u.full_name) as client_name
+            from fleet.rentals r
+            join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.clients c on c.id = r.client_id
+            left join bot.users u on u.tg_id = r.tg_id
+            where r.closed_at is null and r.due_at is not null and r.due_at < $1
+              and b.starline_device_id is not null and b.blocked = false
+            """, today)
+
     # ─────────────────────── хуки проката ───────────────────────
 
     async def open_rental(self, tg_id: int, *, vin_frame: str,
@@ -589,11 +662,12 @@ class FleetDB:
                 bike = await self.upsert_bike(
                     vin, vin_motor=logic.normalize_vin(vin_motor) or None,
                     model_id=model_id, status=logic.RENTED, conn=conn)
-                await conn.execute(
+                closed = await conn.fetch(
                     "update fleet.rentals set closed_at = now(), "
                     "close_notes = 'закрыта автоматически: новая выдача' "
-                    "where closed_at is null and (tg_id = $1 or bike_id = $2)",
-                    tg_id, bike["id"])
+                    "where closed_at is null and (tg_id = $1 or bike_id = $2) "
+                    "returning bike_id", tg_id, bike["id"])
+                await self._free_closed_bikes(conn, closed, keep=bike["id"])
                 # Живая бронь на эту раму выдана - каким бы клиентом она
                 # ни была помечена: единицу только что передали в руки.
                 await conn.execute(

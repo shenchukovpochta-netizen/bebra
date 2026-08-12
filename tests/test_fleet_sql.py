@@ -106,6 +106,19 @@ class TestFleetSql(unittest.TestCase):
             self.assertRegex(schema, rf"\b{col}\b",
                              f"колонки {col} нет в fleet_schema.sql")
 
+    def test_starline_device_id_is_patchable(self):
+        self.assertIn("starline_device_id", BIKE_PATCHABLE)
+
+    def test_mark_blocked_numbering(self):
+        run(self.fleet.mark_blocked(5, blocked=True, reason="неоплата"))
+        self.check_numbering()
+        self.assertIn("blocked = $2", self.pool.query)
+
+    def test_log_starline_numbering(self):
+        run(self.fleet.log_starline(5, "DEV1", "block", True, None, 777))
+        self.check_numbering()
+        self.assertIn("starline_log", self.pool.query)
+
     def test_hold_interval_is_parameterized(self):
         # Минуты уезжают параметром, а не f-строкой в SQL: это ввод оператора.
         pool = self.pool

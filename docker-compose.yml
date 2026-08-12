@@ -97,6 +97,13 @@ services:
       MINIAPP_URL: ${MINIAPP_URL}
       # Токен CRM (/admin). Пусто - вход в CRM только из Telegram админом.
       CRM_TOKEN: ${CRM_TOKEN}
+      # StarLine: блокировка единиц при неоплате. Пусто - интеграция off.
+      STARLINE_APP_ID: ${STARLINE_APP_ID}
+      STARLINE_SECRET: ${STARLINE_SECRET}
+      STARLINE_LOGIN: ${STARLINE_LOGIN}
+      STARLINE_PASSWORD: ${STARLINE_PASSWORD}
+      # 1 - автоблокировать просроченные аренды. По умолчанию 0 (только руками).
+      STARLINE_AUTO_BLOCK: ${STARLINE_AUTO_BLOCK}
     # ports:
     #   - "127.0.0.1:${API_PORT}:${API_PORT}"
     volumes:

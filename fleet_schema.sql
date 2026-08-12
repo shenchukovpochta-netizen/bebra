@@ -75,6 +75,33 @@ create table if not exists fleet.bikes (
   updated_at    timestamptz not null default now()
 );
 create index if not exists bikes_status_idx on fleet.bikes (status);
+-- StarLine: единица оснащена сигнализацией с дистанционным включением.
+-- starline_device_id - устройство в облаке StarLine, привязывается вручную
+-- (в CRM или командой /bike), из формы фиксации не берётся: там только
+-- «GPS: да/нет», без номера устройства. blocked - обездвижена ли единица
+-- (поставлена на охрану) за неоплату; blocked_reason и blocked_at - зачем
+-- и когда. Статуса единицы это не меняет: заблокированная аренда остаётся
+-- арендой, просто мотор не включить.
+alter table fleet.bikes add column if not exists starline_device_id text;
+alter table fleet.bikes add column if not exists blocked        boolean not null default false;
+alter table fleet.bikes add column if not exists blocked_at     timestamptz;
+alter table fleet.bikes add column if not exists blocked_reason text;
+
+-- Журнал команд StarLine: кто, когда, чем закончилось. Блокировка чужого
+-- (пусть и своего же) имущества - действие, за которое надо отвечать,
+-- поэтому каждый вызов оставляет след, включая неудачный (ok=false).
+create table if not exists fleet.starline_log (
+  id         bigserial primary key,
+  bike_id    integer references fleet.bikes (id),
+  device_id  text,
+  action     text        not null,          -- block | unblock
+  ok         boolean     not null,
+  detail     text,
+  by_admin   bigint,                         -- tg_id оператора; null - автоблок
+  created_at timestamptz not null default now()
+);
+create index if not exists starline_log_bike_idx
+  on fleet.starline_log (bike_id, created_at desc);
 
 -- Бронь: удержание конкретной единицы под клиента с таймером. Статус paid
 -- появится вместе с эквайрингом; сейчас бронь живёт только удержанием,

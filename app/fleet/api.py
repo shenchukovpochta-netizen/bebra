@@ -23,6 +23,7 @@ import logging
 from datetime import date, datetime
 from pathlib import Path
 
+import asyncpg
 from aiohttp import web
 
 from . import catalog, logic, webauth
@@ -72,11 +73,12 @@ class Api:
 
     def __init__(self, fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
                  bot_token: str = "", crm_token: str = "",
-                 admins: tuple[int, ...] = ()) -> None:
+                 admins: tuple[int, ...] = (), starline=None) -> None:
         self.fleet = fleet
         self.bot = bot
         self.admin_chat_id = admin_chat_id
         self.bot_token = bot_token
+        self.starline = starline
         self.crm_token = crm_token if len(crm_token or "") >= CRM_TOKEN_MIN_LEN else ""
         if crm_token and not self.crm_token:
             log.warning("CRM_TOKEN короче %s символов - CRM по токену выключена",
@@ -217,10 +219,20 @@ class Api:
         (открыто из Telegram). Сравнение токена constant-time: тайминг
         не должен подсказывать, на каком символе перебор промахнулся."""
         token = request.headers.get("X-CRM-Token", "")
-        if self.crm_token and token and hmac.compare_digest(token, self.crm_token):
+        # Сравнение в байтах: compare_digest на строке с не-ASCII (кириллица
+        # в заголовке или в самом токене) кидает TypeError - и граница
+        # доверия отвечала бы 500 вместо честного отказа.
+        if self.crm_token and token and hmac.compare_digest(
+                token.encode("utf-8", "surrogateescape"), self.crm_token.encode()):
             return True
         user = self._client(request)
         return bool(user and user["id"] in self.admins)
+
+    def _admin_id(self, request: web.Request) -> int | None:
+        """tg_id оператора, если в CRM вошли из Telegram; при входе
+        по токену - None (в журнал уйдёт «оператор по токену»)."""
+        user = self._client(request)
+        return user["id"] if user else None
 
     async def admin_page(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.adminapp, content_type="text/html")
@@ -246,6 +258,8 @@ class Api:
             "bikes": by_status, "total": sum(by_status.values()),
             "rentals_active": len(rentals), "overdue": overdue,
             "bookings_active": len(await self.fleet.bookings_admin()),
+            "blocked": await self.fleet.count_blocked(),
+            "starline": self.starline is not None,
         })
 
     @staticmethod
@@ -273,6 +287,7 @@ class Api:
             "model": r["model"], "point": r["point"], "status": r["status"],
             "notes": r["notes"], "renter_name": r["renter_name"],
             "renter_username": r["renter_username"], "hold_note": r["hold_note"],
+            "starline_device_id": r["starline_device_id"], "blocked": r["blocked"],
         } for r in rows])
 
     async def admin_rentals(self, request: web.Request) -> web.Response:
@@ -341,7 +356,15 @@ class Api:
                          status=400)
         due = logic.parse_due(str(parsed.get("rent_term") or ""),
                               today=date.today())
-        result = await self.fleet.ingest_fixation(parsed, due_at=due)
+        try:
+            result = await self.fleet.ingest_fixation(parsed, due_at=due)
+        except asyncpg.UniqueViolationError:
+            # Параллельный импорт того же клиента/рамы, или телефон уже
+            # принадлежит другой карточке. Данные целы (транзакция
+            # откатилась) - просим повторить, а не роняем 500.
+            return _json({"error": "Карточка занята другим импортом или "
+                          "телефон/рама уже у другого клиента. Повторите."},
+                         status=409)
         return _json({"ok": True, "result": result, "warnings": warnings})
 
     async def admin_close_rental(self, request: web.Request) -> web.Response:
@@ -358,7 +381,74 @@ class Api:
         if bike_id is None:
             return _json({"error": "Аренда уже закрыта или не найдена."},
                          status=409)
+        # Возврат снимает блокировку: держать обездвиженной сданную единицу
+        # незачем, а разблокировать её отдельной кнопкой оператор забудет.
+        await self._auto_unblock(bike_id, self._admin_id(request))
         return _json({"ok": True, "bike_id": bike_id})
+
+    async def _auto_unblock(self, bike_id: int, admin_id: int | None) -> None:
+        if self.starline is None:
+            return
+        bike = await self.fleet.get_bike(str(bike_id))
+        if not bike or not bike["blocked"] or not bike["starline_device_id"]:
+            return
+        ok = await self.starline.unblock(bike["starline_device_id"])
+        await self.fleet.log_starline(
+            bike_id, bike["starline_device_id"], "unblock", ok,
+            "при закрытии аренды" if ok else "команда StarLine не прошла", admin_id)
+        if ok:
+            await self.fleet.mark_blocked(bike_id, blocked=False, reason=None)
+
+    async def admin_bike_starline(self, request: web.Request) -> web.Response:
+        """Привязать единице устройство StarLine (или отвязать пустым id)."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        try:
+            body = await request.json()
+            bike_id = int(body["bike_id"])
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        device_id = str(body.get("device_id") or "").strip() or None
+        await self.fleet.patch_bike(bike_id, starline_device_id=device_id)
+        return _json({"ok": True})
+
+    async def admin_bike_block(self, request: web.Request) -> web.Response:
+        """Заблокировать/разблокировать единицу через StarLine.
+
+        Отметка blocked меняется только после того, как StarLine принял
+        команду: в базе - факт состояния устройства, а не намерение.
+        """
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        if self.starline is None:
+            return _json({"error": "StarLine не настроен на сервере "
+                          "(заполните STARLINE_* в .env)."}, status=400)
+        try:
+            body = await request.json()
+            bike_id = int(body["bike_id"])
+            on = bool(body["on"])
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        bike = await self.fleet.get_bike(str(bike_id))
+        if bike is None:
+            return _json({"error": "Единица не найдена."}, status=404)
+        device = bike["starline_device_id"]
+        if not device:
+            return _json({"error": "У единицы не привязан StarLine. "
+                          "Укажите ID устройства."}, status=400)
+        reason = str(body.get("reason") or "неоплата").strip()
+        admin_id = self._admin_id(request)
+        ok = await (self.starline.block(device) if on
+                    else self.starline.unblock(device))
+        await self.fleet.log_starline(
+            bike_id, device, "block" if on else "unblock", ok,
+            None if ok else "команда StarLine не прошла", admin_id)
+        if not ok:
+            return _json({"error": "StarLine не принял команду. "
+                          "Проверьте связь и ID устройства."}, status=502)
+        await self.fleet.mark_blocked(bike_id, blocked=on,
+                                      reason=reason if on else None)
+        return _json({"ok": True})
 
     async def admin_cancel_booking(self, request: web.Request) -> web.Response:
         if not self._is_admin(request):
@@ -428,9 +518,9 @@ class Api:
 
 def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
               bot_token: str = "", crm_token: str = "",
-              admins: tuple[int, ...] = ()) -> web.Application:
+              admins: tuple[int, ...] = (), starline=None) -> web.Application:
     api = Api(fleet, bot=bot, admin_chat_id=admin_chat_id, bot_token=bot_token,
-              crm_token=crm_token, admins=admins)
+              crm_token=crm_token, admins=admins, starline=starline)
     app = web.Application()
     app.add_routes([
         web.get("/", api.index),
@@ -455,6 +545,8 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/admin/rental/close", api.admin_close_rental),
         web.post("/api/admin/booking/cancel", api.admin_cancel_booking),
         web.post("/api/admin/bike/status", api.admin_bike_status),
+        web.post("/api/admin/bike/starline", api.admin_bike_starline),
+        web.post("/api/admin/bike/block", api.admin_bike_block),
     ])
     if STATIC_DIR.is_dir():
         app.add_routes([web.static("/static", STATIC_DIR)])
@@ -464,11 +556,11 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
 async def start_api(fleet: FleetDB, port: int, *, bot=None,
                     admin_chat_id: int | None = None,
                     bot_token: str = "", crm_token: str = "",
-                    admins: tuple[int, ...] = ()) -> web.AppRunner:
+                    admins: tuple[int, ...] = (), starline=None) -> web.AppRunner:
     """Поднимает витрину и возвращает runner - его гасит main() при остановке."""
     runner = web.AppRunner(build_app(
         fleet, bot=bot, admin_chat_id=admin_chat_id, bot_token=bot_token,
-        crm_token=crm_token, admins=admins))
+        crm_token=crm_token, admins=admins, starline=starline))
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
