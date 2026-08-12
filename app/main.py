@@ -76,6 +76,7 @@ async def run() -> None:
     dp.include_router(menu.router)
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
+    reminders = asyncio.create_task(tasks.reminders_loop(bot, db, cfg))
 
     # docker stop шлёт SIGTERM. Без обработчика процесс умирает мгновенно:
     # фоновые задачи (сохранение скана, хэш) обрываются на полуслове,
@@ -95,7 +96,8 @@ async def run() -> None:
     finally:
         log.info("останавливаюсь")
         retention.cancel()
-        await asyncio.gather(retention, return_exceptions=True)
+        reminders.cancel()
+        await asyncio.gather(retention, reminders, return_exceptions=True)
         await tasks.drain()
         await bot.session.close()
         await db.close()

@@ -116,11 +116,17 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         return
     before = dict(row)
 
-    # expected_state закрывает и двойное нажатие, и второй экземпляр карточки:
-    # повторное подтверждение получит False и честное «не ждёт оплату».
+    # Продление: велосипед у клиента, новый Акт приёма не нужен - меняется
+    # только дата окончания. Ветка стоит до общей: иначе клиент получил бы
+    # второй акт на то же имущество.
+    extend_until = before.get("extend_until")
     if not await db.patch(target, expected_state=logic.WAIT_PAYMENT,
-                          state=logic.WAIT_ACT_SIGN,
+                          state=logic.APPROVED if extend_until
+                          else logic.WAIT_ACT_SIGN,
                           pay_confirmed_at=utcnow()):
+        # expected_state закрывает и двойное нажатие, и второй экземпляр
+        # карточки: повторное подтверждение получит False и честное
+        # «не ждёт оплату».
         await callback.answer(texts.PAY_NOT_WAITING, show_alert=True)
         return
     await db.log_event(target, "payment_confirmed", {"by": callback.from_user.id})
@@ -140,6 +146,10 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
             )
         except TelegramAPIError:
             pass
+
+    if extend_until:
+        await _apply_extension(bot, db, target, before, extend_until)
+        return
 
     await _notify(bot, db, target, "PAY_CONFIRMED_USER")
     row = await db.get_user(target)
@@ -256,6 +266,10 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
     if returned is not None:
         await _return_reply(message, bot, db, cfg, vault, dict(returned))
         return
+    extending = await db.user_by_extend_message(message.chat.id, replied.message_id)
+    if extending is not None:
+        await _extend_reply(message, bot, db, cfg, dict(extending))
+        return
 
     asked = await db.user_by_support_message(message.chat.id, replied.message_id)
     if asked is not None:
@@ -318,11 +332,22 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
         await message.reply(err)
         return
     tg_id = target["tg_id"]
+    # Даты срока считаются здесь же: по ним бот напоминает об окончании.
+    # Строку срока оператор пишет как привык - разбирает её logic.
+    start, end = logic.rent_dates(parsed)
     if not await db.patch(tg_id, expected_status=logic.ST_APPROVED,
-                          issue_data=parsed):
+                          issue_data=parsed, rent_from=start, rent_until=end,
+                          remind_soon_at=None, remind_last_at=None,
+                          remind_overdue_at=None):
         await message.reply(texts.MOD_REPLY_NOT_PENDING)
         return
-    await db.log_event(tg_id, "issue_data_set", {"by": message.from_user.id})
+    await db.log_event(tg_id, "issue_data_set",
+                       {"by": message.from_user.id,
+                        "until": end.strftime("%Y-%m-%d") if end else None})
+    if end is None:
+        # Молчать нельзя: без даты не будет ни напоминания, ни сводки,
+        # и оператор узнает об этом только по факту невернувшегося велосипеда.
+        await message.reply(texts.ISSUE_NO_DATES)
 
     if target.get("contract_status") == logic.CT_SIGNED:
         # Договор уже подписан - переигрывать его нельзя. Данные выдачи
@@ -364,6 +389,74 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     await message.reply(texts.ISSUE_SAVED)
 
 
+async def _apply_extension(bot: Bot, db: Database, target: int, before: dict,
+                           until) -> None:
+    """Оплата продления получена: сдвинуть срок и сказать об этом клиенту.
+
+    Отметки напоминаний сбрасываются: по новому сроку они должны сработать
+    заново, иначе клиент останется без предупреждения перед вторым концом.
+    """
+    issue = dict(before.get("issue_data") or {})
+    issue["rent_term"] = logic.term_with_new_end(issue.get("rent_term"), until)
+    await db.patch(target, rent_until=until, extend_until=None,
+                   issue_data=issue,
+                   extend_chat_id=None, extend_message_id=None,
+                   remind_soon_at=None, remind_last_at=None,
+                   remind_overdue_at=None)
+    await db.log_event(target, "rent_extended",
+                       {"until": until.strftime("%Y-%m-%d")})
+    lang = i18n.user_lang(before)
+    try:
+        await bot.send_message(
+            target,
+            i18n.t(lang, "EXTEND_CONFIRMED").format(
+                until=until.strftime("%d.%m.%Y")),
+            reply_markup=kb.main_menu(lang))
+    except TelegramAPIError:
+        log.warning("подтверждение продления не доставлено клиенту %s", target)
+
+
+async def _extend_reply(message: Message, bot: Bot, db: Database, cfg: Config,
+                        target: dict) -> None:
+    """Ответ оператора на заявку о продлении: новый срок и сумма.
+
+    Клиент переводится на оплату; сам срок сдвинется только после
+    «Оплата получена» - до денег продлевать нечего.
+    """
+    if not logic.rental_is_active(target):
+        await message.reply(texts.EXTEND_NOT_ACTIVE)
+        return
+    parsed, err = logic.parse_extend_form(message.text or message.caption)
+    if parsed is None:
+        await message.reply(err)
+        return
+    tg_id = target["tg_id"]
+    price = str(parsed["rent_price"])
+    issue = dict(target.get("issue_data") or {})
+    issue["rent_price"] = price
+
+    # Из меню или из недописанного вопроса в поддержку - но не из состояний,
+    # где человек что-то подписывает: там его ждёт другая кнопка.
+    for state in (logic.APPROVED, logic.WAIT_SUPPORT, logic.WAIT_PAYMENT):
+        if await db.patch(tg_id, expected_state=state,
+                          state=logic.WAIT_PAYMENT,
+                          extend_until=parsed["rent_until"],
+                          issue_data=issue, pay_confirmed_at=None):
+            break
+    else:
+        await message.reply(texts.MOD_REPLY_NOT_PENDING)
+        return
+    await db.log_event(tg_id, "extend_data_set",
+                       {"by": message.from_user.id,
+                        "until": parsed["rent_until"].strftime("%Y-%m-%d")})
+
+    row = await db.get_user(tg_id)
+    data = dict(row) if row else {**target, "issue_data": issue}
+    await contract.start_payment(bot, db, cfg, data)
+    await message.reply(texts.EXTEND_SAVED.format(
+        until=parsed["rent_until"].strftime("%d.%m.%Y"), price=logic.esc(price)))
+
+
 async def _repeat_rent(message: Message, bot: Bot, db: Database, cfg: Config,
                        vault: Vault, target: dict) -> None:
     """Повторная аренда: прошлый цикл закрыт, оператор прислал новую выдачу.
@@ -376,7 +469,10 @@ async def _repeat_rent(message: Message, bot: Bot, db: Database, cfg: Config,
     cycle = dict(state=logic.WAIT_PAYMENT,
                  act_in_signed_at=None, act_out_signed_at=None,
                  pay_confirmed_at=None, return_data=None,
-                 close_reason=None, close_requested_at=None)
+                 close_reason=None, close_requested_at=None,
+                 extend_until=None, extend_chat_id=None, extend_message_id=None,
+                 remind_soon_at=None, remind_last_at=None,
+                 remind_overdue_at=None)
     # Из меню или из недописанного вопроса в поддержку - но не из состояний,
     # где человек что-то подписывает. expected_state закрывает и гонку двух
     # операторов: второй ответ получит честный отказ.

@@ -361,6 +361,17 @@ T: dict[str, str] = {
     ),
 
     # ── кнопки ──
+    # ── сроки и продление ──
+    "BTN_EXTEND": "📅 Extend the rental",
+    "REMIND_SOON": "📅 A reminder: your rental of <b>{bike}</b> ends {until}. Days left: {days}.\n\nWant to extend it — tap the button below and the operator will name the amount. Returning it — use “🔚 Close rental” in the menu; we accept bikes daily from 10:00 to 19:00.",
+    "REMIND_LAST_DAY": "📅 Today is the last day of your rental of <b>{bike}</b> (until {until}).\n\nTo extend — the button below. Returning it today — tap “🔚 Close rental” in the menu and we will agree on a time.",
+    "REMIND_OVERDUE": "⚠️ The rental term for <b>{bike}</b> expired {until}.\n\nPlease extend it with the button below or return the bike — otherwise, under the agreement, the usage fee keeps accruing.\nIf you have already arranged things with the operator — just reply to this message.",
+    "EXTEND_NO_RENTAL": "No active rental is registered for you — there is nothing to extend. To take a bike: the “🚲 Rent” button.",
+    "EXTEND_ALREADY_ASKED": "Your extension request is already with the operator — they will contact you and name the amount. No need to send it again.",
+    "EXTEND_REQUESTED": "✅ The extension request has been passed to the operator. They will confirm the new term and send the amount to pay — the bike stays with you.",
+    "EXTEND_REQUEST_FAILED": "We could not pass on the request due to a technical hiccup. Message us directly: " + URL,
+    "EXTEND_CONFIRMED": "✅ The rental is extended until {until}. Thank you for the payment!\nThe agreement and the act stay the same — nothing new to sign.",
+
     "BTN_RENT": "🚲 Rent",
     "BTN_TRIPS": "📋 My rentals",
     "BTN_TARIFFS": "💰 Rates",

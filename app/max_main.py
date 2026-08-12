@@ -77,6 +77,10 @@ def load_config() -> Config:
         purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
         purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
         updates_log_days=_int("UPDATES_LOG_DAYS", "7"),
+        # Напоминания о сроке живут в Telegram-боте: у MAX старый поток
+        # без актов и сроков. Поля нужны, чтобы Config собрался.
+        remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
+        remind_hour_utc=_int("REMIND_HOUR_UTC", "7"),
         rate_soft=_int("RATE_SOFT", "40"),
         rate_hard=_int("RATE_HARD", "50"),
         # Различимый префикс: у MAX своя последовательность, и без него

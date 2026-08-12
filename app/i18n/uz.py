@@ -354,6 +354,17 @@ T: dict[str, str] = {
         "tasdiqlandi.\nIjara yopildi. Bizni tanlaganingiz uchun rahmat!"
     ),
 
+    # ── сроки и продление ──
+    "BTN_EXTEND": "📅 Ijarani uzaytirish",
+    "REMIND_SOON": "📅 Eslatma: <b>{bike}</b> ijarasi {until} tugaydi. Qolgan kunlar: {days}.\n\nUzaytirmoqchimisiz — pastdagi tugmani bosing, operator summani aytadi. Topshirmoqchimisiz — menyudagi «🔚 Ijarani yopish»; velosipedlarni har kuni 10:00 dan 19:00 gacha qabul qilamiz.",
+    "REMIND_LAST_DAY": "📅 Bugun <b>{bike}</b> ijarasining oxirgi kuni ({until} gacha).\n\nUzaytirish — pastdagi tugma. Bugun topshirsangiz — menyudagi «🔚 Ijarani yopish» tugmasini bosing, vaqtni kelishamiz.",
+    "REMIND_OVERDUE": "⚠️ <b>{bike}</b> ijarasi muddati {until} tugagan.\n\nIltimos, pastdagi tugma bilan uzaytiring yoki velosipedni topshiring — aks holda shartnomaga ko'ra foydalanish haqi hisoblanaveradi.\nOperator bilan allaqachon kelishgan bo'lsangiz — shu xabarga javob yozing.",
+    "EXTEND_NO_RENTAL": "Sizda faol ijara yo'q — uzaytiradigan narsa yo'q. Velosiped olish uchun: «🚲 Ijaraga olish» tugmasi.",
+    "EXTEND_ALREADY_ASKED": "Uzaytirish arizangiz allaqachon operatorda — u siz bilan bog'lanib summani aytadi. Qayta yuborish shart emas.",
+    "EXTEND_REQUESTED": "✅ Uzaytirish arizasi operatorga yetkazildi. U yangi muddatni tasdiqlaydi va to'lov summasini yuboradi — velosiped sizda qoladi.",
+    "EXTEND_REQUEST_FAILED": "Texnik nosozlik tufayli arizani yetkazib bo'lmadi. Bizga to'g'ridan-to'g'ri yozing: " + URL,
+    "EXTEND_CONFIRMED": "✅ Ijara {until} gacha uzaytirildi. To'lov uchun rahmat!\nShartnoma va akt o'zgarmaydi — yangisini imzolash shart emas.",
+
     "BTN_RENT": "🚲 Ijaraga olish",
     "BTN_TRIPS": "📋 Mening ijaralarim",
     "BTN_TARIFFS": "💰 Narxlar",

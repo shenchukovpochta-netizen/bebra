@@ -210,6 +210,62 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
                          reply_markup=kb.main_menu(lang))
 
 
+# ─────────────────── продление аренды по запросу клиента ───────────────────
+
+@router.callback_query(F.data == "extend")
+async def cb_extend(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                    user: dict | None = None) -> None:
+    """«Продлить аренду»: заявка оператору, велосипед остаётся у клиента.
+
+    Кнопка живёт под напоминанием о сроке и под списком аренд, поэтому
+    работает в любом состоянии: человек мог нажать её посреди вопроса
+    в поддержку - забирать его оттуда незачем, заявка от этого не страдает.
+    """
+    if user is None:
+        await callback.answer()
+        return
+    lang = i18n.user_lang(user)
+    tg_id = user["tg_id"]
+    row = await db.get_user(tg_id)
+    data = dict(row) if row else dict(user)
+    if not logic.rental_is_active(data):
+        await callback.answer()
+        await bot.send_message(tg_id, i18n.t(lang, "EXTEND_NO_RENTAL"))
+        return
+    if data.get("extend_until"):
+        # Заявка уже принята оператором и ждёт оплаты - второй раз звать
+        # его незачем, а клиенту нужно сказать, чего ждать.
+        await callback.answer()
+        await bot.send_message(tg_id, i18n.t(lang, "EXTEND_ALREADY_ASKED"))
+        return
+    await callback.answer()
+
+    given = logic.issue_context(data.get("issue_data"))
+    until = data.get("rent_until")
+    left = logic.days_left(until)
+    try:
+        sent = await bot.send_message(
+            cfg.contract_chat_id,
+            texts.EXTEND_CARD.format(
+                fio=logic.esc(data.get("full_name") or "без имени"),
+                handle=("@" + logic.esc(data["username"])
+                        if data.get("username") else "без username"),
+                tg_id=tg_id, number=logic.esc(data.get("contract_no") or "—"),
+                bike=logic.esc(given["bike_model"]),
+                until=until.strftime("%d.%m.%Y") if until else "не указан",
+                overdue=(f" · просрочка {-left} дн."
+                         if left is not None and left < 0 else ""),
+                form=logic.EXTEND_FORM_TEMPLATE))
+    except TelegramAPIError:
+        log.exception("заявка на продление от %s не доставлена", tg_id)
+        await bot.send_message(tg_id, i18n.t(lang, "EXTEND_REQUEST_FAILED"))
+        return
+    await db.patch(tg_id, extend_chat_id=sent.chat.id,
+                   extend_message_id=sent.message_id)
+    await db.log_event(tg_id, "extend_requested")
+    await bot.send_message(tg_id, i18n.t(lang, "EXTEND_REQUESTED"))
+
+
 # ─────────────────── закрытие аренды по запросу клиента ───────────────────
 
 async def start_close(message: Message, db: Database, user: dict) -> None:
@@ -326,7 +382,11 @@ async def close_request(message: Message, db: Database, user: dict) -> None:
 
 @router.message(F.text.in_(i18n.variants("BTN_TRIPS")))
 async def trips(message: Message, db: Database, user: dict) -> None:
-    await message.answer(await rentals_text(db, user))
+    # Кнопка продления - только при действующей аренде: под списком
+    # закрытых она предлагала бы продлить то, чего нет.
+    markup = (kb.extend(i18n.user_lang(user))
+              if logic.rental_is_active(user) else None)
+    await message.answer(await rentals_text(db, user), reply_markup=markup)
 
 
 async def start_support(message: Message, db: Database, user: dict) -> None:

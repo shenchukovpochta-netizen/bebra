@@ -138,3 +138,37 @@ class TestKeyboards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestMaxConfig(unittest.TestCase):
+    """MAX-бот собирает Config руками, поле за полем.
+
+    Новое обязательное поле в общем Config ломает его молча: бот падает
+    на старте, а узнать об этом можно только по логам сервера. Этот тест
+    и есть та самая проверка.
+    """
+
+    ENV = {
+        "MAX_BOT_TOKEN": "max-token",
+        "MAX_CHANNEL_ID": "-100500", "MAX_ADMIN_CHAT_ID": "-100501",
+        "MAX_ADMINS": "111", "POSTGRES_PASSWORD": "pw", "PDN_KEY": "k" * 44,
+        "OFERTA_URL": "https://example.ru/oferta",
+    }
+
+    def test_load_config_builds_with_minimal_env(self):
+        import os
+
+        from app import max_main
+
+        saved = {k: os.environ.get(k) for k in self.ENV}
+        os.environ.update(self.ENV)
+        try:
+            cfg = max_main.load_config()
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        self.assertEqual(cfg.contract_prefix, "АВМ")
+        self.assertEqual(cfg.pg["database"], "mybike_max")

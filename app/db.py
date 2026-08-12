@@ -25,6 +25,9 @@ PATCHABLE = frozenset({
     "pay_chat_id", "pay_message_id", "pay_confirmed_at",
     "close_reason", "close_requested_at",
     "lang", "faq_lang",
+    "rent_from", "rent_until", "extend_until",
+    "extend_chat_id", "extend_message_id",
+    "remind_soon_at", "remind_last_at", "remind_overdue_at",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
     "issue_data", "issue_chat_id", "issue_message_id",
@@ -230,6 +233,34 @@ class Database:
             "select * from bot.users where return_chat_id = $1 "
             "and return_message_id = $2",
             chat_id, message_id,
+        )
+
+    async def user_by_extend_message(self, chat_id: int,
+                                     message_id: int) -> asyncpg.Record | None:
+        """Заявка на продление, на которую ответил оператор."""
+        return await self.pool.fetchrow(
+            "select * from bot.users where extend_chat_id = $1 "
+            "and extend_message_id = $2",
+            chat_id, message_id,
+        )
+
+    async def active_rentals(self) -> list[asyncpg.Record]:
+        """Действующие аренды с известной датой окончания.
+
+        Одним запросом и целиком: активных аренд десятки, а решать, кому
+        и что напомнить, удобнее в чистой логике - её видно в тестах.
+        Строки без rent_until сюда не попадают: срок оператор написал
+        словами («неделя»), даты нет, и выдумывать её бот не станет.
+        """
+        return await self.pool.fetch(
+            "select tg_id, lang, full_name, contract_no, issue_data, "
+            "       rent_until, extend_until, "
+            "       remind_soon_at, remind_last_at, remind_overdue_at "
+            "from bot.users "
+            "where rent_until is not null "
+            "  and act_in_signed_at is not null "
+            "  and act_out_signed_at is null "
+            "order by rent_until, tg_id",
         )
 
     async def rentals_of(self, tg_id: int, limit: int = 10) -> list[asyncpg.Record]:

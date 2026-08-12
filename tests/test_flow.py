@@ -181,6 +181,10 @@ class FakeDB:
             "doc_file_id": None, "doc_path": None, "doc_is_photo": True,
             "parent_file_id": None, "parent_path": None, "parent_is_photo": True,
             "purge_after": None, "anketa_enc": None, "lang": None,
+            "rent_from": None, "rent_until": None, "extend_until": None,
+            "extend_chat_id": None, "extend_message_id": None,
+            "remind_soon_at": None, "remind_last_at": None,
+            "remind_overdue_at": None,
             "contract_no": None, "contract_path": None, "contract_sha256": None,
             "contract_status": logic.CT_NONE, "contract_issued_at": None,
             "contract_signed_at": None, "mod_chat_id": None, "mod_message_id": None,
@@ -243,6 +247,18 @@ class FakeDB:
                 return dict(row)
         return None
 
+    async def user_by_extend_message(self, chat_id, message_id):
+        for row in self.users.values():
+            if (row.get("extend_chat_id") == chat_id
+                    and row.get("extend_message_id") == message_id):
+                return dict(row)
+        return None
+
+    async def active_rentals(self):
+        return [dict(r) for r in self.users.values()
+                if r.get("rent_until") and r.get("act_in_signed_at")
+                and not r.get("act_out_signed_at")]
+
     async def rentals_of(self, tg_id, limit=10):
         """История аренд: закрытые аренды живут событиями, новые сверху."""
         return [{"payload": payload, "created_at": None}
@@ -271,6 +287,7 @@ def make_config(**overrides) -> Config:
         oferta_version="2026-01-15", pdn_url="", pdn_version="2026-01-15",
         video_url="https://e.ru/v",
         purge_approved_days=90, purge_rejected_days=3, updates_log_days=7,
+        remind_before_days=2, remind_hour_utc=7,
         # Рейт-лимит здесь снят намеренно: FakeDB не двигает окно, а один
         # сценарный тест прогоняет две полные регистрации подряд. Сами пороги
         # проверяются в test_logic, где для этого не нужен Dispatcher.
@@ -1270,6 +1287,186 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                 if isinstance(m, SendMessage)][-1]
         self.assertIn("Актуальные тарифы", last,
                       "без подписанного договора - только тарифы")
+
+    # ─── сроки, напоминания и продление ───
+
+    async def remind(self, today):
+        """Один проход напоминаний от лица фонового цикла."""
+        from app import tasks
+        return await tasks.remind_once(self.bot, self.db, self.cfg, today=today)
+
+    async def test_issue_form_fills_the_deadline(self):
+        await self.register_fully()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["rent_until"].strftime("%d.%m"), "10.08",
+                         "дата окончания не вынута из строки срока")
+        self.assertEqual(row["rent_from"].strftime("%d.%m"), "03.08")
+
+    async def test_operator_warned_when_term_has_no_dates(self):
+        await self.submit()
+        await self.approve()
+        await self.provide_issue(self.ISSUE_FORM.replace("срок: 03.08 - 10.08",
+                                                         "срок: неделя"))
+        row = self.db.users[USER_ID]
+        self.assertIsNone(row["rent_until"])
+        replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
+                           if isinstance(m, SendMessage))
+        self.assertIn("не удалось понять дату", replies)
+
+    async def test_explicit_until_line_sets_the_deadline(self):
+        await self.submit()
+        await self.approve()
+        await self.provide_issue(self.ISSUE_FORM.replace("срок: 03.08 - 10.08",
+                                                         "срок: неделя\nдо: 20.08"))
+        self.assertEqual(self.db.users[USER_ID]["rent_until"].strftime("%d.%m"),
+                         "20.08")
+
+    async def test_reminder_stages_reach_the_client_once(self):
+        await self.register_fully()
+        until = self.db.users[USER_ID]["rent_until"]
+
+        sent, _ = await self.remind(until - timedelta(days=2))
+        self.assertEqual(sent, 1)
+        last = self.session.sent_to(USER_ID)[-1]
+        self.assertIn("заканчивается", last.text)
+        self.assertIn("Truck+", last.text)
+        self.assertEqual(last.reply_markup.inline_keyboard[0][0].callback_data,
+                         "extend")
+        # повторный проход в тот же день молчит
+        self.assertEqual((await self.remind(until - timedelta(days=2)))[0], 0)
+
+        sent, _ = await self.remind(until)
+        self.assertEqual(sent, 1)
+        self.assertIn("последний день", self.session.sent_to(USER_ID)[-1].text)
+
+        sent, digest = await self.remind(until + timedelta(days=3))
+        self.assertEqual(sent, 1)
+        self.assertIn("истёк", self.session.sent_to(USER_ID)[-1].text)
+        self.assertIn("просрочка 3 дн.", digest)
+        # просрочка тоже шлётся один раз
+        self.assertEqual((await self.remind(until + timedelta(days=4)))[0], 0)
+
+    async def test_reminders_speak_the_client_language(self):
+        await self.register_fully()
+        self.db.users[USER_ID]["lang"] = "en"
+        until = self.db.users[USER_ID]["rent_until"]
+        await self.remind(until)
+        self.assertIn("last day of your rental",
+                      self.session.sent_to(USER_ID)[-1].text)
+
+    async def test_closed_rental_is_not_reminded(self):
+        await self.register_fully()
+        await self.close_rental()
+        until = self.db.users[USER_ID]["rent_until"]
+        sent, digest = await self.remind(until + timedelta(days=5))
+        self.assertEqual(sent, 0, "закрытая аренда не должна напоминать о себе")
+        self.assertEqual(digest, "")
+
+    EXTEND_FORM = "до: 17.08.2026\nоплата: 3500 qr"
+
+    async def extend_request(self):
+        await self.feed(cb("extend"))
+
+    async def provide_extend(self, text=None):
+        prompt_id = self.db.users[USER_ID]["extend_message_id"]
+        self.assertIsNotNone(prompt_id, "заявка на продление не отправлена")
+        await self.feed(msg(text or self.EXTEND_FORM, chat_id=ADMIN_CHAT,
+                            user_id=ADMIN_ID, chat_type="supergroup",
+                            reply_to=prompt_id))
+
+    async def test_extension_full_cycle(self):
+        await self.register_fully()
+        await self.extend_request()
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and "продление" in (m.text or "")]
+        self.assertTrue(cards, "заявка на продление не дошла до оператора")
+        self.assertIn("до: ", cards[-1], "в заявке нет формы продления")
+        self.assertIn("передана оператору",
+                      self.session.sent_to(USER_ID)[-1].text)
+
+        acts_before = len([m for m in self.session.documents()
+                           if m.chat_id == USER_ID
+                           and "Акт приёма" in (m.caption or "")])
+        await self.provide_extend()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_PAYMENT)
+        self.assertEqual(row["extend_until"].strftime("%d.%m"), "17.08")
+        pay = [m.text for m in self.session.sent_to(USER_ID)
+               if isinstance(m, SendMessage) and "3500 qr" in (m.text or "")]
+        self.assertTrue(pay, "клиент не увидел сумму продления")
+
+        await self.confirm_pay()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertEqual(row["rent_until"].strftime("%d.%m"), "17.08")
+        self.assertIsNone(row["extend_until"])
+        self.assertIn("продлена до 17.08",
+                      self.session.sent_to(USER_ID)[-1].text)
+        # Новых актов быть не должно: имущество уже у клиента.
+        acts_after = len([m for m in self.session.documents()
+                          if m.chat_id == USER_ID
+                          and "Акт приёма" in (m.caption or "")])
+        self.assertEqual(acts_after, acts_before,
+                         "продление не должно слать новый акт")
+        self.assertTrue(logic.rental_is_active(row))
+
+    async def test_extension_resets_reminders(self):
+        """После продления напоминания должны сработать заново - иначе
+        клиент останется без предупреждения перед новым сроком."""
+        await self.register_fully()
+        until = self.db.users[USER_ID]["rent_until"]
+        await self.remind(until)
+        self.assertIsNotNone(self.db.users[USER_ID]["remind_last_at"])
+        await self.extend_request()
+        await self.provide_extend()
+        await self.confirm_pay()
+        row = self.db.users[USER_ID]
+        self.assertIsNone(row["remind_last_at"])
+        sent, _ = await self.remind(row["rent_until"])
+        self.assertEqual(sent, 1, "по новому сроку напоминание не пришло")
+
+    async def test_extension_updates_the_term_in_history(self):
+        await self.register_fully()
+        await self.extend_request()
+        await self.provide_extend()
+        await self.confirm_pay()
+        await self.feed(msg("📋 Мои аренды"))
+        trips = [m.text for m in self.session.sent_to(USER_ID)
+                 if isinstance(m, SendMessage)][-1]
+        self.assertIn("03.08 - 17.08", trips)
+
+    async def test_extension_without_active_rental_is_refused(self):
+        await self.register_fully()
+        await self.close_rental()
+        await self.extend_request()
+        last = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("Активной аренды", last)
+        self.assertIsNone(self.db.users[USER_ID]["extend_message_id"])
+
+    async def test_second_extension_request_does_not_spam_operator(self):
+        await self.register_fully()
+        await self.extend_request()
+        await self.provide_extend()
+        before = len([m for m in self.session.sent_to(ADMIN_CHAT)
+                      if isinstance(m, SendMessage)
+                      and "продление" in (m.text or "")])
+        await self.extend_request()
+        after = len([m for m in self.session.sent_to(ADMIN_CHAT)
+                     if isinstance(m, SendMessage)
+                     and "продление" in (m.text or "")])
+        self.assertEqual(before, after, "вторая заявка не нужна - ждём оплату")
+        self.assertIn("уже у оператора",
+                      self.session.sent_to(USER_ID)[-1].text)
+
+    async def test_bad_extend_form_is_rejected_with_reason(self):
+        await self.register_fully()
+        await self.extend_request()
+        await self.provide_extend("оплата: 3000")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
+                           if isinstance(m, SendMessage))
+        self.assertIn("Не хватает даты", replies)
 
     # ─── язык всего диалога ───
 

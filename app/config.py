@@ -123,6 +123,11 @@ class Config:
     purge_approved_days: int
     purge_rejected_days: int
     updates_log_days: int
+    # За сколько дней до конца аренды предупредить клиента и в котором
+    # часу слать напоминания и сводку. Час - в UTC: контейнер живёт в UTC,
+    # и «10 утра в Казани» - это 7:00 UTC.
+    remind_before_days: int
+    remind_hour_utc: int
     rate_soft: int
     rate_hard: int
 
@@ -211,6 +216,8 @@ class Config:
             purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
             purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
             updates_log_days=_int("UPDATES_LOG_DAYS", "7"),
+            remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
+            remind_hour_utc=_int("REMIND_HOUR_UTC", "7"),
             rate_soft=_int("RATE_SOFT", str(logic.RATE_SOFT_DEFAULT)),
             rate_hard=_int("RATE_HARD", str(logic.RATE_HARD_DEFAULT)),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",

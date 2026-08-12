@@ -84,6 +84,8 @@ services:
       PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
       PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
       UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
+      REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}
+      REMIND_HOUR_UTC: ${REMIND_HOUR_UTC:-7}
 
       STORAGE_DIR: /files/kyc
       TZ: ${TZ:-Europe/Moscow}
@@ -145,6 +147,8 @@ services:
       PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
       PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
       UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
+      REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}
+      REMIND_HOUR_UTC: ${REMIND_HOUR_UTC:-7}
 
       # Отдельный каталог: сканы из MAX не смешиваются со сканами из Telegram
       MAX_STORAGE_DIR: /files/kyc-max

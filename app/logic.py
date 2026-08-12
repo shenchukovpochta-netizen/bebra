@@ -735,6 +735,9 @@ ISSUE_ALIASES: dict[str, str] = {
     "замок": "kit_lock", "сумка": "kit_bag", "стяжка": "kit_strap",
     "шлем": "kit_helmet",
     "срок": "rent_term", "сроки": "rent_term",
+    # Явная дата окончания: нужна, когда срок написан словами
+    # («неделя»), - из такой строки бот даты не достанет.
+    "до": "rent_until", "окончание": "rent_until",
     "оплата": "rent_price", "сумма": "rent_price",
 }
 
@@ -981,6 +984,214 @@ def rental_is_active(data: dict) -> bool:
     возврата, и «Закрыть аренду» предлагалась бы человеку без велосипеда.
     """
     return bool(data.get("act_in_signed_at")) and not data.get("act_out_signed_at")
+
+
+# ─────────────────────── сроки аренды и продление ───────────────────────
+# Срок оператор пишет строкой («03.08 - 10.08») - так ему привычно, и
+# менять форму выдачи ради напоминаний нельзя. Даты из этой строки
+# вытаскиваются здесь: без них бот не знает, когда аренда кончается,
+# и продление держится на памяти менеджера.
+
+# Год после дефиса берётся только четырёхзначный: иначе «03.08-10.08»
+# читается как «3 августа 2010», и напоминание уезжает на десять лет назад.
+_TERM_DATE = re.compile(r"(\d{1,2})[.\-/](\d{1,2})(?:[./](\d{2,4})|-(\d{4}))?")
+# Одиночная дата после «с» - это начало срока, а не конец: «1 месяц с 01.08»
+# иначе означал бы, что аренда кончается в день выдачи.
+_LONE_START = re.compile(r"\bс\s*$", re.IGNORECASE)
+# Максимальный разумный срок одной аренды: длиннее - это опечатка в дате,
+# а не годовой прокат. Дальше такой срок в напоминания не берётся.
+MAX_TERM_DAYS = 400
+
+
+def _term_date(day: int, month: int, year: int | None, *, today: date) -> date | None:
+    if year is None:
+        year = today.year
+    elif year < 100:
+        year += 2000
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_term_dates(raw: str | None, *,
+                     today: date | None = None) -> tuple[date | None, date | None]:
+    """Строка срока -> (начало, конец). Любая часть может быть None.
+
+    Понимает «03.08 - 10.08», «03.08.2026 — 10.08.2026», «с 3.8 по 10.8»
+    и одиночную дату (её считаем датой окончания: именно она нужна для
+    напоминаний). Год без указания берётся текущий, с поправкой на переход
+    через Новый год: аренда с 28.12 по 04.01 заканчивается в следующем году.
+    """
+    today = today or date.today()
+    text = raw or ""
+    matches = list(_TERM_DATE.finditer(text))
+    found = [(m, _term_date(int(m[1]), int(m[2]),
+                            int(m[3] or m[4]) if (m[3] or m[4]) else None,
+                            today=today))
+             for m in matches]
+    found = [(m, d) for m, d in found if d is not None]
+    if not found:
+        return None, None
+    if len(found) == 1:
+        match, only = found[0]
+        if _LONE_START.search(text[:match.start()]):
+            return only, None       # «1 месяц с 01.08» - это дата начала
+        start, end = None, only
+    else:
+        start, end = found[0][1], found[1][1]
+
+    explicit_year = bool(re.search(r"\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}", raw or ""))
+    if not explicit_year:
+        # Декабрь -> январь: конец уехал бы на год назад относительно начала.
+        if start and end < start:
+            end = end.replace(year=end.year + 1)
+        # Срок, целиком оставшийся в прошлом году: аренда открыта в декабре,
+        # напоминание считается уже в январе.
+        if end < today and (today - end).days > 180:
+            end = end.replace(year=end.year + 1)
+            if start and start > end:
+                start = start.replace(year=start.year - 1)
+    if start and (end - start).days > MAX_TERM_DAYS:
+        return None, None       # не срок, а опечатка - лучше молчать
+    return start, end
+
+
+def rent_dates(issue: dict | None) -> tuple[date | None, date | None]:
+    """Даты аренды из данных выдачи: явное «до:» важнее строки срока."""
+    data = dict(issue or {})
+    start, end = parse_term_dates(data.get("rent_term"))
+    explicit = data.get("rent_until")
+    if explicit:
+        _, forced = parse_term_dates(str(explicit))
+        if forced:
+            end = forced
+    return start, end
+
+
+def term_with_new_end(term: str | None, end: date) -> str:
+    """Строка срока с новой датой окончания - для истории и карточек."""
+    start, _ = parse_term_dates(term)
+    tail = end.strftime("%d.%m")
+    return f"{start.strftime('%d.%m')} - {tail}" if start else tail
+
+
+# Форма продления: оператор называет новую дату и сумму. Ключи те же,
+# что в форме выдачи, - чтобы не заводить второй словарь в голове.
+EXTEND_ALIASES: dict[str, str] = {
+    "до": "rent_until", "по": "rent_until", "окончание": "rent_until",
+    "срок": "rent_until", "продлить до": "rent_until",
+    "оплата": "rent_price", "сумма": "rent_price",
+}
+EXTEND_FORM_TEMPLATE = "до: 17.08\nоплата: 3000 qr"
+
+
+def parse_extend_form(raw: str | None, *,
+                      today: date | None = None) -> tuple[dict[str, Any] | None, str]:
+    """Разбор ответа оператора на заявку о продлении.
+
+    Возвращает ({"rent_until": date, "rent_price": str}, "") либо
+    (None, ошибка). Дата обязана быть в будущем: продление «назад» -
+    это опечатка, а не решение.
+    """
+    today = today or date.today()
+    data: dict[str, Any] = {}
+    unknown: list[str] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        field = EXTEND_ALIASES.get(_clean(key).lower())
+        if field is None:
+            unknown.append(key.strip())
+            continue
+        value = _clean(value)
+        if not _no_markup(value):
+            return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
+        if field == "rent_until":
+            _, end = parse_term_dates(value, today=today)
+            if end is None:
+                return None, (f"Не понял дату «{value}». Нужен вид ДД.ММ "
+                              "или ДД.ММ.ГГГГ, например 17.08.")
+            data[field] = end
+        elif value:
+            data[field] = value
+    if unknown:
+        return None, ("Не понял строки: " + ", ".join(unknown[:5])
+                      + ". Ключи: до, оплата.")
+    if not data.get("rent_until"):
+        return None, "Не хватает даты: строка «до: 17.08»."
+    if data["rent_until"] <= today:
+        return None, (f"Дата {data['rent_until'].strftime('%d.%m.%Y')} уже прошла - "
+                      "продлевать нужно вперёд.")
+    if not data.get("rent_price"):
+        return None, "Не хватает суммы: строка «оплата: 3000 qr»."
+    return data, ""
+
+
+def days_left(until: date | None, *, today: date | None = None) -> int | None:
+    """Сколько дней осталось до конца аренды. Отрицательное - просрочка."""
+    if until is None:
+        return None
+    return (until - (today or date.today())).days
+
+
+# Ступени напоминания. Каждая шлётся один раз: отметка о ней лежит
+# в своей колонке, иначе клиент получал бы одно и то же на каждом проходе.
+REMIND_SOON, REMIND_LAST, REMIND_OVERDUE = "soon", "last", "overdue"
+REMIND_FIELD = {REMIND_SOON: "remind_soon_at", REMIND_LAST: "remind_last_at",
+                REMIND_OVERDUE: "remind_overdue_at"}
+
+
+def reminder_due(row: dict, *, before_days: int,
+                 today: date | None = None) -> str | None:
+    """Какое напоминание пора отправить этой аренде. None - никакое.
+
+    Просрочка важнее последнего дня, последний день важнее «скоро»: если
+    бот сутки лежал, человек должен получить актуальное состояние дел,
+    а не догоняющую цепочку из трёх сообщений.
+    """
+    left = days_left(row.get("rent_until"), today=today)
+    if left is None:
+        return None
+    if left < 0:
+        return None if row.get("remind_overdue_at") else REMIND_OVERDUE
+    if left == 0:
+        return None if row.get("remind_last_at") else REMIND_LAST
+    if left <= before_days:
+        return None if row.get("remind_soon_at") else REMIND_SOON
+    return None
+
+
+def deadline_digest(rows: Iterable[dict], *, today: date | None = None) -> str:
+    """Сводка оператору: что заканчивается и что просрочено. «» - тишина.
+
+    Пустую сводку не шлём намеренно: ежедневное «всё в порядке» перестают
+    читать через неделю, и настоящая строка о просрочке потеряется в ней.
+    """
+    today = today or date.today()
+    soon: list[str] = []
+    over: list[str] = []
+    for row in rows:
+        left = days_left(row.get("rent_until"), today=today)
+        if left is None:
+            continue
+        given = issue_context(row.get("issue_data"))
+        who = esc(row.get("full_name") or "без имени")
+        line = (f"• {who} (ID {row.get('tg_id')}) · № {esc(row.get('contract_no') or '—')}"
+                f" · {esc(given['bike_model'])} · до "
+                f"{row['rent_until'].strftime('%d.%m')}")
+        if left < 0:
+            over.append(f"{line} · просрочка {-left} дн.")
+        elif left <= 1:
+            soon.append(f"{line} · {'сегодня' if left == 0 else 'завтра'}")
+    parts = []
+    if over:
+        parts.append("⛔ <b>Просрочены</b>\n" + "\n".join(over))
+    if soon:
+        parts.append("⏳ <b>Заканчиваются</b>\n" + "\n".join(soon))
+    return "\n\n".join(parts)
 
 
 def close_reason(raw: str | None) -> Validation:

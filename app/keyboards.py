@@ -153,6 +153,18 @@ def paid(pay_url: str = "", lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def extend(lang: str = "ru") -> InlineKeyboardMarkup:
+    """«Продлить аренду» - кнопка под напоминанием и списком аренд.
+
+    Инлайн, а не в меню: меню и так из шести кнопок, а продление нужно
+    ровно в тот момент, когда бот напомнил о сроке.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_EXTEND"),
+                              callback_data="extend")],
+    ])
+
+
 def pay_confirm(tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Оплата получена", callback_data=f"pay:{tg_id}")],

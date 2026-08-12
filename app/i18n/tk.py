@@ -343,6 +343,17 @@ T: dict[str, str] = {
         "tassyklandy.\nKärende ýapyldy. Bizi saýlanyňyz üçin sag boluň!"
     ),
 
+    # ── сроки и продление ──
+    "BTN_EXTEND": "📅 Kärendäni uzaltmak",
+    "REMIND_SOON": "📅 Ýatlatma: <b>{bike}</b> kärendesi {until} gutarýar. Galan günler: {days}.\n\nUzaltmak isleseňiz — aşakdaky düwmä basyň, operator möçberi aýdar. Tabşyrjak bolsaňyz — menýudaky «🔚 Kärendäni ýapmak»; welosipedleri her gün 10:00-dan 19:00-a çenli kabul edýäris.",
+    "REMIND_LAST_DAY": "📅 Şu gün <b>{bike}</b> kärendesiniň soňky güni ({until} çenli).\n\nUzaltmak — aşakdaky düwme. Şu gün tabşyrjak bolsaňyz — menýudaky «🔚 Kärendäni ýapmak» düwmesine basyň, wagty ylalaşarys.",
+    "REMIND_OVERDUE": "⚠️ <b>{bike}</b> kärendesiniň möhleti {until} gutardy.\n\nHaýyş edýäris, aşakdaky düwme bilen uzaldyň ýa-da welosipedi tabşyryň — ýogsam şertnama boýunça peýdalanmak tölegi hasaplanmagyny dowam edýär.\nOperator bilen eýýäm ylalaşan bolsaňyz — şu habara jogap ýazyň.",
+    "EXTEND_NO_RENTAL": "Sizde işjeň kärende ýok — uzaltmaly zat ýok. Welosiped almak üçin: «🚲 Kärendä almak» düwmesi.",
+    "EXTEND_ALREADY_ASKED": "Uzaltmak baradaky arzaňyz eýýäm operatorda — ol siziň bilen habarlaşyp möçberi aýdar. Gaýtadan ibermek gerek däl.",
+    "EXTEND_REQUESTED": "✅ Uzaltmak arzasy operatora ýetirildi. Ol täze möhleti tassyklar we töleg möçberini iberer — welosiped sizde galýar.",
+    "EXTEND_REQUEST_FAILED": "Tehniki näsazlyk sebäpli arzany ýetirip bolmady. Bize göni ýazyň: " + URL,
+    "EXTEND_CONFIRMED": "✅ Kärende {until} çenli uzaldyldy. Töleg üçin sag boluň!\nŞertnama we akt öňküligine galýar — täzesine gol çekmek gerek däl.",
+
     "BTN_RENT": "🚲 Kärendä almak",
     "BTN_TRIPS": "📋 Meniň kärendelerim",
     "BTN_TARIFFS": "💰 Nyrhlar",

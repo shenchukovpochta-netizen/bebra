@@ -92,13 +92,25 @@ create table if not exists bot.users (
   act_out_sha256     text,
   act_out_signed_at  timestamptz,
 
-  -- Язык ветки частых вопросов. Выбирается первым вопросом ветки
-  -- и запоминается; на остальной сценарий бота не влияет.
   -- Язык всего диалога с клиентом (выбирается первым вопросом /start).
   -- faq_lang - прежняя колонка только для ветки вопросов, оставлена ради
   -- бэкфилла и старых строк; код читает и пишет lang.
   lang               text,
   faq_lang           text,
+
+  -- Сроки аренды. rent_until вычисляется из строки срока в данных выдачи
+  -- («03.08 - 10.08») - по ней бот напоминает об окончании и считает
+  -- просрочку. Отметки напоминаний хранятся, чтобы не слать их по кругу
+  -- при каждом проходе; extend_until - дата из принятой заявки на
+  -- продление, ждущая оплаты.
+  rent_from          date,
+  rent_until         date,
+  extend_until       date,
+  extend_chat_id     bigint,
+  extend_message_id  bigint,
+  remind_soon_at     timestamptz,
+  remind_last_at     timestamptz,
+  remind_overdue_at  timestamptz,
 
   -- Запрос клиента на закрытие аренды: причина с его слов и момент запроса.
   -- Причина попадает в отчёт о закрытии, поэтому хранится, а не только
@@ -171,13 +183,28 @@ alter table bot.users add column if not exists close_reason       text;
 alter table bot.users add column if not exists close_requested_at timestamptz;
 alter table bot.users add column if not exists faq_lang           text;
 alter table bot.users add column if not exists lang               text;
+alter table bot.users add column if not exists rent_from          date;
+alter table bot.users add column if not exists rent_until         date;
+alter table bot.users add column if not exists extend_until       date;
+alter table bot.users add column if not exists extend_chat_id     bigint;
+alter table bot.users add column if not exists extend_message_id  bigint;
+alter table bot.users add column if not exists remind_soon_at     timestamptz;
+alter table bot.users add column if not exists remind_last_at     timestamptz;
+alter table bot.users add column if not exists remind_overdue_at  timestamptz;
 -- Бэкфилл: язык, выбранный раньше в ветке вопросов, становится языком
 -- всего диалога. Идемпотентно: после первого прогона обновлять нечего.
 update bot.users set lang = faq_lang where lang is null and faq_lang is not null;
+-- Напоминания об окончании срока идут по этому индексу: активных аренд
+-- со сроком заметно меньше, чем строк в таблице.
+create index if not exists users_rent_until_idx on bot.users (rent_until)
+  where rent_until is not null and act_out_signed_at is null;
+
 -- По этим индексам ищется заявка при ответе оператора на приглашения
 -- «данные выдачи» и «данные возврата».
 create index if not exists users_issue_msg_idx on bot.users (issue_chat_id, issue_message_id)
   where issue_message_id is not null;
+create index if not exists users_extend_msg_idx on bot.users (extend_chat_id, extend_message_id)
+  where extend_message_id is not null;
 create index if not exists users_return_msg_idx on bot.users (return_chat_id, return_message_id)
   where return_message_id is not null;
 

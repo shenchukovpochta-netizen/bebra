@@ -642,3 +642,142 @@ class TestCloseReason(unittest.TestCase):
 
     def test_markup_rejected(self):
         self.assertFalse(logic.close_reason("<b>работа</b>").ok)
+
+
+class TestTermDates(unittest.TestCase):
+    TODAY = date(2026, 8, 12)
+
+    def parse(self, raw):
+        return logic.parse_term_dates(raw, today=self.TODAY)
+
+    def test_range_with_and_without_spaces(self):
+        for raw in ("03.08 - 10.08", "03.08-10.08", "03.08 — 10.08",
+                    "с 3.8 по 10.8"):
+            self.assertEqual(self.parse(raw),
+                             (date(2026, 8, 3), date(2026, 8, 10)), raw)
+
+    def test_dash_separated_dates_are_not_a_year(self):
+        """«03.08-10.08» - это диапазон, а не «3 августа 2010»: двузначное
+        число после дефиса годом не считается."""
+        self.assertEqual(self.parse("03.08-10.08")[1], date(2026, 8, 10))
+        # четырёхзначный год после дефиса - всё ещё год
+        self.assertEqual(self.parse("03-08-2026 - 10-08-2026"),
+                         (date(2026, 8, 3), date(2026, 8, 10)))
+
+    def test_single_date_is_the_end(self):
+        self.assertEqual(self.parse("10.08"), (None, date(2026, 8, 10)))
+
+    def test_single_date_after_s_is_the_start(self):
+        """«1 месяц с 01.08» - дата начала. Приняв её за конец, бот прислал бы
+        напоминание об окончании в день выдачи."""
+        self.assertEqual(self.parse("1 месяц с 01.08"), (date(2026, 8, 1), None))
+
+    def test_new_year_rollover(self):
+        self.assertEqual(self.parse("28.12 - 04.01"),
+                         (date(2026, 12, 28), date(2027, 1, 4)))
+
+    def test_words_give_nothing(self):
+        self.assertEqual(self.parse("неделя"), (None, None))
+        self.assertEqual(self.parse(""), (None, None))
+        self.assertEqual(self.parse(None), (None, None))
+
+    def test_impossible_date_ignored(self):
+        self.assertEqual(self.parse("31.02 - 10.08")[1], date(2026, 8, 10))
+
+    def test_absurd_range_rejected(self):
+        """Больше года - это опечатка в дате, а не аренда: молчим, вместо
+        того чтобы годами не напоминать о просрочке."""
+        self.assertEqual(self.parse("03.08.2026 - 10.08.2028"), (None, None))
+
+    def test_explicit_until_wins_over_term(self):
+        issue = {"rent_term": "неделя", "rent_until": "20.08"}
+        self.assertEqual(logic.rent_dates(issue)[1].strftime("%d.%m"), "20.08")
+
+    def test_term_with_new_end_keeps_the_start(self):
+        self.assertEqual(logic.term_with_new_end("03.08 - 10.08",
+                                                 date(2026, 8, 17)),
+                         "03.08 - 17.08")
+        self.assertEqual(logic.term_with_new_end("неделя", date(2026, 8, 17)),
+                         "17.08")
+
+
+class TestExtendForm(unittest.TestCase):
+    TODAY = date(2026, 8, 12)
+
+    def parse(self, raw):
+        return logic.parse_extend_form(raw, today=self.TODAY)
+
+    def test_minimal_form(self):
+        data, err = self.parse("до: 17.08\nоплата: 3000 qr")
+        self.assertEqual(err, "")
+        self.assertEqual(data["rent_until"], date(2026, 8, 17))
+        self.assertEqual(data["rent_price"], "3000 qr")
+
+    def test_past_date_rejected(self):
+        data, err = self.parse("до: 01.08.2026\nоплата: 3000")
+        self.assertIsNone(data)
+        self.assertIn("прошла", err)
+
+    def test_missing_parts_named(self):
+        self.assertIn("даты", self.parse("оплата: 3000")[1])
+        self.assertIn("суммы", self.parse("до: 17.08")[1])
+
+    def test_unknown_key_is_reported(self):
+        data, err = self.parse("рама: 123\nдо: 17.08\nоплата: 3000")
+        self.assertIsNone(data)
+        self.assertIn("рама", err)
+
+    def test_markup_rejected(self):
+        self.assertIsNone(self.parse("до: 17.08\nоплата: <b>3000</b>")[0])
+
+
+class TestReminders(unittest.TestCase):
+    TODAY = date(2026, 8, 12)
+
+    def row(self, until, **flags):
+        base = {"tg_id": 1, "full_name": "Иванов И.", "contract_no": "АВ-1",
+                "issue_data": {"bike_model": "Truck+"}, "rent_until": until}
+        base.update(flags)
+        return base
+
+    def due(self, row):
+        return logic.reminder_due(row, before_days=2, today=self.TODAY)
+
+    def test_stages_by_days_left(self):
+        self.assertEqual(self.due(self.row(date(2026, 8, 14))), logic.REMIND_SOON)
+        self.assertEqual(self.due(self.row(date(2026, 8, 12))), logic.REMIND_LAST)
+        self.assertEqual(self.due(self.row(date(2026, 8, 10))), logic.REMIND_OVERDUE)
+        self.assertIsNone(self.due(self.row(date(2026, 9, 1))))
+        self.assertIsNone(self.due(self.row(None)))
+
+    def test_each_stage_fires_once(self):
+        for until, field in ((date(2026, 8, 14), "remind_soon_at"),
+                             (date(2026, 8, 12), "remind_last_at"),
+                             (date(2026, 8, 10), "remind_overdue_at")):
+            self.assertIsNone(self.due(self.row(until, **{field: "уже"})))
+
+    def test_overdue_wins_over_stale_flags(self):
+        """Бот сутки лежал: клиент должен получить актуальную просрочку,
+        а не догоняющую цепочку из трёх сообщений."""
+        row = self.row(date(2026, 8, 10), remind_soon_at="было",
+                       remind_last_at="было")
+        self.assertEqual(self.due(row), logic.REMIND_OVERDUE)
+
+    def test_digest_lists_overdue_and_ending(self):
+        rows = [self.row(date(2026, 8, 10)),
+                {**self.row(date(2026, 8, 12)), "tg_id": 2},
+                {**self.row(date(2026, 8, 13)), "tg_id": 3},
+                {**self.row(date(2026, 9, 1)), "tg_id": 4}]
+        digest = logic.deadline_digest(rows, today=self.TODAY)
+        self.assertIn("Просрочены", digest)
+        self.assertIn("просрочка 2 дн.", digest)
+        self.assertIn("сегодня", digest)
+        self.assertIn("завтра", digest)
+        self.assertNotIn("ID 4", digest, "далёкая аренда в сводке не нужна")
+
+    def test_digest_is_empty_when_nothing_happens(self):
+        """Пустую сводку не шлём: ежедневное «всё в порядке» перестают
+        читать, и настоящая строка о просрочке в ней потеряется."""
+        self.assertEqual(
+            logic.deadline_digest([self.row(date(2026, 9, 1))], today=self.TODAY),
+            "")

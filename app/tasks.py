@@ -1,18 +1,27 @@
-"""Ретеншен: удаление сканов и договоров по сроку, чистка журнала апдейтов."""
+"""Фоновые задачи: ретеншен и напоминания о сроке аренды."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date, datetime, timezone
+from typing import Any
 
-from . import logic
+from aiogram.exceptions import TelegramAPIError
+
+from . import i18n
+from . import keyboards as kb
+from . import logic, texts
 from .config import Config
-from .db import Database
+from .db import Database, utcnow
 from .services import files
 
 log = logging.getLogger(__name__)
 
 INTERVAL_SECONDS = 6 * 3600
+# Напоминания проверяются чаще ретеншена: пропущенный из-за перезапуска
+# час не должен стоить клиенту целого дня молчания.
+REMIND_INTERVAL_SECONDS = 900
 
 # Ссылки на живые фоновые задачи. Без них сборщик мусора вправе уничтожить
 # задачу на середине: событийный цикл держит только слабую ссылку. Симптом -
@@ -71,3 +80,95 @@ async def retention_loop(db: Database, cfg: Config) -> None:
         except Exception:                               # noqa: BLE001
             log.exception("прогон ретеншена не удался")
         await asyncio.sleep(INTERVAL_SECONDS)
+
+
+# ─────────────────────── напоминания о сроке ───────────────────────
+
+REMIND_TEXT = {
+    logic.REMIND_SOON: "REMIND_SOON",
+    logic.REMIND_LAST: "REMIND_LAST_DAY",
+    logic.REMIND_OVERDUE: "REMIND_OVERDUE",
+}
+
+
+async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str) -> bool:
+    """Одно напоминание клиенту. False - не доставлено (бот заблокирован).
+
+    Отметка о напоминании ставится в любом случае: иначе заблокировавший
+    бота человек заставлял бы систему пытаться снова каждые пятнадцать
+    минут до конца времён.
+    """
+    lang = i18n.user_lang(row)
+    given = logic.issue_context(row.get("issue_data"))
+    until = row["rent_until"]
+    text = i18n.t(lang, REMIND_TEXT[stage]).format(
+        bike=logic.esc(given["bike_model"]),
+        until=until.strftime("%d.%m.%Y"),
+        days=max(logic.days_left(until) or 0, 0),
+    )
+    delivered = True
+    try:
+        await bot.send_message(row["tg_id"], text, reply_markup=kb.extend(lang))
+    except TelegramAPIError as exc:
+        log.warning("напоминание %s для %s не доставлено: %s",
+                    stage, row["tg_id"], exc)
+        delivered = False
+    await db.patch(row["tg_id"], **{logic.REMIND_FIELD[stage]: utcnow()})
+    await db.log_event(row["tg_id"], "rent_reminder",
+                       {"stage": stage, "delivered": delivered})
+    return delivered
+
+
+async def remind_once(bot: Any, db: Database, cfg: Config, *,
+                      today: date | None = None) -> tuple[int, str]:
+    """Один проход напоминаний. Возвращает (сколько отправлено, сводка).
+
+    Сводка возвращается наружу, а не шлётся здесь: решение о том, слать ли
+    её сегодня, принимает вызывающий - оператору она нужна раз в день,
+    а проход идёт каждые пятнадцать минут.
+    """
+    rows = [dict(r) for r in await db.active_rentals()]
+    sent = 0
+    for row in rows:
+        stage = logic.reminder_due(row, before_days=cfg.remind_before_days,
+                                   today=today)
+        if stage is None:
+            continue
+        await _notify_deadline(bot, db, row, stage)
+        sent += 1
+    return sent, logic.deadline_digest(rows, today=today)
+
+
+async def reminders_loop(bot: Any, db: Database, cfg: Config) -> None:
+    """Напоминания клиентам и ежедневная сводка оператору.
+
+    Клиентские напоминания идут в «рабочий» час: сообщение о конце аренды
+    в три ночи бесит и не читается. Сводка уходит раз в сутки, в тот же час
+    и только если в ней есть строки.
+    """
+    digest_sent_on: date | None = None
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            if now.hour == cfg.remind_hour_utc:
+                sent, digest = await remind_once(bot, db, cfg, today=now.date())
+                if sent:
+                    log.info("напоминаний о сроке отправлено: %s", sent)
+                if digest and digest_sent_on != now.date():
+                    digest_sent_on = now.date()
+                    await _send_digest(bot, cfg, digest, now.date())
+        except asyncio.CancelledError:
+            raise
+        except Exception:                               # noqa: BLE001
+            log.exception("прогон напоминаний не удался")
+        await asyncio.sleep(REMIND_INTERVAL_SECONDS)
+
+
+async def _send_digest(bot: Any, cfg: Config, digest: str, today: date) -> None:
+    try:
+        await bot.send_message(
+            cfg.contract_chat_id,
+            texts.DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
+            + "\n\n" + digest)
+    except TelegramAPIError:
+        log.exception("сводка по срокам не доставлена")
