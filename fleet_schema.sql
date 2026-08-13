@@ -92,6 +92,10 @@ alter table fleet.bikes add column if not exists blocked_reason text;
 -- каждый прогон фоновой задачи.
 alter table fleet.bikes add column if not exists last_service_at     timestamptz not null default now();
 alter table fleet.bikes add column if not exists service_notified_at timestamptz;
+-- Низкий заряд тяговой АКБ (по телеметрии StarLine): отметка «клиента уже
+-- предупредили». Снимается, когда заряд снова поднялся, - иначе одно
+-- предупреждение на весь цикл разряда превратилось бы в спам каждый прогон.
+alter table fleet.bikes add column if not exists low_battery_at timestamptz;
 
 -- Журнал команд StarLine: кто, когда, чем закончилось. Блокировка чужого
 -- (пусть и своего же) имущества - действие, за которое надо отвечать,
@@ -224,3 +228,7 @@ create table if not exists fleet.payments (
 create unique index if not exists payments_pending_rental_idx
   on fleet.payments (rental_id) where status = 'pending';
 create index if not exists payments_status_idx on fleet.payments (status);
+-- Счёт-продление: оплата сдвигает срок аренды на столько дней. Колонка
+-- на счёте, а не отдельная сущность: продление и есть оплата, без денег
+-- срок не двигается.
+alter table fleet.payments add column if not exists extend_days integer;

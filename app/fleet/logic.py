@@ -389,6 +389,26 @@ def battery_percent(voltage) -> int | None:
     return max(0, min(100, round(share * 100)))
 
 
+# Порог «пора на зарядку» и порог сброса разнесены: один порог заставил бы
+# уведомление мигать на каждом колебании напряжения вокруг 20%.
+LOW_BATTERY_PCT = 20
+BATTERY_OK_PCT = 40
+
+
+def battery_alert(percent, *, notified: bool) -> str | None:
+    """Что делать с отметкой «о заряде предупреждали»: 'alert' - заряд упал
+    и клиенту пора сказать, 'clear' - батарею зарядили и отметку снять,
+    None - ничего не менять. Нет телеметрии (None) - ничего: молчание
+    датчика не повод ни пугать клиента, ни забывать, что его пугали."""
+    if percent is None:
+        return None
+    if not notified and percent <= LOW_BATTERY_PCT:
+        return "alert"
+    if notified and percent >= BATTERY_OK_PCT:
+        return "clear"
+    return None
+
+
 def price_amount(raw: str | None) -> int | None:
     """Сумма в рублях из строки оплаты: «3000qr» -> 3000, «3 000 нал» -> 3000.
 
@@ -495,6 +515,63 @@ def parse_due(rent_term: str | None, *, today: date) -> date | None:
     if not matches[-1][2] and value < anchor:
         return to_date(matches[-1], anchor.year + 1)     # None на 29.02
     return value
+
+
+def term_days(rent_term: str | None, opened_at, due_at) -> int | None:
+    """Длина оплаченного периода в днях - шаг продления.
+
+    Сначала по датам самого срока («03.08 - 10.08» - это 7 дней): текст
+    срока не меняется при продлениях, поэтому шаг стабилен. Если в сроке
+    меньше двух дат - по факту: due_at минус день выдачи. Неправдоподобная
+    длина (ноль, отрицательная, больше квартала) - None: продлевать
+    «на 400 дней» из-за опечатки в сроке нельзя.
+    """
+    def sane(days: int) -> int | None:
+        return days if 1 <= days <= 92 else None
+
+    def to_date(match, year_default: int) -> date | None:
+        day, month, year_raw = match
+        year = int(year_raw) if year_raw else year_default
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, int(month), int(day))
+        except ValueError:
+            return None
+
+    matches = _TERM_DATE.findall(rent_term or "")
+    if len(matches) >= 2:
+        # Год начала - год выдачи, а не «сегодня»: для длины периода важен
+        # только переход через Новый год внутри самого срока.
+        base_year = (opened_at.year if opened_at is not None
+                     else date.today().year)
+        start = to_date(matches[0], base_year)
+        end = to_date(matches[-1], start.year if start else base_year)
+        if start is not None and end is not None:
+            if not matches[-1][2] and end < start:      # «28.12 - 04.01»
+                end = to_date(matches[-1], start.year + 1) or end
+            got = sane((end - start).days)
+            if got is not None:
+                return got
+    if due_at is not None and opened_at is not None:
+        opened = opened_at.date() if isinstance(opened_at, datetime) else opened_at
+        return sane((due_at - opened).days)
+    return None
+
+
+def extension_offer(*, rent_term, rent_price, opened_at, due_at) -> dict | None:
+    """Предложение «продлить кнопкой»: на сколько дней и за сколько рублей.
+
+    Шаг - длина оплаченного периода, сумма - из строки оплаты договора.
+    Чего-то не хватает - None: кнопка без честной суммы превратилась бы
+    в счёт «на глазок», такое пусть выставляет оператор руками в CRM.
+    """
+    days = term_days(rent_term, opened_at, due_at)
+    amount = price_amount(rent_price)
+    if days is None or amount is None or due_at is None:
+        return None
+    return {"days": days, "amount": amount,
+            "new_due": due_at + timedelta(days=days)}
 
 
 # ─────────────────── форма фиксации: разбор в CRM ───────────────────

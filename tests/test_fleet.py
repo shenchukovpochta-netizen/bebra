@@ -439,6 +439,80 @@ class TestDue(unittest.TestCase):
                          date(2027, 1, 4))
 
 
+class TestBatteryAlert(unittest.TestCase):
+    def test_alert_when_low_and_silent(self):
+        self.assertEqual(fleet.battery_alert(15, notified=False), "alert")
+        self.assertEqual(fleet.battery_alert(20, notified=False), "alert")
+
+    def test_no_repeat_while_low(self):
+        self.assertIsNone(fleet.battery_alert(15, notified=True))
+
+    def test_hysteresis_between_thresholds(self):
+        # 30% - выше порога тревоги, но ниже порога «зарядили»: ни нового
+        # предупреждения, ни сброса - колебания напряжения не спамят.
+        self.assertIsNone(fleet.battery_alert(30, notified=False))
+        self.assertIsNone(fleet.battery_alert(30, notified=True))
+
+    def test_clear_after_charge(self):
+        self.assertEqual(fleet.battery_alert(80, notified=True), "clear")
+        self.assertIsNone(fleet.battery_alert(80, notified=False))
+
+    def test_silent_telemetry_changes_nothing(self):
+        self.assertIsNone(fleet.battery_alert(None, notified=False))
+        self.assertIsNone(fleet.battery_alert(None, notified=True))
+
+
+class TestTermDays(unittest.TestCase):
+    OPENED = datetime(2026, 8, 3, 12, 0)
+
+    def test_from_term_dates(self):
+        self.assertEqual(
+            fleet.term_days("03.08 - 10.08", self.OPENED, date(2026, 8, 10)), 7)
+
+    def test_term_dates_beat_shifted_due(self):
+        # Аренду уже продлевали: due уехал, но шаг продления - длина
+        # периода из текста срока, а не разница «выдача - новый due».
+        self.assertEqual(
+            fleet.term_days("03.08 - 10.08", self.OPENED, date(2026, 8, 17)), 7)
+
+    def test_new_year_span(self):
+        self.assertEqual(
+            fleet.term_days("28.12 - 04.01", datetime(2026, 12, 28), None), 7)
+
+    def test_fallback_to_due_minus_opened(self):
+        self.assertEqual(
+            fleet.term_days("до конца недели", self.OPENED, date(2026, 8, 10)), 7)
+
+    def test_insane_spans_rejected(self):
+        self.assertIsNone(fleet.term_days("03.08 - 03.08", self.OPENED, None))
+        self.assertIsNone(
+            fleet.term_days("03.08.2025 - 03.08.2026", self.OPENED, None))
+        self.assertIsNone(fleet.term_days(None, None, date(2026, 8, 10)))
+
+
+class TestExtensionOffer(unittest.TestCase):
+    OPENED = datetime(2026, 8, 3, 12, 0)
+
+    def test_full_offer(self):
+        offer = fleet.extension_offer(
+            rent_term="03.08 - 10.08", rent_price="3000qr",
+            opened_at=self.OPENED, due_at=date(2026, 8, 10))
+        self.assertEqual(offer, {"days": 7, "amount": 3000,
+                                 "new_due": date(2026, 8, 17)})
+
+    def test_no_price_no_offer(self):
+        self.assertIsNone(fleet.extension_offer(
+            rent_term="03.08 - 10.08", rent_price="перевод другу",
+            opened_at=self.OPENED, due_at=date(2026, 8, 10)))
+
+    def test_no_due_no_offer(self):
+        # Срок не распознан - двигать нечего: продление без точки отсчёта
+        # выставило бы счёт в никуда.
+        self.assertIsNone(fleet.extension_offer(
+            rent_term="до победы", rent_price="3000",
+            opened_at=self.OPENED, due_at=None))
+
+
 GOOD_REG_FORM = {
     "fio": "Иванов Иван Иванович",
     "phone": "89050238366",

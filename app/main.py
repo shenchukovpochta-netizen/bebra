@@ -118,6 +118,13 @@ async def run() -> None:
     elif cfg.starline_auto_block:
         log.warning("STARLINE_AUTO_BLOCK=1, но реквизиты StarLine не заданы - "
                     "автоблокировка не работает")
+    # Слежение за зарядом АКБ - при любом подключённом StarLine, без
+    # отдельного флага: предупреждение «зарядите батарею» безобидно,
+    # в отличие от обездвиживания.
+    battery = None
+    if starline is not None:
+        battery = asyncio.create_task(tasks.battery_loop(
+            fleet_db, starline, bot, cfg.contract_chat_id))
     # Оплата СБП через Точку: минутный опрос статусов счетов.
     payments = None
     if tochka is not None:
@@ -165,6 +172,9 @@ async def run() -> None:
         if autoblock is not None:
             autoblock.cancel()
             background.append(autoblock)
+        if battery is not None:
+            battery.cancel()
+            background.append(battery)
         if payments is not None:
             payments.cancel()
             background.append(payments)

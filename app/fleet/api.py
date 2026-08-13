@@ -146,21 +146,25 @@ class Api:
         history = await self.fleet.rentals_history(tg_id)
         rental_json = None
         if rental:
+            payment = await self.fleet.pending_payment_of_rental(rental["id"])
             rental_json = {
                 "model": rental["model"], "contract_no": rental["contract_no"],
                 "term": rental["rent_term"], "price": rental["rent_price"],
-                "due_at": str(rental["due_at"] or ""),
+                # Дата по-русски, как в сообщениях бота: клиенту в бейдж
+                # «вернуть до», а не ISO из базы.
+                "due_at": (rental["due_at"].strftime("%d.%m.%Y")
+                           if rental["due_at"] else ""),
                 # closed_at здесь всегда null: запрос отдаёт только живую
                 # аренду, поэтому просрочка меряется по одному due_at.
                 "overdue": logic.overdue(rental["due_at"], None,
                                          today=date.today()),
                 "blocked": bool(rental["blocked"]),
                 "battery": await self._battery(rental["starline_device_id"]),
-                "payment": self._payment_json(
-                    await self.fleet.pending_payment_of_rental(rental["id"])),
+                "payment": self._payment_json(payment),
                 # Плановое ТО раз в две недели: клиент видит, когда пора.
                 "service_days": logic.service_days_left(
                     rental["last_service_at"], now=datetime.now()),
+                "extend": self._extend_offer(rental, payment),
             }
         return _json({
             "booking": booking and {
@@ -190,7 +194,24 @@ class Api:
         percent = logic.battery_percent(volts)
         if percent is None:
             return None
-        return {"percent": percent, "voltage": round(float(volts), 1)}
+        return {"percent": percent, "voltage": round(float(volts), 1),
+                # Порог «пора на зарядку» отдаёт сервер: он один на баннер
+                # в приложении и на фоновое уведомление от бота.
+                "low": percent <= logic.LOW_BATTERY_PCT}
+
+    def _extend_offer(self, rental, payment) -> dict | None:
+        """Предложение «продлить кнопкой» для карточки клиента. None -
+        кнопки нет: без Точки платить нечем, при живом счёте продление
+        создало бы второй pending (и упёрлось бы в инвариант базы)."""
+        if self.tochka is None or payment is not None:
+            return None
+        offer = logic.extension_offer(
+            rent_term=rental["rent_term"], rent_price=rental["rent_price"],
+            opened_at=rental["opened_at"], due_at=rental["due_at"])
+        if offer is None:
+            return None
+        return {"days": offer["days"], "amount": offer["amount"],
+                "new_due": offer["new_due"].strftime("%d.%m.%Y")}
 
     @staticmethod
     def _payment_json(payment) -> dict | None:
@@ -268,6 +289,76 @@ class Api:
             return _json({"error": "Живой брони не было."}, status=409)
         await self._notify_cancel(user, bike_id)
         return _json({"ok": True})
+
+    async def extend(self, request: web.Request) -> web.Response:
+        """Продление аренды кнопкой: счёт СБП на автосчитанную сумму.
+
+        Срок двигается ТОЛЬКО после подтверждения оплаты банком (в
+        payments_loop) - кнопка лишь выставляет счёт. Сумма и шаг считаются
+        сервером заново, а не берутся из запроса: клиент не должен уметь
+        продлиться на год за сто рублей, подправив JSON.
+        """
+        user = self._client(request)
+        if user is None:
+            return _json({"error": "auth"}, status=401)
+        if self.tochka is None:
+            return _json({"error": "Оплата в приложении не подключена - "
+                          "продлите через чат с ботом."}, status=503)
+        rental = await self.fleet.active_rental_of(user["id"])
+        if rental is None:
+            return _json({"error": "Активной аренды нет."}, status=409)
+        if await self.fleet.pending_payment_of_rental(rental["id"]) is not None:
+            return _json({"error": "Сначала оплатите текущий счёт - он уже "
+                          "выставлен и виден в приложении."}, status=409)
+        offer = logic.extension_offer(
+            rent_term=rental["rent_term"], rent_price=rental["rent_price"],
+            opened_at=rental["opened_at"], due_at=rental["due_at"])
+        if offer is None:
+            return _json({"error": "Сумму продления по договору посчитать "
+                          "не получилось - напишите нам в чат с ботом."},
+                         status=409)
+        purpose = (f"Продление аренды на {offer['days']} дн."
+                   + (f", договор {rental['contract_no']}"
+                      if rental["contract_no"] else ""))
+        try:
+            qr = await self.tochka.create_qr(offer["amount"], purpose)
+        except Exception:                               # noqa: BLE001
+            log.exception("Точка: счёт продления аренды %s не зарегистрирован",
+                          rental["id"])
+            return _json({"error": "Банк не принял счёт - попробуйте ещё раз "
+                          "чуть позже."}, status=502)
+        try:
+            payment = await self.fleet.create_payment(
+                rental["id"], tg_id=user["id"], client_id=None,
+                amount=offer["amount"], purpose=purpose, qrc_id=qr["qrc_id"],
+                qr_payload=qr["payload"], created_by=None,
+                extend_days=offer["days"])
+        except asyncpg.UniqueViolationError:
+            # Гонка с оператором, выставившим счёт между проверкой и вставкой.
+            return _json({"error": "По аренде уже есть неоплаченный счёт - "
+                          "обновите экран."}, status=409)
+        await self._notify_extend_request(rental, offer)
+        return _json({"ok": True, "payment": self._payment_json(payment),
+                      "days": offer["days"], "new_due": offer["new_due"]
+                      .strftime("%d.%m.%Y")})
+
+    async def _notify_extend_request(self, rental, offer) -> None:
+        """Карточка оператору: клиент сам выставил себе счёт на продление.
+        Сбой доставки счёт не отменяет - он уже в базе и в опросе оплат."""
+        if self.bot is None or self.admin_chat_id is None:
+            return
+        from .. import texts
+        brief = await self.fleet.rental_brief(rental["id"])
+        try:
+            await self.bot.send_message(
+                self.admin_chat_id, texts.FLEET_EXTEND_REQUEST_CARD.format(
+                    client=logic.esc((brief and brief["client_name"]) or "—"),
+                    number=logic.esc(rental["contract_no"] or "—"),
+                    days=offer["days"], amount=offer["amount"],
+                    due=offer["new_due"].strftime("%d.%m.%Y")))
+        except Exception:                               # noqa: BLE001
+            log.exception("карточка продления аренды %s не доставлена",
+                          rental["id"])
 
     # ─────────────────────── CRM ───────────────────────
 
@@ -1082,6 +1173,7 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.get("/api/me", api.me),
         web.post("/api/book", api.book),
         web.post("/api/cancel", api.cancel),
+        web.post("/api/extend", api.extend),
         # CRM: страница и её API. Всё под _is_admin - токен или админский
         # initData; без них любой запрос отвечает 401.
         web.get("/admin", api.admin_page),

@@ -185,19 +185,46 @@ async def _after_paid(fleet, payment, bot, admin_chat_id, starline) -> None:
     разблокировка. Каждый шаг сам по себе: сбой одного не съедает остальные."""
     rental = (await fleet.rental_brief(payment["rental_id"])
               if payment["rental_id"] else None)
-    if bot is not None and admin_chat_id is not None:
+    # Счёт-продление: оплата подтверждена - срок двигается ЗДЕСЬ, до
+    # карточек, чтобы в них уже стояла новая дата. Не сдвинулся (аренда
+    # закрыта, срока нет) - деньги пришли всё равно, оператору об этом
+    # отдельная карточка вместо победной.
+    extended_to = None
+    if payment["extend_days"] and payment["rental_id"]:
         try:
-            await bot.send_message(admin_chat_id, texts.FLEET_PAID_CARD.format(
-                amount=payment["amount"],
-                client=logic.esc((rental and rental["client_name"]) or "—"),
-                number=logic.esc((rental and rental["contract_no"]) or "—")))
+            extended_to = await fleet.extend_rental(payment["rental_id"],
+                                                    payment["extend_days"])
+        except Exception:                               # noqa: BLE001
+            log.exception("продление по счёту #%s не записано", payment["id"])
+        if extended_to is not None:
+            log.info("аренда %s продлена до %s (счёт #%s)",
+                     payment["rental_id"], extended_to, payment["id"])
+    due_h = extended_to.strftime("%d.%m.%Y") if extended_to else ""
+    if bot is not None and admin_chat_id is not None:
+        client = logic.esc((rental and rental["client_name"]) or "—")
+        number = logic.esc((rental and rental["contract_no"]) or "—")
+        if extended_to is not None:
+            card = texts.FLEET_EXTEND_PAID_CARD.format(
+                amount=payment["amount"], client=client, number=number,
+                due=due_h)
+        elif payment["extend_days"]:
+            card = texts.FLEET_EXTEND_LOST_CARD.format(
+                payment_id=payment["id"], amount=payment["amount"],
+                client=client)
+        else:
+            card = texts.FLEET_PAID_CARD.format(
+                amount=payment["amount"], client=client, number=number)
+        try:
+            await bot.send_message(admin_chat_id, card)
         except Exception:                               # noqa: BLE001
             log.exception("карточка оплаты #%s не доставлена", payment["id"])
     if bot is not None and payment["tg_id"]:
+        text = (texts.FLEET_EXTEND_PAID_CLIENT.format(
+                    amount=payment["amount"], due=due_h)
+                if extended_to is not None
+                else texts.FLEET_PAID_CLIENT.format(amount=payment["amount"]))
         try:
-            await bot.send_message(payment["tg_id"],
-                                   texts.FLEET_PAID_CLIENT.format(
-                                       amount=payment["amount"]))
+            await bot.send_message(payment["tg_id"], text)
         except Exception:                               # noqa: BLE001
             log.exception("клиент %s не узнал об оплате", payment["tg_id"])
     if rental is not None and rental["bike_id"]:
@@ -265,3 +292,83 @@ async def starline_loop(fleet, starline, bot=None, admin_chat_id=None) -> None:
         except Exception:                               # noqa: BLE001
             log.exception("прогон автоблокировки StarLine не удался")
         await asyncio.sleep(STARLINE_INTERVAL_SECONDS)
+
+
+# Заряд меняется часами - десятиминутный такт с пятиминутным кэшем
+# телеметрии почти не дёргает StarLine сверх того, что и так спрашивает
+# Mini App.
+BATTERY_INTERVAL_SECONDS = 10 * 60
+
+
+async def battery_check_once(fleet, starline, bot=None,
+                             admin_chat_id=None) -> int:
+    """Один проход по арендованным единицам с трекером. Возвращает число
+    отправленных предупреждений.
+
+    Гистерезис в logic.battery_alert: предупреждение одно на цикл разряда
+    (флаг low_battery_at), снимается только после настоящей зарядки -
+    колебания напряжения вокруг порога не превращаются в спам.
+    """
+    from .fleet import logic as fleet_logic
+    sent = 0
+    for row in await fleet.rented_with_starline():
+        try:
+            volts = await starline.voltage(row["starline_device_id"])
+        except Exception:                               # noqa: BLE001
+            log.exception("заряд единицы %s не получен", row["bike_id"])
+            continue
+        percent = fleet_logic.battery_percent(volts)
+        action = fleet_logic.battery_alert(
+            percent, notified=row["low_battery_at"] is not None)
+        if action == "clear":
+            await fleet.set_low_battery(row["bike_id"], low=False)
+            continue
+        if action != "alert" or bot is None:
+            continue
+        # Сначала сообщение, потом отметка - отдельными try, как в зове ТО:
+        # упавшая отметка при ушедшем сообщении иначе спамила бы каждый прогон,
+        # а упавшее сообщение с записанной отметкой молчало бы весь разряд.
+        try:
+            if row["tg_id"]:
+                await bot.send_message(
+                    row["tg_id"],
+                    texts.FLEET_BATTERY_LOW_CLIENT.format(percent=percent))
+            elif admin_chat_id is not None:
+                # Клиент из CRM, не из бота: писать ему некуда - зовём
+                # оператора, у него в форме фиксации есть телефон.
+                await bot.send_message(
+                    admin_chat_id, texts.FLEET_BATTERY_LOW_CARD.format(
+                        percent=percent, bike_id=row["bike_id"],
+                        model=logic.esc(row["model"] or "без модели"),
+                        client=logic.esc(row["client_name"] or "—"),
+                        phone=logic.esc(row["client_phone"] or "—")))
+            else:
+                continue
+        except Exception:                               # noqa: BLE001
+            log.exception("предупреждение о заряде единицы %s не доставлено",
+                          row["bike_id"])
+            continue
+        sent += 1
+        try:
+            await fleet.set_low_battery(row["bike_id"], low=True)
+        except Exception:                               # noqa: BLE001
+            log.exception("отметка низкого заряда единицы %s не записана",
+                          row["bike_id"])
+    return sent
+
+
+async def battery_loop(fleet, starline, bot=None, admin_chat_id=None) -> None:
+    """Слежение за зарядом тяговой АКБ арендованных единиц.
+
+    Работает при любых заданных реквизитах StarLine - в отличие от
+    автоблокировки, которой нужен отдельный флаг: предупреждение
+    «зарядите батарею» безобидно, а обездвиживание - нет.
+    """
+    while True:
+        try:
+            await battery_check_once(fleet, starline, bot, admin_chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                               # noqa: BLE001
+            log.exception("прогон проверки заряда не удался")
+        await asyncio.sleep(BATTERY_INTERVAL_SECONDS)

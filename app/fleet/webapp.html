@@ -339,6 +339,10 @@ function drawAlerts(me) {
       Вернуть велосипед нужно было до ${esc(r.due_at)}. Продлить или сдать —
       через чат с ботом.</div>`;
   }
+  if (r && r.battery && r.battery.low) {
+    html += `<div class="alert warn"><b>🪫 Низкий заряд — ${r.battery.percent}%</b>
+      Поставьте АКБ на зарядку, чтобы не остаться без хода.</div>`;
+  }
   if (r && r.service_days != null && r.service_days <= 2) {
     const when = r.service_days <= 0 ? "уже пора" : `через ${r.service_days} дн.`;
     const how = contactLinks() || "через чат с ботом («🆘 Поддержка»)";
@@ -388,7 +392,13 @@ async function loadMe() {
           ? `<div class="hint" style="margin-top:8px">🔧 Плановое ТО: ` +
             (me.rental.service_days <= 0 ? `<b>уже пора</b>`
               : `через ${me.rental.service_days} дн.`) + `</div>` : "") +
-        `<div class="hint" style="margin-top:8px">Продлить или закрыть аренду — в чате с ботом.</div></div>`;
+        (me.rental.extend
+          ? `<button class="big" id="extend" style="margin-top:10px">Продлить на
+             ${me.rental.extend.days} дн. — ${me.rental.extend.amount} ₽</button>
+             <div class="hint">Счёт СБП; после оплаты срок сдвинется сам —
+             до ${esc(me.rental.extend.new_due)}.</div><div id="ext-msg"></div>`
+          : `<div class="hint" style="margin-top:8px">Продлить или закрыть аренду — в чате с ботом.</div>`) +
+        `</div>`;
     }
     if (!me.booking && !me.rental) {
       html += `<div class="card">Активных броней и аренд нет.</div>`;
@@ -406,6 +416,23 @@ async function loadMe() {
       try { await api("/api/cancel", {method: "POST", body: "{}"}); }
       catch (e) { /* уже снята */ }
       loadMe(); loadAll();
+    };
+    const ext = $("extend");
+    if (ext) ext.onclick = async () => {
+      ext.disabled = true;
+      try {
+        const r = await api("/api/extend", {method: "POST", body: "{}"});
+        // Ссылку оплаты открываем сразу - и перерисовываем «Моё»:
+        // счёт станет жёлтым баннером сверху, кнопка исчезнет.
+        if (r.payment && r.payment.link) {
+          if (tg) tg.openLink(r.payment.link);
+          else window.open(r.payment.link, "_blank");
+        }
+        loadMe();
+      } catch (e) {
+        msg($("ext-msg"), String(e), "err");
+        ext.disabled = false;
+      }
     };
   } catch (e) {
     $("me").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;

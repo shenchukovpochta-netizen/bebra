@@ -623,17 +623,27 @@ class FleetDB:
     async def create_payment(self, rental_id: int, *, tg_id: int | None,
                              client_id: int | None, amount: int, purpose: str,
                              qrc_id: str, qr_payload: str,
-                             created_by: int | None) -> asyncpg.Record:
+                             created_by: int | None,
+                             extend_days: int | None = None) -> asyncpg.Record:
         """Счёт на аренду. Второй неоплаченный на ту же аренду отсечёт
-        частичный уникальный индекс - это два списания за одно и то же."""
+        частичный уникальный индекс - это два списания за одно и то же.
+        extend_days - счёт-продление: оплата сдвинет срок на столько дней."""
         return await self.pool.fetchrow(
             """
             insert into fleet.payments
               (rental_id, tg_id, client_id, amount, purpose, qrc_id,
-               qr_payload, created_by)
-            values ($1, $2, $3, $4, $5, $6, $7, $8) returning *
+               qr_payload, created_by, extend_days)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning *
             """, rental_id, tg_id, client_id, amount, purpose, qrc_id,
-            qr_payload, created_by)
+            qr_payload, created_by, extend_days)
+
+    async def extend_rental(self, rental_id: int, days: int):
+        """Сдвиг срока живой аренды. Возвращает новую дату либо None -
+        аренда уже закрыта или без срока (двигать нечего)."""
+        return await self.pool.fetchval(
+            "update fleet.rentals set due_at = due_at + $2::int "
+            "where id = $1 and closed_at is null and due_at is not null "
+            "returning due_at", rental_id, int(days))
 
     async def mark_payment(self, payment_id: int, status: str) -> asyncpg.Record | None:
         """Перевод счёта из pending. None - счёт уже не pending (гонка
@@ -819,6 +829,28 @@ class FleetDB:
             where r.closed_at is null and r.due_at is not null and r.due_at < $1
               and b.starline_device_id is not null and b.blocked = false
             """, today)
+
+    async def rented_with_starline(self) -> list[asyncpg.Record]:
+        """Живые аренды единиц с трекером - для проверки заряда АКБ.
+        Отдаётся и клиент: уведомление о низком заряде адресное."""
+        return await self.pool.fetch(
+            """
+            select b.id as bike_id, b.starline_device_id, b.low_battery_at,
+                   m.title as model, r.tg_id,
+                   coalesce(c.full_name, u.full_name) as client_name,
+                   coalesce(c.phone, u.phone) as client_phone
+            from fleet.rentals r
+            join fleet.bikes b on b.id = r.bike_id
+            left join fleet.models m on m.id = b.model_id
+            left join fleet.clients c on c.id = r.client_id
+            left join bot.users u on u.tg_id = r.tg_id
+            where r.closed_at is null and b.starline_device_id is not null
+            """)
+
+    async def set_low_battery(self, bike_id: int, *, low: bool) -> None:
+        await self.pool.execute(
+            "update fleet.bikes set low_battery_at = case when $2 then now() end, "
+            "updated_at = now() where id = $1", bike_id, low)
 
     # ─────────────────────── хуки проката ───────────────────────
 
