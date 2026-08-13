@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # PATCHABLE в app/db.py: имена колонок подставляются в SQL текстом.
 BIKE_PATCHABLE = frozenset({
     "model_id", "point_id", "vin_motor", "status", "battery_count", "notes",
-    "starline_device_id",
+    "starline_device_id", "purchase_price",
 })
 
 
@@ -88,7 +88,7 @@ class FleetDB:
     async def upsert_bike(self, vin_frame: str, *, vin_motor: str | None = None,
                           model_id: int | None = None, point_id: int | None = None,
                           battery_count: int | None = None, status: str | None = None,
-                          notes: str | None = None,
+                          notes: str | None = None, purchase_price: int | None = None,
                           conn: asyncpg.Connection | None = None) -> asyncpg.Record:
         """Единица по вин-номеру рамы: обновить или завести.
 
@@ -99,8 +99,9 @@ class FleetDB:
         return await (conn or self.pool).fetchrow(
             """
             insert into fleet.bikes
-              (vin_frame, vin_motor, model_id, point_id, battery_count, status, notes)
-            values ($1, $2, $3, $4, coalesce($5, 2), coalesce($6, 'free'), $7)
+              (vin_frame, vin_motor, model_id, point_id, battery_count, status,
+               notes, purchase_price)
+            values ($1, $2, $3, $4, coalesce($5, 2), coalesce($6, 'free'), $7, $8)
             on conflict (vin_frame) do update set
               vin_motor     = coalesce(excluded.vin_motor, fleet.bikes.vin_motor),
               model_id      = coalesce(excluded.model_id, fleet.bikes.model_id),
@@ -108,11 +109,12 @@ class FleetDB:
               battery_count = coalesce($5, fleet.bikes.battery_count),
               status        = coalesce($6, fleet.bikes.status),
               notes         = coalesce(excluded.notes, fleet.bikes.notes),
+              purchase_price = coalesce($8, fleet.bikes.purchase_price),
               updated_at    = now()
             returning *
             """,
             logic.normalize_vin(vin_frame), vin_motor or None, model_id, point_id,
-            battery_count, status, notes or None,
+            battery_count, status, notes or None, purchase_price,
         )
 
     async def get_bike(self, ref: str) -> asyncpg.Record | None:
@@ -829,6 +831,34 @@ class FleetDB:
             where r.closed_at is null and r.due_at is not null and r.due_at < $1
               and b.starline_device_id is not null and b.blocked = false
             """, today)
+
+    # ─────────────────────── аналитика ───────────────────────
+
+    async def analytics_rentals(self) -> list[asyncpg.Record]:
+        """ВСЕ аренды с полями для тренда и оценки выручки - и живые,
+        и закрытые, и импортированные из форм фиксации."""
+        return await self.pool.fetch(
+            "select id, bike_id, rent_term, rent_price, opened_at, closed_at "
+            "from fleet.rentals order by id")
+
+    async def paid_by_rental(self) -> dict[int, int]:
+        """Подтверждённая банком выручка по арендам: суммы оплаченных
+        счетов СБП. Это факт, в отличие от оценки по строкам договоров."""
+        rows = await self.pool.fetch(
+            "select rental_id, sum(amount)::int as paid from fleet.payments "
+            "where status = 'paid' and rental_id is not null "
+            "group by rental_id")
+        return {r["rental_id"]: r["paid"] for r in rows}
+
+    async def analytics_bikes(self) -> list[asyncpg.Record]:
+        return await self.pool.fetch(
+            """
+            select b.id, b.vin_frame, b.status, b.purchase_price,
+                   m.title as model
+            from fleet.bikes b
+            left join fleet.models m on m.id = b.model_id
+            order by b.id
+            """)
 
     async def rented_with_starline(self) -> list[asyncpg.Record]:
         """Живые аренды единиц с трекером - для проверки заряда АКБ.

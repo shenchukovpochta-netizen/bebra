@@ -96,6 +96,10 @@ alter table fleet.bikes add column if not exists service_notified_at timestamptz
 -- предупредили». Снимается, когда заряд снова поднялся, - иначе одно
 -- предупреждение на весь цикл разряда превратилось бы в спам каждый прогон.
 alter table fleet.bikes add column if not exists low_battery_at timestamptz;
+-- Закупочная цена единицы (рубли) - для окупаемости в аналитике CRM.
+-- Пустая цена - «окупаемость не посчитать», а не ноль: ноль означал бы
+-- «велосипед достался даром» и мгновенную мнимую окупаемость.
+alter table fleet.bikes add column if not exists purchase_price integer;
 
 -- Журнал команд StarLine: кто, когда, чем закончилось. Блокировка чужого
 -- (пусть и своего же) имущества - действие, за которое надо отвечать,

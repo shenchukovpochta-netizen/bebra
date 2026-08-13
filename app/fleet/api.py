@@ -572,6 +572,109 @@ class Api:
         await self.fleet.patch_bike(bike_id, starline_device_id=device_id)
         return _json({"ok": True})
 
+    async def admin_bike_price(self, request: web.Request) -> web.Response:
+        """Закупочная цена единицы - для окупаемости. Пусто - снять цену."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        try:
+            body = await request.json()
+            bike_id = int(body["bike_id"])
+            raw = body.get("price")
+            price = int(raw) if raw not in (None, "") else None
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        if price is not None and not 1 <= price <= 10_000_000:
+            return _json({"error": "Цена выглядит неправдоподобно."}, status=400)
+        if not await self.fleet.patch_bike(bike_id, purchase_price=price):
+            return _json({"error": "Единица не найдена."}, status=404)
+        return _json({"ok": True})
+
+    async def admin_analytics(self, request: web.Request) -> web.Response:
+        """Аналитика проката: тренд выдач и возвратов, PnL, окупаемость.
+
+        Выручка двух сортов и они не смешиваются втихую: оплаченные счета
+        СБП - факт, подтверждённый банком; оценка по договору - цена
+        периода х число периодов. За выручку аренды берётся большее из
+        двух: складывать их значило бы посчитать одни деньги дважды.
+        """
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        today = date.today()
+        rentals = await self.fleet.analytics_rentals()
+        paid_map = await self.fleet.paid_by_rental()
+        bikes = await self.fleet.analytics_bikes()
+
+        trend = logic.weekly_trend(
+            [(r["opened_at"], r["closed_at"]) for r in rentals],
+            weeks=12, today=today)
+
+        by_bike: dict[int, dict] = {}
+        totals = {"revenue": 0, "paid": 0, "unpriced_rentals": 0}
+        for r in rentals:
+            est = logic.revenue_estimate(r["rent_term"], r["rent_price"],
+                                         r["opened_at"], r["closed_at"],
+                                         today=today)
+            fact = paid_map.get(r["id"], 0)
+            revenue = max(fact, est or 0)
+            if est is None and fact == 0:
+                totals["unpriced_rentals"] += 1
+            totals["revenue"] += revenue
+            totals["paid"] += fact
+            if r["bike_id"] is None:
+                continue
+            slot = by_bike.setdefault(r["bike_id"], {
+                "revenue": 0, "paid": 0, "rentals": 0, "days": 0,
+                "active": False})
+            slot["revenue"] += revenue
+            slot["paid"] += fact
+            slot["rentals"] += 1
+            if r["opened_at"] is not None:
+                end = r["closed_at"] or datetime.now(r["opened_at"].tzinfo)
+                slot["days"] += max(0, (end - r["opened_at"]).days)
+            if r["closed_at"] is None:
+                slot["active"] = True
+
+        bikes_json, park_price, paid_off_count = [], 0, 0
+        for b in bikes:
+            slot = by_bike.get(b["id"], {"revenue": 0, "paid": 0,
+                                         "rentals": 0, "days": 0,
+                                         "active": False})
+            percent = logic.payback_percent(slot["revenue"],
+                                            b["purchase_price"])
+            if b["purchase_price"]:
+                park_price += b["purchase_price"]
+                if percent is not None and percent >= 100:
+                    paid_off_count += 1
+            bikes_json.append({
+                "id": b["id"], "vin": b["vin_frame"], "model": b["model"],
+                "status": b["status"], "price": b["purchase_price"],
+                "revenue": slot["revenue"], "paid": slot["paid"],
+                "rentals": slot["rentals"], "days": slot["days"],
+                "active": slot["active"], "payback": percent,
+                "paid_off": percent is not None and percent >= 100,
+            })
+
+        issued_total = sum(1 for r in rentals if r["opened_at"] is not None)
+        returned_total = sum(1 for r in rentals if r["closed_at"] is not None)
+        return _json({
+            "trend": [{"start": row["start"].strftime("%d.%m"),
+                       "issued": row["issued"], "returned": row["returned"]}
+                      for row in trend],
+            "summary": {
+                "revenue": totals["revenue"], "paid": totals["paid"],
+                "park_price": park_price,
+                "profit": totals["revenue"] - park_price,
+                "payback": logic.payback_percent(totals["revenue"],
+                                                 park_price),
+                "issued": issued_total, "returned": returned_total,
+                "open": issued_total - returned_total,
+                "bikes": len(bikes), "paid_off": paid_off_count,
+                "priced": sum(1 for b in bikes if b["purchase_price"]),
+                "unpriced_rentals": totals["unpriced_rentals"],
+            },
+            "bikes": bikes_json,
+        })
+
     async def admin_bike_block(self, request: web.Request) -> web.Response:
         """Заблокировать/разблокировать единицу через StarLine.
 
@@ -1191,6 +1294,8 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/admin/bike/starline", api.admin_bike_starline),
         web.post("/api/admin/bike/block", api.admin_bike_block),
         web.post("/api/admin/bike/serviced", api.admin_bike_serviced),
+        web.post("/api/admin/bike/price", api.admin_bike_price),
+        web.get("/api/admin/analytics", api.admin_analytics),
         web.get("/api/admin/payments", api.admin_payments),
         web.post("/api/admin/payment/create", api.admin_payment_create),
         web.post("/api/admin/payment/cancel", api.admin_payment_cancel),

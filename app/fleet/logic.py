@@ -85,6 +85,8 @@ BIKE_ALIASES: dict[str, str] = {
     "акб": "battery_count",
     "статус": "status",
     "заметка": "notes", "заметки": "notes", "коммент": "notes",
+    "цена": "purchase_price", "стоимость": "purchase_price",
+    "закупка": "purchase_price",
 }
 
 BIKE_FORM_TEMPLATE = (
@@ -122,11 +124,14 @@ def parse_bike_form(raw: str | None) -> tuple[dict[str, object] | None, str]:
         # с parse_mode=HTML, и «<х>вилка» в сырой ошибке валила бы отправку.
         if not _no_markup(value):
             return None, f"В строке «{esc(key.strip())}» недопустимы символы < > и &."
-        if field == "battery_count":
-            if not value.isdigit():
+        if field in ("battery_count", "purchase_price"):
+            # Цена приходит и «45 000», и «45000р» - цифры выцепляются,
+            # но совсем без цифр - ошибка вслух, как у акб.
+            digits = re.sub(r"\D", "", value) if field == "purchase_price" else value
+            if not digits.isdigit():
                 return None, (f"«{esc(key.strip())}» - нужно число, "
                               f"получено «{esc(value)}».")
-            data[field] = int(value)
+            data[field] = int(digits)
         elif field == "status":
             status = RU_STATUS.get(value.lower())
             if status is None:
@@ -572,6 +577,85 @@ def extension_offer(*, rent_term, rent_price, opened_at, due_at) -> dict | None:
         return None
     return {"days": days, "amount": amount,
             "new_due": due_at + timedelta(days=days)}
+
+
+# ─────────────────── аналитика: тренды и окупаемость ───────────────────
+#
+# Всё считается из того, что уже есть в учёте: аренды (выдачи и возвраты),
+# оплаченные счета СБП и строки оплаты договоров. Оценка выручки честно
+# называется оценкой: наличные прошлых лет в базе живут только текстом
+# «3000qr» в форме фиксации.
+
+
+def week_start(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def weekly_trend(rentals, *, weeks: int, today: date) -> list[dict]:
+    """Выдачи и возвраты по неделям, последние weeks недель.
+
+    rentals - пары (opened_at, closed_at). Пустые недели остаются в ряду
+    нулями: провал спроса - это данные, а не отсутствие данных.
+    """
+    first = week_start(today) - timedelta(weeks=weeks - 1)
+    rows = [{"start": first + timedelta(weeks=i), "issued": 0, "returned": 0}
+            for i in range(weeks)]
+    index = {row["start"]: row for row in rows}
+
+    def bucket(moment) -> dict | None:
+        if moment is None:
+            return None
+        day = moment.date() if isinstance(moment, datetime) else moment
+        return index.get(week_start(day))
+
+    for opened_at, closed_at in rentals:
+        row = bucket(opened_at)
+        if row is not None:
+            row["issued"] += 1
+        row = bucket(closed_at)
+        if row is not None:
+            row["returned"] += 1
+    return rows
+
+
+def rental_periods(rent_term, opened_at, closed_at, *, today: date) -> int:
+    """Сколько оплаченных периодов прошло у аренды.
+
+    Живая аренда меряется по сегодня: клиент, откатавший три недели
+    недельного договора, должен три недели и оплатить. Шаг неизвестен -
+    один период: консервативная оценка лучше выдуманной."""
+    step = term_days(rent_term, opened_at, None)
+    if opened_at is None:
+        return 1
+    end = closed_at or today
+    end_day = end.date() if isinstance(end, datetime) else end
+    start_day = (opened_at.date() if isinstance(opened_at, datetime)
+                 else opened_at)
+    active = max(1, (end_day - start_day).days)
+    if not step:
+        return 1
+    return max(1, -(-active // step))
+
+
+def revenue_estimate(rent_term, rent_price, opened_at, closed_at,
+                     *, today: date) -> int | None:
+    """Оценка выручки аренды: цена периода х число периодов.
+
+    None - цену из договора не разобрать («перевод», «бартер»): такой
+    аренде в аналитике честнее показать прочерк, чем ноль дохода."""
+    price = price_amount(rent_price)
+    if price is None:
+        return None
+    return price * rental_periods(rent_term, opened_at, closed_at,
+                                  today=today)
+
+
+def payback_percent(revenue: int, purchase_price) -> int | None:
+    """Окупаемость единицы в процентах. None - закупочная цена не задана:
+    без неё вопрос «окуплен или нет» не имеет ответа."""
+    if not purchase_price or purchase_price <= 0:
+        return None
+    return round(revenue * 100 / purchase_price)
 
 
 # ─────────────────── форма фиксации: разбор в CRM ───────────────────

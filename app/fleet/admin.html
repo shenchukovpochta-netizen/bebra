@@ -84,6 +84,29 @@
   .sect{display:none} .sect.on{display:block}
   .toolbar{display:flex; gap:10px; margin-bottom:12px; align-items:center}
   .toolbar input{max-width:340px}
+  /* аналитика: столбики тренда и полоса окупаемости */
+  .chart{display:flex; gap:10px; align-items:flex-end; padding:14px 6px 4px;
+         overflow-x:auto}
+  .wk{display:flex; flex-direction:column; align-items:center; gap:4px;
+      min-width:52px; flex:1}
+  .wk .bars{display:flex; gap:4px; align-items:flex-end; height:120px}
+  .wk .b{width:16px; border-radius:4px 4px 0 0; min-height:2px}
+  .wk .b.iss{background:var(--accent)}
+  .wk .b.ret{background:#4a7fc0}
+  .wk .cnt{font-size:11px; color:var(--hint); font-variant-numeric:tabular-nums;
+           white-space:nowrap}
+  .wk .lbl{font-size:11px; color:var(--hint); white-space:nowrap}
+  .legend{display:flex; gap:16px; font-size:12.5px; color:var(--hint);
+          margin:6px 0 0 6px}
+  .legend i{display:inline-block; width:10px; height:10px; border-radius:3px;
+            margin-right:5px}
+  .pb{background:var(--line); border-radius:5px; height:8px; width:110px;
+      overflow:hidden; display:inline-block; vertical-align:middle}
+  .pb i{display:block; height:100%; background:var(--warn)}
+  .pb i.done{background:var(--ok)}
+  input.price{width:92px; padding:4px 8px; border:1px solid var(--line);
+              border-radius:8px; background:var(--panel); color:var(--ink);
+              font:inherit; font-size:13px; text-align:right}
 </style>
 </head>
 <body>
@@ -109,6 +132,7 @@
     <button data-s="kyc">Заявки KYC</button>
     <button data-s="clients">Клиенты</button>
     <button data-s="payments">Расчёты</button>
+    <button data-s="analytics">Аналитика</button>
     <button data-s="import">Импорт формы</button>
   </nav>
 </header>
@@ -124,6 +148,7 @@
     <div id="clients-out"></div>
   </div>
   <div id="s-payments" class="sect"></div>
+  <div id="s-analytics" class="sect"></div>
   <div id="s-kyc" class="sect"></div>
   <div id="s-import" class="sect">
     <div class="cols">
@@ -583,10 +608,99 @@ $("ingest").onclick = async () => {
   }
 };
 
+// ─── аналитика ───
+const rub = n => (n == null ? "—" : Number(n).toLocaleString("ru-RU") + " ₽");
+
+function trendChart(rows){
+  const top = Math.max(1, ...rows.map(w => Math.max(w.issued, w.returned)));
+  const h = v => Math.round(v / top * 112);
+  return `<div class="panel"><b>Выдачи и возвраты по неделям</b>
+    <div class="chart">` + rows.map(w => `
+      <div class="wk">
+        <div class="cnt">${(w.issued || w.returned) ? w.issued + "/" + w.returned : ""}</div>
+        <div class="bars">
+          <div class="b iss" style="height:${h(w.issued)}px" title="выдач: ${w.issued}"></div>
+          <div class="b ret" style="height:${h(w.returned)}px" title="возвратов: ${w.returned}"></div>
+        </div>
+        <div class="lbl">${esc(w.start)}</div>
+      </div>`).join("") + `
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>выдачи</span>
+      <span><i style="background:#4a7fc0"></i>возвраты</span>
+      <span class="hint">числа над столбиками — выдачи/возвраты за неделю
+      (начало недели — под столбиком)</span></div></div>`;
+}
+
+let ANA_BIKES = {};
+async function drawAnalytics(){
+  const a = await api("/api/admin/analytics");
+  const s = a.summary;
+  ANA_BIKES = {};
+  a.bikes.forEach(b => ANA_BIKES[b.id] = b);
+  const profitCls = s.profit < 0 ? "bad" : "";
+  let html = `<div class="cards">
+    <div class="stat"><b>${rub(s.revenue)}</b><span>выручка (оценка по договорам)</span></div>
+    <div class="stat"><b>${rub(s.paid)}</b><span>из них СБП — подтверждено банком</span></div>
+    <div class="stat"><b>${rub(s.park_price)}</b><span>закупка парка (${s.priced} из ${s.bikes} с ценой)</span></div>
+    <div class="stat ${profitCls}"><b>${rub(s.profit)}</b><span>${s.profit < 0 ? "до окупаемости парка" : "прибыль сверх закупки"}</span></div>` +
+    (s.payback != null ? `<div class="stat"><b>${s.payback}%</b><span>окупаемость парка</span></div>` : "") +
+    `<div class="stat"><b>${s.paid_off}</b><span>окупились (из ${s.priced} с ценой)</span></div>
+    <div class="stat"><b>${s.issued}</b><span>выдач за всё время</span></div>
+    <div class="stat"><b>${s.returned}</b><span>возвратов</span></div>
+    <div class="stat"><b>${s.open}</b><span>сейчас на руках</span></div>
+  </div>`;
+  html += trendChart(a.trend);
+  if (s.unpriced_rentals) {
+    html += `<div class="msg warn">У ${s.unpriced_rentals} аренд(ы) не удалось
+      разобрать цену из договора и счетов СБП по ним нет — их выручка
+      не посчитана. Оценка ниже реальной.</div>`;
+  }
+  html += `<h2>Окупаемость по велосипедам</h2>
+    <p class="hint" style="margin:-4px 0 10px">Выручка каждой аренды — большее
+      из «оплачено по СБП» и «цена периода × число периодов по договору»
+      (складывать нельзя — одни деньги посчитались бы дважды). Закупочную
+      цену можно вписать прямо здесь или формой /bike («цена: 45000»).</p>
+    <table><tr><th>#</th><th>вин рамы</th><th>модель</th><th>статус</th>
+      <th>аренд</th><th>дней в аренде</th><th>выручка</th><th>из них СБП</th>
+      <th>цена закупки</th><th>окупаемость</th></tr>` +
+    a.bikes.map(b => {
+      const pb = b.payback == null ? `<span class="hint">впишите цену</span>`
+        : `<span class="pb"><i class="${b.paid_off ? "done" : ""}"
+             style="width:${Math.min(100, b.payback)}%"></i></span>
+           <span class="num"> ${b.payback}%</span> ` +
+          (b.paid_off ? `<span class="pill st-free">✅ окуплен</span>`
+                      : `<span class="pill st-booked">⏳ ещё нет</span>`);
+      return `<tr><td class="num">${b.id}</td>
+        <td class="num">${esc(b.vin)}</td><td>${esc(b.model || "—")}</td>
+        <td>${pill(b.status)}</td><td class="num">${b.rentals}</td>
+        <td class="num">${b.days}</td><td class="num">${rub(b.revenue)}</td>
+        <td class="num">${b.paid ? rub(b.paid) : "—"}</td>
+        <td><input class="price" data-bike="${b.id}" inputmode="numeric"
+             value="${b.price ?? ""}" placeholder="₽">
+            <button class="act" data-save="${b.id}">💾</button></td>
+        <td>${pb}</td></tr>`;
+    }).join("") + `</table><div id="ana-msg"></div>`;
+  $("s-analytics").innerHTML = html;
+  document.querySelectorAll("#s-analytics [data-save]").forEach(btn =>
+    btn.onclick = async () => {
+      const id = +btn.dataset.save;
+      const raw = document.querySelector(
+        `#s-analytics input[data-bike="${id}"]`).value.replace(/\D/g, "");
+      try {
+        await api("/api/admin/bike/price", {method: "POST",
+          body: JSON.stringify({bike_id: id, price: raw || null})});
+        drawAnalytics();
+      } catch (e) {
+        $("ana-msg").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+      }
+    });
+}
+
 // ─── загрузка ───
 const LOADERS = {overview: drawOverview, bikes: drawBikes, rentals: drawRentals,
                  bookings: drawBookings, clients: drawClients,
-                 payments: drawPayments, kyc: drawKyc, import: () => {}};
+                 payments: drawPayments, analytics: drawAnalytics,
+                 kyc: drawKyc, import: () => {}};
 async function load(name){
   try { await LOADERS[name](); }
   catch (e) { /* 401 уже показал гейт */ }

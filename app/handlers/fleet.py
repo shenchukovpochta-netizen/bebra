@@ -111,7 +111,8 @@ async def _bike(message: Message, fleet: FleetDB, args: str) -> None:
         model_id=model_id, point_id=point_id,
         battery_count=data.get("battery_count"),
         status=str(data.get("status") or "") or None,
-        notes=str(data.get("notes") or "") or None)
+        notes=str(data.get("notes") or "") or None,
+        purchase_price=data.get("purchase_price"))
     if data.get("status") and data["status"] != fl.BOOKED:
         # Явная смена статуса снимает живую бронь, как в /service и /free:
         # оставленная held-бронь на свободной единице - мина под /hold.

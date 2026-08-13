@@ -513,6 +513,82 @@ class TestExtensionOffer(unittest.TestCase):
             opened_at=self.OPENED, due_at=None))
 
 
+class TestWeeklyTrend(unittest.TestCase):
+    TODAY = date(2026, 8, 13)                            # четверг
+
+    def test_counts_by_week(self):
+        rentals = [
+            (datetime(2026, 8, 10, 12), None),           # эта неделя, живая
+            (datetime(2026, 8, 4, 9), datetime(2026, 8, 11, 18)),
+            (datetime(2026, 8, 5, 9), datetime(2026, 8, 6, 10)),
+        ]
+        rows = fleet.weekly_trend(rentals, weeks=2, today=self.TODAY)
+        self.assertEqual([r["start"] for r in rows],
+                         [date(2026, 8, 3), date(2026, 8, 10)])
+        self.assertEqual([r["issued"] for r in rows], [2, 1])
+        self.assertEqual([r["returned"] for r in rows], [1, 1])
+
+    def test_old_events_out_of_window_ignored(self):
+        rows = fleet.weekly_trend([(datetime(2020, 1, 1), None)],
+                                  weeks=4, today=self.TODAY)
+        self.assertEqual(sum(r["issued"] for r in rows), 0)
+
+    def test_empty_weeks_stay_zero(self):
+        rows = fleet.weekly_trend([], weeks=12, today=self.TODAY)
+        self.assertEqual(len(rows), 12)
+        self.assertTrue(all(r["issued"] == 0 and r["returned"] == 0
+                            for r in rows))
+
+
+class TestRevenueEstimate(unittest.TestCase):
+    TODAY = date(2026, 8, 13)
+    OPENED = datetime(2026, 8, 3, 12)
+
+    def test_one_period_closed_in_time(self):
+        self.assertEqual(fleet.revenue_estimate(
+            "03.08 - 10.08", "3000qr", self.OPENED,
+            datetime(2026, 8, 10, 11), today=self.TODAY), 3000)
+
+    def test_live_rental_counts_to_today(self):
+        # Живая аренда: 03.08 - 10.08, а сегодня 13-е - пошёл второй период.
+        self.assertEqual(fleet.revenue_estimate(
+            "03.08 - 10.08", "3000qr", self.OPENED, None,
+            today=self.TODAY), 6000)
+
+    def test_unknown_step_single_period(self):
+        self.assertEqual(fleet.revenue_estimate(
+            "до конца лета", "3000", self.OPENED, None,
+            today=self.TODAY), 3000)
+
+    def test_unparseable_price_none(self):
+        self.assertIsNone(fleet.revenue_estimate(
+            "03.08 - 10.08", "перевод другу", self.OPENED, None,
+            today=self.TODAY))
+
+
+class TestPayback(unittest.TestCase):
+    def test_percent(self):
+        self.assertEqual(fleet.payback_percent(30000, 60000), 50)
+        self.assertEqual(fleet.payback_percent(60000, 60000), 100)
+        self.assertEqual(fleet.payback_percent(90000, 60000), 150)
+
+    def test_no_price_no_answer(self):
+        self.assertIsNone(fleet.payback_percent(30000, None))
+        self.assertIsNone(fleet.payback_percent(30000, 0))
+
+
+class TestBikeFormPrice(unittest.TestCase):
+    def test_price_parsed_with_noise(self):
+        data, err = fleet.parse_bike_form("рама: ABC1\nцена: 45 000р")
+        self.assertEqual(err, "")
+        self.assertEqual(data["purchase_price"], 45000)
+
+    def test_price_without_digits_is_error(self):
+        data, err = fleet.parse_bike_form("рама: ABC1\nцена: дорого")
+        self.assertIsNone(data)
+        self.assertIn("нужно число", err)
+
+
 GOOD_REG_FORM = {
     "fio": "Иванов Иван Иванович",
     "phone": "89050238366",
