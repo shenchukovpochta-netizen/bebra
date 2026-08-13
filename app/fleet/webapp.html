@@ -90,6 +90,25 @@
          background:rgba(169,108,9,.15); color:var(--warn)}
   .sect{display:none}
   .sect.on{display:block}
+  /* Поддержка: плавающая кнопка над вкладками - курьер звонит в любую
+     секунду, с какого бы экрана ни смотрел */
+  .fab{position:fixed; right:14px; bottom:calc(64px + env(safe-area-inset-bottom));
+       width:56px; height:56px; border-radius:50%; border:0; font-size:24px;
+       background:var(--btn); color:var(--btn-fg); z-index:30;
+       box-shadow:0 4px 14px rgba(0,0,0,.25); cursor:pointer}
+  #support{position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:40;
+       display:none; align-items:flex-end}
+  #support.on{display:flex}
+  #support .sheet{background:var(--bg); width:100%; border-radius:16px 16px 0 0;
+       padding:18px 16px calc(18px + env(safe-area-inset-bottom))}
+  #support .sheet b{display:block; font-size:17px; margin-bottom:4px}
+  #support a.sbtn{display:flex; align-items:center; gap:12px; margin-top:10px;
+       padding:14px 16px; border-radius:12px; background:var(--card);
+       color:var(--fg); font-size:16px; font-weight:600}
+  #support a.sbtn.call{background:var(--btn); color:var(--btn-fg)}
+  #support .close{display:block; width:100%; margin-top:12px; padding:12px;
+       border:0; border-radius:12px; background:none; color:var(--hint);
+       font:inherit}
 </style>
 </head>
 <body>
@@ -134,6 +153,17 @@
   <button data-tab="moe">Моё</button>
 </nav>
 
+<button class="fab" id="fab-support" aria-label="Поддержка">🆘</button>
+<div id="support">
+  <div class="sheet">
+    <b>🆘 Поддержка</b>
+    <span class="hint">Сломался велосипед, вопрос по аренде — звоните,
+      мы на связи в рабочее время, в чате — всегда.</span>
+    <div id="support-links"></div>
+    <button class="close" id="support-close">Закрыть</button>
+  </div>
+</div>
+
 <script>
 "use strict";
 const tg = window.Telegram && window.Telegram.WebApp;
@@ -168,6 +198,31 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   if (b.dataset.tab === "moe") loadMe();
   if (b.dataset.tab === "reg") loadReg();
 });
+
+// ─── поддержка: плавающая кнопка, доступна с любого экрана ───
+$("fab-support").onclick = () => {
+  const parts = [];
+  if (CONTACTS.phone) {
+    parts.push(`<a class="sbtn call" href="tel:${CONTACTS.phone.replace(/[^+\d]/g, "")}">
+      📞 Позвонить: ${esc(CONTACTS.phone)}</a>`);
+  }
+  if (CONTACTS.telegram) {
+    parts.push(`<a class="sbtn" href="${esc(CONTACTS.telegram)}" target="_blank"
+      id="support-tg">✈️ Написать в Telegram</a>`);
+  }
+  $("support-links").innerHTML = parts.join("") ||
+    `<div class="hint" style="margin-top:10px">Контакты ещё грузятся —
+     секунду и нажмите снова, либо напишите боту («🆘 Поддержка»).</div>`;
+  const tgl = $("support-tg");
+  if (tgl && tg) tgl.onclick = e => {           // внутри Telegram - без браузера
+    e.preventDefault(); tg.openTelegramLink(CONTACTS.telegram);
+  };
+  $("support").classList.add("on");
+};
+$("support-close").onclick = () => $("support").classList.remove("on");
+$("support").onclick = e => {
+  if (e.target.id === "support") $("support").classList.remove("on");
+};
 
 // ─── витрина ───
 let POINTS = [], MODELS = [], AVAIL = [], PERKS = "", CONTACTS = {};
