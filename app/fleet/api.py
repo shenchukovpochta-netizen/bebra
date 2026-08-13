@@ -398,6 +398,20 @@ class Api:
         by_status: dict[str, int] = {}
         for r in counts:
             by_status[r["status"]] = by_status.get(r["status"], 0) + r["count"]
+        # Контроль по точкам: те же счётчики в разрезе точки приписки.
+        # Из одного списка единиц, без отдельного SQL: блокировки и зов ТО
+        # считаются той же логикой, что красит бейджи в «Парке».
+        by_point: dict[str, dict] = {}
+        for b in await self.fleet.list_bikes(limit=500):
+            slot = by_point.setdefault(b["point"] or "без точки", {
+                "free": 0, "booked": 0, "rented": 0, "service": 0,
+                "lost": 0, "blocked": 0, "service_due": 0})
+            slot[b["status"]] = slot.get(b["status"], 0) + 1
+            slot["blocked"] += bool(b["blocked"])
+            days = logic.service_days_left(b["last_service_at"],
+                                           now=datetime.now())
+            slot["service_due"] += (b["status"] == "rented"
+                                    and days is not None and days <= 0)
         rentals = await self.fleet.rentals_admin(active=True, limit=200)
         today = date.today()
         overdue = [self._rental_json(r, today) for r in rentals
@@ -418,6 +432,8 @@ class Api:
             "starline": self.starline is not None,
             "tochka": self.tochka is not None,
             "service_due": service_due,
+            "points": [{"title": title, **slot}
+                       for title, slot in sorted(by_point.items())],
         })
 
     @staticmethod
@@ -442,7 +458,8 @@ class Api:
         rows = await self.fleet.list_bikes(limit=500)
         return _json([{
             "id": r["id"], "vin_frame": r["vin_frame"], "vin_motor": r["vin_motor"],
-            "model": r["model"], "point": r["point"], "status": r["status"],
+            "model": r["model"], "point": r["point"], "point_id": r["point_id"],
+            "status": r["status"],
             "notes": r["notes"], "renter_name": r["renter_name"],
             "renter_username": r["renter_username"], "hold_note": r["hold_note"],
             "starline_device_id": r["starline_device_id"], "blocked": r["blocked"],
@@ -589,6 +606,25 @@ class Api:
             return _json({"error": "Единица не найдена."}, status=404)
         return _json({"ok": True})
 
+    async def admin_bike_point(self, request: web.Request) -> web.Response:
+        """Перенос единицы на точку из CRM - учёт следует за перестановкой
+        техники. Пустая точка допустима: велосипед в дороге или в гараже."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        try:
+            body = await request.json()
+            bike_id = int(body["bike_id"])
+            raw = body.get("point_id")
+            point_id = int(raw) if raw not in (None, "") else None
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        if point_id is not None and not any(
+                p["id"] == point_id for p in await self.fleet.points()):
+            return _json({"error": "Такой точки нет."}, status=400)
+        if not await self.fleet.patch_bike(bike_id, point_id=point_id):
+            return _json({"error": "Единица не найдена."}, status=404)
+        return _json({"ok": True})
+
     async def admin_bike_since(self, request: web.Request) -> web.Response:
         """Дата ввода в строй - отсчёт жизненного цикла. Пусто - снять
         (вернётся автоотсчёт от первой выдачи)."""
@@ -665,6 +701,10 @@ class Api:
 
         bikes_json, park_price, paid_off_count = [], 0, 0
         replace_due = replace_soon = 0
+        # Деньги в разрезе точек - по ТЕКУЩЕЙ приписке единицы: историю
+        # перестановок учёт не хранит, и честнее сказать это прямо,
+        # чем изображать точность, которой нет.
+        by_point: dict[str, dict] = {}
         for b in bikes:
             slot = by_bike.get(b["id"], {"revenue": 0, "paid": 0,
                                          "rentals": 0, "days": 0,
@@ -683,6 +723,19 @@ class Api:
             if cycle:
                 replace_due += cycle["replace_due"]
                 replace_soon += cycle["replace_soon"]
+            pt = by_point.setdefault(b["point"] or "без точки", {
+                "bikes": 0, "revenue": 0, "paid": 0, "rentals": 0,
+                "active": 0, "priced": 0, "paid_off": 0, "replace_due": 0})
+            pt["bikes"] += 1
+            pt["revenue"] += slot["revenue"]
+            pt["paid"] += slot["paid"]
+            pt["rentals"] += slot["rentals"]
+            pt["active"] += slot["active"]
+            if b["purchase_price"]:
+                pt["priced"] += 1
+                pt["paid_off"] += (percent is not None and percent >= 100)
+            if cycle:
+                pt["replace_due"] += cycle["replace_due"]
             bikes_json.append({
                 "id": b["id"], "vin": b["vin_frame"], "model": b["model"],
                 "status": b["status"], "price": b["purchase_price"],
@@ -718,6 +771,8 @@ class Api:
                 "replace_due": replace_due, "replace_soon": replace_soon,
                 "lifecycle_months": logic.LIFECYCLE_MONTHS,
             },
+            "points": [{"title": title, **pt}
+                       for title, pt in sorted(by_point.items())],
             "bikes": bikes_json,
         })
 
@@ -1342,6 +1397,7 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/admin/bike/serviced", api.admin_bike_serviced),
         web.post("/api/admin/bike/price", api.admin_bike_price),
         web.post("/api/admin/bike/since", api.admin_bike_since),
+        web.post("/api/admin/bike/point", api.admin_bike_point),
         web.get("/api/admin/analytics", api.admin_analytics),
         web.get("/api/admin/payments", api.admin_payments),
         web.post("/api/admin/payment/create", api.admin_payment_create),

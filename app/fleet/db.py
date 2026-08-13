@@ -183,7 +183,7 @@ class FleetDB:
             """
             select b.id, b.vin_frame, b.vin_motor, b.status, b.notes,
                    b.starline_device_id, b.blocked, b.last_service_at,
-                   m.title as model, p.title as point,
+                   b.point_id, m.title as model, p.title as point,
                    u.full_name as renter_name, u.username as renter_username,
                    bk.note as hold_note
             from fleet.bikes b
@@ -856,12 +856,13 @@ class FleetDB:
         return await self.pool.fetch(
             """
             select b.id, b.vin_frame, b.status, b.purchase_price,
-                   b.in_service_since, m.title as model,
+                   b.in_service_since, m.title as model, p.title as point,
                    min(r.opened_at)::date as first_rented_at
             from fleet.bikes b
             left join fleet.models m on m.id = b.model_id
+            left join fleet.points p on p.id = b.point_id
             left join fleet.rentals r on r.bike_id = b.id
-            group by b.id, m.title
+            group by b.id, m.title, p.title
             order by b.id
             """)
 
