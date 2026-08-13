@@ -106,6 +106,7 @@
     <button data-s="bikes">Парк</button>
     <button data-s="rentals">Аренды</button>
     <button data-s="bookings">Брони</button>
+    <button data-s="kyc">Заявки KYC</button>
     <button data-s="clients">Клиенты</button>
     <button data-s="payments">Расчёты</button>
     <button data-s="import">Импорт формы</button>
@@ -123,6 +124,7 @@
     <div id="clients-out"></div>
   </div>
   <div id="s-payments" class="sect"></div>
+  <div id="s-kyc" class="sect"></div>
   <div id="s-import" class="sect">
     <div class="cols">
       <div class="panel">
@@ -456,6 +458,80 @@ window.cancelPayment = async id => {
   drawPayments();
 };
 
+// ─── заявки KYC ───
+let KYC_REASONS = [];
+async function drawKyc(){
+  const d = await api("/api/admin/kyc");
+  KYC_REASONS = d.reject_reasons || [];
+  if (!d.items.length) {
+    $("s-kyc").innerHTML = `<p class="hint">Заявок на проверке нет.</p>`;
+    return;
+  }
+  $("s-kyc").innerHTML = d.items.map(it => {
+    const kv = it.anketa.map(([label, value]) =>
+      `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("");
+    const reasons = KYC_REASONS.map(([code, title]) =>
+      `<option value="${esc(code)}">${esc(title)}</option>`).join("");
+    return `<div class="panel" style="margin-bottom:16px">
+      <div class="row" style="display:flex; justify-content:space-between">
+        <b>${esc(it.full_name || "—")}</b>
+        <span class="hint">подана ${esc(it.submitted)} · id ${it.tg_id}` +
+        (it.username ? ` · @${esc(it.username)}` : "") + `</span></div>
+      <div class="hint">Телефон: ${esc(it.phone || "—")}</div>` +
+      (it.minor ? `<div class="msg warn">⚠ Арендатору 16–17 лет — проверьте
+         согласие родителя (фото ниже).</div>` : "") +
+      (it.duplicates ? `<div class="msg err">⚠ Документ уже использовался
+         другими аккаунтами: совпадений ${it.duplicates}.</div>` : "") +
+      `<div style="display:flex; gap:14px; flex-wrap:wrap; margin:10px 0">
+        <img data-photo="${it.tg_id}/doc" alt="документ"
+             style="max-width:340px; border-radius:10px; display:none">` +
+        (it.has_parent ? `<img data-photo="${it.tg_id}/parent" alt="согласие"
+             style="max-width:340px; border-radius:10px; display:none">` : "") +
+      `</div>
+      <dl class="kv">${kv}</dl>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+        <button class="primary" onclick="kycDecide(${it.tg_id}, true)">
+          ✅ Одобрить</button>
+        <select id="kyc-reason-${it.tg_id}">${reasons}
+          <option value="">свой текст…</option></select>
+        <input type="text" id="kyc-comment-${it.tg_id}"
+               placeholder="комментарий (для «свой текст»)" style="max-width:280px">
+        <button class="act" onclick="kycDecide(${it.tg_id}, false)">
+          ⛔ Отклонить</button>
+      </div><div id="kyc-msg-${it.tg_id}"></div></div>`;
+  }).join("");
+  // Фото за авторизацией: <img src> заголовок не пришлёт - тянем fetch'ем
+  // с токеном и подставляем blob.
+  document.querySelectorAll("[data-photo]").forEach(async img => {
+    try {
+      const r = await fetch("/api/admin/kyc/photo/" + img.dataset.photo,
+                            {headers: {"X-CRM-Token": TOKEN}});
+      if (!r.ok) return;
+      img.src = URL.createObjectURL(await r.blob());
+      img.style.display = "";
+    } catch (e) { /* фото недоступно - анкета всё равно видна */ }
+  });
+}
+window.kycDecide = async (tgId, approve) => {
+  const body = {tg_id: tgId, approve};
+  if (!approve) {
+    const code = $("kyc-reason-" + tgId).value;
+    if (code) body.reason_code = code;
+    else body.comment = $("kyc-comment-" + tgId).value;
+    if (!confirm("Отклонить заявку? Клиент получит причину и сможет "
+                 + "исправить данные.")) return;
+  } else if (!confirm("Одобрить заявку? Оператору уйдёт приглашение "
+                      + "с данными выдачи.")) return;
+  try {
+    await api("/api/admin/kyc/decide", {method:"POST",
+      body: JSON.stringify(body)});
+  } catch (e) {
+    $("kyc-msg-" + tgId).innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+    return;
+  }
+  drawKyc();
+};
+
 // ─── импорт формы ───
 const FIELD_TITLES = {fio:"ФИО", vin_frame:"Вин рамы", vin_motor:"Вин мотора",
   rent_term:"Срок", phone:"Телефон", phone2:"Телефон 2", phone3:"Телефон 3",
@@ -510,7 +586,7 @@ $("ingest").onclick = async () => {
 // ─── загрузка ───
 const LOADERS = {overview: drawOverview, bikes: drawBikes, rentals: drawRentals,
                  bookings: drawBookings, clients: drawClients,
-                 payments: drawPayments, import: () => {}};
+                 payments: drawPayments, kyc: drawKyc, import: () => {}};
 async function load(name){
   try { await LOADERS[name](); }
   catch (e) { /* 401 уже показал гейт */ }

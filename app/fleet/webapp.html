@@ -72,6 +72,16 @@
   .batt .fill{height:100%; border-radius:6px; background:var(--ok)}
   .batt .fill.low{background:var(--bad)}
   .batt .fill.mid{background:var(--warn)}
+  .fld{margin-bottom:12px}
+  .fld label{display:block; font-size:13px; color:var(--hint); margin-bottom:4px}
+  .fld input[type=text], .fld input[type=tel]{
+    width:100%; padding:11px 13px; border-radius:10px; border:1px solid
+    rgba(125,138,148,.35); background:var(--card); color:var(--fg); font:inherit}
+  .fld input.bad{border-color:var(--bad)}
+  .fld .ferr{color:var(--bad); font-size:12.5px; margin-top:3px}
+  .chk{display:flex; gap:10px; align-items:flex-start; margin:12px 0;
+       font-size:14px}
+  .chk input{width:20px; height:20px; margin-top:1px}
   .chips{display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 4px}
   .chip{font-size:12px; padding:3px 9px; border-radius:14px;
         background:rgba(125,138,148,.16); white-space:nowrap}
@@ -109,6 +119,10 @@
   <div id="book-msg"></div>
 </div>
 
+<div id="tab-reg" class="sect">
+  <div id="reg"></div>
+</div>
+
 <div id="tab-moe" class="sect">
   <div id="me"></div>
 </div>
@@ -116,6 +130,7 @@
 <nav class="tabs">
   <button data-tab="vitrina" class="on">Витрина</button>
   <button data-tab="bron">Бронь</button>
+  <button data-tab="reg">Оформление</button>
   <button data-tab="moe">Моё</button>
 </nav>
 
@@ -151,6 +166,7 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
   b.classList.add("on");
   $("tab-" + b.dataset.tab).classList.add("on");
   if (b.dataset.tab === "moe") loadMe();
+  if (b.dataset.tab === "reg") loadReg();
 });
 
 // ─── витрина ───
@@ -393,6 +409,140 @@ async function loadMe() {
     };
   } catch (e) {
     $("me").innerHTML = `<div class="msg err">${esc(String(e))}</div>`;
+  }
+}
+
+// ─── оформление (регистрация + KYC) ───
+const REG_FIELDS = [
+  ["fio", "ФИО полностью", "Иванов Иван Иванович"],
+  ["phone", "Телефон основной", "+7 900 123-45-67", "tel"],
+  ["birth_date", "Дата рождения", "07.03.1990"],
+  ["birth_place", "Место рождения (как в паспорте)", "гор. Казань"],
+  ["passport_number", "Серия и номер паспорта", "1234 567890"],
+  ["passport_date", "Дата выдачи", "01.02.2015"],
+  ["passport_code", "Код подразделения", "160-002"],
+  ["passport_issuer", "Кем выдан (строкой из паспорта)", ""],
+  ["reg_address", "Адрес прописки — город, улица, дом, квартира", ""],
+  ["live_address", "Адрес проживания — город, улица, дом, квартира", ""],
+  ["phone2", "Телефон 2 (близкий человек)", "+7 ...", "tel"],
+  ["phone3", "Телефон 3", "+7 ...", "tel"],
+];
+
+function regForm(st) {
+  const inputs = REG_FIELDS.map(([id, label, ph, type]) =>
+    `<div class="fld"><label for="rg-${id}">${label}</label>
+     <input type="${type || "text"}" id="rg-${id}" placeholder="${esc(ph)}">
+     <div class="ferr" id="er-${id}"></div></div>`).join("");
+  const policyLink = st.policy_file ? `<a href="/policy">Политика обработки ПДн</a>`
+    : st.policy_url ? `<a href="${esc(st.policy_url)}" target="_blank">Политика обработки ПДн</a>`
+    : "Политика обработки ПДн (файл пришлёт бот)";
+  return `<div class="card">
+    ${inputs}
+    <div class="fld"><label>Фото разворота паспорта (JPG/PNG, до 12 МБ)</label>
+      <input type="file" id="rg-doc" accept="image/jpeg,image/png,image/webp">
+      <div class="ferr" id="er-doc"></div></div>
+    <div class="fld" id="parent-block" style="display:none">
+      <label>Вам 16–17 лет: фото письменного согласия родителя</label>
+      <input type="file" id="rg-parent" accept="image/jpeg,image/png,image/webp">
+      <div class="ferr" id="er-parent"></div></div>
+    <label class="chk"><input type="checkbox" id="rg-policy">
+      <span>Я ознакомился(лась) с ${policyLink}</span></label>
+    <label class="chk"><input type="checkbox" id="rg-consent">
+      <span>Даю согласие на обработку персональных данных для заключения
+      договора проката</span></label>
+    <div class="ferr" id="er-consent"></div>
+    <button class="big" id="rg-send">Отправить на проверку</button>
+    <div id="rg-msg"></div>
+  </div>`;
+}
+
+function minorByInput() {
+  const m = ($("rg-birth_date") || {value: ""}).value
+    .match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/);
+  if (!m) return false;
+  const b = new Date(+m[3], +m[2] - 1, +m[1]), now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  if (now < new Date(now.getFullYear(), b.getMonth(), b.getDate())) age--;
+  return age >= 14 && age < 18;
+}
+
+async function loadReg() {
+  if (!initData) {
+    $("reg").innerHTML = `<div class="card">Откройте приложение из чата
+      с ботом, чтобы пройти оформление.</div>`;
+    return;
+  }
+  let st;
+  try { st = await api("/api/reg/status"); }
+  catch (e) { $("reg").innerHTML = `<div class="msg err">${esc(String(e))}</div>`; return; }
+
+  if (st.contract_signed) {
+    $("reg").innerHTML = `<div class="card">✅ <b>Вы зарегистрированы</b>
+      <div class="hint">Договор подписан. Бронируйте и продлевайте —
+      документы уже оформлены.</div></div>`;
+    return;
+  }
+  if (st.status === "pending") {
+    $("reg").innerHTML = `<div class="card">⏳ <b>Заявка на проверке</b>
+      <div class="hint">Обычно это занимает меньше часа в рабочее время.
+      Решение придёт в чат с ботом, статус виден здесь.</div></div>`;
+    return;
+  }
+  if (st.status === "approved") {
+    $("reg").innerHTML = `<div class="card">✅ <b>Проверка пройдена</b>
+      <div class="hint">Договор придёт в чат с ботом — подпишите его там,
+      дальше оплата и получение велосипеда.</div></div>`;
+    return;
+  }
+  let head = "";
+  if (st.status === "rejected") {
+    head = `<div class="alert bad"><b>Заявка отклонена</b>
+      ${esc(st.reject_reason || "")}. Поправьте данные и отправьте снова.</div>`;
+  }
+  $("reg").innerHTML = head + regForm(st);
+  $("rg-birth_date").addEventListener("input", () => {
+    $("parent-block").style.display = minorByInput() ? "" : "none";
+  });
+  $("rg-send").onclick = submitReg;
+}
+
+async function submitReg() {
+  document.querySelectorAll(".ferr").forEach(e => e.textContent = "");
+  document.querySelectorAll(".fld input").forEach(e => e.classList.remove("bad"));
+  const fd = new FormData();
+  REG_FIELDS.forEach(([id]) => fd.append(id, $("rg-" + id).value));
+  fd.append("policy", $("rg-policy").checked ? "1" : "0");
+  fd.append("consent", $("rg-consent").checked ? "1" : "0");
+  if ($("rg-doc").files[0]) fd.append("doc", $("rg-doc").files[0]);
+  if ($("rg-parent").files[0]) fd.append("parent", $("rg-parent").files[0]);
+
+  $("rg-send").disabled = true;
+  try {
+    const r = await fetch("/api/reg/submit", {method: "POST", body: fd,
+      headers: {"X-Telegram-Init-Data": initData}});
+    let body = {};
+    try { body = await r.json(); } catch (e) {}
+    if (r.ok) {
+      if (tg) tg.HapticFeedback.notificationOccurred("success");
+      loadReg();
+      return;
+    }
+    if (body.errors) {
+      for (const [field, msg] of Object.entries(body.errors)) {
+        const err = $("er-" + field), inp = $("rg-" + field);
+        if (err) err.textContent = msg;
+        if (inp) inp.classList.add("bad");
+      }
+      const first = document.querySelector(".ferr:not(:empty)");
+      if (first) first.scrollIntoView({block: "center"});
+      msg($("rg-msg"), "Проверьте подсвеченные поля.", "err");
+    } else {
+      msg($("rg-msg"), body.error || "Не получилось отправить.", "err");
+    }
+  } catch (e) {
+    msg($("rg-msg"), "Нет связи. Попробуйте ещё раз.", "err");
+  } finally {
+    $("rg-send").disabled = false;
   }
 }
 

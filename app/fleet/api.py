@@ -74,13 +74,18 @@ class Api:
     def __init__(self, fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
                  bot_token: str = "", crm_token: str = "",
                  admins: tuple[int, ...] = (), starline=None,
-                 tochka=None) -> None:
+                 tochka=None, db=None, vault=None, cfg=None) -> None:
         self.fleet = fleet
         self.bot = bot
         self.admin_chat_id = admin_chat_id
         self.bot_token = bot_token
         self.starline = starline
         self.tochka = tochka
+        # Регистрация и KYC пишут в bot.users: db - тот же Database, что
+        # у бота, vault шифрует анкету, cfg даёт редакции политики и пути.
+        self.db = db
+        self.vault = vault
+        self.cfg = cfg
         self.crm_token = crm_token if len(crm_token or "") >= CRM_TOKEN_MIN_LEN else ""
         if crm_token and not self.crm_token:
             log.warning("CRM_TOKEN короче %s символов - CRM по токену выключена",
@@ -554,6 +559,371 @@ class Api:
         await self.fleet.mark_serviced(bike_id)
         return _json({"ok": True})
 
+    # ─────────────────── регистрация из Mini App ───────────────────
+
+    @property
+    def _reg_ready(self) -> bool:
+        return all((self.db, self.vault, self.cfg))
+
+    async def reg_status(self, request: web.Request) -> web.Response:
+        user = self._client(request)
+        if user is None:
+            return _json({"error": "auth"}, status=401)
+        if not self._reg_ready:
+            return _json({"error": "Оформление в приложении не подключено."},
+                         status=503)
+        from .. import logic as bot_logic
+        row = await self.db.get_user(user["id"])
+        data = dict(row) if row else {}
+        status = data.get("status") or "new"
+        return _json({
+            "status": "none" if status == "new" else status,
+            "reject_reason": data.get("reject_reason"),
+            "full_name": data.get("full_name"),
+            "contract_signed": data.get("contract_status") == bot_logic.CT_SIGNED,
+            "policy_url": (self.cfg.pdn_url or "") if self.cfg else "",
+            "policy_file": bool(self.cfg and self.cfg.pdn_policy_file.exists()),
+        })
+
+    async def policy_file(self, _request: web.Request) -> web.Response:
+        """Политика обработки ПДн - тот же файл, что бот шлёт на шаге
+        ознакомления. Публична: это документ для клиента, а не секрет."""
+        if self.cfg and self.cfg.pdn_policy_file.exists():
+            return web.FileResponse(self.cfg.pdn_policy_file)
+        raise web.HTTPNotFound
+
+    # Telegram-карточка принимает эти форматы фотографией; HEIC, который
+    # пропускает бот (там Telegram сам перекодирует), из формы не пройдёт.
+    _CARD_MIME = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp"})
+
+    def _check_upload(self, field, *, required_error: str) -> tuple[bytes | None, str]:
+        from .. import logic as bot_logic
+        if not isinstance(field, web.FileField):
+            return None, required_error
+        data = field.file.read()
+        check = bot_logic.validate_upload(False, field.content_type, len(data))
+        if not check.ok:
+            return None, check.error
+        if (field.content_type or "").lower() not in self._CARD_MIME:
+            return None, "Нужен JPG, PNG или WebP."
+        return data, ""
+
+    async def reg_submit(self, request: web.Request) -> web.Response:
+        """Анкета из Mini App: та же регистрация, что в боте, одной формой.
+
+        Пишет в bot.users и шлёт ту же карточку модерации в служебный чат -
+        решение можно принять и кнопками в Telegram, и в CRM. Дальше
+        работает существующий конвейер: договор, подпись, оплата.
+        """
+        user = self._client(request)
+        if user is None:
+            return _json({"error": "auth"}, status=401)
+        if not self._reg_ready:
+            return _json({"error": "Оформление в приложении не подключено."},
+                         status=503)
+        from datetime import date as _date
+
+        from .. import logic as bot_logic
+        from ..db import utcnow
+        from ..services import files as file_store
+
+        tg_id = user["id"]
+        post = await request.post()
+        if post.get("policy") != "1" or post.get("consent") != "1":
+            return _json({"errors": {"consent":
+                          "Нужно ознакомиться с Политикой и дать согласие "
+                          "на обработку персональных данных."}}, status=400)
+
+        form = {k: post.get(k) for k in
+                ("fio", "phone", *bot_logic.ANKETA_FIELDS)}
+        clean, errors = logic.validate_registration(form, today=_date.today())
+
+        doc_bytes, doc_err = self._check_upload(
+            post.get("doc"),
+            required_error="Прикрепите фото разворота паспорта.")
+        if doc_err:
+            errors["doc"] = doc_err
+        minor = bool(clean) and bot_logic.is_minor(clean["anketa"],
+                                                   today=_date.today())
+        parent_bytes = None
+        if minor:
+            parent_bytes, parent_err = self._check_upload(
+                post.get("parent"),
+                required_error="Вам 16–17 лет: нужно фото письменного "
+                               "согласия родителя.")
+            if parent_err:
+                errors["parent"] = parent_err
+        if errors:
+            return _json({"errors": errors}, status=400)
+
+        row = await self.db.upsert_user(tg_id, user.get("username"))
+        data = dict(row)
+        if data.get("status") == bot_logic.ST_PENDING:
+            return _json({"error": "Заявка уже на проверке - дождитесь "
+                          "решения."}, status=409)
+        if (data.get("status") == bot_logic.ST_APPROVED
+                and data.get("contract_status") == bot_logic.CT_SIGNED):
+            return _json({"error": "Вы уже зарегистрированы - договор "
+                          "подписан."}, status=409)
+
+        doc_path, doc_sha = file_store.store(self.cfg.storage_dir, tg_id,
+                                             "doc", doc_bytes)
+        now = utcnow()
+        patch = {
+            "full_name": clean["fio"], "phone": clean["phone"],
+            "anketa_enc": self.vault.encrypt(clean["anketa"]),
+            "doc_path": str(doc_path), "doc_sha256": doc_sha,
+            "doc_is_photo": True,
+            # Два юридических факта с двумя отметками, как в боте:
+            # ознакомление с Политикой и согласие на обработку.
+            "policy_version": self.cfg.pdn_version, "policy_ack_at": now,
+            "oferta_version": self.cfg.oferta_version,
+            "oferta_accepted_at": now,
+            "pdn_version": self.cfg.consent_version, "pdn_consent_at": now,
+            "status": bot_logic.ST_PENDING, "state": bot_logic.PENDING,
+            "reject_reason": None,
+        }
+        if parent_bytes:
+            parent_path, parent_sha = file_store.store(
+                self.cfg.storage_dir, tg_id, "parent", parent_bytes)
+            patch.update(parent_path=str(parent_path),
+                         parent_sha256=parent_sha, parent_is_photo=True)
+
+        patch.update(await self._send_kyc_card(
+            tg_id, clean, doc_bytes, parent_bytes, minor))
+        await self.db.patch(tg_id, **patch)
+        await self.db.log_event(tg_id, "submitted", {"via": "app"})
+
+        duplicates = await self.db.count_duplicate_docs(tg_id, doc_sha)
+        if duplicates and self.bot is not None:
+            from .. import texts
+            await self.db.log_event(tg_id, "duplicate_document",
+                                    {"count": duplicates})
+            try:
+                await self.bot.send_message(
+                    self.admin_chat_id, texts.ALERT_DUPLICATE.format(
+                        tg_id=tg_id, count=duplicates))
+            except Exception:                           # noqa: BLE001
+                log.exception("алерт о дубле документа %s не доставлен", tg_id)
+        await self._notify_client(tg_id, "PENDING_WAIT")
+        return _json({"ok": True, "status": "pending"})
+
+    async def _send_kyc_card(self, tg_id: int, clean: dict, doc_bytes: bytes,
+                             parent_bytes: bytes | None, minor: bool) -> dict:
+        """Карточка модерации - та же, что шлёт бот: фото документа, анкета
+        в порядке договора и кнопки «Одобрить/Отклонить» (работают
+        в Telegram, решение из CRM снимает их).
+
+        Сбой доставки заявку не хоронит: mod_* остаются пустыми, а CRM
+        показывает pending-заявки и без карточки.
+        """
+        if self.bot is None or self.admin_chat_id is None:
+            return {}
+        from aiogram.types import BufferedInputFile
+
+        from .. import keyboards as kb
+        from .. import logic as bot_logic
+        from .. import texts
+        result: dict = {}
+        try:
+            if minor and parent_bytes:
+                sent = await self.bot.send_photo(
+                    self.admin_chat_id,
+                    BufferedInputFile(parent_bytes, "parent.jpg"),
+                    caption=texts.PARENT_CARD_CAPTION.format(tg_id=tg_id))
+                if sent.photo:
+                    result["parent_file_id"] = sent.photo[-1].file_id
+            ctx = bot_logic.contract_context(
+                {"tg_id": tg_id, "full_name": clean["fio"],
+                 "phone": clean["phone"]},
+                clean["anketa"], number="")
+            fields = "\n".join(
+                f"{label}: <b>{bot_logic.esc(ctx.get(field, '—'))}</b>"
+                for field, label in bot_logic.CONTRACT_LABELS)
+            caption = texts.CONTRACT_CARD.format(
+                number="будет присвоен", fields=fields, tg_id=tg_id)
+            if minor:
+                caption += texts.CARD_MINOR_LINE
+            sent = await self.bot.send_photo(
+                self.admin_chat_id, BufferedInputFile(doc_bytes, "doc.jpg"),
+                caption=caption, reply_markup=kb.moderation(tg_id))
+            if sent.photo:
+                result["doc_file_id"] = sent.photo[-1].file_id
+            result["mod_chat_id"] = sent.chat.id
+            result["mod_message_id"] = sent.message_id
+        except Exception:                               # noqa: BLE001
+            log.exception("карточка модерации %s не доставлена - заявка "
+                          "останется видна в CRM", tg_id)
+            await self.db.log_event(tg_id, "moderation_card_failed",
+                                    {"via": "app"})
+        return result
+
+    async def _notify_client(self, tg_id: int, key: str, **fmt) -> None:
+        """Сообщение клиенту от бота на его языке - как _notify в модерации."""
+        if self.bot is None or self.db is None:
+            return
+        from .. import i18n
+        row = await self.db.get_user(tg_id)
+        text = i18n.t(i18n.user_lang(dict(row) if row else None), key)
+        if fmt:
+            text = text.format(**fmt)
+        try:
+            await self.bot.send_message(tg_id, text)
+        except Exception:                               # noqa: BLE001
+            log.exception("клиент %s не получил уведомление %s", tg_id, key)
+
+    # ─────────────────────── KYC в CRM ───────────────────────
+
+    async def admin_kyc(self, request: web.Request) -> web.Response:
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        if not self._reg_ready:
+            return _json({"error": "KYC в CRM не подключён."}, status=503)
+        from .. import logic as bot_logic
+        rows = await self.db.pool.fetch(
+            "select * from bot.users where status = 'pending' "
+            "order by updated_at desc limit 50")
+        items = []
+        for row in rows:
+            data = dict(row)
+            anketa = self.vault.decrypt(data.get("anketa_enc"))
+            duplicates = 0
+            if data.get("doc_sha256"):
+                duplicates = await self.db.count_duplicate_docs(
+                    data["tg_id"], data["doc_sha256"])
+            items.append({
+                "tg_id": data["tg_id"], "username": data.get("username"),
+                "full_name": data.get("full_name"),
+                "phone": data.get("phone"),
+                "submitted": _fmt(data.get("updated_at")),
+                "minor": bot_logic.is_minor(anketa),
+                "has_doc": bool(data.get("doc_path")),
+                "has_parent": bool(data.get("parent_path")),
+                "duplicates": duplicates,
+                "anketa": [
+                    [label, anketa.get(field) or "—"]
+                    for field, label in bot_logic.CONTRACT_LABELS
+                    if field in bot_logic.ANKETA_FIELDS
+                ],
+            })
+        return _json({
+            "items": items,
+            "reject_reasons": [[code, title] for code, (title, _)
+                               in bot_logic.REJECT_REASONS.items()],
+        })
+
+    async def admin_kyc_photo(self, request: web.Request) -> web.Response:
+        """Скан из заявки. ПДн - поэтому только за админской авторизацией,
+        и путь перед отдачей сверяется с шаблоном хранилища, как в ретеншене."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        if not self._reg_ready:
+            raise web.HTTPNotFound
+        from .. import logic as bot_logic
+        try:
+            tg_id = int(request.match_info["tg_id"])
+        except ValueError:
+            raise web.HTTPNotFound from None
+        kind = request.match_info["kind"]
+        if kind not in ("doc", "parent"):
+            raise web.HTTPNotFound
+        row = await self.db.get_user(tg_id)
+        path = dict(row).get(f"{kind}_path") if row else None
+        if not path or not bot_logic.is_safe_store_path(
+                path, self.cfg.storage_dir):
+            raise web.HTTPNotFound
+        return web.FileResponse(path)
+
+    async def admin_kyc_decide(self, request: web.Request) -> web.Response:
+        """Решение по заявке из CRM - тот же перевод статуса, что кнопки
+        в Telegram: guard по expected_status не даст двум модераторам
+        (или CRM и кнопке разом) решить одну заявку дважды."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        if not self._reg_ready:
+            return _json({"error": "KYC в CRM не подключён."}, status=503)
+        from .. import logic as bot_logic
+        from ..db import utcnow
+        try:
+            body = await request.json()
+            tg_id = int(body["tg_id"])
+            approve = bool(body["approve"])
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        row = await self.db.get_user(tg_id)
+        if row is None:
+            return _json({"error": "Заявка не найдена."}, status=404)
+        data = dict(row)
+        admin_id = self._admin_id(request)
+
+        if approve:
+            ok = await self.db.patch(
+                tg_id, expected_status=bot_logic.ST_PENDING,
+                status=bot_logic.ST_APPROVED, state=bot_logic.PENDING,
+                reject_reason=None, reviewed_by=admin_id,
+                reviewed_at=utcnow())
+            if not ok:
+                return _json({"error": "Заявка уже обработана."}, status=409)
+            await self.db.log_event(tg_id, "moderation_approved",
+                                    {"by": admin_id or 0, "via": "crm"})
+            await self._notify_client(tg_id, "APPROVED_WAIT_ISSUE")
+            await self._send_issue_prompt(tg_id, data)
+        else:
+            code = str(body.get("reason_code") or "")
+            if code in bot_logic.REJECT_REASONS:
+                reason = bot_logic.REJECT_REASONS[code][0]
+                back_to = bot_logic.reject_back_to(
+                    code, self.vault.decrypt(data.get("anketa_enc")))
+            else:
+                comment = bot_logic.reject_comment(body.get("comment"))
+                if not comment.ok:
+                    return _json({"errors": {"comment": comment.error}},
+                                 status=400)
+                reason, back_to = comment.value, bot_logic.WAIT_FIO
+            ok = await self.db.patch(
+                tg_id, expected_status=bot_logic.ST_PENDING,
+                status=bot_logic.ST_REJECTED, state=back_to,
+                reject_reason=reason, reviewed_by=admin_id,
+                reviewed_at=utcnow())
+            if not ok:
+                return _json({"error": "Заявка уже обработана."}, status=409)
+            await self.db.log_event(tg_id, "moderation_rejected",
+                                    {"by": admin_id or 0, "reason": reason,
+                                     "via": "crm"})
+            await self.db.set_purge_after(tg_id, self.cfg.purge_rejected_days)
+            await self._notify_client(tg_id, "REJECTED_WITH_REASON",
+                                      reason=bot_logic.esc(reason))
+        # Снять кнопки с Telegram-карточки: второй модератор не должен
+        # решать уже решённую заявку. Сбой не критичен - guard отобьёт.
+        if self.bot is not None and data.get("mod_chat_id"):
+            try:
+                await self.bot.edit_message_reply_markup(
+                    data["mod_chat_id"], data["mod_message_id"],
+                    reply_markup=None)
+            except Exception:                           # noqa: BLE001
+                log.debug("кнопки карточки %s не сняты", tg_id)
+        return _json({"ok": True})
+
+    async def _send_issue_prompt(self, tg_id: int, data: dict) -> None:
+        """Приглашение «данные выдачи» - как после «Одобрить» в Telegram:
+        без него одобренная заявка не поедет дальше по конвейеру договора."""
+        if self.bot is None or self.admin_chat_id is None:
+            return
+        from .. import logic as bot_logic
+        from .. import texts
+        fio = data.get("full_name") or "без имени"
+        try:
+            sent = await self.bot.send_message(
+                self.admin_chat_id,
+                texts.ISSUE_PROMPT.format(fio=bot_logic.esc(fio), tg_id=tg_id,
+                                          form=bot_logic.ISSUE_FORM_TEMPLATE))
+            await self.db.patch(tg_id, issue_chat_id=sent.chat.id,
+                                issue_message_id=sent.message_id)
+        except Exception as exc:                        # noqa: BLE001
+            log.exception("приглашение выдачи для %s не доставлено", tg_id)
+            await self.db.log_event(tg_id, "issue_prompt_failed",
+                                    {"error": str(exc)})
+
     # ─────────────────────── расчёты (СБП, Точка) ───────────────────────
 
     @staticmethod
@@ -690,14 +1060,22 @@ class Api:
 def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
               bot_token: str = "", crm_token: str = "",
               admins: tuple[int, ...] = (), starline=None,
-              tochka=None) -> web.Application:
+              tochka=None, db=None, vault=None, cfg=None) -> web.Application:
     api = Api(fleet, bot=bot, admin_chat_id=admin_chat_id, bot_token=bot_token,
               crm_token=crm_token, admins=admins, starline=starline,
-              tochka=tochka)
-    app = web.Application()
+              tochka=tochka, db=db, vault=vault, cfg=cfg)
+    # client_max_size: анкета приходит с двумя фото до 12 МБ; дефолтный
+    # мегабайт aiohttp резал бы её на середине загрузки.
+    app = web.Application(client_max_size=30 * 1024 * 1024)
     app.add_routes([
         web.get("/", api.index),
         web.get("/api/health", api.health),
+        web.get("/policy", api.policy_file),
+        web.get("/api/reg/status", api.reg_status),
+        web.post("/api/reg/submit", api.reg_submit),
+        web.get("/api/admin/kyc", api.admin_kyc),
+        web.get("/api/admin/kyc/photo/{tg_id}/{kind}", api.admin_kyc_photo),
+        web.post("/api/admin/kyc/decide", api.admin_kyc_decide),
         web.get("/api/points", api.points),
         web.get("/api/models", api.models),
         web.get("/api/availability", api.availability),
@@ -734,11 +1112,12 @@ async def start_api(fleet: FleetDB, port: int, *, bot=None,
                     admin_chat_id: int | None = None,
                     bot_token: str = "", crm_token: str = "",
                     admins: tuple[int, ...] = (), starline=None,
-                    tochka=None) -> web.AppRunner:
+                    tochka=None, db=None, vault=None, cfg=None) -> web.AppRunner:
     """Поднимает витрину и возвращает runner - его гасит main() при остановке."""
     runner = web.AppRunner(build_app(
         fleet, bot=bot, admin_chat_id=admin_chat_id, bot_token=bot_token,
-        crm_token=crm_token, admins=admins, starline=starline, tochka=tochka))
+        crm_token=crm_token, admins=admins, starline=starline, tochka=tochka,
+        db=db, vault=vault, cfg=cfg))
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()

@@ -131,7 +131,7 @@ async def run() -> None:
             fleet_db, cfg.api_port, bot=bot,
             admin_chat_id=cfg.contract_chat_id, bot_token=cfg.bot_token,
             crm_token=cfg.crm_token, admins=cfg.admins, starline=starline,
-            tochka=tochka)
+            tochka=tochka, db=db, vault=vault, cfg=cfg)
     # Кнопка меню «🚲 Бронь» во всех личных чатах: появляется, как только
     # владелец опубликовал Mini App по HTTPS и заполнил MINIAPP_URL.
     if cfg.miniapp_url:

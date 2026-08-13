@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta
 
+from .. import logic as bot_logic
 from ..logic import KIT_FIELDS, esc, normalize_phone
 
 # ─────────────────────────── статусы единицы ───────────────────────────
@@ -307,6 +308,59 @@ def hold_minutes_for_pickup(pickup: datetime, *, now: datetime) -> int:
     """Сколько держать единицу: до визита плюс запас на опоздание."""
     minutes = int((pickup - now).total_seconds() // 60) + BOOKING_GRACE_MINUTES
     return max(minutes, BOOKING_GRACE_MINUTES)
+
+
+# ─────────────────── регистрация из Mini App ───────────────────
+#
+# Та же анкета, что собирает бот за шестнадцать сообщений, - одной формой.
+# Валидаторы НЕ дублируются: каждое поле проверяет ровно та же функция
+# из app/logic.py, что и в боте, - иначе форма приняла бы то, что бот
+# отверг, и наоборот.
+
+def validate_registration(form: dict, *, today: date) -> tuple[dict | None, dict[str, str]]:
+    """Проверка всей анкеты разом: (чистые данные, {}) либо (None, ошибки).
+
+    Ошибки - по полям, а не первой попавшейся: клиент правит форму целиком,
+    и гонять его по одной ошибке за раз - это бот на шестнадцать сообщений,
+    от которого форма и уходит.
+    """
+    errors: dict[str, str] = {}
+    clean: dict = {"anketa": {}}
+
+    fio = bot_logic.validate_fio(str(form.get("fio") or ""))
+    if fio.ok:
+        clean["fio"] = fio.value
+    else:
+        errors["fio"] = fio.error
+
+    phone = normalize_phone(str(form.get("phone") or ""))
+    if phone is None:
+        errors["phone"] = "Не похоже на номер телефона. Пример: +7 900 123-45-67."
+    else:
+        clean["phone"] = phone
+
+    for step in bot_logic.ANKETA_STEPS:
+        raw = str(form.get(step.field) or "")
+        if step.field == "birth_date":
+            result = bot_logic.validate_birth_date(raw, today=today)
+        elif step.field == "passport_date":
+            result = bot_logic.validate_date(raw, today=today)
+        elif step.field in ("phone2", "phone3"):
+            taken = [p for p in (phone, clean["anketa"].get("phone2")) if p]
+            result = bot_logic.validate_phone(raw, taken=taken)
+        else:
+            result = step.validate(raw)
+        if result.ok:
+            clean["anketa"][step.field] = result.value
+        else:
+            errors[step.field] = result.error
+
+    if not errors and not bot_logic.passport_date_consistent(clean["anketa"]):
+        errors["passport_date"] = ("Дата выдачи не согласуется с датой "
+                                   "рождения: паспорт выдают с 14 лет.")
+    if errors:
+        return None, errors
+    return clean, {}
 
 
 # ─────────────────────────── заряд АКБ ───────────────────────────

@@ -439,6 +439,70 @@ class TestDue(unittest.TestCase):
                          date(2027, 1, 4))
 
 
+GOOD_REG_FORM = {
+    "fio": "Иванов Иван Иванович",
+    "phone": "89050238366",
+    "birth_date": "07.03.1990",
+    "birth_place": "гор. Казань",
+    "passport_number": "1234567890",
+    "passport_date": "01.02.2015",
+    "passport_code": "160002",
+    "passport_issuer": "МВД по Республике Татарстан",
+    "reg_address": "Казань, ул. Чистопольская, д. 97б, кв. 6",
+    "live_address": "Казань, ул. Лаврентьева, д. 24а, кв. 129",
+    "phone2": "89053731217",
+    "phone3": "89050222012",
+}
+
+
+class TestRegistrationForm(unittest.TestCase):
+    TODAY = date(2026, 8, 12)
+
+    def check(self, **overrides):
+        return fleet.validate_registration({**GOOD_REG_FORM, **overrides},
+                                           today=self.TODAY)
+
+    def test_good_form_normalized_like_bot(self):
+        clean, errors = self.check()
+        self.assertEqual(errors, {})
+        # Нормализация ровно та же, что у бота: телефоны к +7, паспорт
+        # к «1234 567890», код к «160-002».
+        self.assertEqual(clean["phone"], "+79050238366")
+        self.assertEqual(clean["anketa"]["passport_number"], "1234 567890")
+        self.assertEqual(clean["anketa"]["passport_code"], "160-002")
+        self.assertEqual(clean["anketa"]["birth_date"], "07.03.1990")
+        self.assertFalse(logic.missing_anketa_fields(clean["anketa"]))
+
+    def test_errors_come_per_field_not_first_only(self):
+        clean, errors = self.check(fio="X", passport_number="12",
+                                   reg_address="коротко")
+        self.assertIsNone(clean)
+        self.assertEqual(set(errors),
+                         {"fio", "passport_number", "reg_address"})
+
+    def test_duplicate_phones_rejected(self):
+        clean, errors = self.check(phone2="89050238366")
+        self.assertIsNone(clean)
+        self.assertIn("уже указан", errors["phone2"])
+
+    def test_minor_detected_after_validation(self):
+        clean, errors = self.check(birth_date="01.01.2010",
+                                   passport_date="01.02.2025")
+        self.assertEqual(errors, {})
+        self.assertTrue(logic.is_minor(clean["anketa"], today=self.TODAY))
+
+    def test_underage_rejected(self):
+        clean, errors = self.check(birth_date="01.01.2015")
+        self.assertIsNone(clean)
+        self.assertIn("birth_date", errors)
+
+    def test_passport_before_14_years_rejected(self):
+        clean, errors = self.check(birth_date="07.03.2005",
+                                   passport_date="01.02.2015")
+        self.assertIsNone(clean)
+        self.assertIn("passport_date", errors)
+
+
 class TestService(unittest.TestCase):
     NOW = datetime(2026, 8, 12, 14, 0)
 
