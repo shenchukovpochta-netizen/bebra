@@ -41,6 +41,31 @@ class StarLineError(Exception):
     """Ошибка обращения к StarLine. Наружу пользователю не показывается."""
 
 
+async def unblock_bike(fleet, starline, bike_id: int, *, reason: str,
+                       admin_id: int | None = None) -> bool:
+    """Снять блокировку единицы и отметить это в учёте.
+
+    ЕДИНСТВЕННЫЙ путь всех разблокировок - оплата счёта, возврат
+    велосипеда, кнопка в CRM: отметка blocked снимается только после
+    того, как StarLine принял команду, и каждый вызов оставляет след
+    в журнале. Разъехавшиеся копии этой логики уже однажды дали дыру
+    «возврат через бота не снимает блокировку».
+    """
+    if starline is None:
+        return False
+    bike = await fleet.get_bike(str(bike_id))
+    if not bike or not bike["blocked"] or not bike["starline_device_id"]:
+        return False
+    device = bike["starline_device_id"]
+    ok = await starline.unblock(device)
+    await fleet.log_starline(bike_id, device, "unblock", ok,
+                             reason if ok else "команда StarLine не прошла",
+                             admin_id)
+    if ok:
+        await fleet.mark_blocked(bike_id, blocked=False, reason=None)
+    return ok
+
+
 def md5_hex(value: str) -> str:
     return hashlib.md5(value.encode("utf-8")).hexdigest()
 
@@ -131,8 +156,12 @@ class StarLine:
         не должен превращаться в запрос к StarLine.
         """
         cached = self._voltage_cache.get(device_id)
-        if cached and time.monotonic() - cached[0] < VOLTAGE_TTL_SECONDS:
-            return cached[1]
+        if cached:
+            # Пустой результат кэшируется коротко: единичный сетевой сбой
+            # не должен прятать заряд у клиента на все пять минут.
+            ttl = VOLTAGE_TTL_SECONDS if cached[1] is not None else 60
+            if time.monotonic() - cached[0] < ttl:
+                return cached[1]
         data: dict = {}
         for attempt in (1, 2):
             try:
@@ -141,6 +170,15 @@ class StarLine:
                 data = await self._get_json(
                     f"{DEV_BASE}/v3/device/{device_id}/data", {},
                     cookies={"slnet": self._slnet})
+                # Протухший slnet - это HTTP 200 с кодом ошибки в теле,
+                # исключения нет. Без этой проверки voltage() застревал бы
+                # на мёртвом токене до рестарта: сбрасываем и пробуем снова.
+                if data.get("code") not in (None, 200, "200"):
+                    log.warning("StarLine data %s вернул %r", device_id,
+                                data.get("code"))
+                    self._slnet = None
+                    data = {}
+                    continue
                 break
             except Exception:                           # noqa: BLE001
                 log.exception("StarLine: телеметрия %s не получена (попытка %s)",
@@ -176,6 +214,9 @@ class StarLine:
             data={"login": self.login, "pass": md5_hex(self.password)})
         token = resp.get("user_token") or (resp.get("desc") or {}).get("user_token")
         if not token:
+            # Отозванный app-токен не должен залипать на все 3 часа TTL:
+            # следующая попытка получит его заново.
+            self._app_token = None
             raise StarLineError(f"user/login вернул {resp!r}")
         return token
 
@@ -203,7 +244,11 @@ class StarLine:
                     f"{DEV_BASE}/v1/device/{device_id}/set_param",
                     json={"type": self.block_param, self.block_param: value},
                     cookies={"slnet": self._slnet})
-                if resp.get("code") in (200, None) or resp.get("state") == 1:
+                # Успех - только ЯВНЫЙ: ответ без кода («{}», текст ошибки
+                # шлюза) успехом не считается, иначе blocked в базе врал бы
+                # против реального устройства - «заблокирован» у уехавшего
+                # неплательщика или «разблокирован» у обездвиженного.
+                if resp.get("code") in (200, "200") or resp.get("state") == 1:
                     return True
                 log.warning("StarLine set_param %s вернул %r", device_id, resp)
                 self._slnet = None            # похоже на протухший токен

@@ -191,6 +191,17 @@ async def _backfill(fleet: FleetDB) -> None:
                             today=row["act_in_signed_at"].date()))
         rentals += inserted is not None
 
+    # Отсчёт планового ТО у восстановленных единиц - от даты выдачи,
+    # а не от момента деплоя: иначе выданный три месяца назад велосипед
+    # получил бы первый зов ТО через 14 дней ПОСЛЕ деплоя, и все старые
+    # аренды позвались бы разом в один день.
+    await pool.execute("""
+        update fleet.bikes b set last_service_at = r.opened_at
+        from fleet.rentals r
+        where r.bike_id = b.id and r.closed_at is null
+          and b.last_service_at > r.opened_at
+        """)
+
     # Закрытые аренды: рама в payload не писалась, поэтому bike_id пуст.
     # opened_at неизвестен - берётся момент события, то есть закрытия:
     # для истории важен факт и порядок, а не длительность.

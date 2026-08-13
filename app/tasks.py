@@ -117,9 +117,16 @@ async def _service_calls(fleet, bot, admin_chat_id) -> None:
                 client=logic.esc(row["client_name"] or "—"),
                 phone=logic.esc(row["client_phone"] or "—"),
                 days=overdue_days))
-            await fleet.mark_service_notified(row["bike_id"])
         except Exception:                               # noqa: BLE001
             log.exception("карточка ТО по единице %s не доставлена",
+                          row["bike_id"])
+            continue
+        try:
+            # Отметка отдельно от отправки: упавшая отметка при ушедшей
+            # карточке иначе повторяла бы зов каждый прогон - спам в чат.
+            await fleet.mark_service_notified(row["bike_id"])
+        except Exception:                               # noqa: BLE001
+            log.exception("отметка зова ТО по единице %s не записана",
                           row["bike_id"])
 
 
@@ -149,7 +156,27 @@ async def check_payments_once(fleet, tochka, bot=None, admin_chat_id=None,
         log.info("оплата: счёт #%s на %s ₽ оплачен", p["id"], p["amount"])
         await _after_paid(fleet, row, bot, admin_chat_id, starline)
     for p in await fleet.stale_payments(max_age_hours=PAYMENT_MAX_AGE_HOURS):
+        # Последний опрос ПЕРЕД пометкой: оплата на границе суток - между
+        # предыдущим циклом и протуханием - иначе молча стала бы expired.
+        if await tochka.payment_status(p["qrc_id"]) == "paid":
+            row = await fleet.mark_payment(p["id"], "paid")
+            if row is not None:
+                paid += 1
+                await _after_paid(fleet, row, bot, admin_chat_id, starline)
+            continue
         await fleet.mark_payment(p["id"], "expired")
+    # Отменённые и просроченные с живым QR: деактивировать QR в банке
+    # нечем, ссылка у клиента действует до ttl - оплата по ней должна
+    # подниматься в paid, а не теряться.
+    for p in await fleet.closed_payments_recent(max_age_hours=PAYMENT_MAX_AGE_HOURS):
+        if await tochka.payment_status(p["qrc_id"]) != "paid":
+            continue
+        row = await fleet.revive_payment(p["id"])
+        if row is not None:
+            paid += 1
+            log.warning("оплата: счёт #%s оплачен ПОСЛЕ отмены/протухания - "
+                        "поднят в paid", p["id"])
+            await _after_paid(fleet, row, bot, admin_chat_id, starline)
     return paid
 
 
@@ -173,20 +200,12 @@ async def _after_paid(fleet, payment, bot, admin_chat_id, starline) -> None:
                                        amount=payment["amount"]))
         except Exception:                               # noqa: BLE001
             log.exception("клиент %s не узнал об оплате", payment["tg_id"])
-    if (starline is not None and rental is not None
-            and rental["bike_id"] and rental["blocked"]):
-        bike = await fleet.get_bike(str(rental["bike_id"]))
-        device = bike and bike["starline_device_id"]
-        if device:
-            ok = await starline.unblock(device)
-            await fleet.log_starline(rental["bike_id"], device, "unblock", ok,
-                                     "оплата счёта" if ok
-                                     else "команда StarLine не прошла", None)
-            if ok:
-                await fleet.mark_blocked(rental["bike_id"], blocked=False,
-                                         reason=None)
-                log.info("StarLine: единица %s разблокирована после оплаты",
-                         rental["bike_id"])
+    if rental is not None and rental["bike_id"]:
+        from .fleet.starline import unblock_bike
+        if await unblock_bike(fleet, starline, rental["bike_id"],
+                              reason="оплата счёта"):
+            log.info("StarLine: единица %s разблокирована после оплаты",
+                     rental["bike_id"])
 
 
 async def payments_loop(fleet, tochka, bot=None, admin_chat_id=None,

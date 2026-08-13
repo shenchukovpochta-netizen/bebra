@@ -574,6 +574,12 @@ class FleetDB:
                     rental_id, notes or None)
                 if row is None:
                     return None
+                # Закрытая аренда не должна оставлять висящий счёт: клиент
+                # рассчитался иначе, а старая ссылка оплаты у него на руках.
+                await conn.execute(
+                    "update fleet.payments set status = 'cancelled', "
+                    "updated_at = now() "
+                    "where rental_id = $1 and status = 'pending'", rental_id)
                 if row["bike_id"] is not None:
                     await conn.execute(
                         "update fleet.bikes set status = $2, updated_at = now() "
@@ -656,12 +662,38 @@ class FleetDB:
             "and created_at <= now() - ($1 || ' hours')::interval",
             str(int(max_age_hours)))
 
-    async def pending_payment_of_tg(self, tg_id: int) -> asyncpg.Record | None:
-        """Неоплаченный счёт клиента - для баннера в Mini App."""
+    async def pending_payment_of_rental(self, rental_id: int) -> asyncpg.Record | None:
+        """Неоплаченный счёт ИМЕННО этой аренды - для баннера в Mini App.
+
+        Поиск по одному tg_id показывал бы клиенту с новым велосипедом
+        счёт прошлой, уже закрытой аренды - со старой ссылкой оплаты.
+        """
         return await self.pool.fetchrow(
             "select * from fleet.payments "
-            "where tg_id = $1 and status = 'pending' order by id desc limit 1",
-            tg_id)
+            "where rental_id = $1 and status = 'pending' "
+            "order by id desc limit 1", rental_id)
+
+    async def closed_payments_recent(self, *, max_age_hours: int) -> list[asyncpg.Record]:
+        """Недавно отменённые/просроченные счета с живым QR.
+
+        Отменить QR в банке нечем - ссылка у клиента действует до ttl,
+        и оплата по ней должна быть замечена, а не потеряна: такие счета
+        продолжают опрашиваться, пока QR не умрёт сам.
+        """
+        return await self.pool.fetch(
+            "select * from fleet.payments "
+            "where status in ('cancelled', 'expired') and qrc_id is not null "
+            "and created_at > now() - ($1 || ' hours')::interval",
+            str(int(max_age_hours)))
+
+    async def revive_payment(self, payment_id: int) -> asyncpg.Record | None:
+        """Отменённый/просроченный счёт, по которому банк подтвердил деньги:
+        поднимается в paid. Деньги пришли - учёт обязан их видеть."""
+        return await self.pool.fetchrow(
+            "update fleet.payments set status = 'paid', paid_at = now(), "
+            "updated_at = now() "
+            "where id = $1 and status in ('cancelled', 'expired') returning *",
+            payment_id)
 
     async def payments_admin(self, limit: int = 100) -> list[asyncpg.Record]:
         return await self.pool.fetch(
@@ -849,9 +881,16 @@ class FleetDB:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     "update fleet.rentals set closed_at = now(), close_notes = $2 "
-                    "where tg_id = $1 and closed_at is null returning bike_id",
+                    "where tg_id = $1 and closed_at is null "
+                    "returning id, bike_id",
                     tg_id, notes or None)
-                if row is None or row["bike_id"] is None:
+                if row is None:
+                    return None
+                await conn.execute(
+                    "update fleet.payments set status = 'cancelled', "
+                    "updated_at = now() "
+                    "where rental_id = $1 and status = 'pending'", row["id"])
+                if row["bike_id"] is None:
                     return None
                 await conn.execute(
                     "update fleet.bikes set status = $2, updated_at = now() "

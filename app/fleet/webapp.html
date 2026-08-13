@@ -126,8 +126,11 @@ if (tg) { tg.ready(); tg.expand(); }
 const initData = (tg && tg.initData) || "";
 
 const $ = id => document.getElementById(id);
+// Кавычки экранируются наравне со скобками: значения попадают
+// и в HTML-атрибуты (href, src), где «"» иначе закрывала бы атрибут.
 const esc = s => String(s == null ? "" : s)
-  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const price = n => Number(n).toLocaleString("ru-RU") + " ₽";
 
 async function api(path, opts) {
@@ -195,9 +198,9 @@ function drawVitrina() {
   $("models").innerHTML = MODELS.map(m => {
     let photo = "";
     if (m.photo && m.photo.startsWith("/")) {
-      photo = `<img class="photo" src="${m.photo}" alt="${esc(m.title)}" loading="lazy">`;
+      photo = `<img class="photo" src="${esc(m.photo)}" alt="${esc(m.title)}" loading="lazy">`;
     } else if (m.photo) {
-      photo = `<div class="plinks"><a href="${m.photo}" target="_blank">посмотреть фото</a></div>`;
+      photo = `<div class="plinks"><a href="${esc(m.photo)}" target="_blank">посмотреть фото</a></div>`;
     }
     const chips = (m.specs || []).length
       ? `<div class="chips">` + m.specs.map(s =>
@@ -310,7 +313,7 @@ function drawAlerts(me) {
     html += `<div class="alert ${kind}"><b>${title}</b>
       Счёт на ${r.payment.amount} ₽ за аренду${r.model ? " " + esc(r.model) : ""}.
       ${r.blocked ? "Велосипед заблокирован до оплаты." : ""}
-      ${r.payment.link ? `<a class="paybtn" href="${r.payment.link}" target="_blank">Оплатить по СБП</a>` : ""}
+      ${r.payment.link ? `<a class="paybtn" href="${esc(r.payment.link)}" target="_blank">Оплатить по СБП</a>` : ""}
     </div>`;
   } else if (r && r.blocked) {
     html += `<div class="alert bad"><b>🔒 Велосипед заблокирован</b>
@@ -322,9 +325,10 @@ function drawAlerts(me) {
   }
   if (r && r.service_days != null && r.service_days <= 2) {
     const when = r.service_days <= 0 ? "уже пора" : `через ${r.service_days} дн.`;
+    const how = contactLinks() || "через чат с ботом («🆘 Поддержка»)";
     html += `<div class="alert warn"><b>🔧 Плановое ТО — ${when}</b>
       Бесплатное обслуживание раз в 2 недели входит в тариф. Запишитесь:
-      ${contactLinks()}</div>`;
+      ${how}</div>`;
   }
   $("alerts").innerHTML = html;
 }

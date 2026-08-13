@@ -147,8 +147,11 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
+// Кавычки экранируются наравне со скобками: значения попадают и в
+// HTML-атрибуты (href), где «"» иначе закрывала бы атрибут - инъекция.
 const esc = s => String(s == null ? "" : s)
-  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+  .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 const ST = {free:["свободен","st-free"], booked:["бронь","st-booked"],
             rented:["в аренде","st-rented"], service:["сервис","st-service"],
             lost:["утерян","st-lost"]};
@@ -212,7 +215,8 @@ async function drawOverview(){
       ? "подключён — блокировка при неоплате доступна на вкладке «Парк»"
       : "не настроен (заполните STARLINE_* в .env, чтобы блокировать неплательщиков)"}</p>`;
   if (o.overdue.length) {
-    html += `<h2>Просроченные аренды</h2>` + rentalTable(o.overdue, o.starline);
+    html += `<h2>Просроченные аренды</h2>`
+         + rentalTable(o.overdue, o.starline, o.tochka);
   }
   if (o.service_due && o.service_due.length) {
     html += `<h2>Пора на плановое ТО (раз в 2 недели)</h2>
@@ -239,6 +243,7 @@ window.serviced = async id => {
 // ─── парк ───
 async function drawBikes(){
   const rows = await api("/api/admin/bikes");
+  rows.forEach(b => ROW_BY_ID.bike[b.id] = b);
   $("s-bikes").innerHTML = `<table><tr><th>#</th><th>Модель</th><th>Рама</th>
     <th>Точка</th><th>Статус</th><th>Кто держит</th><th>StarLine</th><th></th></tr>` +
     rows.map(b => `<tr><td class="num">${b.id}</td>
@@ -266,8 +271,8 @@ async function drawBikes(){
           ? `<button class="act" onclick="blockBike(${b.id},false)">разблокировать</button>`
           : b.starline_device_id
           ? `<button class="act" onclick="blockBike(${b.id},true)">🔒 блок</button>
-             <button class="act" onclick="bindStarline(${b.id},'${esc(b.starline_device_id)}')">StarLine…</button>`
-          : `<button class="act" onclick="bindStarline(${b.id},'')">привязать StarLine</button>`) +
+             <button class="act" onclick="bindStarline(${b.id})">StarLine…</button>`
+          : `<button class="act" onclick="bindStarline(${b.id})">привязать StarLine</button>`) +
         (b.status === "rented" && b.service_days != null && b.service_days <= 2
           ? ` <button class="act" onclick="serviced(${b.id})">✅ ТО</button>` : "") +
       `</td></tr>`).join("") + `</table>`;
@@ -278,8 +283,9 @@ window.bikeStatus = async (id, status) => {
     body: JSON.stringify({bike_id:id, status, note})});
   drawBikes();
 };
-window.bindStarline = async (id, current) => {
-  const dev = prompt("ID устройства StarLine (пусто — отвязать):", current || "");
+window.bindStarline = async (id) => {
+  const current = (ROW_BY_ID.bike[id] || {}).starline_device_id || "";
+  const dev = prompt("ID устройства StarLine (пусто — отвязать):", current);
   if (dev === null) return;
   await api("/api/admin/bike/starline", {method:"POST",
     body: JSON.stringify({bike_id:id, device_id:dev.trim()})});
@@ -298,9 +304,14 @@ window.blockBike = async (id, on) => {
 };
 
 // ─── аренды ───
-function rentalTable(list, starline){
+// Данные строк - по id в карте, а не в строковых параметрах onclick:
+// свободный текст (цена из формы) в атрибуте ломал бы разметку.
+const ROW_BY_ID = {rental: {}, bike: {}};
+function rentalTable(list, starline, tochka){
   if (!list.length) return `<p class="hint">пусто</p>`;
+  list.forEach(r => ROW_BY_ID.rental[r.id] = r);
   const canBlock = starline !== false;
+  const canInvoice = tochka !== false;
   return `<table><tr><th>Клиент</th><th>Телефон</th><th>Единица</th>
     <th>Срок</th><th>Вернуть до</th><th>Оплата</th><th></th></tr>` +
     list.map(r => `<tr class="${r.overdue ? "overdue" : ""}">
@@ -315,15 +326,18 @@ function rentalTable(list, starline){
         ? `<span class="hint">закрыта ${esc(r.closed_at)}</span>`
         : (r.pending_amount
             ? `<span class="pill st-booked">ждёт ${r.pending_amount} ₽</span> `
-            : `<button class="act" onclick="invoice(${r.id},'${esc(r.price || "")}')">💳 счёт</button> `) +
+            : canInvoice
+            ? `<button class="act" onclick="invoice(${r.id})">💳 счёт</button> `
+            : "") +
           `<button class="act" onclick="closeRental(${r.id})">закрыть</button>` +
           (canBlock && r.bike_id
             ? ` <button class="act" title="Заблокировать за неоплату" onclick="blockBike(${r.bike_id},true)">🔒 неоплата</button>`
             : "")}</td>
       </tr>`).join("") + `</table>`;
 }
-window.invoice = async (rentalId, priceHint) => {
-  const digits = (priceHint || "").replace(/\D/g, "");
+window.invoice = async (rentalId) => {
+  const row = ROW_BY_ID.rental[rentalId] || {};
+  const digits = String(row.price || "").replace(/\D/g, "");
   const raw = prompt("Сумма счёта, ₽ (СБП, Точка):", digits || "");
   if (raw === null) return;
   const amount = parseInt(raw.replace(/\D/g, ""), 10);
@@ -339,8 +353,9 @@ window.invoice = async (rentalId, priceHint) => {
 async function drawRentals(){
   const d = await api("/api/admin/rentals");
   $("s-rentals").innerHTML =
-    `<h2>Активные (${d.active.length})</h2>` + rentalTable(d.active) +
-    `<h2>Недавно закрытые</h2>` + rentalTable(d.closed);
+    `<h2>Активные (${d.active.length})</h2>`
+    + rentalTable(d.active, d.starline, d.tochka)
+    + `<h2>Недавно закрытые</h2>` + rentalTable(d.closed, d.starline, d.tochka);
 }
 window.closeRental = async id => {
   const note = prompt("Замечания по возврату (пусто — без замечаний):") ?? null;
@@ -425,7 +440,7 @@ async function drawPayments(){
           <td class="num hint">${esc(p.created_at)}</td>
           <td class="num hint">${esc(p.paid_at || "—")}</td>
           <td>${p.status === "pending"
-            ? `<a href="${p.link}" target="_blank">ссылка</a>
+            ? `<a href="${esc(p.link)}" target="_blank">ссылка</a>
                <button class="act" onclick="cancelPayment(${p.id})">отменить</button>`
             : ""}</td></tr>`;
       }).join("") + `</table>`;

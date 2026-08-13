@@ -81,8 +81,18 @@ async def run() -> None:
     me = await bot.get_me()
     log.info("бот @%s готов", me.username)
 
+    # StarLine и Точка создаются ДО Dispatcher: middleware раздаёт их
+    # обработчикам (разблокировка при возврате через бота).
+    starline = StarLine.from_config(cfg)
+    if starline is not None:
+        log.info("StarLine подключён (блокировка при неоплате доступна в CRM)")
+    tochka = Tochka.from_config(cfg)
+    if tochka is not None:
+        log.info("Точка подключена: счета СБП доступны в CRM")
+
     dp = Dispatcher()
-    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault, fleet_db))
+    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault, fleet_db,
+                                                  starline))
     # Порядок важен: модерация раньше регистрации, иначе клик админа
     # провалится в пользовательский сценарий. Договор - до регистрации,
     # чтобы «Подписываю» не поймала ловушка шага. menu - последним.
@@ -100,11 +110,6 @@ async def run() -> None:
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
     holds = asyncio.create_task(tasks.fleet_loop(fleet_db, bot,
                                                  cfg.contract_chat_id))
-    # StarLine: блокировка единиц при неоплате. Клиент один на процесс;
-    # None, если реквизиты не заданы.
-    starline = StarLine.from_config(cfg)
-    if starline is not None:
-        log.info("StarLine подключён (блокировка при неоплате доступна в CRM)")
     autoblock = None
     if cfg.starline_auto_block and starline is not None:
         log.warning("StarLine: АВТОБЛОКИРОВКА просроченных аренд ВКЛЮЧЕНА")
@@ -113,11 +118,9 @@ async def run() -> None:
     elif cfg.starline_auto_block:
         log.warning("STARLINE_AUTO_BLOCK=1, но реквизиты StarLine не заданы - "
                     "автоблокировка не работает")
-    # Оплата СБП через Точку: счета из CRM + минутный опрос статусов.
-    tochka = Tochka.from_config(cfg)
+    # Оплата СБП через Точку: минутный опрос статусов счетов.
     payments = None
     if tochka is not None:
-        log.info("Точка подключена: счета СБП доступны в CRM")
         payments = asyncio.create_task(tasks.payments_loop(
             fleet_db, tochka, bot, cfg.contract_chat_id, starline))
     # Витрина парка и Mini App - только при заданном порте. Боту и токен,

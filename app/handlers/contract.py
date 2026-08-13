@@ -769,7 +769,8 @@ async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
 @router.callback_query(StateIs(logic.WAIT_RETURN_SIGN), F.data == "return_sign")
 async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
                          cfg: Config, vault: Vault, user: dict,
-                         fleet: FleetDB | None = None) -> None:
+                         fleet: FleetDB | None = None,
+                         starline=None) -> None:
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_RETURN_SIGN,
                           state=logic.APPROVED, act_out_signed_at=signed_at):
@@ -819,9 +820,15 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
     # из формы закрытия - в сервис. Сбой учёта возврат не останавливает.
     if fleet is not None:
         try:
-            await fleet.close_rental(
+            bike_id = await fleet.close_rental(
                 tg_id, notes=logic.close_notes(closed),
                 to_service=fleet_logic.needs_service(closed))
+            # Сданная единица не должна остаться обездвиженной: возврат
+            # снимает блокировку StarLine тем же путём, что оплата и CRM.
+            if bike_id is not None:
+                from ..fleet.starline import unblock_bike
+                await unblock_bike(fleet, starline, bike_id,
+                                   reason="возврат велосипеда")
         except Exception:                               # noqa: BLE001
             log.exception("возврат %s не попал в учёт парка", tg_id)
 

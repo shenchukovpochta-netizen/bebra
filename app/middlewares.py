@@ -67,14 +67,15 @@ def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
 
 
 class PipelineMiddleware(BaseMiddleware):
-    # fleet необязателен: тесты собирают middleware без парка, и хуки
-    # в обработчиках при None просто молчат.
+    # fleet и starline необязательны: тесты собирают middleware без парка,
+    # и хуки в обработчиках при None просто молчат.
     def __init__(self, db: Database, cfg: Config, vault: Vault,
-                 fleet: Any = None) -> None:
+                 fleet: Any = None, starline: Any = None) -> None:
         self.db = db
         self.cfg = cfg
         self.vault = vault
         self.fleet = fleet
+        self.starline = starline
 
     def _is_service_chat(self, chat_id: int) -> bool:
         """Служебные чаты: модерация заявок и утверждение договоров.
@@ -149,6 +150,7 @@ class PipelineMiddleware(BaseMiddleware):
         data["cfg"] = self.cfg
         data["vault"] = self.vault
         data["fleet"] = self.fleet
+        data["starline"] = self.starline
 
         # Модерация идёт мимо всего пользовательского конвейера: у админа нет
         # анкеты, рейт-лимит и подписка к нему не относятся.

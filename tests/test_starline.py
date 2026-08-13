@@ -120,6 +120,20 @@ class TestControl(unittest.TestCase):
         sl.login_state = 0            # StarLine отверг логин
         self.assertFalse(run(sl.block("DEV1")))
 
+    def test_empty_answer_is_not_success(self):
+        # Ответ без кода («{}», текст ошибки шлюза) - НЕ успех: иначе
+        # blocked в базе врал бы против реального устройства.
+        sl = FakeStarLine()
+        original = sl._post
+
+        async def post(url, **kw):
+            if "set_param" in url:
+                sl.calls.append(("POST", url, kw))
+                return {}
+            return await original(url, **kw)
+        sl._post = post
+        self.assertFalse(run(sl.block("DEV1")))
+
     def test_from_config_disabled_returns_none(self):
         class Cfg:
             starline_enabled = False
@@ -140,6 +154,25 @@ class TestVoltage(unittest.TestCase):
     def test_garbage_is_none(self):
         for payload in ({}, None, {"data": {"battery": "err"}}, [1, 2]):
             self.assertIsNone(extract_voltage(payload), payload)
+
+    def test_voltage_recovers_from_stale_slnet(self):
+        # Протухший slnet - это HTTP 200 с кодом ошибки в теле: voltage
+        # обязан переавторизоваться и повторить, а не застрять до рестарта.
+        sl = FakeStarLine()
+        sl._slnet = "STALE"
+        state = {"n": 0}
+
+        async def fake_get(url, params, cookies=None):
+            sl.calls.append(("GET", url, params))
+            if "device/" in url:
+                state["n"] += 1
+                if state["n"] == 1:
+                    return {"code": 401}
+                return {"data": {"voltage": 61.0}}
+            return await FakeStarLine._get_json(sl, url, params)
+        sl._get_json = fake_get
+        self.assertEqual(run(sl.voltage("DEV1")), 61.0)
+        self.assertEqual(state["n"], 2)
 
     def test_voltage_cached(self):
         sl = FakeStarLine()

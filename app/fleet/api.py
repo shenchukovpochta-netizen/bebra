@@ -152,7 +152,7 @@ class Api:
                 "blocked": bool(rental["blocked"]),
                 "battery": await self._battery(rental["starline_device_id"]),
                 "payment": self._payment_json(
-                    await self.fleet.pending_payment_of_tg(tg_id)),
+                    await self.fleet.pending_payment_of_rental(rental["id"])),
                 # Плановое ТО раз в две недели: клиент видит, когда пора.
                 "service_days": logic.service_days_left(
                     rental["last_service_at"], now=datetime.now()),
@@ -320,6 +320,7 @@ class Api:
             "bookings_active": len(await self.fleet.bookings_admin()),
             "blocked": await self.fleet.count_blocked(),
             "starline": self.starline is not None,
+            "tochka": self.tochka is not None,
             "service_due": service_due,
         })
 
@@ -368,7 +369,8 @@ class Api:
         closed = [self._rental_json(r)
                   for r in await self.fleet.rentals_admin(active=False, limit=30)]
         return _json({"active": active, "closed": closed,
-                      "tochka": self.tochka is not None})
+                      "tochka": self.tochka is not None,
+                      "starline": self.starline is not None})
 
     async def admin_bookings(self, request: web.Request) -> web.Response:
         if not self._is_admin(request):
@@ -457,17 +459,9 @@ class Api:
         return _json({"ok": True, "bike_id": bike_id})
 
     async def _auto_unblock(self, bike_id: int, admin_id: int | None) -> None:
-        if self.starline is None:
-            return
-        bike = await self.fleet.get_bike(str(bike_id))
-        if not bike or not bike["blocked"] or not bike["starline_device_id"]:
-            return
-        ok = await self.starline.unblock(bike["starline_device_id"])
-        await self.fleet.log_starline(
-            bike_id, bike["starline_device_id"], "unblock", ok,
-            "при закрытии аренды" if ok else "команда StarLine не прошла", admin_id)
-        if ok:
-            await self.fleet.mark_blocked(bike_id, blocked=False, reason=None)
+        from .starline import unblock_bike
+        await unblock_bike(self.fleet, self.starline, bike_id,
+                           reason="при закрытии аренды", admin_id=admin_id)
 
     async def admin_bike_starline(self, request: web.Request) -> web.Response:
         """Привязать единице устройство StarLine (или отвязать пустым id)."""
@@ -647,7 +641,13 @@ class Api:
         row = await self.fleet.mark_payment(payment_id, "cancelled")
         if row is None:
             return _json({"error": "Счёт уже не в ожидании."}, status=409)
-        return _json({"ok": True})
+        # Честно про ограничение: деактивировать QR в банке нечем, ссылка
+        # у клиента живёт до конца суток. Оплату по ней фоновая задача
+        # заметит и поднимет счёт в paid - но лучше, чтобы оператор знал.
+        return _json({"ok": True, "warning":
+                      "Ссылка оплаты у клиента остаётся действующей до конца "
+                      "суток. Если он оплатит по ней - счёт сам поднимется "
+                      "в «оплачен», и вы увидите карточку."})
 
     # ─────────────────────── карточки операторам ───────────────────────
 
