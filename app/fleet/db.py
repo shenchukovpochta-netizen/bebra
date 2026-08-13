@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 # PATCHABLE в app/db.py: имена колонок подставляются в SQL текстом.
 BIKE_PATCHABLE = frozenset({
     "model_id", "point_id", "vin_motor", "status", "battery_count", "notes",
-    "starline_device_id", "purchase_price",
+    "starline_device_id", "purchase_price", "in_service_since",
 })
 
 
@@ -851,12 +851,17 @@ class FleetDB:
         return {r["rental_id"]: r["paid"] for r in rows}
 
     async def analytics_bikes(self) -> list[asyncpg.Record]:
+        """Единицы с датой первой выдачи: она - запасной отсчёт жизненного
+        цикла, когда владелец не вписал «в строю с» руками."""
         return await self.pool.fetch(
             """
             select b.id, b.vin_frame, b.status, b.purchase_price,
-                   m.title as model
+                   b.in_service_since, m.title as model,
+                   min(r.opened_at)::date as first_rented_at
             from fleet.bikes b
             left join fleet.models m on m.id = b.model_id
+            left join fleet.rentals r on r.bike_id = b.id
+            group by b.id, m.title
             order by b.id
             """)
 

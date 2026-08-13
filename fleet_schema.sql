@@ -100,6 +100,10 @@ alter table fleet.bikes add column if not exists low_battery_at timestamptz;
 -- Пустая цена - «окупаемость не посчитать», а не ноль: ноль означал бы
 -- «велосипед достался даром» и мгновенную мнимую окупаемость.
 alter table fleet.bikes add column if not exists purchase_price integer;
+-- Ввод в строй - отсчёт жизненного цикла (~10 месяцев на велосипед).
+-- Пусто - берётся дата ПЕРВОЙ выдачи: у машин, заведённых бэкфиллом,
+-- created_at это день деплоя, а не начало службы.
+alter table fleet.bikes add column if not exists in_service_since date;
 
 -- Журнал команд StarLine: кто, когда, чем закончилось. Блокировка чужого
 -- (пусть и своего же) имущества - действие, за которое надо отвечать,

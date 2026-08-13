@@ -658,6 +658,124 @@ def payback_percent(revenue: int, purchase_price) -> int | None:
     return round(revenue * 100 / purchase_price)
 
 
+def _as_date(moment) -> date | None:
+    if moment is None:
+        return None
+    return moment.date() if isinstance(moment, datetime) else moment
+
+
+def revenue_in_window(items, *, start: date, end: date) -> int:
+    """Выручка, приходящаяся на окно дат.
+
+    items - тройки (opened_at, closed_at, revenue). Выручка аренды
+    размазывается по её дням поровну: аренда на стыке месяцев делится
+    между ними по дням, а не сваливается в месяц выдачи целиком.
+    """
+    total = 0.0
+    for opened_at, closed_at, revenue in items:
+        if not revenue:
+            continue
+        a = _as_date(opened_at)
+        if a is None:
+            continue
+        b = _as_date(closed_at) or end
+        days = max(1, (b - a).days)
+        overlap = (min(a + timedelta(days=days), end)
+                   - max(a, start)).days
+        if overlap > 0:
+            total += revenue * overlap / days
+    return round(total)
+
+
+def month_starts(months: int, *, today: date) -> list[date]:
+    """Первые числа последних months месяцев, по возрастанию."""
+    year, month = today.year, today.month
+    out: list[date] = []
+    for _ in range(months):
+        out.append(date(year, month, 1))
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return out[::-1]
+
+
+def monthly_revenue(items, *, months: int, today: date) -> list[dict]:
+    """Выручка по месяцам - финансовый ряд для графика в CRM."""
+    starts = month_starts(months, today=today)
+    rows = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else today + timedelta(days=1)
+        rows.append({"start": start,
+                     "amount": revenue_in_window(items, start=start, end=end)})
+    return rows
+
+
+def utilization_percent(rentals, bikes_count: int, *, days: int,
+                        today: date) -> int | None:
+    """Загрузка парка: доля «велосипедо-дней» в аренде за окно.
+
+    100% - весь парк в аренде все days дней. None - парка нет: делить
+    не на что."""
+    if bikes_count <= 0:
+        return None
+    start = today - timedelta(days=days)
+    end = today + timedelta(days=1)
+    busy = 0
+    for opened_at, closed_at in rentals:
+        a = _as_date(opened_at)
+        if a is None:
+            continue
+        b = _as_date(closed_at) or end
+        overlap = (min(b, end) - max(a, start)).days
+        if overlap > 0:
+            busy += overlap
+    return min(100, round(busy * 100 / (bikes_count * days)))
+
+
+# ────────────────── жизненный цикл единицы ──────────────────
+#
+# Наблюдение владельца: велосипед живёт в прокате около 10 месяцев,
+# дальше износ съедает и надёжность, и остаточную стоимость. Значит,
+# к замене надо успеть и окупиться, и накопить на следующего.
+
+LIFECYCLE_MONTHS = 10
+_DAYS_PER_MONTH = 30.44                                  # средний месяц
+
+
+def bike_age_months(since, *, today: date) -> float | None:
+    """Возраст единицы в месяцах от ввода в строй. None - дата неизвестна."""
+    day = _as_date(since)
+    if day is None or day > today:
+        return None
+    return (today - day).days / _DAYS_PER_MONTH
+
+
+def lifecycle(since, revenue: int, purchase_price, *, today: date) -> dict | None:
+    """Состояние жизненного цикла: возраст, сколько до замены, темп денег.
+
+    replace_due - циклу конец, пора менять. earn_month - фактический темп
+    выручки, need_month - темп, при котором закупка отбивается за цикл:
+    сравнение отвечает «успевает ли велик окупиться до замены».
+    """
+    age = bike_age_months(since, today=today)
+    if age is None:
+        return None
+    left = LIFECYCLE_MONTHS - age
+    out = {
+        "age_months": round(age, 1),
+        "left_months": max(0.0, round(left, 1)),
+        "replace_due": age >= LIFECYCLE_MONTHS,
+        "replace_soon": 0 < left <= 1,
+        "earn_month": round(revenue / age) if age >= 0.5 else None,
+        "need_month": (round(purchase_price / LIFECYCLE_MONTHS)
+                       if purchase_price else None),
+    }
+    out["on_track"] = (None if out["earn_month"] is None
+                       or out["need_month"] is None
+                       else out["earn_month"] >= out["need_month"])
+    return out
+
+
 # ─────────────────── форма фиксации: разбор в CRM ───────────────────
 #
 # Заполненные формы фиксации (те самые «1. ФИО: ...», которые собирает

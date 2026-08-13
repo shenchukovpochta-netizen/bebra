@@ -577,6 +577,82 @@ class TestPayback(unittest.TestCase):
         self.assertIsNone(fleet.payback_percent(30000, 0))
 
 
+class TestMonthlyRevenue(unittest.TestCase):
+    TODAY = date(2026, 8, 13)
+
+    def test_rental_splits_between_months(self):
+        # 14 дней на стыке июля и августа, 7000 ₽: поровну по 500/день.
+        items = [(datetime(2026, 7, 25, 12), datetime(2026, 8, 8, 12), 7000)]
+        rows = fleet.monthly_revenue(items, months=3, today=self.TODAY)
+        by = {r["start"].strftime("%m"): r["amount"] for r in rows}
+        self.assertEqual(by["07"], 3500)                 # 25.07-31.07 = 7 дней
+        self.assertEqual(by["08"], 3500)
+        self.assertEqual(by["06"], 0)
+
+    def test_live_rental_counts_until_today(self):
+        items = [(datetime(2026, 8, 3, 12), None, 3000)]
+        rows = fleet.monthly_revenue(items, months=2, today=self.TODAY)
+        self.assertEqual(rows[-1]["amount"], 3000)
+
+    def test_zero_revenue_ignored(self):
+        rows = fleet.monthly_revenue(
+            [(datetime(2026, 8, 3), None, 0)], months=2, today=self.TODAY)
+        self.assertEqual(sum(r["amount"] for r in rows), 0)
+
+
+class TestUtilization(unittest.TestCase):
+    TODAY = date(2026, 8, 30)
+
+    def test_half_loaded(self):
+        # Один велосипед, 15 дней аренды в 30-дневном окне.
+        rentals = [(datetime(2026, 8, 5), datetime(2026, 8, 20))]
+        self.assertEqual(fleet.utilization_percent(
+            rentals, 1, days=30, today=self.TODAY), 50)
+
+    def test_live_rental_and_cap(self):
+        # Аренда старше окна и живая: заполняет всё окно, но не больше 100%.
+        rentals = [(datetime(2026, 1, 1), None)]
+        self.assertEqual(fleet.utilization_percent(
+            rentals, 1, days=30, today=self.TODAY), 100)
+
+    def test_empty_park_is_none(self):
+        self.assertIsNone(fleet.utilization_percent([], 0, days=30,
+                                                    today=self.TODAY))
+
+
+class TestLifecycle(unittest.TestCase):
+    TODAY = date(2026, 8, 13)
+
+    def test_old_bike_due_for_replacement(self):
+        c = fleet.lifecycle(date(2025, 9, 1), 55000, 60000, today=self.TODAY)
+        self.assertTrue(c["replace_due"])
+        self.assertEqual(c["left_months"], 0.0)
+
+    def test_young_bike_counts_down(self):
+        c = fleet.lifecycle(date(2026, 1, 13), 42000, 60000, today=self.TODAY)
+        self.assertFalse(c["replace_due"])
+        self.assertAlmostEqual(c["age_months"], 7.0, delta=0.1)
+        # 42000 за 7 мес = 6000/мес при нужных 6000/мес - успевает.
+        self.assertEqual(c["need_month"], 6000)
+        self.assertTrue(c["on_track"])
+
+    def test_slow_bike_flagged(self):
+        c = fleet.lifecycle(date(2026, 1, 13), 21000, 60000, today=self.TODAY)
+        self.assertFalse(c["on_track"])
+
+    def test_no_date_no_answer(self):
+        self.assertIsNone(fleet.lifecycle(None, 1000, 60000, today=self.TODAY))
+        # дата из будущего - мусор, а не отрицательный возраст
+        self.assertIsNone(fleet.lifecycle(date(2027, 1, 1), 0, None,
+                                          today=self.TODAY))
+
+    def test_no_price_no_pace_but_age_works(self):
+        c = fleet.lifecycle(date(2026, 6, 1), 9000, None, today=self.TODAY)
+        self.assertIsNone(c["need_month"])
+        self.assertIsNone(c["on_track"])
+        self.assertIsNotNone(c["age_months"])
+
+
 class TestBikeFormPrice(unittest.TestCase):
     def test_price_parsed_with_noise(self):
         data, err = fleet.parse_bike_form("рама: ABC1\nцена: 45 000р")

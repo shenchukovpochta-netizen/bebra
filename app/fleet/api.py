@@ -20,7 +20,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import asyncpg
@@ -589,6 +589,25 @@ class Api:
             return _json({"error": "Единица не найдена."}, status=404)
         return _json({"ok": True})
 
+    async def admin_bike_since(self, request: web.Request) -> web.Response:
+        """Дата ввода в строй - отсчёт жизненного цикла. Пусто - снять
+        (вернётся автоотсчёт от первой выдачи)."""
+        if not self._is_admin(request):
+            return _json({"error": "auth"}, status=401)
+        try:
+            body = await request.json()
+            bike_id = int(body["bike_id"])
+            raw = str(body.get("since") or "").strip()
+            since = date.fromisoformat(raw) if raw else None
+        except (ValueError, KeyError, TypeError):
+            return _json({"error": "Не понял запрос."}, status=400)
+        if since is not None and not date(2015, 1, 1) <= since <= date.today():
+            return _json({"error": "Дата вне разумного: от 2015 года "
+                          "и не из будущего."}, status=400)
+        if not await self.fleet.patch_bike(bike_id, in_service_since=since):
+            return _json({"error": "Единица не найдена."}, status=404)
+        return _json({"ok": True})
+
     async def admin_analytics(self, request: web.Request) -> web.Response:
         """Аналитика проката: тренд выдач и возвратов, PnL, окупаемость.
 
@@ -610,6 +629,7 @@ class Api:
 
         by_bike: dict[int, dict] = {}
         totals = {"revenue": 0, "paid": 0, "unpriced_rentals": 0}
+        money_items = []          # (opened, closed, revenue) - для рядов денег
         for r in rentals:
             est = logic.revenue_estimate(r["rent_term"], r["rent_price"],
                                          r["opened_at"], r["closed_at"],
@@ -620,6 +640,7 @@ class Api:
                 totals["unpriced_rentals"] += 1
             totals["revenue"] += revenue
             totals["paid"] += fact
+            money_items.append((r["opened_at"], r["closed_at"], revenue))
             if r["bike_id"] is None:
                 continue
             slot = by_bike.setdefault(r["bike_id"], {
@@ -634,7 +655,16 @@ class Api:
             if r["closed_at"] is None:
                 slot["active"] = True
 
+        months = logic.monthly_revenue(money_items, months=12, today=today)
+        revenue_30 = logic.revenue_in_window(
+            money_items, start=today - timedelta(days=30),
+            end=today + timedelta(days=1))
+        util_30 = logic.utilization_percent(
+            [(r["opened_at"], r["closed_at"]) for r in rentals],
+            len(bikes), days=30, today=today)
+
         bikes_json, park_price, paid_off_count = [], 0, 0
+        replace_due = replace_soon = 0
         for b in bikes:
             slot = by_bike.get(b["id"], {"revenue": 0, "paid": 0,
                                          "rentals": 0, "days": 0,
@@ -645,6 +675,14 @@ class Api:
                 park_price += b["purchase_price"]
                 if percent is not None and percent >= 100:
                     paid_off_count += 1
+            # Отсчёт цикла: дата «в строю с» от владельца, иначе первая
+            # выдача. created_at не годится: у бэкфилла это день деплоя.
+            since = b["in_service_since"] or b["first_rented_at"]
+            cycle = logic.lifecycle(since, slot["revenue"],
+                                    b["purchase_price"], today=today)
+            if cycle:
+                replace_due += cycle["replace_due"]
+                replace_soon += cycle["replace_soon"]
             bikes_json.append({
                 "id": b["id"], "vin": b["vin_frame"], "model": b["model"],
                 "status": b["status"], "price": b["purchase_price"],
@@ -652,6 +690,9 @@ class Api:
                 "rentals": slot["rentals"], "days": slot["days"],
                 "active": slot["active"], "payback": percent,
                 "paid_off": percent is not None and percent >= 100,
+                "since": str(since) if since else None,
+                "since_auto": b["in_service_since"] is None,
+                "cycle": cycle,
             })
 
         issued_total = sum(1 for r in rentals if r["opened_at"] is not None)
@@ -660,6 +701,8 @@ class Api:
             "trend": [{"start": row["start"].strftime("%d.%m"),
                        "issued": row["issued"], "returned": row["returned"]}
                       for row in trend],
+            "months": [{"start": row["start"].strftime("%m.%Y"),
+                        "amount": row["amount"]} for row in months],
             "summary": {
                 "revenue": totals["revenue"], "paid": totals["paid"],
                 "park_price": park_price,
@@ -671,6 +714,9 @@ class Api:
                 "bikes": len(bikes), "paid_off": paid_off_count,
                 "priced": sum(1 for b in bikes if b["purchase_price"]),
                 "unpriced_rentals": totals["unpriced_rentals"],
+                "revenue_30": revenue_30, "utilization_30": util_30,
+                "replace_due": replace_due, "replace_soon": replace_soon,
+                "lifecycle_months": logic.LIFECYCLE_MONTHS,
             },
             "bikes": bikes_json,
         })
@@ -1295,6 +1341,7 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
         web.post("/api/admin/bike/block", api.admin_bike_block),
         web.post("/api/admin/bike/serviced", api.admin_bike_serviced),
         web.post("/api/admin/bike/price", api.admin_bike_price),
+        web.post("/api/admin/bike/since", api.admin_bike_since),
         web.get("/api/admin/analytics", api.admin_analytics),
         web.get("/api/admin/payments", api.admin_payments),
         web.post("/api/admin/payment/create", api.admin_payment_create),
