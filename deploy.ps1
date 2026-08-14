@@ -56,7 +56,8 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
 $fleet = @('app/fleet/__init__.py', 'app/fleet/logic.py', 'app/fleet/db.py',
            'app/fleet/seed.py', 'app/fleet/api.py', 'app/fleet/webauth.py',
            'app/fleet/webapp.html', 'app/fleet/catalog.py',
-           'app/fleet/admin.html', 'app/fleet/starline.py',
+           'app/fleet/admin.html', 'app/fleet/landing.html',
+           'app/fleet/starline.py',
            'app/fleet/tochka.py')
 # Фото моделей (имена - в catalog.py). Добавили файл - впишите сюда.
 $fleetStatic = @('app/fleet/static/README.txt')

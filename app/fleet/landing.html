@@ -1,0 +1,427 @@
+<!doctype html>
+<!-- Публичный сайт проката: маркетинговый лендинг на корне домена.
+     Один файл без сборки, как webapp.html и admin.html. Все данные -
+     модели, тарифы, точки, наличие, контакты - берутся из того же API,
+     что кормит Mini App: на сайте не живёт ни одной своей цифры,
+     сменился прайс - сменился везде. Открытый в Telegram (initData),
+     сам уводит в приложение /app: MINIAPP_URL может указывать на корень. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Аренда электровелосипедов в Казани — для курьеров и доставки</title>
+<meta name="description" content="Прокат электровелосипедов в Казани: два АКБ,
+бесплатное обслуживание, договор онлайн, оплата СБП. Бронь в Telegram за минуту.">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+// Открыли из Telegram - это Mini App, а не сайт: уводим в приложение.
+if (window.Telegram && window.Telegram.WebApp
+    && window.Telegram.WebApp.initData) {
+  location.replace("/app" + location.hash);
+}
+</script>
+<style>
+  :root{
+    --ink:#151a21; --paper:#ffffff; --muted:#66707c; --line:#e7eaee;
+    --accent:#e8842c; --accent-dark:#c96d1a; --accent-soft:#fdf1e4;
+    --dark:#181d24; --dark2:#20262f; --ok:#2c7a4c;
+  }
+  *{box-sizing:border-box; margin:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--paper); color:var(--ink);
+       font:16px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+  a{color:var(--accent-dark); text-decoration:none}
+  img{max-width:100%}
+  .wrap{max-width:1100px; margin:0 auto; padding:0 20px}
+  h2{font-size:clamp(24px,3.4vw,34px); line-height:1.2; margin:0 0 8px}
+  .sub{color:var(--muted); margin-bottom:28px; max-width:640px}
+  section{padding:56px 0}
+
+  /* шапка */
+  header{position:sticky; top:0; z-index:20; background:rgba(255,255,255,.94);
+         backdrop-filter:blur(8px); border-bottom:1px solid var(--line)}
+  .bar{display:flex; align-items:center; gap:18px; padding:12px 0}
+  .logo{font-weight:800; font-size:18px; white-space:nowrap}
+  .bar nav{display:flex; gap:16px; font-size:14.5px; color:var(--muted);
+           overflow-x:auto}
+  .bar nav a{color:inherit; white-space:nowrap}
+  .bar .grow{flex:1}
+  .phone{font-weight:700; white-space:nowrap}
+  .btn{display:inline-block; padding:12px 22px; border-radius:12px;
+       background:var(--accent); color:#fff !important; font-weight:700;
+       border:0; font-size:15.5px; cursor:pointer; text-align:center}
+  .btn:hover{background:var(--accent-dark)}
+  .btn.ghost{background:transparent; color:var(--ink) !important;
+             border:2px solid var(--line)}
+  .btn.ghost:hover{border-color:var(--accent); color:var(--accent-dark) !important}
+  .btn.small{padding:9px 16px; font-size:14px}
+
+  /* hero */
+  .hero{background:linear-gradient(160deg,var(--dark),var(--dark2));
+        color:#fff; padding:64px 0 58px}
+  .hero .wrap{display:grid; grid-template-columns:1.2fr .8fr; gap:40px;
+              align-items:center}
+  .kicker{display:inline-block; background:rgba(232,132,44,.16);
+          color:#ffb46b; font-weight:700; font-size:13.5px; padding:5px 12px;
+          border-radius:20px; margin-bottom:16px}
+  .hero h1{font-size:clamp(30px,4.6vw,48px); line-height:1.12; margin:0 0 14px}
+  .hero h1 em{color:var(--accent); font-style:normal}
+  .hero p{color:#aeb6c0; font-size:17.5px; max-width:520px}
+  .hero .cta{display:flex; gap:12px; flex-wrap:wrap; margin-top:26px}
+  .hero .cta .btn.ghost{color:#fff !important; border-color:#3a4250}
+  .hero .cta .btn.ghost:hover{border-color:var(--accent)}
+  .ticks{display:flex; flex-wrap:wrap; gap:10px 22px; margin-top:26px;
+         color:#c6cdd6; font-size:14.5px}
+  .ticks span::before{content:"✓"; color:var(--accent); font-weight:800;
+                      margin-right:7px}
+  .price-card{background:rgba(255,255,255,.05); border:1px solid #333b47;
+              border-radius:20px; padding:26px 28px; text-align:center}
+  .price-card .from{color:#aeb6c0; font-size:14px}
+  .price-card .amount{font-size:clamp(36px,4.5vw,52px); font-weight:800;
+                      color:var(--accent); line-height:1.1; margin:4px 0}
+  .price-card .per{color:#aeb6c0; margin-bottom:14px}
+  .price-card .free-now{margin-top:14px; font-size:14px; color:#8fd3a8}
+
+  /* преимущества */
+  .grid{display:grid; gap:16px}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g4{grid-template-columns:repeat(4,1fr)}
+  .feat{background:#f7f8fa; border:1px solid var(--line); border-radius:16px;
+        padding:20px}
+  .feat .ico{font-size:26px; margin-bottom:10px}
+  .feat b{display:block; margin-bottom:5px; font-size:16.5px}
+  .feat span{color:var(--muted); font-size:14.5px}
+
+  /* модели */
+  .models{background:#f7f8fa}
+  .model{background:#fff; border:1px solid var(--line); border-radius:18px;
+         overflow:hidden; display:flex; flex-direction:column}
+  .model .ph{aspect-ratio:16/10; background:linear-gradient(150deg,#e9edf2,#f6f8fa);
+             display:flex; align-items:center; justify-content:center;
+             font-size:52px; overflow:hidden}
+  .model .ph img{width:100%; height:100%; object-fit:cover; display:block}
+  .model .body{padding:18px 20px 20px; display:flex; flex-direction:column;
+               gap:12px; flex:1}
+  .model h3{font-size:19px; margin:0}
+  .chips{display:flex; flex-wrap:wrap; gap:6px}
+  .chip{font-size:12.5px; padding:3px 10px; border-radius:14px;
+        background:var(--accent-soft); color:var(--accent-dark); font-weight:600}
+  .trow{display:flex; justify-content:space-between; font-size:15px;
+        padding:5px 0; border-bottom:1px dashed var(--line)}
+  .trow:last-child{border-bottom:0}
+  .trow b{font-variant-numeric:tabular-nums}
+  .avail{font-size:13.5px; font-weight:700}
+  .avail.yes{color:var(--ok)} .avail.no{color:var(--muted)}
+  .model .btn{margin-top:auto}
+
+  /* как это работает */
+  .step{position:relative; background:#f7f8fa; border:1px solid var(--line);
+        border-radius:16px; padding:22px 20px 20px}
+  .step .n{position:absolute; top:-14px; left:18px; width:30px; height:30px;
+           border-radius:50%; background:var(--accent); color:#fff;
+           font-weight:800; display:flex; align-items:center;
+           justify-content:center; font-size:15px}
+  .step b{display:block; margin-bottom:5px}
+  .step span{color:var(--muted); font-size:14.5px}
+
+  /* точки */
+  .point{background:#fff; border:1px solid var(--line); border-radius:16px;
+         padding:20px}
+  .point b{font-size:17px}
+  .point .addr{color:var(--muted); margin:4px 0 10px}
+  .point .hrs{display:inline-block; background:var(--accent-soft);
+              color:var(--accent-dark); font-weight:700; font-size:13px;
+              border-radius:12px; padding:3px 10px; margin-bottom:10px}
+  .point .links{display:flex; gap:16px; font-size:14.5px}
+  .points-sec{background:#f7f8fa}
+
+  /* faq */
+  details{border:1px solid var(--line); border-radius:14px; margin-bottom:10px;
+          background:#fff}
+  summary{padding:16px 20px; font-weight:700; cursor:pointer; list-style:none;
+          display:flex; justify-content:space-between; gap:12px}
+  summary::after{content:"+"; color:var(--accent); font-size:22px; line-height:1}
+  details[open] summary::after{content:"–"}
+  details p{padding:0 20px 16px; color:var(--muted)}
+
+  /* финальный CTA и подвал */
+  .cta-band{background:linear-gradient(150deg,var(--dark),var(--dark2));
+            color:#fff; border-radius:24px; padding:44px 30px; text-align:center}
+  .cta-band h2{color:#fff}
+  .cta-band p{color:#aeb6c0; margin-bottom:22px}
+  footer{border-top:1px solid var(--line); padding:28px 0 40px;
+         color:var(--muted); font-size:14px}
+  footer .wrap{display:flex; flex-wrap:wrap; gap:10px 30px;
+               justify-content:space-between}
+
+  @media (max-width:900px){
+    .hero .wrap{grid-template-columns:1fr}
+    .g3,.g4{grid-template-columns:repeat(2,1fr)}
+    .bar nav{display:none}
+  }
+  @media (max-width:560px){
+    .g3,.g4{grid-template-columns:1fr}
+    section{padding:40px 0}
+    .price-card{padding:20px}
+    .bar .phone{display:none}   /* номер есть в hero и подвале */
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <div class="logo">🚲 Аренда&nbsp;велосипедов</div>
+    <nav>
+      <a href="#models">Модели и цены</a>
+      <a href="#how">Как арендовать</a>
+      <a href="#points">Точки</a>
+      <a href="#faq">Вопросы</a>
+    </nav>
+    <div class="grow"></div>
+    <a class="phone" id="head-phone" href="#contacts">Казань</a>
+    <a class="btn small" id="head-tg" href="#" target="_blank">Написать</a>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <span class="kicker">Казань · работаем 7/0</span>
+      <h1>Аренда электровелосипедов<br>для <em>курьеров и доставки</em></h1>
+      <p>Два аккумулятора на 70 км хода, бесплатное обслуживание с выездным
+         мастером, договор и оплата — онлайн. Забирайте велосипед в день
+         обращения.</p>
+      <div class="cta">
+        <a class="btn" id="hero-tg" href="#" target="_blank">🚀 Забронировать в Telegram</a>
+        <a class="btn ghost" id="hero-call" href="#">📞 Позвонить</a>
+      </div>
+      <div class="ticks">
+        <span>2 АКБ в комплекте</span>
+        <span>бесплатный ремонт и ТО</span>
+        <span>оплата СБП</span>
+        <span>сигнализация StarLine</span>
+      </div>
+    </div>
+    <div class="price-card">
+      <div class="from">аренда от</div>
+      <div class="amount" id="min-price">…</div>
+      <div class="per">₽ в неделю</div>
+      <a class="btn" id="price-tg" href="#" target="_blank" style="width:100%">Забронировать</a>
+      <div class="free-now" id="free-now"></div>
+    </div>
+  </div>
+</section>
+
+<section id="feats">
+  <div class="wrap">
+    <h2>Почему у нас</h2>
+    <p class="sub">Велосипед — ваш рабочий инструмент. Наша работа — чтобы он
+       ездил каждый день, а не стоял в ремонте.</p>
+    <div class="grid g3" id="feat-grid"></div>
+  </div>
+</section>
+
+<section class="models" id="models">
+  <div class="wrap">
+    <h2>Модели и цены</h2>
+    <p class="sub">Наличие показывается вживую — это те же данные, что видит
+       оператор. Продление после срока — по тарифу модели, ₽/сутки.</p>
+    <div class="grid g3" id="model-grid"></div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>Как арендовать</h2>
+    <p class="sub">От заявки до выдачи — обычно меньше часа, всё оформление
+       онлайн в Telegram.</p>
+    <div class="grid g4" style="margin-top:24px">
+      <div class="step"><span class="n">1</span><b>Бронь в Telegram</b>
+        <span>Откройте бота, выберите модель, точку и время визита —
+        велосипед закрепляется за вами.</span></div>
+      <div class="step"><span class="n">2</span><b>Анкета и договор онлайн</b>
+        <span>Заполните анкету прямо в приложении, проверка занимает меньше
+        часа в рабочее время. Договор подписывается в чате.</span></div>
+      <div class="step"><span class="n">3</span><b>Оплата по СБП</b>
+        <span>Счёт на точную сумму, оплата по QR из любого банка. Продление
+        потом — одной кнопкой в приложении.</span></div>
+      <div class="step"><span class="n">4</span><b>Забирайте и работайте</b>
+        <span>Приезжайте на точку к выбранному времени — велосипед заряжен,
+        проверен и ждёт вас.</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="points-sec" id="points">
+  <div class="wrap">
+    <h2>Где забрать</h2>
+    <p class="sub" id="hours-sub">Точки выдачи в Казани.</p>
+    <div class="grid g3" id="point-grid"></div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <h2>Частые вопросы</h2>
+    <div style="max-width:760px; margin-top:20px">
+      <details><summary>Какие документы нужны?</summary>
+        <p>Паспорт. Анкета заполняется онлайн в приложении или в чате с ботом,
+        фото разворота паспорта прикладывается там же. Клиентам 16–17 лет
+        дополнительно нужно письменное согласие родителя.</p></details>
+      <details><summary>Как проходит оплата?</summary>
+        <p>По СБП: бот выставляет счёт на точную сумму, вы платите по QR
+        из приложения любого банка. Оплата подтверждается банком автоматически —
+        никаких чеков пересылать не нужно.</p></details>
+      <details><summary>Что входит в аренду?</summary>
+        <p id="faq-perks">Два аккумулятора, бесплатное обслуживание, держатель
+        для телефона с зарядкой.</p></details>
+      <details><summary>Что делать, если велосипед сломался?</summary>
+        <p>Позвонить или написать нам — кнопка «🆘 Поддержка» есть в приложении
+        на каждом экране. Ремонт и плановое ТО раз в две недели — бесплатно,
+        работает выездной мастер и две мастерские по Казани.</p></details>
+      <details><summary>Можно ли продлить аренду?</summary>
+        <p>Да, прямо в приложении: кнопка «Продлить» сама считает сумму
+        по вашему договору и выставляет счёт СБП. После оплаты срок
+        сдвигается автоматически.</p></details>
+      <details><summary>Зимой работаете?</summary>
+        <p>Да, работаем круглый год без выходных. Зимой — новая зимняя резина
+        и тёплые перчатки на руль в комплекте.</p></details>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="cta-band" id="contacts">
+      <h2>Готовы выехать сегодня?</h2>
+      <p>Свободные велосипеды видны в приложении — бронь занимает минуту.</p>
+      <div class="cta" style="justify-content:center; display:flex; gap:12px; flex-wrap:wrap">
+        <a class="btn" id="cta-tg" href="#" target="_blank">🚀 Забронировать в Telegram</a>
+        <a class="btn ghost" id="cta-call" href="#" style="color:#fff !important; border-color:#3a4250">📞 <span id="cta-phone">Позвонить</span></a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>🚲 Аренда электровелосипедов, Казань</div>
+    <div id="foot-hours"></div>
+    <div><a id="foot-phone" href="#"></a> · <a id="foot-tg" href="#" target="_blank">Telegram</a></div>
+  </div>
+</footer>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+  .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+const rub = n => Number(n).toLocaleString("ru-RU");
+const PERIODS = {1:"1 сутки", 7:"1 неделя", 14:"2 недели", 30:"1 месяц"};
+
+// Преимущества: постоянный набор - это витрина того, что уже работает
+// в продукте, а не обещания.
+const FEATS = [
+  ["🔋","Два аккумулятора","В комплекте 2 АКБ — до 70 км хода. Уровень заряда виден прямо в приложении."],
+  ["🛠️","Бесплатное обслуживание","Плановое ТО раз в 2 недели, выездной мастер и две мастерские по Казани."],
+  ["📱","Всё оформление онлайн","Бронь, анкета, договор, оплата СБП и продление — в Telegram, без бумаг и очередей."],
+  ["🛡️","Сигнализация StarLine","Дистанционное включение с брелка. Велосипед под охраной, когда вы отдыхаете."],
+  ["❄️","Готов к зиме","Новая зимняя резина и тёплые перчатки на руль — работайте круглый год."],
+  ["⚡","Выдача в день обращения","Проверка анкеты — меньше часа в рабочее время. Приехали — забрали."],
+];
+
+function draw(models, points, avail, contacts, perks){
+  const tel = contacts.phone ? "tel:" + contacts.phone.replace(/[^+\d]/g,"") : "#";
+  const tgl = contacts.telegram || "#";
+  ["head-tg","hero-tg","price-tg","cta-tg","foot-tg"].forEach(id => $(id).href = tgl);
+  ["hero-call","cta-call"].forEach(id => $(id).href = tel);
+  $("head-phone").href = tel; $("head-phone").textContent = contacts.phone || "Казань";
+  $("foot-phone").href = tel; $("foot-phone").textContent = contacts.phone || "";
+  $("cta-phone").textContent = contacts.phone || "Позвонить";
+  if (perks) $("faq-perks").textContent = perks;
+
+  $("feat-grid").innerHTML = FEATS.map(([i,t,d]) =>
+    `<div class="feat"><div class="ico">${i}</div><b>${t}</b><span>${d}</span></div>`).join("");
+
+  // минимальная недельная цена - в hero
+  const weekly = models.flatMap(m => m.tariffs.filter(t => t.period_days === 7)
+                                              .map(t => t.price));
+  const anyP = models.flatMap(m => m.tariffs.map(t => t.price));
+  const min = weekly.length ? Math.min(...weekly)
+            : anyP.length ? Math.min(...anyP) : null;
+  $("min-price").textContent = min != null ? rub(min) : "—";
+
+  const freeOf = title => avail.filter(a => a.model === title)
+                               .reduce((s,a) => s + a.free, 0);
+  const totalFree = avail.reduce((s,a) => s + a.free, 0);
+  $("free-now").textContent = totalFree
+    ? `сейчас свободно: ${totalFree} шт.` : "";
+
+  $("model-grid").innerHTML = models.map(m => {
+    const free = freeOf(m.title);
+    const chips = (m.specs || []).slice(0,4).map(s =>
+      `<span class="chip">${esc(s[1])}</span>`).join("");
+    const rows = (m.tariffs || []).map(t =>
+      `<div class="trow"><span>${PERIODS[t.period_days] || t.period_days + " дн."}</span>
+       <b>${rub(t.price)} ₽</b></div>`).join("") +
+      (m.extend_price ? `<div class="trow"><span>продление</span>
+       <b>${rub(m.extend_price)} ₽/сутки</b></div>` : "");
+    // Файла с фото может ещё не быть - тогда велосипед-эмодзи,
+    // а не сломанная картинка с alt-текстом на пол-карточки.
+    const photo = m.photo
+      ? `<img src="${esc(m.photo)}" alt="${esc(m.title)}" loading="lazy"
+           onerror="this.parentElement.textContent='🚲'">` : "🚲";
+    return `<div class="model"><div class="ph">${photo}</div>
+      <div class="body">
+        <div class="trow" style="border:0; padding:0"><h3>${esc(m.title)}</h3>
+          <span class="avail ${free ? "yes" : "no"}">${free ? "свободно " + free : "под заказ"}</span></div>
+        <div class="chips">${chips}</div>
+        <div>${rows}</div>
+        <a class="btn" href="${esc(contacts.telegram || "#")}" target="_blank">Забронировать</a>
+      </div></div>`;
+  }).join("");
+
+  $("point-grid").innerHTML = points.map(p => {
+    const map = (p.lat && p.lon)
+      ? `<a href="https://yandex.ru/maps/?pt=${p.lon},${p.lat}&z=16" target="_blank">на карте</a>` : "";
+    const free = avail.filter(a => a.point === p.title)
+                      .reduce((s,a) => s + a.free, 0);
+    return `<div class="point"><b>${esc(p.title)}</b>
+      <div class="addr">${esc(p.address || "")}</div>
+      <span class="hrs">${p.open_hour}:00–${p.close_hour}:00, без выходных</span>
+      <div class="avail ${free ? "yes" : "no"}" style="margin-bottom:8px">
+        ${free ? "сейчас свободно: " + free : "уточняйте наличие"}</div>
+      <div class="links">${map}
+        <a href="tel:${(p.phone || "").replace(/[^+\d]/g,"")}">${esc(p.phone || "")}</a></div>
+      </div>`;
+  }).join("");
+
+  const h = points[0];
+  if (h) {
+    $("hours-sub").textContent =
+      `Точки выдачи в Казани, ежедневно с ${h.open_hour}:00 до ${h.close_hour}:00.`;
+    $("foot-hours").textContent =
+      `ежедневно ${h.open_hour}:00–${h.close_hour}:00`;
+  }
+}
+
+(async () => {
+  try {
+    const [mres, points, avail] = await Promise.all([
+      fetch("/api/models").then(r => r.json()),
+      fetch("/api/points").then(r => r.json()),
+      fetch("/api/availability").then(r => r.json()),
+    ]);
+    draw(mres.models || [], points || [], avail || [],
+         mres.contacts || {}, mres.perks || "");
+  } catch (e) {
+    // Без API сайт остаётся читабельным: тексты статичны, а цены
+    // и наличие просто не заполняются.
+    $("min-price").textContent = "—";
+  }
+})();
+</script>
+</body>
+</html>

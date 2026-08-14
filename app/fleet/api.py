@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 WEBAPP_FILE = Path(__file__).resolve().parent / "webapp.html"
 ADMIN_FILE = Path(__file__).resolve().parent / "admin.html"
+LANDING_FILE = Path(__file__).resolve().parent / "landing.html"
 # Фото моделей: файлы кладутся сюда владельцем (имена - в catalog.py)
 # и отдаются с нашего же сервера, без внешних CDN.
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -95,10 +96,17 @@ class Api:
         # без рестарта, а отсутствие должно обнаружиться сразу.
         self.webapp = WEBAPP_FILE.read_text(encoding="utf-8")
         self.adminapp = ADMIN_FILE.read_text(encoding="utf-8")
+        self.landing = LANDING_FILE.read_text(encoding="utf-8")
 
     # ─────────────────────── витрина ───────────────────────
 
     async def index(self, _request: web.Request) -> web.Response:
+        """Корень домена - публичный сайт-лендинг. Открытый из Telegram,
+        он сам уводит в Mini App (/app): MINIAPP_URL со старых установок
+        может указывать на корень, и ломать его нельзя."""
+        return web.Response(text=self.landing, content_type="text/html")
+
+    async def app_page(self, _request: web.Request) -> web.Response:
         return web.Response(text=self.webapp, content_type="text/html")
 
     async def health(self, _request: web.Request) -> web.Response:
@@ -1364,6 +1372,7 @@ def build_app(fleet: FleetDB, *, bot=None, admin_chat_id: int | None = None,
     app = web.Application(client_max_size=30 * 1024 * 1024)
     app.add_routes([
         web.get("/", api.index),
+        web.get("/app", api.app_page),
         web.get("/api/health", api.health),
         web.get("/policy", api.policy_file),
         web.get("/api/reg/status", api.reg_status),
