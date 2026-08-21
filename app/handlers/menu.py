@@ -353,8 +353,8 @@ async def rent(message: Message, bot: Bot, db: Database, cfg: Config,
 
 
 async def rentals_text(db: Database, user: dict) -> str:
-    lang = i18n.user_lang(user)
     """История аренд: текущая сверху, закрытые - из журнала событий."""
+    lang = i18n.user_lang(user)
     lines = []
     if logic.rental_is_active(user):
         given = logic.issue_context(user.get("issue_data"))

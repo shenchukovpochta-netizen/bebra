@@ -319,6 +319,27 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
         pass
 
 
+def _buyout_fields(target: dict, start) -> dict:
+    """Что записать про выкуп при этой выдаче.
+
+    Внутри одной аренды график не трогаем: оператор может переслать форму
+    хоть пять раз, и каждый раз обнулять накопленное было бы издевательством.
+
+    Повторная выдача - другое дело. Между арендами человек за велосипед
+    не платил, и считать перерыв оплаченным нельзя: замораживаем набранные
+    платежи числом и начинаем отсчёт от новой выдачи. А если прошлый выкуп
+    уже состоялся, тот велосипед его, и новый график начинается с нуля.
+    """
+    repeat = bool(target.get("act_in_signed_at") and target.get("act_out_signed_at"))
+    if not repeat:
+        return {} if target.get("buyout_from") else {"buyout_from": start}
+    if target.get("buyout_done_at"):
+        return {"buyout_from": start, "buyout_days": 0, "buyout_done_at": None}
+    done = logic.buyout_state(target)
+    return {"buyout_from": start,
+            "buyout_days": done["paid_days"] if done else 0}
+
+
 async def _issue_reply(message: Message, bot: Bot, db: Database,
                        cfg: Config, vault: Vault, target: dict) -> None:
     """Данные выдачи от оператора: сохранить и выдать договор.
@@ -335,13 +356,9 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     # Даты срока считаются здесь же: по ним бот напоминает об окончании.
     # Строку срока оператор пишет как привык - разбирает её logic.
     start, end = logic.rent_dates(parsed)
-    # Начало графика выкупа - день первой выдачи. При повторной выдаче
-    # оно НЕ сдвигается: выкуп копится по всем оплаченным дням подряд,
-    # а не начинается заново с каждым новым велосипедом.
-    buyout_from = target.get("buyout_from") or start
     if not await db.patch(tg_id, expected_status=logic.ST_APPROVED,
                           issue_data=parsed, rent_from=start, rent_until=end,
-                          buyout_from=buyout_from,
+                          **_buyout_fields(target, start),
                           remind_soon_at=None, remind_last_at=None,
                           remind_overdue_at=None):
         await message.reply(texts.MOD_REPLY_NOT_PENDING)

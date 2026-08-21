@@ -1615,6 +1615,65 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("нет поля", text)
         self.assertNotIn("______", text)
 
+    async def test_act_waits_while_the_client_is_busy(self):
+        """Дневной проход не выдёргивает человека из другого шага: он мог
+        как раз просить о закрытии аренды, и подмена состояния оставила бы
+        его с мёртвой кнопкой. Выкуп от одного дня не убежит."""
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        start = row["buyout_from"]
+        row["rent_until"] = start + timedelta(days=200)
+        await self.feed(msg("🔚 Закрыть аренду"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_CLOSE_REASON)
+
+        self.assertEqual(await self.buyout_pass(start + timedelta(days=119)), 0)
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_CLOSE_REASON)
+        self.assertIsNone(row.get("buyout_done_at"), "акт помечен выданным зря")
+
+        # человек вернулся в меню - следующий проход своё возьмёт
+        row["state"] = logic.APPROVED
+        self.assertEqual(await self.buyout_pass(start + timedelta(days=120)), 1)
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_BUYOUT_SIGN)
+
+    async def test_repeat_rental_carries_days_without_the_gap(self):
+        """Между арендами клиент за велосипед не платил: накопленные
+        платежи переезжают числом, а перерыв в график не идёт."""
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        start = row["buyout_from"]
+        row["rent_until"] = start + timedelta(days=9)     # оплачено 10 дней
+        await self.close_rental()
+        await self.feed(msg("🚲 Арендовать"))
+        await self.provide_issue(self.BUYOUT_FORM.replace(
+            "срок: 03.08 - 10.08", "срок: 03.09 - 10.09"))
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["buyout_days"], 10, "платежи первой аренды потеряны")
+        self.assertEqual(row["buyout_from"], row["rent_from"],
+                         "отсчёт новой аренды должен начинаться с её выдачи")
+        state = logic.buyout_state(row, today=row["rent_from"])
+        self.assertEqual(state["paid_days"], 11,
+                         "перерыв между арендами засчитан как оплата")
+
+    async def test_new_buyout_after_the_previous_one_starts_over(self):
+        """Прошлый велосипед уже его: новый график начинается с нуля,
+        иначе второй акт выдался бы в день выдачи."""
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        row["rent_until"] = row["buyout_from"] + timedelta(days=200)
+        await self.buyout_pass(row["buyout_from"] + timedelta(days=119))
+        await self.feed(cb("buyout_sign"))
+        await self.close_rental()
+        await self.feed(msg("🚲 Арендовать"))
+        await self.provide_issue(self.BUYOUT_FORM)
+
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["buyout_days"], 0)
+        self.assertIsNone(row["buyout_done_at"], "новый график считается выданным")
+        state = logic.buyout_state(row, today=row["rent_from"])
+        self.assertEqual(state["paid_days"], 1)
+
     async def test_lost_buyout_act_is_resent(self):
         await self.buyout_rental()
         row = self.db.users[USER_ID]

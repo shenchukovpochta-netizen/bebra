@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -774,6 +774,20 @@ class TestReminders(unittest.TestCase):
         row = self.row(date(2026, 8, 10), extend_until=date(2026, 8, 20))
         self.assertIsNone(self.due(row))
 
+    def test_no_reminders_after_the_buyout(self):
+        """Велосипед выкуплен и стал собственностью клиента: «продлите
+        аренду или верните велосипед» после этого - неправда."""
+        row = self.row(date(2026, 8, 10), buyout_done_at="вчера")
+        self.assertIsNone(self.due(row))
+
+    def test_digest_marks_bought_out_rentals(self):
+        """Оператору пометка нужна: без неё строка читается как обычная
+        просрочка, и он поедет искать велосипед, который уже не вернут."""
+        rows = [self.row(date(2026, 8, 10), buyout_done_at="вчера")]
+        digest = logic.deadline_digest(rows, today=self.TODAY)
+        self.assertIn("выкуплен", digest)
+        self.assertIn("просрочка", digest)
+
     def test_operator_still_sees_such_rentals_in_the_digest(self):
         """Клиента не трогаем, но у оператора аренда обязана остаться
         на виду: велосипед всё ещё не вернули."""
@@ -923,6 +937,69 @@ class TestBuyout(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(parsed["buyout_total"], "150000")
         self.assertEqual(parsed["buyout_payments"], "120")
+
+    def test_days_of_previous_rentals_are_carried(self):
+        """Платежи прошлых аренд лежат числом: график сквозной, а отсчёт
+        по датам начинается заново с каждой выдачи."""
+        data = self.data(paid_until=date(2026, 8, 9), buyout_days=30)
+        state = logic.buyout_state(data, today=date(2026, 8, 9))
+        self.assertEqual(state["paid_days"], 35)
+        self.assertEqual(state["paid"], 43750)
+
+    def test_gap_between_rentals_is_not_paid(self):
+        """Между арендами человек за велосипед не платил: перерыв
+        в график выкупа не идёт, иначе месяц без велосипеда выкупал бы
+        его наравне с месяцем езды."""
+        first = self.data(paid_until=date(2026, 8, 14))
+        carried = logic.buyout_state(first, today=date(2026, 8, 14))["paid_days"]
+        self.assertEqual(carried, 10)
+        # месяц перерыва, потом новая выдача с 15.09
+        second = self.data(paid_until=date(2026, 9, 24), buyout_days=carried,
+                           buyout_from=date(2026, 9, 15),
+                           rent_from=date(2026, 9, 15))
+        state = logic.buyout_state(second, today=date(2026, 9, 24))
+        self.assertEqual(state["paid_days"], 20, "перерыв засчитан как оплата")
+
+    def test_carried_days_never_exceed_the_schedule(self):
+        data = self.data(paid_until=date(2026, 8, 9), buyout_days=500)
+        state = logic.buyout_state(data, today=date(2026, 8, 9))
+        self.assertEqual(state["paid_days"], 120)
+        self.assertEqual(state["paid"], 150000)
+        self.assertTrue(state["done"])
+
+    def test_finish_accounts_for_carried_days(self):
+        """Дата окончания считается от последнего оплаченного дня:
+        «начало плюс 120» с накопленными днями обещало бы собственность
+        позже, чем она наступит."""
+        data = self.data(paid_until=date(2026, 12, 31), buyout_days=100)
+        state = logic.buyout_state(data, today=self.START)
+        self.assertEqual(state["paid_days"], 101)
+        self.assertEqual(state["finish"], self.START + timedelta(days=19))
+
+    def test_half_filled_buyout_is_an_error(self):
+        """Забытая строка выключала бы выкуп молча, и узнал бы об этом
+        клиент - через несколько месяцев, не дождавшись собственности."""
+        form = "рама: 1\nмотор: 2\nсрок: 05.08 - 12.08\nоплата: 3000\n"
+        parsed, err = logic.parse_issue_form(form + "выкуп: 150000")
+        self.assertIsNone(parsed)
+        self.assertIn("платежей", err)
+        parsed, err = logic.parse_issue_form(form + "платежей: 120")
+        self.assertIsNone(parsed)
+        self.assertIn("сумм", err.lower())
+
+    def test_absurd_buyout_numbers_are_an_error(self):
+        form = "рама: 1\nмотор: 2\nсрок: 05.08 - 12.08\nоплата: 3000\n"
+        parsed, err = logic.parse_issue_form(
+            form + "выкуп: 150000\nплатежей: 99999")
+        self.assertIsNone(parsed)
+        self.assertIn("платежей", err)
+        parsed, err = logic.parse_issue_form(
+            form + "выкуп: 99999999999\nплатежей: 120")
+        self.assertIsNone(parsed)
+        self.assertIn("выкуп", err)
+        parsed, err = logic.parse_issue_form(
+            form + "выкуп: сто тысяч\nплатежей: 120")
+        self.assertIsNone(parsed)
 
     def test_money_formats_with_non_breaking_spaces(self):
         """Разряды разделяются неразрывным пробелом: перенос строки посреди

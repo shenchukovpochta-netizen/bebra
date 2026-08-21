@@ -738,6 +738,7 @@ ISSUE_ALIASES: dict[str, str] = {
     "дождевик": "kit_rain", "чехол": "kit_case",
     "замок": "kit_lock", "сумка": "kit_bag", "стяжка": "kit_strap",
     "шлем": "kit_helmet",
+    "цвет": "bike_color",
     "срок": "rent_term", "сроки": "rent_term",
     # Явная дата окончания: нужна, когда срок написан словами
     # («неделя»), - из такой строки бот даты не достанет.
@@ -823,7 +824,37 @@ def parse_issue_form(raw: str | None) -> tuple[dict[str, str] | None, str]:
     missing = [ISSUE_LABELS[f] for f in ISSUE_REQUIRED if not data.get(f)]
     if missing:
         return None, "Не хватает: " + ", ".join(missing) + "."
+    err = _check_buyout(data)
+    if err:
+        return None, err
     return data, ""
+
+
+def _check_buyout(data: dict[str, str]) -> str:
+    """Проверка строк выкупа. «» - всё в порядке (в том числе без выкупа).
+
+    Молча пропускать нельзя: обычная аренда и аренда с выкупом внешне
+    неотличимы, и опечатка в сумме или забытая строка «платежей»
+    выключали бы выкуп совсем. Оператор узнавал бы об этом через
+    несколько месяцев - от клиента, который не дождался собственности.
+    """
+    total_raw = data.get("buyout_total")
+    payments_raw = data.get("buyout_payments")
+    if not total_raw and not payments_raw:
+        return ""
+    if not total_raw:
+        return "Для выкупа не хватает суммы: строка «выкуп: 150000»."
+    if not payments_raw:
+        return "Для выкупа не хватает строки «платежей: 120»."
+    total = _money(total_raw)
+    if not total or total > BUYOUT_MAX_TOTAL:
+        return (f"«выкуп: {total_raw}» - нужна сумма в рублях, "
+                f"не больше {BUYOUT_MAX_TOTAL}.")
+    payments = _money(payments_raw)
+    if not payments or payments > BUYOUT_MAX_PAYMENTS:
+        return (f"«платежей: {payments_raw}» - нужно число платежей "
+                f"от 1 до {BUYOUT_MAX_PAYMENTS}.")
+    return ""
 
 
 def issue_context(issue: dict | None) -> dict[str, str]:
@@ -1202,6 +1233,11 @@ def buyout_state(data: dict, *, today: date | None = None) -> dict[str, Any] | N
     графика. Поэтому считаем от начала выкупа до конца оплаченного срока
     (rent_until), но не дальше сегодняшнего дня: завтрашние платежи ещё
     не наступили, и обещать по ним собственность нельзя.
+
+    К дням текущей аренды прибавляется buyout_days - платежи прошлых
+    аренд. Одной датой начала тут не обойтись: между арендами бывает
+    перерыв, и считать его оплаченным нельзя - иначе месяц без
+    велосипеда выкупал бы его наравне с месяцем езды.
     """
     plan = buyout_plan(data)
     if plan is None:
@@ -1216,16 +1252,23 @@ def buyout_state(data: dict, *, today: date | None = None) -> dict[str, Any] | N
         # день не наступил, платёж по графику не сделан.
         edge = min(paid_until, today)
         done_days = max((edge - start).days + 1, 0)
+    done_days += max(int(data.get("buyout_days") or 0), 0)
     done_days = min(done_days, plan["payments"])
     paid = round(plan["per_payment"] * done_days)
     if done_days >= plan["payments"]:
         paid = plan["total"]
     left = max(plan["total"] - paid, 0)
+    left_days = max(plan["payments"] - done_days, 0)
     finish = None
     if start is not None:
-        finish = start + timedelta(days=plan["payments"] - 1)
+        # Считаем от последнего оплаченного дня, а не от начала графика:
+        # с накопленными днями прошлых аренд «начало плюс число платежей»
+        # обещало бы собственность позже, чем она наступит.
+        last = min(paid_until, today) if paid_until is not None else today
+        last = max(last, start - timedelta(days=1))
+        finish = last + timedelta(days=left_days)
     return {**plan, "paid_days": done_days, "paid": paid, "left": left,
-            "left_days": max(plan["payments"] - done_days, 0),
+            "left_days": left_days,
             "done": left == 0, "finish": finish,
             "percent": round(paid * 100 / plan["total"])}
 
@@ -1260,8 +1303,14 @@ def reminder_due(row: dict, *, before_days: int,
     в ответ на собственную заявку выглядит так, будто его не услышали.
     Оператор при этом видит такую аренду в сводке - для него ничего
     не меняется.
+
+    Молчим и после выкупа: велосипед уже собственность клиента, и
+    «продлите аренду или верните велосипед» в этот момент - неправда.
+    Оборудование оператор забирает обычным актом возврата, и напоминает
+    о нём человек, а не бот.
     """
-    if row.get("close_requested_at") or row.get("extend_until"):
+    if (row.get("close_requested_at") or row.get("extend_until")
+            or row.get("buyout_done_at")):
         return None
     left = days_left(row.get("rent_until"), today=today)
     if left is None:
@@ -1293,6 +1342,11 @@ def deadline_digest(rows: Iterable[dict], *, today: date | None = None) -> str:
         line = (f"• {who} (ID {row.get('tg_id')}) · № {esc(row.get('contract_no') or '—')}"
                 f" · {esc(given['bike_model'])} · до "
                 f"{row['rent_until'].strftime('%d.%m')}")
+        if row.get("buyout_done_at"):
+            # Велосипед выкуплен: назад он не приедет, вернуть нужно
+            # только оборудование. Без пометки строка читается как
+            # обычная просрочка, и оператор поедет искать велосипед.
+            line += " · выкуплен"
         if left < 0:
             over.append(f"{line} · просрочка {-left} дн.")
         elif left <= 1:

@@ -114,8 +114,13 @@ create table if not exists bot.users (
 
   -- Аренда с правом выкупа. Условия (сумма и число платежей) лежат
   -- в issue_data вместе с остальными данными выдачи; здесь - начало
-  -- графика и следы самого перехода собственности.
+  -- графика и следы самого перехода собственности. buyout_days -
+  -- платежи, накопленные ПРОШЛЫМИ арендами: между двумя арендами клиент
+  -- за велосипед не платит, и эти дни в график не идут, поэтому при
+  -- новой выдаче накопленное замораживается числом, а buyout_from
+  -- начинает отсчёт заново.
   buyout_from        date,
+  buyout_days        integer not null default 0,
   buyout_done_at     timestamptz,
   buyout_path        text,
   buyout_sha256      text,
@@ -201,6 +206,7 @@ alter table bot.users add column if not exists remind_soon_at     timestamptz;
 alter table bot.users add column if not exists remind_last_at     timestamptz;
 alter table bot.users add column if not exists remind_overdue_at  timestamptz;
 alter table bot.users add column if not exists buyout_from        date;
+alter table bot.users add column if not exists buyout_days        integer not null default 0;
 alter table bot.users add column if not exists buyout_done_at     timestamptz;
 alter table bot.users add column if not exists buyout_path        text;
 alter table bot.users add column if not exists buyout_sha256      text;

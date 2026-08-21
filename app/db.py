@@ -28,8 +28,8 @@ PATCHABLE = frozenset({
     "rent_from", "rent_until", "extend_until",
     "extend_chat_id", "extend_message_id",
     "remind_soon_at", "remind_last_at", "remind_overdue_at",
-    "buyout_from", "buyout_done_at", "buyout_path", "buyout_sha256",
-    "buyout_signed_at",
+    "buyout_from", "buyout_days", "buyout_done_at", "buyout_path",
+    "buyout_sha256", "buyout_signed_at",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
     "issue_data", "issue_chat_id", "issue_message_id",
@@ -255,10 +255,10 @@ class Database:
         словами («неделя»), даты нет, и выдумывать её бот не станет.
         """
         return await self.pool.fetch(
-            "select tg_id, lang, full_name, contract_no, issue_data, "
+            "select tg_id, state, lang, full_name, contract_no, issue_data, "
             "       rent_from, rent_until, extend_until, close_requested_at, "
             "       remind_soon_at, remind_last_at, remind_overdue_at, "
-            "       buyout_from, buyout_done_at "
+            "       buyout_from, buyout_days, buyout_done_at "
             "from bot.users "
             "where rent_until is not null "
             "  and act_in_signed_at is not null "

@@ -136,6 +136,12 @@ async def buyout_once(bot: Any, db: Database, cfg: Config, vault: Any, *,
         row = dict(record)
         if row.get("buyout_done_at"):
             continue
+        if row.get("state") != logic.APPROVED:
+            # Клиент сейчас в диалоге: подписывает акт возврата, платит
+            # за продление, пишет в поддержку. Перевод в подпись выкупа
+            # оборвал бы это на середине - подождём до следующего прохода,
+            # выкуп от одного дня не убежит.
+            continue
         state = logic.buyout_state(row, today=today)
         if state is None or not state["done"]:
             continue

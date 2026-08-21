@@ -866,7 +866,11 @@ async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
     docx, _ = _build_act(cfg, cfg.buyout_template,
                          _act_context(cfg, data, anketa, signed_at=UNSIGNED))
 
-    if not await db.patch(tg_id, state=logic.WAIT_BUYOUT_SIGN,
+    # expected_state обязателен: пока собирался документ, клиент мог начать
+    # возврат или уйти в поддержку, и подмена состояния под ним оставила бы
+    # его с мёртвой кнопкой на прошлом шаге.
+    if not await db.patch(tg_id, expected_state=logic.APPROVED,
+                          state=logic.WAIT_BUYOUT_SIGN,
                           buyout_done_at=utcnow()):
         raise ContractProblem(f"не удалось перевести {tg_id} на подпись выкупа")
 
