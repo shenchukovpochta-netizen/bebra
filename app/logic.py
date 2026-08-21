@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable
 
@@ -64,6 +64,10 @@ WAIT_PAYMENT = "wait_payment"
 WAIT_ACT_SIGN = "wait_act_sign"
 # Оператор прислал данные возврата, клиент подтверждает Акт возврата.
 WAIT_RETURN_SIGN = "wait_return_sign"
+# Выкупная стоимость выплачена целиком: клиент подписывает Акт о переходе
+# права собственности. Отдельное состояние - переход собственности это
+# самостоятельный юридический факт, и он фиксируется своей подписью.
+WAIT_BUYOUT_SIGN = "wait_buyout_sign"
 APPROVED = "approved"
 # Зарегистрированный пользователь нажал «Поддержка» и пишет вопрос.
 # Отдельное состояние обязательно: без него следующее сообщение провалилось бы
@@ -91,7 +95,7 @@ KNOWN_STATES = frozenset({
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
     WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
-    WAIT_PAYMENT, WAIT_ACT_SIGN, WAIT_RETURN_SIGN, APPROVED,
+    WAIT_PAYMENT, WAIT_ACT_SIGN, WAIT_RETURN_SIGN, WAIT_BUYOUT_SIGN, APPROVED,
     WAIT_SUPPORT, WAIT_CLOSE_REASON,
 })
 
@@ -509,7 +513,7 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
 STORE_FILE_NAME = re.compile(
     r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg"
     r"|contract-\d+\.(?:pdf|docx)|soglasie-\d+\.docx"
-    r"|actin-\d+\.docx|actout-\d+\.docx)$")
+    r"|actin-\d+\.docx|actout-\d+\.docx|buyout-\d+\.docx)$")
 
 
 def is_safe_store_path(path: str | None, storage_dir: Any) -> bool:
@@ -738,6 +742,10 @@ ISSUE_ALIASES: dict[str, str] = {
     # Явная дата окончания: нужна, когда срок написан словами
     # («неделя»), - из такой строки бот даты не достанет.
     "до": "rent_until", "окончание": "rent_until",
+    # Аренда с правом выкупа: выкупная стоимость и число платежей
+    # из графика (Приложение № 4 к договору).
+    "выкуп": "buyout_total", "выкупная стоимость": "buyout_total",
+    "платежей": "buyout_payments", "платежи": "buyout_payments",
     "оплата": "rent_price", "сумма": "rent_price",
 }
 
@@ -777,6 +785,9 @@ ISSUE_FORM_TEMPLATE = (
     "срок: 03.08 - 10.08\n"
     "оплата: 3000 qr"
 )
+# Для аренды с правом выкупа оператор дописывает к форме две строки -
+# они необязательные, и обычная аренда о них ничего не знает.
+ISSUE_BUYOUT_HINT = "выкуп: 150000\nплатежей: 120"
 
 
 def parse_issue_form(raw: str | None) -> tuple[dict[str, str] | None, str]:
@@ -1135,6 +1146,98 @@ def days_left(until: date | None, *, today: date | None = None) -> int | None:
     if until is None:
         return None
     return (until - (today or date.today())).days
+
+
+# ─────────────────────── выкуп велосипеда ───────────────────────
+# Аренда с правом выкупа: часть каждого оплаченного дня идёт в выкупную
+# стоимость, и когда она выбрана целиком, велосипед переходит в
+# собственность Арендатора по Акту о переходе права собственности.
+# График из договора («120 платежей по дням, итого 150 000 ₽») бот
+# держит не таблицей, а двумя числами: сумма и число платежей. Таблица
+# в документе - это тот же равномерный график, и хранить 120 строк,
+# чтобы каждый раз пересчитывать одно и то же деление, незачем.
+
+BUYOUT_ALIASES: dict[str, str] = {
+    "выкуп": "buyout_total", "выкупная стоимость": "buyout_total",
+    "платежей": "buyout_payments", "платежи": "buyout_payments",
+}
+# Разумные границы: выкуп в рублях и число платежей из графика.
+# Всё, что вне их, - опечатка оператора, а не условие договора.
+BUYOUT_MAX_TOTAL = 10_000_000
+BUYOUT_MAX_PAYMENTS = 3650
+
+
+def _money(raw: Any) -> int | None:
+    """«150 000 ₽» -> 150000. None, если числа в строке нет."""
+    digits = re.sub(r"[^\d]", "", str(raw or ""))
+    return int(digits) if digits else None
+
+
+def money(value: int | float | None) -> str:
+    """Сумма для человека: 150000 -> «150 000 ₽» с неразрывными пробелами."""
+    if value is None:
+        return "—"
+    return f"{int(value):,}".replace(",", " ") + " ₽"
+
+
+def buyout_plan(data: dict) -> dict[str, Any] | None:
+    """Условия выкупа из данных выдачи. None - обычная аренда без выкупа."""
+    issue = dict(data.get("issue_data") or {})
+    total = _money(data.get("buyout_total") or issue.get("buyout_total"))
+    if not total or total > BUYOUT_MAX_TOTAL:
+        return None
+    payments = _money(data.get("buyout_payments")
+                      or issue.get("buyout_payments")) or 0
+    if not 1 <= payments <= BUYOUT_MAX_PAYMENTS:
+        return None
+    return {"total": total, "payments": payments,
+            "per_payment": total / payments}
+
+
+def buyout_state(data: dict, *, today: date | None = None) -> dict[str, Any] | None:
+    """Сколько выкупа выплачено и сколько осталось. None - выкупа нет.
+
+    Выкуп копится по ОПЛАЧЕННЫМ дням: клиент платит за аренду вперёд,
+    и день, за который деньги получены, - это и есть очередной платёж
+    графика. Поэтому считаем от начала выкупа до конца оплаченного срока
+    (rent_until), но не дальше сегодняшнего дня: завтрашние платежи ещё
+    не наступили, и обещать по ним собственность нельзя.
+    """
+    plan = buyout_plan(data)
+    if plan is None:
+        return None
+    today = today or date.today()
+    start = data.get("buyout_from") or data.get("rent_from")
+    paid_until = data.get("rent_until")
+    if start is None or paid_until is None:
+        done_days = 0
+    else:
+        # Оплачено по paid_until включительно, но не считаем вперёд: пока
+        # день не наступил, платёж по графику не сделан.
+        edge = min(paid_until, today)
+        done_days = max((edge - start).days + 1, 0)
+    done_days = min(done_days, plan["payments"])
+    paid = round(plan["per_payment"] * done_days)
+    if done_days >= plan["payments"]:
+        paid = plan["total"]
+    left = max(plan["total"] - paid, 0)
+    finish = None
+    if start is not None:
+        finish = start + timedelta(days=plan["payments"] - 1)
+    return {**plan, "paid_days": done_days, "paid": paid, "left": left,
+            "left_days": max(plan["payments"] - done_days, 0),
+            "done": left == 0, "finish": finish,
+            "percent": round(paid * 100 / plan["total"])}
+
+
+def buyout_progress(data: dict, *, today: date | None = None) -> str:
+    """Строка прогресса выкупа для карточек оператора. «» - выкупа нет."""
+    state = buyout_state(data, today=today)
+    if state is None:
+        return ""
+    return (f"Выкуп: {money(state['paid'])} из {money(state['total'])} "
+            f"({state['percent']}%), платежей {state['paid_days']}"
+            f"/{state['payments']}")
 
 
 # Ступени напоминания. Каждая шлётся один раз: отметка о ней лежит

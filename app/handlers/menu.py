@@ -370,6 +370,21 @@ async def rentals_text(db: Database, user: dict) -> str:
             bike=logic.esc(payload.get("bike") or "—"),
             term=logic.esc(payload.get("term") or "—"),
             closed_at=logic.esc(payload.get("closed_at") or "—")))
+    # Выкуп показывается прямо в списке: клиент, который платит за
+    # велосипед, каждый раз спрашивает «сколько осталось» - и это
+    # единственный экран, где он смотрит на свою аренду.
+    buyout = logic.buyout_state(user)
+    if buyout is not None and logic.rental_is_active(user):
+        lines.append("")
+        lines.append(i18n.t(lang, "BUYOUT_LINE").format(
+            paid=logic.money(buyout["paid"]), total=logic.money(buyout["total"]),
+            percent=buyout["percent"], days=buyout["paid_days"],
+            payments=buyout["payments"]))
+        if not buyout["done"] and buyout["finish"]:
+            lines.append(i18n.t(lang, "BUYOUT_LEFT_LINE").format(
+                left=logic.money(buyout["left"]),
+                left_days=buyout["left_days"],
+                finish=buyout["finish"].strftime("%d.%m.%Y")))
     if not lines:
         return i18n.t(lang, "TRIPS_EMPTY")
     return i18n.t(lang, "TRIPS_HEADER") + "\n".join(lines)

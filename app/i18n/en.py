@@ -360,6 +360,13 @@ T: dict[str, str] = {
         "{signed_at}.\nThe rental is closed. Thank you for choosing us!"
     ),
 
+    # ── выкуп ──
+    "BUYOUT_LINE": "💎 Buyout: {paid} of {total} ({percent}%), payments {days} of {payments}",
+    "BUYOUT_LEFT_LINE": "{left} left — that is {left_days} payments, until {finish}.",
+    "BUYOUT_READY": "🎉 Congratulations! The buyout price of <b>{total}</b> has been paid in full.\n\nBelow is the Act of transfer of ownership of the <b>{bike}</b> bike. Read it and tap “Sign” — from that moment the bike is yours.\nThe equipment (battery, charger, bag and so on) is not part of the buyout and is returned under the Return Act — the operator will agree on a time with you.",
+    "BUYOUT_SIGNED": "✅ The Act of transfer of ownership under agreement No. {number} was signed {signed_at}.\nThe bike has become your property — congratulations!\n\nYour copy of the act stays in this chat.",
+    "BUYOUT_RESEND": "The Act of transfer of ownership under agreement No. {number} is not signed yet — here it is again.\nTap “Sign” or “There is a mistake”.",
+
     # ── кнопки ──
     # ── сроки и продление ──
     "BTN_EXTEND": "📅 Extend the rental",

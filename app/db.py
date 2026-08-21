@@ -28,6 +28,8 @@ PATCHABLE = frozenset({
     "rent_from", "rent_until", "extend_until",
     "extend_chat_id", "extend_message_id",
     "remind_soon_at", "remind_last_at", "remind_overdue_at",
+    "buyout_from", "buyout_done_at", "buyout_path", "buyout_sha256",
+    "buyout_signed_at",
     "mod_chat_id", "mod_message_id",
     "support_chat_id", "support_message_id",
     "issue_data", "issue_chat_id", "issue_message_id",
@@ -254,8 +256,9 @@ class Database:
         """
         return await self.pool.fetch(
             "select tg_id, lang, full_name, contract_no, issue_data, "
-            "       rent_until, extend_until, close_requested_at, "
-            "       remind_soon_at, remind_last_at, remind_overdue_at "
+            "       rent_from, rent_until, extend_until, close_requested_at, "
+            "       remind_soon_at, remind_last_at, remind_overdue_at, "
+            "       buyout_from, buyout_done_at "
             "from bot.users "
             "where rent_until is not null "
             "  and act_in_signed_at is not null "
@@ -305,11 +308,12 @@ class Database:
     async def rows_to_purge(self, limit: int = 200) -> list[asyncpg.Record]:
         return await self.pool.fetch(
             "select tg_id, doc_path, parent_path, contract_path, soglasie_path, "
-            "       act_in_path, act_out_path from bot.users "
+            "       act_in_path, act_out_path, buyout_path from bot.users "
             "where purge_after is not null and purge_after < now() "
             "  and (doc_path is not null or parent_path is not null "
             "       or contract_path is not null or soglasie_path is not null "
-            "       or act_in_path is not null or act_out_path is not null) "
+            "       or act_in_path is not null or act_out_path is not null "
+            "       or buyout_path is not null) "
             "limit $1",
             limit,
         )
@@ -332,7 +336,7 @@ class Database:
             "update bot.users set doc_file_id = null, doc_path = null, "
             "parent_file_id = null, parent_path = null, "
             "contract_path = null, soglasie_path = null, "
-            "act_in_path = null, act_out_path = null, "
+            "act_in_path = null, act_out_path = null, buyout_path = null, "
             "anketa_enc = null, "
             "purge_after = null, updated_at = now() where tg_id = $1",
             tg_id,

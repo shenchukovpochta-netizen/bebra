@@ -365,6 +365,13 @@ T: dict[str, str] = {
     "EXTEND_REQUEST_FAILED": "Texnik nosozlik tufayli arizani yetkazib bo'lmadi. Bizga to'g'ridan-to'g'ri yozing: " + URL,
     "EXTEND_CONFIRMED": "✅ Ijara {until} gacha uzaytirildi. To'lov uchun rahmat!\nShartnoma va akt o'zgarmaydi — yangisini imzolash shart emas.",
 
+    # ── выкуп ──
+    "BUYOUT_LINE": "💎 Sotib olish: {total} dan {paid}, ({percent}%), to'lovlar {payments} dan {days}",
+    "BUYOUT_LEFT_LINE": "{left} qoldi — bu {left_days} ta to'lov, {finish} gacha.",
+    "BUYOUT_READY": "🎉 Tabriklaymiz! <b>{total}</b> miqdoridagi sotib olish qiymati to'liq to'landi.\n\nQuyida — <b>{bike}</b> velosipediga mulk huquqi o'tishi to'g'risidagi Akt. O'qing va «Imzolayman» tugmasini bosing — shu paytdan velosiped sizniki.\nJihozlar (akkumulyator, quvvatlagich, sumka va boshqalar) sotib olishga kirmaydi va Qaytarish akti bo'yicha qaytariladi — operator siz bilan vaqtni kelishadi.",
+    "BUYOUT_SIGNED": "✅ № {number} shartnoma bo'yicha mulk huquqi o'tishi to'g'risidagi Akt {signed_at} imzolandi.\nVelosiped sizning mulkingizga o'tdi — tabriklaymiz!\n\nAkt nusxasi shu chatda sizda qoladi.",
+    "BUYOUT_RESEND": "№ {number} shartnoma bo'yicha mulk huquqi o'tishi akti hali imzolanmagan — mana u yana.\n«Imzolayman» yoki «Xato bor» tugmasini bosing.",
+
     "BTN_RENT": "🚲 Ijaraga olish",
     "BTN_TRIPS": "📋 Mening ijaralarim",
     "BTN_TARIFFS": "💰 Narxlar",

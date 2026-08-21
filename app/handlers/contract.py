@@ -546,6 +546,12 @@ def _act_context(cfg: Config, data: dict, anketa: dict, *,
     ctx["return_notes"] = str(ret.get("return_notes") or "—")
     ctx["return_date"] = str(ret.get("return_date") or
                              utcnow().strftime("%d.%m.%Y"))
+    # Акт о переходе права собственности: сумма выкупа и цвет (в договоре
+    # он один - чёрный, но пусть приходит из данных выдачи, если укажут).
+    plan = logic.buyout_plan(data)
+    ctx["buyout_total"] = logic.money(plan["total"]) if plan else "—"
+    given = dict(data.get("issue_data") or {})
+    ctx["bike_color"] = str(given.get("bike_color") or "Чёрный")
     return ctx
 
 
@@ -839,3 +845,154 @@ async def st_wait_return_sign(message: Message, bot: Bot, db: Database,
     except (ContractProblem, TelegramAPIError):
         log.exception("не удалось переотправить акт возврата %s", user["tg_id"])
         await message.answer(i18n.t(user.get("lang"), "ACT_PRESS_BUTTON"))
+
+
+# ─────────────────── Акт о переходе права собственности ───────────────────
+
+async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
+                          tg_id: int) -> None:
+    """Выкуп выплачен: выдать Акт о переходе права собственности на подпись.
+
+    Вызывается из фонового прохода, когда график выкупа выбран целиком.
+    Состояние переводится здесь же: до подписи собственность не перешла,
+    и клиент должен видеть, чего от него ждут.
+    """
+    row = await db.get_user(tg_id)
+    if row is None:
+        raise ContractProblem(f"нет записи о пользователе {tg_id}")
+    data = dict(row)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    docx, _ = _build_act(cfg, cfg.buyout_template,
+                         _act_context(cfg, data, anketa, signed_at=UNSIGNED))
+
+    if not await db.patch(tg_id, state=logic.WAIT_BUYOUT_SIGN,
+                          buyout_done_at=utcnow()):
+        raise ContractProblem(f"не удалось перевести {tg_id} на подпись выкупа")
+
+    lang = i18n.user_lang(data)
+    state = logic.buyout_state(data) or {}
+    given = logic.issue_context(data.get("issue_data"))
+    await bot.send_document(
+        tg_id, BufferedInputFile(docx, filename=_act_filename("vykup", number)),
+        caption=i18n.t(lang, "BUYOUT_READY").format(
+            total=logic.money(state.get("total")),
+            bike=logic.esc(given["bike_model"])),
+        reply_markup=kb.sign_buyout(lang),
+    )
+    await db.log_event(tg_id, "buyout_act_sent", {"number": number})
+
+    # Оператору - карточка: оборудование в выкуп не входит и его надо
+    # принять, а велосипед в акт возврата больше не возвращается.
+    try:
+        await bot.send_message(
+            cfg.contract_chat_id,
+            texts.BUYOUT_DONE_CARD.format(
+                fio=logic.esc(data.get("full_name") or "без имени"), tg_id=tg_id,
+                number=logic.esc(number), bike=logic.esc(given["bike_model"]),
+                total=logic.money(state.get("total"))))
+    except TelegramAPIError:
+        log.exception("карточка выкупа по %s не доставлена", number)
+
+
+@router.callback_query(StateIs(logic.WAIT_BUYOUT_SIGN), F.data == "buyout_sign")
+async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
+                         cfg: Config, vault: Vault, user: dict) -> None:
+    """Подпись Акта о переходе права собственности - велосипед стал его."""
+    signed_at = utcnow()
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_BUYOUT_SIGN,
+                          state=logic.APPROVED, buyout_signed_at=signed_at):
+        await callback.answer()
+        return
+    lang = i18n.user_lang(user)
+    await callback.answer(i18n.t(lang, "CONTRACT_SIGN_TOAST"))
+
+    tg_id = user["tg_id"]
+    row = await db.get_user(tg_id)
+    data = dict(row) if row else dict(user)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
+
+    try:
+        docx, digest = _build_act(cfg, cfg.buyout_template,
+                                  _act_context(cfg, data, anketa,
+                                               signed_at=stamp))
+    except ContractProblem:
+        log.exception("подписанный акт выкупа %s не собрался", tg_id)
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.BUYOUT_ALERT_FAILED.format(
+                                   tg_id=tg_id,
+                                   reason="акт выкупа не пересобрался"))
+        return
+
+    old_path = data.get("buyout_path")
+    path, _ = files.store(cfg.storage_dir, tg_id, "buyout", docx)
+    await db.patch(tg_id, buyout_path=str(path), buyout_sha256=digest)
+    if old_path and old_path != str(path):
+        files.remove(old_path)
+    await db.log_event(tg_id, "buyout_signed", {"number": number})
+    await db.set_purge_after(tg_id, cfg.purge_approved_days)
+
+    await bot.send_document(
+        tg_id, BufferedInputFile(docx, filename=_act_filename("vykup", number)),
+        caption=i18n.t(lang, "BUYOUT_SIGNED").format(
+            number=logic.esc(number), signed_at=stamp),
+        reply_markup=kb.main_menu(lang),
+    )
+    try:
+        await bot.send_document(
+            cfg.fix_chat_id,
+            BufferedInputFile(docx, filename=_act_filename("vykup", number)),
+            caption=texts.BUYOUT_SIGNED_FIX.format(
+                number=logic.esc(number),
+                fio=logic.esc(data.get("full_name")), tg_id=tg_id,
+                signed_at=stamp, sha256=digest),
+            message_thread_id=cfg.fix_topic_id,
+        )
+    except TelegramAPIError:
+        log.exception("акт выкупа %s не доставлен в чат фиксации", number)
+        await db.log_event(tg_id, "buyout_fix_failed", {"number": number})
+
+
+@router.callback_query(StateIs(logic.WAIT_BUYOUT_SIGN), F.data == "buyout_mistake")
+async def cb_buyout_mistake(callback: CallbackQuery, bot: Bot, db: Database,
+                            cfg: Config, user: dict) -> None:
+    """Клиент видит ошибку в акте выкупа - разбирается оператор."""
+    await callback.answer()
+    await db.log_event(user["tg_id"], "buyout_mistake")
+    await bot.send_message(user["tg_id"],
+                           i18n.t(user.get("lang"), "ACT_MISTAKE_SENT"))
+    try:
+        row = await db.get_user(user["tg_id"])
+        number = (dict(row).get("contract_no") if row else "") or ""
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.ACT_MISTAKE_ALERT.format(
+                                   tg_id=user["tg_id"],
+                                   number=logic.esc(number)))
+    except TelegramAPIError:
+        log.exception("алерт об ошибке акта выкупа не доставлен")
+
+
+@router.message(StateIs(logic.WAIT_BUYOUT_SIGN))
+async def st_wait_buyout_sign(message: Message, bot: Bot, db: Database,
+                              cfg: Config, vault: Vault, user: dict) -> None:
+    """Потерянный акт выкупа переотправляется на любое сообщение."""
+    row = await db.get_user(user["tg_id"])
+    data = dict(row) if row else dict(user)
+    anketa = vault.decrypt(data.get("anketa_enc"))
+    number = data.get("contract_no") or ""
+    lang = i18n.user_lang(user)
+    try:
+        docx, _ = _build_act(cfg, cfg.buyout_template,
+                             _act_context(cfg, data, anketa, signed_at=UNSIGNED))
+    except ContractProblem:
+        log.exception("не удалось переотправить акт выкупа %s", user["tg_id"])
+        await message.answer(i18n.t(lang, "ACT_PRESS_BUTTON"))
+        return
+    await bot.send_document(
+        user["tg_id"],
+        BufferedInputFile(docx, filename=_act_filename("vykup", number)),
+        caption=i18n.t(lang, "BUYOUT_RESEND").format(number=logic.esc(number)),
+        reply_markup=kb.sign_buyout(lang),
+    )

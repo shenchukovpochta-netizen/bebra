@@ -180,6 +180,16 @@ def sign_act(lang: str = "ru") -> InlineKeyboardMarkup:
     ])
 
 
+def sign_buyout(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Подпись Акта о переходе права собственности."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_SIGN"),
+                              callback_data="buyout_sign")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_MISTAKE"),
+                              callback_data="buyout_mistake")],
+    ])
+
+
 def sign_return(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_RETURN_SIGN"),

@@ -824,3 +824,109 @@ class TestReminderSchedule(unittest.TestCase):
 
     def test_once_a_day(self):
         self.assertFalse(self.due(9, date(2026, 8, 12)))
+
+
+class TestBuyout(unittest.TestCase):
+    """Аренда с правом выкупа: график из договора - два числа."""
+
+    START = date(2026, 8, 5)
+
+    def data(self, *, paid_until=None, total="150 000", payments="120", **extra):
+        issue = {"bike_model": "Truck+"}
+        if total is not None:
+            issue["buyout_total"] = total
+        if payments is not None:
+            issue["buyout_payments"] = payments
+        base = {"issue_data": issue, "rent_from": self.START,
+                "buyout_from": self.START,
+                "rent_until": paid_until or self.START}
+        base.update(extra)
+        return base
+
+    def test_no_plan_without_numbers(self):
+        self.assertIsNone(logic.buyout_state(self.data(total=None)))
+        self.assertIsNone(logic.buyout_state(self.data(payments=None)))
+        self.assertIsNone(logic.buyout_state({"issue_data": {}}))
+
+    def test_absurd_numbers_are_ignored(self):
+        """Опечатка оператора не должна превращаться в график на век."""
+        self.assertIsNone(logic.buyout_state(self.data(payments="99999")))
+        self.assertIsNone(logic.buyout_state(self.data(total="99999999999")))
+        self.assertIsNone(logic.buyout_state(self.data(payments="0")))
+
+    def test_money_is_parsed_from_human_text(self):
+        state = logic.buyout_state(self.data(total="150 000 ₽"),
+                                   today=self.START)
+        self.assertEqual(state["total"], 150000)
+        self.assertEqual(state["per_payment"], 1250)
+
+    def test_accrues_by_paid_days(self):
+        # оплачен месяц вперёд, но сегодня только пятый день
+        data = self.data(paid_until=date(2026, 9, 5))
+        state = logic.buyout_state(data, today=date(2026, 8, 9))
+        self.assertEqual(state["paid_days"], 5)
+        self.assertEqual(state["paid"], 6250)
+        self.assertEqual(state["left"], 143750)
+        self.assertFalse(state["done"])
+
+    def test_does_not_count_beyond_today(self):
+        """Оплачено вперёд - но платёж по графику наступает в свой день,
+        и обещать собственность за завтрашние дни нельзя."""
+        data = self.data(paid_until=date(2026, 12, 31))
+        state = logic.buyout_state(data, today=date(2026, 8, 10))
+        self.assertEqual(state["paid_days"], 6)
+
+    def test_does_not_count_unpaid_days(self):
+        """Срок кончился, клиент не продлил - выкуп стоит на месте."""
+        data = self.data(paid_until=date(2026, 8, 20))
+        state = logic.buyout_state(data, today=date(2026, 9, 30))
+        self.assertEqual(state["paid_days"], 16)
+
+    def test_completes_exactly_at_the_schedule_end(self):
+        data = self.data(paid_until=date(2026, 12, 31))
+        state = logic.buyout_state(data, today=date(2026, 12, 2))
+        self.assertTrue(state["done"])
+        self.assertEqual(state["paid_days"], 120)
+        self.assertEqual(state["paid"], 150000)
+        self.assertEqual(state["left"], 0)
+        self.assertEqual(state["percent"], 100)
+        # график из документа: 120 платежей с 05.08 - последний 02.12
+        self.assertEqual(state["finish"], date(2026, 12, 2))
+
+    def test_never_exceeds_the_total(self):
+        data = self.data(paid_until=date(2027, 12, 31))
+        state = logic.buyout_state(data, today=date(2027, 12, 31))
+        self.assertEqual(state["paid"], 150000)
+        self.assertEqual(state["left"], 0)
+        self.assertEqual(state["paid_days"], 120)
+
+    def test_rounding_does_not_lose_rubles(self):
+        """Неровная сумма: последний платёж закрывает остаток целиком."""
+        data = self.data(total="100000", payments="7",
+                         paid_until=date(2026, 8, 11))
+        state = logic.buyout_state(data, today=date(2026, 8, 11))
+        self.assertTrue(state["done"])
+        self.assertEqual(state["paid"], 100000)
+
+    def test_progress_line_for_operator(self):
+        data = self.data(paid_until=date(2026, 9, 5))
+        line = logic.buyout_progress(data, today=date(2026, 8, 9))
+        self.assertIn(logic.money(6250), line)
+        self.assertIn(logic.money(150000), line)
+        self.assertIn("5/120", line)
+        self.assertEqual(logic.buyout_progress({"issue_data": {}}), "")
+
+    def test_issue_form_accepts_buyout_lines(self):
+        parsed, err = logic.parse_issue_form(
+            "рама: 1\nмотор: 2\nсрок: 05.08 - 12.08\nоплата: 3000\n"
+            "выкуп: 150000\nплатежей: 120")
+        self.assertEqual(err, "")
+        self.assertEqual(parsed["buyout_total"], "150000")
+        self.assertEqual(parsed["buyout_payments"], "120")
+
+    def test_money_formats_with_non_breaking_spaces(self):
+        """Разряды разделяются неразрывным пробелом: перенос строки посреди
+        «150 000» читается как другая цена."""
+        self.assertEqual(logic.money(150000), "150\u00a0000\u00a0₽")
+        self.assertEqual(logic.money(0), "0\u00a0₽")
+        self.assertEqual(logic.money(None), "—")

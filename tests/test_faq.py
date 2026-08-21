@@ -252,10 +252,11 @@ class TestI18n(unittest.TestCase):
     FOREIGN = tuple(code for code in i18n.LANGS if code != "ru")
 
     def test_requested_languages_are_supported(self):
-        # русский, английский, узбекский, туркменский, египетский (арабский),
-        # иранский (фарси), хинди, чувашский - список заказчика
+        # русский, английский, узбекский, туркменский, татарский,
+        # египетский (арабский), иранский (фарси), хинди, чувашский -
+        # список заказчика
         self.assertEqual(set(i18n.LANGS),
-                         {"ru", "en", "uz", "tk", "ar", "fa", "hi", "cv"})
+                         {"ru", "en", "uz", "tk", "tt", "ar", "fa", "hi", "cv"})
         for code in i18n.LANGS:
             self.assertIn(code, i18n.LANG_TITLES)
 

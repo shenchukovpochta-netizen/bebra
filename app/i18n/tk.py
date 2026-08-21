@@ -354,6 +354,13 @@ T: dict[str, str] = {
     "EXTEND_REQUEST_FAILED": "Tehniki näsazlyk sebäpli arzany ýetirip bolmady. Bize göni ýazyň: " + URL,
     "EXTEND_CONFIRMED": "✅ Kärende {until} çenli uzaldyldy. Töleg üçin sag boluň!\nŞertnama we akt öňküligine galýar — täzesine gol çekmek gerek däl.",
 
+    # ── выкуп ──
+    "BUYOUT_LINE": "💎 Satyn almak: {total} dan {paid} ({percent}%), tölegler {payments} dan {days}",
+    "BUYOUT_LEFT_LINE": "{left} galdy — bu {left_days} töleg, {finish} çenli.",
+    "BUYOUT_READY": "🎉 Gutlaýarys! <b>{total}</b> möçberindäki satyn alyş bahasy doly tölendi.\n\nAşakda — <b>{bike}</b> welosipedine eýeçilik hukugynyň geçmegi hakyndaky Akt. Okaň we «Gol çekýärin» düwmesine basyň — şol pursatdan welosiped siziňki.\nEnjamlar (akkumulýator, zarýadlaýjy, sumka we beýlekiler) satyn alyşa girmeýär we Gaýtaryş akty boýunça gaýtarylýar — operator siziň bilen wagty ylalaşar.",
+    "BUYOUT_SIGNED": "✅ № {number} şertnama boýunça eýeçilik hukugynyň geçmegi hakyndaky Akt {signed_at} gol çekildi.\nWelosiped siziň eýeçiligiňize geçdi — gutlaýarys!\n\nAktyň nusgasy şu çatda sizde galýar.",
+    "BUYOUT_RESEND": "№ {number} şertnama boýunça eýeçilik akty entek gol çekilmedi — ine ol ýene.\n«Gol çekýärin» ýa-da «Ýalňyş bar» düwmesine basyň.",
+
     "BTN_RENT": "🚲 Kärendä almak",
     "BTN_TRIPS": "📋 Meniň kärendelerim",
     "BTN_TARIFFS": "💰 Nyrhlar",

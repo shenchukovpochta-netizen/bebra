@@ -24,20 +24,20 @@ from __future__ import annotations
 
 from .. import texts
 from ..faq_i18n import LANG_TITLES, LANGS, pick_prompt  # noqa: F401 - реэкспорт
-from . import ar, cv, en, fa, hi, tk, uz
+from . import ar, cv, en, fa, hi, tk, tt, uz
 
 # Пакеты переводов: язык -> {ключ -> текст}. Русского здесь нет намеренно -
 # его источник texts.py и BUTTONS_RU, и вторая копия разъехалась бы.
 PACKS: dict[str, dict[str, str]] = {
-    "en": en.T, "uz": uz.T, "tk": tk.T, "ar": ar.T,
+    "en": en.T, "uz": uz.T, "tk": tk.T, "tt": tt.T, "ar": ar.T,
     "fa": fa.T, "hi": hi.T, "cv": cv.T,
 }
 # Переводы ошибок валидации: язык -> {русский текст ошибки -> перевод}.
 # Ключ - сама русская строка из logic.py: валидаторы не пришлось трогать,
 # а непереведённая ошибка уходит по-русски (честный fallback).
 ERRORS: dict[str, dict[str, str]] = {
-    "en": en.ERRORS, "uz": uz.ERRORS, "tk": tk.ERRORS, "ar": ar.ERRORS,
-    "fa": fa.ERRORS, "hi": hi.ERRORS, "cv": cv.ERRORS,
+    "en": en.ERRORS, "uz": uz.ERRORS, "tk": tk.ERRORS, "tt": tt.ERRORS,
+    "ar": ar.ERRORS, "fa": fa.ERRORS, "hi": hi.ERRORS, "cv": cv.ERRORS,
 }
 
 # Русские подписи кнопок - канонические. Кнопок нет в texts.py (они жили

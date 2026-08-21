@@ -50,7 +50,8 @@ async def purge_once(db: Database, cfg: Config) -> tuple[int, int]:
     for row in await db.rows_to_purge():
         paths = [p for p in (row["doc_path"], row["parent_path"],
                              row["contract_path"], row["soglasie_path"],
-                             row["act_in_path"], row["act_out_path"]) if p]
+                             row["act_in_path"], row["act_out_path"],
+                             row["buyout_path"]) if p]
         # Путь пришёл из своей же базы, но перед удалением всё равно сверяется
         # с шаблоном: одна опечатка в запросе - и rm уедет не туда.
         unsafe = [p for p in paths if not logic.is_safe_store_path(p, cfg.storage_dir)]
@@ -120,6 +121,35 @@ async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str, *,
     return delivered
 
 
+async def buyout_once(bot: Any, db: Database, cfg: Config, vault: Any, *,
+                      today: date | None = None) -> int:
+    """Проверить графики выкупа и выдать акт тем, кто выплатил всё.
+
+    Живёт в том же дневном проходе, что напоминания: выкуп копится по
+    оплаченным дням, и «выплачено полностью» - это событие календаря,
+    а не нажатие кнопки. Акт выдаётся один раз (buyout_done_at).
+    """
+    from .handlers import contract as contract_handlers
+
+    sent = 0
+    for record in await db.active_rentals():
+        row = dict(record)
+        if row.get("buyout_done_at"):
+            continue
+        state = logic.buyout_state(row, today=today)
+        if state is None or not state["done"]:
+            continue
+        try:
+            await contract_handlers.send_buyout_act(bot, db, cfg, vault,
+                                                    row["tg_id"])
+            sent += 1
+        except Exception:                               # noqa: BLE001
+            # Акт не собрался или не ушёл - остальные клиенты не должны
+            # страдать из-за одного; попробуем на следующем проходе.
+            log.exception("акт выкупа для %s не выдан", row["tg_id"])
+    return sent
+
+
 async def remind_once(bot: Any, db: Database, cfg: Config, *,
                       today: date | None = None) -> tuple[int, str]:
     """Один проход напоминаний. Возвращает (сколько отправлено, сводка).
@@ -150,7 +180,8 @@ def due_today(now: datetime, last_run_on: date | None, hour: int) -> bool:
     return now.hour >= hour and last_run_on != now.date()
 
 
-async def reminders_loop(bot: Any, db: Database, cfg: Config) -> None:
+async def reminders_loop(bot: Any, db: Database, cfg: Config,
+                         vault: Any = None) -> None:
     """Напоминания клиентам и ежедневная сводка оператору.
 
     Раз в сутки, в «рабочий» час: сообщение о конце аренды в три ночи
@@ -166,6 +197,11 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config) -> None:
                 sent, digest = await remind_once(bot, db, cfg, today=now.date())
                 if sent:
                     log.info("напоминаний о сроке отправлено: %s", sent)
+                if vault is not None:
+                    done = await buyout_once(bot, db, cfg, vault,
+                                             today=now.date())
+                    if done:
+                        log.info("актов выкупа выдано: %s", done)
                 if digest:
                     await _send_digest(bot, cfg, digest, now.date())
         except asyncio.CancelledError:

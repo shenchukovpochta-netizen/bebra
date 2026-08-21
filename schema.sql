@@ -112,6 +112,15 @@ create table if not exists bot.users (
   remind_last_at     timestamptz,
   remind_overdue_at  timestamptz,
 
+  -- Аренда с правом выкупа. Условия (сумма и число платежей) лежат
+  -- в issue_data вместе с остальными данными выдачи; здесь - начало
+  -- графика и следы самого перехода собственности.
+  buyout_from        date,
+  buyout_done_at     timestamptz,
+  buyout_path        text,
+  buyout_sha256      text,
+  buyout_signed_at   timestamptz,
+
   -- Запрос клиента на закрытие аренды: причина с его слов и момент запроса.
   -- Причина попадает в отчёт о закрытии, поэтому хранится, а не только
   -- пересылается оператору.
@@ -191,6 +200,11 @@ alter table bot.users add column if not exists extend_message_id  bigint;
 alter table bot.users add column if not exists remind_soon_at     timestamptz;
 alter table bot.users add column if not exists remind_last_at     timestamptz;
 alter table bot.users add column if not exists remind_overdue_at  timestamptz;
+alter table bot.users add column if not exists buyout_from        date;
+alter table bot.users add column if not exists buyout_done_at     timestamptz;
+alter table bot.users add column if not exists buyout_path        text;
+alter table bot.users add column if not exists buyout_sha256      text;
+alter table bot.users add column if not exists buyout_signed_at   timestamptz;
 -- Бэкфилл: язык, выбранный раньше в ветке вопросов, становится языком
 -- всего диалога. Идемпотентно: после первого прогона обновлять нечего.
 update bot.users set lang = faq_lang where lang is null and faq_lang is not null;

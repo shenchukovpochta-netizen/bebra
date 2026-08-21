@@ -144,6 +144,8 @@ class Config:
     # подстановками, что и договор.
     act_in_template: Path = Path("/srv/app/act_priema_template.docx")
     act_out_template: Path = Path("/srv/app/act_vozvrata_template.docx")
+    # Акт о переходе права собственности: аренда с правом выкупа.
+    buyout_template: Path = Path("/srv/app/act_vykup_template.docx")
     # Согласие на обработку ПДн - приложение к договору, подписывается
     # вместе с ним той же кнопкой.
     soglasie_template: Path = Path("/srv/app/soglasie_template.docx")
@@ -193,6 +195,8 @@ class Config:
                 _env("ACT_IN_TEMPLATE", "/srv/app/act_priema_template.docx")),
             act_out_template=Path(
                 _env("ACT_OUT_TEMPLATE", "/srv/app/act_vozvrata_template.docx")),
+            buyout_template=Path(
+                _env("BUYOUT_TEMPLATE", "/srv/app/act_vykup_template.docx")),
             soglasie_template=Path(
                 _env("SOGLASIE_TEMPLATE", "/srv/app/soglasie_template.docx")),
             pdn_policy_file=Path(

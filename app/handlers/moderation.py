@@ -335,8 +335,13 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     # Даты срока считаются здесь же: по ним бот напоминает об окончании.
     # Строку срока оператор пишет как привык - разбирает её logic.
     start, end = logic.rent_dates(parsed)
+    # Начало графика выкупа - день первой выдачи. При повторной выдаче
+    # оно НЕ сдвигается: выкуп копится по всем оплаченным дням подряд,
+    # а не начинается заново с каждым новым велосипедом.
+    buyout_from = target.get("buyout_from") or start
     if not await db.patch(tg_id, expected_status=logic.ST_APPROVED,
                           issue_data=parsed, rent_from=start, rent_until=end,
+                          buyout_from=buyout_from,
                           remind_soon_at=None, remind_last_at=None,
                           remind_overdue_at=None):
         await message.reply(texts.MOD_REPLY_NOT_PENDING)

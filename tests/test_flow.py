@@ -281,6 +281,7 @@ def make_config(**overrides) -> Config:
         fix_chat_id=FIX_CHAT, fix_topic_id=FIX_TOPIC, contract_template=TEMPLATE,
         act_in_template=APP_DIR / "act_priema_template.docx",
         act_out_template=APP_DIR / "act_vozvrata_template.docx",
+        buyout_template=APP_DIR / "act_vykup_template.docx",
         soglasie_template=APP_DIR / "soglasie_template.docx",
         pdn_policy_file=APP_DIR / "pdn_policy.docx",
         channel_url="https://t.me/test", oferta_url="https://e.ru/o",
@@ -329,6 +330,15 @@ _seq = [0]
 def _next_id() -> int:
     _seq[0] += 1
     return _seq[0]
+
+
+def docx_text(docx: bytes) -> str:
+    """Видимый текст docx: содержимое всех <w:t> из word/document.xml."""
+    import io
+    import re
+    import zipfile
+    xml = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode("utf-8")
+    return "".join(re.findall(r"<w:t(?: [^>]*)?>(.*?)</w:t>", xml, re.S))
 
 
 def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
@@ -1374,7 +1384,11 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.session.sent_to(USER_ID)), before)
         self.assertIn("просрочка", digest, "оператор должен видеть просрочку")
 
-    EXTEND_FORM = "до: 17.08.2026\nоплата: 3500 qr"
+    # Дата продления считается от сегодня: зашитая в тест дата однажды
+    # оказывается в прошлом, и тест начинает падать сам по себе.
+    EXTEND_UNTIL = date.today() + timedelta(days=5)
+    EXTEND_FORM = (f"до: {EXTEND_UNTIL.strftime('%d.%m.%Y')}\n"
+                   "оплата: 3500 qr")
 
     async def extend_request(self):
         await self.feed(cb("extend"))
@@ -1402,7 +1416,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.provide_extend()
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.WAIT_PAYMENT)
-        self.assertEqual(row["extend_until"].strftime("%d.%m"), "17.08")
+        self.assertEqual(row["extend_until"], self.EXTEND_UNTIL)
         pay = [m.text for m in self.session.sent_to(USER_ID)
                if isinstance(m, SendMessage) and "3500 qr" in (m.text or "")]
         self.assertTrue(pay, "клиент не увидел сумму продления")
@@ -1410,9 +1424,9 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.confirm_pay()
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.APPROVED)
-        self.assertEqual(row["rent_until"].strftime("%d.%m"), "17.08")
+        self.assertEqual(row["rent_until"], self.EXTEND_UNTIL)
         self.assertIsNone(row["extend_until"])
-        self.assertIn("продлена до 17.08",
+        self.assertIn("продлена до " + self.EXTEND_UNTIL.strftime("%d.%m.%Y"),
                       self.session.sent_to(USER_ID)[-1].text)
         # Новых актов быть не должно: имущество уже у клиента.
         acts_after = len([m for m in self.session.documents()
@@ -1453,7 +1467,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg("📋 Мои аренды"))
         trips = [m.text for m in self.session.sent_to(USER_ID)
                  if isinstance(m, SendMessage)][-1]
-        self.assertIn("03.08 - 17.08", trips)
+        self.assertIn("03.08 - " + self.EXTEND_UNTIL.strftime("%d.%m"), trips)
 
     async def test_extension_without_active_rental_is_refused(self):
         await self.register_fully()
@@ -1487,6 +1501,128 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         replies = " ".join(m.text or "" for m in self.session.sent_to(ADMIN_CHAT)
                            if isinstance(m, SendMessage))
         self.assertIn("Не хватает даты", replies)
+
+    # ─── выкуп велосипеда ───
+
+    BUYOUT_FORM = ("рама: 264022410703084\n"
+                   "мотор: 240W25021406\n"
+                   "модель: Truck+\n"
+                   "срок: 03.08 - 10.08\n"
+                   "оплата: 3000 qr\n"
+                   "выкуп: 150000\n"
+                   "платежей: 120")
+
+    async def buyout_rental(self):
+        """Аренда с правом выкупа до подписанного акта приёма."""
+        await self.submit()
+        await self.approve()
+        await self.provide_issue(self.BUYOUT_FORM)
+        await self.feed(cb("sign"))
+        await self.confirm_pay()
+        await self.feed(cb("act_sign"))
+
+    async def buyout_pass(self, today):
+        """Дневной проход выкупа от лица фонового цикла."""
+        from app import tasks
+        return await tasks.buyout_once(self.bot, self.db, self.cfg,
+                                       self.vault, today=today)
+
+    async def test_buyout_terms_are_saved_and_shown(self):
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["issue_data"]["buyout_total"], "150000")
+        self.assertIsNotNone(row["buyout_from"], "начало графика не записано")
+
+        await self.feed(msg("📋 Мои аренды"))
+        trips = [m.text for m in self.session.sent_to(USER_ID)
+                 if isinstance(m, SendMessage)][-1]
+        self.assertIn("Выкуп:", trips)
+        self.assertIn("150", trips.replace("\xa0", " "))
+
+    async def test_ordinary_rental_says_nothing_about_buyout(self):
+        await self.register_fully()
+        await self.feed(msg("📋 Мои аренды"))
+        trips = [m.text for m in self.session.sent_to(USER_ID)
+                 if isinstance(m, SendMessage)][-1]
+        self.assertNotIn("Выкуп", trips)
+
+    async def test_act_is_issued_only_when_fully_paid(self):
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        start = row["buyout_from"]
+        # оплачен весь график вперёд, но сегодня только начало
+        row["rent_until"] = start + timedelta(days=200)
+
+        self.assertEqual(await self.buyout_pass(start + timedelta(days=10)), 0,
+                         "акт выдан до полной выплаты")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+
+        # последний, 120-й платёж
+        self.assertEqual(await self.buyout_pass(start + timedelta(days=119)), 1)
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_BUYOUT_SIGN)
+        self.assertIsNotNone(row["buyout_done_at"])
+        acts = [m for m in self.session.documents()
+                if m.chat_id == USER_ID
+                and "переходе права собственности" in (m.caption or "")]
+        self.assertTrue(acts, "акт выкупа не отправлен клиенту")
+        self.assertEqual(acts[-1].reply_markup.inline_keyboard[0][0].callback_data,
+                         "buyout_sign")
+        cards = [m.text for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and "Выкуп выплачен" in (m.text or "")]
+        self.assertTrue(cards, "оператор не узнал о выкупе")
+
+        # повторный проход второго акта не шлёт
+        self.assertEqual(await self.buyout_pass(start + timedelta(days=130)), 0)
+
+    async def test_buyout_act_is_signed_and_fixed(self):
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        row["rent_until"] = row["buyout_from"] + timedelta(days=200)
+        await self.buyout_pass(row["buyout_from"] + timedelta(days=119))
+
+        await self.feed(cb("buyout_sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertIsNotNone(row["buyout_signed_at"])
+        self.assertIsNotNone(row["buyout_sha256"])
+        signed = [m for m in self.session.documents()
+                  if m.chat_id == USER_ID
+                  and "перешёл в вашу собственность" in (m.caption or "")]
+        self.assertTrue(signed, "подписанный акт не пришёл клиенту")
+        to_fix = [m for m in self.session.documents()
+                  if m.chat_id == FIX_CHAT
+                  and "переходе права собственности" in (m.caption or "")]
+        self.assertTrue(to_fix, "акт выкупа не в чате фиксации")
+        self.assertEqual(to_fix[0].message_thread_id, FIX_TOPIC)
+
+    async def test_buyout_act_prints_the_bike_and_the_price(self):
+        """Акт - юридический документ: в нём обязаны быть вин-номера
+        и выкупная стоимость, иначе он ничего не подтверждает."""
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        row["rent_until"] = row["buyout_from"] + timedelta(days=200)
+        await self.buyout_pass(row["buyout_from"] + timedelta(days=119))
+        act = [m for m in self.session.documents()
+               if m.chat_id == USER_ID
+               and "переходе права собственности" in (m.caption or "")][-1]
+        text = docx_text(act.document.data)
+        self.assertIn("264022410703084", text)
+        self.assertIn("240W25021406", text)
+        self.assertIn("Truck+", text)
+        self.assertIn("150", text.replace("\xa0", " "))
+        self.assertIn("Иванов Иван Иванович", text)
+        self.assertNotIn("нет поля", text)
+        self.assertNotIn("______", text)
+
+    async def test_lost_buyout_act_is_resent(self):
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        row["rent_until"] = row["buyout_from"] + timedelta(days=200)
+        await self.buyout_pass(row["buyout_from"] + timedelta(days=119))
+        await self.feed(msg("а где акт?"))
+        last = [m for m in self.session.documents() if m.chat_id == USER_ID][-1]
+        self.assertIn("ещё не подписан", last.caption)
 
     # ─── язык всего диалога ───
 
