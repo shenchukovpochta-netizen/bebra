@@ -316,9 +316,13 @@ async def _fix(bot: Bot, db: Database, cfg: Config, data: dict, anketa: dict, *,
         await bot.send_document(
             cfg.fix_chat_id,
             BufferedInputFile(pdf, filename=_filename(number)),
-            caption=texts.CONTRACT_FIX_CARD.format(
+            # Через лимит подписи перевалить нельзя: Telegram отвергнет
+            # отправку целиком, и подписанный договор не окажется в чате
+            # фиксации - подтверждать выдачу станет нечем.
+            caption=logic.caption_with_fields(
+                texts.CONTRACT_FIX_CARD,
+                _fix_fields(data, anketa),
                 number=logic.esc(number),
-                fields=_fix_fields(data, anketa),
                 tg_id=data.get("tg_id"),
                 signed_at=signed_at,
                 sha256=digest,

@@ -672,13 +672,16 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
                         data.get("parent_is_photo", True),
                         caption=texts.PARENT_CARD_CAPTION.format(tg_id=tg_id))
 
-    caption = texts.CONTRACT_CARD.format(
+    # Подпись собирается с оглядкой на лимит Telegram: у клиента с длинными
+    # адресами она перевалит за 1024 символа, и карточка не уйдёт вовсе -
+    # заявка станет невидимой для модератора. Реквизиты есть в документе,
+    # а невидимая заявка не стоит ни одной лишней строки.
+    caption = logic.caption_with_fields(
+        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else ""),
+        anketa_lines(data, anketa),
         number=logic.esc(data.get("contract_no") or "будет присвоен"),
-        fields=anketa_lines(data, anketa),
         tg_id=tg_id,
     )
-    if minor:
-        caption += texts.CARD_MINOR_LINE
     sent = await send_doc(
         bot, cfg.contract_chat_id, data,
         caption=caption,

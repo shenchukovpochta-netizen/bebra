@@ -553,6 +553,79 @@ def contract_number(seq: int, *, today: date | None = None,
     return f"{prefix}-{(today or date.today()).year}-{int(seq):06d}"
 
 
+# ─────────────────── лимиты Telegram на длину ───────────────────
+#
+# Сообщение - 4096 символов, подпись к файлу - 1024. Превышение это не
+# «обрежется», а 400 на всю отправку: карточка с заявкой не уйдёт вовсе,
+# и заявка станет невидимой для модератора, а подписанный договор
+# не попадёт в чат фиксации. Считаем с запасом: Telegram меряет длину
+# в кодовых единицах UTF-16, где эмодзи стоит два символа, а Python -
+# по одному.
+MESSAGE_LIMIT = 3800
+CAPTION_LIMIT = 1000
+FIELDS_TRIMMED = "…\n(полные реквизиты — в самом документе)"
+
+
+def clip_fields(fields: str, budget: int) -> str:
+    """Блок реквизитов, укороченный по строкам до заданного запаса.
+
+    Режем по строкам, а не по символам: половина слова «Адрес регистрац»
+    в карточке выглядит как сбой, а недосказанность с многоточием читается
+    как недосказанность.
+    """
+    if len(fields) <= budget:
+        return fields
+    room = budget - len(FIELDS_TRIMMED)
+    kept: list[str] = []
+    used = 0
+    for line in fields.splitlines():
+        if used + len(line) + 1 > room:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.append(FIELDS_TRIMMED)
+    return "\n".join(kept)
+
+
+def caption_with_fields(template: str, fields: str, **fmt: Any) -> str:
+    """Подпись к файлу с блоком реквизитов - гарантированно в лимите.
+
+    Длинные адреса и «кем выдан» на 250 символов складываются в подпись
+    длиннее 1024, и Telegram отвергает отправку целиком. Документ важнее
+    полноты подписи: реквизиты в нём и так есть.
+    """
+    base = len(template.format(fields="", **fmt))
+    return template.format(fields=clip_fields(fields, max(CAPTION_LIMIT - base, 0)),
+                           **fmt)
+
+
+def split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Длинный текст - на сообщения по границам строк.
+
+    Сводка по срокам растёт вместе с прокатом: на четвёртом десятке аренд
+    она перестаёт влезать в одно сообщение, и оператор не получает её
+    целиком - молча, с одной строкой в логе.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    used = 0
+    for line in text.splitlines():
+        while len(line) > limit:            # одна строка длиннее лимита
+            if current:
+                parts.append("\n".join(current))
+                current, used = [], 0
+            parts.append(line[:limit])
+            line = line[limit:]
+        if current and used + len(line) + 1 > limit:
+            parts.append("\n".join(current))
+            current, used = [], 0
+        current.append(line)
+        used += len(line) + 1
+    if current:
+        parts.append("\n".join(current))
+    return parts or [""]
+
+
 # Поля, которые подставляются в шаблон договора. Порядок задаёт и вид
 # карточки модератора: читать её сверху вниз надо так же, как договор.
 CONTRACT_LABELS: tuple[tuple[str, str], ...] = (
@@ -908,6 +981,9 @@ CLOSE_ALIASES: dict[str, str] = {
 CLOSE_DEFAULTS = {"debt_paid": "0", "damage": "0", "repair_paid": "0",
                   "wash_paid": "0", "review": "нет", "feedback": "—"}
 CLOSE_REQUIRED = ("return_address", "accepted_by")
+# Потолок на строку формы: отчёт о закрытии уходит одним сообщением,
+# и один развесистый отзыв не должен стоить оператору всего отчёта.
+CLOSE_VALUE_LIMIT = 500
 CLOSE_LABELS = {"return_address": "адрес", "accepted_by": "принял",
                 "closed_at": "когда", "reason": "причина"}
 
@@ -953,6 +1029,13 @@ def parse_close_form(raw: str | None, *, reason: str = "",
         value = _clean(value)
         if not _no_markup(value):
             return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
+        if len(value) > CLOSE_VALUE_LIMIT:
+            # Отчёт уходит оператору ОДНИМ сообщением - его пересылают
+            # в «Фиксацию сдачи», где разбирает другой бот, и разрезать
+            # его на части нельзя. Длинный отзыв утопил бы весь отчёт
+            # в лимите Telegram, и оператору не досталось бы ничего.
+            return None, (f"Строка «{key.strip()}» длиннее "
+                          f"{CLOSE_VALUE_LIMIT} символов - сократите её.")
         if value:
             data[field] = value
     if unknown:

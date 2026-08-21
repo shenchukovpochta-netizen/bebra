@@ -218,10 +218,17 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
 
 
 async def _send_digest(bot: Any, cfg: Config, digest: str, today: date) -> None:
-    try:
-        await bot.send_message(
-            cfg.contract_chat_id,
-            texts.DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
+    """Сводка оператору - при необходимости несколькими сообщениями.
+
+    На четвёртом десятке аренд сводка перестаёт влезать в лимит Telegram,
+    и одно длинное сообщение не доходит целиком - молча, с одной строкой
+    в логе. Оператор при этом уверен, что просрочек нет.
+    """
+    text = (texts.DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
             + "\n\n" + digest)
-    except TelegramAPIError:
-        log.exception("сводка по срокам не доставлена")
+    for part in logic.split_message(text):
+        try:
+            await bot.send_message(cfg.contract_chat_id, part)
+        except TelegramAPIError:
+            log.exception("сводка по срокам не доставлена")
+            return

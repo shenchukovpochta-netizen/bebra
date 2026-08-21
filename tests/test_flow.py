@@ -110,8 +110,20 @@ class FakeSession(BaseSession):
     async def stream_content(self, *args, **kwargs):    # pragma: no cover
         yield b"fake-image-bytes"
 
+    # Настоящие лимиты Telegram: сообщение - 4096 символов, подпись
+    # к файлу - 1024. Заглушка обязана их соблюдать, иначе целый класс
+    # ошибок («карточка не ушла, заявка невидима») в тестах не виден.
+    TEXT_LIMIT = 4096
+    CAPTION_LIMIT = 1024
+
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
+        if isinstance(method, SendMessage) and len(method.text or "") > self.TEXT_LIMIT:
+            raise TelegramBadRequest(method=method, message="message is too long")
+        if (isinstance(method, (SendPhoto, SendDocument))
+                and len(method.caption or "") > self.CAPTION_LIMIT):
+            raise TelegramBadRequest(method=method,
+                                     message="message caption is too long")
         if (isinstance(method, SendPhoto)
                 and method.chat_id == self.fail_photo_to):
             raise TelegramBadRequest(method=method, message="chat not found")
@@ -1614,6 +1626,83 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Иванов Иван Иванович", text)
         self.assertNotIn("нет поля", text)
         self.assertNotIn("______", text)
+
+    # ─── длина сообщений и подписей ───
+
+    # Всё по верхней границе валидаторов: место рождения 150, «кем выдан»
+    # 200, адреса по 250 символов. Так пишут редко, но валидатор это
+    # разрешает - значит, бот обязан это пережить.
+    LONG_ANKETA = (
+        "07.03.1990",
+        "поселок городского типа Васильево Зеленодольского района " * 2 + "РТ",
+        "1234 567890",
+        "01.02.2015",
+        "160-002",
+        "ОТДЕЛОМ УФМС РОССИИ ПО РЕСПУБЛИКЕ ТАТАРСТАН В СОВЕТСКОМ РАЙОНЕ " * 3,
+        "Республика Татарстан, город Казань, улица Николая Ершова, дом 55 " * 3
+        + "квартира 143",
+        "Республика Татарстан, город Казань, улица Академика Завойского " * 3
+        + "дом 17, квартира 88",
+        "+7 900 111-22-33",
+        "+7 900 444-55-66",
+    )
+
+    async def test_long_anketa_still_reaches_the_moderator(self):
+        """Подпись карточки с длинными адресами перевалит за лимит Telegram,
+        и заявка станет невидимой: человек ждёт, модератор не знает о нём.
+        Реквизиты есть в документе - лучше урезать подпись, чем потерять
+        карточку."""
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        for answer in self.LONG_ANKETA:
+            await self.feed(msg(answer))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_DOC,
+                         "анкета по верхней границе валидаторов не прошла")
+        await self.feed(msg(photo=True))
+        await self.feed(cb("confirm"))
+
+        cards = [m for m in self.session.calls
+                 if isinstance(m, (SendPhoto, SendDocument))
+                 and m.chat_id == ADMIN_CHAT and m.reply_markup]
+        self.assertTrue(cards, "карточка модерации не ушла")
+        self.assertLessEqual(len(cards[-1].caption), 1024)
+        self.assertIn(logic.FIELDS_TRIMMED, cards[-1].caption,
+                      "подпись не обрезана - проверка ничего не проверяет")
+        self.assertIn("Telegram ID", cards[-1].caption,
+                      "хвост подписи обязан пережить обрезку")
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.PENDING)
+
+        # и подписанный договор обязан попасть в чат фиксации
+        await self.approve()
+        await self.provide_issue()
+        await self.feed(cb("sign"))
+        fixed = [m for m in self.session.documents() if m.chat_id == FIX_CHAT]
+        self.assertTrue(fixed, "договор не дошёл до чата фиксации")
+        self.assertLessEqual(len(fixed[0].caption), 1024)
+        self.assertIn("Отпечаток", fixed[0].caption,
+                      "без отпечатка запись в фиксации ничего не доказывает")
+
+    async def test_long_digest_is_sent_in_several_messages(self):
+        """Сводка растёт вместе с прокатом: на четвёртом десятке аренд она
+        перестаёт влезать в сообщение, и оператор молча остаётся без неё."""
+        from app import tasks
+        rows = [{"tg_id": 1000 + i, "full_name": "Хайруллин Ильнур Рустемович",
+                 "contract_no": f"АВ-2026-{i:06d}",
+                 "issue_data": {"bike_model": "Kugoo V3 Pro Максимальная"},
+                 "rent_until": date.today() - timedelta(days=3)}
+                for i in range(60)]
+        digest = logic.deadline_digest(rows)
+        self.assertGreater(len(digest), 4096, "для проверки нужна длинная сводка")
+        await tasks._send_digest(self.bot, self.cfg, digest, date.today())
+        parts = [m for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and "АВ-2026-" in (m.text or "")]
+        self.assertGreater(len(parts), 1, "сводка ушла одним куском")
+        self.assertEqual(sum(t.text.count("АВ-2026-") for t in parts), 60,
+                         "часть аренд потерялась при разбиении")
 
     async def test_act_waits_while_the_client_is_busy(self):
         """Дневной проход не выдёргивает человека из другого шага: он мог

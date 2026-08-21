@@ -581,6 +581,16 @@ class TestCloseForm(unittest.TestCase):
         self.assertIsNone(data)
         self.assertIn("< >", err)
 
+    def test_endless_review_is_rejected(self):
+        """Отчёт уходит одним сообщением: развесистый отзыв утопил бы его
+        в лимите Telegram, и оператор не получил бы ничего."""
+        data, err = self.parse("адрес: а\nпринял: и\nотзыв: " + "х" * 900)
+        self.assertIsNone(data)
+        self.assertIn("сократите", err)
+        # обычный отзыв на пару абзацев проходит
+        data, err = self.parse("адрес: а\nпринял: и\nотзыв: " + "х" * 400)
+        self.assertEqual(err, "")
+
     def test_notes_for_the_act_mention_only_property(self):
         """В акт возврата идут повреждения и суммы, а не причина и отзывы."""
         data, _ = self.parse("адрес: а\nпринял: и\nпричина: надоело\n"
@@ -838,6 +848,62 @@ class TestReminderSchedule(unittest.TestCase):
 
     def test_once_a_day(self):
         self.assertFalse(self.due(9, date(2026, 8, 12)))
+
+
+class TestTelegramLimits(unittest.TestCase):
+    """Лимиты на длину: превышение - это не обрезка, а недоставка целиком."""
+
+    TEMPLATE = "Договор № {number}\n{fields}\nTelegram ID: {tg_id}"
+
+    def fields(self, count, length=200):
+        return "\n".join(f"Поле {i}: " + "я" * length for i in range(count))
+
+    def test_short_caption_is_untouched(self):
+        caption = logic.caption_with_fields(self.TEMPLATE, "ФИО: Иванов",
+                                            number="АВ-1", tg_id=1)
+        self.assertIn("ФИО: Иванов", caption)
+        self.assertNotIn(logic.FIELDS_TRIMMED, caption)
+
+    def test_long_fields_are_trimmed_to_the_limit(self):
+        """Клиент с адресами по 250 символов не должен стоить карточки:
+        без обрезки Telegram отвергает отправку, и заявка становится
+        невидимой для модератора."""
+        caption = logic.caption_with_fields(self.TEMPLATE, self.fields(12),
+                                            number="АВ-1", tg_id=1)
+        self.assertLessEqual(len(caption), logic.CAPTION_LIMIT)
+        self.assertIn(logic.FIELDS_TRIMMED, caption)
+        self.assertIn("Telegram ID: 1", caption, "хвост подписи обязан остаться")
+        self.assertIn("Поле 0", caption, "первые строки обязаны остаться")
+
+    def test_trimming_keeps_whole_lines(self):
+        caption = logic.caption_with_fields(self.TEMPLATE, self.fields(12),
+                                            number="АВ-1", tg_id=1)
+        for line in caption.splitlines():
+            if line.startswith("Поле "):
+                self.assertEqual(len(line), len("Поле 0: ") + 200)
+
+    def test_absurdly_long_head_still_fits(self):
+        caption = logic.caption_with_fields(self.TEMPLATE, self.fields(3),
+                                            number="А" * 2000, tg_id=1)
+        self.assertIn(logic.FIELDS_TRIMMED, caption)
+
+    def test_short_message_is_not_split(self):
+        self.assertEqual(logic.split_message("одна строка"), ["одна строка"])
+
+    def test_long_message_splits_on_line_boundaries(self):
+        text = "\n".join(f"• строка {i} " + "х" * 90 for i in range(100))
+        parts = logic.split_message(text)
+        self.assertGreater(len(parts), 1)
+        for part in parts:
+            self.assertLessEqual(len(part), logic.MESSAGE_LIMIT)
+        # ни одна строка не потеряна и ни одна не разрезана посередине
+        self.assertEqual("\n".join(parts).splitlines(), text.splitlines())
+
+    def test_single_line_longer_than_the_limit_is_cut(self):
+        parts = logic.split_message("я" * (logic.MESSAGE_LIMIT * 2 + 5))
+        self.assertEqual(len(parts), 3)
+        for part in parts:
+            self.assertLessEqual(len(part), logic.MESSAGE_LIMIT)
 
 
 class TestBuyout(unittest.TestCase):
