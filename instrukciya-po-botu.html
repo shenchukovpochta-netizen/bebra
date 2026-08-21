@@ -1,0 +1,930 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Инструкция по работе с ботом — прокат электровелосипедов</title>
+<meta name="description" content="Инструкция для операторов проката: карточки, формы выдачи и закрытия, оплата, продление, выкуп.">
+</head>
+<body>
+<style>
+  :root {
+    --ground: #eceee9;
+    --surface: #ffffff;
+    --surface-2: #f4f6f2;
+    --ink: #17211c;
+    --muted: #5c6b62;
+    --faint: #8a978f;
+    --line: #d3dad4;
+    --line-soft: #e2e7e2;
+    --accent: #1c6a4e;
+    --accent-soft: #d9e9e0;
+    --signal: #a8471a;
+    --signal-soft: #f5e2d8;
+    --shadow: 0 1px 2px rgba(23, 33, 28, .06), 0 8px 24px -16px rgba(23, 33, 28, .25);
+
+    --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans", Arial, sans-serif;
+    --serif: Georgia, "Times New Roman", "Noto Serif", serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10150f;
+      --surface: #171d18;
+      --surface-2: #1d241e;
+      --ink: #e4eae2;
+      --muted: #9dab9f;
+      --faint: #78877b;
+      --line: #2a332b;
+      --line-soft: #232b24;
+      --accent: #6cc79b;
+      --accent-soft: #1d3229;
+      --signal: #e0906a;
+      --signal-soft: #33231a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #10150f;
+    --surface: #171d18;
+    --surface-2: #1d241e;
+    --ink: #e4eae2;
+    --muted: #9dab9f;
+    --faint: #78877b;
+    --line: #2a332b;
+    --line-soft: #232b24;
+    --accent: #6cc79b;
+    --accent-soft: #1d3229;
+    --signal: #e0906a;
+    --signal-soft: #33231a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  /* ── шапка ── */
+
+  header.masthead {
+    border-bottom: 1px solid var(--line);
+    padding: 56px 0 36px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .eyebrow {
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: clamp(34px, 5.5vw, 54px);
+    line-height: 1.05;
+    letter-spacing: -.02em;
+    text-wrap: balance;
+    margin: 0;
+    max-width: 18ch;
+  }
+
+  .lede {
+    margin: 0;
+    max-width: 62ch;
+    font-size: 19px;
+    color: var(--muted);
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-family: var(--sans);
+    font-size: 13px;
+  }
+
+  .tag {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: 5px 13px;
+    color: var(--muted);
+  }
+
+  .tag b { color: var(--ink); font-weight: 600; }
+
+  /* ── раскладка ── */
+
+  .layout {
+    display: grid;
+    grid-template-columns: 232px minmax(0, 1fr);
+    gap: 56px;
+    align-items: start;
+    padding-top: 40px;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 24px;
+    font-family: var(--sans);
+    font-size: 14px;
+    /* Ячейка грида по умолчанию не даёт содержимому сжаться, и строка
+       разделов на телефоне растягивала бы всю страницу вбок. */
+    min-width: 0;
+  }
+
+  nav.toc h2 {
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    margin: 0 0 14px;
+  }
+
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    counter-reset: toc;
+  }
+
+  nav.toc a {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    text-decoration: none;
+    color: var(--muted);
+    padding: 6px 10px 6px 8px;
+    border-radius: 7px;
+    border-left: 2px solid transparent;
+    line-height: 1.35;
+  }
+
+  nav.toc a::before {
+    counter-increment: toc;
+    content: counter(toc);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--faint);
+    min-width: 15px;
+  }
+
+  nav.toc a:hover { color: var(--ink); background: var(--surface-2); }
+
+  nav.toc a.on {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--surface);
+    font-weight: 600;
+  }
+
+  nav.toc a.on::before { color: var(--accent); }
+
+  main { min-width: 0; max-width: 72ch; }
+
+  section { padding: 8px 0 44px; scroll-margin-top: 20px; }
+
+  section + section { border-top: 1px solid var(--line-soft); padding-top: 40px; }
+
+  h2.title {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: clamp(23px, 3vw, 30px);
+    letter-spacing: -.015em;
+    line-height: 1.2;
+    text-wrap: balance;
+    margin: 0 0 20px;
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
+  }
+
+  h2.title .num {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    padding-top: 4px;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 17px;
+    letter-spacing: -.005em;
+    margin: 30px 0 10px;
+  }
+
+  p { margin: 0 0 15px; }
+
+  main a { color: var(--accent); text-underline-offset: 3px; }
+
+  strong { font-weight: 500; color: var(--ink); }
+
+  ul { margin: 0 0 16px; padding-left: 20px; }
+  li { margin-bottom: 7px; }
+  li::marker { color: var(--faint); }
+
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--surface-2);
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+
+  /* ── формы ── */
+
+  .form {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    margin: 0 0 20px;
+    overflow: hidden;
+  }
+
+  .form .cap {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--surface-2);
+  }
+
+  .form pre {
+    margin: 0;
+    padding: 16px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.75;
+    overflow-x: auto;
+    color: var(--ink);
+  }
+
+  .form pre .k { color: var(--accent); }
+
+  /* ── таблицы ── */
+
+  .tablewrap { overflow-x: auto; margin: 0 0 22px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 15px;
+    font-family: var(--sans);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  td code { font-size: 13px; }
+
+  /* ── врезки ── */
+
+  .note, .warn {
+    border-radius: 10px;
+    padding: 15px 18px;
+    margin: 0 0 22px;
+    font-size: 16px;
+  }
+
+  .note {
+    background: var(--accent-soft);
+    border-left: 3px solid var(--accent);
+  }
+
+  .warn {
+    background: var(--signal-soft);
+    border-left: 3px solid var(--signal);
+  }
+
+  .note p:last-child, .warn p:last-child { margin-bottom: 0; }
+
+  .warn strong { color: var(--signal); font-weight: 600; }
+
+  /* ── шаги ── */
+
+  .steps { display: flex; flex-direction: column; gap: 26px; margin: 0 0 8px; }
+
+  .step { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 16px; }
+
+  .step .dot {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    margin-top: 2px;
+  }
+
+  .step h3 { margin-top: 2px; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    margin-top: 40px;
+    padding-top: 24px;
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--faint);
+  }
+
+  a:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; gap: 24px; padding-top: 24px; }
+
+    nav.toc {
+      position: static;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 10px;
+      padding: 14px;
+    }
+
+    nav.toc ol {
+      flex-direction: row;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      max-width: 100%;
+      gap: 6px;
+      padding-bottom: 4px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    nav.toc a {
+      white-space: nowrap;
+      border-left: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 6px;
+    }
+
+    nav.toc a.on { border-left: none; border-bottom-color: var(--accent); }
+
+    header.masthead { padding-top: 36px; }
+    main { max-width: none; }
+  }
+
+  @media print {
+    :root {
+      --ground: #ffffff; --surface: #ffffff; --surface-2: #f4f6f2;
+      --ink: #000000; --muted: #333333; --faint: #555555;
+      --line: #bbbbbb; --line-soft: #dddddd;
+      --accent: #14523c; --accent-soft: #eef4f0;
+      --signal: #8a3a15; --signal-soft: #f7efea;
+      --shadow: none;
+    }
+    body { font-size: 11pt; }
+    .wrap { max-width: none; padding: 0 12mm 12mm; }
+    nav.toc { display: none; }
+    .layout { grid-template-columns: 1fr; padding-top: 12pt; }
+    main { max-width: none; }
+    h2.title, h3 { break-after: avoid; }
+    .form, .tablewrap, .note, .warn, .step { break-inside: avoid; }
+    header.masthead { padding-top: 0; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">ИП Галимзянов · прокат электровелосипедов, Казань</p>
+    <h1>Инструкция по работе с ботом</h1>
+    <p class="lede">Для тех, кто выдаёт велосипеды и разбирает заявки: какие карточки
+      приходят, что на них отвечать и что бот сделает сам. Установка — в <code>INSTALL.md</code>,
+      устройство — в <code>README.md</code>.</p>
+    <div class="meta">
+      <span class="tag">Кому: <b>операторы проката</b></span>
+      <span class="tag">Все формы — <b>ответом на карточку</b></span>
+      <span class="tag">Кнопки — только у <b>ADMINS</b></span>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <nav class="toc" aria-label="Разделы">
+      <h2>Разделы</h2>
+      <ol>
+        <li><a href="#s1">Что бот делает сам</a></li>
+        <li><a href="#s2">Чаты и права</a></li>
+        <li><a href="#s3">Первая аренда</a></li>
+        <li><a href="#s4">Пока аренда идёт</a></li>
+        <li><a href="#s5">Закрытие аренды</a></li>
+        <li><a href="#s6">Повторная аренда</a></li>
+        <li><a href="#s7">Выкуп велосипеда</a></li>
+        <li><a href="#s8">Поддержка</a></li>
+        <li><a href="#s9">Языки</a></li>
+        <li><a href="#s10">Документы и хранение</a></li>
+        <li><a href="#s11">Если что-то не так</a></li>
+        <li><a href="#s12">Чего делать нельзя</a></li>
+        <li><a href="#s13">Шпаргалка по формам</a></li>
+      </ol>
+    </nav>
+
+    <main>
+
+      <section id="s1">
+        <h2 class="title"><span class="num">01</span>Что бот делает сам, а что делаете вы</h2>
+        <p>Бот ведёт клиента по цепочке <strong>ознакомление → подписание → оплата →
+          получение</strong>: спрашивает язык, показывает Политику ПДн, собирает анкету
+          и фотографии документа, формирует договор и акты, считает сроки и напоминает
+          о них, принимает заявки на продление, закрытие и повторную аренду.</p>
+        <p>Три решения он не принимает никогда — их принимаете вы:</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Решение</th><th>Как оно выглядит у вас</th></tr></thead>
+            <tbody>
+              <tr><td>Одобрить или отклонить заявку</td><td>кнопки на карточке</td></tr>
+              <tr><td>Что именно выдаём — вин-номера, комплект, срок, цена</td><td>ответ на карточку формой</td></tr>
+              <tr><td>Деньги пришли</td><td>кнопка «Оплата получена»</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Пока вы не нажали и не ответили, дальше ничего не поедет.</p>
+      </section>
+
+      <section id="s2">
+        <h2 class="title"><span class="num">02</span>Чаты и права</h2>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Чат</th><th>Что в нём</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Чат модерации</strong><br><code>ADMIN_CHAT_ID</code></td>
+                  <td>вопросы в поддержку</td></tr>
+              <tr><td><strong>Чат договоров</strong><br><code>CONTRACT_CHAT_ID</code></td>
+                  <td>карточки на утверждение, формы выдачи, оплата, продление, закрытие, сводка по срокам</td></tr>
+              <tr><td><strong>Фиксация сдачи</strong><br><code>FIX_CHAT_ID</code> + тема</td>
+                  <td>подписанные договоры и акты с отпечатками</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="note">
+          <p>Кнопки и формы работают только у тех, чей Telegram ID указан в <code>ADMINS</code>.
+            Чужое нажатие получит «Недостаточно прав», чужой ответ на карточку бот молча
+            пропустит — так случайный человек в группе не выдаст велосипед.</p>
+        </div>
+        <p>Всё, что вы пишете боту, — это <strong>ответ (reply) на его карточку</strong>.
+          Не на своё сообщение, не отдельным текстом: по номеру карточки бот понимает,
+          о каком клиенте речь.</p>
+      </section>
+
+      <section id="s3">
+        <h2 class="title"><span class="num">03</span>Первая аренда, шаг за шагом</h2>
+
+        <div class="steps">
+
+          <div class="step">
+            <div class="dot">1</div>
+            <div>
+              <h3>Клиент проходит анкету</h3>
+              <p>Подписка на канал → язык → ФИО → Политика ПДн → согласие → телефон →
+                десять вопросов анкеты → <strong>две фотографии документа</strong>.</p>
+              <p>Вторая фотография — разворот с пропиской (у водительского удостоверения
+                обратная сторона). Она необязательна: если всё видно на первом снимке,
+                клиент нажимает «Хватит одного фото». Обе фотографии придут вам
+                <strong>перед карточкой</strong>, вторая — с подписью «Вторая страница документа».</p>
+              <p>Клиенту 16–17 лет — бот дополнительно требует фото письменного согласия
+                родителя и ставит на карточке пометку «Арендатору 16–17 лет». Без согласия
+                карточка просто не придёт. Если тот же документ уже проходил регистрацию
+                с другого аккаунта, придёт алерт о совпадении.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="dot">2</div>
+            <div>
+              <h3>Вы утверждаете заявку</h3>
+              <p>В чат договоров приходит карточка: фотография документа и все реквизиты
+                будущего договора в том же порядке, в каком они стоят в самом договоре.
+                Сверьте глазами и нажмите:</p>
+              <ul>
+                <li><strong>✅ Одобрить</strong> — бот попросит у вас данные выдачи;</li>
+                <li><strong>⛔ Отклонить</strong> — бот предложит шесть причин кнопками
+                  (ФИО не совпадает, паспорт с ошибкой, адрес не полностью, телефоны
+                  не подходят, фото не читается, согласие родителя не читается). Нужна
+                  своя формулировка — ответьте на карточку текстом, он уйдёт клиенту дословно.</li>
+              </ul>
+              <p>После отказа клиент возвращается <strong>на тот шаг, который вы назвали</strong>,
+                а не в начало: переснять фото — значит переснять фото, а не вводить всю анкету.
+                Если два человека нажмут одновременно, сработает только первое нажатие.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="dot">3</div>
+            <div>
+              <h3>Вы отвечаете данными выдачи</h3>
+              <p>Бот пришлёт приглашение с шаблоном. Скопируйте, подставьте значения
+                и ответьте на это сообщение:</p>
+              <div class="form">
+                <div class="cap">Форма выдачи</div>
+                <pre><span class="k">рама:</span> 264022410703084
+<span class="k">мотор:</span> 240W25021406
+<span class="k">модель:</span> Truck+
+<span class="k">акб:</span> 2
+<span class="k">зу:</span> 1
+<span class="k">срок:</span> 03.08 - 10.08
+<span class="k">оплата:</span> 3000 qr</pre>
+              </div>
+              <p>Обязательные строки: <strong>рама, мотор, срок, оплата</strong>.
+                Остальное по необходимости.</p>
+              <div class="tablewrap">
+                <table>
+                  <thead><tr><th>Ключ</th><th>Что значит</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>рама</code>, <code>мотор</code></td><td>вин-номера (можно «вин рамы», «вин мотора»)</td></tr>
+                    <tr><td><code>модель</code> / <code>марка</code></td><td>модель велосипеда</td></tr>
+                    <tr><td><code>цвет</code></td><td>цвет, по умолчанию «Чёрный»</td></tr>
+                    <tr><td><code>срок</code></td><td>«03.08 - 10.08», «с 3.8 по 10.8», «03.08.2026 — 10.08.2026»</td></tr>
+                    <tr><td><code>до</code> / <code>окончание</code></td><td>явная дата окончания, если срок написан словами («неделя»)</td></tr>
+                    <tr><td><code>оплата</code> / <code>сумма</code></td><td>текстом, как есть: «3000 qr», «3500 наличными»</td></tr>
+                    <tr><td><code>акб</code>, <code>зу</code>, <code>зеркала</code>, <code>муфты</code>, <code>педали</code>, <code>дождевик</code>, <code>чехол</code>, <code>замок</code>, <code>сумка</code>, <code>стяжка</code>, <code>шлем</code></td><td>комплектация числами</td></tr>
+                    <tr><td><code>выкуп</code>, <code>платежей</code></td><td>аренда с правом выкупа — см. раздел 7</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>Бот отвечает на ошибки прямо: «Не хватает: рама, мотор», «Не понял строки:
+                колесо». Пока форма не разобрана, ничего не отправляется. Если в строке срока
+                нет даты, бот скажет об этом отдельно — без даты не будет ни напоминаний,
+                ни сводки, допишите строку <code>до: 10.08</code>.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="dot">4</div>
+            <div>
+              <h3>Клиент подписывает договор</h3>
+              <p>Клиенту уходит договор в docx с вин-номерами и комплектацией и приложение —
+                Согласие на обработку ПДн. Кнопка «✍️ Подписываю» одна на оба документа.
+                После подписи вы получаете <strong>форму фиксации</strong> (заполните прочерки
+                и перешлите в тему «Фиксация сдачи») и <strong>карточку оплаты</strong> с суммой.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="dot">5</div>
+            <div>
+              <h3>Оплата</h3>
+              <p>Клиент видит сумму, ссылку на счёт (СБП QR) и кнопки «💳 Оплатить»
+                и «✅ Я оплатил(а)». Присланный им чек приходит вам ответом на ту же карточку.</p>
+              <div class="warn">
+                <p><strong>Сверьте поступление по счёту</strong> и только потом нажимайте
+                  «Оплата получена». Это единственная проверка перед выдачей имущества —
+                  после неё бот сразу отдаёт Акт приёма-передачи.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="dot">6</div>
+            <div>
+              <h3>Выдача</h3>
+              <p>Клиент подписывает Акт приёма-передачи → документы уходят в «Фиксацию сдачи»
+                с отпечатком SHA-256 → вам приходит приглашение возврата (по нему потом
+                закроете аренду) → клиент попадает в меню. С этого момента аренда активна.</p>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <section id="s4">
+        <h2 class="title"><span class="num">04</span>Пока аренда идёт</h2>
+        <p><strong>Напоминания клиенту</strong> — по разу на каждую ступень: за
+          <code>REMIND_BEFORE_DAYS</code> дней до конца, в последний день и при просрочке.
+          Под напоминанием кнопка «📅 Продлить аренду».</p>
+        <p>Бот молчит, если клиент уже попросил закрыть аренду, уже ждёт оплаты продления
+          или уже выкупил велосипед — в этих случаях «продлите или верните» было бы неправдой.</p>
+        <p><strong>Сводка вам</strong> — раз в сутки, в час <code>REMIND_HOUR_UTC</code>
+          (7 = 10 утра в Казани), и только если есть о чём писать: «⛔ Просрочены»
+          и «⏳ Заканчиваются». Пустую сводку бот не шлёт намеренно: ежедневное «всё в порядке»
+          перестают читать, и настоящая строка о просрочке в нём потеряется. Выкупленный
+          велосипед помечен «выкуплен» — назад он не приедет, вернуть нужно только оборудование.</p>
+        <h3>Продление</h3>
+        <p>Клиент жмёт «📅 Продлить» → вам приходит заявка → отвечаете на неё двумя строками:</p>
+        <div class="form">
+          <div class="cap">Форма продления</div>
+          <pre><span class="k">до:</span> 17.08
+<span class="k">оплата:</span> 3000 qr</pre>
+        </div>
+        <p>Дата — только вперёд. Клиент получает сумму, и <strong>после вашей кнопки
+          «Оплата получена» срок сдвигается сам</strong>. Новый акт не выдаётся: велосипед
+          и так у клиента.</p>
+      </section>
+
+      <section id="s5">
+        <h2 class="title"><span class="num">05</span>Закрытие аренды</h2>
+        <p>Клиент жмёт «🔚 Закрыть аренду» и пишет причину. Вам приходит запрос с причиной
+          и формой. Примите велосипед и ответьте на карточку:</p>
+        <div class="form">
+          <div class="cap">Форма закрытия</div>
+          <pre><span class="k">когда:</span> 07.08
+<span class="k">долги:</span> 0
+<span class="k">повреждения:</span> 0
+<span class="k">ремонт:</span> 0
+<span class="k">мойка:</span> 0
+<span class="k">адрес:</span> Адоратского 15
+<span class="k">принял:</span> Ирик
+<span class="k">отзыв:</span> нет
+<span class="k">рекомендации:</span> —</pre>
+        </div>
+        <p>Обязательные строки: <strong>адрес</strong> и <strong>принял</strong>. Нули
+          проставлены заранее — «0» в отчёте значит «ничего не платил». Одна строка —
+          не длиннее 500 символов: отчёт уходит одним сообщением.</p>
+        <p>Дальше бот сам: соберёт <strong>Акт возврата</strong> с замечаниями (повреждения
+          и оплаченные суммы), отправит клиенту на «✍️ Подтверждаю», а вам пришлёт
+          <strong>отчёт о закрытии</strong> — готовый текст для «Фиксации сдачи», слово
+          в слово в согласованном формате. Аренда закрывается и уезжает в историю клиента.</p>
+      </section>
+
+      <section id="s6">
+        <h2 class="title"><span class="num">06</span>Повторная аренда</h2>
+        <p>Клиент с подписанным договором и без велосипеда на руках жмёт «🚲 Арендовать» —
+          вам приходит заявка с той же формой выдачи. Ответили → клиент платит →
+          «Оплата получена» → новый Акт приёма-передачи → аренда снова активна.</p>
+        <p><strong>Договор остаётся прежним</strong> — второй раз его не подписывают.
+          Каждая закрытая аренда остаётся в истории клиента отдельной строкой.</p>
+        <p>Если велосипед ещё не вернули, бот ответит «У клиента активная аренда» —
+          сначала закрытие, потом новая выдача.</p>
+      </section>
+
+      <section id="s7">
+        <h2 class="title"><span class="num">07</span>Выкуп велосипеда</h2>
+        <p>Чтобы аренда была с правом выкупа, допишите к форме выдачи две строки:</p>
+        <div class="form">
+          <div class="cap">Условия выкупа — к форме выдачи</div>
+          <pre><span class="k">выкуп:</span> 150000
+<span class="k">платежей:</span> 120</pre>
+        </div>
+        <p>Бот сам поделит: 150 000 / 120 = 1 250 ₽ за платёж. <strong>Обе строки обязательны
+          вместе</strong> — одна без другой это ошибка формы, а не тихо выключенный выкуп.</p>
+        <p><strong>Как копится.</strong> По оплаченным дням: от выдачи до конца оплаченного
+          срока, но не дальше сегодняшнего дня. Не продлил аренду — выкуп стоит на месте.
+          Перерыв между арендами в график не идёт, а накопленное при новой выдаче сохраняется.</p>
+        <p><strong>Что видит клиент.</strong> Строку в «📋 Мои аренды»: сколько выплачено,
+          сколько осталось и до какой даты при нынешнем темпе.</p>
+        <div class="note">
+          <p><strong>Когда график закрыт.</strong> Бот отдаёт клиенту Акт о переходе права
+            собственности на подпись и присылает вам карточку. Велосипед становится
+            собственностью клиента, а оборудование — АКБ, зарядное, сумка — в выкуп
+            не входит и принимается обычным Актом возврата.</p>
+        </div>
+      </section>
+
+      <section id="s8">
+        <h2 class="title"><span class="num">08</span>Поддержка</h2>
+        <p>Клиент жмёт «🆘 Поддержка» и пишет вопрос. Бот сразу отвечает сам, если узнал
+          тему (адрес, тарифы, зарядка, поломка, продление…), а вопрос всё равно присылает
+          вам — с темой, меткой и пометкой, отвечал ли бот.</p>
+        <p><strong>Красные темы</strong> — долг, угон, суд, скидка, 18− — бот по существу
+          не отвечает никогда: цену и юридические последствия назначает человек. Такая
+          карточка приходит с меткой.</p>
+        <p>Чтобы ответить клиенту, ответьте на карточку вопроса. Ваш текст уйдёт ему
+          как «💬 Ответ поддержки». Отвечать можно несколько раз, диалог не обрывается.</p>
+      </section>
+
+      <section id="s9">
+        <h2 class="title"><span class="num">09</span>Языки</h2>
+        <p>Клиент выбирает язык первым вопросом и меняет кнопкой «🌐 Сменить язык».
+          Доступны русский, английский, узбекский, туркменский, татарский, арабский,
+          фарси, хинди и чувашский. На выбранном языке идёт <strong>весь диалог</strong>:
+          анкета, ошибки, кнопки меню, напоминания, подписи документов.</p>
+        <p>Что не переводится никогда:</p>
+        <ul>
+          <li>служебные карточки и формы — их читаете вы, они всегда русские;</li>
+          <li>договор, согласие и акты — подписывается русский текст, и второго
+            «экземпляра» на другом языке быть не должно;</li>
+          <li>то, что клиент написал сам: ФИО, адреса, причина сдачи.</li>
+        </ul>
+      </section>
+
+      <section id="s10">
+        <h2 class="title"><span class="num">10</span>Документы, подписи и хранение</h2>
+        <p>Каждый документ подписывается простой электронной подписью: в договоре это
+          раздел 7 (момент подписи, Telegram ID, отпечаток SHA-256), в согласии и актах —
+          плашка. Отпечаток печатается в самом документе и дублируется в чате фиксации:
+          по нему проверяется, что файл не правили.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Документ</th><th>Когда появляется</th></tr></thead>
+            <tbody>
+              <tr><td>Политика ПДн</td><td>шаг ознакомления, как есть</td></tr>
+              <tr><td>Договор проката + Согласие на ПДн</td><td>после ваших данных выдачи</td></tr>
+              <tr><td>Акт приёма-передачи</td><td>после «Оплата получена»</td></tr>
+              <tr><td>Акт возврата</td><td>после вашей формы закрытия</td></tr>
+              <tr><td>Акт о переходе права собственности</td><td>когда выкуп выплачен целиком</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Сроки хранения.</strong> Сканы и документы удаляются автоматически:
+          через <code>PURGE_APPROVED_DAYS</code> (по умолчанию 90) дней после последней
+          активности, через 3 дня после отказа и сразу — если клиент нажал «Заполнить
+          повторно». Реквизиты договора (номер, отпечаток, дата подписи) остаются: иначе
+          нечем доказать, что было подписано.</p>
+      </section>
+
+      <section id="s11">
+        <h2 class="title"><span class="num">11</span>Если что-то пошло не так</h2>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Симптом</th><th>Что проверить</th></tr></thead>
+            <tbody>
+              <tr><td>Карточка на утверждение не приходит</td><td>бот добавлен в чат договоров; <code>CONTRACT_CHAT_ID</code> верный; если это личка — владелец аккаунта хотя бы раз нажал <code>/start</code>: первым бот написать не может</td></tr>
+              <tr><td>Кнопки отвечают «Недостаточно прав»</td><td>вашего Telegram ID нет в <code>ADMINS</code></td></tr>
+              <tr><td>Бот не реагирует на форму</td><td>вы ответили не на карточку бота либо не в служебном чате</td></tr>
+              <tr><td>«Не понял строки: …»</td><td>опечатка в ключе; бот перечислит все ключи, которые знает</td></tr>
+              <tr><td>«Не хватает: рама, мотор»</td><td>не заполнены обязательные строки формы</td></tr>
+              <tr><td>«Дата уже прошла»</td><td>продлевать можно только вперёд</td></tr>
+              <tr><td>«У клиента активная аренда»</td><td>велосипед ещё не вернули — сначала закрытие</td></tr>
+              <tr><td>Клиент не получил договор</td><td>придёт алерт «Не удалось сформировать договор» с причиной</td></tr>
+              <tr><td>Клиент не получает напоминания</td><td>он заблокировал бота; в базе напоминание всё равно отмечается отправленным</td></tr>
+              <tr><td>Заявка «зависла»</td><td>посмотрите состояние клиента: до подписи он ждёт кнопку, после подписи — вашу оплату</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="s12">
+        <h2 class="title"><span class="num">12</span>Чего делать нельзя</h2>
+        <div class="warn">
+          <p><strong>Пересылать сканы документов</strong> за пределы служебных чатов.
+            Всё, что бот хранит, он же и удаляет по сроку; пересланная копия живёт вечно
+            и вне контроля.</p>
+        </div>
+        <div class="warn">
+          <p><strong>Терять <code>secrets/pdn_key</code>.</strong> Анкеты в базе зашифрованы
+            этим ключом. Без него дамп базы бесполезен — в том числе и для вас.</p>
+        </div>
+        <div class="warn">
+          <p><strong>Одобрять 16–17-летнего без согласия родителя.</strong> Бот такую
+            карточку не пришлёт, и обходить это вручную нельзя: договор оспаривается целиком.</p>
+        </div>
+        <div class="warn">
+          <p><strong>Нажимать «Оплата получена» до поступления денег.</strong> Это
+            единственная проверка перед выдачей имущества.</p>
+        </div>
+      </section>
+
+      <section id="s13">
+        <h2 class="title"><span class="num">13</span>Шпаргалка: все формы</h2>
+        <div class="form">
+          <div class="cap">Выдача — ответ на приглашение или на заявку об аренде</div>
+          <pre><span class="k">рама:</span> 264022410703084
+<span class="k">мотор:</span> 240W25021406
+<span class="k">модель:</span> Truck+
+<span class="k">акб:</span> 2
+<span class="k">зу:</span> 1
+<span class="k">срок:</span> 03.08 - 10.08
+<span class="k">оплата:</span> 3000 qr</pre>
+        </div>
+        <div class="form">
+          <div class="cap">Выкуп — те же строки плюс эти две</div>
+          <pre><span class="k">выкуп:</span> 150000
+<span class="k">платежей:</span> 120</pre>
+        </div>
+        <div class="form">
+          <div class="cap">Продление — ответ на заявку о продлении</div>
+          <pre><span class="k">до:</span> 17.08
+<span class="k">оплата:</span> 3000 qr</pre>
+        </div>
+        <div class="form">
+          <div class="cap">Закрытие — ответ на запрос о закрытии</div>
+          <pre><span class="k">когда:</span> 07.08
+<span class="k">долги:</span> 0
+<span class="k">повреждения:</span> 0
+<span class="k">ремонт:</span> 0
+<span class="k">мойка:</span> 0
+<span class="k">адрес:</span> Адоратского 15
+<span class="k">принял:</span> Ирик
+<span class="k">отзыв:</span> нет
+<span class="k">рекомендации:</span> —</pre>
+        </div>
+      </section>
+
+      <footer>
+        Инструкция живёт в репозитории как <code>GUIDE.md</code> и обновляется вместе
+        с ботом. Установка — <code>INSTALL.md</code>, устройство и принятые решения —
+        <code>README.md</code>.
+      </footer>
+
+    </main>
+  </div>
+</div>
+
+<script>
+  // Подсветка раздела, который сейчас на экране: в инструкции листают
+  // между разделами, и «где я» должно читаться без прокрутки к началу.
+  //
+  // Считаем прямо по положению заголовков, а не через IntersectionObserver:
+  // наблюдатель сообщает только о пересёкших границу, и после перехода
+  // по ссылке в оглавлении подсвечивался раздел, оставшийся «видимым»
+  // с прошлого события.
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll("nav.toc a"));
+    var sections = Array.prototype.slice.call(document.querySelectorAll("main section"));
+    if (!links.length || !sections.length) return;
+
+    var map = {};
+    links.forEach(function (a) { map[a.getAttribute("href").slice(1)] = a; });
+    var ticking = false;
+
+    function refresh() {
+      ticking = false;
+      var line = window.innerHeight * 0.25;   // где проходит «читаю здесь»
+      var current = sections[0].id;
+      for (var i = 0; i < sections.length; i++) {
+        if (sections[i].getBoundingClientRect().top <= line) current = sections[i].id;
+      }
+      links.forEach(function (a) {
+        a.classList.remove("on");
+        a.removeAttribute("aria-current");
+      });
+      if (map[current]) {
+        map[current].classList.add("on");
+        map[current].setAttribute("aria-current", "true");
+      }
+    }
+
+    function schedule() {
+      if (ticking) return;
+      ticking = true;
+      window.requestAnimationFrame(refresh);
+    }
+
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    refresh();
+  })();
+</script>
+
+</body>
+</html>
