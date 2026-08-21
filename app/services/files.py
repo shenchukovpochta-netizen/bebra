@@ -37,7 +37,7 @@ async def download(bot: Bot, file_id: str, max_bytes: int) -> bytes:
 # имя файла на диске сверяется с шаблоном перед удалением (logic.STORE_FILE_NAME),
 # и произвольное расширение означало бы, что ретеншен такой файл не опознает
 # и не удалит - скан или договор останется на диске навсегда.
-SLOT_EXT = {"doc": "jpg", "parent": "jpg", "contract": "docx",
+SLOT_EXT = {"doc": "jpg", "doc2": "jpg", "parent": "jpg", "contract": "docx",
             "soglasie": "docx", "actin": "docx", "actout": "docx",
             "buyout": "docx"}
 

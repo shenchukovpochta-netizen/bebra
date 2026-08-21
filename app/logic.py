@@ -45,6 +45,11 @@ WAIT_PHONE2 = "wait_phone2"
 WAIT_PHONE3 = "wait_phone3"
 
 WAIT_DOC = "wait_doc"
+# Вторая фотография документа: разворот с пропиской у паспорта, обратная
+# сторона у прав. Шаг необязательный - одной фотографией человек вправе
+# обойтись, - но спросить обязаны: с одного разворота модератор не сверит
+# ни адрес регистрации, ни срок действия.
+WAIT_DOC2 = "wait_doc2"
 # Фото письменного согласия законного представителя. Шаг только для тех,
 # кому от 16 до 18: у совершеннолетнего его в потоке нет вовсе.
 WAIT_PARENT_CONSENT = "wait_parent_consent"
@@ -94,7 +99,7 @@ KNOWN_STATES = frozenset({
     WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
     WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
-    WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
+    WAIT_DOC, WAIT_DOC2, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
     WAIT_PAYMENT, WAIT_ACT_SIGN, WAIT_RETURN_SIGN, WAIT_BUYOUT_SIGN, APPROVED,
     WAIT_SUPPORT, WAIT_CLOSE_REASON,
 })
@@ -511,7 +516,7 @@ def parse_moderation_callback(data: str | None) -> tuple[str, int] | None:
 # версией бота. Убрать .pdf - значит навсегда оставить старые договоры
 # на диске: ретеншен перестанет их опознавать.
 STORE_FILE_NAME = re.compile(
-    r"^\d+-(?:doc-\d+\.jpg|parent-\d+\.jpg"
+    r"^\d+-(?:doc-\d+\.jpg|doc2-\d+\.jpg|parent-\d+\.jpg"
     r"|contract-\d+\.(?:pdf|docx)|soglasie-\d+\.docx"
     r"|actin-\d+\.docx|actout-\d+\.docx|buyout-\d+\.docx)$")
 

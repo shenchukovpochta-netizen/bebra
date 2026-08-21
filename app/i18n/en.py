@@ -109,6 +109,16 @@ T: dict[str, str] = {
         "photo so that the details are clearly readable."
     ),
     "DOC_NEED_PHOTO": "We need a photo of the document. Please attach an image.",
+    "ASK_DOC2": (
+        "Photo received. Now send a second photo of the document — the "
+        "page with your registration address (for a driving licence, the "
+        "reverse side).\n\nIf every detail is already visible on the first "
+        "photo, tap the button below."
+    ),
+    "DOC2_NEED_PHOTO": (
+        "We need a photo of the second page of the document. Attach an "
+        "image or tap «One photo is enough»."
+    ),
     "ASK_PARENT_CONSENT": (
         "You are under 18, so one more document is required: the written "
         "consent of a parent (legal guardian) to conclude the rental "
@@ -397,6 +407,7 @@ T: dict[str, str] = {
     "BTN_CONSENT": "✅ I consent",
     "BTN_CONFIRM": "Confirm",
     "BTN_RESTART": "Fill in again",
+    "BTN_DOC_ENOUGH": "One photo is enough",
     "BTN_SIGN": "✍️ Sign",
     "BTN_MISTAKE": "There is a mistake",
     "BTN_PAY": "💳 Pay",

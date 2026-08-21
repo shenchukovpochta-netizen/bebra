@@ -114,6 +114,16 @@ T: dict[str, str] = {
         "Ma'lumotlar aniq o'qiladigan qilib suratga oling."
     ),
     "DOC_NEED_PHOTO": "Aynan hujjat surati kerak. Rasm biriktiring.",
+    "ASK_DOC2": (
+        "Surat qabul qilindi. Endi hujjatning ikkinchi suratini yuboring "
+        "— ro'yxatdan o'tgan manzil sahifasi (haydovchilik guvohnomasida "
+        "— orqa tomoni).\n\nAgar barcha ma'lumot birinchi suratda "
+        "ko'rinsa, quyidagi tugmani bosing."
+    ),
+    "DOC2_NEED_PHOTO": (
+        "Hujjatning ikkinchi sahifasi surati kerak. Rasm biriktiring "
+        "yoki «Bitta surat yetarli» tugmasini bosing."
+    ),
     "ASK_PARENT_CONSENT": (
         "Siz hali 18 yoshga to'lmagansiz, shuning uchun yana bitta hujjat "
         "kerak: ota-onaning (qonuniy vakilning) prokat shartnomasini tuzishga "
@@ -390,6 +400,7 @@ T: dict[str, str] = {
     "BTN_CONSENT": "✅ Rozilik beraman",
     "BTN_CONFIRM": "Tasdiqlayman",
     "BTN_RESTART": "Qaytadan to'ldirish",
+    "BTN_DOC_ENOUGH": "Bitta surat yetarli",
     "BTN_SIGN": "✍️ Imzolayman",
     "BTN_MISTAKE": "Xato bor",
     "BTN_PAY": "💳 To'lash",

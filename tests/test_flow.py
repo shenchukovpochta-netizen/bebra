@@ -355,14 +355,16 @@ def docx_text(docx: bytes) -> str:
 
 def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
         photo=False, document=False, contact_user_id=None, reply_to=None,
-        reply_from_bot=True) -> Update:
+        reply_from_bot=True, file_id=None) -> Update:
     kwargs = {}
     if document:
-        kwargs["document"] = Document(file_id="d1", file_unique_id="du1",
+        kwargs["document"] = Document(file_id=file_id or "d1", file_unique_id="du1",
                                       file_name="passport.jpg",
                                       mime_type="image/jpeg", file_size=2000)
     if photo:
-        kwargs["photo"] = [PhotoSize(file_id="f1", file_unique_id="u1",
+        # file_id задаётся снаружи там, где важно различать снимки:
+        # вторая страница документа не должна затирать первую.
+        kwargs["photo"] = [PhotoSize(file_id=file_id or "f1", file_unique_id="u1",
                                      width=100, height=100, file_size=1000)]
     if contact_user_id is not None:
         kwargs["contact"] = Contact(phone_number="79990000000", first_name="U",
@@ -440,7 +442,10 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()
+        # Документ - двумя фотографиями: разворот с данными и разворот
+        # с пропиской. Вторая необязательна, но это обычный путь клиента.
         await self.feed(msg(photo=True))
+        await self.feed(msg(photo=True, file_id="f2"))
 
     async def submit(self):
         await self.register_up_to_confirm()
@@ -538,6 +543,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         for answer in answers:
             await self.feed(msg(answer))
         await self.feed(msg(photo=True))
+        await self.feed(msg(photo=True, file_id="f2"))   # вторая страница
 
     async def test_minor_asked_for_parent_consent_after_doc(self):
         await self.register_minor_up_to_doc()
@@ -553,6 +559,93 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["state"], logic.CONFIRM)
         self.assertTrue(row["parent_file_id"])
 
+    # ─── вторая фотография документа ───
+
+    async def register_up_to_doc(self):
+        """Регистрация взрослого до шага документа, но без самого фото."""
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.fill_anketa()
+
+    async def test_second_photo_is_asked_and_saved(self):
+        """С одного разворота модератор не сверит ни прописку, ни срок
+        действия документа - вторую страницу бот обязан спросить."""
+        await self.register_up_to_doc()
+        await self.feed(msg(photo=True))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_DOC2)
+        ask = [m for m in self.session.sent_to(USER_ID)
+               if isinstance(m, SendMessage)][-1]
+        self.assertIn("вторую фотографию", ask.text)
+        self.assertEqual(ask.reply_markup.inline_keyboard[0][0].callback_data,
+                         "doc_enough")
+
+        await self.feed(msg(photo=True, file_id="f2"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM)
+        self.assertTrue(row["doc2_file_id"])
+        self.assertNotEqual(row["doc2_file_id"], row["doc_file_id"],
+                            "вторая фотография не должна затирать первую")
+
+    async def test_one_photo_is_enough_when_the_client_says_so(self):
+        """В паспорте без прописки второй страницы физически нет - без
+        выхода человек упёрся бы в шаг, который не может пройти."""
+        await self.register_up_to_doc()
+        await self.feed(msg(photo=True))
+        await self.feed(cb("doc_enough"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.CONFIRM)
+        self.assertIsNone(row["doc2_file_id"])
+
+    async def test_text_instead_of_the_second_photo_repeats_the_button(self):
+        await self.register_up_to_doc()
+        await self.feed(msg(photo=True))
+        await self.feed(msg("а зачем вторая?"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_DOC2)
+        last = [m for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("второй страницы", last.text)
+        self.assertIsNotNone(last.reply_markup, "кнопка выхода должна остаться")
+
+    async def test_second_photo_reaches_the_moderator(self):
+        await self.submit()
+        pages = [m for m in self.session.sent_to(ADMIN_CHAT)
+                 if not isinstance(m, SendMessage)
+                 and "Вторая страница" in (m.caption or "")]
+        self.assertTrue(pages, "вторая страница не ушла модератору")
+        card = [m for m in self.session.sent_to(ADMIN_CHAT)
+                if not isinstance(m, SendMessage) and m.reply_markup][-1]
+        self.assertLess(self.session.calls.index(pages[0]),
+                        self.session.calls.index(card),
+                        "вторая страница обязана быть НАД карточкой с кнопками")
+
+    async def test_new_document_drops_the_old_second_page(self):
+        """Человек вернулся на шаг документа после отказа: подмешивать
+        к новому паспорту страницу от старого нельзя."""
+        await self.submit()
+        first = self.db.users[USER_ID]["doc2_file_id"]
+        self.assertTrue(first)
+        await self.feed(cb(f"reject:{USER_ID}", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        await self.feed(cb(f"rj:{USER_ID}:doc", chat_id=ADMIN_CHAT,
+                           user_id=ADMIN_ID, chat_type="supergroup"))
+        await self.feed(msg(photo=True))
+        self.assertIsNone(self.db.users[USER_ID]["doc2_file_id"],
+                          "страница от старого документа осталась")
+        await self.feed(cb("doc_enough"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.CONFIRM)
+
+    async def test_restart_clears_the_second_page(self):
+        await self.register_up_to_confirm()
+        await self.feed(cb("restart"))
+        row = self.db.users[USER_ID]
+        self.assertIsNone(row["doc_file_id"])
+        self.assertIsNone(row["doc2_file_id"])
+
     async def test_minor_card_carries_consent_and_warning(self):
         """Утверждающий обязан увидеть возраст и согласие ДО кнопки
         «Одобрить»: договор с 16-17-летним без согласия оспаривается целиком."""
@@ -561,16 +654,19 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("confirm"))
         captions = [m.caption or "" for m in self.session.sent_to(ADMIN_CHAT)
                     if not isinstance(m, SendMessage)]
-        self.assertEqual(len(captions), 2, "ожидали фото согласия и карточку")
-        self.assertIn("законного представителя", captions[0])
-        self.assertIn("16–17", captions[1])
+        self.assertEqual(len(captions), 3,
+                         "ожидали вторую страницу, фото согласия и карточку")
+        self.assertIn("Вторая страница", captions[0])
+        self.assertIn("законного представителя", captions[1])
+        self.assertIn("16–17", captions[2])
 
     async def test_adult_card_has_no_minor_warning(self):
         await self.submit()
         captions = [m.caption or "" for m in self.session.sent_to(ADMIN_CHAT)
                     if not isinstance(m, SendMessage)]
-        self.assertEqual(len(captions), 1, "у взрослого - только карточка")
-        self.assertNotIn("16–17", captions[0])
+        self.assertEqual(len(captions), 2,
+                         "у взрослого - вторая страница документа и карточка")
+        self.assertNotIn("16–17", captions[-1])
 
     async def test_minor_contract_contains_parent_clause(self):
         await self.register_minor_up_to_doc()
@@ -1663,6 +1759,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_DOC,
                          "анкета по верхней границе валидаторов не прошла")
         await self.feed(msg(photo=True))
+        await self.feed(msg(photo=True))
         await self.feed(cb("confirm"))
 
         cards = [m for m in self.session.calls
@@ -1810,6 +1907,11 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Bunday sana mavjud emas", err)
 
         await self.fill_anketa()
+        await self.feed(msg(photo=True))
+        # просьба о второй странице документа - тоже на узбекском
+        ask2 = [m.text for m in self.session.sent_to(USER_ID)
+                if isinstance(m, SendMessage)][-1]
+        self.assertIn("ikkinchi suratini", ask2)
         await self.feed(msg(photo=True))
         await self.feed(cb("confirm"))
         await self.approve_fully()
@@ -2285,6 +2387,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg(contact_user_id=USER_ID))
         await self.fill_anketa()
         await self.feed(msg(document=True))
+        await self.feed(cb("doc_enough"))       # второй страницы у файла нет
 
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.CONFIRM)
@@ -2413,10 +2516,12 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
                            user_id=ADMIN_ID, chat_type="supergroup"))
         self.assertIsNotNone(self.db.users[USER_ID]["purge_after"])
         await self.feed(msg(photo=True))                 # новое фото документа
+        self.assertIsNone(self.db.users[USER_ID]["purge_after"],
+                          "дата удаления должна сбрасываться при новой загрузке")
+        await self.feed(msg(photo=True))                 # новая вторая страница
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.CONFIRM)
-        self.assertIsNone(row["purge_after"],
-                          "дата удаления должна сбрасываться при новой загрузке")
+        self.assertIsNone(row["purge_after"])
 
     async def test_reject_by_reply_sends_moderator_text(self):
         await self.submit()

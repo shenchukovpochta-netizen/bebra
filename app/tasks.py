@@ -48,7 +48,7 @@ async def purge_once(db: Database, cfg: Config) -> tuple[int, int]:
     """Возвращает (удалено файлов, удалено записей журнала)."""
     removed = 0
     for row in await db.rows_to_purge():
-        paths = [p for p in (row["doc_path"], row["parent_path"],
+        paths = [p for p in (row["doc_path"], row["doc2_path"], row["parent_path"],
                              row["contract_path"], row["soglasie_path"],
                              row["act_in_path"], row["act_out_path"],
                              row["buyout_path"]) if p]

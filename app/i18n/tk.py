@@ -109,6 +109,16 @@ T: dict[str, str] = {
         "goşuň. Maglumatlar aýdyň okalar ýaly surata alyň."
     ),
     "DOC_NEED_PHOTO": "Hut resminamanyň suraty gerek. Surat goşuň.",
+    "ASK_DOC2": (
+        "Surat kabul edildi. Indi resminamanyň ikinji suratyny iberiň — "
+        "hasaba alnan salgy sahypasy (sürüjilik şahadatnamasynda — arka "
+        "tarapy).\n\nEger ähli maglumat birinji suratda görünýän bolsa, "
+        "aşakdaky düwmä basyň."
+    ),
+    "DOC2_NEED_PHOTO": (
+        "Resminamanyň ikinji sahypasynyň suraty gerek. Surat birikdiriň "
+        "ýa-da «Bir surat ýeterlik» düwmesine basyň."
+    ),
     "ASK_PARENT_CONSENT": (
         "Siz entek 18 ýaşamadyňyz, şonuň üçin ýene bir resminama gerek: "
         "ata-enäniň (kanuny wekiliň) kärende şertnamasyny baglaşmaga ýazmaça "
@@ -379,6 +389,7 @@ T: dict[str, str] = {
     "BTN_CONSENT": "✅ Razylyk berýärin",
     "BTN_CONFIRM": "Tassyklaýaryn",
     "BTN_RESTART": "Täzeden doldurmak",
+    "BTN_DOC_ENOUGH": "Bir surat ýeterlik",
     "BTN_SIGN": "✍️ Gol çekýärin",
     "BTN_MISTAKE": "Ýalňyş bar",
     "BTN_PAY": "💳 Tölemek",

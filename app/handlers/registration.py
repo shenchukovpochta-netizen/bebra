@@ -463,11 +463,11 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
         return
     file_id = _file_id(message)
     is_photo = bool(message.photo)
-    # 16-17-летнего после документа ждёт ещё фото согласия родителя,
-    # взрослого - сразу подтверждение.
-    following = logic.state_after_doc(
-        vault.decrypt(user.get("anketa_enc")),
-        has_parent_consent=bool(user.get("parent_file_id")))
+    # Второй фотографией идёт разворот с пропиской (у прав - обратная
+    # сторона): с одного разворота модератор не сверит ни адрес регистрации,
+    # ни срок действия. Старая вторая фотография стирается здесь же -
+    # человек мог вернуться на этот шаг после отказа, и подмешивать
+    # к новому документу страницу от старого нельзя.
     # purge_after сбрасывается обязательно. «Заполнить повторно» и отказ
     # модератора ставят дату удаления в прошлое (или на 3 дня вперёд), и если
     # её не снять, ретеншен снесёт СВЕЖИЕ сканы вместе со старыми: пользователь
@@ -475,17 +475,74 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_DOC,
                           doc_file_id=file_id, doc_is_photo=is_photo,
                           doc_path=None, doc_sha256=None,
-                          purge_after=None, state=following):
+                          doc2_file_id=None, doc2_path=None, doc2_sha256=None,
+                          purge_after=None, state=logic.WAIT_DOC2):
         return
     await db.log_event(user["tg_id"], "doc_uploaded")
-    if following == logic.CONFIRM:
-        await send_confirm(bot, {**user, "doc_file_id": file_id,
-                                 "doc_is_photo": is_photo})
-    else:
-        await message.answer(i18n.t(user.get("lang"), PROMPTS[following]),
-                             reply_markup=kb.remove())
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, "ASK_DOC2"), reply_markup=kb.doc_enough(lang))
     # Скачивание и хэш - в фоне: пользователь не должен ждать сеть.
     tasks.spawn(_process_upload(bot, db, cfg, user["tg_id"], file_id, "doc"))
+
+
+# ─────────────────── вторая фотография документа ───────────────────
+
+async def _after_doc(bot: Bot, db: Database, vault: Vault, user: dict,
+                     answer, extra: dict | None = None) -> None:
+    """Шаг документа пройден: дальше согласие родителя или подтверждение."""
+    following = logic.state_after_doc(
+        vault.decrypt(user.get("anketa_enc")),
+        has_parent_consent=bool(user.get("parent_file_id")))
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_DOC2,
+                          state=following):
+        return
+    if following == logic.CONFIRM:
+        await send_confirm(bot, {**user, **(extra or {})})
+        return
+    await answer(i18n.t(i18n.user_lang(user), PROMPTS[following]),
+                 reply_markup=kb.remove())
+
+
+@router.message(StateIs(logic.WAIT_DOC2), F.photo | F.document)
+async def st_doc2(message: Message, bot: Bot, db: Database, cfg: Config,
+                  vault: Vault, user: dict) -> None:
+    """Вторая фотография документа - разворот с пропиской.
+
+    Приходит и альбомом: Telegram шлёт по апдейту на снимок, первый
+    попадает в шаг документа, второй сюда, и человеку не приходится
+    отправлять их по одной.
+    """
+    check = _check_upload(message)
+    if not check.ok:
+        await message.answer(i18n.err(user.get("lang"), check.error))
+        return
+    file_id = _file_id(message)
+    is_photo = bool(message.photo)
+    if not await db.patch(user["tg_id"], expected_state=logic.WAIT_DOC2,
+                          doc2_file_id=file_id, doc2_is_photo=is_photo,
+                          doc2_path=None, doc2_sha256=None):
+        return
+    await db.log_event(user["tg_id"], "doc2_uploaded")
+    await _after_doc(bot, db, vault, user, message.answer,
+                     {"doc2_file_id": file_id, "doc2_is_photo": is_photo})
+    tasks.spawn(_process_upload(bot, db, cfg, user["tg_id"], file_id, "doc2"))
+
+
+@router.callback_query(StateIs(logic.WAIT_DOC2), F.data == "doc_enough")
+async def cb_doc_enough(callback: CallbackQuery, bot: Bot, db: Database,
+                        vault: Vault, user: dict) -> None:
+    """«Хватит одного фото»: второй страницы у документа может не быть."""
+    await callback.answer()
+    await db.log_event(user["tg_id"], "doc2_skipped")
+    await _after_doc(bot, db, vault, user,
+                     lambda text, **kw: bot.send_message(user["tg_id"], text, **kw))
+
+
+@router.message(StateIs(logic.WAIT_DOC2))
+async def st_doc2_wrong(message: Message, user: dict) -> None:
+    lang = i18n.user_lang(user)
+    await message.answer(i18n.t(lang, "DOC2_NEED_PHOTO"),
+                         reply_markup=kb.doc_enough(lang))
 
 
 async def send_confirm(bot: Bot, data: dict) -> None:
@@ -552,6 +609,7 @@ async def cb_restart(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
     # а оставленная анкета молча уехала бы в договор старой.
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
                           state=logic.WAIT_FIO, doc_file_id=None, doc_sha256=None,
+                          doc2_file_id=None, doc2_sha256=None,
                           parent_file_id=None, parent_sha256=None,
                           anketa_enc=None, purge_after=utcnow()):
         await callback.answer()
@@ -659,6 +717,14 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
         # реквизитов выглядит как полная - утвердят не глядя.
         raise CardNotReady(f"у {tg_id} не заполнено: {', '.join(missing)}")
 
+    # Вторая страница документа уходит ПЕРЕД карточкой - как и согласие
+    # родителя: утверждающий читает чат снизу вверх от карточки с кнопками,
+    # и обе фотографии оказываются прямо над ней.
+    if data.get("doc2_file_id"):
+        await send_file(bot, cfg.contract_chat_id, data["doc2_file_id"],
+                        data.get("doc2_is_photo", True),
+                        caption=texts.DOC2_CARD_CAPTION.format(tg_id=tg_id))
+
     minor = logic.is_minor(anketa)
     if minor and not data.get("parent_file_id"):
         # Одобрить 16-17-летнего без согласия родителя нельзя, а карточка
@@ -697,11 +763,12 @@ async def _process_upload(bot: Bot, db: Database, cfg: Config, tg_id: int,
                           file_id: str | None, slot: str) -> None:
     """Скачать присланный файл, положить на диск и посчитать хэш.
 
-    Слот «doc» - скан документа, «parent» - согласие родителя; лежат
-    и удаляются одинаково. Хэш у документа нужен для антифрода: один и тот же
-    паспорт не должен проходить регистрацию с разных аккаунтов. Согласие
-    на дубли не проверяется: одно и то же согласие у двух братьев - норма,
-    а не фрод. Всё это в фоне - пользователь не должен ждать сеть,
+    Слот «doc» - скан документа, «doc2» - его вторая страница, «parent» -
+    согласие родителя; лежат и удаляются одинаково. Хэш у документа нужен
+    для антифрода: один и тот же паспорт не должен проходить регистрацию
+    с разных аккаунтов. Ни согласие, ни вторая страница на дубли не
+    проверяются: одно согласие у двух братьев и одна прописка у соседей -
+    норма, а не фрод. Всё это в фоне - пользователь не должен ждать сеть,
     стоя на экране подтверждения.
     """
     try:
@@ -711,6 +778,9 @@ async def _process_upload(bot: Bot, db: Database, cfg: Config, tg_id: int,
         path, digest = files.store(cfg.storage_dir, tg_id, slot, data)
         if slot == "parent":
             await db.patch(tg_id, parent_path=str(path), parent_sha256=digest)
+            return
+        if slot == "doc2":
+            await db.patch(tg_id, doc2_path=str(path), doc2_sha256=digest)
             return
         await db.patch(tg_id, doc_path=str(path), doc_sha256=digest)
 

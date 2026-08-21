@@ -17,6 +17,16 @@ create table if not exists bot.users (
   -- это надо в момент отправки, а угадать по самому file_id нельзя.
   doc_is_photo       boolean     not null default true,
 
+  -- Вторая фотография документа: разворот с пропиской у паспорта,
+  -- обратная сторона у прав. Необязательная - у клиента, приславшего
+  -- одну, все четыре поля пусты. Хэш второй фотографии на дубли
+  -- не проверяется: страница прописки у однофамильцев из одного дома
+  -- совпадает законно, и это не фрод.
+  doc2_file_id       text,
+  doc2_path          text,
+  doc2_sha256        text,
+  doc2_is_photo      boolean     not null default true,
+
   -- Письменное согласие законного представителя: только у арендаторов
   -- 16-17 лет, у взрослых все четыре поля пусты. Хранится и удаляется
   -- по тем же правилам, что скан документа.
@@ -151,6 +161,10 @@ create table if not exists bot.users (
 alter table bot.users add column if not exists doc_path       text;
 alter table bot.users add column if not exists doc_sha256     text;
 alter table bot.users add column if not exists doc_is_photo   boolean not null default true;
+alter table bot.users add column if not exists doc2_file_id   text;
+alter table bot.users add column if not exists doc2_path      text;
+alter table bot.users add column if not exists doc2_sha256    text;
+alter table bot.users add column if not exists doc2_is_photo  boolean not null default true;
 alter table bot.users add column if not exists pdn_version    text;
 alter table bot.users add column if not exists pdn_consent_at timestamptz;
 alter table bot.users add column if not exists purge_after    timestamptz;

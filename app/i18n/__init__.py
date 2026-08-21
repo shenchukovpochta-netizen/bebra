@@ -62,6 +62,7 @@ BUTTONS_RU: dict[str, str] = {
     "BTN_CONSENT": "✅ Даю согласие",
     "BTN_CONFIRM": "Подтверждаю",
     "BTN_RESTART": "Заполнить повторно",
+    "BTN_DOC_ENOUGH": "Хватит одного фото",
     "BTN_SIGN": "✍️ Подписываю",
     "BTN_MISTAKE": "Есть ошибка",
     "BTN_PAY": "💳 Оплатить",

@@ -85,6 +85,18 @@ def share_contact(lang: str = "ru") -> ReplyKeyboardMarkup:
     )
 
 
+def doc_enough(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Шаг второй фотографии документа: кнопка «одной достаточно».
+
+    Вторая фотография необязательна - в паспорте без прописки её просто
+    неоткуда взять, - и без выхода человек упёрся бы в шаг, который
+    физически не может пройти.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=i18n.t(lang, "BTN_DOC_ENOUGH"),
+                             callback_data="doc_enough")]])
+
+
 def confirm(lang: str = "ru") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CONFIRM"),
