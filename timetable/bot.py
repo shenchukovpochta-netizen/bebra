@@ -21,7 +21,7 @@ from aiogram.types import CallbackQuery, Message
 
 from . import keyboards, logic, texts
 from .config import Config
-from .model import LAST_WEEK, monday_of_week, week_number
+from .model import LAST_WEEK, monday_of_week
 
 log = logging.getLogger("timetable")
 router = Router()
@@ -61,19 +61,27 @@ async def cmd_tomorrow(message: Message) -> None:
     await _send_day(message, logic.now_msk().date() + timedelta(days=1))
 
 
+def current_week() -> int:
+    """Учебная неделя, к которой относятся ответы «на эту неделю»."""
+    return logic.display_week(logic.now_msk().date())
+
+
 @router.message(Command("week"))
 async def cmd_week(message: Message, command: CommandObject) -> None:
     """/week - текущая неделя, /week N - конкретная."""
-    week = week_number(logic.now_msk().date())
-    if command.args:
-        raw = command.args.strip()
-        if not raw.lstrip("-").isdigit():
-            await answer(message, f"Не понял номер недели: <code>{texts.esc(raw)}</code>. "
-                                  f"Нужно число от 1 до {LAST_WEEK}, например /week 7.")
-            return
-        week = int(raw)
-    # Вне семестра «текущей недели» нет; показываем первую, иначе ответом
-    # была бы пустая простыня из шести «пар нет».
+    raw = (command.args or "").strip()
+    if not raw:
+        # Без номера отвечаем ровно как кнопка «Неделя»: одно и то же
+        # действие не должно давать двух разных ответов.
+        await answer(message, texts.week_answer(current_week(), logic.week_plan(current_week())))
+        return
+    week = logic.parse_week(raw)
+    if week is None:
+        # Ввод обрезаем: без ограничения длинная строка после экранирования
+        # раздувает ответ за лимит Telegram, и сообщение не уходит вовсе.
+        await answer(message, f"Не понял номер недели: <code>{texts.esc(raw[:32])}</code>. "
+                              f"Нужно число от 1 до {LAST_WEEK}, например /week 7.")
+        return
     if not 1 <= week <= LAST_WEEK:
         await answer(message, texts.week_answer(week, ()))
         return
@@ -82,8 +90,7 @@ async def cmd_week(message: Message, command: CommandObject) -> None:
 
 @router.message(F.text == keyboards.WEEK)
 async def btn_week(message: Message) -> None:
-    week = week_number(logic.now_msk().date())
-    week = min(max(week, 1), LAST_WEEK)
+    week = current_week()
     await answer(message, texts.week_answer(week, logic.week_plan(week)))
 
 
@@ -104,9 +111,7 @@ async def pick_day(call: CallbackQuery) -> None:
         return
     if not 0 <= weekday <= 5 or call.message is None:
         return
-    today = logic.now_msk().date()
-    week = min(max(week_number(today), 1), LAST_WEEK)
-    day = monday_of_week(week) + timedelta(days=weekday)
+    day = monday_of_week(current_week()) + timedelta(days=weekday)
     for chunk in texts.split_message(texts.day_answer(day, logic.occurrences(day))):
         await call.message.answer(chunk, reply_markup=keyboards.MAIN)
 
@@ -123,9 +128,14 @@ async def cmd_date(message: Message, command: CommandObject) -> None:
     await _send_day(message, day)
 
 
-@router.message(F.text)
+@router.message(F.chat.type == "private", F.text)
 async def fallback(message: Message) -> None:
-    """Любой другой текст: подсказка вместо молчания."""
+    """Любой другой текст в личке: подсказка вместо молчания.
+
+    Только в личке. В группе Telegram доставляет боту все сообщения со
+    слэша, включая команды чужих ботов, и бот отвечал бы «Не понял» на
+    каждую из них, навязывая всем свою клавиатуру.
+    """
     await answer(message, "Не понял. Нажмите кнопку ниже или посмотрите /help.")
 
 

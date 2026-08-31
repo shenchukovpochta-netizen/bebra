@@ -100,7 +100,8 @@ def group_by_time(occs: tuple[Occurrence, ...]) -> list[tuple[Occurrence, ...]]:
     """
     groups: list[tuple[Occurrence, ...]] = []
     for occ in occs:
-        if groups and (groups[-1][0].starts_at, groups[-1][0].ends_at) == (occ.starts_at, occ.ends_at):
+        bounds = (occ.starts_at, occ.ends_at)
+        if groups and (groups[-1][0].starts_at, groups[-1][0].ends_at) == bounds:
             groups[-1] = groups[-1] + (occ,)
         else:
             groups.append((occ,))

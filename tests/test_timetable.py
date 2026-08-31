@@ -134,11 +134,12 @@ class TestOccurrences(unittest.TestCase):
 
     def test_lessons_swap_mid_semester(self):
         # Понедельник, 12:10: до 9-й недели физика, с 10-й - нанотехнологии.
-        early = logic.occurrences(monday_of_week(9))
-        late = logic.occurrences(monday_of_week(10))
-        at = lambda occs: next(o.lesson.subject for o in occs if o.slot.start == time(12, 10))
-        self.assertEqual(at(early), "Физика")
-        self.assertTrue(at(late).startswith("Физико-химические основы"))
+        def at_noon(occs):
+            return next(o.lesson.subject for o in occs if o.slot.start == time(12, 10))
+
+        self.assertEqual(at_noon(logic.occurrences(monday_of_week(9))), "Физика")
+        self.assertTrue(
+            at_noon(logic.occurrences(monday_of_week(10))).startswith("Физико-химические основы"))
 
 
 class TestCurrentAndNext(unittest.TestCase):
@@ -371,6 +372,41 @@ class TestParseDate(unittest.TestCase):
     def test_garbage(self):
         for raw in ("", "мусор", "32.01.2026", "15/09/2026", "29.02"):
             self.assertIsNone(logic.parse_date(raw), raw)
+
+
+class TestDisplayWeek(unittest.TestCase):
+    """Неделя, которую бот показывает по кнопке «Неделя» и в выборе дня."""
+
+    def test_weekday_gives_its_own_week(self):
+        self.assertEqual(logic.display_week(date(2026, 9, 9)), 2)
+
+    def test_sunday_points_at_the_week_ahead(self):
+        # Вечером воскресенья 06.09 неделя 1 уже прошла: кнопка «Понедельник»
+        # отвечала бы расписанием понедельника 31.08, которого не было.
+        self.assertEqual(logic.display_week(date(2026, 9, 6)), 2)
+        self.assertEqual(monday_of_week(logic.display_week(date(2026, 9, 6))), date(2026, 9, 7))
+
+    def test_saturday_keeps_its_week(self):
+        self.assertEqual(logic.display_week(date(2026, 9, 5)), 1)
+
+    def test_clamped_to_semester(self):
+        self.assertEqual(logic.display_week(date(2026, 1, 1)), 1)
+        self.assertEqual(logic.display_week(date(2027, 6, 1)), LAST_WEEK)
+
+
+class TestParseWeek(unittest.TestCase):
+    def test_number(self):
+        self.assertEqual(logic.parse_week("7"), 7)
+
+    def test_signed(self):
+        self.assertEqual(logic.parse_week("-5"), -5)
+        self.assertEqual(logic.parse_week("+7"), 7)
+
+    def test_not_a_number(self):
+        # «--5» и надстрочная «²» проходят isdigit, но int на них падает:
+        # раньше хендлер молча умирал, не ответив пользователю ничего.
+        for raw in ("--5", "²", "abc", "", "7.5", "7 8"):
+            self.assertIsNone(logic.parse_week(raw), raw)
 
 
 class TestDataMatchesSource(unittest.TestCase):

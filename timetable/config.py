@@ -17,7 +17,7 @@ class Config:
     token: str
 
     @staticmethod
-    def load() -> "Config":
+    def load() -> Config:
         return Config(token=_token())
 
 
