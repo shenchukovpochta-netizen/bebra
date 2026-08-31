@@ -278,6 +278,26 @@ class TestRendering(unittest.TestCase):
         for occ in logic.occurrences(day):
             self.assertIn(texts.esc(occ.lesson.subject), answer)
 
+    def test_week_answer_keeps_subgroup_marks(self):
+        """В обзоре недели подгруппа обязана быть: без неё пары не различить."""
+        answer = texts.week_answer(5, logic.week_plan(5))
+        # Четверговый английский - у 1 группы, пятничный - у 2-й. Без пометки
+        # студент второй подгруппы пойдёт в четверг на чужую пару.
+        self.assertIn("1 гр.", answer)
+        self.assertIn("2 гр.", answer)
+        self.assertIn("1/2 гр.", answer)
+        self.assertIn("делится пополам", answer)
+
+    def test_week_answer_marks_match_the_day_view(self):
+        """Одна и та же пара не должна быть помечена в /today и не помечена в /week."""
+        for week in range(1, LAST_WEEK + 1):
+            week_text = texts.week_answer(week, logic.week_plan(week))
+            for day, occs in logic.week_plan(week):
+                for occ in occs:
+                    if occ.lesson.subgroup:
+                        self.assertIn(texts.esc(occ.lesson.subgroup), week_text,
+                                      f"{day} {occ.lesson.subject}: подгруппа потеряна в /week")
+
     def test_answers_fit_telegram_limit(self):
         """Ни один ответ бота не должен превышать лимит после разбиения."""
         checked = 0

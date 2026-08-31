@@ -85,9 +85,9 @@ def lesson_body(lesson) -> str:
         lines.append(f"📍 {esc(lesson.room)}")
     # Подгруппы и чётность - не украшение: без них студент второй подгруппы
     # придёт на пару первой. Собираем в одну строку, чтобы не раздувать ответ.
-    marks = [m for m in (esc(lesson.subgroup), PARITY_NAMES[lesson.parity], esc(lesson.note)) if m]
+    marks = _marks(lesson)
     if marks:
-        lines.append(f"<i>ℹ️ {'; '.join(marks)}</i>")
+        lines.append(f"ℹ️{marks[2:]}")
     return "\n".join(lines)
 
 
@@ -111,6 +111,12 @@ def group_by_time(occs: tuple[Occurrence, ...]) -> list[tuple[Occurrence, ...]]:
 def lesson_block(occs: tuple[Occurrence, ...]) -> str:
     """Время один раз, под ним - все занятия этого времени."""
     return time_header(occs[0]) + "\n" + "\n\n".join(lesson_body(o.lesson) for o in occs)
+
+
+def _marks(lesson) -> str:
+    """Подгруппа, чётность и примечание одной строкой - или пусто."""
+    marks = [m for m in (esc(lesson.subgroup), PARITY_NAMES[lesson.parity], esc(lesson.note)) if m]
+    return f" · <i>{'; '.join(marks)}</i>" if marks else ""
 
 
 def day_answer(day: date, occs: tuple[Occurrence, ...]) -> str:
@@ -202,8 +208,12 @@ def week_answer(week: int, plan: tuple[tuple[date, tuple[Occurrence, ...]], ...]
         for occ in occs:
             room = f" · {esc(occ.lesson.room)}" if occ.lesson.room else ""
             kind = f" ({esc(occ.lesson.kind)})" if occ.lesson.kind else ""
+            # Подгруппа и чётность нужны и здесь. Без них четверговый
+            # английский (1 гр.) неотличим от пятничного (2 гр.), и студент
+            # второй подгруппы идёт в четверг на чужую пару.
             rows.append(
-                f"{hhmm(occ.starts_at)}–{hhmm(occ.ends_at)} {esc(occ.lesson.subject)}{kind}{room}"
+                f"{hhmm(occ.starts_at)}–{hhmm(occ.ends_at)} "
+                f"{esc(occ.lesson.subject)}{kind}{room}{_marks(occ.lesson)}"
             )
         body.append(title + "\n" + "\n".join(rows))
     return head + "\n\n" + "\n\n".join(body)

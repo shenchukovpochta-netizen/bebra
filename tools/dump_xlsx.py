@@ -53,7 +53,11 @@ def main(argv: list[str]) -> int:
     seen: set[tuple] = set()
     for row in range(1, ws.max_row + 1):
         day, slot, cell = val(row, 1), val(row, 2), val(row, column)
-        key = (anchor.get((row, 1)), anchor.get((row, 2)), anchor.get((row, column)))
+        # Запасное значение обязательно. Без него у необъединённых ячеек все
+        # три элемента ключа равны None, ключи разных строк совпадают, и
+        # строки с занятиями молча пропадают из выдачи - а выдача эта
+        # единственный способ пересобрать расписание на новый семестр.
+        key = tuple(anchor.get((row, col), (row, col)) for col in (1, 2, column))
         if key in seen or (day is None and slot is None and cell is None):
             continue
         seen.add(key)

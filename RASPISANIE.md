@@ -65,14 +65,25 @@ py -3 -m timetable
 
 ### Шаг 5. Автозапуск на сервере (systemd)
 
-Чтобы бот поднимался сам после перезагрузки, положите токен в файл и
-опишите службу.
+Чтобы бот поднимался сам после перезагрузки, заведите отдельного
+пользователя, положите токен в файл и опишите службу.
 
 ```bash
-sudo install -d -m 750 /etc/raspisanie
+# Служебный пользователь: без домашнего каталога и без входа в систему.
+# Если он уже есть, useradd просто скажет об этом и ничего не сломает.
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin bot
+
+# Токен: владелец root, читать может только группа bot.
+sudo install -d -m 750 -o root -g bot /etc/raspisanie
 printf '123456789:AAH...' | sudo tee /etc/raspisanie/token > /dev/null
-sudo chmod 600 /etc/raspisanie/token
+sudo chown root:bot /etc/raspisanie/token
+sudo chmod 640 /etc/raspisanie/token
 ```
+
+Права именно 640 и группа `bot`, а не 600 root:root: служба работает не
+от root и файл с правами 600 не откроет — бот честно скажет
+`не прочитать файл токена ... Permission denied` и при `Restart=always`
+будет повторять это каждые пять секунд.
 
 `/etc/systemd/system/raspisanie.service`:
 
@@ -111,6 +122,8 @@ journalctl -u raspisanie -f           # живой лог
 | Что видно | Что случилось |
 |---|---|
 | `Бот не запущен: не задан токен бота` | переменная `SCHEDULE_BOT_TOKEN` пустая или не экспортирована |
+| `не прочитать файл токена … Permission denied` | файл токена недоступен пользователю службы: `sudo chown root:bot` и `chmod 640` |
+| `status=217/USER`, `Failed to determine user credentials` | не создан пользователь `bot` — см. шаг 5 |
 | `токен бота не похож на токен Telegram: нет двоеточия` | скопирована не вся строка от @BotFather |
 | `Telegram не принял токен` | токен отозван или с опечаткой — выпустите новый через `/token` у @BotFather |
 | `нет связи с api.telegram.org` | нет интернета, не работает DNS или провайдер режет Telegram — на сервере нужен прокси |
