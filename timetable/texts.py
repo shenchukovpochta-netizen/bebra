@@ -66,15 +66,16 @@ def week_line(week: int) -> str:
     return f"{week}-я учебная неделя ({parity})"
 
 
-def lesson_block(occ: Occurrence, *, with_time: bool = True) -> str:
-    """Одно занятие: время, предмет, преподаватель, аудитория, оговорки."""
-    lesson = occ.lesson
-    lines: list[str] = []
-    if with_time:
-        number = pair_number(occ.slot.start)
-        tag = f"{number}-я пара · " if number else ""
-        lines.append(f"<b>{tag}{hhmm(occ.starts_at)}–{hhmm(occ.ends_at)}</b>")
-    lines.append(f"📚 {esc(lesson.subject)}" + (f" <i>({esc(lesson.kind)})</i>" if lesson.kind else ""))
+def time_header(occ: Occurrence) -> str:
+    number = pair_number(occ.slot.start)
+    tag = f"{number}-я пара · " if number else ""
+    return f"<b>{tag}{hhmm(occ.starts_at)}–{hhmm(occ.ends_at)}</b>"
+
+
+def lesson_body(lesson) -> str:
+    """Занятие без времени: предмет, преподаватель, аудитория, оговорки."""
+    lines = [f"📚 {esc(lesson.subject)}"
+             + (f" <i>({esc(lesson.kind)})</i>" if lesson.kind else "")]
     if lesson.teacher:
         lines.append(f"👤 {esc(lesson.teacher)}")
     if lesson.room:
@@ -87,6 +88,27 @@ def lesson_block(occ: Occurrence, *, with_time: bool = True) -> str:
     return "\n".join(lines)
 
 
+def group_by_time(occs: tuple[Occurrence, ...]) -> list[tuple[Occurrence, ...]]:
+    """Занятия, идущие в одно и то же время, - в одну группу.
+
+    В одной клетке расписания их бывает два (четверг, 10:10: английский и
+    немецкий у разных подгрупп). Без группировки ответ выглядел бы как две
+    разные «2-е пары» подряд, будто одна идёт после другой.
+    """
+    groups: list[tuple[Occurrence, ...]] = []
+    for occ in occs:
+        if groups and (groups[-1][0].starts_at, groups[-1][0].ends_at) == (occ.starts_at, occ.ends_at):
+            groups[-1] = groups[-1] + (occ,)
+        else:
+            groups.append((occ,))
+    return groups
+
+
+def lesson_block(occs: tuple[Occurrence, ...]) -> str:
+    """Время один раз, под ним - все занятия этого времени."""
+    return time_header(occs[0]) + "\n" + "\n\n".join(lesson_body(o.lesson) for o in occs)
+
+
 def day_answer(day: date, occs: tuple[Occurrence, ...]) -> str:
     """Расписание одного дня."""
     week = week_number(day)
@@ -95,7 +117,7 @@ def day_answer(day: date, occs: tuple[Occurrence, ...]) -> str:
         return f"{head}\n\nВ этот день пар нет: дата вне осеннего семестра."
     if not occs:
         return f"{head}\n\n🎉 Пар нет."
-    return head + "\n\n" + "\n\n".join(lesson_block(occ) for occ in occs)
+    return head + "\n\n" + "\n\n".join(lesson_block(g) for g in group_by_time(occs))
 
 
 def status_answer(st: Status) -> str:
@@ -115,7 +137,7 @@ def status_answer(st: Status) -> str:
         left = st.minutes_left
         parts.append(
             f"▶️ <b>Сейчас идёт</b> (до конца {minutes(left)}):\n\n"
-            + "\n\n".join(lesson_block(occ) for occ in st.current)
+            + "\n\n".join(lesson_block(g) for g in group_by_time(st.current))
         )
     elif st.following and st.next_is_today:
         parts.append(f"☕️ <b>Сейчас перемена.</b> До следующей пары {minutes(st.minutes_until)}.")
@@ -141,7 +163,7 @@ def _when_phrase(st: Status) -> str:
 
 
 def _following_block(st: Status) -> str:
-    return "\n\n".join(lesson_block(occ) for occ in st.following)
+    return "\n\n".join(lesson_block(g) for g in group_by_time(st.following))
 
 
 def week_answer(week: int, plan: tuple[tuple[date, tuple[Occurrence, ...]], ...]) -> str:

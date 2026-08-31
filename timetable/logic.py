@@ -82,7 +82,10 @@ def upcoming(moment: datetime) -> tuple[Occurrence, ...]:
     Идущая сейчас пара следующей не считается: у неё уже наступило начало,
     и вопрос «что скоро начнётся» про неё бессмыслен.
     """
-    day = moment.date()
+    # Сканируем с начала семестра, а не с moment: при сбитых часах сервера
+    # (или вопросе «что дальше» задолго до 1 сентября) цикл иначе перебирал
+    # бы день за днём всё время до начала занятий.
+    day = max(moment.date(), monday_of_week(1))
     while day <= LAST_DAY:
         todays = occurrences(day)
         later = [occ for occ in todays if occ.starts_at > moment]

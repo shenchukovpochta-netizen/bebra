@@ -263,6 +263,14 @@ class TestRendering(unittest.TestCase):
         answer = texts.day_answer(date(2026, 9, 5), logic.occurrences(date(2026, 9, 5)))
         self.assertIn("Пар нет", answer)
 
+    def test_parallel_lessons_share_one_time_header(self):
+        # Четверг, 10:10: английский и немецкий - одна пара, а не две подряд.
+        day = date(2026, 9, 10)
+        answer = texts.day_answer(day, logic.occurrences(day))
+        self.assertEqual(answer.count("2-я пара"), 1)
+        self.assertIn("немецкий язык", answer)
+        self.assertIn("Хованская Е.С.", answer)
+
     def test_day_answer_lists_every_lesson(self):
         day = date(2026, 9, 9)
         answer = texts.day_answer(day, logic.occurrences(day))
