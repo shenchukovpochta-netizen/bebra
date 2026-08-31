@@ -1,0 +1,226 @@
+"""Хендлеры и точка входа бота расписания.
+
+Long polling, а не вебхук: боту не нужен ни публичный адрес, ни сертификат,
+ни открытый порт - он только читает встроенное расписание.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+import sys
+from datetime import date, datetime, timedelta
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import CallbackQuery, Message
+
+from . import keyboards, logic, texts
+from .config import Config
+from .model import DAY_NAMES, LAST_WEEK, monday_of_week, week_number
+
+log = logging.getLogger("timetable")
+router = Router()
+
+
+async def answer(message: Message, text: str) -> None:
+    """Отправка с учётом лимита длины сообщения Telegram."""
+    for chunk in texts.split_message(text):
+        await message.answer(chunk, reply_markup=keyboards.MAIN)
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message) -> None:
+    await answer(message, texts.start_answer(logic.status(logic.now_msk())))
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await answer(message, texts.HELP)
+
+
+@router.message(Command("now", "next"))
+@router.message(F.text == keyboards.NOW)
+async def cmd_now(message: Message) -> None:
+    await answer(message, texts.status_answer(logic.status(logic.now_msk())))
+
+
+@router.message(Command("today"))
+@router.message(F.text == keyboards.TODAY)
+async def cmd_today(message: Message) -> None:
+    await _send_day(message, logic.now_msk().date())
+
+
+@router.message(Command("tomorrow"))
+@router.message(F.text == keyboards.TOMORROW)
+async def cmd_tomorrow(message: Message) -> None:
+    await _send_day(message, logic.now_msk().date() + timedelta(days=1))
+
+
+@router.message(Command("week"))
+async def cmd_week(message: Message, command: CommandObject) -> None:
+    """/week - текущая неделя, /week N - конкретная."""
+    week = week_number(logic.now_msk().date())
+    if command.args:
+        raw = command.args.strip()
+        if not raw.lstrip("-").isdigit():
+            await answer(message, f"Не понял номер недели: <code>{texts.esc(raw)}</code>. "
+                                  f"Нужно число от 1 до {LAST_WEEK}, например /week 7.")
+            return
+        week = int(raw)
+    # Вне семестра «текущей недели» нет; показываем первую, иначе ответом
+    # была бы пустая простыня из шести «пар нет».
+    if not 1 <= week <= LAST_WEEK:
+        await answer(message, texts.week_answer(week, ()))
+        return
+    await answer(message, texts.week_answer(week, logic.week_plan(week)))
+
+
+@router.message(F.text == keyboards.WEEK)
+async def btn_week(message: Message) -> None:
+    week = week_number(logic.now_msk().date())
+    week = min(max(week, 1), LAST_WEEK)
+    await answer(message, texts.week_answer(week, logic.week_plan(week)))
+
+
+@router.message(Command("day"))
+@router.message(F.text == keyboards.DAYS)
+async def cmd_day(message: Message) -> None:
+    await message.answer("Какой день показать?", reply_markup=keyboards.DAY_PICKER)
+
+
+@router.callback_query(F.data.startswith("day:"))
+async def pick_day(call: CallbackQuery) -> None:
+    # Ответить на callback нужно всегда: иначе у пользователя на кнопке
+    # висят «часики» до самого таймаута Telegram.
+    await call.answer()
+    try:
+        weekday = int(call.data.split(":", 1)[1])
+    except ValueError:
+        return
+    if not 0 <= weekday <= 5 or call.message is None:
+        return
+    today = logic.now_msk().date()
+    week = min(max(week_number(today), 1), LAST_WEEK)
+    day = monday_of_week(week) + timedelta(days=weekday)
+    for chunk in texts.split_message(texts.day_answer(day, logic.occurrences(day))):
+        await call.message.answer(chunk, reply_markup=keyboards.MAIN)
+
+
+@router.message(Command("date"))
+async def cmd_date(message: Message, command: CommandObject) -> None:
+    """/date 15.09.2026 - расписание на конкретную дату."""
+    raw = (command.args or "").strip()
+    day = _parse_date(raw)
+    if day is None:
+        await answer(message, "Дату нужно писать как <code>ДД.ММ.ГГГГ</code> или "
+                              "<code>ДД.ММ</code>, например /date 15.09.2026")
+        return
+    await _send_day(message, day)
+
+
+@router.message(F.text)
+async def fallback(message: Message) -> None:
+    """Любой другой текст: подсказка вместо молчания."""
+    await answer(message, "Не понял. Нажмите кнопку ниже или посмотрите /help.")
+
+
+async def _send_day(message: Message, day: date) -> None:
+    await answer(message, texts.day_answer(day, logic.occurrences(day)))
+
+
+def _parse_date(raw: str) -> date | None:
+    """ДД.ММ.ГГГГ или ДД.ММ - год берётся из учебного года расписания."""
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d.%m"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if fmt == "%d.%m":
+            # Без года подставляем тот, в котором эта дата попадает
+            # в семестр: «15.09» - это сентябрь 2026, а «20.01» - январь 2027.
+            for year in (monday_of_week(1).year, monday_of_week(1).year + 1):
+                try:
+                    guess = parsed.date().replace(year=year)
+                except ValueError:
+                    continue
+                if 1 <= week_number(guess) <= LAST_WEEK:
+                    return guess
+            return parsed.date().replace(year=monday_of_week(1).year)
+        return parsed.date()
+    return None
+
+
+def _install_stop_handlers(dp: Dispatcher) -> None:
+    """SIGTERM от docker stop и systemd должен останавливать опрос по-хорошему."""
+    running: set[asyncio.Task] = set()
+
+    def stop() -> None:
+        # Ссылку на задачу держим в множестве: голый create_task может быть
+        # собран сборщиком мусора, и остановка тихо не произойдёт.
+        task = asyncio.create_task(dp.stop_polling())
+        running.add(task)
+        task.add_done_callback(running.discard)
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop)
+        except NotImplementedError:
+            pass  # Windows: сигналы через add_signal_handler не заводятся
+
+
+async def run(cfg: Config) -> None:
+    bot = Bot(cfg.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    dp.include_router(router)
+    _install_stop_handlers(dp)
+    try:
+        # get_me проверяет токен сразу. Без него бот «запускается» молча и
+        # падает только на первом апдейте - то есть когда его уже ждут.
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError:
+            log.error("Telegram не принял токен. Проверьте SCHEDULE_BOT_TOKEN "
+                      "или выпустите новый у @BotFather")
+            return
+        except TelegramNetworkError as exc:
+            log.error("нет связи с api.telegram.org (%s). Проверьте интернет, "
+                      "DNS и прокси на сервере", exc)
+            return
+        log.info("бот @%s запущен: расписание %s, учебных недель %d",
+                 me.username, texts.GROUP, LAST_WEEK)
+        # Оставшийся от прошлого запуска вебхук молча съедает все апдейты, и
+        # long polling получает пустоту: снимаем его перед стартом.
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    finally:
+        log.info("останавливаюсь")
+        await bot.session.close()
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
+    # Конфигурацию читаем до запуска цикла: забытый токен должен давать
+    # одну понятную строку, а не десять кадров стека.
+    try:
+        cfg = Config.load()
+    except RuntimeError as exc:
+        print(f"Бот не запущен: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    try:
+        asyncio.run(run(cfg))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

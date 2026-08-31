@@ -21,7 +21,7 @@ if (-not $SkipTests) {
   if ($LASTEXITCODE -ne 0) { throw 'тесты не прошли, деплой остановлен' }
 
   Step 'проверка синтаксиса всех модулей'
-  py -3 -m compileall -q app
+  py -3 -m compileall -q app timetable tools
   if ($LASTEXITCODE -ne 0) { throw 'модули не компилируются' }
 
   # Сверка файлов между собой: переменная объявлена в одном месте и забыта
@@ -37,7 +37,7 @@ if (-not $SkipTests) {
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
           'schema.sql', 'bootstrap.sh', 'install.sh', '.env.example', '.gitignore',
           'README.md', 'INSTALL.md', 'GUIDE.md', 'instrukciya-po-botu.html',
-          'consistency.py')
+          'RASPISANIE.md', 'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
          'app/logic.py', 'app/faq.py', 'app/faq_i18n.py', 'app/texts.py',
@@ -59,14 +59,20 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
-          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py')
+          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
+          'tests/test_timetable.py')
+# Бот расписания - отдельный процесс со своим токеном, базы не требует.
+$timetable = @('timetable/__init__.py', 'timetable/__main__.py', 'timetable/bot.py',
+               'timetable/config.py', 'timetable/data.py', 'timetable/keyboards.py',
+               'timetable/logic.py', 'timetable/model.py', 'timetable/texts.py')
+$tools = @('tools/dump_xlsx.py')
 
-foreach ($f in ($root + $app + $handlers + $services + $max + $tests)) {
+foreach ($f in ($root + $app + $handlers + $services + $max + $tests + $timetable + $tools)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/tests' '$Path/timetable' '$Path/tools'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -82,6 +88,10 @@ scp $max       "${Server}:${Path}/app/max/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (max) не удался' }
 scp $tests     "${Server}:${Path}/tests/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (tests) не удался' }
+scp $timetable "${Server}:${Path}/timetable/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (timetable) не удался' }
+scp $tools     "${Server}:${Path}/tools/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (tools) не удался' }
 
 # CRLF в .sh ломает shebang: bash ругается на «\r: команда не найдена»
 Step 'нормализую переводы строк'
