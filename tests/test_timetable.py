@@ -310,6 +310,69 @@ class TestRendering(unittest.TestCase):
                 self.assertEqual(chunk.count("<i>"), chunk.count("</i>"))
 
 
+class TestEmptyNowStates(unittest.TestCase):
+    """Четыре разных «сейчас пары нет» не должны выглядеть одинаково."""
+
+    @staticmethod
+    def state(m: datetime) -> str:
+        return texts.status_answer(logic.status(m))
+
+    def test_before_the_first_lesson_of_the_day(self):
+        answer = self.state(moment(2026, 9, 7, 7, 0))
+        self.assertIn("ещё не начались", answer)
+        self.assertNotIn("перемена", answer)
+
+    def test_day_without_lessons_is_not_finished(self):
+        # Воскресенье и суббота: пар не было ни одной, «закончились» соврало бы.
+        for day in (date(2026, 9, 13), date(2026, 9, 12)):
+            answer = self.state(datetime.combine(day, time(12, 0), tzinfo=MSK))
+            self.assertIn("Сегодня пар нет", answer)
+            self.assertNotIn("закончились", answer)
+
+    def test_break_between_lessons(self):
+        answer = self.state(moment(2026, 9, 14, 15, 30))
+        self.assertIn("перемена", answer)
+
+    def test_after_the_last_lesson(self):
+        answer = self.state(moment(2026, 9, 14, 20, 0))
+        self.assertIn("закончились", answer)
+
+    def test_first_monday_has_no_lessons_at_all(self):
+        # 31.08 - понедельник первой недели: пар нет, но это не «закончились».
+        self.assertIn("Сегодня пар нет", self.state(moment(2026, 8, 31, 12, 0)))
+
+    def test_before_semester_names_the_date_of_the_first_lesson(self):
+        # Без даты студент отнёс бы первую пару к дате начала семестра
+        # строкой выше - к понедельнику 31.08, когда пар нет вовсе.
+        answer = self.state(moment(2026, 8, 20, 12, 0))
+        self.assertIn("1 сентября 2026", answer)
+        self.assertIn("08:30", answer)
+
+
+class TestParseDate(unittest.TestCase):
+    def test_full_date(self):
+        self.assertEqual(logic.parse_date("15.09.2026"), date(2026, 9, 15))
+
+    def test_short_year(self):
+        self.assertEqual(logic.parse_date("15.09.26"), date(2026, 9, 15))
+
+    def test_day_and_month_inside_semester(self):
+        self.assertEqual(logic.parse_date("15.09"), date(2026, 9, 15))
+
+    def test_january_belongs_to_the_second_year(self):
+        # 04.01 - это январь 2027, а не 2026: иначе бот ответил бы про
+        # дату годичной давности, да ещё и с другим днём недели.
+        self.assertEqual(logic.parse_date("04.01"), date(2027, 1, 4))
+        self.assertEqual(logic.parse_date("20.02"), date(2027, 2, 20))
+
+    def test_autumn_belongs_to_the_first_year(self):
+        self.assertEqual(logic.parse_date("31.12"), date(2026, 12, 31))
+
+    def test_garbage(self):
+        for raw in ("", "мусор", "32.01.2026", "15/09/2026", "29.02"):
+            self.assertIsNone(logic.parse_date(raw), raw)
+
+
 class TestDataMatchesSource(unittest.TestCase):
     """Сверка разобранного расписания с исходным текстом клеток xlsx.
 

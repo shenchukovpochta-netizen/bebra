@@ -104,6 +104,10 @@ class Status:
     week: int
     current: tuple[Occurrence, ...]
     following: tuple[Occurrence, ...]
+    # Все пары сегодняшнего дня. Без них нельзя отличить «пары кончились»
+    # от «сегодня их и не было» и от «первая ещё не началась»: во всех трёх
+    # случаях current пуст.
+    today: tuple[Occurrence, ...] = ()
 
     @property
     def in_semester(self) -> bool:
@@ -132,11 +136,13 @@ class Status:
 
 def status(moment: datetime) -> Status:
     """Срез расписания на момент moment."""
+    todays = occurrences(moment.date())
     return Status(
         moment=moment,
         week=week_number(moment.date()),
-        current=current(moment),
+        current=tuple(occ for occ in todays if occ.contains(moment)),
         following=upcoming(moment),
+        today=todays,
     )
 
 
@@ -160,4 +166,37 @@ def next_day_with_lessons(after: date) -> date | None:
         if occurrences(day):
             return day
         day += timedelta(days=1)
+    return None
+
+def parse_date(raw: str) -> date | None:
+    """Разбор даты из команды /date: ДД.ММ.ГГГГ, ДД.ММ.ГГ или ДД.ММ.
+
+    Живёт здесь, а не в хендлере: разбор пользовательского ввода -
+    чистая логика, и тесты не должны ради неё ставить aiogram.
+    """
+    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d.%m"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if fmt == "%d.%m":
+            # Без года подставляем тот, в котором эта дата попадает
+            # в семестр: «15.09» - это сентябрь 2026, а «20.01» - январь 2027.
+            first = monday_of_week(1)
+            for year in (first.year, first.year + 1):
+                try:
+                    guess = parsed.date().replace(year=year)
+                except ValueError:
+                    continue
+                if 1 <= week_number(guess) <= LAST_WEEK:
+                    return guess
+            # Ни один год не попал в семестр - выбираем по месяцу. Иначе
+            # январь уезжал бы на год назад, и бот отвечал бы про другую
+            # дату с другим днём недели, не показывая года в ответе.
+            year = first.year if parsed.month >= first.month else first.year + 1
+            try:
+                return parsed.date().replace(year=year)
+            except ValueError:
+                return None
+        return parsed.date()
     return None

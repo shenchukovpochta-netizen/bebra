@@ -10,7 +10,7 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -21,7 +21,7 @@ from aiogram.types import CallbackQuery, Message
 
 from . import keyboards, logic, texts
 from .config import Config
-from .model import DAY_NAMES, LAST_WEEK, monday_of_week, week_number
+from .model import LAST_WEEK, monday_of_week, week_number
 
 log = logging.getLogger("timetable")
 router = Router()
@@ -115,7 +115,7 @@ async def pick_day(call: CallbackQuery) -> None:
 async def cmd_date(message: Message, command: CommandObject) -> None:
     """/date 15.09.2026 - расписание на конкретную дату."""
     raw = (command.args or "").strip()
-    day = _parse_date(raw)
+    day = logic.parse_date(raw)
     if day is None:
         await answer(message, "Дату нужно писать как <code>ДД.ММ.ГГГГ</code> или "
                               "<code>ДД.ММ</code>, например /date 15.09.2026")
@@ -131,28 +131,6 @@ async def fallback(message: Message) -> None:
 
 async def _send_day(message: Message, day: date) -> None:
     await answer(message, texts.day_answer(day, logic.occurrences(day)))
-
-
-def _parse_date(raw: str) -> date | None:
-    """ДД.ММ.ГГГГ или ДД.ММ - год берётся из учебного года расписания."""
-    for fmt in ("%d.%m.%Y", "%d.%m.%y", "%d.%m"):
-        try:
-            parsed = datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-        if fmt == "%d.%m":
-            # Без года подставляем тот, в котором эта дата попадает
-            # в семестр: «15.09» - это сентябрь 2026, а «20.01» - январь 2027.
-            for year in (monday_of_week(1).year, monday_of_week(1).year + 1):
-                try:
-                    guess = parsed.date().replace(year=year)
-                except ValueError:
-                    continue
-                if 1 <= week_number(guess) <= LAST_WEEK:
-                    return guess
-            return parsed.date().replace(year=monday_of_week(1).year)
-        return parsed.date()
-    return None
 
 
 def _install_stop_handlers(dp: Dispatcher) -> None:

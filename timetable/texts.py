@@ -41,8 +41,11 @@ def esc(text: str | None) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def human_date(day: date) -> str:
-    return f"{DAY_NAMES[day.weekday()].lower()}, {day.day} {MONTHS[day.month - 1]}"
+def human_date(day: date, *, with_year: bool = False) -> str:
+    text = f"{DAY_NAMES[day.weekday()].lower()}, {day.day} {MONTHS[day.month - 1]}"
+    # Год нужен там, где дату выбрал пользователь: «4 января» без года
+    # не даёт заметить, что бот понял её не так, как имелось в виду.
+    return f"{text} {day.year}" if with_year else text
 
 
 def hhmm(moment: datetime) -> str:
@@ -112,7 +115,7 @@ def lesson_block(occs: tuple[Occurrence, ...]) -> str:
 def day_answer(day: date, occs: tuple[Occurrence, ...]) -> str:
     """Расписание одного дня."""
     week = week_number(day)
-    head = f"📅 <b>{human_date(day).capitalize()}</b>\n{week_line(week)}"
+    head = f"📅 <b>{human_date(day, with_year=True).capitalize()}</b>\n{week_line(week)}"
     if week < 1 or week > LAST_WEEK:
         return f"{head}\n\nВ этот день пар нет: дата вне осеннего семестра."
     if not occs:
@@ -129,7 +132,13 @@ def status_answer(st: Status) -> str:
     if not st.in_semester:
         tail = ""
         if st.following:
-            tail = "\n\n⏭ <b>Первая пара семестра:</b>\n" + _following_block(st)
+            nxt = st.following[0]
+            # Дата обязательна: строкой выше стоит дата начала семестра, и без
+            # неё студент решит, что первая пара - в тот самый день. А она
+            # во вторник: понедельник первой недели пар не имеет вовсе.
+            tail = (f"\n\n⏭ <b>Первая пара семестра</b> — "
+                    f"{human_date(nxt.day, with_year=True)} в {hhmm(nxt.starts_at)}:\n\n"
+                    + _following_block(st))
         return head + "\n\nСейчас пар нет: время вне осеннего семестра." + tail
 
     parts = [head]
@@ -139,6 +148,12 @@ def status_answer(st: Status) -> str:
             f"▶️ <b>Сейчас идёт</b> (до конца {minutes(left)}):\n\n"
             + "\n\n".join(lesson_block(g) for g in group_by_time(st.current))
         )
+    elif not st.today:
+        # Суббота, воскресенье и понедельник первой недели: пар не было ни
+        # одной, и «закончились» звучало бы так, будто студент их проспал.
+        parts.append("🎉 <b>Сегодня пар нет.</b>")
+    elif st.moment < st.today[0].starts_at:
+        parts.append(f"🌅 <b>Пары ещё не начались.</b> Первая через {minutes(st.minutes_until)}.")
     elif st.following and st.next_is_today:
         parts.append(f"☕️ <b>Сейчас перемена.</b> До следующей пары {minutes(st.minutes_until)}.")
     else:
