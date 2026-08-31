@@ -28,9 +28,15 @@ router = Router()
 
 
 async def answer(message: Message, text: str) -> None:
-    """Отправка с учётом лимита длины сообщения Telegram."""
+    """Отправка с учётом лимита длины сообщения Telegram.
+
+    Клавиатуру прикрепляем только в личке: в группе ReplyKeyboardMarkup
+    меняет поле ввода всем участникам сразу, а расписание там спрашивает
+    один человек.
+    """
+    markup = keyboards.MAIN if message.chat.type == "private" else None
     for chunk in texts.split_message(text):
-        await message.answer(chunk, reply_markup=keyboards.MAIN)
+        await message.answer(chunk, reply_markup=markup)
 
 
 @router.message(CommandStart())
@@ -112,8 +118,7 @@ async def pick_day(call: CallbackQuery) -> None:
     if not 0 <= weekday <= 5 or call.message is None:
         return
     day = monday_of_week(current_week()) + timedelta(days=weekday)
-    for chunk in texts.split_message(texts.day_answer(day, logic.occurrences(day))):
-        await call.message.answer(chunk, reply_markup=keyboards.MAIN)
+    await answer(call.message, texts.day_answer(day, logic.occurrences(day)))
 
 
 @router.message(Command("date"))
