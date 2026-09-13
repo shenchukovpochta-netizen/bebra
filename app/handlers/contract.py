@@ -23,6 +23,7 @@ from .. import i18n
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
+from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
 from ..services import contract as contract_service
@@ -164,7 +165,7 @@ async def issue(bot: Bot, db: Database, cfg: Config, vault: Vault, tg_id: int) -
 
 @router.callback_query(StateIs(logic.WAIT_SIGN), F.data == "sign")
 async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
-                  vault: Vault, user: dict) -> None:
+                  vault: Vault, user: dict, crm: Any = None) -> None:
     """Простая электронная подпись: факт нажатия, момент и отпечаток текста.
 
     Договор пересобирается с проставленной датой подписания, поэтому отпечаток
@@ -212,6 +213,10 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 
     await db.log_event(tg_id, "contract_signed", {"number": number})
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
+    if crm is not None:
+        # Карточка клиента в CRM: подписанный договор - момент, когда
+        # человек становится клиентом, а не заявкой.
+        await crm_sync.on_contract_signed(crm, {**data, "contract_no": number})
 
     if docs_ok:
         old_path = data.get("contract_path")
@@ -602,7 +607,8 @@ async def send_act_in(bot: Bot, db: Database, cfg: Config, data: dict,
 
 @router.callback_query(StateIs(logic.WAIT_ACT_SIGN), F.data == "act_sign")
 async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
-                      cfg: Config, vault: Vault, user: dict) -> None:
+                      cfg: Config, vault: Vault, user: dict,
+                      crm: Any = None) -> None:
     """Подпись Акта приёма-передачи: с этого момента имущество передано."""
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_ACT_SIGN,
@@ -643,6 +649,9 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
     await db.log_event(tg_id, "act_in_signed", {"number": number})
     # Аренда началась - отсчёт хранения заново, от последней активности.
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
+    if crm is not None:
+        # Имущество передано - в CRM появляется аренда и первое начисление.
+        await crm_sync.on_rental_started(crm, data, today=signed_at.date())
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
@@ -754,7 +763,8 @@ async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
 
 @router.callback_query(StateIs(logic.WAIT_RETURN_SIGN), F.data == "return_sign")
 async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
-                         cfg: Config, vault: Vault, user: dict) -> None:
+                         cfg: Config, vault: Vault, user: dict,
+                         crm: Any = None) -> None:
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_RETURN_SIGN,
                           state=logic.APPROVED, act_out_signed_at=signed_at):
@@ -788,6 +798,8 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
     if old_path and old_path != str(path):
         files.remove(old_path)      # акт прошлого цикла, ссылки на него уже нет
     await db.log_event(tg_id, "act_out_signed", {"number": number})
+    if crm is not None:
+        await crm_sync.on_rental_closed(crm, data, today=signed_at.date())
     # Аренда закрыта - хранение отсчитывается от закрытия, а не от подписи
     # договора: иначе долгая аренда пережила бы собственные документы.
     await db.set_purge_after(tg_id, cfg.purge_approved_days)

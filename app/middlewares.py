@@ -66,10 +66,14 @@ def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
 
 
 class PipelineMiddleware(BaseMiddleware):
-    def __init__(self, db: Database, cfg: Config, vault: Vault) -> None:
+    def __init__(self, db: Database, cfg: Config, vault: Vault,
+                 crm: Any = None) -> None:
         self.db = db
         self.cfg = cfg
         self.vault = vault
+        # Доступ к схеме CRM (кабинет клиента, синхронизация). None - бот
+        # работает без CRM: кабинет отвечает «недоступен», хуки молчат.
+        self.crm = crm
 
     def _is_service_chat(self, chat_id: int) -> bool:
         """Служебные чаты: модерация заявок и утверждение договоров.
@@ -134,6 +138,7 @@ class PipelineMiddleware(BaseMiddleware):
         data["db"] = self.db
         data["cfg"] = self.cfg
         data["vault"] = self.vault
+        data["crm"] = self.crm
 
         # Модерация идёт мимо всего пользовательского конвейера: у админа нет
         # анкеты, рейт-лимит и подписка к нему не относятся.

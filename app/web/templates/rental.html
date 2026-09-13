@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Аренда #{{ rental.id }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Аренда #{{ rental.id }} <span class="tag {{ rental.status }}">{{ RENTAL_STATUSES[rental.status] }}</span></h1></div>
+<div class="cols">
+<section class="card">
+  <h2>Условия</h2>
+  <dl>
+    <dt>Клиент</dt><dd><a href="/clients/{{ rental.client_id }}">{{ rental.full_name }}</a> · {{ rental.phone }}</dd>
+    <dt>Велосипед</dt><dd>{% if rental.bike_id %}<a href="/bikes/{{ rental.bike_id }}">{{ rental.bike_code }}</a> {{ rental.bike_model }}{% else %}<span class="muted">не указан</span>{% endif %}</dd>
+    <dt>Тариф</dt><dd>{{ rental.tariff_name }} — {{ money(rental.price) }} / {{ rental.period_days }} дн., {{ BILLING[rental.billing] }}</dd>
+    <dt>Договор</dt><dd>{{ rental.contract_no or '—' }}</dd>
+    <dt>Начало</dt><dd>{{ rental.started_on|dmy }}</dd>
+    <dt>Начислено по</dt><dd>{{ rental.billed_until|dmy }}</dd>
+    <dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>
+    <dt>Баланс клиента</dt><dd class="{% if rental.balance < 0 %}bad{% endif %}"><b>{{ money(rental.balance) }}</b></dd>
+    {% if rental.closed_on %}<dt>Закрыта</dt><dd>{{ rental.closed_on|dmy }}{% if rental.close_note %} — {{ rental.close_note }}{% endif %}</dd>{% endif %}
+    <dt>Оформил</dt><dd class="muted">{{ rental.created_by or '—' }} · {{ rental.created_at|dmy }}</dd>
+  </dl>
+</section>
+{% if rental.status == 'active' %}
+<section class="card">
+  <h2>Сменить тариф</h2>
+  <form method="post" action="/rentals/{{ rental.id }}/tariff" class="grid2">
+    <label>Тариф <select name="tariff_id">{% for t in tariffs %}<option value="{{ t.id }}" {% if t.id == rental.tariff_id %}selected{% endif %}>{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}</select></label>
+    <label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <button type="submit">Применить со следующего периода</button>
+  </form>
+  <h2>Закрыть аренду</h2>
+  <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
+    <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
+    <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option></select></label>
+    <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
+    <button type="submit" class="danger">Закрыть</button>
+  </form>
+  <p class="muted">Начисления останавливаются, неиспользованный остаток периода не возвращается автоматически — при необходимости добавьте корректировку в карточке клиента.</p>
+</section>
+{% endif %}
+</div>
+<section class="card">
+  <h2>Начисления по аренде</h2>
+  <table>
+    <tr><th>Дата</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Заметка</th></tr>
+    {% for x in ledger %}
+    <tr><td>{{ x.created_at|dmy }}</td><td>{{ KINDS.get(x.kind, x.kind) }}</td>
+      <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}">{{ money_signed(x.amount) }}</td>
+      <td>{{ period_label(x.period_from, x.period_to) }}</td><td>{{ x.note or '' }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Начислений нет.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

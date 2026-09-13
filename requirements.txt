@@ -8,3 +8,10 @@ asyncpg>=0.30
 cryptography>=42
 # Договор собирается заполнением docx-шаблона стандартными zipfile и re -
 # отдельной библиотеки для этого не нужно.
+# Веб-панель CRM (python -m app.web): страницы на Jinja2, формы через
+# python-multipart, cookie сессии подписывает itsdangerous.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+itsdangerous>=2.1

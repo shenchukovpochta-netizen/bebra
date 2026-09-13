@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{{ app_title }}{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{% if staff %}
+<header class="top">
+  <a class="brand" href="/">🚲 {{ app_title }}</a>
+  <nav>
+    <a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>
+    <a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>
+    <a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>
+    <a href="/bikes" {% if request.url.path.startswith('/bikes') %}class="on"{% endif %}>Парк</a>
+    <a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>
+    <a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>
+    <a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>
+    <a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>
+    <a href="/staff" {% if request.url.path.startswith('/staff') %}class="on"{% endif %}>{{ staff.name or staff.login }}</a>
+  </nav>
+</header>
+{% endif %}
+<main>
+{% for kind, text in flash %}
+  <div class="flash {{ kind }}">{{ text }}</div>
+{% endfor %}
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

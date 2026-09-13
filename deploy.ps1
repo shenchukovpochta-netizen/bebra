@@ -36,22 +36,42 @@ if (-not $SkipTests) {
 # не уедут на сервер по случайности.
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
           'schema.sql', 'bootstrap.sh', 'install.sh', '.env.example', '.gitignore',
-          'README.md', 'INSTALL.md', 'GUIDE.md', 'instrukciya-po-botu.html',
+          'README.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'instrukciya-po-botu.html',
           'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
          'app/logic.py', 'app/faq.py', 'app/faq_i18n.py', 'app/texts.py',
-         'app/i18n/__init__.py', 'app/i18n/en.py', 'app/i18n/uz.py',
-         'app/i18n/tk.py', 'app/i18n/ar.py', 'app/i18n/fa.py',
-         'app/i18n/hi.py', 'app/i18n/cv.py', 'app/i18n/tt.py',
          'app/keyboards.py',
          'app/middlewares.py',
          'app/filters.py', 'app/tasks.py', 'app/contract_template.docx',
          'app/act_priema_template.docx', 'app/act_vozvrata_template.docx', 'app/act_vykup_template.docx',
          'app/soglasie_template.docx', 'app/pdn_policy.docx')
+# Переводы - отдельным списком: scp кладёт файлы в указанный каталог,
+# и из общего списка $app они уезжали бы в app/, а не в app/i18n/.
+$i18n = @('app/i18n/__init__.py', 'app/i18n/en.py', 'app/i18n/uz.py',
+          'app/i18n/tk.py', 'app/i18n/ar.py', 'app/i18n/fa.py',
+          'app/i18n/hi.py', 'app/i18n/cv.py', 'app/i18n/tt.py')
 $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
-              'app/handlers/contract.py', 'app/handlers/faq.py')
+              'app/handlers/contract.py', 'app/handlers/faq.py',
+              'app/handlers/cabinet.py')
+# CRM: логика, база, биллинг, синхронизация с ботом; веб-панель со шаблонами.
+$crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
+         'app/crm/billing.py', 'app/crm/service.py', 'app/crm/notify.py',
+         'app/crm/sync.py')
+$web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
+         'app/web/config.py')
+$webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
+                  'app/web/templates/login.html', 'app/web/templates/missing.html',
+                  'app/web/templates/dashboard.html', 'app/web/templates/clients.html',
+                  'app/web/templates/client.html', 'app/web/templates/client_form.html',
+                  'app/web/templates/bikes.html', 'app/web/templates/bike.html',
+                  'app/web/templates/bike_form.html', 'app/web/templates/rentals.html',
+                  'app/web/templates/rental.html', 'app/web/templates/rental_form.html',
+                  'app/web/templates/tariffs.html', 'app/web/templates/finance.html',
+                  'app/web/templates/claims.html', 'app/web/templates/reports.html',
+                  'app/web/templates/staff.html')
+$webStatic = @('app/web/static/style.css')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
@@ -59,14 +79,17 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
-          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py')
+          'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
+          'tests/fake_crm.py', 'tests/test_crm_logic.py', 'tests/test_crm_sql.py',
+          'tests/test_cabinet.py', 'tests/test_web.py')
 
-foreach ($f in ($root + $app + $handlers + $services + $max + $tests)) {
+foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
+                $webTemplates + $webStatic + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static' '$Path/tests'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -74,12 +97,22 @@ scp $root      "${Server}:${Path}/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (корень) не удался' }
 scp $app       "${Server}:${Path}/app/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (app) не удался' }
+scp $i18n      "${Server}:${Path}/app/i18n/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (i18n) не удался' }
 scp $handlers  "${Server}:${Path}/app/handlers/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (handlers) не удался' }
 scp $services  "${Server}:${Path}/app/services/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (services) не удался' }
 scp $max       "${Server}:${Path}/app/max/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (max) не удался' }
+scp $crm       "${Server}:${Path}/app/crm/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (crm) не удался' }
+scp $web       "${Server}:${Path}/app/web/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (web) не удался' }
+scp $webTemplates "${Server}:${Path}/app/web/templates/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (web/templates) не удался' }
+scp $webStatic "${Server}:${Path}/app/web/static/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (web/static) не удался' }
 scp $tests     "${Server}:${Path}/tests/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (tests) не удался' }
 

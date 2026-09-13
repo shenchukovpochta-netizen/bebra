@@ -68,6 +68,13 @@ BUTTONS_RU: dict[str, str] = {
     "BTN_PAY": "💳 Оплатить",
     "BTN_PAID": "✅ Я оплатил(а)",
     "BTN_RETURN_SIGN": "✍️ Подтверждаю",
+    # Кабинет клиента (CRM)
+    "BTN_CABINET": "🚲 Мой кабинет",
+    "BTN_CAB_TOPUP": "💳 Пополнить баланс",
+    "BTN_CAB_HISTORY": "🧾 История",
+    "BTN_CAB_CONTRACT": "📄 Договор",
+    "BTN_CAB_REFRESH": "🔄 Обновить",
+    "BTN_CAB_BACK": "◀️ Назад",
 }
 
 # Кнопки reply-клавиатур, чьё нажатие приходит текстом сообщения: только
@@ -75,7 +82,7 @@ BUTTONS_RU: dict[str, str] = {
 # callback'ами, им обратный поиск не нужен.
 _TEXT_BUTTONS = ("BTN_RENT", "BTN_TRIPS", "BTN_TARIFFS", "BTN_SUPPORT",
                  "BTN_FAQ", "BTN_CLOSE_RENT", "BTN_CANCEL", "BTN_SAME_ADDRESS",
-                 "BTN_SHARE_CONTACT")
+                 "BTN_SHARE_CONTACT", "BTN_CABINET")
 
 
 def norm(lang: str | None) -> str:

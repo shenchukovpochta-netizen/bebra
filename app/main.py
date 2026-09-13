@@ -16,11 +16,14 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
+from .crm.db import CrmDB
 from .db import Database
-from .handlers import contract, faq, menu, moderation, registration
+from .handlers import cabinet, contract, faq, menu, moderation, registration
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
@@ -57,16 +60,23 @@ async def run() -> None:
     db = await Database.connect(cfg.pg)
     await db.apply_schema(Path(__file__).resolve().parent.parent / "schema.sql")
     log.info("схема применена")
+    # CRM живёт в той же базе (схема crm) и на том же пуле: кабинет клиента
+    # и синхронизация бот -> CRM работают без отдельного подключения.
+    crm = CrmDB(db.pool)
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
     log.info("бот @%s готов", me.username)
 
     dp = Dispatcher()
-    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault))
+    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault, crm))
     # Порядок важен: модерация раньше регистрации, иначе клик админа
     # провалится в пользовательский сценарий. Договор - до регистрации,
     # чтобы «Подписываю» не поймала ловушка шага. menu - последним.
+    # Кабинет - первым: /cabinet должен открываться из любого шага анкеты,
+    # а ответ оператора суммой на карточку заявки - не доехать до общего
+    # обработчика реплаев модерации.
+    dp.include_router(cabinet.router)
     dp.include_router(moderation.router)
     dp.include_router(contract.router)
     dp.include_router(registration.router)
@@ -77,7 +87,15 @@ async def run() -> None:
 
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
     reminders = asyncio.create_task(
-        tasks.reminders_loop(bot, db, cfg, vault))
+        tasks.reminders_loop(bot, db, cfg, vault, crm))
+    # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Начать / меню"),
+            BotCommand(command="cabinet", description="🚲 Мой кабинет"),
+        ])
+    except TelegramAPIError:
+        log.warning("не удалось задать список команд бота")
 
     # docker stop шлёт SIGTERM. Без обработчика процесс умирает мгновенно:
     # фоновые задачи (сохранение скана, хэш) обрываются на полуслове,

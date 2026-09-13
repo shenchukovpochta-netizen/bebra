@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bar"><h1>Тарифы</h1></div>
+<div class="cols">
+<section class="card">
+  <table>
+    <tr><th>Название</th><th>Период</th><th>Цена</th><th>Заметка</th><th></th></tr>
+    {% for t in rows %}
+    <tr class="{% if not t.active %}muted{% endif %}">
+      <form method="post" action="/tariffs/{{ t.id }}">
+      <td><input name="name" value="{{ t.name }}"></td>
+      <td><input name="period_days" value="{{ t.period_days }}" size="3"> дн.</td>
+      <td><input name="price" value="{{ t.price }}" size="7"> ₽</td>
+      <td><input name="note" value="{{ t.note or '' }}"></td>
+      <td class="actions"><button type="submit" class="ghost">Сохранить</button>
+          <button type="submit" name="action" value="toggle" class="ghost">{{ 'Выключить' if t.active else 'Включить' }}</button></td>
+      </form>
+    </tr>
+    {% else %}<tr><td colspan="5" class="muted">Тарифов пока нет.</td></tr>{% endfor %}
+  </table>
+</section>
+<section class="card narrow">
+  <h2>Новый тариф</h2>
+  <form method="post" action="/tariffs">
+    <label>Название <input name="name" placeholder="Неделя, Truck+" required></label>
+    <label>Период, дней <input name="period_days" type="number" min="1" max="366" value="7" required></label>
+    <label>Цена за период <input name="price" inputmode="decimal" placeholder="3000" required></label>
+    <label>Заметка <input name="note"></label>
+    <button type="submit">Добавить</button>
+  </form>
+  <p class="muted">Идущие аренды хранят свою копию цены и периода: правка тарифа их не меняет. Выключенный тариф не предлагается при оформлении, но остаётся в истории.</p>
+</section>
+</div>
+{% endblock %}

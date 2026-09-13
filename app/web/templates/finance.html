@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bar">
+  <h1>Финансы</h1>
+  <form method="get" class="search">
+    <input name="since" type="date" value="{{ since|iso }}">
+    <input name="until" type="date" value="{{ until|iso }}">
+    <select name="kind"><option value="">все виды</option>{% for code, label in KINDS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <button type="submit">Показать</button>
+  </form>
+</div>
+<div class="tiles">
+  <div class="tile"><b>{{ money(totals.get('payment', 0)) }}</b><span>платежи</span></div>
+  <div class="tile"><b>{{ money(-totals.get('charge', 0)) }}</b><span>начисления</span></div>
+  <div class="tile"><b>{{ money(-totals.get('fine', 0)) }}</b><span>штрафы / ремонт</span></div>
+  <div class="tile"><b>{{ money(-totals.get('refund', 0)) }}</b><span>возвраты</span></div>
+  <div class="tile"><b>{{ money(totals.get('adjust', 0)) }}</b><span>корректировки</span></div>
+</div>
+<div class="card">
+<table>
+  <tr><th>Дата</th><th>Клиент</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th>Кто</th></tr>
+  {% for x in rows %}
+  <tr>
+    <td>{{ x.created_at|dmy }}</td>
+    <td><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a></td>
+    <td>{{ KINDS.get(x.kind, x.kind) }}</td>
+    <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}">{{ money_signed(x.amount) }}</td>
+    <td>{{ period_label(x.period_from, x.period_to) }}</td>
+    <td>{{ METHODS.get(x.method, x.method or '') }}</td>
+    <td>{{ x.note or '' }}</td>
+    <td class="muted">{{ x.created_by or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="muted">За период записей нет.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

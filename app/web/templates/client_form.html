@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+<h1>Новый клиент</h1>
+<form method="post" action="/clients">
+  <label>ФИО <input name="full_name" required></label>
+  <label>Телефон <input name="phone" placeholder="+7 900 123-45-67" required></label>
+  <label>Номер договора <input name="contract_no"></label>
+  <label>Статус <select name="status">{% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+  <label>Заметка <textarea name="note" rows="3"></textarea></label>
+  <button type="submit">Сохранить</button>
+</form>
+<p class="muted">Клиент, прошедший регистрацию в боте, появляется здесь сам после подписания договора. Заводить руками нужно только тех, кто пришёл мимо бота; они привяжут Telegram, отправив боту /cabinet и свой контакт.</p>
+</div>
+{% endblock %}

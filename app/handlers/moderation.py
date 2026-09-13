@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -17,6 +18,7 @@ from .. import i18n
 from .. import keyboards as kb
 from .. import logic, texts
 from ..config import Config
+from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import ServiceChatReply
 from ..services.crypto import Vault
@@ -96,7 +98,7 @@ async def cb_approve(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
 
 @router.callback_query(F.data.regexp(r"^pay:-?\d+$"))
 async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
-                 vault: Vault) -> None:
+                 vault: Vault, crm: Any = None) -> None:
     """«Оплата получена»: перевести клиента с оплаты на Акт приёма-передачи.
 
     Кнопка живёт на карточке оплаты в служебном чате. Подтверждение - только
@@ -149,8 +151,16 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 
     if extend_until:
         await _apply_extension(bot, db, target, before, extend_until)
+        if crm is not None:
+            await crm_sync.on_rental_extended(crm, before, until=extend_until,
+                                              by=f"tg:{callback.from_user.id}")
         return
 
+    if crm is not None:
+        # Платёж в журнал CRM. Аренда там появится после подписи акта
+        # приёма - и спишет этот платёж первым начислением.
+        await crm_sync.on_payment_confirmed(crm, before,
+                                            by=f"tg:{callback.from_user.id}")
     await _notify(bot, db, target, "PAY_CONFIRMED_USER")
     row = await db.get_user(target)
     data = dict(row) if row else before

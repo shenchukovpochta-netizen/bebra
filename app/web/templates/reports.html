@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bar"><h1>Отчёты</h1></div>
+<div class="tiles">
+  <div class="tile"><b>{{ utilization }}%</b><span>загрузка парка: {{ rented }} из {{ fleet }}</span></div>
+  <div class="tile"><b>{{ bikes.get('repair', 0) }}</b><span>в ремонте</span></div>
+  <div class="tile"><b>{{ debtors|length }}</b><span>должников</span></div>
+</div>
+<div class="cols">
+<section class="card">
+  <h2>По месяцам</h2>
+  <table>
+    <tr><th>Месяц</th><th>Поступило</th><th>Начислено</th><th>Возвраты</th><th>Ремонт</th></tr>
+    {% for m in months %}
+    <tr><td>{{ m.month.strftime('%m.%Y') }}</td><td class="num ok">{{ money(m.paid) }}</td>
+      <td class="num">{{ money(m.charged) }}</td><td class="num">{{ money(m.refunded) }}</td><td class="num">{{ money(m.repairs) }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Данных пока нет.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">«Поступило» — реальные деньги; «Начислено» — заработанное по тарифам и штрафам. Разница между ними накапливается в балансах клиентов.</p>
+</section>
+<section class="card">
+  <h2>Должники</h2>
+  <table>
+    <tr><th>Клиент</th><th>Телефон</th><th>Долг</th></tr>
+    {% for d in debtors %}
+    <tr><td><a href="/clients/{{ d.id }}">{{ d.full_name }}</a>{% if d.status != 'active' %} <span class="tag bad">{{ CLIENT_STATUSES[d.status] }}</span>{% endif %}</td><td>{{ d.phone }}</td><td class="num bad">{{ money(d.balance) }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">Долгов нет.</td></tr>{% endfor %}
+  </table>
+</section>
+</div>
+{% endblock %}

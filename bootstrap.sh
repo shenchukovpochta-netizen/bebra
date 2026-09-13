@@ -78,6 +78,17 @@ fi
 if [ ! -s secrets/bot_token ]; then
   die "нет secrets/bot_token. Создайте: printf '%s' '<токен>' > secrets/bot_token"
 fi
+# Веб-панель CRM: ключ подписи cookie и пароль первого администратора.
+# Пароль нужен один раз - при пустой таблице сотрудников; дальше живёт
+# в базе, и файл можно удалить после первого входа.
+if [ ! -s secrets/crm_secret ]; then
+  openssl rand -hex 32 | tr -d '\n' > secrets/crm_secret
+  say "сгенерирован secrets/crm_secret"
+fi
+if [ ! -s secrets/crm_admin_password ]; then
+  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14 > secrets/crm_admin_password
+  say "сгенерирован пароль панели CRM: secrets/crm_admin_password"
+fi
 # Пустой файл-заглушка: compose объявляет секрет max_bot_token на уровне
 # файла, и отсутствие файла ломало бы запуск даже тем, кто MAX не включал.
 # Реальный токен кладётся сюда только при включении профиля max.

@@ -712,7 +712,8 @@ def reject_back_to(code: str, anketa: dict | None, *,
     return back_to
 
 
-MODERATION_DATA = re.compile(r"^(?:approve|reject|rj|rjc|rjx|pay):-?\d+(?::[a-z]+)?$")
+MODERATION_DATA = re.compile(
+    r"^(?:approve|reject|rj|rjc|rjx|pay|crmpay):-?\d+(?::[a-z]+)?$")
 
 
 def is_moderation_data(data: str | None) -> bool:
@@ -723,6 +724,8 @@ def is_moderation_data(data: str | None) -> bool:
     approve/reject, кнопки выбора причины отказа отбрасывались как чужие -
     в группе они не доходили до обработчика вообще. «pay» - кнопка
     «Оплата получена» на карточке оплаты: живёт в тех же служебных чатах.
+    «crmpay» - кнопки зачисления и отказа на карточке заявки из кабинета
+    клиента (CRM) - там же.
     """
     return bool(data) and MODERATION_DATA.fullmatch(data) is not None
 

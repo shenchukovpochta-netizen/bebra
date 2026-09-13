@@ -15,7 +15,11 @@ build-backend = "setuptools.build_meta"
 dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools]
-packages = ["app", "app.handlers", "app.services"]
+packages = ["app", "app.handlers", "app.services", "app.i18n", "app.max",
+            "app.crm", "app.web"]
+
+[tool.setuptools.package-data]
+"app.web" = ["templates/*.html", "static/*.css"]
 
 [project.scripts]
 bot = "app.main:main"

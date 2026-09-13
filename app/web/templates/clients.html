@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bar">
+  <h1>Клиенты</h1>
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="ФИО, телефон, договор">
+    <select name="status"><option value="">все статусы</option>
+      {% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+    <button type="submit">Найти</button>
+  </form>
+  <a class="btn" href="/clients/new">+ Клиент</a>
+</div>
+<div class="card">
+<table>
+  <tr><th>Клиент</th><th>Телефон</th><th>Telegram</th><th>Аренда</th><th>Оплачено</th><th>Баланс</th></tr>
+  {% for c in rows %}
+  <tr>
+    <td><a href="/clients/{{ c.id }}">{{ c.full_name }}</a>
+      {% if c.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[c.status] }}</span>{% endif %}</td>
+    <td>{{ c.phone }}</td>
+    <td>{% if c.tg_id %}✅{% if c.username %} @{{ c.username }}{% endif %}{% else %}<span class="muted">не привязан</span>{% endif %}</td>
+    <td>{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}</td>
+    <td class="num {% if c.balance < 0 %}bad{% endif %}">{{ money(c.balance) }}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="muted">Никого не найдено.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

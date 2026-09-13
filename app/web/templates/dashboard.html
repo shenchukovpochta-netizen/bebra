@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="tiles">
+  <a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>
+  <a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>
+  <a class="tile" href="/bikes?status=available"><b>{{ bikes.get('available', 0) }}</b><span>свободных из {{ counts.bikes }}</span></a>
+  <a class="tile {% if counts.claims %}hot{% endif %}" href="/claims"><b>{{ counts.claims }}</b><span>заявок на зачисление</span></a>
+  <div class="tile"><b>{{ money(month.get('payment', 0)) }}</b><span>поступило за месяц</span></div>
+  <div class="tile"><b>{{ money(-(month.get('charge', 0) + month.get('fine', 0))) }}</b><span>начислено за месяц</span></div>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Требуют внимания</h2>
+  {% if attention %}
+  <table>
+    <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th><th>Баланс</th></tr>
+    {% for r in attention %}
+    <tr>
+      <td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% if not r.tg_id %} <span class="muted" title="без Telegram">·</span>{% endif %}</td>
+      <td>{{ r.bike_code or '—' }}</td>
+      <td>{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}</td>
+      <td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Все аренды оплачены, платежей на ближайшие дни нет.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Заявки на зачисление</h2>
+  {% if claims %}
+  <table>
+    <tr><th>#</th><th>Клиент</th><th>Ожидается</th><th>Чек</th><th></th></tr>
+    {% for c in claims %}
+    <tr>
+      <td>{{ c.id }}</td>
+      <td><a href="/clients/{{ c.client_id }}">{{ c.full_name }}</a><br><small class="muted">{{ c.created_at|dmy }}</small></td>
+      <td class="num">{{ money(c.amount_hint) }}</td>
+      <td>{% if c.receipt_file_id %}есть{% else %}—{% endif %}</td>
+      <td><a class="btn" href="/claims">Обработать</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Открытых заявок нет.</p>{% endif %}
+</section>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Парк</h2>
+  <ul class="inline">
+    {% for code, label in BIKE_STATUSES.items() %}
+      <li><a href="/bikes?status={{ code }}">{{ label }}: <b>{{ bikes.get(code, 0) }}</b></a></li>
+    {% endfor %}
+  </ul>
+  <p><a class="btn" href="/rentals/new">+ Оформить аренду</a> <a class="btn ghost" href="/clients/new">+ Клиент</a> <a class="btn ghost" href="/bikes/new">+ Велосипед</a></p>
+</section>
+<section class="card">
+  <h2>Должники</h2>
+  {% if debtors %}
+  <table>{% for d in debtors %}<tr><td><a href="/clients/{{ d.id }}">{{ d.full_name }}</a></td><td class="num bad">{{ money(d.balance) }}</td></tr>{% endfor %}</table>
+  {% else %}<p class="muted">Долгов нет.</p>{% endif %}
+  <form method="post" action="/billing/run" class="inline-form">
+    <button class="ghost" type="submit" title="Начислить наступившие периоды прямо сейчас, не дожидаясь ночного прохода">Начислить сейчас</button>
+    <small class="muted">Начисления идут сами раз в сутки; кнопка — если нужно увидеть новый период немедленно.</small>
+  </form>
+</section>
+</div>
+{% endblock %}

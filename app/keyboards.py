@@ -259,8 +259,11 @@ def faq_entry(lang: str = "ru") -> InlineKeyboardMarkup:
 
 
 def main_menu(lang: str = "ru") -> ReplyKeyboardMarkup:
+    # Кабинет - первой строкой на всю ширину: баланс и «оплачено до» клиент
+    # смотрит чаще всего остального, и искать кнопку он не должен.
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text=i18n.t(lang, "BTN_CABINET"))],
             [KeyboardButton(text=i18n.t(lang, "BTN_RENT")),
              KeyboardButton(text=i18n.t(lang, "BTN_TRIPS"))],
             [KeyboardButton(text=i18n.t(lang, "BTN_TARIFFS")),
@@ -273,3 +276,63 @@ def main_menu(lang: str = "ru") -> ReplyKeyboardMarkup:
 
 
 remove = ReplyKeyboardRemove
+
+
+# ─────────────────────── кабинет клиента (CRM) ───────────────────────
+# callback «cab:...» - экраны кабинета у клиента, «crmpay:<id>:ok|no» -
+# кнопки оператора на карточке заявки о зачислении (служебный чат).
+
+def cabinet(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_TOPUP"), callback_data="cab:pay")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_HISTORY"),
+                              callback_data="cab:history"),
+         InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_CONTRACT"),
+                              callback_data="cab:contract")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REFRESH"), callback_data="cab:home")],
+    ])
+
+
+def cab_pay(pay_url: str = "", lang: str = "ru") -> InlineKeyboardMarkup:
+    """Экран пополнения: ссылка на оплату, «я оплатил», назад.
+
+    Кнопка-ссылка только при похожем на URL значении: Telegram отвергает
+    сообщение целиком из-за кнопки с битым url (см. paid()).
+    """
+    rows = []
+    if pay_url.startswith(("http://", "https://")):
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAY"), url=pay_url)])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAID"),
+                                      callback_data="cab:paid")])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"),
+                                      callback_data="cab:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cab_back(lang: str = "ru") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"), callback_data="cab:home")],
+    ])
+
+
+def cab_topup(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Под напоминанием об оплате - сразу в пополнение."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_TOPUP"), callback_data="cab:pay")],
+    ])
+
+
+def cabinet_entry(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Под уведомлением о зачислении или новой аренде - открыть кабинет."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CABINET"), callback_data="cab:home")],
+    ])
+
+
+def claim_confirm(claim_id: int, amount_text: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Зачислить {amount_text}",
+                              callback_data=f"crmpay:{claim_id}:ok"),
+         InlineKeyboardButton(text="❌ Отклонить",
+                              callback_data=f"crmpay:{claim_id}:no")],
+    ])

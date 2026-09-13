@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bar"><h1>Заявки на зачисление</h1></div>
+<div class="card">
+<p class="muted">Клиент нажал «Я оплатил(а)» в кабинете. Сверьте поступление в банке и зачислите фактическую сумму — клиент получит уведомление с новой датой «оплачено до». Те же кнопки есть на карточке заявки в служебном чате Telegram.</p>
+<table>
+  <tr><th>#</th><th>Когда</th><th>Клиент</th><th>Баланс</th><th>Ожидается</th><th>Чек</th><th>Зачислить</th><th></th></tr>
+  {% for c in rows %}
+  <tr>
+    <td>{{ c.id }}</td>
+    <td>{{ c.created_at|dmy }}</td>
+    <td><a href="/clients/{{ c.client_id }}">{{ c.full_name }}</a><br><small class="muted">{{ c.phone }}</small></td>
+    <td class="num {% if c.balance < 0 %}bad{% endif %}">{{ money(c.balance) }}</td>
+    <td class="num">{{ money(c.amount_hint) }}</td>
+    <td>{% if c.receipt_file_id %}прислан в чат{% else %}—{% endif %}</td>
+    <td>
+      <form method="post" action="/claims/{{ c.id }}/confirm" class="inline-form">
+        <input name="amount" value="{{ c.amount_hint or '' }}" size="7" inputmode="decimal">
+        <select name="method">{% for code, label in METHODS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
+        <button type="submit">Зачислить</button>
+      </form>
+    </td>
+    <td><form method="post" action="/claims/{{ c.id }}/reject"><button type="submit" class="ghost danger">Отклонить</button></form></td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="muted">Открытых заявок нет.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

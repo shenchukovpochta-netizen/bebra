@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Вход — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>🚲 {{ app_title }}</h1>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>Логин <input name="login" autocomplete="username" autofocus required></label>
+    <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Войти</button>
+  </form>
+</div>
+{% endblock %}

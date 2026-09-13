@@ -87,7 +87,8 @@ if ghost:
 # ── 4. колонки, используемые в коде, против схемы ────────────────────────
 code = "\n".join(read(p.relative_to(ROOT).as_posix())
                  for p in (ROOT / "app").rglob("*.py"))
-schema_cols = set(re.findall(r"^\s{2,}(\w+)\s+(?:bigint|text|jsonb|numeric|timestamptz|integer|bigserial)",
+schema_cols = set(re.findall(r"^\s{2,}(\w+)\s+(?:bigint|text|jsonb|numeric|timestamptz|integer"
+                             r"|bigserial|date|boolean)",
                              schema, re.M))
 schema_cols |= set(re.findall(r"add column if not exists\s+(\w+)", schema))
 used = set(re.findall(r'"(\w+)"\s*:', "")) | set(re.findall(r"bot\.users\s+set\s+(\w+)", code))

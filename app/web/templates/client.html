@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ client.full_name }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar">
+  <h1>{{ client.full_name }}
+    {% if client.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[client.status] }}</span>{% endif %}</h1>
+  {% if not rental and client.status == 'active' %}<a class="btn" href="/rentals/new?client={{ client.id }}">Оформить аренду</a>{% endif %}
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Состояние</h2>
+  <dl>
+    <dt>Баланс</dt><dd class="{% if balance < 0 %}bad{% endif %}"><b>{{ money(balance) }}</b></dd>
+    <dt>Аренда</dt><dd>{% if rental %}<a href="/rentals/{{ rental.id }}">{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}</a> · {{ rental.tariff_name }} — {{ money(rental.price) }} / {{ rental.period_days }} дн. ({{ BILLING[rental.billing] }}){% else %}<span class="muted">нет</span>{% endif %}</dd>
+    <dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>
+    <dt>Телефон</dt><dd>{{ client.phone }}</dd>
+    <dt>Telegram</dt><dd>{% if client.tg_id %}✅ ID {{ client.tg_id }}{% if client.username %} · @{{ client.username }}{% endif %}{% else %}<span class="muted">не привязан — клиент отправляет боту /cabinet и делится контактом</span>{% endif %}</dd>
+    <dt>Договор</dt><dd>{{ client.contract_no or '—' }}{% if has_contract %} · <a href="/clients/{{ client.id }}/contract">скачать подписанный</a>{% endif %}</dd>
+    {% if bot_user %}<dt>В боте</dt><dd>статус {{ bot_user.status }}, шаг {{ bot_user.state }}{% if bot_user.rent_until %}, срок по форме выдачи до {{ bot_user.rent_until|dmy }}{% endif %}</dd>{% endif %}
+    <dt>Источник</dt><dd>{{ 'из бота' if client.source == 'bot' else 'заведён в панели' }} · {{ client.created_at|dmy }}</dd>
+    {% if claim %}<dt>Заявка</dt><dd class="warn">#{{ claim.id }} на зачисление ждёт проверки — <a href="/claims">обработать</a></dd>{% endif %}
+  </dl>
+</section>
+
+<section class="card">
+  <h2>Записать в журнал</h2>
+  <form method="post" action="/clients/{{ client.id }}/ledger" class="grid2">
+    <label>Вид <select name="kind">
+      <option value="payment">Платёж (приход)</option>
+      <option value="fine">Штраф / ремонт (списание)</option>
+      <option value="refund">Возврат клиенту (списание)</option>
+      <option value="adjust">Корректировка (со знаком)</option>
+    </select></label>
+    <label>Сумма <input name="amount" inputmode="decimal" placeholder="3000" required></label>
+    <label>Способ <select name="method"><option value="">—</option>{% for code, label in METHODS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+    <label>Заметка <input name="note" placeholder="за что"></label>
+    <button type="submit">Записать</button>
+  </form>
+  <p class="muted">Платёж клиенту с привязанным Telegram уходит уведомлением с новой датой «оплачено до». Начисления за периоды делает биллинг сам.</p>
+</section>
+</div>
+
+<section class="card">
+  <h2>Журнал операций</h2>
+  <table>
+    <tr><th>Дата</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th>Кто</th></tr>
+    {% for x in ledger %}
+    <tr>
+      <td>{{ x.created_at|dmy }}</td>
+      <td>{{ KINDS.get(x.kind, x.kind) }}</td>
+      <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}">{{ money_signed(x.amount) }}</td>
+      <td>{{ period_label(x.period_from, x.period_to) }}</td>
+      <td>{{ METHODS.get(x.method, x.method or '') }}</td>
+      <td>{{ x.note or '' }}</td>
+      <td class="muted">{{ x.created_by or '' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="7" class="muted">Записей нет.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<div class="cols">
+<section class="card">
+  <h2>История аренд</h2>
+  <table>
+    <tr><th>#</th><th>Велосипед</th><th>Тариф</th><th>С</th><th>По</th><th>Статус</th></tr>
+    {% for r in rentals %}
+    <tr><td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td><td>{{ r.bike_code or '—' }} {{ r.bike_model or '' }}</td>
+      <td>{{ r.tariff_name }}</td><td>{{ r.started_on|dmy }}</td><td>{{ r.closed_on|dmy if r.closed_on else '' }}</td>
+      <td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
+    {% else %}<tr><td colspan="6" class="muted">Аренд не было.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<section class="card">
+  <h2>Карточка</h2>
+  <form method="post" action="/clients/{{ client.id }}/edit">
+    <label>ФИО <input name="full_name" value="{{ client.full_name }}" required></label>
+    <label>Телефон <input name="phone" value="{{ client.phone }}" required></label>
+    <label>Номер договора <input name="contract_no" value="{{ client.contract_no or '' }}"></label>
+    <label>Статус <select name="status">{% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}" {% if client.status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Заметка <textarea name="note" rows="3">{{ client.note or '' }}</textarea></label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">Чёрный список закрывает кабинет в Telegram и оформление аренды; телефон остаётся в базе, и повторная регистрация с этим номером будет видна здесь.</p>
+</section>
+</div>
+{% endblock %}

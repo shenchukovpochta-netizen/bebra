@@ -316,3 +316,174 @@ create table if not exists bot.events (
   created_at timestamptz not null default now()
 );
 create index if not exists events_tg_idx on bot.events (tg_id, created_at desc);
+
+
+-- ═══════════════════════════════ CRM ═══════════════════════════════
+-- Учёт проката: клиенты, парк, тарифы, аренды, деньги. Живёт в своей
+-- схеме crm и не трогает bot.users: у бота свой цикл (анкета, договор,
+-- акты, ретеншен ПДн), у CRM - свой (баланс, начисления, парк). Связь
+-- между ними - телефон и tg_id клиента, и только в одну сторону:
+-- бот пишет в CRM, CRM в bot.users ничего не меняет.
+--
+-- Персональных данных здесь минимум: ФИО, телефон, номер договора.
+-- Паспортные данные и адреса остаются в зашифрованной анкете бота.
+
+create schema if not exists crm;
+
+-- Сотрудники веб-панели. Пароль - scrypt (см. crm.logic.hash_password).
+create table if not exists crm.staff (
+  id             bigserial primary key,
+  login          text        not null unique,
+  password_hash  text        not null,
+  name           text        not null default '',
+  role           text        not null default 'manager',   -- admin|manager
+  active         boolean     not null default true,
+  created_at     timestamptz not null default now()
+);
+
+-- Тарифы: цена за период. Аренда копирует цену и период к себе
+-- при оформлении, поэтому правка тарифа не меняет уже идущие аренды.
+create table if not exists crm.tariffs (
+  id             bigserial primary key,
+  name           text        not null,
+  period_days    integer     not null,
+  price          numeric(12,2) not null,
+  note           text,
+  active         boolean     not null default true,
+  sort           integer     not null default 100,
+  created_at     timestamptz not null default now()
+);
+
+-- Парк. code - инвентарный номер, который написан на раме и по которому
+-- велосипед называют в переписке. frame_no - заводской номер рамы: по нему
+-- бот находит велосипед из формы выдачи оператора.
+create table if not exists crm.bikes (
+  id             bigserial primary key,
+  code           text        not null unique,
+  model          text        not null,
+  frame_no       text,
+  motor_no       text,
+  battery_count  integer     not null default 2,
+  -- available|rented|repair|reserved|lost|sold. rented ставит и снимает
+  -- сама аренда; остальное - оператор.
+  status         text        not null default 'available',
+  purchase_price numeric(12,2),
+  purchased_on   date,
+  note           text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+create unique index if not exists bikes_frame_idx on crm.bikes (frame_no)
+  where frame_no is not null;
+
+-- Клиенты. phone - нормализованный (+7XXXXXXXXXX), это ключ связи
+-- с ботом: клиент, заведённый руками до регистрации в боте, привяжет
+-- свой Telegram, поделившись контактом в /cabinet.
+create table if not exists crm.clients (
+  id             bigserial primary key,
+  full_name      text        not null,
+  phone          text        not null unique,
+  tg_id          bigint      unique,
+  username       text,
+  status         text        not null default 'active',   -- active|blocked|blacklist
+  contract_no    text,
+  note           text,
+  source         text        not null default 'manual',   -- manual|bot
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+
+-- Аренды. Одна активная на клиента и одна на велосипед - это не правило
+-- бизнеса, а защита от двойного начисления: два оператора, оформившие
+-- одну выдачу дважды, иначе списывали бы с клиента вдвое.
+--
+-- billing: auto - начисление по периодам тарифа (дневной проход),
+-- manual - начисления только явные (аренды, заведённые ботом из формы
+-- выдачи: срок и цену там задаёт оператор, продление - отдельной формой).
+-- billed_until - начало ещё не начисленного периода (исключительно).
+create table if not exists crm.rentals (
+  id             bigserial primary key,
+  client_id      bigint      not null references crm.clients (id),
+  bike_id        bigint      references crm.bikes (id),
+  tariff_id      bigint      references crm.tariffs (id),
+  tariff_name    text        not null,
+  period_days    integer     not null,
+  price          numeric(12,2) not null,
+  billing        text        not null default 'auto',     -- auto|manual
+  contract_no    text,
+  started_on     date        not null,
+  billed_until   date        not null,
+  status         text        not null default 'active',   -- active|closed
+  closed_on      date,
+  close_note     text,
+  -- Дедупликация напоминаний: не больше одного в день на аренду.
+  notified_on    date,
+  notified_kind  text,
+  created_by     text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+create unique index if not exists rentals_active_client_idx on crm.rentals (client_id)
+  where status = 'active';
+create unique index if not exists rentals_active_bike_idx on crm.rentals (bike_id)
+  where status = 'active' and bike_id is not null;
+create index if not exists rentals_client_idx on crm.rentals (client_id, id desc);
+
+-- Журнал денег. Одна таблица на всё: платежи (+), начисления (-),
+-- штрафы и ремонт (-), возвраты (-), корректировки (±). Баланс клиента -
+-- сумма amount, и никакой отдельной колонки «баланс», которая может
+-- разойтись с журналом.
+create table if not exists crm.ledger (
+  id             bigserial primary key,
+  client_id      bigint      not null references crm.clients (id),
+  rental_id      bigint      references crm.rentals (id),
+  kind           text        not null,   -- payment|charge|fine|refund|adjust
+  amount         numeric(12,2) not null,
+  method         text,                   -- sbp|cash|card|transfer|other
+  period_from    date,
+  period_to      date,
+  note           text,
+  created_by     text,
+  created_at     timestamptz not null default now()
+);
+create index if not exists ledger_client_idx on crm.ledger (client_id, id desc);
+create index if not exists ledger_created_idx on crm.ledger (created_at desc);
+-- Одно начисление на период: повторный проход биллинга (рестарт, ручной
+-- запуск из панели) упирается в индекс, а не списывает второй раз.
+create unique index if not exists ledger_charge_period_idx on crm.ledger (rental_id, period_from)
+  where kind = 'charge' and period_from is not null;
+
+-- Заявка «Я оплатил(а)» из кабинета: клиент нажал кнопку, оператор
+-- сверил поступление и зачислил. Сумму называет оператор, а не клиент:
+-- в банке видно, сколько пришло на самом деле.
+create table if not exists crm.payment_claims (
+  id               bigserial primary key,
+  client_id        bigint      not null references crm.clients (id),
+  amount_hint      numeric(12,2),
+  receipt_file_id  text,
+  receipt_is_photo boolean     not null default true,
+  status           text        not null default 'pending',  -- pending|confirmed|rejected
+  -- Карточка заявки в служебном чате: к ней привязаны кнопки и ответ суммой.
+  card_chat_id     bigint,
+  card_message_id  bigint,
+  ledger_id        bigint,
+  resolved_by      text,
+  resolved_at      timestamptz,
+  created_at       timestamptz not null default now()
+);
+create index if not exists claims_pending_idx on crm.payment_claims (status)
+  where status = 'pending';
+create index if not exists claims_card_idx on crm.payment_claims (card_chat_id, card_message_id)
+  where card_message_id is not null;
+
+-- Журнал по велосипеду: смены статуса, ремонты с их стоимостью, заметки.
+create table if not exists crm.bike_log (
+  id             bigserial primary key,
+  bike_id        bigint      not null references crm.bikes (id),
+  kind           text        not null,   -- status|repair|note
+  note           text,
+  cost           numeric(12,2),
+  created_by     text,
+  created_at     timestamptz not null default now()
+);
+create index if not exists bike_log_idx on crm.bike_log (bike_id, id desc);

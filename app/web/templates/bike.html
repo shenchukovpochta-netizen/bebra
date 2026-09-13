@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ bike.code }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar">
+  <h1>{{ bike.code }} · {{ bike.model }} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
+  {% if bike.status == 'available' %}<a class="btn" href="/rentals/new?bike={{ bike.id }}">Выдать в аренду</a>{% endif %}
+</div>
+<div class="cols">
+<section class="card">
+  <h2>Карточка</h2>
+  {% if bike.rental_id %}<p>Сейчас у <a href="/clients/{{ bike.client_id }}">{{ bike.full_name }}</a> — <a href="/rentals/{{ bike.rental_id }}">аренда #{{ bike.rental_id }}</a>.</p>{% endif %}
+  <form method="post" action="/bikes/{{ bike.id }}/edit" class="grid2">
+    <label>Инвентарный номер <input name="code" value="{{ bike.code }}" required></label>
+    <label>Модель <input name="model" value="{{ bike.model }}" required></label>
+    <label>Номер рамы <input name="frame_no" value="{{ bike.frame_no or '' }}"></label>
+    <label>Номер мотора <input name="motor_no" value="{{ bike.motor_no or '' }}"></label>
+    <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="{{ bike.battery_count }}"></label>
+    <label>Цена покупки <input name="purchase_price" value="{{ bike.purchase_price or '' }}"></label>
+    <label>Дата покупки <input name="purchased_on" type="date" value="{{ bike.purchased_on|iso }}"></label>
+    <label>Заметка <input name="note" value="{{ bike.note or '' }}"></label>
+    <button type="submit">Сохранить</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Статус</h2>
+  {% if bike.rental_id %}
+    <p class="muted">Пока идёт аренда, статус «в аренде» снимается только закрытием аренды.</p>
+  {% else %}
+  <form method="post" action="/bikes/{{ bike.id }}/status" class="grid2">
+    <label>Новый статус <select name="status">{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}" {% if bike.status == code %}selected{% endif %}>{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>
+    <label>Почему <input name="note" placeholder="необязательно"></label>
+    <button type="submit">Изменить</button>
+  </form>
+  {% endif %}
+  <h2>Запись в журнал</h2>
+  <form method="post" action="/bikes/{{ bike.id }}/log" class="grid2">
+    <label>Вид <select name="kind"><option value="repair">Ремонт</option><option value="note">Заметка</option></select></label>
+    <label>Стоимость <input name="cost" inputmode="decimal" placeholder="если ремонт"></label>
+    <label class="wide">Что сделано <input name="note" required></label>
+    <button type="submit">Записать</button>
+  </form>
+</section>
+</div>
+<div class="cols">
+<section class="card">
+  <h2>Журнал</h2>
+  <table>
+    <tr><th>Дата</th><th>Вид</th><th>Запись</th><th>Стоимость</th><th>Кто</th></tr>
+    {% for x in log %}
+    <tr><td>{{ x.created_at|dmy }}</td><td>{{ {'status': 'статус', 'repair': 'ремонт', 'note': 'заметка'}.get(x.kind, x.kind) }}</td>
+      <td>{{ x.note or '' }}</td><td class="num">{{ money(x.cost) if x.cost else '' }}</td><td class="muted">{{ x.created_by or '' }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Записей нет.</td></tr>{% endfor %}
+  </table>
+</section>
+<section class="card">
+  <h2>Аренды</h2>
+  <table>
+    <tr><th>#</th><th>Клиент</th><th>С</th><th>По</th><th>Статус</th></tr>
+    {% for r in rentals %}
+    <tr><td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td><td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a></td>
+      <td>{{ r.started_on|dmy }}</td><td>{{ r.closed_on|dmy if r.closed_on else '' }}</td><td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Ещё не выдавался.</td></tr>{% endfor %}
+  </table>
+</section>
+</div>
+{% endblock %}

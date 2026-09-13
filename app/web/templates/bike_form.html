@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+<h1>Новый велосипед</h1>
+<form method="post" action="/bikes">
+  <label>Инвентарный номер <input name="code" placeholder="B-012" required></label>
+  <label>Модель <input name="model" placeholder="Kugoo V3 Pro" required></label>
+  <label>Номер рамы <input name="frame_no"></label>
+  <label>Номер мотора <input name="motor_no"></label>
+  <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="2"></label>
+  <label>Цена покупки <input name="purchase_price" inputmode="decimal"></label>
+  <label>Дата покупки <input name="purchased_on" type="date"></label>
+  <label>Заметка <textarea name="note" rows="3"></textarea></label>
+  <button type="submit">Сохранить</button>
+</form>
+<p class="muted">Номер рамы стоит заполнить: по нему бот находит велосипед из формы выдачи оператора и не заводит дубль.</p>
+</div>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+<h1>Оформить аренду</h1>
+<form method="post" action="/rentals">
+  <label>Клиент <select name="client_id" required>
+    <option value="">— выберите —</option>
+    {% for c in clients %}<option value="{{ c.id }}" {% if c.id == client_id %}selected{% endif %}>{{ c.full_name }} · {{ c.phone }}{% if c.balance %} · баланс {{ money(c.balance) }}{% endif %}</option>{% endfor %}
+  </select></label>
+  <label>Велосипед <select name="bike_id">
+    <option value="">— без велосипеда (записать позже) —</option>
+    {% for b in bikes %}<option value="{{ b.id }}" {% if b.id == bike_id %}selected{% endif %}>{{ b.code }} · {{ b.model }}</option>{% endfor %}
+  </select></label>
+  <label>Тариф <select name="tariff_id" required>
+    {% for t in tariffs %}<option value="{{ t.id }}">{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}
+  </select></label>
+  <label>Начало <input name="started_on" type="date" value="{{ today()|iso }}"></label>
+  <label>Начисление <select name="billing">
+    <option value="auto">по тарифу, каждый период автоматически</option>
+    <option value="manual">вручную (только записи оператора)</option>
+  </select></label>
+  <label>Номер договора <input name="contract_no" placeholder="по умолчанию из карточки клиента"></label>
+  <button type="submit">Оформить</button>
+</form>
+<p class="muted">Первый период начисляется сразу: на балансе клиента появится долг в размере тарифа, который закроет платёж. Если клиент уже внёс деньги — сначала запишите платёж в карточке, потом оформляйте.</p>
+{% if not tariffs %}<p class="flash err">Нет активных тарифов — <a href="/tariffs">добавьте хотя бы один</a>.</p>{% endif %}
+</div>
+{% endblock %}

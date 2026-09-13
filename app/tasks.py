@@ -187,7 +187,7 @@ def due_today(now: datetime, last_run_on: date | None, hour: int) -> bool:
 
 
 async def reminders_loop(bot: Any, db: Database, cfg: Config,
-                         vault: Any = None) -> None:
+                         vault: Any = None, crm: Any = None) -> None:
     """Напоминания клиентам и ежедневная сводка оператору.
 
     Раз в сутки, в «рабочий» час: сообщение о конце аренды в три ночи
@@ -210,6 +210,11 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                         log.info("актов выкупа выдано: %s", done)
                 if digest:
                     await _send_digest(bot, cfg, digest, now.date())
+                if crm is not None:
+                    # Начисления, напоминания об оплате и сводка по долгам -
+                    # тем же дневным проходом, что и напоминания о сроке.
+                    from .crm import billing
+                    await billing.run_daily(bot, db, crm, cfg, today=now.date())
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

@@ -14,6 +14,12 @@ secrets:
   # без него профиль просто не поднимается.
   max_bot_token:
     file: ./secrets/max_bot_token
+  # Ключ подписи cookie веб-панели и пароль её первого администратора.
+  # Оба генерирует bootstrap.sh; пароль нужен только до первого входа.
+  crm_secret:
+    file: ./secrets/crm_secret
+  crm_admin_password:
+    file: ./secrets/crm_admin_password
 
 services:
   postgres:
@@ -103,6 +109,64 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
+  # Веб-панель CRM: клиенты, парк, аренды, тарифы, деньги. Свой процесс
+  # и свой порт, база общая с ботом (схема crm). Токен бота ей нужен
+  # только для уведомлений клиентам о зачислении и аренде.
+  # Слушает 127.0.0.1 сервера: наружу не торчит, вход через SSH-туннель
+  # или через профиль https с доменом (см. CRM.md).
+  crm:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.web"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets: [db_password, bot_token, crm_secret, crm_admin_password]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      BOT_TOKEN_FILE: /run/secrets/bot_token
+      CRM_SECRET_FILE: /run/secrets/crm_secret
+      CRM_ADMIN_PASSWORD_FILE: /run/secrets/crm_admin_password
+
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-mybike}
+      POSTGRES_DB: ${POSTGRES_DB:-mybike}
+
+      CRM_ADMIN_LOGIN: ${CRM_ADMIN_LOGIN:-admin}
+      CRM_TITLE: ${CRM_TITLE:-CRM проката}
+      # Порт внутри контейнера фиксирован; наружу пробрасывается CRM_PORT.
+      CRM_PORT: "8080"
+      REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}
+      # Договоры клиентов лежат в хранилище бота; панель отдаёт их на
+      # скачивание, поэтому том смонтирован только на чтение.
+      STORAGE_DIR: /files/kyc
+      TZ: ${TZ:-Europe/Moscow}
+    ports:
+      - "${CRM_BIND:-127.0.0.1}:${CRM_PORT:-8080}:8080"
+    volumes:
+      - kycfiles:/files:ro
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # HTTPS для панели по домену: docker compose --profile https up -d
+  # Caddy сам получает и продлевает сертификат Let's Encrypt. Нужны
+  # A-запись CRM_DOMAIN на IP сервера и открытые порты 80/443 в ufw.
+  caddy:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    depends_on: [crm]
+    command: ["caddy", "reverse-proxy", "--from", "${CRM_DOMAIN}", "--to", "crm:8080"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddydata:/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
   # Бот в MAX. Не поднимается обычным `docker compose up` - только явно:
   #   printf '%s' '<токен от @MasterBot>' > secrets/max_bot_token
   #   docker compose --profile max up -d --build
@@ -165,3 +229,4 @@ services:
 volumes:
   pgdata:
   kycfiles:
+  caddydata:
