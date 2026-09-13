@@ -362,3 +362,67 @@ class TestPages(WebCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExtras(WebCase):
+    """Троттлинг входа, экспорт CSV, поиск по цифрам телефона, будущая дата."""
+
+    def test_login_is_throttled_after_failures(self):
+        from app.web import app as web_app
+        for _ in range(web_app.LOGIN_LIMIT):
+            self.assertEqual(self.login(password="nope").status_code, 401)
+        # даже верный пароль не пускает, пока окно не истекло
+        r = self.login()
+        self.assertEqual(r.status_code, 429)
+        self.assertIn("Слишком много попыток", r.text)
+
+    def test_successful_login_clears_failures(self):
+        self.assertEqual(self.login(password="nope").status_code, 401)
+        self.assertEqual(self.login().status_code, 303)
+        self.client.post("/logout")
+        self.assertEqual(self.login(password="nope").status_code, 401)
+        self.assertEqual(self.login().status_code, 303)
+
+    def test_csv_exports(self):
+        self.login()
+        self.seed()
+        run(self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("3000"),
+                                method="sbp", note="перевод"))
+        r = self.client.get("/finance.csv")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("text/csv", r.headers["content-type"])
+        self.assertIn("attachment", r.headers["content-disposition"])
+        text = r.content.decode("utf-8")
+        self.assertTrue(text.startswith("﻿"))
+        self.assertIn("Дата;Клиент;Вид;Сумма", text)
+        self.assertIn("Иванов Иван;Платёж;3000,00;;СБП;перевод", text)
+        r = self.client.get("/clients.csv?q=Иван")
+        self.assertEqual(r.status_code, 200)
+        text = r.content.decode("utf-8")
+        self.assertIn("ФИО;Телефон;Статус", text)
+        self.assertIn("Иванов Иван;+79990000000;Активен;есть;3000,00", text)
+        self.assertNotIn("Иванов", self.client.get("/clients.csv?q=Сидор").text)
+        # экспорт закрыт без входа
+        self.client.post("/logout")
+        self.assertEqual(self.client.get("/finance.csv").status_code, 303)
+
+    def test_phone_search_ignores_formatting(self):
+        self.login()
+        self.seed()
+        for q in ("900 000", "8 (999) 000-00-00", "+7 999 000 00 00", "9990000000"):
+            self.assertIn("Иванов Иван", self.get_ok(f"/clients?q={q}"), q)
+        self.assertNotIn("Иванов Иван", self.get_ok("/clients?q=123 456"))
+
+    def test_future_start_is_not_charged_in_advance(self):
+        self.login()
+        self.seed()
+        start = date.today() + timedelta(days=3)
+        r = self.client.post("/rentals", data={"client_id": self.client_id,
+                                               "bike_id": self.bike_id,
+                                               "tariff_id": self.tariff_id,
+                                               "started_on": start.isoformat()})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(run(self.crm.client_balance(self.client_id)), D(0))
+        rental = run(self.crm.active_rental_of(self.client_id))
+        self.assertEqual(rental["billed_until"], start)
+        self.assertIn(f"начислится {start:%d.%m.%Y}", self.get_ok(r.headers["location"]))

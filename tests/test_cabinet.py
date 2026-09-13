@@ -617,3 +617,40 @@ class TestBilling(CabinetCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBlacklistOnCard(CabinetCase):
+    """Телефон заявителя в чёрном списке CRM - отметка на карточке модерации."""
+
+    async def submit(self):
+        from tests.test_flow import ANKETA_ANSWERS
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        for answer in ANKETA_ANSWERS:
+            await self.feed(msg(answer))
+        await self.feed(msg(photo=True))
+        await self.feed(msg(photo=True, file_id="f2"))
+        await self.feed(cb("confirm"))
+
+    def card_caption(self):
+        cards = [m for m in self.session.calls
+                 if isinstance(m, SendPhoto) and m.chat_id == ADMIN_CHAT
+                 and "Договор на утверждение" in (m.caption or "")]
+        self.assertTrue(cards, "карточка модерации не ушла")
+        return cards[-1].caption
+
+    async def test_blacklisted_phone_is_flagged(self):
+        client = await self.crm_client(tg_id=OTHER_ID)     # старый аккаунт, тот же номер
+        await self.crm.update_client(client["id"], status="blacklist", note="не вернул АКБ")
+        await self.submit()
+        caption = self.card_caption()
+        self.assertIn("⛔ <b>В CRM: Чёрный список.</b> не вернул АКБ", caption)
+
+    async def test_clean_phone_has_no_flag(self):
+        await self.crm_client()
+        await self.submit()
+        self.assertNotIn("⛔", self.card_caption())

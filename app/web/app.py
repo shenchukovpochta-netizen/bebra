@@ -8,9 +8,13 @@ app.crm.logic и app.crm.service, уведомления клиентам - app.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
+import time
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -30,6 +34,10 @@ log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 PUBLIC = ("/login", "/static", "/healthz")
 SESSION_DAYS = 14
+# Перебор пароля: после LOGIN_LIMIT неудач с одного адреса вход закрыт
+# на LOGIN_WINDOW секунд. Память процесса, без базы: панель одна, и
+# рестарт, обнуляющий счётчик, атакующему ничего не даёт.
+LOGIN_LIMIT, LOGIN_WINDOW = 10, 15 * 60
 
 
 def _dmy(value: Any) -> str:
@@ -44,6 +52,30 @@ def _dmy(value: Any) -> str:
 
 def _file_exists(path: str) -> bool:
     return os.path.exists(path)
+
+
+def _csv(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
+    """CSV для Excel: BOM, точка с запятой, десятичная запятая."""
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow([_cell(v) for v in row])
+    return Response(buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Decimal):
+        return f"{value:.2f}".replace(".", ",")
+    if isinstance(value, datetime):
+        return value.strftime("%d.%m.%Y %H:%M")
+    if isinstance(value, date):
+        return value.strftime("%d.%m.%Y")
+    return str(value)
 
 
 def _iso(value: Any) -> str:
@@ -109,6 +141,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     app.add_middleware(SessionMiddleware, secret_key=cfg.secret, session_cookie="crm_session",
                        same_site="strict", max_age=SESSION_DAYS * 24 * 3600)
 
+    login_failures: dict[str, list[float]] = {}
+
+    def client_ip(request: Request) -> str:
+        return request.client.host if request.client else "?"
+
+    def login_throttled(ip: str) -> bool:
+        now = time.monotonic()
+        recent = [t for t in login_failures.get(ip, ()) if now - t < LOGIN_WINDOW]
+        if recent:
+            login_failures[ip] = recent
+        else:
+            login_failures.pop(ip, None)
+        return len(recent) >= LOGIN_LIMIT
+
     async def form(request: Request) -> dict[str, str]:
         data = await request.form()
         return {k: (v if isinstance(v, str) else "") for k, v in data.items()}
@@ -131,14 +177,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/login")
     async def login(request: Request) -> Response:
         data = await form(request)
+        ip = client_ip(request)
+        if login_throttled(ip):
+            return render(request, "login.html", status_code=429,
+                          error="Слишком много попыток входа. Подождите 15 минут.",
+                          next=data.get("next") or "/")
         login_check = logic.check_login(data.get("login"))
         staff = await crm.staff_by_login(login_check.value) if login_check.ok else None
         if (staff is None or not staff.get("active")
                 or not logic.verify_password(data.get("password") or "",
                                              staff.get("password_hash"))):
+            login_failures.setdefault(ip, []).append(time.monotonic())
             return render(request, "login.html", status_code=401,
                           error="Неверный логин или пароль.",
                           next=data.get("next") or "/")
+        login_failures.pop(ip, None)
         request.session.clear()
         request.session["staff_id"] = staff["id"]
         target = data.get("next") or "/"
@@ -204,6 +257,26 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       "bike_code": r.get("bike_code")} if r.get("rental_id") else None
             r["summary"] = summarize(rental, r.get("balance", 0))
         return render(request, "clients.html", rows=rows, q=q, status=status)
+
+    @app.get("/clients.csv")
+    async def clients_csv(request: Request) -> Response:
+        q = request.query_params.get("q") or ""
+        status = request.query_params.get("status") or ""
+        rows = []
+        for c in await crm.clients(q=q or None, status=status or None, limit=10000):
+            rental = ({"status": "active", "billed_until": c["billed_until"],
+                       "price": c["price"], "period_days": c["period_days"]}
+                      if c.get("rental_id") else None)
+            s = summarize(rental, c.get("balance", 0))
+            rows.append([c["full_name"], c["phone"], logic.CLIENT_STATUSES.get(c["status"]),
+                         ("@" + c["username"]) if c.get("username") else
+                         ("есть" if c.get("tg_id") else ""),
+                         logic.to_money(c.get("balance", 0)), c.get("bike_code"),
+                         c.get("tariff_name"), s.get("covered_until"),
+                         c.get("contract_no"), c.get("created_at")])
+        return _csv("clients.csv",
+                    ["ФИО", "Телефон", "Статус", "Telegram", "Баланс", "Велосипед",
+                     "Тариф", "Оплачено до", "Договор", "Добавлен"], rows)
 
     @app.get("/clients/new")
     async def client_new(request: Request) -> Response:
@@ -492,7 +565,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/rentals/new")
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
-        flash(request, "Аренда оформлена, первый период начислен.")
+        if started.value > date.today() and billing == "auto":
+            flash(request, f"Аренда оформлена. Первый период начислится "
+                           f"{started.value:%d.%m.%Y}.")
+        else:
+            flash(request, "Аренда оформлена, первый период начислен.")
         return redirect(f"/rentals/{rental_id}")
 
     @app.get("/rentals/{rental_id}")
@@ -607,6 +684,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         totals = await crm.ledger_totals(since=since.value, until=until.value)
         return render(request, "finance.html", rows=rows, totals=totals,
                       since=since.value, until=until.value, kind=kind)
+
+    @app.get("/finance.csv")
+    async def finance_csv(request: Request) -> Response:
+        since = logic.check_date(request.query_params.get("since"),
+                                 default=date.today().replace(day=1))
+        until = logic.check_date(request.query_params.get("until"), default=date.today())
+        kind = request.query_params.get("kind") or ""
+        if not since.ok or not until.ok:
+            return redirect("/finance")
+        rows = [[x["created_at"], x["full_name"], logic.KINDS.get(x["kind"], x["kind"]),
+                 logic.to_money(x["amount"]),
+                 logic.period_label(x.get("period_from"), x.get("period_to")),
+                 logic.METHODS.get(x.get("method"), x.get("method") or ""),
+                 x.get("note"), x.get("created_by")]
+                for x in await crm.ledger(since=since.value, until=until.value,
+                                          kind=kind or None, limit=100000)]
+        name = f"finance-{since.value:%Y%m%d}-{until.value:%Y%m%d}.csv"
+        return _csv(name, ["Дата", "Клиент", "Вид", "Сумма", "Период", "Способ",
+                           "Заметка", "Кто"], rows)
 
     @app.get("/claims")
     async def claims(request: Request) -> Response:

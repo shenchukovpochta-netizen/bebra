@@ -8,6 +8,7 @@
     <select name="kind"><option value="">все виды</option>{% for code, label in KINDS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
     <button type="submit">Показать</button>
   </form>
+  <a class="btn ghost" href="/finance.csv?since={{ since|iso }}&until={{ until|iso }}&kind={{ kind }}">Скачать CSV</a>
 </div>
 <div class="tiles">
   <div class="tile"><b>{{ money(totals.get('payment', 0)) }}</b><span>платежи</span></div>

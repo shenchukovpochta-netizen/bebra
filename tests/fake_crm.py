@@ -159,7 +159,12 @@ class FakeCrm:
                 continue
             hay = (f"{c['full_name']} {c['phone']} {c.get('contract_no') or ''} "
                    f"{c.get('username') or ''}")
-            if q and q.lower() not in hay.lower():
+            digits = "".join(ch for ch in (q or "") if ch.isdigit())
+            if len(digits) == 11 and digits[0] in "78":
+                digits = digits[1:]
+            phone_digits = "".join(ch for ch in c["phone"] if ch.isdigit())
+            if q and q.lower() not in hay.lower() \
+                    and not (len(digits) >= 3 and digits in phone_digits):
                 continue
             r = self._active(c["id"])
             b = self.bikes_.get(r["bike_id"]) if r and r["bike_id"] else None

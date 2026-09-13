@@ -81,7 +81,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
           'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
           'tests/fake_crm.py', 'tests/test_crm_logic.py', 'tests/test_crm_sql.py',
-          'tests/test_cabinet.py', 'tests/test_web.py')
+          'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $tests)) {

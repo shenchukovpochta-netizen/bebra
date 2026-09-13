@@ -11,10 +11,10 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from .. import i18n
+from .. import i18n, logic, tasks, texts
 from .. import keyboards as kb
-from .. import logic, tasks, texts
 from ..config import Config
+from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
 from ..services import files
@@ -623,7 +623,8 @@ async def cb_restart(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
 
 @router.callback_query(StateIs(logic.CONFIRM), F.data == "confirm")
 async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
-                     cfg: Config, vault: Vault, user: dict) -> None:
+                     cfg: Config, vault: Vault, user: dict,
+                     crm: Any = None) -> None:
     if cfg.auto_approve:
         if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
                               state=logic.APPROVED, status=logic.ST_APPROVED):
@@ -650,7 +651,7 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
     # заявка становится невидимой: пользователь ждёт, модератор не знает.
     # Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
     try:
-        await send_moderation_card(bot, db, cfg, vault, user["tg_id"])
+        await send_moderation_card(bot, db, cfg, vault, user["tg_id"], crm=crm)
     except (TelegramAPIError, CardNotReady):
         log.exception("КАРТОЧКА МОДЕРАЦИИ НЕ ОТПРАВЛЕНА для %s - заявка невидима "
                       "для модераторов. Проверьте CONTRACT_CHAT_ID и то, что "
@@ -692,7 +693,7 @@ def anketa_lines(data: dict, anketa: dict) -> str:
 
 
 async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault,
-                               tg_id: int) -> None:
+                               tg_id: int, crm: Any = None) -> None:
     """Карточка на утверждение договора.
 
     Уходит в cfg.contract_chat_id - личку того, кто утверждает договоры.
@@ -742,8 +743,16 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
     # адресами она перевалит за 1024 символа, и карточка не уйдёт вовсе -
     # заявка станет невидимой для модератора. Реквизиты есть в документе,
     # а невидимая заявка не стоит ни одной лишней строки.
+    # Чёрный список CRM: номер из анкеты числится за закрытым клиентом.
+    # Строка идёт в шаблон до полей, чтобы её не срезал лимит подписи.
+    crm_line = ""
+    if crm is not None:
+        flagged = await crm_sync.card_flag(crm, data)
+        if flagged is not None:
+            crm_line = texts.CARD_CRM_LINE.format(status=logic.esc(flagged[0]),
+                                                  note=logic.esc(flagged[1]))
     caption = logic.caption_with_fields(
-        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else ""),
+        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else "") + crm_line,
         anketa_lines(data, anketa),
         number=logic.esc(data.get("contract_no") or "будет присвоен"),
         tg_id=tg_id,

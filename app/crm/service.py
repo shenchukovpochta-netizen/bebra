@@ -60,7 +60,12 @@ async def add_entry(crm: Any, client: dict, *, kind: str, amount: Decimal,
 async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict,
                       started_on: date, contract_no: str | None, by: str,
                       billing: str = "auto") -> int:
-    """Оформить аренду и начислить первый период."""
+    """Оформить аренду и начислить первый период.
+
+    Аренда с датой начала в будущем не начисляется заранее: первый период
+    спишет дневной проход в свой день - иначе клиент видел бы долг за
+    велосипед, которого ещё не получил.
+    """
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
     if bike is not None and bike.get("status") != "available":
@@ -88,7 +93,7 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
                                       "price": logic.to_money(tariff["price"]),
                                       "tariff_name": tariff["name"],
                                       "billing": "auto", "status": "active"},
-                         today=max(date.today(), started_on))
+                         today=date.today())
     return rental_id
 
 

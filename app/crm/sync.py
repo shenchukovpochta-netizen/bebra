@@ -197,3 +197,24 @@ async def on_rental_closed(crm: Any, user: dict, *, today: date) -> None:
                                note="Акт возврата подписан в боте")
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не закрыта", user.get("contract_no"))
+
+
+async def card_flag(crm: Any, user: dict) -> tuple[str, str] | None:
+    """(статус, заметка) для карточки модерации, если заявитель в CRM
+    числится с закрытым статусом. None - всё в порядке или CRM недоступна.
+
+    Ищется по tg_id и по телефону из анкеты: человек из чёрного списка
+    заводит новый Telegram-аккаунт, а номер оставляет прежним.
+    """
+    try:
+        client = await crm.client_by_tg(user["tg_id"])
+        phone = bot_logic.normalize_phone(user.get("phone"))
+        if client is None and phone:
+            client = await crm.client_by_phone(phone)
+        if client is None or client.get("status") == "active":
+            return None
+        return (logic.CLIENT_STATUSES.get(client["status"], client["status"]),
+                client.get("note") or "")
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: проверка чёрного списка для %s не удалась", user.get("tg_id"))
+        return None

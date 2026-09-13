@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -203,9 +204,18 @@ class CrmDB:
             conds.append(f"c.status = ${len(args)}")
         if q:
             args.append(f"%{q.strip()}%")
-            conds.append(f"(c.full_name ilike ${len(args)} or c.phone ilike ${len(args)} "
+            text_cond = (f"c.full_name ilike ${len(args)} or c.phone ilike ${len(args)} "
                          f"or c.contract_no ilike ${len(args)} "
-                         f"or c.username ilike ${len(args)})")
+                         f"or c.username ilike ${len(args)}")
+            # Телефон ищут как набрали: «900 111», «8 (900) 111-22-33».
+            # Сравниваются только цифры, у восьмёрки отбрасывается код страны.
+            digits = re.sub(r"\D", "", q)
+            if len(digits) >= 3:
+                if len(digits) == 11 and digits[0] in "78":
+                    digits = digits[1:]
+                args.append(f"%{digits}%")
+                text_cond += f" or regexp_replace(c.phone, '\\D', '', 'g') like ${len(args)}"
+            conds.append(f"({text_cond})")
         where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)
         return _rows(await self.pool.fetch(
