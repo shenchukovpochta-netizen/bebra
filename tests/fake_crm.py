@@ -105,6 +105,10 @@ class FakeCrm:
         return next((dict(b) for b in self.bikes_.values() if b.get("frame_no") == frame_no),
                     None)
 
+    async def bike_by_motor(self, motor_no):
+        return next((dict(b) for b in self.bikes_.values() if b.get("motor_no") == motor_no),
+                    None)
+
     async def bike_by_code(self, code):
         return next((dict(b) for b in self.bikes_.values() if b["code"] == code), None)
 

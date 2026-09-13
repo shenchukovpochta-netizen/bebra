@@ -15,3 +15,5 @@ uvicorn[standard]>=0.30
 jinja2>=3.1
 python-multipart>=0.0.9
 itsdangerous>=2.1
+# Импорт учётной таблицы xlsx в CRM (python -m app.crm.import_xlsx, страница «Импорт»).
+openpyxl>=3.1

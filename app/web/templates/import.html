@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bar"><h1>Импорт таблицы</h1></div>
+<div class="cols">
+<section class="card narrow">
+  <h2>Учётная таблица (.xlsx)</h2>
+  <form method="post" action="/import" enctype="multipart/form-data">
+    <label>Файл <input name="file" type="file" accept=".xlsx" required></label>
+    <label class="check"><input name="apply" type="checkbox" value="1"> Записать в базу (без галочки - только отчёт)</label>
+    <button type="submit">Загрузить</button>
+  </form>
+  <p class="muted">Первая строка - заголовки (№, Модель, ВИН рамы, ФИО, телефон, тариф, цена,
+    оплачено, долг, до какого оплачена, статус…), дальше по строке на велосипед. Порядок
+    колонок неважен. Велосипеды с известным VIN или номером, клиенты с известным телефоном
+    и клиенты с идущей арендой пропускаются - таблицу можно загружать повторно.</p>
+  <p class="muted">Сначала загрузите без галочки и прочитайте отчёт: что добавится, что
+    пропустится и какие ячейки не разобрались. Потом - с галочкой.</p>
+</section>
+{% if report %}
+<section class="card">
+  <h2>{{ 'Записано' if applied else 'Проверка' }} <small class="muted">{{ filename }}</small></h2>
+  <pre class="report">{{ report }}</pre>
+  {% if not applied %}<p class="muted">Это сухой прогон, база не менялась. Чтобы записать, загрузите файл ещё раз с галочкой «Записать в базу».</p>{% endif %}
+</section>
+{% endif %}
+</div>
+{% endblock %}

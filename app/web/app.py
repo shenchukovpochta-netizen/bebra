@@ -27,7 +27,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
-from ..crm import logic, notify, service
+from ..crm import import_xlsx, logic, notify, service
 from .config import WebConfig
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,8 @@ SESSION_DAYS = 14
 # на LOGIN_WINDOW секунд. Память процесса, без базы: панель одна, и
 # рестарт, обнуляющий счётчик, атакующему ничего не даёт.
 LOGIN_LIMIT, LOGIN_WINDOW = 10, 15 * 60
+# Учётная таблица проката - сотни строк, единицы мегабайт.
+IMPORT_MAX_BYTES = 20 * 1024 * 1024
 
 
 def _dmy(value: Any) -> str:
@@ -812,6 +814,42 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         await crm.set_staff_active(staff_id, not target["active"])
         flash(request, "Доступ " + ("включён." if not target["active"] else "отключён."))
         return redirect("/staff")
+
+    # ─────────────────────── импорт таблицы ───────────────────────
+
+    @app.get("/import")
+    async def import_page(request: Request) -> Response:
+        if not is_admin(request):
+            return Response("Только для администратора", status_code=403)
+        return render(request, "import.html", report=None, applied=False)
+
+    @app.post("/import")
+    async def import_run(request: Request) -> Response:
+        if not is_admin(request):
+            return Response("Только для администратора", status_code=403)
+        data = await request.form()
+        upload = data.get("file")
+        apply = data.get("apply") == "1"
+        if upload is None or isinstance(upload, str) or not upload.filename:
+            flash(request, "Выберите файл таблицы (.xlsx).", "err")
+            return redirect("/import")
+        if not upload.filename.lower().endswith(".xlsx"):
+            flash(request, "Нужна таблица Excel в формате .xlsx.", "err")
+            return redirect("/import")
+        content = await upload.read(IMPORT_MAX_BYTES + 1)
+        if len(content) > IMPORT_MAX_BYTES:
+            flash(request, "Файл больше 20 МБ - это не учётная таблица.", "err")
+            return redirect("/import")
+        try:
+            plan, done = await import_xlsx.run(crm, content, apply=apply, by=who(request))
+        except import_xlsx.ImportError_ as e:
+            flash(request, str(e), "err")
+            return redirect("/import")
+        if apply:
+            flash(request, f"Записано: велосипедов {done['bikes']}, клиентов {done['clients']}, "
+                           f"аренд {done['rentals']}.")
+        return render(request, "import.html", report=import_xlsx.report_text(plan, done),
+                      applied=apply, filename=upload.filename)
 
     return app
 

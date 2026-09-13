@@ -43,12 +43,14 @@
 | `app/tasks.py` | ретеншен: удаление сканов и договоров по сроку, чистка журнала |
 | `app/handlers/cabinet.py` | **кабинет клиента** (CRM): баланс, тариф, «оплачено до», пополнение, договор |
 | `app/crm/` | **CRM**: логика денег и периодов, база, биллинг, синхронизация с ботом, уведомления |
+| `app/crm/import_xlsx.py` | импорт учётной таблицы xlsx (парк, арендаторы, долги) в CRM: панель → Импорт или `python -m app.crm.import_xlsx` |
 | `app/web/` | **веб-панель CRM**: FastAPI + Jinja2, сервис `crm` (см. [CRM.md](CRM.md)) |
 | `tests/test_logic.py`, `tests/test_config.py` | чистая логика и конфигурация, нужен только stdlib |
 | `tests/test_sql.py` | нумерация плейсхолдеров и белый список колонок |
 | `tests/test_contract.py` | шифрование анкеты и сборка договора |
 | `tests/test_flow.py` | сквозной прогон сценария через настоящий Dispatcher |
 | `tests/test_crm_logic.py`, `tests/test_crm_sql.py` | CRM: деньги, периоды, напоминания; SQL слоя CRM |
+| `tests/test_import.py` | импорт таблицы: разбор ячеек, план, идемпотентность, страница /import |
 | `tests/test_cabinet.py`, `tests/test_web.py` | кабинет клиента сквозь Dispatcher; панель через TestClient |
 | `app/max/` | **бот в MAX**: клиент Bot API, опрос, обработчики (профиль `max`) |
 | `app/max_main.py` | точка входа MAX-бота, своя база `mybike_max` |

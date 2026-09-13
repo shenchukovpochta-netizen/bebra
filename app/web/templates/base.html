@@ -21,6 +21,7 @@
       <a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>
       <a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>
       <a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>
+      {% if staff.role == 'admin' %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}
       <a href="/staff" class="me {% if request.url.path.startswith('/staff') %}on{% endif %}">{{ staff.name or staff.login }}</a>
     </nav>
   </div>

@@ -18,7 +18,7 @@
     <dt>Telegram</dt><dd>{% if client.tg_id %}✅ ID {{ client.tg_id }}{% if client.username %} · @{{ client.username }}{% endif %}{% else %}<span class="muted">не привязан — клиент отправляет боту /cabinet и делится контактом</span>{% endif %}</dd>
     <dt>Договор</dt><dd>{{ client.contract_no or '—' }}{% if has_contract %} · <a href="/clients/{{ client.id }}/contract">скачать подписанный</a>{% endif %}</dd>
     {% if bot_user %}<dt>В боте</dt><dd>статус {{ bot_user.status }}, шаг {{ bot_user.state }}{% if bot_user.rent_until %}, срок по форме выдачи до {{ bot_user.rent_until|dmy }}{% endif %}</dd>{% endif %}
-    <dt>Источник</dt><dd>{{ 'из бота' if client.source == 'bot' else 'заведён в панели' }} · {{ client.created_at|dmy }}</dd>
+    <dt>Источник</dt><dd>{{ {'bot': 'из бота', 'import': 'импорт из таблицы'}.get(client.source, 'заведён в панели') }} · {{ client.created_at|dmy }}</dd>
     {% if claim %}<dt>Заявка</dt><dd class="warn">#{{ claim.id }} на зачисление ждёт проверки — <a href="/claims">обработать</a></dd>{% endif %}
   </dl>
 </section>

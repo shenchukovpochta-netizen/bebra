@@ -58,7 +58,7 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
 # CRM: логика, база, биллинг, синхронизация с ботом; веб-панель со шаблонами.
 $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/billing.py', 'app/crm/service.py', 'app/crm/notify.py',
-         'app/crm/sync.py')
+         'app/crm/sync.py', 'app/crm/import_xlsx.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -71,7 +71,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/rental.html', 'app/web/templates/rental_form.html',
                   'app/web/templates/tariffs.html', 'app/web/templates/finance.html',
                   'app/web/templates/claims.html', 'app/web/templates/reports.html',
-                  'app/web/templates/staff.html')
+                  'app/web/templates/staff.html', 'app/web/templates/import.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -100,7 +100,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
           'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
           'tests/fake_crm.py', 'tests/test_crm_logic.py', 'tests/test_crm_sql.py',
-          'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py')
+          'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py',
+          'tests/test_import.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

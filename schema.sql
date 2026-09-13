@@ -388,7 +388,7 @@ create table if not exists crm.clients (
   status         text        not null default 'active',   -- active|blocked|blacklist
   contract_no    text,
   note           text,
-  source         text        not null default 'manual',   -- manual|bot
+  source         text        not null default 'manual',   -- manual|bot|import
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );

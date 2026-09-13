@@ -148,6 +148,10 @@ class CrmDB:
         return _row(await self.pool.fetchrow(
             "select * from crm.bikes where frame_no = $1", frame_no))
 
+    async def bike_by_motor(self, motor_no: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.bikes where motor_no = $1", motor_no))
+
     async def bike_by_code(self, code: str) -> dict | None:
         return _row(await self.pool.fetchrow(
             "select * from crm.bikes where code = $1", code))
