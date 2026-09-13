@@ -478,6 +478,11 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
                           doc2_file_id=None, doc2_path=None, doc2_sha256=None,
                           purge_after=None, state=logic.WAIT_DOC2):
         return
+    # Прежние сканы ссылку в базе только что потеряли: не удалить их
+    # здесь - значит оставить паспорт на диске навсегда.
+    for old in (user.get("doc_path"), user.get("doc2_path")):
+        if old:
+            files.remove(old)
     await db.log_event(user["tg_id"], "doc_uploaded")
     lang = i18n.user_lang(user)
     await message.answer(i18n.t(lang, "ASK_DOC2"), reply_markup=kb.doc_enough(lang))
@@ -522,6 +527,8 @@ async def st_doc2(message: Message, bot: Bot, db: Database, cfg: Config,
                           doc2_file_id=file_id, doc2_is_photo=is_photo,
                           doc2_path=None, doc2_sha256=None):
         return
+    if user.get("doc2_path"):
+        files.remove(user["doc2_path"])
     await db.log_event(user["tg_id"], "doc2_uploaded")
     await _after_doc(bot, db, vault, user, message.answer,
                      {"doc2_file_id": file_id, "doc2_is_photo": is_photo})
@@ -588,6 +595,8 @@ async def st_parent(message: Message, bot: Bot, db: Database, cfg: Config,
                           parent_path=None, parent_sha256=None,
                           purge_after=None, state=logic.CONFIRM):
         return
+    if user.get("parent_path"):
+        files.remove(user["parent_path"])
     await db.log_event(user["tg_id"], "parent_consent_uploaded")
     await send_confirm(bot, user)
     tasks.spawn(_process_upload(bot, db, cfg, user["tg_id"], file_id, "parent"))
@@ -652,7 +661,18 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
     # Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
     try:
         await send_moderation_card(bot, db, cfg, vault, user["tg_id"], crm=crm)
-    except (TelegramAPIError, CardNotReady):
+    except CardNotReady:
+        # Анкеты для карточки нет: человек вернулся после отказа, когда
+        # ретеншен уже стёр её. Оставить его в pending - значит тупик:
+        # карточка не уйдёт никогда. Вернуть на первый шаг и сказать об этом.
+        log.warning("карточка %s не собрана - анкета неполная, регистрация заново",
+                    user["tg_id"])
+        await db.patch(user["tg_id"], expected_state=logic.PENDING,
+                       state=logic.WAIT_FIO, status=logic.ST_NEW)
+        await db.log_event(user["tg_id"], "resubmit_after_purge")
+        await bot.send_message(user["tg_id"], i18n.t(lang, "WELCOME"),
+                               reply_markup=kb.remove())
+    except TelegramAPIError:
         log.exception("КАРТОЧКА МОДЕРАЦИИ НЕ ОТПРАВЛЕНА для %s - заявка невидима "
                       "для модераторов. Проверьте CONTRACT_CHAT_ID и то, что "
                       "владелец аккаунта нажал /start у бота: написать первым "

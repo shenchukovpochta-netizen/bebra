@@ -41,7 +41,9 @@ fi
 # и нет - то есть падало ровно там, где важнее всего.
 TZ_VALUE=""
 if [ -f .env ]; then
-  TZ_VALUE="$(sed -n 's/^TZ=//p' .env | head -1)"
+  # Кавычки снять: иначе повторный запуск писал TZ=""Europe/Moscow"",
+  # и docker compose отказывался читать .env.
+  TZ_VALUE="$(sed -n 's/^TZ=//p' .env | head -1 | tr -d '"')"
   # shellcheck disable=SC1091
   set -a; . ./.env; set +a
 fi
@@ -260,6 +262,23 @@ PURGE_REJECTED_DAYS="${PURGE_REJECTED_DAYS}"
 UPDATES_LOG_DAYS="${UPDATES_LOG_DAYS:-7}"
 REMIND_BEFORE_DAYS="${REMIND_BEFORE_DAYS:-2}"
 REMIND_HOUR_UTC="${REMIND_HOUR_UTC:-7}"
+
+# Панель CRM и бот в MAX: этот скрипт о них не спрашивает, значения
+# переносятся из прежнего .env как есть (правятся через nano .env).
+CRM_BIND="${CRM_BIND:-127.0.0.1}"
+CRM_PORT="${CRM_PORT:-8080}"
+CRM_ADMIN_LOGIN="${CRM_ADMIN_LOGIN:-admin}"
+CRM_TITLE="${CRM_TITLE:-МАЙБАЙК}"
+CRM_DOMAIN="${CRM_DOMAIN:-}"
+
+MAX_CHANNEL_ID="${MAX_CHANNEL_ID:-}"
+MAX_CHANNEL_URL="${MAX_CHANNEL_URL:-}"
+MAX_ADMIN_CHAT_ID="${MAX_ADMIN_CHAT_ID:-}"
+MAX_ADMINS="${MAX_ADMINS:-}"
+MAX_CONTRACT_CHAT_ID="${MAX_CONTRACT_CHAT_ID:-}"
+MAX_FIX_CHAT_ID="${MAX_FIX_CHAT_ID:-}"
+MAX_CONTRACT_PREFIX="${MAX_CONTRACT_PREFIX:-АВМ}"
+MAX_API_BASE="${MAX_API_BASE:-https://botapi.max.ru}"
 EOF
 chmod 600 .env
 ok ".env готов"

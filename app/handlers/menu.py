@@ -9,9 +9,8 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
 
-from .. import faq, i18n
+from .. import faq, i18n, logic, texts
 from .. import keyboards as kb
-from .. import logic, texts
 from ..config import Config
 from ..db import Database, utcnow
 from ..filters import StateIs

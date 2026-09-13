@@ -364,6 +364,68 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestReviewFixes(WebCase):
+    """Регрессии ревью: двойное зачисление, ручной биллинг, местное время,
+    ссылка CSV, чужой велосипед в форме аренды, next с параметрами."""
+
+    def test_double_confirm_writes_one_payment(self):
+        self.seed()
+        self.login()
+        pid = run(self.crm.create_claim(self.client_id, D("2500")))
+        self.assertEqual(self.client.post(f"/claims/{pid}/confirm",
+                                          data={"amount": "2500"}).status_code, 303)
+        r = self.client.post(f"/claims/{pid}/confirm", data={"amount": "2500"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("уже обработали", self.client.get("/claims").text)
+        entries = run(self.crm.ledger_of(self.client_id))
+        self.assertEqual([x["kind"] for x in entries], ["payment"])
+        self.assertEqual(run(self.crm.ledger_totals()).get("payment"), D("2500"))
+        self.assertEqual(run(self.crm.client_balance(self.client_id)), D("2500"))
+
+    def test_manual_rental_flash_does_not_claim_a_charge(self):
+        self.seed()
+        self.login()
+        r = self.client.post("/rentals", data={"client_id": self.client_id,
+                                               "bike_id": self.bike_id,
+                                               "tariff_id": self.tariff_id,
+                                               "billing": "manual"})
+        self.assertEqual(r.status_code, 303)
+        page = self.client.get(r.headers["location"]).text
+        self.assertIn("без начисления", page)
+        self.assertNotIn("первый период начислен", page)
+        self.assertEqual(run(self.crm.client_balance(self.client_id)), D(0))
+
+    def test_unknown_bike_id_is_rejected(self):
+        self.seed()
+        self.login()
+        r = self.client.post("/rentals", data={"client_id": self.client_id, "bike_id": "777",
+                                               "tariff_id": self.tariff_id})
+        self.assertEqual(r.headers["location"], "/rentals/new")
+        self.assertIn("Такого велосипеда нет", self.client.get("/rentals/new").text)
+        self.assertIsNone(run(self.crm.active_rental_of(self.client_id)))
+
+    def test_timestamps_shown_in_local_time(self):
+        from datetime import UTC, datetime
+
+        from app.web import app as web_app
+        moment = datetime(2026, 9, 13, 21, 30, tzinfo=UTC)
+        local = moment.astimezone()
+        expected = local.strftime("%d.%m.%Y %H:%M")
+        self.assertEqual(web_app._dmy(moment), expected)
+        self.assertEqual(web_app._cell(moment), expected)
+        self.assertEqual(web_app._dmy(date(2026, 9, 13)), "13.09.2026")
+
+    def test_csv_link_encodes_query(self):
+        self.login()
+        page = self.client.get("/clients", params={"q": "A&B#1"}).text
+        self.assertIn("/clients.csv?q=A%26B%231&status=", page)
+
+    def test_login_redirect_keeps_query(self):
+        r = self.client.get("/clients?q=abc")
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/login?next=%2Fclients%3Fq%3Dabc")
+
+
 class TestExtras(WebCase):
     """Троттлинг входа, экспорт CSV, поиск по цифрам телефона, будущая дата."""
 
@@ -375,6 +437,16 @@ class TestExtras(WebCase):
         r = self.login()
         self.assertEqual(r.status_code, 429)
         self.assertIn("Слишком много попыток", r.text)
+
+    def test_throttle_is_per_login_not_per_address(self):
+        """За туннелем и Caddy все приходят с одного адреса: чужие неудачи
+        по другому логину не должны закрывать вход администратору."""
+        from app.web import app as web_app
+        run(self.crm.create_staff("ivan", logic.hash_password("password-1"), "Иван", "manager"))
+        for _ in range(web_app.LOGIN_LIMIT):
+            self.assertEqual(self.login("ivan", "nope").status_code, 401)
+        self.assertEqual(self.login("ivan", "password-1").status_code, 429)
+        self.assertEqual(self.login().status_code, 303)
 
     def test_successful_login_clears_failures(self):
         self.assertEqual(self.login(password="nope").status_code, 401)

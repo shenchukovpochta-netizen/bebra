@@ -168,7 +168,7 @@ class Config:
         return self.pdn_version
 
     @classmethod
-    def load(cls) -> "Config":
+    def load(cls) -> Config:
         return cls(
             bot_token=_secret("BOT_TOKEN"),
             channel_id=_int("CHANNEL_ID", required=True),

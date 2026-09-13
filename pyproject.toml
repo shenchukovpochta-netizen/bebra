@@ -30,3 +30,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "ASYNC"]
+# ASYNC109/ASYNC240 советуют trio/anyio-обёртки (timeout-параметр, Path
+# в async def); проект на чистом asyncio, а чтение файлов там - один раз
+# на старте.
+ignore = ["ASYNC109", "ASYNC240"]
+
+[tool.ruff.lint.per-file-ignores]
+# Языковые пакеты - длинные строки переводов; переносить их значит
+# рисковать текстом, который читают клиенты.
+"app/i18n/*.py" = ["E501"]
+"app/faq_i18n.py" = ["E501"]

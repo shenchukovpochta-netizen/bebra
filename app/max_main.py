@@ -69,7 +69,7 @@ def load_config() -> Config:
         contract_template=Path(
             _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.docx")),
         channel_url=_env("MAX_CHANNEL_URL", "https://max.ru"),
-        oferta_url=_env("OFERTA_URL", required=True),
+        oferta_url=_env("OFERTA_URL"),
         oferta_version=_env("OFERTA_VERSION", "2026-01-15"),
         pdn_url=_env("PDN_URL"),
         pdn_version=_env("PDN_VERSION", _env("OFERTA_VERSION", "2026-01-15")),

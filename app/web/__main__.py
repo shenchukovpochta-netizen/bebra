@@ -52,8 +52,11 @@ async def run() -> None:
                         stream=sys.stdout)
     app, cfg, db, bot = await build()
     log.info("панель CRM слушает порт %s", cfg.port)
-    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=cfg.port,
-                                           log_level="info", proxy_headers=True))
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="0.0.0.0", port=cfg.port, log_level="info", proxy_headers=True,
+        # Без этого uvicorn верит заголовкам только от 127.0.0.1, а Caddy
+        # приходит из сети compose - адрес клиента терялся бы.
+        forwarded_allow_ips="*" if cfg.trust_proxy else None))
     try:
         await server.serve()
     finally:

@@ -17,8 +17,8 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import logic  # noqa: E402
 from app import config as cfg_mod  # noqa: E402
+from app import logic  # noqa: E402
 from app.config import Config  # noqa: E402
 
 BASE_ENV = {

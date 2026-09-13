@@ -574,7 +574,7 @@ docker compose logs -f bot-max
 | Переспросить настройки | `bash install.sh` |
 | Логи веб-панели CRM | `docker compose logs -f crm` |
 | Зайти в панель CRM | `ssh -L 8080:127.0.0.1:8080 root@ВАШ_IP`, затем http://localhost:8080; логин `admin`, пароль в `secrets/crm_admin_password` |
-| Перенести учётную таблицу Excel в CRM | панель → Импорт (сначала без галочки, прочитать отчёт, потом с галочкой «Записать в базу»); из консоли: `docker compose cp таблица.xlsx crm:/tmp/ && docker compose exec crm python -m app.crm.import_xlsx /tmp/таблица.xlsx --apply` — см. [CRM.md](CRM.md) |
+| Перенести учётную таблицу Excel в CRM | панель → Импорт (сначала без галочки, прочитать отчёт, потом с галочкой «Записать в базу»); из консоли: `chmod 644 таблица.xlsx && docker compose cp таблица.xlsx crm:/tmp/ && docker compose exec crm python -m app.crm.import_xlsx /tmp/таблица.xlsx --apply` — см. [CRM.md](CRM.md) |
 | Панель по домену с HTTPS | `CRM_DOMAIN` в `.env`, `ufw allow 80/tcp && ufw allow 443/tcp`, `docker compose --profile https up -d` — см. [CRM.md](CRM.md) |
 
 Сканы и договоры лежат в отдельном томе `kycfiles` и в дамп базы не попадают.

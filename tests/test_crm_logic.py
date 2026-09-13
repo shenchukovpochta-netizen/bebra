@@ -177,6 +177,25 @@ class TestReminders(unittest.TestCase):
         self.assertNotIn("Закрытый", text)
         self.assertEqual(logic.digest([], today=TODAY, before_days=2), "")
 
+    def test_digest_escapes_html(self):
+        """Сводка уходит с parse_mode=HTML: «<» в имени ломало бы всё сообщение."""
+        rows = [self.rental(full_name="Иванов <брат> & Co", bike_code="<1>",
+                            billed_until=TODAY - timedelta(days=4), balance=D(-3000))]
+        text = logic.digest(rows, today=TODAY, before_days=2)
+        self.assertIn("Иванов &lt;брат&gt; &amp; Co · &lt;1&gt;", text)
+        self.assertNotIn("<брат>", text)
+
+    def test_first_amount(self):
+        """Первое число, а не склейка всех цифр строки."""
+        self.assertEqual(logic.first_amount("3000 qr 14.09"), D("3000.00"))
+        self.assertEqual(logic.first_amount("3 000 р (за 7 дней)"), D("3000.00"))
+        self.assertEqual(logic.first_amount("1500 сбп + 1500 нал"), D("1500.00"))
+        self.assertEqual(logic.first_amount(2500), D("2500.00"))
+        self.assertIsNone(logic.first_amount("бесплатно"))
+        self.assertIsNone(logic.first_amount(None))
+        self.assertEqual(logic.rental_from_issue({"rent_price": "3000 qr 14.09"}, None, None,
+                                                 today=TODAY)["price"], D("3000.00"))
+
 
 class TestChecks(unittest.TestCase):
     def test_amount(self):

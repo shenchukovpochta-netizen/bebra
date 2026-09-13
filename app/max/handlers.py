@@ -227,6 +227,10 @@ async def st_upload(ctx: Ctx, user: dict, attachments: list) -> None:
                                   doc_path=None, doc_sha256=None,
                                   purge_after=None, state=following):
             return
+        # Прежний скан ссылку в базе только что потерял: не удалить его
+        # здесь - значит оставить паспорт на диске навсегда.
+        if user.get("doc_path"):
+            files.remove(user["doc_path"])
         await ctx.db.log_event(user["tg_id"], "doc_uploaded")
         if following == logic.CONFIRM:
             await send_confirm(ctx, {**user, "doc_file_id": token})
@@ -248,6 +252,8 @@ async def st_upload(ctx: Ctx, user: dict, attachments: list) -> None:
                               parent_path=None, parent_sha256=None,
                               purge_after=None, state=logic.CONFIRM):
         return
+    if user.get("parent_path"):
+        files.remove(user["parent_path"])
     await ctx.db.log_event(user["tg_id"], "parent_consent_uploaded")
     await send_confirm(ctx, user)
     tasks.spawn(_process_upload(ctx, user["tg_id"], url, "parent"))
@@ -426,6 +432,11 @@ async def issue(ctx: Ctx, tg_id: int) -> str:
             contract_status=logic.CT_ISSUED, contract_issued_at=issued_at):
         files.remove(path)
         raise ContractProblem(f"статус {tg_id} изменился, договор не выдан")
+    # Повторная выдача после «Есть ошибка»: прежний неподписанный экземпляр
+    # с паспортными данными больше ни на что не ссылается - удалить.
+    stale = data.get("contract_path")
+    if stale and stale != str(path):
+        files.remove(stale)
     await ctx.db.log_event(tg_id, "contract_issued", {"number": number})
     await _send_contract(ctx, tg_id, docx, number,
                          texts.MAX_CONTRACT_READY.format(number=logic.esc(number)),

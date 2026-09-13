@@ -134,6 +134,8 @@ services:
 
       CRM_ADMIN_LOGIN: ${CRM_ADMIN_LOGIN:-admin}
       CRM_TITLE: ${CRM_TITLE:-МАЙБАЙК}
+      # Непустой домен = панель за Caddy: адрес клиента из X-Forwarded-For.
+      CRM_DOMAIN: ${CRM_DOMAIN:-}
       # Порт внутри контейнера фиксирован; наружу пробрасывается CRM_PORT.
       CRM_PORT: "8080"
       REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}

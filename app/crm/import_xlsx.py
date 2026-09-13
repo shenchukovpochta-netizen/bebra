@@ -120,10 +120,16 @@ def _money_cell(value: Any) -> Decimal | None:
 
 
 def _days_cell(value: Any) -> int | None:
-    m = re.search(r"\d+", str(value or ""))
+    """Срок в днях: «7», «7 дней», «2 недели», «1 месяц» (30 дней)."""
+    text = str(value or "").lower()
+    m = re.search(r"\d+", text)
     if not m:
         return None
     days = int(m.group())
+    if "нед" in text:
+        days *= 7
+    elif "мес" in text:
+        days *= 30
     return days if 1 <= days <= logic.MAX_PERIOD_DAYS else None
 
 
@@ -395,8 +401,12 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
             existing = await crm.bike_by_frame(row.frame)
         if existing is None and row.motor:
             existing = await crm.bike_by_motor(row.motor)
-        if existing is None and code:
+        if existing is None and not (row.frame or row.motor):
+            # По номеру - только когда в строке нет VIN: перенумерованная
+            # таблица иначе привязала бы аренду к чужому велосипеду.
             existing = await crm.bike_by_code(code)
+        elif existing is None and await crm.bike_by_code(code) is not None:
+            code = f"{code}-{row.line}"
         if existing is not None:
             plan.skipped_bikes.append(
                 f"строка {row.line}: велосипед уже есть ({existing.get('code')})")
@@ -410,9 +420,12 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
             for v in (row.frame, row.motor):
                 if v:
                     seen_vins.add(v)
+            # «В аренде» без арендатора в строке: велосипед всё равно не на
+            # точке - статус «в аренде», карточку аренды заведёт оператор.
             bike_ref = {"code": code, "model": row.model or "Truck+",
                         "frame_no": row.frame, "motor_no": row.motor,
-                        "status": status if status != "rented" else "available",
+                        "status": ("rented" if status == "rented" and not row.fio
+                                   else status if status != "rented" else "available"),
                         "note": _bike_note(row, place), "line": row.line,
                         "wants_rented": status == "rented"}
             if not row.model:
@@ -595,18 +608,17 @@ async def _main(argv: list[str]) -> int:
         print(__doc__)
         return 2
     path, apply = argv[0], "--apply" in argv
-    import asyncpg
-
     from ..config import _env, _int, _secret
+    from ..db import Database
     from .db import CrmDB
-    pool = await asyncpg.create_pool(
-        user=_env("POSTGRES_USER", "mybike"), password=_secret("POSTGRES_PASSWORD"),
-        database=_env("POSTGRES_DB", "mybike"), host=_env("POSTGRES_HOST", "postgres"),
-        port=_int("POSTGRES_PORT", "5432"), min_size=1, max_size=2)
+    db = await Database.connect({
+        "user": _env("POSTGRES_USER", "mybike"), "password": _secret("POSTGRES_PASSWORD"),
+        "database": _env("POSTGRES_DB", "mybike"), "host": _env("POSTGRES_HOST", "postgres"),
+        "port": _int("POSTGRES_PORT", "5432")})
     try:
-        plan, done = await run(CrmDB(pool), path, apply=apply, by="import:cli")
+        plan, done = await run(CrmDB(db.pool), path, apply=apply, by="import:cli")
     finally:
-        await pool.close()
+        await db.close()
     print(report_text(plan, done))
     if not apply:
         print("\nЭто сухой прогон. Чтобы записать: добавьте --apply")

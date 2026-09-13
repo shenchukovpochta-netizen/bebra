@@ -388,6 +388,7 @@ T: dict[str, str] = {
     "EXTEND_REQUESTED": "✅ The extension request has been passed to the operator. They will confirm the new term and send the amount to pay — the bike stays with you.",
     "EXTEND_REQUEST_FAILED": "We could not pass on the request due to a technical hiccup. Message us directly: " + URL,
     "EXTEND_CONFIRMED": "✅ The rental is extended until {until}. Thank you for the payment!\nThe agreement and the act stay the same — nothing new to sign.",
+    "EXTEND_CANCELLED": "The extension request was cancelled by the operator — the rental term is unchanged.\nNeed to extend later — press “Extend” again or contact support.",
 
     "BTN_RENT": "🚲 Rent",
     "BTN_TRIPS": "📋 My rentals",

@@ -19,9 +19,8 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from .. import i18n
+from .. import i18n, logic, texts
 from .. import keyboards as kb
-from .. import logic, texts
 from ..config import Config
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import os
 import re
 from collections.abc import Iterable
@@ -247,8 +248,11 @@ def digest(rentals: Iterable[dict], *, today: date, before_days: int) -> str:
         until = covered_until(r["billed_until"], r.get("balance", 0),
                               r["price"], r["period_days"])
         left = days_left(until, today=today) or 0
-        who = r.get("full_name") or f"клиент #{r.get('client_id')}"
-        bike = r.get("bike_code") or ""
+        # Сводка уходит с parse_mode=HTML: имя из таблицы импорта или
+        # из бота может содержать «<» - без экранирования Telegram отвергает
+        # всё сообщение, и сводки не видит никто.
+        who = html.escape(r.get("full_name") or f"клиент #{r.get('client_id')}", quote=False)
+        bike = html.escape(r.get("bike_code") or "", quote=False)
         tail = f" · {bike}" if bike else ""
         if left < 0:
             debtors.append(
@@ -446,6 +450,17 @@ def topup_hint(summary: dict) -> Decimal:
 
 # ─────────────────────────── синхронизация с ботом ───────────────────────────
 
+def first_amount(text: Any) -> Decimal | None:
+    """Сумма из свободного текста оператора: первое число, пробелы внутри
+    числа допустимы («3 000 qr 14.09» -> 3000). Склеивать все цифры
+    строки нельзя: «3000 qr 14.09» превращалось бы в 30 001 409."""
+    m = re.search(r"\d[\d \u00a0]*", str(text or ""))
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group())
+    return to_money(int(digits)) if digits else None
+
+
 def rental_from_issue(issue: dict | None, rent_from: date | None,
                       rent_until: date | None, *, today: date) -> dict[str, Any]:
     """Условия аренды из формы выдачи оператора (issue_data бота).
@@ -456,8 +471,7 @@ def rental_from_issue(issue: dict | None, rent_from: date | None,
     а события бота (выдача, продление).
     """
     issue = issue or {}
-    digits = re.sub(r"[^\d]", "", str(issue.get("rent_price") or ""))
-    price = to_money(int(digits)) if digits else Decimal(0)
+    price = first_amount(issue.get("rent_price")) or Decimal(0)
     start = rent_from or today
     if rent_until and rent_until > start:
         period = (rent_until - start).days

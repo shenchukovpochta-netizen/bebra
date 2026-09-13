@@ -30,6 +30,9 @@ class WebConfig:
     remind_before_days: int
     # Имя проката в шапке панели.
     title: str = "МАЙБАЙК"
+    # Панель стоит за Caddy (задан CRM_DOMAIN): адрес клиента брать из
+    # X-Forwarded-For, иначе все входы выглядят как один адрес прокси.
+    trust_proxy: bool = False
 
     @classmethod
     def load(cls) -> WebConfig:
@@ -49,4 +52,5 @@ class WebConfig:
             port=_int("CRM_PORT", "8080"),
             remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
             title=_env("CRM_TITLE", "МАЙБАЙК"),
+            trust_proxy=bool(_env("CRM_DOMAIN", "")),
         )

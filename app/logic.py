@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any
 
 # ─────────────────────────── состояния FSM ───────────────────────────
 
@@ -1219,6 +1220,14 @@ EXTEND_ALIASES: dict[str, str] = {
 EXTEND_FORM_TEMPLATE = "до: 17.08\nоплата: 3000 qr"
 
 
+CANCEL_WORDS = frozenset({"отмена", "отменить", "отменяю", "cancel"})
+
+
+def is_cancel_word(text: str | None) -> bool:
+    """Ответ оператора «отмена» на карточку продления."""
+    return (text or "").strip().lower().rstrip(".!") in CANCEL_WORDS
+
+
 def parse_extend_form(raw: str | None, *,
                       today: date | None = None) -> tuple[dict[str, Any] | None, str]:
     """Разбор ответа оператора на заявку о продлении.
@@ -1505,7 +1514,8 @@ def fixation_form(user: dict, anketa: dict | None, issue: dict | None = None, *,
         f"9. Ник в Telegram: {esc('@' + username) if username else FORM_BLANK}\n"
         f"10. Сумма и способ оплаты: {esc(given['rent_price'])}\n"
         f"11. Адрес прописки с квартирой в Казани: {esc(data.get('reg_address') or FORM_BLANK)}\n"
-        f"12. Адрес проживания с квартирой в Казани: {esc(data.get('live_address') or FORM_BLANK)}\n"
+        f"12. Адрес проживания с квартирой в Казани: "
+        f"{esc(data.get('live_address') or FORM_BLANK)}\n"
         f"13. Подключен GPS-Трекер: {FORM_BLANK}\n"
         f"14. Адрес сдачи: {FORM_BLANK}\n"
         f"15. Кто выдал: {FORM_BLANK}\n"

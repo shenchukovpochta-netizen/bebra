@@ -172,3 +172,24 @@ class TestMaxConfig(unittest.TestCase):
                     os.environ[key] = value
         self.assertEqual(cfg.contract_prefix, "АВМ")
         self.assertEqual(cfg.pg["database"], "mybike_max")
+
+    def test_load_config_without_oferta_url(self):
+        """OFERTA_URL в .env.example пустой и у Telegram-бота необязателен -
+        бот в MAX не должен падать на старте без него."""
+        import os
+
+        from app import max_main
+
+        env = {k: v for k, v in self.ENV.items() if k != "OFERTA_URL"}
+        saved = {k: os.environ.get(k) for k in self.ENV}
+        os.environ.update(env)
+        os.environ.pop("OFERTA_URL", None)
+        try:
+            cfg = max_main.load_config()
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        self.assertFalse(cfg.oferta_url)

@@ -376,6 +376,7 @@ T: dict[str, str] = {
     "EXTEND_CONFIRMED": "✅ Ijara {until} gacha uzaytirildi. To'lov uchun rahmat!\nShartnoma va akt o'zgarmaydi — yangisini imzolash shart emas.",
 
     # ── выкуп ──
+    "EXTEND_CANCELLED": "Uzaytirish so‘rovi operator tomonidan bekor qilindi — ijara muddati o‘zgarmadi.\nKeyinroq uzaytirish kerak bo‘lsa — «Uzaytirish» tugmasini yana bosing yoki qo‘llab-quvvatlashga yozing.",
     "BUYOUT_LINE": "💎 Sotib olish: {total} dan {paid}, ({percent}%), to'lovlar {payments} dan {days}",
     "BUYOUT_LEFT_LINE": "{left} qoldi — bu {left_days} ta to'lov, {finish} gacha.",
     "BUYOUT_READY": "🎉 Tabriklaymiz! <b>{total}</b> miqdoridagi sotib olish qiymati to'liq to'landi.\n\nQuyida — <b>{bike}</b> velosipediga mulk huquqi o'tishi to'g'risidagi Akt. O'qing va «Imzolayman» tugmasini bosing — shu paytdan velosiped sizniki.\nJihozlar (akkumulyator, quvvatlagich, sumka va boshqalar) sotib olishga kirmaydi va Qaytarish akti bo'yicha qaytariladi — operator siz bilan vaqtni kelishadi.",

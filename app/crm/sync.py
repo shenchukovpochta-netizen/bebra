@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import date, timedelta
 from typing import Any
 
@@ -26,8 +25,7 @@ log = logging.getLogger(__name__)
 
 def _price_of(user: dict) -> Any:
     """Сумма из данных выдачи бота («3000 qr» -> 3000). None - не число."""
-    digits = re.sub(r"[^\d]", "", str((user.get("issue_data") or {}).get("rent_price") or ""))
-    return logic.to_money(int(digits)) if digits else None
+    return logic.first_amount((user.get("issue_data") or {}).get("rent_price"))
 
 
 async def client_from_bot(crm: Any, user: dict) -> dict | None:
@@ -177,6 +175,10 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
         start = rental["billed_until"]
         if until <= start:
             return
+        if not amount:
+            log.warning("CRM: продление %s до %s - цена «%s» не разобрана, начислено 0; "
+                        "поправьте в панели", user.get("contract_no"), until,
+                        (user.get("issue_data") or {}).get("rent_price"))
         await crm.charge_period(
             rental["id"], client["id"], period_from=start, period_to=until,
             amount=-(amount or logic.to_money(0)),

@@ -5,14 +5,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 
-from . import i18n
+from . import i18n, logic
 from . import keyboards as kb
-from . import logic
 from .config import Config
 from .db import Database
 from .services.crypto import Vault

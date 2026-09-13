@@ -23,21 +23,13 @@ async def credit_claim(crm: Any, claim: dict, amount: Decimal, *, by: str,
                        method: str = "sbp") -> int | None:
     """Зачислить заявку клиента. None - её уже закрыл кто-то другой.
 
-    Сначала запись в журнал, затем закрытие заявки: если второй оператор
-    успел раньше, resolve_claim вернёт False, и лишнюю запись мы снимаем
-    корректировкой - деньги клиента не могут зачислиться дважды.
+    Закрытие заявки и платёж - одна транзакция в базе: второй оператор
+    (двойной тап, панель и Telegram одновременно) не пишет в журнал
+    ничего, и сумма платежей в отчётах не раздувается.
     """
-    ledger_id = await crm.add_ledger(
-        client_id=claim["client_id"], kind="payment", amount=abs(amount),
-        method=method, created_by=by, note=f"Пополнение по заявке #{claim['id']}")
-    if not await crm.resolve_claim(claim["id"], status="confirmed",
-                                   resolved_by=by, ledger_id=ledger_id):
-        await crm.add_ledger(
-            client_id=claim["client_id"], kind="adjust", amount=-abs(amount),
-            created_by="system",
-            note=f"Отмена двойного зачисления по заявке #{claim['id']}")
-        return None
-    return ledger_id
+    return await crm.credit_claim(
+        claim["id"], client_id=claim["client_id"], amount=abs(amount), method=method,
+        note=f"Пополнение по заявке #{claim['id']}", created_by=by)
 
 
 async def reject_claim(crm: Any, claim: dict, *, by: str) -> bool:

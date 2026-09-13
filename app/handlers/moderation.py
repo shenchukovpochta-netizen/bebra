@@ -14,9 +14,8 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
 
-from .. import i18n
+from .. import i18n, logic, texts
 from .. import keyboards as kb
-from .. import logic, texts
 from ..config import Config
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
@@ -151,6 +150,9 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
 
     if extend_until:
         await _apply_extension(bot, db, target, before, extend_until)
+        # Документы хранятся, пока идёт аренда: без сдвига ретеншен стирал
+        # бы договор и сканы посреди долгой аренды или выкупа.
+        await db.set_purge_after(target, cfg.purge_approved_days)
         if crm is not None:
             await crm_sync.on_rental_extended(crm, before, until=extend_until,
                                               by=f"tg:{callback.from_user.id}")
@@ -183,6 +185,8 @@ async def cb_reject_menu(callback: CallbackQuery, cfg: Config) -> None:
         await callback.answer(texts.MOD_BROKEN_BUTTON, show_alert=True)
         return
     await callback.answer(texts.MOD_PICK_REASON)
+    if not isinstance(callback.message, Message):
+        return
     try:
         await callback.message.edit_reply_markup(
             reply_markup=kb.reject_reasons(parsed[1], logic.REJECT_REASONS))
@@ -202,6 +206,8 @@ async def cb_reject_cancel(callback: CallbackQuery, cfg: Config) -> None:
         await callback.answer(texts.MOD_BROKEN_BUTTON, show_alert=True)
         return
     await callback.answer()
+    if not isinstance(callback.message, Message):
+        return
     try:
         await callback.message.edit_reply_markup(reply_markup=kb.moderation(parsed[1]))
     except TelegramAPIError:
@@ -458,11 +464,29 @@ async def _extend_reply(message: Message, bot: Bot, db: Database, cfg: Config,
     if not logic.rental_is_active(target):
         await message.reply(texts.EXTEND_NOT_ACTIVE)
         return
+    tg_id = target["tg_id"]
+    if logic.is_cancel_word(message.text):
+        # Клиент передумал или оператор ошибся: до «Оплата получена» у
+        # клиента иначе нет выхода - все кнопки отвечают «ждём оплату».
+        if not await db.patch(tg_id, expected_state=logic.WAIT_PAYMENT,
+                              state=logic.APPROVED, extend_until=None,
+                              pay_chat_id=None, pay_message_id=None,
+                              extend_chat_id=None, extend_message_id=None):
+            await message.reply(texts.EXTEND_NOTHING_TO_CANCEL)
+            return
+        await db.log_event(tg_id, "extend_cancelled", {"by": message.from_user.id})
+        lang = i18n.user_lang(target)
+        try:
+            await bot.send_message(tg_id, i18n.t(lang, "EXTEND_CANCELLED"),
+                                   reply_markup=kb.main_menu(lang))
+        except TelegramAPIError:
+            log.warning("отмена продления не доставлена клиенту %s", tg_id)
+        await message.reply(texts.EXTEND_CANCELLED_MOD)
+        return
     parsed, err = logic.parse_extend_form(message.text or message.caption)
     if parsed is None:
         await message.reply(err)
         return
-    tg_id = target["tg_id"]
     price = str(parsed["rent_price"])
     issue = dict(target.get("issue_data") or {})
     issue["rent_price"] = price
@@ -693,6 +717,11 @@ async def _mark_card(callback: CallbackQuery, approved: bool | None) -> None:
     else:
         verdict = "✅ Одобрено" if approved else "⛔ Отклонено"
     who = callback.from_user.username or callback.from_user.id
+    # Карточке больше двух суток - Telegram присылает InaccessibleMessage
+    # без caption и edit_*: решение уже записано, правка подписи - косметика,
+    # ронять из-за неё уведомление клиенту нельзя.
+    if not isinstance(callback.message, Message):
+        return
     try:
         await callback.message.edit_caption(
             caption=f"{callback.message.caption or ''}\n\n{verdict} — @{who}",

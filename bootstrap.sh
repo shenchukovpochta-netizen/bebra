@@ -86,7 +86,10 @@ if [ ! -s secrets/crm_secret ]; then
   say "сгенерирован secrets/crm_secret"
 fi
 if [ ! -s secrets/crm_admin_password ]; then
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14 > secrets/crm_admin_password
+  # Не «tr </dev/urandom | head»: head закрывает трубу, tr падает по
+  # SIGPIPE, и под pipefail установка молча обрывалась на этой строке.
+  openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-16 | tr -d '\n' \
+    > secrets/crm_admin_password
   say "сгенерирован пароль панели CRM: secrets/crm_admin_password"
 fi
 # Пустой файл-заглушка: compose объявляет секрет max_bot_token на уровне

@@ -34,19 +34,29 @@ log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 PUBLIC = ("/login", "/static", "/healthz")
 SESSION_DAYS = 14
-# Перебор пароля: после LOGIN_LIMIT неудач с одного адреса вход закрыт
-# на LOGIN_WINDOW секунд. Память процесса, без базы: панель одна, и
-# рестарт, обнуляющий счётчик, атакующему ничего не даёт.
-LOGIN_LIMIT, LOGIN_WINDOW = 10, 15 * 60
+# Перебор пароля: после LOGIN_LIMIT неудач по одному логину вход в него
+# закрыт на LOGIN_WINDOW секунд; отдельный, более щедрый предел на адрес
+# (LOGIN_IP_LIMIT) - против перебора логинов. За Caddy и SSH-туннелем все
+# запросы приходят с одного адреса, поэтому основной ключ - логин: иначе
+# чужие десять попыток закрывали бы вход всем сотрудникам. Память
+# процесса, без базы: панель одна, и рестарт, обнуляющий счётчик,
+# атакующему ничего не даёт.
+LOGIN_LIMIT, LOGIN_IP_LIMIT, LOGIN_WINDOW = 10, 100, 15 * 60
 # Учётная таблица проката - сотни строк, единицы мегабайт.
 IMPORT_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _local(value: datetime) -> datetime:
+    """Момент из базы (timestamptz приходит в UTC) - в часовом поясе
+    контейнера (TZ в compose), как его ждёт оператор."""
+    return value.astimezone() if value.tzinfo else value
 
 
 def _dmy(value: Any) -> str:
     if not value:
         return "—"
     if isinstance(value, datetime):
-        return value.strftime("%d.%m.%Y %H:%M")
+        return _local(value).strftime("%d.%m.%Y %H:%M")
     if isinstance(value, date):
         return value.strftime("%d.%m.%Y")
     return str(value)
@@ -74,7 +84,7 @@ def _cell(value: Any) -> str:
     if isinstance(value, Decimal):
         return f"{value:.2f}".replace(".", ",")
     if isinstance(value, datetime):
-        return value.strftime("%d.%m.%Y %H:%M")
+        return _local(value).strftime("%d.%m.%Y %H:%M")
     if isinstance(value, date):
         return value.strftime("%d.%m.%Y")
     return str(value)
@@ -133,7 +143,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 request.state.staff = staff
         path = request.url.path
         if request.state.staff is None and not path.startswith(PUBLIC):
-            return redirect("/login?next=" + quote(path, safe=""))
+            target = path + (f"?{request.url.query}" if request.url.query else "")
+            return redirect("/login?next=" + quote(target, safe=""))
         return await call_next(request)
 
     # Порядок важен: последний add_middleware - внешний. Сессия должна быть
@@ -148,14 +159,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     def client_ip(request: Request) -> str:
         return request.client.host if request.client else "?"
 
-    def login_throttled(ip: str) -> bool:
+    def login_throttled(key: str, limit: int) -> bool:
         now = time.monotonic()
-        recent = [t for t in login_failures.get(ip, ()) if now - t < LOGIN_WINDOW]
+        recent = [t for t in login_failures.get(key, ()) if now - t < LOGIN_WINDOW]
         if recent:
-            login_failures[ip] = recent
+            login_failures[key] = recent
         else:
-            login_failures.pop(ip, None)
-        return len(recent) >= LOGIN_LIMIT
+            login_failures.pop(key, None)
+        return len(recent) >= limit
 
     async def form(request: Request) -> dict[str, str]:
         data = await request.form()
@@ -179,8 +190,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/login")
     async def login(request: Request) -> Response:
         data = await form(request)
-        ip = client_ip(request)
-        if login_throttled(ip):
+        login_key = "login:" + (data.get("login") or "").strip().lower()[:64]
+        ip_key = "ip:" + client_ip(request)
+        if login_throttled(login_key, LOGIN_LIMIT) or login_throttled(ip_key, LOGIN_IP_LIMIT):
             return render(request, "login.html", status_code=429,
                           error="Слишком много попыток входа. Подождите 15 минут.",
                           next=data.get("next") or "/")
@@ -189,11 +201,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if (staff is None or not staff.get("active")
                 or not logic.verify_password(data.get("password") or "",
                                              staff.get("password_hash"))):
-            login_failures.setdefault(ip, []).append(time.monotonic())
+            for key in (login_key, ip_key):
+                login_failures.setdefault(key, []).append(time.monotonic())
             return render(request, "login.html", status_code=401,
                           error="Неверный логин или пароль.",
                           next=data.get("next") or "/")
-        login_failures.pop(ip, None)
+        login_failures.pop(login_key, None)
         request.session.clear()
         request.session["staff_id"] = staff["id"]
         target = data.get("next") or "/"
@@ -554,6 +567,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if client is None or tariff is None:
             flash(request, "Выберите клиента и тариф.", "err")
             return redirect("/rentals/new")
+        if bike is None and (data.get("bike_id") or "").strip():
+            flash(request, "Такого велосипеда нет.", "err")
+            return redirect("/rentals/new")
         if not started.ok or billing not in logic.BILLING:
             flash(request, started.error or "Недопустимый режим начисления.", "err")
             return redirect("/rentals/new")
@@ -567,7 +583,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/rentals/new")
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
-        if started.value > date.today() and billing == "auto":
+        if billing == "manual":
+            flash(request, "Аренда оформлена без начисления: записи в журнал делаете вы.")
+        elif started.value > date.today():
             flash(request, f"Аренда оформлена. Первый период начислится "
                            f"{started.value:%d.%m.%Y}.")
         else:
@@ -837,6 +855,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Нужна таблица Excel в формате .xlsx.", "err")
             return redirect("/import")
         content = await upload.read(IMPORT_MAX_BYTES + 1)
+        await upload.close()
         if len(content) > IMPORT_MAX_BYTES:
             flash(request, "Файл больше 20 МБ - это не учётная таблица.", "err")
             return redirect("/import")

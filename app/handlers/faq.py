@@ -21,9 +21,8 @@ from datetime import datetime
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, Message
 
-from .. import faq, faq_i18n, i18n
+from .. import faq, faq_i18n, i18n, logic, texts
 from .. import keyboards as kb
-from .. import logic, texts
 from ..config import Config
 from ..db import Database
 from ..filters import StateIs

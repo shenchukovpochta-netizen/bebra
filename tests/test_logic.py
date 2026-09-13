@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -828,8 +828,8 @@ class TestReminderSchedule(unittest.TestCase):
     """Когда фоновый цикл делает дневной проход."""
 
     def now(self, hour):
-        from datetime import datetime, timezone
-        return datetime(2026, 8, 12, hour, 30, tzinfo=timezone.utc)
+        from datetime import datetime
+        return datetime(2026, 8, 12, hour, 30, tzinfo=UTC)
 
     def due(self, hour, last_run_on):
         from app import tasks

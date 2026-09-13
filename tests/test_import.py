@@ -132,6 +132,9 @@ class TestCells(unittest.TestCase):
     def test_days(self):
         self.assertEqual(ix._days_cell("7 дней"), 7)
         self.assertEqual(ix._days_cell(30), 30)
+        self.assertEqual(ix._days_cell("2 недели"), 14)
+        self.assertEqual(ix._days_cell("1 месяц"), 30)
+        self.assertEqual(ix._days_cell("неделя"), None)
         self.assertIsNone(ix._days_cell("#VALUE!"))
         self.assertIsNone(ix._days_cell(0))
 
@@ -318,6 +321,22 @@ class TestPlanApply(unittest.TestCase):
         r = run(self.crm.active_rental_of(cid))
         self.assertEqual(r["bike_id"], bike_id)
         self.assertEqual(run(self.crm.bike(bike_id))["status"], "rented")
+
+    def test_reused_number_with_new_vin_is_a_new_bike(self):
+        """Перенумерованная таблица: № занят другим велосипедом, VIN новый -
+        аренда не должна прицепиться к чужому велосипеду."""
+        run(self.crm.create_bike(code="1", model="Truck+", frame_no="999999999999999"))
+        plan, done = run(ix.run(self.crm, self.data, apply=True))
+        self.assertEqual(done["bikes"], 8)
+        new = run(self.crm.bike_by_frame("264022501706153"))
+        self.assertEqual(new["code"], "1-2")
+        self.assertEqual(run(self.crm.bike_by_code("1"))["status"], "available")
+
+    def test_rented_row_without_renter_marks_bike_rented(self):
+        rows = [{"№": 9, "Модель": "Truck+ ", "ВИН КОЛЕСА": "240W25021899",
+                 "ВИН РАМЫ": 264022501706199, "статус": "В аренде (долгов нет)"}]
+        run(ix.run(self.crm, sheet(rows), apply=True))
+        self.assertEqual(run(self.crm.bike_by_motor("240W25021899"))["status"], "rented")
 
     def test_report(self):
         plan, done = run(ix.run(self.crm, self.data, apply=True))

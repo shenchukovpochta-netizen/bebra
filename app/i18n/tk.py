@@ -365,6 +365,7 @@ T: dict[str, str] = {
     "EXTEND_CONFIRMED": "✅ Kärende {until} çenli uzaldyldy. Töleg üçin sag boluň!\nŞertnama we akt öňküligine galýar — täzesine gol çekmek gerek däl.",
 
     # ── выкуп ──
+    "EXTEND_CANCELLED": "Uzaltmak baradaky arzany operator ýatyrdy — kärende möhleti üýtgemedi.\nSoň uzaltmaly bolsa — «Uzaltmak» düwmesini ýene basyň ýa-da goldawa ýazyň.",
     "BUYOUT_LINE": "💎 Satyn almak: {total} dan {paid} ({percent}%), tölegler {payments} dan {days}",
     "BUYOUT_LEFT_LINE": "{left} galdy — bu {left_days} töleg, {finish} çenli.",
     "BUYOUT_READY": "🎉 Gutlaýarys! <b>{total}</b> möçberindäki satyn alyş bahasy doly tölendi.\n\nAşakda — <b>{bike}</b> welosipedine eýeçilik hukugynyň geçmegi hakyndaky Akt. Okaň we «Gol çekýärin» düwmesine basyň — şol pursatdan welosiped siziňki.\nEnjamlar (akkumulýator, zarýadlaýjy, sumka we beýlekiler) satyn alyşa girmeýär we Gaýtaryş akty boýunça gaýtarylýar — operator siziň bilen wagty ylalaşar.",

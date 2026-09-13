@@ -561,6 +561,33 @@ class CrmDB:
             "update crm.payment_claims set receipt_file_id = $2, receipt_is_photo = $3 "
             "where id = $1", claim_id, file_id, is_photo)
 
+    async def credit_claim(self, claim_id: int, *, client_id: int, amount: Decimal,
+                           method: str, note: str, created_by: str) -> int | None:
+        """Зачислить заявку: закрыть её и записать платёж одной транзакцией.
+
+        None - заявку уже закрыл кто-то другой (двойной тап, панель и
+        Telegram одновременно); тогда в журнал не пишется ничего.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                update crm.payment_claims
+                   set status = 'confirmed', resolved_by = $2, resolved_at = now()
+                 where id = $1 and status = 'pending'
+                returning id
+                """, claim_id, created_by)
+            if row is None:
+                return None
+            ledger_id = int(await conn.fetchval(
+                """
+                insert into crm.ledger (client_id, kind, amount, method, note, created_by)
+                values ($1, 'payment', $2, $3, $4, $5) returning id
+                """, client_id, amount, method, note, created_by))
+            await conn.execute(
+                "update crm.payment_claims set ledger_id = $2 where id = $1",
+                claim_id, ledger_id)
+            return ledger_id
+
     async def resolve_claim(self, claim_id: int, *, status: str, resolved_by: str,
                             ledger_id: int | None = None) -> bool:
         """Закрыть заявку. False - её уже закрыл кто-то другой (двойной тап,

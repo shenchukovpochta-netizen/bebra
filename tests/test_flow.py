@@ -15,7 +15,7 @@ import asyncio
 import importlib
 import sys
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -135,7 +135,7 @@ class FakeSession(BaseSession):
                     else ChatMemberLeft(user=user, status="left"))
         if isinstance(method, (SendMessage, SendPhoto, SendDocument)):
             return Message(
-                message_id=len(self.calls), date=datetime.now(timezone.utc),
+                message_id=len(self.calls), date=datetime.now(UTC),
                 chat=Chat(id=method.chat_id, type="private"),
             )
         if isinstance(method, (AnswerCallbackQuery, EditMessageCaption,
@@ -375,11 +375,11 @@ def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
         author = (User(id=1, is_bot=True, first_name="bot") if reply_from_bot
                   else User(id=user_id + 1, is_bot=False, first_name="admin2"))
         kwargs["reply_to_message"] = Message(
-            message_id=reply_to, date=datetime.now(timezone.utc),
+            message_id=reply_to, date=datetime.now(UTC),
             chat=Chat(id=chat_id, type=chat_type), from_user=author,
         )
     return Update(update_id=_next_id(), message=Message(
-        message_id=_next_id(), date=datetime.now(timezone.utc),
+        message_id=_next_id(), date=datetime.now(UTC),
         chat=Chat(id=chat_id, type=chat_type),
         from_user=User(id=user_id, is_bot=False, first_name="U"),
         text=text, **kwargs,
@@ -390,7 +390,7 @@ def cb(data, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private") -> Update
     return Update(update_id=_next_id(), callback_query=CallbackQuery(
         id=str(_next_id()), from_user=User(id=user_id, is_bot=False, first_name="U"),
         chat_instance="ci", data=data,
-        message=Message(message_id=_next_id(), date=datetime.now(timezone.utc),
+        message=Message(message_id=_next_id(), date=datetime.now(UTC),
                         chat=Chat(id=chat_id, type=chat_type)),
     ))
 

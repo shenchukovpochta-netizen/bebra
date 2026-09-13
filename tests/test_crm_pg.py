@@ -120,6 +120,10 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await service.credit_claim(self.crm, claim, D("2500"), by="a"))
         self.assertIsNone(await service.credit_claim(self.crm, claim, D("2500"), by="b"))
         self.assertEqual(await self.crm.client_balance(self.client_id), D("2500.00"))
+        # второй оператор не оставил в журнале ничего: ни платежа, ни отмены
+        entries = await self.crm.ledger_of(self.client_id)
+        self.assertEqual([x["kind"] for x in entries], ["payment"])
+        self.assertEqual((await self.crm.claim(pid))["ledger_id"], entries[0]["id"])
         self.assertEqual((await self.crm.claim(pid))["status"], "confirmed")
         self.assertEqual(await self.crm.pending_claims(), [])
 

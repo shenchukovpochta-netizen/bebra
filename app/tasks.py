@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from aiogram.exceptions import TelegramAPIError
 
-from . import i18n
+from . import i18n, logic, texts
 from . import keyboards as kb
-from . import logic, texts
 from .config import Config
 from .db import Database, utcnow
 from .services import files
@@ -194,31 +193,44 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
     бесит и не читается. Сводка уходит тем же проходом и только если
     в ней есть строки.
     """
-    last_run_on: date | None = None
+    # Отметка «сегодня сделано» ставится только после удачного прохода:
+    # один сбой базы или Telegram в назначенный час иначе оставлял клиентов
+    # без напоминаний на сутки. Повтор безопасен - каждое напоминание
+    # помечается в базе и второй раз не уходит. У бота и CRM отметки свои:
+    # сбой одного не должен ни отменять, ни повторять проход другого.
+    bot_done_on: date | None = None
+    crm_done_on: date | None = None
     while True:
         try:
-            now = datetime.now(timezone.utc)
-            if due_today(now, last_run_on, cfg.remind_hour_utc):
-                last_run_on = now.date()
-                sent, digest = await remind_once(bot, db, cfg, today=now.date())
-                if sent:
-                    log.info("напоминаний о сроке отправлено: %s", sent)
-                if vault is not None:
-                    done = await buyout_once(bot, db, cfg, vault,
-                                             today=now.date())
-                    if done:
-                        log.info("актов выкупа выдано: %s", done)
-                if digest:
-                    await _send_digest(bot, cfg, digest, now.date())
-                if crm is not None:
-                    # Начисления, напоминания об оплате и сводка по долгам -
-                    # тем же дневным проходом, что и напоминания о сроке.
-                    from .crm import billing
-                    await billing.run_daily(bot, db, crm, cfg, today=now.date())
+            now = datetime.now(UTC)
+            today = now.date()
+            if due_today(now, bot_done_on, cfg.remind_hour_utc):
+                try:
+                    sent, digest = await remind_once(bot, db, cfg, today=today)
+                    if sent:
+                        log.info("напоминаний о сроке отправлено: %s", sent)
+                    if vault is not None:
+                        done = await buyout_once(bot, db, cfg, vault, today=today)
+                        if done:
+                            log.info("актов выкупа выдано: %s", done)
+                    if digest:
+                        await _send_digest(bot, cfg, digest, today)
+                    bot_done_on = today
+                except asyncio.CancelledError:
+                    raise
+                except Exception:                       # noqa: BLE001
+                    log.exception("прогон напоминаний не удался, повтор через "
+                                  "%s с", REMIND_INTERVAL_SECONDS)
+            if crm is not None and due_today(now, crm_done_on, cfg.remind_hour_utc):
+                # Начисления, напоминания об оплате и сводка по долгам -
+                # тем же дневным проходом, что и напоминания о сроке.
+                from .crm import billing
+                await billing.run_daily(bot, db, crm, cfg, today=today)
+                crm_done_on = today
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001
-            log.exception("прогон напоминаний не удался")
+            log.exception("дневной проход CRM не удался")
         await asyncio.sleep(REMIND_INTERVAL_SECONDS)
 
 

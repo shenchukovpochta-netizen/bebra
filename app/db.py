@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import logging
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import asyncpg
+
+log = logging.getLogger(__name__)
 
 # Белый список колонок для UPDATE. Имена колонок нельзя передать параметром,
 # они подставляются в SQL как текст - поэтому только из этого множества.
@@ -41,7 +45,7 @@ PATCHABLE = frozenset({
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
@@ -51,6 +55,15 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
         await conn.set_type_codec(
             type_name, encoder=json.dumps, decoder=json.loads, schema="pg_catalog",
         )
+    # Сутки и месяцы в отчётах режутся по часовому поясу сессии, а сервер
+    # Postgres живёт в UTC: без этого «за сегодня» начиналось бы в 03:00
+    # по Москве. Пояс - тот же TZ, что у контейнеров бота и панели.
+    tz = os.environ.get("TZ") or ""
+    if tz:
+        try:
+            await conn.execute(f"set time zone '{tz.replace(chr(39), '')}'")
+        except asyncpg.PostgresError:
+            log.warning("часовой пояс %r Postgres не принял, отчёты считаются в UTC", tz)
 
 
 class Database:
@@ -58,7 +71,7 @@ class Database:
         self.pool = pool
 
     @classmethod
-    async def connect(cls, params: dict[str, Any]) -> "Database":
+    async def connect(cls, params: dict[str, Any]) -> Database:
         """Параметры по отдельности, а не строкой DSN.
 
         Пароль из `openssl rand -base64 24` содержит "/" примерно в 40%
@@ -75,7 +88,14 @@ class Database:
         await self.pool.close()
 
     async def apply_schema(self, path: Path) -> None:
-        await self.pool.execute(path.read_text(encoding="utf-8"))
+        """Схема идемпотентна, но «if not exists» не спасает от гонки: бот
+        и панель стартуют одновременно и на пустой базе оба создают одни и
+        те же объекты - один из них падал бы с duplicate key. Консультативная
+        блокировка выстраивает их в очередь."""
+        sql = path.read_text(encoding="utf-8")
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select pg_advisory_xact_lock(7331)")
+            await conn.execute(sql)
 
     # ─────────────────────── журнал апдейтов ───────────────────────
 
@@ -312,6 +332,9 @@ class Database:
             "       soglasie_path, act_in_path, act_out_path, buyout_path "
             "from bot.users "
             "where purge_after is not null and purge_after < now() "
+            # Акт приёма подписан, акт возврата нет - велосипед у клиента:
+            # договор и сканы нужны до конца аренды, сколько бы она ни шла.
+            "  and not (act_in_signed_at is not null and act_out_signed_at is null) "
             "  and (doc_path is not null or doc2_path is not null "
             "       or parent_path is not null "
             "       or contract_path is not null or soglasie_path is not null "

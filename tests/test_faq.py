@@ -13,9 +13,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import faq  # noqa: E402
+from app import (
+    faq,  # noqa: E402
+    texts,  # noqa: E402
+)
 from app import faq_i18n as i18n  # noqa: E402
-from app import texts  # noqa: E402
 
 DAY = datetime(2026, 8, 10, 12, 0)      # рабочее время
 NIGHT = datetime(2026, 8, 10, 23, 0)    # вне графика

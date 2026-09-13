@@ -115,6 +115,9 @@ class FakeCrm:
     async def create_bike(self, **fields):
         if any(b["code"] == fields.get("code") for b in self.bikes_.values()):
             raise UniqueError("code")
+        if fields.get("frame_no") and any(b["frame_no"] == fields["frame_no"]
+                                          for b in self.bikes_.values()):
+            raise UniqueError("frame_no")
         bid = self._id()
         self.bikes_[bid] = {"id": bid, "code": None, "model": None, "frame_no": None,
                             "motor_no": None, "battery_count": 2, "status": "available",
@@ -333,7 +336,7 @@ class FakeCrm:
 
     async def ledger_totals(self, *, since=None, until=None):
         out: dict[str, Decimal] = {}
-        for x in await self.ledger(since=since, until=until):
+        for x in await self.ledger(since=since, until=until, limit=10**9):
             out[x["kind"]] = out.get(x["kind"], Decimal(0)) + x["amount"]
         return out
 
@@ -407,6 +410,16 @@ class FakeCrm:
 
     async def set_claim_receipt(self, claim_id, file_id, is_photo):
         self.claims_[claim_id].update(receipt_file_id=file_id, receipt_is_photo=is_photo)
+
+    async def credit_claim(self, claim_id, *, client_id, amount, method, note, created_by):
+        p = self.claims_.get(claim_id)
+        if p is None or p["status"] != "pending":
+            return None
+        lid = await self.add_ledger(client_id=client_id, kind="payment", amount=amount,
+                                    method=method, note=note, created_by=created_by)
+        p.update(status="confirmed", resolved_by=created_by, ledger_id=lid,
+                 resolved_at=self._now())
+        return lid
 
     async def resolve_claim(self, claim_id, *, status, resolved_by, ledger_id=None):
         p = self.claims_.get(claim_id)

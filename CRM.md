@@ -152,7 +152,7 @@ Telegram получает сообщение с новой датой «опла
 импорта не задваивается. Аренды из таблицы — с ручным биллингом: новые
 периоды им не начисляются автоматически, продление оформляется как обычно.
 Из консоли сервера то же самое:
-`docker compose cp таблица.xlsx crm:/tmp/ && docker compose exec crm python -m app.crm.import_xlsx /tmp/таблица.xlsx --apply`
+`chmod 644 таблица.xlsx && docker compose cp таблица.xlsx crm:/tmp/ && docker compose exec crm python -m app.crm.import_xlsx /tmp/таблица.xlsx --apply`
 (без `--apply` — только отчёт).
 
 **Чёрный список работает и в боте.** Если человек из чёрного списка

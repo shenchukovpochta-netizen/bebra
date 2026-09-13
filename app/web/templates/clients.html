@@ -10,7 +10,7 @@
     <button type="submit">Найти</button>
   </form>
   <a class="btn" href="/clients/new">+ Клиент</a>
-  <a class="btn ghost" href="/clients.csv?q={{ q }}&status={{ status }}">CSV</a>
+  <a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}">CSV</a>
 </div>
 <div class="card">
 <table>
