@@ -62,6 +62,7 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
+                  'app/web/templates/_logo.html', 'app/web/templates/_bolt.html',
                   'app/web/templates/login.html', 'app/web/templates/missing.html',
                   'app/web/templates/dashboard.html', 'app/web/templates/clients.html',
                   'app/web/templates/client.html', 'app/web/templates/client_form.html',
@@ -71,7 +72,25 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/tariffs.html', 'app/web/templates/finance.html',
                   'app/web/templates/claims.html', 'app/web/templates/reports.html',
                   'app/web/templates/staff.html')
-$webStatic = @('app/web/static/style.css')
+$webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
+$webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
+             'app/web/static/fonts/onest-400-cyrillic.woff2',
+             'app/web/static/fonts/onest-400-latin.woff2',
+             'app/web/static/fonts/onest-500-cyrillic-ext.woff2',
+             'app/web/static/fonts/onest-500-cyrillic.woff2',
+             'app/web/static/fonts/onest-500-latin.woff2',
+             'app/web/static/fonts/onest-600-cyrillic-ext.woff2',
+             'app/web/static/fonts/onest-600-cyrillic.woff2',
+             'app/web/static/fonts/onest-600-latin.woff2',
+             'app/web/static/fonts/onest-700-cyrillic-ext.woff2',
+             'app/web/static/fonts/onest-700-cyrillic.woff2',
+             'app/web/static/fonts/onest-700-latin.woff2',
+             'app/web/static/fonts/unbounded-600-cyrillic-ext.woff2',
+             'app/web/static/fonts/unbounded-600-cyrillic.woff2',
+             'app/web/static/fonts/unbounded-600-latin.woff2',
+             'app/web/static/fonts/unbounded-700-cyrillic-ext.woff2',
+             'app/web/static/fonts/unbounded-700-cyrillic.woff2',
+             'app/web/static/fonts/unbounded-700-latin.woff2')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py')
@@ -84,12 +103,12 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
-                $webTemplates + $webStatic + $tests)) {
+                $webTemplates + $webStatic + $webFonts + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static/fonts' '$Path/tests'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -113,6 +132,8 @@ scp $webTemplates "${Server}:${Path}/app/web/templates/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (web/templates) не удался' }
 scp $webStatic "${Server}:${Path}/app/web/static/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (web/static) не удался' }
+scp $webFonts  "${Server}:${Path}/app/web/static/fonts/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (web/static/fonts) не удался' }
 scp $tests     "${Server}:${Path}/tests/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (tests) не удался' }
 

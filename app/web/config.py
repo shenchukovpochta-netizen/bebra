@@ -29,7 +29,7 @@ class WebConfig:
     # то же число, что у напоминаний бота.
     remind_before_days: int
     # Имя проката в шапке панели.
-    title: str = "CRM проката"
+    title: str = "МАЙБАЙК"
 
     @classmethod
     def load(cls) -> WebConfig:
@@ -48,5 +48,5 @@ class WebConfig:
             storage_dir=Path(_env("STORAGE_DIR", "/files/kyc")),
             port=_int("CRM_PORT", "8080"),
             remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
-            title=_env("CRM_TITLE", "CRM проката"),
+            title=_env("CRM_TITLE", "МАЙБАЙК"),
         )

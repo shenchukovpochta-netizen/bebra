@@ -19,7 +19,7 @@ packages = ["app", "app.handlers", "app.services", "app.i18n", "app.max",
             "app.crm", "app.web"]
 
 [tool.setuptools.package-data]
-"app.web" = ["templates/*.html", "static/*.css"]
+"app.web" = ["templates/*.html", "static/*.css", "static/fonts/*.woff2"]
 
 [project.scripts]
 bot = "app.main:main"

@@ -1,14 +1,19 @@
 {% extends "base.html" %}
-{% block title %}Вход — {{ app_title }}{% endblock %}
+{% block title %}Вход · {{ app_title }}{% endblock %}
 {% block content %}
-<div class="card narrow">
-  <h1>🚲 {{ app_title }}</h1>
-  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
-  <form method="post" action="/login">
-    <input type="hidden" name="next" value="{{ next }}">
-    <label>Логин <input name="login" autocomplete="username" autofocus required></label>
-    <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
-    <button type="submit">Войти</button>
-  </form>
+<div class="login">
+  <div class="login-art">{% include "_bolt.html" %}</div>
+  <div class="login-box">
+    <div class="login-logo">{% include "_logo.html" %}</div>
+    <h1>Вход<br>в&nbsp;панель</h1>
+    {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label>Логин <input name="login" autocomplete="username" autofocus required></label>
+      <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Войти</button>
+    </form>
+    <p class="muted">Клиенты, парк, аренды и деньги проката. Доступ выдаёт администратор.</p>
+  </div>
 </div>
 {% endblock %}
