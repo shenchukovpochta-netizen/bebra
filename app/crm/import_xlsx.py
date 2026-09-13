@@ -28,7 +28,7 @@ import io
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -344,6 +344,14 @@ def _client_note(row: Row) -> str:
     return "\n".join(parts)[: logic.NOTE_LIMIT]
 
 
+def _dated(day: date) -> datetime:
+    """Момент записи журнала для строки таблицы: полдень дня выдачи по UTC.
+    Деньги из таблицы - за прошлые месяцы; датировать их днём загрузки
+    значило бы показать в отчёте «поступило за месяц» миллион, которого
+    в этом месяце не было."""
+    return datetime.combine(day, time(12), tzinfo=UTC)
+
+
 def _bike_note(row: Row, place: str) -> str:
     parts = []
     if place:
@@ -448,7 +456,8 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
                 if status != "rented" and row.debt:
                     plan.debts.append({"phone": row.phone, "amount": row.debt,
                                        "note": f"Долг по таблице ({row.status})",
-                                       "line": row.line, "fio": row.fio})
+                                       "line": row.line, "fio": row.fio,
+                                       "dated": row.started or row.paid_until or today})
             planned_clients[row.phone] = client_ref
         else:
             warn(f"{row.fio}: телефон {row.phone} уже встречался выше - карточка одна"
@@ -531,25 +540,28 @@ async def apply_plan(crm: Any, plan: Plan, *, by: str = "import") -> dict[str, i
             tariff_name=r["tariff_name"], period_days=r["period_days"], price=r["price"],
             billing="manual", started_on=r["started_on"], contract_no=None, created_by=by)
         done["rentals"] += 1
+        dated = _dated(r["started_on"])
         if r["charge"]:
             await crm.charge_period(
                 rental_id, client_id, period_from=r["started_on"],
                 period_to=r["billed_until"], amount=-r["charge"],
-                note=f"Начислено по таблице ({r['tariff_name']})", created_by=by)
+                note=f"Начислено по таблице ({r['tariff_name']})", created_by=by,
+                created_at=dated)
             done["ledger"] += 1
         else:
             await crm.update_rental(rental_id, billed_until=r["billed_until"])
         if r["paid"]:
             await crm.add_ledger(client_id=client_id, rental_id=rental_id, kind="payment",
                                  amount=r["paid"], method="other",
-                                 note="Оплачено по таблице", created_by=by)
+                                 note="Оплачено по таблице", created_by=by,
+                                 created_at=dated)
             done["ledger"] += 1
     for d in plan.debts:
         client_id = ids.get(d["phone"])
         if client_id is None:
             continue
         await crm.add_ledger(client_id=client_id, kind="adjust", amount=-d["amount"],
-                             note=d["note"], created_by=by)
+                             note=d["note"], created_by=by, created_at=_dated(d["dated"]))
         done["ledger"] += 1
     return done
 

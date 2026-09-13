@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -385,11 +385,14 @@ class CrmDB:
 
     async def charge_period(self, rental_id: int, client_id: int, *,
                             period_from: date, period_to: date, amount: Decimal,
-                            note: str, created_by: str = "billing") -> bool:
+                            note: str, created_by: str = "billing",
+                            created_at: datetime | None = None) -> bool:
         """Начислить период и сдвинуть billed_until - одной транзакцией.
 
         Повтор того же периода (второй проход, ручной запуск) упирается
         в уникальный индекс и возвращает False, ничего не списав.
+        created_at задаёт только импорт: записи из таблицы датируются
+        днём выдачи, а не днём загрузки, чтобы не раздувать текущий месяц.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             try:
@@ -397,10 +400,10 @@ class CrmDB:
                     """
                     insert into crm.ledger
                       (client_id, rental_id, kind, amount, period_from, period_to,
-                       note, created_by)
-                    values ($1, $2, 'charge', $3, $4, $5, $6, $7)
+                       note, created_by, created_at)
+                    values ($1, $2, 'charge', $3, $4, $5, $6, $7, coalesce($8, now()))
                     """, client_id, rental_id, amount, period_from, period_to,
-                    note, created_by)
+                    note, created_by, created_at)
             except asyncpg.UniqueViolationError:
                 return False
             await conn.execute(
@@ -419,14 +422,16 @@ class CrmDB:
                          rental_id: int | None = None, method: str | None = None,
                          note: str | None = None, created_by: str | None = None,
                          period_from: date | None = None,
-                         period_to: date | None = None) -> int:
+                         period_to: date | None = None,
+                         created_at: datetime | None = None) -> int:
         return int(await self.pool.fetchval(
             """
             insert into crm.ledger (client_id, rental_id, kind, amount, method,
-                                    note, created_by, period_from, period_to)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id
+                                    note, created_by, period_from, period_to, created_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, coalesce($10, now()))
+            returning id
             """, client_id, rental_id, kind, amount, method, note, created_by,
-            period_from, period_to))
+            period_from, period_to, created_at))
 
     async def ledger_of(self, client_id: int, limit: int = 100) -> list[dict]:
         return _rows(await self.pool.fetch(

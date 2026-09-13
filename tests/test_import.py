@@ -285,8 +285,11 @@ class TestPlanApply(unittest.TestCase):
         waiting = run(crm.bike_by_frame("JL20240715478"))
         self.assertEqual((waiting["status"], waiting["model"]), ("available", "Kugoo V3 pro"))
         self.assertIn("Место: Павлюхина", waiting["note"])
-        # автор записей
+        # автор записей; деньги из таблицы датированы днём выдачи, а не загрузки
         self.assertEqual(entries[0]["created_by"], "import:test")
+        self.assertEqual(entries[0]["created_at"].date(), date(2026, 1, 5))
+        for x in run(crm.ledger_of(c["id"])):
+            self.assertEqual(x["created_at"].date(), date(2026, 9, 1))
 
     def test_second_run_changes_nothing(self):
         run(ix.run(self.crm, self.data, apply=True))

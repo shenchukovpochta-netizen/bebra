@@ -288,13 +288,14 @@ class FakeCrm:
         return True
 
     async def charge_period(self, rental_id, client_id, *, period_from, period_to,
-                            amount, note, created_by="billing"):
+                            amount, note, created_by="billing", created_at=None):
         if any(x["kind"] == "charge" and x["rental_id"] == rental_id
                and x["period_from"] == period_from for x in self.ledger_):
             return False
         await self.add_ledger(client_id=client_id, rental_id=rental_id, kind="charge",
                               amount=Decimal(amount), note=note, created_by=created_by,
-                              period_from=period_from, period_to=period_to)
+                              period_from=period_from, period_to=period_to,
+                              created_at=created_at)
         r = self.rentals_[rental_id]
         r["billed_until"] = max(r["billed_until"], period_to)
         return True
@@ -304,13 +305,14 @@ class FakeCrm:
 
     # ─── журнал ───
     async def add_ledger(self, *, client_id, kind, amount, rental_id=None, method=None,
-                         note=None, created_by=None, period_from=None, period_to=None):
+                         note=None, created_by=None, period_from=None, period_to=None,
+                         created_at=None):
         lid = self._id()
         self.ledger_.append({"id": lid, "client_id": client_id, "rental_id": rental_id,
                              "kind": kind, "amount": Decimal(amount), "method": method,
                              "period_from": period_from, "period_to": period_to,
                              "note": note, "created_by": created_by,
-                             "created_at": self._now()})
+                             "created_at": created_at or self._now()})
         return lid
 
     async def ledger_of(self, client_id, limit=100):
