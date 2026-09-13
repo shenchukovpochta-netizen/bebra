@@ -237,6 +237,14 @@ Postgres (`tests/test_crm_pg.py`, нужен `pip install pgserver` — он п�
 
 ## 5. Развёртывание и доступ
 
+Бот и CRM — один архив и один `docker compose up`: у них общая база,
+общий `.env` и общие секреты; CRM добавляет сервис `crm` и два файла
+в `secrets/`. Свежая установка — `bash install.sh` (см. INSTALL.md).
+Обновление бота, поставленного до появления CRM, — раздел «Обновление
+бота, установленного до появления CRM» там же: код заливается поверх,
+`.env`, секреты и docx-шаблоны остаются, `bash bootstrap.sh` досоздаёт
+секреты и поднимает сервис.
+
 `install.sh` / `bootstrap.sh` сами генерируют `secrets/crm_secret` (ключ
 подписи cookie) и `secrets/crm_admin_password` (пароль первого
 администратора, логин `CRM_ADMIN_LOGIN`, по умолчанию `admin`). Пароль
