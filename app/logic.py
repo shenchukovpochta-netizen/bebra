@@ -150,6 +150,9 @@ def validate_fio(raw: str | None) -> Validation:
         return Validation(False, error="Похоже на опечатку. Введите ФИО полностью, без цифр.")
     if re.search(r"[<>&]", fio):
         return Validation(False, error="В ФИО недопустимы символы < > и &.")
+    # Начало с =, +, -, @ - это формула для Excel в выгрузках CRM, а не имя.
+    if fio[0] in "=+-@":
+        return Validation(False, error="Похоже на опечатку. Введите ФИО полностью.")
     return Validation(True, value=fio)
 
 

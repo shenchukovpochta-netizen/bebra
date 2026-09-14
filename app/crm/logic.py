@@ -333,6 +333,8 @@ def check_name(raw: Any, *, what: str = "Название") -> Check:
         return Check(False, error=f"{what}: не длиннее {NAME_LIMIT} символов.")
     if "<" in text or ">" in text:
         return Check(False, error=f"{what}: без угловых скобок.")
+    if text[0] in "=+-@":
+        return Check(False, error=f"{what}: не может начинаться с {text[0]}.")
     return Check(True, text)
 
 

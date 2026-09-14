@@ -51,6 +51,9 @@ class TestFio(unittest.TestCase):
         # Именно этот вектор бьёт по модератору: подделанная ссылка рядом
         # с кнопкой «Одобрить».
         self.assertFalse(logic.validate_fio('<a href="https://evil.ru">Иванов Иван</a>').ok)
+        # начало с символа формулы Excel - не имя (выгрузки CSV в панели)
+        for bad in ("=HYPERLINK(x)", "+Иванов Иван", "-Иванов Иван", "@Иванов Иван"):
+            self.assertFalse(logic.validate_fio(bad).ok, bad)
 
     def test_too_long(self):
         self.assertFalse(logic.validate_fio("И" * 121).ok)

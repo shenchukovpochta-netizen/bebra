@@ -202,6 +202,11 @@ class TestReminders(unittest.TestCase):
 
 
 class TestChecks(unittest.TestCase):
+    def test_name_rejects_formula_start(self):
+        self.assertFalse(logic.check_name("=SUM(A1)", what="Модель").ok)
+        self.assertIn("не может начинаться", logic.check_name("@x").error)
+        self.assertTrue(logic.check_name("Truck+").ok)
+
     def test_amount(self):
         self.assertEqual(logic.check_amount("3 000").value, D("3000.00"))
         self.assertFalse(logic.check_amount("0").ok)

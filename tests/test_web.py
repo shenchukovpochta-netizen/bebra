@@ -415,6 +415,21 @@ class TestReviewFixes(WebCase):
         self.assertEqual(web_app._cell(moment), expected)
         self.assertEqual(web_app._dmy(date(2026, 9, 13)), "13.09.2026")
 
+    def test_csv_neutralises_formulas(self):
+        """Имя из бота «=HYPERLINK(...)» не должно стать формулой в Excel."""
+        from app.web import app as web_app
+        self.assertEqual(web_app._cell('=HYPERLINK("http://evil";"Иванов")'),
+                         '="=HYPERLINK(""http://evil"";""Иванов"")"')
+        self.assertEqual(web_app._cell("+79990000000"), '="+79990000000"')
+        self.assertEqual(web_app._cell("Иванов Иван"), "Иванов Иван")
+        self.assertEqual(web_app._cell(D("-3000")), "-3000,00")       # числа не трогаем
+        cid = run(self.crm.create_client(full_name="Петров", phone="+79990000001"))
+        run(self.crm.update_client(cid, note="=cmd|' /C calc'!A1"))
+        self.login()
+        body = self.client.get("/clients.csv").text
+        self.assertNotIn('\n=cmd', body)
+        self.assertIn('"=""+79990000001"""', body)
+
     def test_csv_link_encodes_query(self):
         self.login()
         page = self.client.get("/clients", params={"q": "A&B#1"}).text
@@ -577,7 +592,9 @@ class TestExtras(WebCase):
         self.assertEqual(r.status_code, 200)
         text = r.content.decode("utf-8")
         self.assertIn("ФИО;Телефон;Статус", text)
-        self.assertIn("Иванов Иван;+79990000000;Активен;есть;3000,00", text)
+        # телефон начинается с «+» - отдаётся как формула-строка, чтобы Excel
+        # не превратил его в число и не вычислял ничего из имён
+        self.assertIn('Иванов Иван;"=""+79990000000""";Активен;есть;3000,00', text)
         self.assertNotIn("Иванов", self.client.get("/clients.csv?q=Сидор").text)
         # экспорт закрыт без входа
         self.client.post("/logout")

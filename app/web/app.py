@@ -79,6 +79,13 @@ def _csv(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+# Символы, с которых Excel и LibreOffice начинают формулу. Имя клиента
+# приходит из бота как набрал человек: «=HYPERLINK(...)» в ФИО превратил бы
+# выгрузку в фишинговую ссылку у оператора. Такие строки отдаются как
+# формула-строка ="...": таблица показывает текст и ничего не вычисляет.
+_FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return ""
@@ -88,7 +95,10 @@ def _cell(value: Any) -> str:
         return _local(value).strftime("%d.%m.%Y %H:%M")
     if isinstance(value, date):
         return value.strftime("%d.%m.%Y")
-    return str(value)
+    text = str(value)
+    if text.startswith(_FORMULA_STARTS):
+        return '="' + text.replace('"', '""') + '"'
+    return text
 
 
 def _iso(value: Any) -> str:
