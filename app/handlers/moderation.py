@@ -19,7 +19,7 @@ from .. import keyboards as kb
 from ..config import Config
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
-from ..filters import ServiceChatReply
+from ..filters import ServiceChatReply, is_operator
 from ..services.crypto import Vault
 from . import contract
 
@@ -28,7 +28,7 @@ router = Router(name="moderation")
 
 
 def _is_admin(user_id: int, cfg: Config) -> bool:
-    return user_id in cfg.admins
+    return is_operator(cfg, user_id)
 
 
 async def _decide(db: Database, callback: CallbackQuery, target: int, *,

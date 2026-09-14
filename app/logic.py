@@ -12,6 +12,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -459,7 +460,8 @@ def validate_upload(is_photo: bool, mime: str | None, size: int | None) -> Valid
 
 def should_process(chat_type: str | None, *, from_admin_chat: bool,
                    is_moderation_callback: bool,
-                   is_moderation_reply: bool = False) -> bool:
+                   is_moderation_reply: bool = False,
+                   is_service_command: bool = False) -> bool:
     """Пускать ли апдейт дальше.
 
     Личные чаты - да: там идёт вся регистрация. Групповые - только если это
@@ -474,7 +476,8 @@ def should_process(chat_type: str | None, *, from_admin_chat: bool,
     """
     if chat_type == "private":
         return True
-    return from_admin_chat and (is_moderation_callback or is_moderation_reply)
+    return from_admin_chat and (is_moderation_callback or is_moderation_reply
+                                or is_service_command)
 
 
 def is_subscribed(status: str | None, is_member: bool | None = None) -> bool:
@@ -714,7 +717,94 @@ def reject_back_to(code: str, anketa: dict | None, *,
 
 
 MODERATION_DATA = re.compile(
-    r"^(?:approve|reject|rj|rjc|rjx|pay|crmpay):-?\d+(?::[a-z]+)?$")
+    r"^(?:approve|reject|rj|rjc|rjx|pay|crmpay):-?\d+(?::[a-z]+)?$|^bk:\d+:[a-z_]+$")
+
+# Команды парка в служебном чате: /bike B-03 - карточка велосипеда
+# с кнопками статуса; ремонт - ответом на карточку.
+FLEET_COMMAND = re.compile(r"^/(?:bike|велик|park)(?:@\w+)?(?:\s+(.+))?$", re.S)
+BIKE_CARD_MARK = "🚲 Велосипед "
+
+
+def is_fleet_command(text: str | None) -> bool:
+    return bool(text) and FLEET_COMMAND.match(text.strip()) is not None
+
+
+def fleet_command_arg(text: str | None) -> str:
+    m = FLEET_COMMAND.match((text or "").strip())
+    return (m.group(1) or "").strip() if m else ""
+
+
+def bike_code_from_card(text: str | None) -> str | None:
+    """Инвентарный номер из карточки бота «🚲 Велосипед B-03 · …»."""
+    if not text or not text.startswith(BIKE_CARD_MARK):
+        return None
+    rest = text[len(BIKE_CARD_MARK):].split("\n", 1)[0]
+    code = rest.split(" · ", 1)[0].strip()
+    return code or None
+
+
+def parse_repair_form(text: str | None, nodes: dict[str, str]) -> tuple[dict | None, str]:
+    """Форма ремонта ответом на карточку велосипеда:
+
+        узел: контроллер
+        запчасти: 2500
+        работа: 500
+        что: заменил, прошил
+
+    Узел ищется по подстроке названия из справочника (без учёта регистра).
+    Суммы могут отсутствовать - тогда ноль (работа своя, запчастей не было).
+    """
+    fields: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip().lower()] = value.strip()
+    node_text = fields.get("узел") or fields.get("node") or ""
+    if not node_text:
+        return None, ("Не вижу строки «узел: …». Пример:\n"
+                      "узел: контроллер\nзапчасти: 2500\nработа: 500")
+    matches = repair_node_matches(node_text, nodes)
+    if not matches:
+        known = ", ".join(sorted(nodes.values(), key=str.lower))
+        return None, f"Узла «{node_text}» нет в справочнике. Есть: {known}"
+    if len(matches) > 1:
+        options = " / ".join(nodes[c] for c in matches)
+        return None, f"Уточните узел «{node_text}»: {options}"
+    code = matches[0]
+    out: dict[str, Any] = {"node": code, "note": fields.get("что") or fields.get("note") or ""}
+    for key, alias in (("parts_cost", "запчасти"), ("labor_cost", "работа")):
+        raw = re.sub(r"[\s₽]|руб\.?|р\.?$", "", fields.get(alias, "").lower()).replace(",", ".")
+        if not raw:
+            out[key] = Decimal(0)
+            continue
+        # Строгий шаблон, а не Decimal(raw): «nan» и «1e9» - тоже Decimal,
+        # но не суммы.
+        if not re.fullmatch(r"\d{1,7}(?:\.\d{1,2})?", raw):
+            return None, f"Не понял сумму в строке «{alias}: {fields.get(alias)}»."
+        out[key] = Decimal(raw).quantize(Decimal("0.01"))
+    return out, ""
+
+
+def repair_node_matches(text: str, nodes: dict[str, str]) -> list[str]:
+    """Коды узлов, подходящие под название или его часть: точное совпадение
+    кода или названия - один ответ; иначе все, где встречается подстрока
+    («тормоза» - четыре узла, пусть оператор уточнит)."""
+    needle = text.strip().lower()
+    if not needle:
+        return []
+    if needle in nodes:
+        return [needle]
+    exact = [c for c, t in nodes.items() if t.lower() == needle]
+    if exact:
+        return exact
+    return [c for c, t in nodes.items() if needle in t.lower()]
+
+
+def find_repair_node(text: str, nodes: dict[str, str]) -> str | None:
+    """Код узла, если название определяет его однозначно."""
+    matches = repair_node_matches(text, nodes)
+    return matches[0] if len(matches) == 1 else None
 
 
 def is_moderation_data(data: str | None) -> bool:

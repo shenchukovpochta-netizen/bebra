@@ -210,8 +210,9 @@ class FakeCrm:
             out[b["status"]] = out.get(b["status"], 0) + 1
         return out
 
-    async def bike_log(self, bike_id, limit=50):
-        return [dict(x) for x in reversed(self.bike_log_) if x["bike_id"] == bike_id][:limit]
+    async def bike_log(self, bike_id, limit=50, kind=None):
+        return [dict(x) for x in reversed(self.bike_log_)
+                if x["bike_id"] == bike_id and (not kind or x["kind"] == kind)][:limit]
 
     async def add_bike_log(self, bike_id, kind, note, cost, created_by):
         lid = self._id()

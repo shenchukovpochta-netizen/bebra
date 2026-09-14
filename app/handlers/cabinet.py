@@ -32,7 +32,7 @@ from ..crm import logic as crm_logic
 from ..crm import notify, service
 from ..crm import sync as crm_sync
 from ..db import Database
-from ..filters import ServiceChatReply, StateIs
+from ..filters import ServiceChatReply, StateIs, is_operator
 
 log = logging.getLogger(__name__)
 router = Router(name="cabinet")
@@ -366,7 +366,7 @@ async def cb_contract(callback: CallbackQuery, bot: Bot, db: Database, user: dic
 # ─────────────────────────── операторская часть ───────────────────────────
 
 def _is_admin(user_id: int, cfg: Config) -> bool:
-    return user_id in cfg.admins
+    return is_operator(cfg, user_id)
 
 
 async def _mark_card(bot: Bot, claim: dict, mark: str) -> None:

@@ -282,7 +282,12 @@ class CrmDB:
             "select status, count(*) as n from crm.bikes group by status")
         return {r["status"]: int(r["n"]) for r in rows}
 
-    async def bike_log(self, bike_id: int, limit: int = 50) -> list[dict]:
+    async def bike_log(self, bike_id: int, limit: int = 50,
+                       kind: str | None = None) -> list[dict]:
+        if kind:
+            return _rows(await self.pool.fetch(
+                "select * from crm.bike_log where bike_id = $1 and kind = $3 "
+                "order by id desc limit $2", bike_id, limit, kind))
         return _rows(await self.pool.fetch(
             "select * from crm.bike_log where bike_id = $1 order by id desc limit $2",
             bike_id, limit))

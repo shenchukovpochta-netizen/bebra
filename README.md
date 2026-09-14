@@ -42,6 +42,7 @@
 | `app/services/crypto.py` | шифрование анкеты в базе (AES-256-GCM) |
 | `app/tasks.py` | ретеншен: удаление сканов и договоров по сроку, чистка журнала |
 | `app/handlers/cabinet.py` | **кабинет клиента** (CRM): баланс, тариф, «оплачено до», пополнение, договор |
+| `app/handlers/fleet.py` | **парк из служебного чата**: `/bike B-03`, статус кнопкой, ремонт по узлу ответом на карточку |
 | `app/crm/` | **CRM**: логика денег и периодов, база, биллинг, синхронизация с ботом, уведомления |
 | `schema.sql` (crm) | журнал статусов велосипедов триггером, справочник узлов ремонта, позиции ремонта — основа трёх чисел парка (см. [CRM.md](CRM.md)) |
 | `app/crm/import_xlsx.py` | импорт учётной таблицы xlsx (парк, арендаторы, долги) в CRM: панель → Импорт или `python -m app.crm.import_xlsx` |
@@ -52,7 +53,7 @@
 | `tests/test_flow.py` | сквозной прогон сценария через настоящий Dispatcher |
 | `tests/test_crm_logic.py`, `tests/test_crm_sql.py` | CRM: деньги, периоды, напоминания; SQL слоя CRM |
 | `tests/test_import.py` | импорт таблицы: разбор ячеек, план, идемпотентность, страница /import |
-| `tests/test_cabinet.py`, `tests/test_web.py` | кабинет клиента сквозь Dispatcher; панель через TestClient |
+| `tests/test_cabinet.py`, `tests/test_fleet.py`, `tests/test_web.py` | кабинет клиента и парк из чата сквозь Dispatcher; панель через TestClient |
 | `app/max/` | **бот в MAX**: клиент Bot API, опрос, обработчики (профиль `max`) |
 | `app/max_main.py` | точка входа MAX-бота, своя база `mybike_max` |
 | `install.sh` | **установка одной командой**: вопросы, проверки, запуск |

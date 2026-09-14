@@ -355,7 +355,7 @@ def docx_text(docx: bytes) -> str:
 
 def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
         photo=False, document=False, contact_user_id=None, reply_to=None,
-        reply_from_bot=True, file_id=None) -> Update:
+        reply_from_bot=True, file_id=None, reply_text=None) -> Update:
     kwargs = {}
     if document:
         kwargs["document"] = Document(file_id=file_id or "d1", file_unique_id="du1",
@@ -376,7 +376,7 @@ def msg(text=None, *, chat_id=CHAT_ID, user_id=USER_ID, chat_type="private",
                   else User(id=user_id + 1, is_bot=False, first_name="admin2"))
         kwargs["reply_to_message"] = Message(
             message_id=reply_to, date=datetime.now(UTC),
-            chat=Chat(id=chat_id, type=chat_type), from_user=author,
+            chat=Chat(id=chat_id, type=chat_type), from_user=author, text=reply_text,
         )
     return Update(update_id=_next_id(), message=Message(
         message_id=_next_id(), date=datetime.now(UTC),

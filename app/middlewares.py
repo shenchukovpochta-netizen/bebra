@@ -15,6 +15,7 @@ from . import i18n, logic
 from . import keyboards as kb
 from .config import Config
 from .db import Database
+from .filters import is_service_chat
 from .services.crypto import Vault
 from .services.subscription import check_subscription
 
@@ -81,7 +82,7 @@ class PipelineMiddleware(BaseMiddleware):
         Их два, и совпадать они не обязаны: заявки могут разбирать в группе,
         а договоры утверждает один человек в личке.
         """
-        return chat_id in {self.cfg.admin_chat_id, self.cfg.contract_chat_id}
+        return is_service_chat(self.cfg, chat_id)
 
     async def __call__(self, handler: Handler, event: TelegramObject,
                        data: dict[str, Any]) -> Any:
@@ -104,11 +105,13 @@ class PipelineMiddleware(BaseMiddleware):
         is_moderation_reply = (
             isinstance(inner, Message) and inner.reply_to_message is not None
         )
+        is_fleet = isinstance(inner, Message) and logic.is_fleet_command(inner.text)
         if not logic.should_process(
             payload.get("chat_type"),
             from_admin_chat=self._is_service_chat(chat_id),
             is_moderation_callback=is_moderation,
             is_moderation_reply=is_moderation_reply,
+            is_service_command=is_fleet,
         ):
             return None
 
@@ -120,7 +123,8 @@ class PipelineMiddleware(BaseMiddleware):
         # из служебного чата. Чат утверждения договоров - это личка, и без
         # проверки чата владелец @arenda_velo_kazan попадал бы под гейт
         # подписки и рейт-лимит наравне с клиентами.
-        service = self._is_service_chat(chat_id) and (is_moderation or is_moderation_reply)
+        service = self._is_service_chat(chat_id) and (is_moderation or is_moderation_reply
+                                                      or is_fleet)
 
         try:
             result = await self._dispatch(handler, event, data, inner, user_id, service)

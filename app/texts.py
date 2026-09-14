@@ -837,3 +837,29 @@ CAB_CLAIM_AMOUNT_BAD = "Не понял сумму. Ответьте на кар
 CAB_CLAIM_CREDITED = "Зачислено {amount}. Баланс клиента: {balance}."
 CAB_CLAIM_REJECTED_TOAST = "Заявка отклонена"
 CAB_DIGEST_INTRO = "💰 Сводка по оплатам на {today}"
+
+# ─ парк из служебного чата ─
+FLEET_USAGE = (
+    "Карточка велосипеда: <code>/bike B-03</code> (инвентарный номер, рама или мотор).\n"
+    "На карточке - кнопки статуса; ремонт - ответом на карточку:\n"
+    "<code>узел: контроллер\nзапчасти: 2500\nработа: 500\nчто: заменил</code>"
+)
+FLEET_NOT_FOUND = "Велосипед «{query}» не найден: ни по номеру, ни по раме, ни по мотору."
+FLEET_NO_CRM = "CRM не подключена: карточки парка недоступны."
+FLEET_CARD = (
+    "🚲 Велосипед {code} · {model}\n"
+    "Статус: <b>{status}</b>{location}\n"
+    "{renter}\n"
+    "{repairs}\n\n"
+    "Ремонт - ответьте на это сообщение:\n"
+    "<code>узел: контроллер\nзапчасти: 2500\nработа: 500</code>"
+)
+FLEET_CARD_RENTER = "У клиента: {name} (аренда #{rental_id})"
+FLEET_CARD_FREE = "Не в аренде"
+FLEET_CARD_REPAIRS = "Ремонты: {items}"
+FLEET_CARD_NO_REPAIRS = "Ремонтов не записано"
+FLEET_STATUS_SET = "{code}: {status} - {who}"
+FLEET_RENTED_LOCK = "Велосипед в аренде: статус меняет только закрытие аренды."
+FLEET_SAME_STATUS = "Уже {status}."
+FLEET_REPAIR_SAVED = "🔧 {code}: {node} - {total} (запчасти {parts}, работа {labor}) - {who}"
+FLEET_NO_RIGHTS = "Только для операторов."
