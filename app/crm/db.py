@@ -114,7 +114,8 @@ class CrmDB:
     async def bikes(self, *, status: str | None = None, q: str | None = None,
                     location: str | None = None, limit: int = 500) -> list[dict]:
         """Список с текущим арендатором - одним запросом, без N+1."""
-        conds, args = [], []
+        conds: list[str] = []
+        args: list[Any] = []
         if status:
             args.append(status)
             conds.append(f"b.status = ${len(args)}")
@@ -312,7 +313,8 @@ class CrmDB:
     async def clients(self, *, q: str | None = None, status: str | None = None,
                       limit: int = 500) -> list[dict]:
         """Список с балансом и активной арендой - одним запросом."""
-        conds, args = [], []
+        conds: list[str] = []
+        args: list[Any] = []
         if status:
             args.append(status)
             conds.append(f"c.status = ${len(args)}")
@@ -553,7 +555,8 @@ class CrmDB:
 
     async def ledger(self, *, since: date | None = None, until: date | None = None,
                      kind: str | None = None, limit: int = 1000) -> list[dict]:
-        conds, args = [], []
+        conds: list[str] = []
+        args: list[Any] = []
         if since:
             args.append(since)
             conds.append(f"l.created_at >= ${len(args)}::date")
@@ -574,7 +577,8 @@ class CrmDB:
 
     async def ledger_totals(self, *, since: date | None = None,
                             until: date | None = None) -> dict[str, Decimal]:
-        conds, args = [], []
+        conds: list[str] = []
+        args: list[Any] = []
         if since:
             args.append(since)
             conds.append(f"created_at >= ${len(args)}::date")
