@@ -102,12 +102,16 @@ class FakeCrm:
         return self._bike_row(b) if b else None
 
     async def bike_by_frame(self, frame_no):
-        return next((dict(b) for b in self.bikes_.values() if b.get("frame_no") == frame_no),
-                    None)
+        for b in self.bikes_.values():
+            if b["frame_no"] and b["frame_no"].upper() == str(frame_no).upper():
+                return dict(b)
+        return None
 
     async def bike_by_motor(self, motor_no):
-        return next((dict(b) for b in self.bikes_.values() if b.get("motor_no") == motor_no),
-                    None)
+        for b in self.bikes_.values():
+            if b["motor_no"] and b["motor_no"].upper() == str(motor_no).upper():
+                return dict(b)
+        return None
 
     async def bike_by_code(self, code):
         return next((dict(b) for b in self.bikes_.values() if b["code"] == code), None)

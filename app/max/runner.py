@@ -26,6 +26,13 @@ async def poll_forever(ctx: Ctx, stop: asyncio.Event) -> None:
         try:
             batch = await ctx.cl.updates(marker)
         except MaxAPIError as exc:
+            if exc.status in (401, 403):
+                # Токен отвергнут: чаще опрашивать бессмысленно, а молчать
+                # нельзя - в логе должна быть понятная причина.
+                log.error("MAX отверг токен бота (HTTP %s) - проверьте "
+                          "secrets/max_bot_token; повтор через 60 с", exc.status)
+                await asyncio.sleep(60)
+                continue
             log.warning("getUpdates не удался: %s", exc)
             await asyncio.sleep(3)
             continue

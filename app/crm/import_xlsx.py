@@ -133,10 +133,12 @@ def _days_cell(value: Any) -> int | None:
     return days if 1 <= days <= logic.MAX_PERIOD_DAYS else None
 
 
-def _date_cell(value: Any, *, year_from: date | None = None) -> date | None:
+def _date_cell(value: Any, *, year_from: date | None = None,
+               not_after: date | None = None) -> date | None:
     """Дата из ячейки: datetime, «до 14.09», «на 28.03», «14.09.2026».
     Год без года берётся от даты выдачи; если получилось раньше выдачи -
-    следующий год."""
+    следующий год. Для самой даты выдачи год - текущий, но не в будущем:
+    «28.12» в январе - прошлый декабрь (not_after=сегодня)."""
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -157,6 +159,11 @@ def _date_cell(value: Any, *, year_from: date | None = None) -> date | None:
     if not year_text and year_from and result < year_from:
         try:
             result = date(year + 1, month, day)
+        except ValueError:
+            return None
+    if not year_text and not_after and result > not_after:
+        try:
+            result = date(year - 1, month, day)
         except ValueError:
             return None
     return result
@@ -234,9 +241,11 @@ class Row:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def read_rows(source: str | bytes | io.BytesIO) -> list[Row]:
+def read_rows(source: str | bytes | io.BytesIO, *, today: date | None = None) -> list[Row]:
     """Строки таблицы: первая строка - заголовки, дальше по одной на велосипед."""
     import openpyxl
+
+    today = today or date.today()
 
     if isinstance(source, bytes):
         source = io.BytesIO(source)
@@ -268,7 +277,7 @@ def read_rows(source: str | bytes | io.BytesIO) -> list[Row]:
         phone2, extra2 = _phones(raw.get("phone2"))
         if phone2:
             extra = extra + [phone2] + extra2
-        started = _date_cell(raw.get("started"))
+        started = _date_cell(raw.get("started"), not_after=today)
         row = Row(
             line=line, no=_text(raw.get("no")), model=_text(raw.get("model")),
             motor=_vin(raw.get("motor")), frame=_vin(raw.get("frame")),
@@ -385,6 +394,7 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
     seen_vins: set[str] = set()
     planned_clients: dict[str, dict] = {}       # телефон -> клиент из плана
     clients_with_rental: set[str] = set()
+    bikes_taken: set[int] = set()               # существующие, уже отданные в плане
     no_model: list[int] = []
 
     for row in rows:
@@ -446,6 +456,12 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
                 f"строка {row.line}: {row.fio} - телефон не разобран "
                 f"({_text(row.raw.get('phone')) or 'пусто'})")
             continue
+
+        def keep_rented(ref: dict | None = bike_ref, wanted: bool = status == "rented") -> None:
+            # Аренда в CRM не заводится, но велосипед по таблице у клиента:
+            # новый велосипед записывается «в аренде», а не «свободен».
+            if wanted and ref is not None and not ref.get("existing_id"):
+                ref["status"] = "rented"
         client_status = "blacklist" if status == "lost" else "active"
         client_ref = planned_clients.get(row.phone)
         if client_ref is None:
@@ -457,6 +473,9 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
                 client_ref = {"existing_id": existing_client["id"], "phone": row.phone}
                 if await crm.active_rental_of(existing_client["id"]) is not None:
                     clients_with_rental.add(row.phone)
+                if status != "rented" and row.debt:
+                    warn(f"{row.fio}: клиент уже есть в CRM - долг "
+                         f"{row.debt:,.0f} ₽ из таблицы не записан".replace(",", " "))
             else:
                 client_ref = {
                     "full_name": row.fio, "phone": row.phone,
@@ -483,13 +502,17 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
         if row.phone in clients_with_rental:
             plan.skipped_rentals.append(
                 f"строка {row.line}: у {row.fio} уже есть идущая аренда")
+            keep_rented()
             continue
         if bike_ref is None:
             warn(f"{row.fio}: велосипед не определён - аренда оформлена без велосипеда")
-        elif bike_ref.get("existing_id") and bike_ref.get("status") == "rented":
+        elif bike_ref.get("existing_id") and (bike_ref.get("status") == "rented"
+                                              or bike_ref["existing_id"] in bikes_taken):
             plan.skipped_rentals.append(
                 f"строка {row.line}: велосипед уже в аренде в CRM")
             continue
+        if bike_ref is not None and bike_ref.get("existing_id"):
+            bikes_taken.add(bike_ref["existing_id"])
         started = row.started or row.paid_until or today
         if row.started is None:
             warn(f"{row.fio}: дата выдачи не разобрана "
@@ -548,10 +571,20 @@ async def apply_plan(crm: Any, plan: Plan, *, by: str = "import") -> dict[str, i
             client_id = existing["id"]
         bike = r["bike"] or {}
         bike_id = bike.get("id") or bike.get("existing_id")
-        rental_id = await crm.create_rental(
-            client_id=client_id, bike_id=bike_id, tariff_id=None,
-            tariff_name=r["tariff_name"], period_days=r["period_days"], price=r["price"],
-            billing="manual", started_on=r["started_on"], contract_no=None, created_by=by)
+        try:
+            rental_id = await crm.create_rental(
+                client_id=client_id, bike_id=bike_id, tariff_id=None,
+                tariff_name=r["tariff_name"], period_days=r["period_days"],
+                price=r["price"], billing="manual", started_on=r["started_on"],
+                contract_no=None, created_by=by)
+        except Exception as exc:                          # noqa: BLE001
+            if "unique" not in type(exc).__name__.lower():
+                raise
+            # Уникальные индексы: одна активная аренда на клиента и на велосипед.
+            plan.skipped_rentals.append(
+                f"строка {r['line']}: аренда {r['fio']} не записана - "
+                f"клиент или велосипед уже в аренде")
+            continue
         done["rentals"] += 1
         dated = _dated(r["started_on"])
         if r["charge"]:
@@ -597,7 +630,8 @@ def report_text(plan: Plan, done: dict[str, int] | None = None) -> str:
 
 async def run(crm: Any, source: str | bytes | io.BytesIO, *, apply: bool,
               by: str = "import") -> tuple[Plan, dict[str, int] | None]:
-    rows = read_rows(source)
+    # openpyxl - чистый CPU на секунды: в потоке, чтобы панель не замирала.
+    rows = await asyncio.to_thread(read_rows, source)
     plan = await build_plan(crm, rows)
     done = await apply_plan(crm, plan, by=by) if apply else None
     return plan, done

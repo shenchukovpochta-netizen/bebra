@@ -140,7 +140,7 @@ if ($LASTEXITCODE -ne 0) { throw 'scp (tests) не удался' }
 
 # CRLF в .sh ломает shebang: bash ругается на «\r: команда не найдена»
 Step 'нормализую переводы строк'
-ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh && chmod +x bootstrap.sh install.sh"
+ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh .env.example schema.sql && chmod +x bootstrap.sh install.sh"
 
 Write-Host "`nФайлы на сервере. Дальше:" -ForegroundColor Green
 Write-Host "  ssh $Server"

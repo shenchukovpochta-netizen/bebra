@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -392,10 +393,11 @@ def _contract_ctx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
     return built
 
 
-def _build_docx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
+async def _build_docx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
                 signed_at: str, issued_at: Any) -> tuple[bytes, str]:
     try:
-        return contract_service.build(
+        return await asyncio.to_thread(
+            contract_service.build,
             ctx.cfg.contract_template,
             _contract_ctx(ctx, data, anketa, number=number,
                           signed_at=signed_at, issued_at=issued_at))
@@ -423,7 +425,7 @@ async def issue(ctx: Ctx, tg_id: int) -> str:
     number = data.get("contract_no") or logic.contract_number(
         await ctx.db.next_contract_seq(), prefix=ctx.cfg.contract_prefix)
     issued_at = data.get("contract_issued_at") or utcnow()
-    docx, digest = _build_docx(ctx, data, anketa, number=number,
+    docx, digest = await _build_docx(ctx, data, anketa, number=number,
                                signed_at=UNSIGNED, issued_at=issued_at)
     path, _ = files.store(ctx.cfg.storage_dir, tg_id, "contract", docx)
     if not await ctx.db.patch(
@@ -462,7 +464,7 @@ async def cb_sign(ctx: Ctx, user: dict, callback_id: str) -> None:
     stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
 
     try:
-        docx, digest = _build_docx(ctx, data, anketa, number=number,
+        docx, digest = await _build_docx(ctx, data, anketa, number=number,
                                    signed_at=stamp,
                                    issued_at=data.get("contract_issued_at"))
     except ContractProblem:
@@ -484,11 +486,16 @@ async def cb_sign(ctx: Ctx, user: dict, callback_id: str) -> None:
     await ctx.db.log_event(tg_id, "contract_signed", {"number": number})
     await ctx.db.set_purge_after(tg_id, ctx.cfg.purge_approved_days)
 
-    await _send_contract(ctx, tg_id, docx, number,
-                         texts.CONTRACT_SIGNED_USER.format(
-                             number=logic.esc(number), signed_at=stamp,
-                             video_url=logic.esc(ctx.cfg.video_url)),
-                         kb.main_menu())
+    # Сбой доставки клиенту не должен отменять фиксацию и очистку анкеты:
+    # договор уже подписан и лежит на диске, клиент получит его по «Договор».
+    try:
+        await _send_contract(ctx, tg_id, docx, number,
+                             texts.CONTRACT_SIGNED_USER.format(
+                                 number=logic.esc(number), signed_at=stamp,
+                                 video_url=logic.esc(ctx.cfg.video_url)),
+                             kb.main_menu())
+    except MaxAPIError as exc:
+        log.warning("подписанный договор %s не доставлен клиенту %s: %s", number, tg_id, exc)
 
     # фиксация сдачи: без тем, общим потоком чата фиксации
     try:
@@ -535,7 +542,7 @@ async def st_wait_sign(ctx: Ctx, user: dict) -> None:
     anketa = ctx.vault.decrypt(data.get("anketa_enc"))
     number = data.get("contract_no") or ""
     try:
-        docx, _ = _build_docx(ctx, data, anketa, number=number,
+        docx, _ = await _build_docx(ctx, data, anketa, number=number,
                               signed_at=UNSIGNED,
                               issued_at=data.get("contract_issued_at"))
     except ContractProblem:

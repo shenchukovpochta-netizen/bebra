@@ -241,8 +241,11 @@ class TestPlanApply(unittest.TestCase):
         plan, done = run(ix.run(self.crm, self.data, apply=True, by="import:test"))
         self.assertEqual(done, {"bikes": 8, "clients": 4, "rentals": 3, "ledger": 7})
         crm = self.crm
+        # строка 7: второй велосипед Груздева - аренда пропущена (одна на
+        # клиента), но велосипед по таблице у него, значит «в аренде»
         self.assertEqual(run(crm.bike_counts()),
-                         {"rented": 3, "lost": 1, "repair": 1, "sold": 1, "available": 2})
+                         {"rented": 4, "lost": 1, "repair": 1, "sold": 1, "available": 1})
+        self.assertEqual(run(crm.bike_by_motor("240W25021886"))["status"], "rented")
         # первый клиент: аренда с начислением 4000 и платежом 4000, оплачено до 08.09
         c = run(crm.client_by_phone("+79600547202"))
         self.assertEqual(c["source"], "import")
@@ -321,6 +324,36 @@ class TestPlanApply(unittest.TestCase):
         r = run(self.crm.active_rental_of(cid))
         self.assertEqual(r["bike_id"], bike_id)
         self.assertEqual(run(self.crm.bike(bike_id))["status"], "rented")
+
+    def test_started_without_year_is_not_in_the_future(self):
+        rows = [dict(ROWS[0], **{"когда брал": "28.12", "До какого оплачена аренда?": "до 04.01"})]
+        parsed = ix.read_rows(sheet(rows), today=date(2026, 1, 10))
+        self.assertEqual(parsed[0].started, date(2025, 12, 28))
+        self.assertEqual(parsed[0].paid_until, date(2026, 1, 4))
+        self.assertEqual(ix._date_cell("28.12", not_after=date(2026, 12, 30)), date(2026, 12, 28))
+
+    def test_two_rows_for_one_existing_bike_rent_it_once(self):
+        """Один велосипед в CRM, две строки «в аренде» с его VIN: вторая аренда
+        пропускается в плане, запись не падает на уникальном индексе."""
+        run(self.crm.create_bike(code="X", model="Truck+", frame_no="264022501706153"))
+        rows = [ROWS[0], dict(ROWS[1], **{"ВИН РАМЫ": 264022501706153, "ВИН КОЛЕСА": None})]
+        plan, done = run(ix.run(self.crm, sheet(rows), apply=True))
+        self.assertEqual(len(plan.rentals), 1)
+        self.assertIn("велосипед уже в аренде в CRM", "\n".join(plan.skipped_rentals))
+        self.assertEqual(done["rentals"], 1)
+        self.assertEqual(run(self.crm.bike_by_code("X"))["status"], "rented")
+
+    def test_existing_client_debt_is_reported_not_dropped(self):
+        run(self.crm.create_client(full_name="Лобанов В.", phone="+79274444863"))
+        plan, _ = run(ix.run(self.crm, self.data, apply=False))
+        self.assertEqual(plan.debts, [])
+        self.assertIn("долг 178 500 ₽ из таблицы не записан", "\n".join(plan.warnings))
+
+    def test_vin_lookup_ignores_case(self):
+        run(self.crm.create_bike(code="Y", model="Kugoo", frame_no="jl20240715478"))
+        plan, done = run(ix.run(self.crm, self.data, apply=True))
+        self.assertIn("велосипед уже есть (Y)", "\n".join(plan.skipped_bikes))
+        self.assertEqual(done["bikes"], 7)
 
     def test_reused_number_with_new_vin_is_a_new_bike(self):
         """Перенумерованная таблица: № занят другим велосипедом, VIN новый -

@@ -144,10 +144,16 @@ class MaxClient:
         async with sess.get(url) as resp:
             if resp.status >= 400:
                 raise MaxAPIError(resp.status, await resp.text())
-            data = await resp.read()
-        if len(data) > max_bytes:
-            raise MaxAPIError(0, f"файл больше лимита: {len(data)} байт")
-        return data
+            if resp.content_length and resp.content_length > max_bytes:
+                raise MaxAPIError(0, f"файл больше лимита: {resp.content_length} байт")
+            # Читать кусками и остановиться на лимите: иначе гигабайтное
+            # «фото» целиком оседало бы в памяти до проверки размера.
+            data = bytearray()
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise MaxAPIError(0, f"файл больше лимита: >{max_bytes} байт")
+        return bytes(data)
 
     # ─────────────────────────── подписка ───────────────────────────
 

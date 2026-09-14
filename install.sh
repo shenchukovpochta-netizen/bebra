@@ -299,7 +299,9 @@ bash bootstrap.sh
 bold "Проверяю, что бот поднялся"
 READY=""
 for _ in $(seq 1 30); do
-  if docker compose logs bot 2>/dev/null | grep -q "готов"; then READY="yes"; break; fi
+  # Не grep -q: он закрывает трубу на первом совпадении, docker получает
+  # SIGPIPE, и под pipefail условие ложно срабатывает «не готов».
+  if docker compose logs bot 2>/dev/null | grep "готов" >/dev/null; then READY="yes"; break; fi
   sleep 2
 done
 

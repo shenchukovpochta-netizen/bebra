@@ -145,12 +145,14 @@ class CrmDB:
             """, bike_id))
 
     async def bike_by_frame(self, frame_no: str) -> dict | None:
+        # Без учёта регистра: панель и бот хранят VIN как ввели, импорт
+        # приводит к верхнему регистру - иначе один велосипед заводился бы дважды.
         return _row(await self.pool.fetchrow(
-            "select * from crm.bikes where frame_no = $1", frame_no))
+            "select * from crm.bikes where upper(frame_no) = upper($1)", frame_no))
 
     async def bike_by_motor(self, motor_no: str) -> dict | None:
         return _row(await self.pool.fetchrow(
-            "select * from crm.bikes where motor_no = $1", motor_no))
+            "select * from crm.bikes where upper(motor_no) = upper($1)", motor_no))
 
     async def bike_by_code(self, code: str) -> dict | None:
         return _row(await self.pool.fetchrow(

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -88,7 +89,9 @@ async def _build(cfg: Config, data: dict, anketa: dict, *, number: str,
     ctx = _context(cfg, data, anketa, number=number, signed_at=signed_at,
                    issued_at=issued_at)
     try:
-        return contract_service.build(cfg.contract_template, ctx)
+        # Шаблон - 5 МБ docx, сборка ~0,5 с чистого CPU: в потоке, чтобы
+        # на это время не замирал весь бот.
+        return await asyncio.to_thread(contract_service.build, cfg.contract_template, ctx)
     except (contract_service.TemplateProblem, OSError) as exc:
         raise ContractProblem(str(exc)) from exc
 

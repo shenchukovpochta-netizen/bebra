@@ -42,6 +42,7 @@ SESSION_DAYS = 14
 # процесса, без базы: панель одна, и рестарт, обнуляющий счётчик,
 # атакующему ничего не даёт.
 LOGIN_LIMIT, LOGIN_IP_LIMIT, LOGIN_WINDOW = 10, 100, 15 * 60
+LOGIN_KEYS_SWEEP = 500
 # Учётная таблица проката - сотни строк, единицы мегабайт.
 IMPORT_MAX_BYTES = 20 * 1024 * 1024
 
@@ -161,6 +162,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     def login_throttled(key: str, limit: int) -> bool:
         now = time.monotonic()
+        if len(login_failures) > LOGIN_KEYS_SWEEP:
+            # Ключи - логины, которые выбирает атакующий: без чистки словарь
+            # рос бы бесконечно. Стираются те, у кого окно уже истекло.
+            for stale in [k for k, ts in login_failures.items()
+                          if not ts or now - ts[-1] >= LOGIN_WINDOW]:
+                login_failures.pop(stale, None)
         recent = [t for t in login_failures.get(key, ()) if now - t < LOGIN_WINDOW]
         if recent:
             login_failures[key] = recent
@@ -863,6 +870,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             plan, done = await import_xlsx.run(crm, content, apply=apply, by=who(request))
         except import_xlsx.ImportError_ as e:
             flash(request, str(e), "err")
+            return redirect("/import")
+        except Exception:                                  # noqa: BLE001
+            log.exception("импорт таблицы %s не удался", upload.filename)
+            flash(request, "Импорт прерван ошибкой; что успело записаться - в базе, "
+                           "повторная загрузка пропустит уже добавленное. "
+                           "Подробности в логе панели.", "err")
             return redirect("/import")
         if apply:
             flash(request, f"Записано: велосипедов {done['bikes']}, клиентов {done['clients']}, "
