@@ -54,6 +54,7 @@
 | `tests/test_crm_logic.py`, `tests/test_crm_sql.py` | CRM: деньги, периоды, напоминания; SQL слоя CRM |
 | `tests/test_import.py` | импорт таблицы: разбор ячеек, план, идемпотентность, страница /import |
 | `tests/test_cabinet.py`, `tests/test_fleet.py`, `tests/test_web.py` | кабинет клиента и парк из чата сквозь Dispatcher; панель через TestClient |
+| `tests/test_web_pg.py` | панель целиком на настоящем Postgres (pgserver): страницы, формы, импорт |
 | `app/max/` | **бот в MAX**: клиент Bot API, опрос, обработчики (профиль `max`) |
 | `app/max_main.py` | точка входа MAX-бота, своя база `mybike_max` |
 | `install.sh` | **установка одной командой**: вопросы, проверки, запуск |
