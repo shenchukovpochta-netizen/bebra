@@ -594,7 +594,9 @@ def fleet_metrics(days: dict[str, Any], revenue: Any) -> dict[str, Any]:
     idle = sum((days.get(s, Decimal(0)) for s in IDLE_STATUSES), Decimal(0))
     rented = days.get("rented", Decimal(0))
     idle_percent = (float(round(100 * idle / operational, 1)) if operational else None)
-    avg_check = to_money(Decimal(str(revenue)) / rented) if rented else None
+    # Чек имеет смысл от одного полного велосипеде-дня: деление на минуты
+    # первой аренды давало бы «108 миллионов в день».
+    avg_check = to_money(Decimal(str(revenue)) / rented) if rented >= 1 else None
     return {
         "operational_days": operational, "idle_days": idle, "rented_days": rented,
         "idle_percent": idle_percent, "avg_check": avg_check,

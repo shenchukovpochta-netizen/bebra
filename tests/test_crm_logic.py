@@ -362,6 +362,9 @@ class TestFleetMetrics(unittest.TestCase):
         self.assertIsNone(empty["idle_percent"])
         self.assertIsNone(empty["avg_check"])
         self.assertFalse(empty["idle_ok"])
+        # меньше одного велосипеде-дня аренды - чек не считается
+        tiny = logic.fleet_metrics({"rented": D("0.01"), "available": D(30)}, D("3500"))
+        self.assertIsNone(tiny["avg_check"])
         good = logic.fleet_metrics({"rented": D(95), "available": D(5)}, D("50000"))
         self.assertTrue(good["idle_ok"])
         self.assertEqual(good["idle_percent"], 5.0)
