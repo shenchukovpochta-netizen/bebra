@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     from fastapi.testclient import TestClient
 
-    from app.crm import logic
+    from app.crm import logic, service
     from app.web.app import create_app, ensure_admin
     from app.web.config import WebConfig
     from tests.fake_crm import FakeCrm
@@ -336,7 +336,7 @@ class TestPages(WebCase):
         self.assertIn("Иванов Иван", self.get_ok("/"))
         report = self.get_ok("/reports")
         self.assertIn("−3 000 ₽", report)
-        self.assertIn("загрузка парка", report)
+        self.assertIn("сейчас в аренде", report)
 
     def test_billing_run_button(self):
         started = (date.today() - timedelta(days=8)).isoformat()
@@ -424,6 +424,111 @@ class TestReviewFixes(WebCase):
         r = self.client.get("/clients?q=abc")
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/login?next=%2Fclients%3Fq%3Dabc")
+
+
+class TestFleetMetricsPages(WebCase):
+    """Три числа на сводке и в отчётах, амортизация, ремонт по узлам,
+    точки, новые статусы."""
+
+    def test_dashboard_three_numbers(self):
+        self.seed()
+        run(self.crm.create_bike(code="B-2", model="Truck+", status="repair",
+                                 location="Павлюхина", purchase_price=D("48000"),
+                                 residual_price=D("0"), service_months=24,
+                                 battery_price=D("9000"), battery_count=2,
+                                 battery_service_months=15))
+        run(self.crm.create_bike(code="B-3", model="Truck+", status="lost"))
+        self.login()
+        page = self.get_ok("/")
+        self.assertIn("Три числа", page)
+        self.assertIn("операционный парк", page)
+        self.assertIn(">2</b>", page)                        # B-1 и B-2, без потерянного
+        self.assertIn("отложить на парк", page)
+        self.assertIn("3 200 ₽", page)                       # 48000/24 + 9000*2/15
+        self.assertIn("Павлюхина: свободных <b>0</b>, в ремонте и на ТО <b>1</b>", page)
+
+    def test_bike_form_amortization_and_location(self):
+        self.login()
+        r = self.client.post("/bikes", data={"code": "B-9", "model": "Truck+",
+                                             "location": "Адоратского", "purchase_price": "47000",
+                                             "service_months": "24", "residual_price": "5000",
+                                             "battery_price": "9000", "battery_count": "2",
+                                             "battery_service_months": "15"})
+        self.assertEqual(r.status_code, 303)
+        bike = run(self.crm.bike_by_code("B-9"))
+        self.assertEqual((bike["location"], bike["service_months"], bike["residual_price"],
+                          bike["battery_price"], bike["battery_service_months"]),
+                         ("Адоратского", 24, D("5000"), D("9000"), 15))
+        page = self.get_ok(f"/bikes/{bike['id']}")
+        self.assertIn("2 950 ₽</b> в месяц", page)
+        self.assertIn("История статусов", page)
+        r = self.client.post("/bikes", data={"code": "B-10", "model": "T", "location": "Марс"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("Точка: недопустимое значение", self.client.get("/bikes/new").text)
+        self.assertIsNone(run(self.crm.bike_by_code("B-10")))
+        # фильтр по точке в списке, «не на точке» - отдельный фильтр
+        self.assertIn("B-9", self.client.get("/bikes", params={"location": "Адоратского"}).text)
+        self.assertNotIn("B-9", self.client.get("/bikes", params={"location": "Павлюхина"}).text)
+        run(self.crm.create_bike(code="B-11", model="T"))
+        page = self.client.get("/bikes", params={"location": "none"}).text
+        self.assertIn("B-11", page)
+        self.assertNotIn("B-9", page)
+        # автор первой записи журнала статусов - тот, кто завёл велосипед
+        log = run(self.crm.bike_status_log(bike["id"]))
+        self.assertEqual((log[-1]["to_status"], log[-1]["changed_by"]),
+                         ("available", "staff:admin"))
+
+    def test_repair_by_node_and_report(self):
+        self.seed()
+        self.login()
+        r = self.client.post(f"/bikes/{self.bike_id}/repair",
+                             data={"node": "brake_pads", "parts_cost": "400",
+                                   "labor_cost": "300", "note": "передние"})
+        self.assertEqual(r.status_code, 303)
+        entries = run(self.crm.bike_log(self.bike_id))
+        self.assertEqual((entries[0]["kind"], entries[0]["cost"], entries[0]["note"]),
+                         ("repair", D("700"), "Тормоза: колодки: передние"))
+        from datetime import UTC, datetime
+        self.assertEqual(run(self.crm.repair_stats(
+            datetime(2000, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC)))["by_node"][0]["n"],
+            1)
+        # ноль в стоимости - допустимо (работа своя, запчастей не было)
+        r = self.client.post(f"/bikes/{self.bike_id}/repair",
+                             data={"node": "wiring", "parts_cost": "0", "labor_cost": "0"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(len(run(self.crm.bike_log(self.bike_id))), 2)
+        r = self.client.post(f"/bikes/{self.bike_id}/repair", data={"node": "warp_drive"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("Узел", self.client.get(f"/bikes/{self.bike_id}").text)
+        self.assertEqual(len(run(self.crm.bike_log(self.bike_id))), 2)
+        report = self.get_ok("/reports")
+        self.assertIn("Тормоза: колодки", report)
+        self.assertIn("Kugoo V3", report)
+        self.assertIn("Три числа по месяцам", report)
+
+    def test_status_history_and_new_statuses(self):
+        self.seed()
+        self.login()
+        r = self.client.post(f"/bikes/{self.bike_id}/status",
+                             data={"status": "maintenance", "note": "плановое ТО"})
+        self.assertEqual(r.status_code, 303)
+        log = run(self.crm.bike_status_log(self.bike_id))
+        self.assertEqual((log[0]["from_status"], log[0]["to_status"], log[0]["changed_by"]),
+                         ("available", "maintenance", "staff:admin"))
+        page = self.get_ok(f"/bikes/{self.bike_id}")
+        self.assertIn("На ТО", page)
+        run(self.crm.update_bike(self.bike_id, status="available"))
+        rid = run(service.open_rental(self.crm, client=run(self.crm.client(self.client_id)),
+                                      bike=run(self.crm.bike(self.bike_id)),
+                                      tariff=run(self.crm.tariff(self.tariff_id)),
+                                      started_on=date.today(), contract_no=None, by="t"))
+        r = self.client.post(f"/rentals/{rid}/close", data={"bike_status": "written_off",
+                                                            "note": "рама лопнула"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(run(self.crm.bike(self.bike_id))["status"], "written_off")
+        log = run(self.crm.bike_status_log(self.bike_id))
+        self.assertEqual((log[0]["to_status"], log[0]["changed_by"]),
+                         ("written_off", "staff:admin"))
 
 
 class TestExtras(WebCase):

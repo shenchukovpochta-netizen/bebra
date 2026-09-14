@@ -1,5 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
+<section class="card three">
+  <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %, чек {{ money(CHECK_TARGET) }}/день</span></div>
+  <div class="tiles">
+    <a class="tile" href="/bikes"><b>{{ operational }}</b><span>операционный парк<br><small class="muted">без утерянных, проданных, списанных</small></span></a>
+    <div class="tile {% if metrics.idle_percent is none %}{% elif metrics.idle_ok %}good{% else %}warn{% endif %}">
+      <b>{% if metrics.idle_percent is none %}—{% else %}{{ metrics.idle_percent }} %{% endif %}</b>
+      <span>простой парка<br><small class="muted">{% if metrics.operational_days %}свободны {{ metrics.idle_breakdown.available|round(0)|int }} · ремонт {{ metrics.idle_breakdown.repair|round(0)|int }} · ТО {{ metrics.idle_breakdown.maintenance|round(0)|int }} велосипеде-дней{% else %}журнал статусов ещё пуст{% endif %}</small></span>
+    </div>
+    <div class="tile {% if metrics.avg_check is none %}{% elif metrics.check_ok %}good{% else %}warn{% endif %}">
+      <b>{% if metrics.avg_check is none %}—{% else %}{{ money(metrics.avg_check) }}{% endif %}</b>
+      <span>средний чек в день<br><small class="muted">{% if metrics.rented_days %}на {{ metrics.rented_days|round(0)|int }} велосипеде-дней аренды{% else %}аренд за период не было{% endif %}</small></span>
+    </div>
+    <a class="tile" href="/reports"><b>{{ money(amortization) }}</b><span>отложить на парк в этом месяце<br><small class="muted">амортизация рам и АКБ</small></span></a>
+  </div>
+  {% if idle_by_location %}
+  <ul class="inline">
+    {% for l in idle_by_location %}<li><a href="/bikes?location={{ l.location|urlencode if l.location != 'не на точке' else 'none' }}&status=available">{{ l.location }}: свободных <b>{{ l.free }}</b>, в ремонте и на ТО <b>{{ l.repair }}</b></a></li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
 <div class="tiles">
   <a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>
   <a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>

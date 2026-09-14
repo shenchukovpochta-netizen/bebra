@@ -13,7 +13,7 @@ import io
 import logging
 import os
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -103,6 +103,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         money=logic.money, money_signed=logic.money_signed, period_label=logic.period_label,
         KINDS=logic.KINDS, METHODS=logic.METHODS, BIKE_STATUSES=logic.BIKE_STATUSES,
         BIKE_MANUAL_STATUSES=logic.BIKE_MANUAL_STATUSES,
+        OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
+        LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
+        IDLE_TARGET_PERCENT=logic.IDLE_TARGET_PERCENT, CHECK_TARGET=logic.CHECK_TARGET,
+        amortization_month=logic.amortization_month,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
         today=date.today, bot_enabled=bot is not None,
@@ -179,6 +183,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await request.form()
         return {k: (v if isinstance(v, str) else "") for k, v in data.items()}
 
+    def cost_field(data: dict, name: str) -> logic.Check:
+        """Стоимость в форме: пусто и «0» - ноль (запчастей не было, работа
+        своя), иначе обычная проверка суммы."""
+        raw = (data.get(name) or "").strip().replace(",", ".")
+        if raw in ("", "0", "0.0", "0.00"):
+            return logic.Check(True, Decimal(0))
+        return logic.check_amount(raw)
+
     def summarize(rental: dict | None, balance: Any) -> dict:
         return logic.rental_summary(rental, balance, today=date.today())
 
@@ -253,11 +265,44 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows.sort(key=lambda r: (r["summary"]["days_left"] or 0, r["id"]))
         attention = [r for r in rows
                      if (r["summary"]["days_left"] or 0) <= cfg.remind_before_days]
+        bikes_by = await crm.bike_counts()
+        fleet = await crm.bikes(limit=10000)
         return render(request, "dashboard.html",
-                      counts=await crm.counts(), bikes=await crm.bike_counts(),
+                      counts=await crm.counts(), bikes=bikes_by,
+                      operational=sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES),
+                      metrics=await period_metrics(days=30),
+                      amortization=logic.amortization_total(fleet),
+                      idle_by_location=idle_by_location(fleet),
                       claims=await crm.pending_claims(), rentals=rows,
                       attention=attention, debtors=await crm.debtors(10),
                       month=await crm.ledger_totals(since=date.today().replace(day=1)))
+
+    async def period_metrics(*, days: int = 0, since: datetime | None = None,
+                             until: datetime | None = None) -> dict:
+        """Три числа за период: простой, средний чек, дни. По умолчанию -
+        последние `days` дней до текущего момента."""
+        now = datetime.now().astimezone()
+        until = until or now
+        since = since or (until - timedelta(days=days))
+        return logic.fleet_metrics(await crm.bike_days_by_status(since, until),
+                                   await crm.rental_revenue(since, until))
+
+    def idle_by_location(fleet: list[dict]) -> list[dict]:
+        """Где стоят простаивающие велосипеды: по точкам, свободные отдельно
+        от ремонта, чтобы было видно, что выдавать нечего, а что чинить."""
+        out: dict[str, dict] = {}
+        for b in fleet:
+            if b.get("status") not in logic.IDLE_STATUSES:
+                continue
+            row = out.setdefault(b.get("location") or "не на точке",
+                                 {"location": b.get("location") or "не на точке",
+                                  "free": 0, "repair": 0})
+            if b["status"] in ("available", "reserved"):
+                row["free"] += 1
+            else:
+                row["repair"] += 1
+        order = {loc: i for i, loc in enumerate(logic.LOCATIONS)}
+        return sorted(out.values(), key=lambda r: (order.get(r["location"], 99), r["location"]))
 
     @app.post("/billing/run")
     async def billing_run(request: Request) -> Response:
@@ -416,8 +461,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def bikes(request: Request) -> Response:
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
-        return render(request, "bikes.html", q=q, status=status,
-                      rows=await crm.bikes(q=q or None, status=status or None),
+        location = request.query_params.get("location") or ""
+        return render(request, "bikes.html", q=q, status=status, location=location,
+                      rows=await crm.bikes(q=q or None, status=status or None,
+                                           location=location or None),
                       counts=await crm.bike_counts())
 
     @app.get("/bikes/new")
@@ -440,11 +487,30 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not batteries.isdigit() or not 0 <= int(batteries) <= 10:
             flash(request, "АКБ: число от 0 до 10.", "err")
             return None
+        location = (data.get("location") or "").strip()
+        if location and location not in logic.LOCATIONS:
+            flash(request, "Точка: недопустимое значение.", "err")
+            return None
+        months = data.get("service_months") or "24"
+        bat_months = data.get("battery_service_months") or "15"
+        for label, value in (("Срок службы", months), ("Срок службы АКБ", bat_months)):
+            if not value.isdigit() or not 1 <= int(value) <= 240:
+                flash(request, f"{label}: число месяцев от 1 до 240.", "err")
+                return None
+        residual = cost_field(data, "residual_price")
+        bat_price = (logic.check_amount(data.get("battery_price"))
+                     if (data.get("battery_price") or "").strip() else logic.Check(True, None))
+        for check in (residual, bat_price):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return None
         return {"code": code.value, "model": model.value, "note": note.value,
                 "frame_no": (data.get("frame_no") or "").strip() or None,
                 "motor_no": (data.get("motor_no") or "").strip() or None,
                 "battery_count": int(batteries), "purchase_price": price.value,
-                "purchased_on": bought.value}
+                "purchased_on": bought.value, "location": location or None,
+                "service_months": int(months), "residual_price": residual.value,
+                "battery_price": bat_price.value, "battery_service_months": int(bat_months)}
 
     @app.post("/bikes")
     async def bike_create(request: Request) -> Response:
@@ -458,7 +524,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if fields["frame_no"] and await crm.bike_by_frame(fields["frame_no"]) is not None:
             flash(request, "Велосипед с таким номером рамы уже есть.", "err")
             return redirect("/bikes/new")
-        bike_id = await crm.create_bike(**fields)
+        bike_id = await crm.create_bike(by=who(request), **fields)
         flash(request, "Велосипед добавлен.")
         return redirect(f"/bikes/{bike_id}")
 
@@ -468,7 +534,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if bike is None:
             return render(request, "missing.html", status_code=404, what="Велосипед")
         return render(request, "bike.html", bike=bike, log=await crm.bike_log(bike_id),
-                      rentals=await crm.bike_rentals(bike_id))
+                      rentals=await crm.bike_rentals(bike_id),
+                      status_log=await crm.bike_status_log(bike_id),
+                      nodes=await crm.repair_nodes(),
+                      amortization=logic.amortization_month(bike))
 
     @app.post("/bikes/{bike_id}/edit")
     async def bike_edit(request: Request, bike_id: int) -> Response:
@@ -507,7 +576,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if bike.get("rental_id"):
             flash(request, "Велосипед в аренде: сначала закройте аренду.", "err")
             return redirect(f"/bikes/{bike_id}")
-        await crm.update_bike(bike_id, status=status.value)
+        await crm.update_bike(bike_id, by=who(request), status=status.value)
         await crm.add_bike_log(bike_id, "status",
                                f"{logic.BIKE_STATUSES[status.value]}"
                                + (f": {note.value}" if note.value else ""),
@@ -534,6 +603,29 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect(f"/bikes/{bike_id}")
         await crm.add_bike_log(bike_id, kind.value, note.value, cost.value, who(request))
         flash(request, "Запись добавлена.")
+        return redirect(f"/bikes/{bike_id}")
+
+    @app.post("/bikes/{bike_id}/repair")
+    async def bike_repair(request: Request, bike_id: int) -> Response:
+        """Ремонт по узлу: запчасти и работа отдельно. Узел - только из
+        справочника, иначе отчёт «что ломается» не соберётся."""
+        if await crm.bike(bike_id) is None:
+            return render(request, "missing.html", status_code=404, what="Велосипед")
+        data = await form(request)
+        node = logic.check_choice(data.get("node"), tuple(logic.REPAIR_NODES), what="Узел")
+        note = logic.check_note(data.get("note"))
+        parts = cost_field(data, "parts_cost")
+        labor = cost_field(data, "labor_cost")
+        for check in (node, note, parts, labor):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/bikes/{bike_id}")
+        await crm.create_repair(bike_id, items=[{"node": node.value, "parts_cost": parts.value,
+                                                 "labor_cost": labor.value, "note": note.value}],
+                                note=f"{logic.REPAIR_NODES[node.value]}"
+                                     + (f": {note.value}" if note.value else ""),
+                                created_by=who(request))
+        flash(request, "Ремонт записан.")
         return redirect(f"/bikes/{bike_id}")
 
     # ─────────────────────── аренды ───────────────────────
@@ -624,7 +716,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect(f"/rentals/{rental_id}")
         try:
             await service.close_rental(crm, rental, closed_on=closed.value, note=note.value,
-                                       bike_status=data.get("bike_status") or "available")
+                                       bike_status=data.get("bike_status") or "available",
+                                       by=who(request))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/rentals/{rental_id}")
@@ -776,11 +869,32 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.get("/reports")
     async def reports(request: Request) -> Response:
         bikes_by = await crm.bike_counts()
-        fleet = sum(v for k, v in bikes_by.items() if k not in ("sold", "lost"))
+        fleet_rows = await crm.bikes(limit=10000)
+        fleet = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
         rented = bikes_by.get("rented", 0)
+        # Три числа по месяцам: текущий и пять прошлых.
+        now = datetime.now().astimezone()
+        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        months_metrics = []
+        for _ in range(6):
+            nxt = (first + timedelta(days=32)).replace(day=1)
+            m = await period_metrics(since=first, until=min(nxt, now))
+            months_metrics.append({"month": first.date(), **m})
+            first = (first - timedelta(days=1)).replace(day=1)
+        # Ровно 12 календарных месяцев, включая текущий: тем же шагом,
+        # что и таблица выше, а не «минус 335 дней».
+        since_year = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(11):
+            since_year = (since_year - timedelta(days=1)).replace(day=1)
         return render(request, "reports.html", months=await crm.revenue_by_month(12),
                       bikes=bikes_by, fleet=fleet, rented=rented,
                       utilization=(round(100 * rented / fleet) if fleet else 0),
+                      months_metrics=months_metrics,
+                      amortization=logic.amortization_total(fleet_rows),
+                      priced=sum(1 for b in fleet_rows
+                                 if b.get("status") in logic.OPERATIONAL_STATUSES
+                                 and b.get("purchase_price") is not None),
+                      repairs=await crm.repair_stats(since_year, now),
                       debtors=await crm.debtors(50))
 
     # ─────────────────────── сотрудники ───────────────────────

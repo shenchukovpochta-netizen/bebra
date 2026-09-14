@@ -567,7 +567,7 @@ docker compose logs -f bot-max
 | Перезапуск | `docker compose restart bot` |
 | Обновить код | залить `deploy.ps1`, затем `docker compose up -d --build` |
 | Остановить | `docker compose down` |
-| Бэкап базы | `docker compose exec -T postgres pg_dump -U mybike mybike \| gzip > /root/backup-$(date +%F).sql.gz` |
+| Бэкап базы | делается сам раз в сутки в `./backups/` (сервис `backup`, хранение `BACKUP_KEEP_DAYS` дней); руками: `docker compose exec -T postgres pg_dump -U mybike mybike \| gzip > /root/backup-$(date +%F).sql.gz` |
 | Правка договора | скачать `app/contract_template.docx`, поправить в Word, залить обратно, `docker compose restart bot` |
 | Правка ответов на частые вопросы | поправить `app/faq.py` (адреса, график, тексты ответов), залить, `docker compose up -d --build` |
 | Смена расчётного счёта | поменять `PAY_URL` в `.env`, затем `docker compose up -d` |

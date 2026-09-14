@@ -190,6 +190,15 @@ def _phones(value: Any) -> tuple[str | None, list[str]]:
     return main, [p for p in found if p != main]
 
 
+def _location(text: str) -> str | None:
+    """Точка выдачи из текста статуса: «Ремонт (Павлюхина)» -> Павлюхина."""
+    low = (text or "").lower()
+    for loc in logic.LOCATIONS:
+        if loc.lower() in low:
+            return loc
+    return None
+
+
 def bike_status(status: str) -> tuple[str, str]:
     """Статус велосипеда в CRM и пояснение (место) из статуса таблицы."""
     s = status.lower()
@@ -436,6 +445,7 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
                         "frame_no": row.frame, "motor_no": row.motor,
                         "status": ("rented" if status == "rented" and not row.fio
                                    else status if status != "rented" else "available"),
+                        "location": _location(place or row.status),
                         "note": _bike_note(row, place), "line": row.line,
                         "wants_rented": status == "rented"}
             if not row.model:
@@ -549,8 +559,9 @@ async def apply_plan(crm: Any, plan: Plan, *, by: str = "import") -> dict[str, i
     """Записать план. Возвращает счётчики. Порядок: велосипеды, клиенты, аренды."""
     done = {"bikes": 0, "clients": 0, "rentals": 0, "ledger": 0}
     for b in plan.bikes:
-        b["id"] = await crm.create_bike(code=b["code"], model=b["model"], frame_no=b["frame_no"],
-                                        motor_no=b["motor_no"], status=b["status"],
+        b["id"] = await crm.create_bike(by=by, code=b["code"], model=b["model"],
+                                        frame_no=b["frame_no"], motor_no=b["motor_no"],
+                                        status=b["status"], location=b.get("location"),
                                         note=b["note"])
         done["bikes"] += 1
     ids: dict[str, int] = {}

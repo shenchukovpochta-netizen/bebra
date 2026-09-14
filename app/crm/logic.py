@@ -24,7 +24,7 @@ import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
@@ -48,10 +48,40 @@ METHODS = {
 
 BIKE_STATUSES = {
     "available": "Свободен", "rented": "В аренде", "repair": "В ремонте",
-    "reserved": "Забронирован", "lost": "Утерян", "sold": "Продан",
+    "maintenance": "На ТО", "reserved": "Забронирован", "lost": "Утерян",
+    "sold": "Продан", "written_off": "Списан",
 }
 # Статусы, которые ставит оператор руками. rented - только через аренду.
-BIKE_MANUAL_STATUSES = ("available", "repair", "reserved", "lost", "sold")
+BIKE_MANUAL_STATUSES = ("available", "repair", "maintenance", "reserved", "lost", "sold",
+                        "written_off")
+# Операционный парк - то, что зарабатывает или может заработать. Потерянные,
+# проданные и списанные в знаменатель простоя не попадают никогда.
+OPERATIONAL_STATUSES = ("available", "rented", "repair", "maintenance", "reserved")
+# Простой: велосипед в парке, но не в аренде.
+IDLE_STATUSES = ("available", "reserved", "repair", "maintenance")
+# Точки выдачи. Пусто у велосипеда - «не на точке» (у клиента, в пути).
+LOCATIONS = ("Павлюхина", "Адоратского")
+# Цели: простой меньше десятой части парка, чек 500 ₽ в день на велосипед.
+IDLE_TARGET_PERCENT = 10
+CHECK_TARGET = Decimal(500)
+# Узлы ремонта - фиксированный справочник (в базе crm.repair_nodes тот же
+# список; здесь - для проверки формы и подписей без запроса в базу).
+REPAIR_NODES = {
+    "motor_wheel": "Мотор-колесо", "controller": "Контроллер", "battery": "АКБ",
+    "bms": "BMS", "charger": "Зарядное устройство",
+    "brake_pads": "Тормоза: колодки", "brake_disc": "Тормоза: диск",
+    "brake_lever": "Тормоза: ручка", "brake_line": "Тормоза: гидролиния",
+    "frame": "Рама", "fork": "Вилка / амортизация", "headset": "Рулевая колонка",
+    "handlebar": "Руль", "throttle": "Ручка газа", "hall_sensors": "Датчики Холла",
+    "wiring": "Проводка", "headlight": "Фара", "taillight": "Задний фонарь",
+    "turn_signals": "Поворотники", "horn": "Сигнал",
+    "wheel_front": "Колесо переднее", "wheel_rear": "Колесо заднее",
+    "tube_tire": "Камера / покрышка", "fender_front": "Крыло переднее",
+    "fender_rear": "Крыло заднее", "rack": "Багажник", "kickstand": "Подножка",
+    "saddle": "Седло", "seatpost": "Подседельный штырь", "chain_guard": "Защита цепи",
+    "mirrors": "Зеркала", "phone_holder": "Держатель телефона",
+    "gps_tracker": "GPS-трекер", "other": "Прочее",
+}
 
 CLIENT_STATUSES = {
     "active": "Активен", "blocked": "Заблокирован", "blacklist": "Чёрный список",
@@ -499,3 +529,76 @@ def bike_code_from_frame(frame_no: str | None, model: str | None) -> str:
         return f"АВТО-{tail}"
     stem = re.sub(r"[^\w]", "", str(model or ""))[:8].upper() or "BIKE"
     return f"АВТО-{stem}"
+
+
+# ─────────────────────────── метрики парка ───────────────────────────
+
+def amortization_month(bike: dict) -> Decimal | None:
+    """Сколько велосипед «съедает» в месяц: рама по сроку службы за вычетом
+    остаточной стоимости плюс АКБ по своей цене и своему сроку. None -
+    цена покупки не задана, считать нечего."""
+    price = bike.get("purchase_price")
+    if price is None:
+        return None
+    months = int(bike.get("service_months") or 24)
+    residual = to_money(bike.get("residual_price") or 0)
+    frame = max(to_money(price) - residual, Decimal(0)) / max(months, 1)
+    battery = Decimal(0)
+    if bike.get("battery_price"):
+        battery = (to_money(bike["battery_price"]) * int(bike.get("battery_count") or 0)
+                   / max(int(bike.get("battery_service_months") or 15), 1))
+    return to_money(frame + battery)
+
+
+def amortization_total(bikes: Iterable[dict]) -> Decimal:
+    """Отложить на обновление парка в этом месяце: сумма по операционному парку."""
+    total = Decimal(0)
+    for b in bikes:
+        if b.get("status") in OPERATIONAL_STATUSES:
+            total += amortization_month(b) or Decimal(0)
+    return to_money(total)
+
+
+def days_by_status(log: Iterable[dict], since: datetime, until: datetime) -> dict[str, Decimal]:
+    """Велосипеде-дни по статусам за период по журналу статусов.
+
+    log - записи (bike_id, to_status, changed_at) в любом порядке; интервал
+    статуса длится до следующей записи того же велосипеда или до until.
+    Та же арифметика, что в SQL CrmDB.bike_days_by_status - на ней
+    держатся простой и средний чек, поэтому она есть и в чистом виде.
+    """
+    by_bike: dict[int, list[dict]] = {}
+    for r in log:
+        by_bike.setdefault(r["bike_id"], []).append(r)
+    out: dict[str, Decimal] = {}
+    for rows in by_bike.values():
+        rows.sort(key=lambda r: r["changed_at"])
+        for i, r in enumerate(rows):
+            start = max(r["changed_at"], since)
+            end = min(rows[i + 1]["changed_at"] if i + 1 < len(rows) else until, until)
+            if end <= start:
+                continue
+            days = Decimal((end - start).total_seconds()) / Decimal(86400)
+            out[r["to_status"]] = out.get(r["to_status"], Decimal(0)) + days
+    return out
+
+
+def fleet_metrics(days: dict[str, Any], revenue: Any) -> dict[str, Any]:
+    """Три числа за период из велосипеде-дней по статусам и арендной выручки.
+
+    idle_percent - доля дней простоя в днях операционного парка;
+    avg_check - выручка на один день аренды. None - данных нет.
+    """
+    days = {k: Decimal(str(v)) for k, v in days.items()}
+    operational = sum((days.get(s, Decimal(0)) for s in OPERATIONAL_STATUSES), Decimal(0))
+    idle = sum((days.get(s, Decimal(0)) for s in IDLE_STATUSES), Decimal(0))
+    rented = days.get("rented", Decimal(0))
+    idle_percent = (float(round(100 * idle / operational, 1)) if operational else None)
+    avg_check = to_money(Decimal(str(revenue)) / rented) if rented else None
+    return {
+        "operational_days": operational, "idle_days": idle, "rented_days": rented,
+        "idle_percent": idle_percent, "avg_check": avg_check,
+        "idle_ok": idle_percent is not None and idle_percent < IDLE_TARGET_PERCENT,
+        "check_ok": avg_check is not None and avg_check >= CHECK_TARGET,
+        "idle_breakdown": {s: days.get(s, Decimal(0)) for s in IDLE_STATUSES},
+    }

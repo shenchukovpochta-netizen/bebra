@@ -15,11 +15,17 @@
     <label>Номер рамы <input name="frame_no" value="{{ bike.frame_no or '' }}"></label>
     <label>Номер мотора <input name="motor_no" value="{{ bike.motor_no or '' }}"></label>
     <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="{{ bike.battery_count }}"></label>
+    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}" {% if bike.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <label>Цена покупки <input name="purchase_price" value="{{ bike.purchase_price or '' }}"></label>
     <label>Дата покупки <input name="purchased_on" type="date" value="{{ bike.purchased_on|iso }}"></label>
-    <label>Заметка <input name="note" value="{{ bike.note or '' }}"></label>
+    <label>Срок службы, мес. <input name="service_months" type="number" min="1" max="240" value="{{ bike.service_months or 24 }}"></label>
+    <label>Остаточная стоимость <input name="residual_price" value="{{ bike.residual_price or '' }}"></label>
+    <label>Цена одной АКБ <input name="battery_price" value="{{ bike.battery_price or '' }}"></label>
+    <label>Срок службы АКБ, мес. <input name="battery_service_months" type="number" min="1" max="240" value="{{ bike.battery_service_months or 15 }}"></label>
+    <label class="wide">Заметка <input name="note" value="{{ bike.note or '' }}"></label>
     <button type="submit">Сохранить</button>
   </form>
+  <p class="muted">Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
 <section class="card">
   <h2>Статус</h2>
@@ -32,11 +38,19 @@
     <button type="submit">Изменить</button>
   </form>
   {% endif %}
-  <h2>Запись в журнал</h2>
+  <h2>Ремонт</h2>
+  <form method="post" action="/bikes/{{ bike.id }}/repair" class="grid2">
+    <label class="wide">Узел <select name="node" required>{% for n in nodes %}<option value="{{ n.code }}">{{ n.title }}</option>{% endfor %}</select></label>
+    <label>Запчасти, ₽ <input name="parts_cost" inputmode="decimal" placeholder="0"></label>
+    <label>Работа, ₽ <input name="labor_cost" inputmode="decimal" placeholder="0"></label>
+    <label class="wide">Что сделано <input name="note" placeholder="необязательно"></label>
+    <button type="submit">Записать ремонт</button>
+  </form>
+  <p class="muted">Узел только из справочника: так собирается отчёт «что ломается и какая модель дороже».</p>
+  <h2>Заметка</h2>
   <form method="post" action="/bikes/{{ bike.id }}/log" class="grid2">
-    <label>Вид <select name="kind"><option value="repair">Ремонт</option><option value="note">Заметка</option></select></label>
-    <label>Стоимость <input name="cost" inputmode="decimal" placeholder="если ремонт"></label>
-    <label class="wide">Что сделано <input name="note" required></label>
+    <input type="hidden" name="kind" value="note">
+    <label class="wide">Текст <input name="note" required></label>
     <button type="submit">Записать</button>
   </form>
 </section>
@@ -53,6 +67,15 @@
   </table>
 </section>
 <section class="card">
+  <h2>История статусов</h2>
+  <table>
+    <tr><th>Когда</th><th>Стало</th><th>Было</th><th>Кто</th></tr>
+    {% for x in status_log %}
+    <tr><td>{{ x.changed_at|dmy }}</td><td><span class="tag {{ x.to_status }}">{{ BIKE_STATUSES.get(x.to_status, x.to_status) }}</span></td>
+      <td class="muted">{{ BIKE_STATUSES.get(x.from_status, x.from_status) if x.from_status else '—' }}</td><td class="muted">{{ x.changed_by or '' }}</td></tr>
+    {% else %}<tr><td colspan="4" class="muted">Записей нет.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Пишется базой при каждой смене статуса; по этому журналу считается простой.</p>
   <h2>Аренды</h2>
   <table>
     <tr><th>#</th><th>Клиент</th><th>С</th><th>По</th><th>Статус</th></tr>

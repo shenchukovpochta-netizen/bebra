@@ -287,10 +287,13 @@ class TestPlanApply(unittest.TestCase):
         ra = run(crm.active_rental_of(alla["id"]))
         self.assertIsNone(ra["bike_id"])
         self.assertEqual(run(crm.client_balance(alla["id"])), D(0))   # начислено = оплачено
-        # ждёт сдачи: свободен, место в заметке
+        # ждёт сдачи: свободен, место в заметке и точка выдачи в карточке
         waiting = run(crm.bike_by_frame("JL20240715478"))
         self.assertEqual((waiting["status"], waiting["model"]), ("available", "Kugoo V3 pro"))
         self.assertIn("Место: Павлюхина", waiting["note"])
+        self.assertEqual(waiting["location"], "Павлюхина")
+        self.assertIsNone(run(crm.bike_by_motor("240W25021881"))["location"])
+        self.assertEqual(ix._location("Ждет сдачи (адоратского)"), "Адоратского")
         # автор записей; деньги из таблицы датированы днём выдачи, а не загрузки
         self.assertEqual(entries[0]["created_by"], "import:test")
         self.assertEqual(entries[0]["created_at"].date(), date(2026, 1, 5))

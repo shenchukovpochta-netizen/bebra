@@ -111,3 +111,5 @@ body:has(.login){background:var(--ink)}
 @media (max-width:760px){.login{grid-template-columns:1fr;align-items:end;padding-bottom:20px}.login-box{grid-column:1}.login-art svg{left:-20%;top:-30%;height:90%}}
 pre.report{white-space:pre-wrap;word-break:break-word;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;max-height:70vh;overflow:auto}
 label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check input{width:auto;margin:0}
+.card.three{margin-bottom:16px}.card.three .tiles{margin-bottom:8px}.three-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:10px}.three-head h2{margin:0}.tile.good{border-color:var(--green);box-shadow:inset 4px 0 0 var(--green)}.tile.warn{border-color:var(--brand);box-shadow:inset 4px 0 0 var(--brand)}.tile small{display:block;font-size:12px;margin-top:2px}
+.tag.maintenance{background:#E8F4FF;color:#0B5A86}.tag.written_off{background:var(--ink);color:#fff}

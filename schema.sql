@@ -487,3 +487,102 @@ create table if not exists crm.bike_log (
   created_at     timestamptz not null default now()
 );
 create index if not exists bike_log_idx on crm.bike_log (bike_id, id desc);
+
+-- ─────────────────────── метрики парка ───────────────────────
+-- Три числа, ради которых система существует: операционный парк,
+-- % простоя и средний чек в день. Простой задним числом считается только
+-- по журналу статусов, поэтому журнал ведёт триггер базы, а не код
+-- приложения: код можно забыть, триггер - нет.
+--
+-- Статусы велосипеда: available|rented|repair|maintenance|reserved|
+-- lost|sold|written_off. Операционный парк - первые пять; потерянные,
+-- проданные и списанные в знаменатель простоя не попадают никогда.
+alter table crm.bikes add column if not exists location text;
+-- Амортизация считается честно и раздельно: рама по сроку службы и
+-- остаточной стоимости, АКБ - по своей цене и своему сроку (в разы короче).
+alter table crm.bikes add column if not exists service_months integer not null default 24;
+alter table crm.bikes add column if not exists residual_price numeric(12,2) not null default 0;
+alter table crm.bikes add column if not exists battery_price numeric(12,2);
+alter table crm.bikes add column if not exists battery_service_months integer not null default 15;
+
+create table if not exists crm.bike_status_log (
+  id             bigserial primary key,
+  bike_id        bigint      not null references crm.bikes (id),
+  from_status    text,
+  to_status      text        not null,
+  changed_at     timestamptz not null default now(),
+  -- кто менял: staff:логин, bot, import - если код сообщил через
+  -- set_config('crm.actor', ...) в той же транзакции
+  changed_by     text
+);
+create index if not exists bike_status_log_idx on crm.bike_status_log (bike_id, changed_at);
+
+create or replace function crm.log_bike_status() returns trigger
+language plpgsql as $$
+begin
+  if tg_op = 'INSERT' or old.status is distinct from new.status then
+    insert into crm.bike_status_log (bike_id, from_status, to_status, changed_at, changed_by)
+    values (new.id,
+            case when tg_op = 'INSERT' then null else old.status end,
+            new.status, now(),
+            nullif(current_setting('crm.actor', true), ''));
+  end if;
+  return new;
+end
+$$;
+drop trigger if exists bikes_status_log on crm.bikes;
+create trigger bikes_status_log
+  after insert or update of status on crm.bikes
+  for each row execute function crm.log_bike_status();
+
+-- Велосипеды, заведённые до появления журнала: история начинается с даты
+-- их создания в CRM. Простой за месяцы до этого посчитать нечем - это
+-- ограничение импорта из таблицы, и оно честно описано в CRM.md.
+insert into crm.bike_status_log (bike_id, from_status, to_status, changed_at)
+select b.id, null, b.status, b.created_at
+from crm.bikes b
+where not exists (select 1 from crm.bike_status_log l where l.bike_id = b.id);
+
+-- ─────────────────────── ремонт по узлам ───────────────────────
+-- Справочник узлов фиксированный: свободный ввод не даёт ответить,
+-- какая модель дороже в ремонте и какой узел ломается чаще.
+-- Расширяется только правкой этого списка (он идемпотентен).
+create table if not exists crm.repair_nodes (
+  code   text primary key,
+  title  text not null,
+  sort   integer not null default 0
+);
+insert into crm.repair_nodes (code, title, sort) values
+  ('motor_wheel', 'Мотор-колесо', 10), ('controller', 'Контроллер', 20),
+  ('battery', 'АКБ', 30), ('bms', 'BMS', 40), ('charger', 'Зарядное устройство', 50),
+  ('brake_pads', 'Тормоза: колодки', 60), ('brake_disc', 'Тормоза: диск', 61),
+  ('brake_lever', 'Тормоза: ручка', 62), ('brake_line', 'Тормоза: гидролиния', 63),
+  ('frame', 'Рама', 70), ('fork', 'Вилка / амортизация', 71),
+  ('headset', 'Рулевая колонка', 72), ('handlebar', 'Руль', 73),
+  ('throttle', 'Ручка газа', 74), ('hall_sensors', 'Датчики Холла', 80),
+  ('wiring', 'Проводка', 81), ('headlight', 'Фара', 90), ('taillight', 'Задний фонарь', 91),
+  ('turn_signals', 'Поворотники', 92), ('horn', 'Сигнал', 93),
+  ('wheel_front', 'Колесо переднее', 100), ('wheel_rear', 'Колесо заднее', 101),
+  ('tube_tire', 'Камера / покрышка', 102),
+  ('fender_front', 'Крыло переднее', 110), ('fender_rear', 'Крыло заднее', 111),
+  ('rack', 'Багажник', 112), ('kickstand', 'Подножка', 113), ('saddle', 'Седло', 114),
+  ('seatpost', 'Подседельный штырь', 115), ('chain_guard', 'Защита цепи', 116),
+  ('mirrors', 'Зеркала', 117), ('phone_holder', 'Держатель телефона', 118),
+  ('gps_tracker', 'GPS-трекер', 119), ('other', 'Прочее', 999)
+on conflict (code) do update set title = excluded.title, sort = excluded.sort;
+
+-- Позиция ремонта: узел, запчасти, работа. Шапка ремонта - запись
+-- crm.bike_log вида repair с общей суммой, как и раньше: старые записи
+-- без позиций остаются в отчёте по модели, но не по узлам.
+create table if not exists crm.repair_items (
+  id             bigserial primary key,
+  log_id         bigint      not null references crm.bike_log (id) on delete cascade,
+  bike_id        bigint      not null references crm.bikes (id),
+  node           text        not null references crm.repair_nodes (code),
+  parts_cost     numeric(12,2) not null default 0,
+  labor_cost     numeric(12,2) not null default 0,
+  note           text,
+  created_at     timestamptz not null default now()
+);
+create index if not exists repair_items_idx on crm.repair_items (bike_id, created_at);
+create index if not exists repair_items_node_idx on crm.repair_items (node, created_at);

@@ -29,7 +29,7 @@
   <h2>Закрыть аренду</h2>
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
-    <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option></select></label>
+    <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="maintenance">на ТО</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option><option value="written_off">списан</option></select></label>
     <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
     <button type="submit" class="danger">Закрыть</button>
   </form>

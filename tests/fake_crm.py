@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from app.crm import logic as crm_logic
+
 
 class FakeCrm:
     def __init__(self) -> None:
@@ -21,6 +23,8 @@ class FakeCrm:
         self.ledger_: list[dict] = []
         self.claims_: dict[int, dict] = {}
         self.bike_log_: list[dict] = []
+        self.status_log_: list[dict] = []
+        self.repair_items_: list[dict] = []
         self._seq = 0
 
     def _id(self) -> int:
@@ -90,12 +94,72 @@ class FakeCrm:
                             if rental else None)
         return row
 
-    async def bikes(self, *, status=None, q=None, limit=500):
+    async def bikes(self, *, status=None, q=None, location=None, limit=500):
         rows = [self._bike_row(b) for b in self.bikes_.values()
                 if (not status or b["status"] == status)
+                and (not location or (b.get("location") is None if location == "none"
+                                      else b.get("location") == location))
                 and (not q or q.lower()
                      in f"{b['code']} {b['model']} {b.get('frame_no') or ''}".lower())]
         return sorted(rows, key=lambda b: b["code"])[:limit]
+
+    def _log_status(self, bike_id, from_status, to_status, by=None):
+        """Аналог триггера crm.log_bike_status."""
+        self.status_log_.append({"id": self._id(), "bike_id": bike_id,
+                                 "from_status": from_status, "to_status": to_status,
+                                 "changed_at": self._now(), "changed_by": by or None})
+
+    async def bike_status_log(self, bike_id, limit=30):
+        rows = [dict(x) for x in self.status_log_ if x["bike_id"] == bike_id]
+        return sorted(rows, key=lambda x: (x["changed_at"], x["id"]), reverse=True)[:limit]
+
+    async def bike_days_by_status(self, since, until):
+        until = min(until, self._now())
+        return crm_logic.days_by_status(self.status_log_, since, until)
+
+    async def rental_revenue(self, since, until):
+        return sum((x["amount"] for x in self.ledger_
+                    if x["kind"] == "payment" and since <= x["created_at"] < until),
+                   Decimal(0))
+
+    async def repair_nodes(self):
+        return [{"code": c, "title": t} for c, t in crm_logic.REPAIR_NODES.items()]
+
+    async def create_repair(self, bike_id, *, items, note, created_by):
+        total = sum((Decimal(str(i.get("parts_cost") or 0))
+                     + Decimal(str(i.get("labor_cost") or 0)) for i in items), Decimal(0))
+        log_id = await self.add_bike_log(bike_id, "repair", note, total, created_by)
+        for i in items:
+            self.repair_items_.append({
+                "id": self._id(), "log_id": log_id, "bike_id": bike_id, "node": i["node"],
+                "parts_cost": Decimal(str(i.get("parts_cost") or 0)),
+                "labor_cost": Decimal(str(i.get("labor_cost") or 0)),
+                "note": i.get("note"), "created_at": self._now()})
+        return log_id
+
+    async def repair_stats(self, since, until):
+        by_node: dict[str, dict] = {}
+        for i in self.repair_items_:
+            if not since <= i["created_at"] < until:
+                continue
+            row = by_node.setdefault(i["node"], {"code": i["node"],
+                                                 "title": crm_logic.REPAIR_NODES[i["node"]],
+                                                 "n": 0, "cost": Decimal(0)})
+            row["n"] += 1
+            row["cost"] += i["parts_cost"] + i["labor_cost"]
+        by_model: dict[str, dict] = {}
+        for x in self.bike_log_:
+            if x["kind"] != "repair" or not since <= x["created_at"] < until:
+                continue
+            model = self.bikes_[x["bike_id"]]["model"]
+            row = by_model.setdefault(model, {"model": model, "n": 0, "bikes": set(),
+                                              "cost": Decimal(0)})
+            row["n"] += 1
+            row["bikes"].add(x["bike_id"])
+            row["cost"] += x["cost"] or Decimal(0)
+        return {"by_node": sorted(by_node.values(), key=lambda r: -r["cost"]),
+                "by_model": [dict(r, bikes=len(r["bikes"]))
+                             for r in sorted(by_model.values(), key=lambda r: -r["cost"])]}
 
     async def bike(self, bike_id):
         b = self.bikes_.get(bike_id)
@@ -116,7 +180,7 @@ class FakeCrm:
     async def bike_by_code(self, code):
         return next((dict(b) for b in self.bikes_.values() if b["code"] == code), None)
 
-    async def create_bike(self, **fields):
+    async def create_bike(self, *, by=None, **fields):
         if any(b["code"] == fields.get("code") for b in self.bikes_.values()):
             raise UniqueError("code")
         if fields.get("frame_no") and any(b["frame_no"] == fields["frame_no"]
@@ -126,12 +190,19 @@ class FakeCrm:
         self.bikes_[bid] = {"id": bid, "code": None, "model": None, "frame_no": None,
                             "motor_no": None, "battery_count": 2, "status": "available",
                             "purchase_price": None, "purchased_on": None, "note": None,
+                            "location": None, "service_months": 24,
+                            "residual_price": Decimal(0), "battery_price": None,
+                            "battery_service_months": 15,
                             "created_at": self._now(), "updated_at": self._now(),
                             **fields}
+        self._log_status(bid, None, self.bikes_[bid]["status"], by)
         return bid
 
-    async def update_bike(self, bike_id, **fields):
+    async def update_bike(self, bike_id, *, by=None, **fields):
+        before = self.bikes_[bike_id]["status"]
         self.bikes_[bike_id].update(fields)
+        if "status" in fields and fields["status"] != before:
+            self._log_status(bike_id, before, fields["status"], by)
 
     async def bike_counts(self):
         out: dict[str, int] = {}
@@ -279,18 +350,21 @@ class FakeCrm:
                               "created_by": created_by, "created_at": self._now(),
                               "updated_at": self._now()}
         if bike_id is not None:
+            self._log_status(bike_id, self.bikes_[bike_id]["status"], "rented", created_by)
             self.bikes_[bike_id]["status"] = "rented"
         return rid
 
     async def update_rental(self, rental_id, **fields):
         self.rentals_[rental_id].update(fields)
 
-    async def close_rental(self, rental_id, *, closed_on, note, bike_status="available"):
+    async def close_rental(self, rental_id, *, closed_on, note, bike_status="available",
+                           closed_by=None):
         r = self.rentals_.get(rental_id)
         if r is None or r["status"] != "active":
             return False
         r.update(status="closed", closed_on=closed_on, close_note=note)
         if r["bike_id"] is not None and self.bikes_[r["bike_id"]]["status"] == "rented":
+            self._log_status(r["bike_id"], "rented", bike_status, closed_by)
             self.bikes_[r["bike_id"]]["status"] = bike_status
         return True
 

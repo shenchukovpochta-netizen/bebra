@@ -127,6 +127,82 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.claim(pid))["status"], "confirmed")
         self.assertEqual(await self.crm.pending_claims(), [])
 
+    async def test_status_log_is_written_by_trigger(self):
+        await self.seed()
+        log = await self.crm.bike_status_log(self.bike_id)
+        self.assertEqual([(x["from_status"], x["to_status"]) for x in log],
+                         [(None, "available")])
+        await self.crm.update_bike(self.bike_id, by="staff:admin", status="repair")
+        await self.crm.update_bike(self.bike_id, note="без смены статуса")
+        rid = await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
+                                           tariff_id=None, tariff_name="t", period_days=7,
+                                           price=D(1000), billing="manual",
+                                           started_on=date.today(), contract_no=None,
+                                           created_by="bot")
+        await self.crm.close_rental(rid, closed_on=date.today(), note=None,
+                                    bike_status="maintenance", closed_by="staff:irik")
+        log = await self.crm.bike_status_log(self.bike_id)
+        created = await self.crm.create_bike(by="staff:admin", code="B-actor", model="T")
+        first = await self.crm.bike_status_log(created)
+        self.assertEqual((first[0]["to_status"], first[0]["changed_by"]),
+                         ("available", "staff:admin"))
+        pairs = [(x["from_status"], x["to_status"], x["changed_by"]) for x in log]
+        self.assertEqual(pairs[0], ("rented", "maintenance", "staff:irik"))
+        self.assertEqual(pairs[-1], (None, "available", None))
+        self.assertIn(("available", "repair", "staff:admin"), pairs)
+        self.assertIn(("repair", "rented", "bot"), pairs)
+        self.assertEqual(len(pairs), 4)
+        # повторное применение схемы не дублирует бэкфилл
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual(len(await self.crm.bike_status_log(self.bike_id)), 4)
+
+    async def test_bike_days_and_revenue(self):
+        await self.seed()
+        from datetime import UTC, datetime, timedelta
+        now = datetime.now(UTC)
+        # переписать журнал руками: 10 дней назад свободен, 7 дней назад в аренде
+        await self.pool.execute("delete from crm.bike_status_log where bike_id = $1",
+                                self.bike_id)
+        await self.pool.execute(
+            "insert into crm.bike_status_log (bike_id, from_status, to_status, changed_at) "
+            "values ($1, null, 'available', $2), ($1, 'available', 'rented', $3)",
+            self.bike_id, now - timedelta(days=10), now - timedelta(days=7))
+        await self.pool.execute("update crm.bikes set status = 'rented' where id = $1",
+                                self.bike_id)
+        days = await self.crm.bike_days_by_status(now - timedelta(days=10), now)
+        self.assertAlmostEqual(float(days["available"]), 3.0, places=2)
+        self.assertAlmostEqual(float(days["rented"]), 7.0, places=2)
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("3500"))
+        await self.crm.add_ledger(client_id=self.client_id, kind="charge", amount=D("-3500"))
+        revenue = await self.crm.rental_revenue(now - timedelta(days=10), now + timedelta(days=1))
+        self.assertEqual(revenue, D("3500.00"))
+        m = logic.fleet_metrics(days, revenue)
+        self.assertEqual(m["idle_percent"], 30.0)
+        self.assertEqual(m["avg_check"], D("500.00"))
+
+    async def test_repair_by_node(self):
+        await self.seed()
+        from datetime import UTC, datetime, timedelta
+        nodes = await self.crm.repair_nodes()
+        self.assertEqual(len(nodes), len(logic.REPAIR_NODES))
+        self.assertEqual({n["code"] for n in nodes}, set(logic.REPAIR_NODES))
+        log_id = await self.crm.create_repair(
+            self.bike_id, items=[{"node": "brake_pads", "parts_cost": D(400), "labor_cost": D(300)},
+                                 {"node": "controller", "parts_cost": D(2500)}],
+            note="тормоза и контроллер", created_by="staff:mech")
+        entries = await self.crm.bike_log(self.bike_id)
+        self.assertEqual((entries[0]["id"], entries[0]["kind"], entries[0]["cost"]),
+                         (log_id, "repair", D("3200.00")))
+        now = datetime.now(UTC)
+        stats = await self.crm.repair_stats(now - timedelta(days=1), now + timedelta(days=1))
+        self.assertEqual([(r["code"], r["n"], r["cost"]) for r in stats["by_node"]],
+                         [("controller", 1, D("2500.00")), ("brake_pads", 1, D("700.00"))])
+        self.assertEqual([(r["model"], r["bikes"], r["n"], r["cost"]) for r in stats["by_model"]],
+                         [("Kugoo V3", 1, 1, D("3200.00"))])
+        with self.assertRaises(asyncpg.ForeignKeyViolationError):
+            await self.crm.create_repair(self.bike_id, items=[{"node": "warp_drive"}],
+                                         note=None, created_by=None)
+
     async def test_close_rental_frees_bike_once(self):
         await self.seed()
         rid = await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,

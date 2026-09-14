@@ -8,8 +8,13 @@
   <label>Номер рамы <input name="frame_no"></label>
   <label>Номер мотора <input name="motor_no"></label>
   <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="2"></label>
+  <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
   <label>Цена покупки <input name="purchase_price" inputmode="decimal"></label>
   <label>Дата покупки <input name="purchased_on" type="date"></label>
+  <label>Срок службы, мес. <input name="service_months" type="number" min="1" max="240" value="24"></label>
+  <label>Остаточная стоимость <input name="residual_price" inputmode="decimal" placeholder="0"></label>
+  <label>Цена одной АКБ <input name="battery_price" inputmode="decimal" placeholder="для амортизации"></label>
+  <label>Срок службы АКБ, мес. <input name="battery_service_months" type="number" min="1" max="240" value="15"></label>
   <label>Заметка <textarea name="note" rows="3"></textarea></label>
   <button type="submit">Сохранить</button>
 </form>

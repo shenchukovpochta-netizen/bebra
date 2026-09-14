@@ -119,7 +119,7 @@ async def _bike_for(crm: Any, spec: dict) -> int | None:
     code = logic.bike_code_from_frame(frame, spec.get("bike_model"))
     if await crm.bike_by_code(code) is not None:
         code = f"{code}-{date.today().strftime('%d%m')}"
-    return await crm.create_bike(code=code, model=spec.get("bike_model") or "—",
+    return await crm.create_bike(by="bot", code=code, model=spec.get("bike_model") or "—",
                                  frame_no=frame, motor_no=spec.get("motor_no"),
                                  note="Заведён ботом из формы выдачи")
 
@@ -195,7 +195,7 @@ async def on_rental_closed(crm: Any, user: dict, *, today: date) -> None:
         rental = await crm.active_rental_of(client["id"])
         if rental is None:
             return
-        await crm.close_rental(rental["id"], closed_on=today,
+        await crm.close_rental(rental["id"], closed_on=today, closed_by="bot",
                                note="Акт возврата подписан в боте")
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не закрыта", user.get("contract_no"))

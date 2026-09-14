@@ -2,13 +2,27 @@
 {% block content %}
 <div class="bar"><h1>Отчёты</h1></div>
 <div class="tiles">
-  <div class="tile"><b>{{ utilization }}%</b><span>загрузка парка: {{ rented }} из {{ fleet }}</span></div>
-  <div class="tile"><b>{{ bikes.get('repair', 0) }}</b><span>в ремонте</span></div>
+  <div class="tile"><b>{{ utilization }}%</b><span>сейчас в аренде: {{ rented }} из {{ fleet }} операционных</span></div>
+  <div class="tile"><b>{{ bikes.get('repair', 0) + bikes.get('maintenance', 0) }}</b><span>в ремонте и на ТО</span></div>
+  <div class="tile"><b>{{ money(amortization) }}</b><span>амортизация в месяц<br><small class="muted">цена задана у {{ priced }} из {{ fleet }}</small></span></div>
   <div class="tile"><b>{{ debtors|length }}</b><span>должников</span></div>
 </div>
 <div class="cols">
 <section class="card">
-  <h2>По месяцам</h2>
+  <h2>Три числа по месяцам</h2>
+  <table>
+    <tr><th>Месяц</th><th>Простой</th><th>Чек/день</th><th>Дней аренды</th><th>Дней парка</th></tr>
+    {% for m in months_metrics %}
+    <tr><td>{{ m.month.strftime('%m.%Y') }}</td>
+      <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+      <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
+      <td class="num">{{ m.rented_days|round(0)|int }}</td><td class="num">{{ m.operational_days|round(0)|int }}</td></tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Простой — доля велосипеде-дней вне аренды (свободен, бронь, ремонт, ТО) в днях операционного парка; цель меньше {{ IDLE_TARGET_PERCENT }} %. Чек — платежи клиентов за месяц на один день аренды; цель {{ money(CHECK_TARGET) }}. История статусов ведётся с момента появления велосипеда в CRM: импортированные из таблицы считаются с даты импорта.</p>
+</section>
+<section class="card">
+  <h2>Деньги по месяцам</h2>
   <table>
     <tr><th>Месяц</th><th>Поступило</th><th>Начислено</th><th>Возвраты</th><th>Ремонт</th></tr>
     {% for m in months %}
@@ -18,6 +32,28 @@
   </table>
   <p class="muted">«Поступило» — реальные деньги; «Начислено» — заработанное по тарифам и штрафам. Разница между ними накапливается в балансах клиентов.</p>
 </section>
+</div>
+<div class="cols">
+<section class="card">
+  <h2>Что ломается <small class="muted">за 12 месяцев</small></h2>
+  <table>
+    <tr><th>Узел</th><th>Ремонтов</th><th>Стоимость</th></tr>
+    {% for r in repairs.by_node %}
+    <tr><td>{{ r.title }}</td><td class="num">{{ r.n }}</td><td class="num">{{ money(r.cost) }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">Ремонтов по узлам ещё не записывали.</td></tr>{% endfor %}
+  </table>
+</section>
+<section class="card">
+  <h2>Какая модель дороже <small class="muted">за 12 месяцев</small></h2>
+  <table>
+    <tr><th>Модель</th><th>Велосипедов</th><th>Ремонтов</th><th>Стоимость</th><th>На велосипед</th></tr>
+    {% for r in repairs.by_model %}
+    <tr><td>{{ r.model }}</td><td class="num">{{ r.bikes }}</td><td class="num">{{ r.n }}</td><td class="num">{{ money(r.cost) }}</td><td class="num">{{ money(r.cost / r.bikes) if r.bikes else '' }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Ремонтов ещё не было.</td></tr>{% endfor %}
+  </table>
+</section>
+</div>
+<div class="cols">
 <section class="card">
   <h2>Должники</h2>
   <table>

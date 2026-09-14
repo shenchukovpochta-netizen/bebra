@@ -17,7 +17,8 @@ import asyncpg
 # Белые списки колонок для UPDATE: имена подставляются в SQL текстом.
 BIKE_FIELDS = frozenset({
     "code", "model", "frame_no", "motor_no", "battery_count", "status",
-    "purchase_price", "purchased_on", "note",
+    "purchase_price", "purchased_on", "note", "location", "service_months",
+    "residual_price", "battery_price", "battery_service_months",
 })
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
@@ -111,12 +112,17 @@ class CrmDB:
     # ─────────────────────── парк ───────────────────────
 
     async def bikes(self, *, status: str | None = None, q: str | None = None,
-                    limit: int = 500) -> list[dict]:
+                    location: str | None = None, limit: int = 500) -> list[dict]:
         """Список с текущим арендатором - одним запросом, без N+1."""
         conds, args = [], []
         if status:
             args.append(status)
             conds.append(f"b.status = ${len(args)}")
+        if location == "none":
+            conds.append("b.location is null")
+        elif location:
+            args.append(location)
+            conds.append(f"b.location = ${len(args)}")
         if q:
             args.append(f"%{q.strip()}%")
             conds.append(f"(b.code ilike ${len(args)} or b.model ilike ${len(args)} "
@@ -158,21 +164,118 @@ class CrmDB:
         return _row(await self.pool.fetchrow(
             "select * from crm.bikes where code = $1", code))
 
-    async def create_bike(self, **fields: Any) -> int:
+    async def create_bike(self, *, by: str | None = None, **fields: Any) -> int:
         unknown = set(fields) - BIKE_FIELDS
         if unknown:
             raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
         cols = list(fields)
         placeholders = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
-        return int(await self.pool.fetchval(
-            f"insert into crm.bikes ({', '.join(cols)}) values ({placeholders}) "
-            f"returning id", *[fields[c] for c in cols]))
+        async with self.pool.acquire() as conn, conn.transaction():
+            # Первая запись журнала статусов тоже должна знать автора.
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            return int(await conn.fetchval(
+                f"insert into crm.bikes ({', '.join(cols)}) values ({placeholders}) "
+                f"returning id", *[fields[c] for c in cols]))
 
-    async def update_bike(self, bike_id: int, **fields: Any) -> None:
+    async def update_bike(self, bike_id: int, *, by: str | None = None,
+                          **fields: Any) -> None:
+        """by - кто меняет: триггер журнала статусов читает его из
+        set_config('crm.actor') в той же транзакции."""
         sets, values = _set_clause(fields, BIKE_FIELDS, 2)
-        await self.pool.execute(
-            f"update crm.bikes set {sets}, updated_at = now() where id = $1",
-            bike_id, *values)
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            await conn.execute(
+                f"update crm.bikes set {sets}, updated_at = now() where id = $1",
+                bike_id, *values)
+
+    async def bike_status_log(self, bike_id: int, limit: int = 30) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.bike_status_log where bike_id = $1 "
+            "order by changed_at desc, id desc limit $2", bike_id, limit))
+
+    async def bike_days_by_status(self, since: datetime, until: datetime) -> dict[str, Decimal]:
+        """Велосипеде-дни по статусам за [since, until) по журналу статусов.
+
+        Интервал статуса длится до следующей записи того же велосипеда,
+        открытый - до текущего момента. Та же арифметика, что
+        logic.days_by_status: на ней держатся простой и средний чек.
+        """
+        rows = await self.pool.fetch(
+            """
+            with s as (
+              select bike_id, to_status, changed_at,
+                     lead(changed_at) over (partition by bike_id order by changed_at, id)
+                       as next_at
+              from crm.bike_status_log
+            )
+            select to_status as status,
+                   sum(extract(epoch from (least(coalesce(next_at, now()), $2::timestamptz)
+                                           - greatest(changed_at, $1::timestamptz)))) / 86400
+                     as days
+            from s
+            where changed_at < $2::timestamptz and coalesce(next_at, now()) > $1::timestamptz
+            group by to_status
+            """, since, until)
+        return {r["status"]: Decimal(str(r["days"])) for r in rows if r["days"] and r["days"] > 0}
+
+    async def rental_revenue(self, since: datetime, until: datetime) -> Decimal:
+        """Арендная выручка за период - все платежи клиентов. Ремонт чужой
+        техники сюда не попадает: он не в журнале клиентов."""
+        return Decimal(await self.pool.fetchval(
+            "select coalesce(sum(amount), 0) from crm.ledger "
+            "where kind = 'payment' and created_at >= $1 and created_at < $2",
+            since, until))
+
+    # ─────────────────────── ремонт по узлам ───────────────────────
+
+    async def repair_nodes(self) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select code, title from crm.repair_nodes order by sort, code"))
+
+    async def create_repair(self, bike_id: int, *, items: list[dict], note: str | None,
+                            created_by: str | None) -> int:
+        """Ремонт: запись журнала велосипеда с общей суммой и позиции по
+        узлам - одной транзакцией."""
+        total = sum((Decimal(str(i.get("parts_cost") or 0)) + Decimal(str(i.get("labor_cost") or 0))
+                     for i in items), Decimal(0))
+        async with self.pool.acquire() as conn, conn.transaction():
+            log_id = int(await conn.fetchval(
+                "insert into crm.bike_log (bike_id, kind, note, cost, created_by) "
+                "values ($1, 'repair', $2, $3, $4) returning id",
+                bike_id, note, total, created_by))
+            for i in items:
+                await conn.execute(
+                    """
+                    insert into crm.repair_items
+                      (log_id, bike_id, node, parts_cost, labor_cost, note)
+                    values ($1, $2, $3, $4, $5, $6)
+                    """, log_id, bike_id, i["node"],
+                    Decimal(str(i.get("parts_cost") or 0)),
+                    Decimal(str(i.get("labor_cost") or 0)), i.get("note"))
+            return log_id
+
+    async def repair_stats(self, since: datetime, until: datetime) -> dict[str, list[dict]]:
+        """Что ломается и что дорого: по узлам (только структурные записи)
+        и по моделям (все ремонты, включая старые без позиций)."""
+        by_node = _rows(await self.pool.fetch(
+            """
+            select n.code, n.title, count(*) as n,
+                   sum(i.parts_cost + i.labor_cost) as cost
+            from crm.repair_items i join crm.repair_nodes n on n.code = i.node
+            where i.created_at >= $1 and i.created_at < $2
+            group by n.code, n.title, n.sort
+            order by cost desc, n.sort
+            """, since, until))
+        by_model = _rows(await self.pool.fetch(
+            """
+            select b.model, count(*) as n, count(distinct b.id) as bikes,
+                   sum(coalesce(l.cost, 0)) as cost
+            from crm.bike_log l join crm.bikes b on b.id = l.bike_id
+            where l.kind = 'repair' and l.created_at >= $1 and l.created_at < $2
+            group by b.model
+            order by cost desc
+            """, since, until))
+        return {"by_node": by_node, "by_model": by_model}
 
     async def bike_counts(self) -> dict[str, int]:
         rows = await self.pool.fetch(
@@ -344,6 +447,7 @@ class CrmDB:
         UniqueViolationError; вызывающий переводит его в понятное сообщение.
         """
         async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", created_by or "")
             rental_id = int(await conn.fetchval(
                 """
                 insert into crm.rentals
@@ -366,9 +470,11 @@ class CrmDB:
             rental_id, *values)
 
     async def close_rental(self, rental_id: int, *, closed_on: date,
-                           note: str | None, bike_status: str = "available") -> bool:
+                           note: str | None, bike_status: str = "available",
+                           closed_by: str | None = None) -> bool:
         """Закрыть аренду и освободить велосипед. False - уже закрыта."""
         async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", closed_by or "")
             row = await conn.fetchrow(
                 """
                 update crm.rentals

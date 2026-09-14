@@ -310,5 +310,62 @@ class TestIssueSync(unittest.TestCase):
         self.assertEqual(logic.bike_code_from_frame(None, None), "АВТО-BIKE")
 
 
+
+class TestFleetMetrics(unittest.TestCase):
+    """Три числа: простой, чек, амортизация - формулы из CLAUDE.md."""
+
+    def test_amortization_splits_frame_and_battery(self):
+        bike = {"purchase_price": D("47000"), "service_months": 24, "residual_price": D("5000"),
+                "battery_price": D("9000"), "battery_count": 2, "battery_service_months": 15,
+                "status": "available"}
+        # рама (47000-5000)/24 = 1750; АКБ 9000*2/15 = 1200
+        self.assertEqual(logic.amortization_month(bike), D("2950.00"))
+        self.assertIsNone(logic.amortization_month({"purchase_price": None}))
+        # без цены АКБ - только рама; отрицательной амортизации не бывает
+        self.assertEqual(logic.amortization_month({"purchase_price": D("1000"),
+                                                   "residual_price": D("5000"),
+                                                   "service_months": 10}), D("0.00"))
+        lost = dict(bike, status="lost")
+        self.assertEqual(logic.amortization_total([bike, lost, dict(bike, status="repair")]),
+                         D("5900.00"))
+
+    def test_days_by_status_from_log(self):
+        from datetime import UTC, datetime
+        t = lambda d, h=0: datetime(2026, 9, d, h, tzinfo=UTC)  # noqa: E731
+        log = [
+            {"bike_id": 1, "to_status": "available", "changed_at": t(1)},
+            {"bike_id": 1, "to_status": "rented", "changed_at": t(3)},
+            {"bike_id": 1, "to_status": "available", "changed_at": t(10)},
+            {"bike_id": 2, "to_status": "repair", "changed_at": t(5, 12)},
+            {"bike_id": 3, "to_status": "lost", "changed_at": t(1)},
+        ]
+        days = logic.days_by_status(log, t(1), t(11))
+        self.assertEqual(days["rented"], D(7))
+        self.assertEqual(days["available"], D(3))            # 2 до аренды + 1 после
+        self.assertEqual(days["repair"], D("5.5"))
+        self.assertEqual(days["lost"], D(10))
+        # окно уже журнала: обрезается с обеих сторон
+        days = logic.days_by_status(log, t(4), t(6))
+        self.assertEqual(days["rented"], D(2))
+        self.assertEqual(days["repair"], D("0.5"))
+        self.assertNotIn("available", days)
+
+    def test_fleet_metrics_targets(self):
+        m = logic.fleet_metrics({"rented": D(60), "available": D(5), "repair": D(3),
+                                 "lost": D(30)}, D("30000"))
+        self.assertEqual(m["operational_days"], D(68))       # потерянные не в знаменателе
+        self.assertEqual(m["idle_percent"], 11.8)
+        self.assertFalse(m["idle_ok"])
+        self.assertEqual(m["avg_check"], D("500.00"))
+        self.assertTrue(m["check_ok"])
+        empty = logic.fleet_metrics({}, D(0))
+        self.assertIsNone(empty["idle_percent"])
+        self.assertIsNone(empty["avg_check"])
+        self.assertFalse(empty["idle_ok"])
+        good = logic.fleet_metrics({"rented": D(95), "available": D(5)}, D("50000"))
+        self.assertTrue(good["idle_ok"])
+        self.assertEqual(good["idle_percent"], 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

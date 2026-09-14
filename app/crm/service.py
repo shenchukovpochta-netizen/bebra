@@ -116,11 +116,11 @@ async def charge_all(crm: Any, *, today: date) -> int:
 
 
 async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | None,
-                       bike_status: str = "available") -> None:
+                       bike_status: str = "available", by: str | None = None) -> None:
     if bike_status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус велосипеда.")
     if not await crm.close_rental(rental["id"], closed_on=closed_on, note=note,
-                                  bike_status=bike_status):
+                                  bike_status=bike_status, closed_by=by):
         raise ServiceError("Аренда уже закрыта.")
 
 
