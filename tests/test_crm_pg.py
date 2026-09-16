@@ -155,6 +155,11 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         # повторное применение схемы не дублирует бэкфилл
         await Database(self.pool).apply_schema(SCHEMA)
         self.assertEqual(len(await self.crm.bike_status_log(self.bike_id)), 4)
+        # с какого момента велосипед в текущем статусе - последняя запись
+        since = await self.crm.bike_status_since()
+        self.assertEqual(since[self.bike_id], log[0]["changed_at"])
+        self.assertEqual(since[created], first[0]["changed_at"])
+        self.assertIsNotNone(since[self.bike_id].tzinfo)
 
     async def test_bike_days_and_revenue(self):
         await self.seed()

@@ -28,6 +28,8 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
+from .. import logic as bot_logic
+
 # ─────────────────────────── словари ───────────────────────────
 
 KINDS = {
@@ -606,3 +608,98 @@ def fleet_metrics(days: dict[str, Any], revenue: Any) -> dict[str, Any]:
         "check_ok": avg_check is not None and avg_check >= CHECK_TARGET,
         "idle_breakdown": {s: days.get(s, Decimal(0)) for s in IDLE_STATUSES},
     }
+
+
+# ─────────────────────────── быстрая выдача ───────────────────────────
+#
+# Мастер выдачи в панели: телефон -> тариф и модель -> конкретный
+# велосипед -> оплата и аренда. Здесь то, что считается без базы: цена
+# за день против цели среднего чека, свободные по моделям и точкам,
+# простой велосипеда, состояние клиента в боте, сколько взять при выдаче.
+
+def per_day(price: Any, period_days: Any) -> Decimal:
+    """Цена тарифа за день: сравнивать тарифы разной длины и цель 500 ₽."""
+    days = int(period_days or 0)
+    if days <= 0:
+        return Decimal(0)
+    return (to_money(price) / days).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def tariff_tiles(tariffs: Iterable[dict]) -> list[dict]:
+    """Плитки тарифов для выбора, от короткого к длинному.
+
+    per_day - цена за день, hits_target - не ниже цели среднего чека;
+    saving - сколько клиент экономит против самого короткого тарифа
+    за тот же срок («неделя: −1 190 ₽»). Оператору видно, какой тариф
+    продавать: длинный и с экономией для клиента, но не ниже цели.
+    """
+    rows = [dict(t) for t in tariffs
+            if t.get("active", True) and int(t.get("period_days") or 0) > 0]
+    if not rows:
+        return []
+    order = sorted(rows, key=lambda t: (int(t["period_days"]), to_money(t["price"])))
+    base_price, base_days = to_money(order[0]["price"]), int(order[0]["period_days"])
+    out = []
+    for t in order:
+        day = per_day(t["price"], t["period_days"])
+        # Выгода считается от цен, а не от округлённой цены за день:
+        # иначе «две недели» показывали бы 599,98 ₽ вместо 600 ₽.
+        saving = (base_price * int(t["period_days"]) / base_days
+                  - to_money(t["price"])).quantize(CENT, rounding=ROUND_HALF_UP)
+        out.append({**t, "per_day": day, "saving": saving if saving > 0 else Decimal(0),
+                    "hits_target": day >= CHECK_TARGET})
+    return out
+
+
+def model_availability(bikes: Iterable[dict]) -> list[dict]:
+    """Свободные велосипеды по моделям и точкам: {model, free, by_location}.
+
+    Модели с большим запасом идут первыми: выдавать надо то, чего много,
+    а не последний экземпляр редкой модели.
+    """
+    by_model: dict[str, dict] = {}
+    for b in bikes:
+        if b.get("status") != "available":
+            continue
+        model = b.get("model") or "—"
+        row = by_model.setdefault(model, {"model": model, "free": 0, "by_location": {}})
+        row["free"] += 1
+        place = b.get("location") or "не на точке"
+        row["by_location"][place] = row["by_location"].get(place, 0) + 1
+    return sorted(by_model.values(), key=lambda r: (-r["free"], r["model"]))
+
+
+def idle_days(since: datetime | None, *, now: datetime) -> int | None:
+    """Сколько дней велосипед стоит в текущем статусе. None - журнала нет."""
+    if since is None:
+        return None
+    return max((now - since).days, 0)
+
+
+def bot_client_state(user: dict | None) -> dict[str, str]:
+    """Что о клиенте знает бот - код и подпись для мастера выдачи.
+
+    none - не в боте; registering - анкета не закончена; pending -
+    заявка на проверке; approved - одобрен, договор не подписан;
+    signed - договор подписан; renting - велосипед на руках по акту бота.
+    """
+    if not user:
+        return {"code": "none", "label": "не в боте"}
+    if user.get("status") != bot_logic.ST_APPROVED:
+        if user.get("state") == bot_logic.PENDING:
+            return {"code": "pending", "label": "заявка в боте на проверке"}
+        return {"code": "registering", "label": "регистрация в боте не завершена"}
+    number = user.get("contract_no") or "—"
+    if user.get("contract_status") != bot_logic.CT_SIGNED:
+        return {"code": "approved", "label": "одобрен в боте, договор ещё не подписан"}
+    if user.get("act_in_signed_at") and not user.get("act_out_signed_at"):
+        return {"code": "renting", "label": f"по акту бота велосипед на руках, договор № {number}"}
+    return {"code": "signed", "label": f"договор № {number} подписан в боте"}
+
+
+def issue_payment_default(price: Any, balance: Any) -> Decimal:
+    """Сколько взять при выдаче: цена первого периода за вычетом того, что
+    уже лежит на балансе. Долг сюда не добавляется: он виден оператору
+    отдельной строкой и закрывается своим платежом."""
+    need = to_money(price) - max(to_money(balance), Decimal(0))
+    return max(need, Decimal(0))

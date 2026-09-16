@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import types
 import unittest
 from datetime import date, timedelta
 from decimal import Decimal
@@ -37,6 +38,10 @@ class FakeBotDB:
         row = self.users.get(tg_id)
         return dict(row) if row else None
 
+    async def user_by_phone(self, phone):
+        row = next((u for u in self.users.values() if u.get("phone") == phone), None)
+        return dict(row) if row else None
+
 
 class FakeBot:
     def __init__(self) -> None:
@@ -44,6 +49,9 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, reply_markup=None):
         self.sent.append((chat_id, text))
+
+    async def get_me(self):
+        return types.SimpleNamespace(username="mybike_test_bot")
 
 
 def run(coro):
@@ -158,7 +166,7 @@ class TestPages(WebCase):
 
     def test_every_page_renders_empty(self):
         for path in ("/", "/clients", "/clients/new", "/bikes", "/bikes/new", "/rentals",
-                     "/rentals/new", "/tariffs", "/finance", "/claims", "/reports",
+                     "/rentals/new", "/issue", "/tariffs", "/finance", "/claims", "/reports",
                      "/staff", f"/clients/{self.client_id}", f"/bikes/{self.bike_id}"):
             self.get_ok(path)
 

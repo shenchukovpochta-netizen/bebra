@@ -3,7 +3,7 @@
 {% block content %}
 <div class="bar">
   <h1>{{ bike.code }} · {{ bike.model }} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
-  {% if bike.status == 'available' %}<a class="btn" href="/rentals/new?bike={{ bike.id }}">Выдать в аренду</a>{% endif %}
+  {% if bike.status == 'available' %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
 </div>
 <div class="cols">
 <section class="card">

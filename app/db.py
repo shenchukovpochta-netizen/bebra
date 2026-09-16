@@ -147,6 +147,18 @@ class Database:
     async def get_user(self, tg_id: int) -> asyncpg.Record | None:
         return await self.pool.fetchrow("select * from bot.users where tg_id = $1", tg_id)
 
+    async def user_by_phone(self, phone: str) -> asyncpg.Record | None:
+        """Пользователь бота по телефону из анкеты (+7XXXXXXXXXX).
+
+        Мастеру выдачи в панели: клиент, которого заводят по телефону, мог
+        уже зарегистрироваться в боте - тогда ФИО, Telegram и договор
+        подхватываются оттуда. Из двух строк с одним номером берётся та,
+        что дальше прошла по регистрации.
+        """
+        return await self.pool.fetchrow(
+            "select * from bot.users where phone = $1 "
+            "order by (status = 'approved') desc, updated_at desc limit 1", phone)
+
     async def patch(self, tg_id: int, *, expected_state: str | None = None,
                     expected_status: str | None = None, **fields: Any) -> bool:
         """UPDATE с оптимистичной блокировкой.

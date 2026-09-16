@@ -46,7 +46,7 @@
 | `app/crm/` | **CRM**: логика денег и периодов, база, биллинг, синхронизация с ботом, уведомления |
 | `schema.sql` (crm) | журнал статусов велосипедов триггером, справочник узлов ремонта, позиции ремонта — основа трёх чисел парка (см. [CRM.md](CRM.md)) |
 | `app/crm/import_xlsx.py` | импорт учётной таблицы xlsx (парк, арендаторы, долги) в CRM: панель → Импорт или `python -m app.crm.import_xlsx` |
-| `app/web/` | **веб-панель CRM**: FastAPI + Jinja2, сервис `crm` (см. [CRM.md](CRM.md)) |
+| `app/web/` | **веб-панель CRM**: FastAPI + Jinja2, сервис `crm`; быстрая выдача в четыре шага (см. [CRM.md](CRM.md)) |
 | `tests/test_logic.py`, `tests/test_config.py` | чистая логика и конфигурация, нужен только stdlib |
 | `tests/test_sql.py` | нумерация плейсхолдеров и белый список колонок |
 | `tests/test_contract.py` | шифрование анкеты и сборка договора |
@@ -55,6 +55,7 @@
 | `tests/test_import.py` | импорт таблицы: разбор ячеек, план, идемпотентность, страница /import |
 | `tests/test_cabinet.py`, `tests/test_fleet.py`, `tests/test_web.py` | кабинет клиента и парк из чата сквозь Dispatcher; панель через TestClient |
 | `tests/test_web_pg.py` | панель целиком на настоящем Postgres (pgserver): страницы, формы, импорт |
+| `tests/test_issue.py`, `tests/test_bot_review.py` | мастер быстрой выдачи; регрессии логики бота |
 | `app/max/` | **бот в MAX**: клиент Bot API, опрос, обработчики (профиль `max`) |
 | `app/max_main.py` | точка входа MAX-бота, своя база `mybike_max` |
 | `install.sh` | **установка одной командой**: вопросы, проверки, запуск |

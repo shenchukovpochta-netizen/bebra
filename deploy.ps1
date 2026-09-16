@@ -65,6 +65,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/_logo.html', 'app/web/templates/_bolt.html',
                   'app/web/templates/login.html', 'app/web/templates/missing.html',
                   'app/web/templates/dashboard.html', 'app/web/templates/clients.html',
+                  'app/web/templates/issue.html',
                   'app/web/templates/client.html', 'app/web/templates/client_form.html',
                   'app/web/templates/bikes.html', 'app/web/templates/bike.html',
                   'app/web/templates/bike_form.html', 'app/web/templates/rentals.html',
@@ -102,7 +103,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/fake_crm.py', 'tests/test_crm_logic.py', 'tests/test_crm_sql.py',
           'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py',
           'tests/test_import.py', 'tests/test_review.py', 'tests/test_scripts.py',
-          'tests/test_fleet.py', 'tests/test_web_pg.py', 'tests/test_bot_review.py')
+          'tests/test_fleet.py', 'tests/test_web_pg.py', 'tests/test_bot_review.py',
+          'tests/test_issue.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

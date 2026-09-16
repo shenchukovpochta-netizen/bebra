@@ -113,6 +113,13 @@ class FakeCrm:
         rows = [dict(x) for x in self.status_log_ if x["bike_id"] == bike_id]
         return sorted(rows, key=lambda x: (x["changed_at"], x["id"]), reverse=True)[:limit]
 
+    async def bike_status_since(self):
+        out = {}
+        for x in self.status_log_:
+            if x["bike_id"] not in out or x["changed_at"] > out[x["bike_id"]]:
+                out[x["bike_id"]] = x["changed_at"]
+        return out
+
     async def bike_days_by_status(self, since, until):
         until = min(until, self._now())
         return crm_logic.days_by_status(self.status_log_, since, until)

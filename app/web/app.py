@@ -13,7 +13,7 @@ import io
 import logging
 import os
 import time
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -637,6 +637,211 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                 created_by=who(request))
         flash(request, "Ремонт записан.")
         return redirect(f"/bikes/{bike_id}")
+
+    # ─────────────────────── быстрая выдача ───────────────────────
+    #
+    # Мастер в четыре шага: телефон клиента -> тариф и модель -> конкретный
+    # велосипед -> сводка, оплата и аренда. Состояние живёт в адресе
+    # (?client=&tariff=&model=&bike=), поэтому мастер открывается и с карточки
+    # клиента, и с карточки велосипеда, а «назад» - обычная ссылка.
+    # Брони нет намеренно: черновики, которые никто не закрывает, держали бы
+    # велосипеды «забронированными»; вместо этого свободность проверяется
+    # в момент оформления, а гонку двух операторов ловит уникальный индекс.
+
+    bot_name: dict[str, str] = {}
+
+    async def bot_username() -> str:
+        """Имя бота для ссылки-приглашения; пусто - бота нет или он недоступен."""
+        if bot is None:
+            return ""
+        if "name" not in bot_name:
+            try:
+                me = await bot.get_me()
+                bot_name["name"] = getattr(me, "username", "") or ""
+            except Exception:                                # noqa: BLE001
+                log.warning("не удалось узнать имя бота для ссылки-приглашения")
+                return ""
+        return bot_name["name"]
+
+    async def bot_user_by_phone(phone: str | None) -> dict | None:
+        if db is None or not phone or not hasattr(db, "user_by_phone"):
+            return None
+        row = await db.user_by_phone(phone)
+        return dict(row) if row else None
+
+    async def bot_user_for(client: dict) -> dict | None:
+        """Строка bot.users для клиента: по Telegram, иначе по телефону."""
+        row = None
+        if db is not None and client.get("tg_id"):
+            row = await db.get_user(client["tg_id"])
+        if row is None:
+            return await bot_user_by_phone(client.get("phone"))
+        return dict(row)
+
+    def issue_url(**params: Any) -> str:
+        query = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in params.items()
+                         if v not in (None, ""))
+        return "/issue" + (f"?{query}" if query else "")
+
+    def plain_amount(value: Decimal) -> str:
+        """Сумма в поле формы: 3000, а не 3000.00."""
+        text = f"{value:f}"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    @app.get("/issue")
+    async def issue(request: Request) -> Response:
+        p = request.query_params
+        ctx: dict[str, Any] = {"step": 1, "client": None, "phone": p.get("phone") or "",
+                               "new_client": None, "bike": None, "tariff": None,
+                               "model": (p.get("model") or "").strip()}
+        if (p.get("bike") or "").isdigit():
+            # С карточки велосипеда: модель известна, шаг выбора пропускается.
+            bike = await crm.bike(int(p["bike"]))
+            if bike is not None and bike.get("status") != "available":
+                flash(request, f"Велосипед {bike['code']} сейчас "
+                               f"«{logic.BIKE_STATUSES.get(bike['status'], bike['status'])}» "
+                               "- выберите другой.", "err")
+                bike = None
+            ctx["bike"] = bike
+        client = None
+        if (p.get("client") or "").isdigit():
+            client = await crm.client(int(p["client"]))
+        elif p.get("phone"):
+            phone = bot_logic.normalize_phone(p["phone"])
+            if phone is None:
+                flash(request, "Телефон: не похоже на номер. Пример: +7 900 123-45-67.", "err")
+                return render(request, "issue.html", **ctx)
+            client = await crm.client_by_phone(phone)
+            if client is None:
+                # Новый клиент: ФИО и Telegram подсказывает бот, если человек
+                # уже регистрировался там с этим номером.
+                user = await bot_user_by_phone(phone)
+                ctx["new_client"] = {"phone": phone,
+                                     "full_name": (user or {}).get("full_name") or "",
+                                     "bot": logic.bot_client_state(user)}
+                ctx["phone"] = phone
+                return render(request, "issue.html", **ctx)
+            return redirect(issue_url(client=client["id"], bike=p.get("bike")))
+        if client is None:
+            return render(request, "issue.html", **ctx)
+
+        balance = await crm.client_balance(client["id"])
+        active = await crm.active_rental_of(client["id"])
+        bot_user = await bot_user_for(client)
+        ctx.update(step=2, client=client, balance=balance, active=active, bot_user=bot_user,
+                   bot_state=logic.bot_client_state(bot_user),
+                   bot_username=await bot_username())
+        if active is not None or client.get("status") != "active":
+            # Дальше идти некуда: сначала закрыть аренду или снять блокировку.
+            return render(request, "issue.html", **ctx)
+        available = await crm.bikes(status="available")
+        ctx["tariffs"] = logic.tariff_tiles(await crm.tariffs(active_only=True))
+        ctx["models"] = logic.model_availability(available)
+        if (p.get("tariff") or "").isdigit():
+            ctx["tariff"] = await crm.tariff(int(p["tariff"]))
+        if ctx["bike"] is not None:
+            ctx["model"] = ctx["bike"]["model"]
+        tariff = ctx["tariff"]
+        if tariff is None or not ctx["model"]:
+            return render(request, "issue.html", **ctx)
+        if ctx["bike"] is None:
+            q = (p.get("q") or "").strip()
+            since = await crm.bike_status_since()
+            now = datetime.now(UTC)
+            rows = [dict(b) for b in available
+                    if b.get("model") == ctx["model"]
+                    and (not q or q.lower() in (b.get("code") or "").lower())]
+            for b in rows:
+                b["idle_days"] = logic.idle_days(since.get(b["id"]), now=now)
+            # Дольше всех простаивающий - первым: выдать его и есть
+            # снижение простоя, а не просто удобство оператора.
+            rows.sort(key=lambda b: (-(b["idle_days"] or 0), b["code"]))
+            ctx.update(step=3, bikes=rows, q=q)
+            return render(request, "issue.html", **ctx)
+        started = logic.check_date(p.get("started_on"), default=date.today())
+        start = started.value if started.ok else date.today()
+        ctx.update(step=4, started_on=start,
+                   ends_on=start + timedelta(days=int(tariff["period_days"])),
+                   per_day=logic.per_day(tariff["price"], tariff["period_days"]),
+                   pay_default=plain_amount(
+                       logic.issue_payment_default(tariff["price"], balance)),
+                   contract_no=(client.get("contract_no")
+                                or (bot_user or {}).get("contract_no") or ""))
+        return render(request, "issue.html", **ctx)
+
+    @app.post("/issue/client")
+    async def issue_client(request: Request) -> Response:
+        data = await form(request)
+        fields = await _client_fields(request, data, current=None)
+        if fields is None:
+            return redirect(issue_url(phone=data.get("phone"), bike=data.get("bike_id")))
+        # Человек мог уже зарегистрироваться в боте с этим номером: тогда
+        # карточка сразу получает его Telegram и номер договора, и
+        # уведомления о сроке и оплате доходят с первого дня.
+        user = await bot_user_by_phone(fields["phone"])
+        tg_id = user.get("tg_id") if user else None
+        if tg_id and await crm.client_by_tg(tg_id) is not None:
+            tg_id = None
+        client_id = await crm.create_client(
+            full_name=fields["full_name"], phone=fields["phone"], note=fields["note"],
+            tg_id=tg_id, username=(user or {}).get("username") if tg_id else None,
+            contract_no=fields["contract_no"] or (user or {}).get("contract_no"))
+        flash(request, "Клиент добавлен." + (" Telegram подхвачен из бота." if tg_id else ""))
+        return redirect(issue_url(client=client_id, bike=data.get("bike_id")))
+
+    @app.post("/issue")
+    async def issue_create(request: Request) -> Response:
+        data = await form(request)
+        back = issue_url(client=data.get("client_id"), tariff=data.get("tariff_id"),
+                         bike=data.get("bike_id"))
+        try:
+            client = await crm.client(int(data.get("client_id") or 0))
+            tariff = await crm.tariff(int(data.get("tariff_id") or 0))
+            bike = await crm.bike(int(data.get("bike_id") or 0))
+        except (TypeError, ValueError):
+            client = tariff = bike = None
+        if client is None or tariff is None or bike is None:
+            flash(request, "Выберите клиента, тариф и велосипед.", "err")
+            return redirect(back)
+        started = logic.check_date(data.get("started_on"), default=date.today())
+        pay = cost_field(data, "pay_amount")
+        method = data.get("pay_method") or "sbp"
+        contract = (logic.check_name(data.get("contract_no"), what="Договор")
+                    if (data.get("contract_no") or "").strip() else logic.Check(True, None))
+        for check in (started, pay, contract):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(back)
+        if pay.value > 0 and method not in logic.METHODS:
+            flash(request, "Выберите способ оплаты.", "err")
+            return redirect(back)
+        # Номер договора: с формы, иначе из карточки, иначе из бота - оператор
+        # его наизусть не помнит, а в акте и отчётах он нужен.
+        contract_no = contract.value or client.get("contract_no")
+        if not contract_no:
+            contract_no = ((await bot_user_for(client)) or {}).get("contract_no")
+        try:
+            rental_id = await service.open_rental(
+                crm, client=client, bike=bike, tariff=tariff, started_on=started.value,
+                contract_no=contract_no, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(back)
+        if pay.value > 0:
+            # Платёж после начисления первого периода: баланс сразу честный,
+            # и уведомление клиенту уходит с верной датой «оплачено до».
+            await service.add_entry(crm, client, kind="payment", amount=pay.value,
+                                    method=method, note=f"При выдаче № {bike['code']}",
+                                    by=who(request), rental_id=rental_id)
+        rental = await crm.rental(rental_id)
+        await notify.rental_opened(bot, db, crm, client, rental)
+        if pay.value > 0:
+            flash(request, f"Выдача оформлена: № {bike['code']} у клиента, "
+                           f"принято {logic.money(pay.value)}.")
+        else:
+            flash(request, f"Выдача оформлена без оплаты: № {bike['code']} у клиента, "
+                           "первый период остался долгом на балансе.")
+        return redirect(f"/rentals/{rental_id}")
 
     # ─────────────────────── аренды ───────────────────────
 

@@ -4,7 +4,7 @@
 <div class="bar">
   <h1>{{ client.full_name }}
     {% if client.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[client.status] }}</span>{% endif %}</h1>
-  {% if not rental and client.status == 'active' %}<a class="btn" href="/rentals/new?client={{ client.id }}">Оформить аренду</a>{% endif %}
+  {% if not rental and client.status == 'active' %}<a class="btn" href="/issue?client={{ client.id }}">⚡ Выдать велосипед</a>{% endif %}
 </div>
 
 <div class="cols">

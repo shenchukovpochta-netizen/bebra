@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}Быстрая выдача — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar">
+  <h1>Быстрая выдача</h1>
+  {% if client %}<a class="btn ghost" href="/issue">Другой клиент</a>{% endif %}
+</div>
+
+<div class="steps">
+  <span class="{% if client %}done{% elif step == 1 %}now{% else %}todo{% endif %}">1 · {% if client %}{{ client.full_name }}{% else %}Клиент{% endif %}</span>
+  <span class="{% if tariff and (model or bike) %}done{% elif step == 2 %}now{% else %}todo{% endif %}">2 · {% if tariff and (model or bike) %}{{ tariff.name }} · {{ model or bike.model }}{% else %}Тариф и модель{% endif %}</span>
+  <span class="{% if bike %}done{% elif step == 3 %}now{% else %}todo{% endif %}">3 · {% if bike %}№ {{ bike.code }}{% else %}Велосипед{% endif %}</span>
+  <span class="{% if step == 4 %}now{% else %}todo{% endif %}">4 · Оплата и аренда</span>
+</div>
+
+{# ─── шаг 1: клиент по телефону ─── #}
+{% if not client %}
+<div class="card narrow">
+  <h2>Телефон клиента</h2>
+  <form method="get" action="/issue">
+    {% if bike %}<input type="hidden" name="bike" value="{{ bike.id }}">{% endif %}
+    <label>Номер <input name="phone" inputmode="tel" placeholder="+7 900 123-45-67" value="{{ phone or '' }}" autofocus required></label>
+    <button type="submit">Найти</button>
+  </form>
+  {% if bike %}<p class="muted">Велосипед № {{ bike.code }} ({{ bike.model }}) уже выбран — останется только клиент, тариф и оплата.</p>{% endif %}
+  <p class="muted">Клиент из бота, из таблицы и заведённый руками ищется одинаково — по цифрам номера. Нового клиента можно завести здесь же.</p>
+</div>
+
+{% if new_client %}
+<div class="card narrow">
+  <h2>Новый клиент</h2>
+  <p>Номер <b>{{ new_client.phone }}</b> в CRM не найден.
+    {% if new_client.bot.code != 'none' %}В боте: <span class="tag bot-{{ new_client.bot.code }}">{{ new_client.bot.label }}</span> — ФИО и Telegram подхватятся оттуда.{% else %}В боте с этим номером никого нет.{% endif %}</p>
+  <form method="post" action="/issue/client">
+    <input type="hidden" name="phone" value="{{ new_client.phone }}">
+    {% if bike %}<input type="hidden" name="bike_id" value="{{ bike.id }}">{% endif %}
+    <label>ФИО <input name="full_name" value="{{ new_client.full_name }}" placeholder="Иванов Иван Иванович" required></label>
+    <label>Заметка <input name="note" placeholder="откуда узнал, компания — по желанию"></label>
+    <button type="submit">Завести и продолжить</button>
+  </form>
+</div>
+{% endif %}
+{% endif %}
+
+{# ─── карточка клиента над шагами 2–4 ─── #}
+{% if client %}
+<div class="card">
+  <div class="who">
+    <b>{{ client.full_name }}</b>
+    <span>{{ client.phone }}</span>
+    <span class="{% if balance < 0 %}bad{% endif %}">баланс <b>{{ money(balance) }}</b></span>
+    <span class="tag bot-{{ bot_state.code }}">{{ bot_state.label }}</span>
+    {% if client.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[client.status] }}</span>{% endif %}
+    <a href="/clients/{{ client.id }}">карточка</a>
+  </div>
+  {% if not client.tg_id %}
+    <p class="muted">Telegram не привязан: уведомления о сроке и оплате клиенту не уйдут.
+      {% if bot_username %}Пригласите в бот — <a href="https://t.me/{{ bot_username }}?start=issue">t.me/{{ bot_username }}</a>: после /start клиент делится контактом, и кабинет привязывается по этому номеру.{% else %}Клиент отправляет боту /cabinet и делится контактом.{% endif %}</p>
+  {% endif %}
+  {% if active %}
+    <p class="flash err">У клиента уже идёт аренда — <a href="/rentals/{{ active.id }}">№ {{ active.id }}</a>. Сначала закройте её, потом выдавайте новый велосипед.</p>
+  {% elif client.status != 'active' %}
+    <p class="flash err">Клиент заблокирован или в чёрном списке — выдача невозможна. Снять блокировку можно в <a href="/clients/{{ client.id }}/edit">карточке</a>.</p>
+  {% elif bot_state.code == 'renting' %}
+    <p class="flash err">По документам бота велосипед ещё на руках. Если это повторная выдача, сначала закройте прошлую в боте (форма возврата), иначе акт приёма не сойдётся с парком.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ─── шаг 2: тариф и модель ─── #}
+{% if step == 2 and client and not active and client.status == 'active' %}
+<form method="get" action="/issue">
+  <input type="hidden" name="client" value="{{ client.id }}">
+  {% if bike %}<input type="hidden" name="bike" value="{{ bike.id }}">{% endif %}
+  <div class="card">
+    <h2>Тариф</h2>
+    {% if tariffs %}
+    <div class="choices">
+      {% for t in tariffs %}
+      <label class="choice {% if tariff and tariff.id == t.id %}on{% endif %}">
+        <input type="radio" name="tariff" value="{{ t.id }}" {% if (tariff and tariff.id == t.id) or (not tariff and loop.last) %}checked{% endif %} required>
+        <b>{{ t.name }}</b>
+        <span class="price">{{ money(t.price) }} / {{ t.period_days }} дн.</span>
+        <small>{{ money(t.per_day) }} в день{% if t.hits_target %} · цель {{ money(CHECK_TARGET) }} ✓{% else %} · ниже цели {{ money(CHECK_TARGET) }}{% endif %}{% if t.saving %} · выгода клиенту {{ money(t.saving) }}{% endif %}</small>
+      </label>
+      {% endfor %}
+    </div>
+    {% else %}<p class="flash err">Нет активных тарифов — <a href="/tariffs">добавьте хотя бы один</a>.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Модель <small class="muted">(свободные сейчас)</small></h2>
+    {% if bike %}
+      <p>Выбран велосипед <b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}. <a href="/issue?client={{ client.id }}">Выбрать другой</a></p>
+    {% elif models %}
+    <div class="choices">
+      {% for m in models %}
+      <label class="choice {% if model == m.model %}on{% endif %}">
+        <input type="radio" name="model" value="{{ m.model }}" {% if model == m.model or (not model and loop.first) %}checked{% endif %} required>
+        <b>{{ m.model }}</b>
+        <small>свободно {{ m.free }}{% for place, n in m.by_location.items() %} · {{ place }}: {{ n }}{% endfor %}</small>
+      </label>
+      {% endfor %}
+    </div>
+    {% else %}<p class="flash err">Свободных велосипедов нет — <a href="/bikes?status=repair">посмотрите ремонт</a> или <a href="/bikes/new">заведите новый</a>.</p>{% endif %}
+  </div>
+  <div class="issue-bar">
+    <span class="spacer"></span>
+    <button type="submit" {% if not tariffs or not (models or bike) %}disabled{% endif %}>Далее →</button>
+  </div>
+</form>
+{% endif %}
+
+{# ─── шаг 3: конкретный велосипед ─── #}
+{% if step == 3 %}
+<div class="card">
+  <h2>{{ model }} — какой именно</h2>
+  <form method="get" action="/issue" class="issue-bar">
+    <input type="hidden" name="client" value="{{ client.id }}">
+    <input type="hidden" name="tariff" value="{{ tariff.id }}">
+    <input type="hidden" name="model" value="{{ model }}">
+    <label style="margin:0;flex:1 1 200px">Поиск по номеру <input name="q" value="{{ q or '' }}" placeholder="B-03"></label>
+    <button type="submit" class="ghost">Найти</button>
+  </form>
+  <form method="get" action="/issue">
+    <input type="hidden" name="client" value="{{ client.id }}">
+    <input type="hidden" name="tariff" value="{{ tariff.id }}">
+    {% if bikes %}
+    <p class="muted">Первым стоит тот, что простаивает дольше всех: выдавайте его — это и есть снижение простоя.</p>
+    <div class="choices">
+      {% for b in bikes %}
+      <label class="choice">
+        <input type="radio" name="bike" value="{{ b.id }}" {% if loop.first %}checked{% endif %} required>
+        <b>№ {{ b.code }}</b>
+        <small>{{ b.location or 'не на точке' }}{% if b.idle_days is not none %} · простаивает {{ b.idle_days }} дн.{% endif %}{% if b.frame_no %} · рама {{ b.frame_no }}{% endif %}</small>
+        {% if b.note %}<small>{{ b.note }}</small>{% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="issue-bar">
+      <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}">← Назад</a>
+      <span class="spacer"></span>
+      <button type="submit">Далее →</button>
+    </div>
+    {% else %}
+    <p class="flash err">{% if q %}Ничего не найдено по «{{ q }}».{% else %}Свободных велосипедов этой модели нет.{% endif %} <a href="/issue?client={{ client.id }}&tariff={{ tariff.id }}">Выбрать другую модель</a></p>
+    {% endif %}
+  </form>
+</div>
+{% endif %}
+
+{# ─── шаг 4: сводка, оплата, аренда ─── #}
+{% if step == 4 %}
+<form method="post" action="/issue">
+  <input type="hidden" name="client_id" value="{{ client.id }}">
+  <input type="hidden" name="tariff_id" value="{{ tariff.id }}">
+  <input type="hidden" name="bike_id" value="{{ bike.id }}">
+  <div class="cols">
+  <section class="card">
+    <h2>Сводка</h2>
+    <dl>
+      <dt>Клиент</dt><dd>{{ client.full_name }} · {{ client.phone }}</dd>
+      <dt>Велосипед</dt><dd><b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}</dd>
+      <dt>Тариф</dt><dd>{{ tariff.name }} — {{ money(tariff.price) }} / {{ tariff.period_days }} дн. <span class="muted">({{ money(per_day) }} в день)</span></dd>
+      <dt>Начало</dt><dd><input name="started_on" type="date" value="{{ started_on|iso }}" style="max-width:200px"></dd>
+      <dt>Оплачено будет до</dt><dd>{{ ends_on|dmy }} <span class="muted">при оплате первого периода</span></dd>
+      <dt>Договор №</dt><dd><input name="contract_no" value="{{ contract_no }}" placeholder="из бота или бумажный" style="max-width:260px"></dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Оплата при выдаче</h2>
+    <p>Баланс сейчас <b class="{% if balance < 0 %}bad{% endif %}">{{ money(balance) }}</b>.
+      Первый период начислится сразу: <b>{{ money(tariff.price) }}</b>.
+      {% if balance < 0 %}Долг {{ money(-balance) }} остаётся на балансе и виден в карточке.{% endif %}</p>
+    <label>Принять сейчас, ₽ <input name="pay_amount" inputmode="decimal" value="{{ pay_default }}"></label>
+    <label>Способ <select name="pay_method">{% for code, label in METHODS.items() %}<option value="{{ code }}" {% if code == 'sbp' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <p class="muted">0 — выдать без оплаты: клиент получит уведомление с долгом и ссылкой на оплату из кабинета (если Telegram привязан).</p>
+  </section>
+  </div>
+  <div class="issue-bar">
+    <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}&model={{ bike.model|urlencode }}">← Назад</a>
+    <span class="spacer"></span>
+    <button type="submit">✓ Оформить выдачу</button>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

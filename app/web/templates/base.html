@@ -14,6 +14,7 @@
     <a class="brand" href="/" title="{{ app_title }}">{% include "_logo.html" %}<span class="brand-sub">CRM</span></a>
     <nav>
       <a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>
+      <a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
       <a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>
       <a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>
       <a href="/bikes" {% if request.url.path.startswith('/bikes') %}class="on"{% endif %}>Парк</a>

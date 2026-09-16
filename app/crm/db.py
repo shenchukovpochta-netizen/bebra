@@ -194,6 +194,17 @@ class CrmDB:
             "select * from crm.bike_status_log where bike_id = $1 "
             "order by changed_at desc, id desc limit $2", bike_id, limit))
 
+    async def bike_status_since(self) -> dict[int, datetime]:
+        """С какого момента каждый велосипед в текущем статусе - по журналу.
+
+        Одним запросом на весь парк: мастеру выдачи нужен простой каждого
+        свободного велосипеда, чтобы выдавать тот, что стоит дольше всех.
+        """
+        rows = await self.pool.fetch(
+            "select bike_id, max(changed_at) as since from crm.bike_status_log "
+            "group by bike_id")
+        return {int(r["bike_id"]): r["since"] for r in rows}
+
     async def bike_days_by_status(self, since: datetime, until: datetime) -> dict[str, Decimal]:
         """Велосипеде-дни по статусам за [since, until) по журналу статусов.
 
