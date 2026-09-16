@@ -1616,7 +1616,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return
         order = await crm.work_order(order_id)
         if order:
-            await notify.order_assigned(bot, crm, order, tech)
+            await notify.order_assigned(bot, order, tech)
 
     @app.get("/service")
     async def service_desk(request: Request) -> Response:
@@ -1786,7 +1786,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if order.get("payer") == "client" and order.get("client_id"):
             client = await crm.client(order["client_id"])
             if client:
-                await notify.repair_ready(bot, db, client, order, totals["total"])
+                await notify.repair_ready(bot, client, order, totals["total"])
         flash(request, f"Наряд закрыт: клиенту {logic.money(totals['total'])}, "
                        f"себестоимость {logic.money(totals['cost'])}.")
         return redirect(f"/orders/{order_id}")

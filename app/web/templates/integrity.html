@@ -2,7 +2,7 @@
 {% block title %}Расхождения — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Расхождения</h1>
-  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/integrity" class="on">Расхождения</a></nav>
+  {% with active = 'integrity' %}{% include '_report_tabs.html' %}{% endwith %}
 </div>
 
 {% if not issues %}

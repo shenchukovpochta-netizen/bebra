@@ -2,7 +2,7 @@
 {% block title %}Клиенты и каналы — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Клиенты и каналы</h1>
-  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/channels" class="on">Каналы</a></nav>
+  {% with active = 'channels' %}{% include '_report_tabs.html' %}{% endwith %}
   <a class="btn ghost" href="/reports/channels.csv">CSV</a>
 </div>
 <div class="card">

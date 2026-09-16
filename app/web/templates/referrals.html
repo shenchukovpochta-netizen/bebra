@@ -2,7 +2,7 @@
 {% block title %}Приглашения — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Приглашения</h1>
-  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/payback">Окупаемость</a><a href="/reports/referrals" class="on">Приглашения</a></nav>
+  {% with active = 'referrals' %}{% include '_report_tabs.html' %}{% endwith %}
   <form method="get" class="search">
     <input type="date" name="since" value="{{ since|iso }}">
     <input type="date" name="until" value="{{ until|iso }}">

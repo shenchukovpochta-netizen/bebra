@@ -481,11 +481,20 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cell["repair_cost"], D("1200.00"))
         self.assertGreater(cell["rented_days"], 0)
 
+        # предоплата за день до выдачи: аренды в тот день ещё не было
+        await self.crm.add_ledger(
+            client_id=self.client_id, rental_id=None, kind="payment", amount=D("500"),
+            method="cash", note=None, created_by="t",
+            created_at=now - timedelta(days=10))
+        money = await self.crm.model_money(now - timedelta(days=30), now + timedelta(days=1))
+        self.assertEqual(money["Kugoo V3"]["paid"], D("3500.00"),
+                         "предоплата тоже находит свою модель")
+
         rows = logic.payback_rows(await self.crm.bikes(limit=100), money, days=30)
         row = next(r for r in rows if r["model"] == "Kugoo V3")
-        self.assertEqual(row["paid"], D("3000.00"))
+        self.assertEqual(row["paid"], D("3500.00"))
         self.assertEqual(row["repair_cost"], D("1200.00"))
-        self.assertEqual(logic.payback_total(rows)["paid"], D("3000.00"))
+        self.assertEqual(logic.payback_total(rows)["paid"], D("3500.00"))
 
     async def test_referrals_on_postgres(self):
         """Приглашения на живой базе: один переход на человека, бонус

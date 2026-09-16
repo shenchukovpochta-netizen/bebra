@@ -1099,6 +1099,9 @@ class CrmDB:
         `rental_id` пуст (зачисление по заявке клиента из бота), поэтому
         для них берётся аренда клиента, шедшая в день платежа: иначе
         выручка модели просела бы ровно на самый частый способ оплаты.
+        Если в тот день аренды не было - предоплата за велосипед, который
+        ещё не выдали, или доплата после возврата, - берётся ближайшая
+        по времени аренда того же клиента.
         """
         money = _rows(await self.pool.fetch(
             """
@@ -1109,7 +1112,11 @@ class CrmDB:
                        where r.client_id = l.client_id
                          and r.started_on <= l.created_at::date
                          and (r.closed_on is null or r.closed_on >= l.created_at::date)
-                       order by r.id desc limit 1)) as rental_id
+                       order by r.id desc limit 1), (
+                       select r.id from crm.rentals r
+                       where r.client_id = l.client_id
+                       order by abs(r.started_on - l.created_at::date), r.id
+                       limit 1)) as rental_id
               from crm.ledger l
               where l.created_at >= $1 and l.created_at < $2
             )

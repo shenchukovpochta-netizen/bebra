@@ -108,10 +108,9 @@ async def referral_bonus(bot: Any, db: Any, agent: dict, friend: dict,
     return await _send(bot, agent["tg_id"], text, kb.cabinet_entry(lang))
 
 
-async def order_assigned(bot: Any, crm: Any, order: dict, tech: dict) -> bool:
+async def order_assigned(bot: Any, order: dict, tech: dict) -> bool:
     """Технику: на тебя назначен наряд. Язык русский: сотрудники местные,
     а языковые пакеты - для клиентов."""
-    del crm
     if not tech.get("tg_id") or bot is None:
         return False
     what = (f"Велосипед № {order.get('bike_code')} {order.get('bike_model') or ''}".strip()
@@ -123,14 +122,12 @@ async def order_assigned(bot: Any, crm: Any, order: dict, tech: dict) -> bool:
     return await _send(bot, tech["tg_id"], text)
 
 
-async def repair_ready(bot: Any, db: Any, client: dict, order: dict,
-                       total: Any) -> bool:
+async def repair_ready(bot: Any, client: dict, order: dict, total: Any) -> bool:
     """Клиенту: его техника из наряда готова и сколько это стоило.
 
     Только по клиентским нарядам: свой парк чинится молча, там ждать
     нечего и некому.
     """
-    del db
     if not client.get("tg_id") or bot is None:
         return False
     what = (f"Велосипед № {order.get('bike_code')}" if order.get("bike_id")

@@ -144,6 +144,19 @@ class TestPaybackInPanel(tw.WebCase):
         self.rent(pay=D(2500), with_rental=False)
         self.assertEqual(self.money()["Kugoo V3"]["paid"], D(2500))
 
+    def test_prepayment_before_the_rental_finds_the_model(self):
+        """Заплатил вперёд, велосипед выдали позже - деньги всё равно модели."""
+        rid = tw.run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="auto",
+            started_on=self.until, contract_no="АВ-1", created_by="staff:admin"))
+        del rid
+        tw.run(self.crm.add_ledger(
+            client_id=self.client_id, rental_id=None, kind="payment", amount=D(3000),
+            method="sbp", note=None, created_by="staff:admin",
+            created_at=datetime.combine(self.since, datetime.min.time(), tzinfo=UTC)))
+        self.assertEqual(self.money()["Kugoo V3"]["paid"], D(3000))
+
     def test_repairs_and_client_works_land_on_the_model(self):
         self.rent()
         tw.run(self.crm.create_repair(self.bike_id,

@@ -915,13 +915,19 @@ class FakeCrm:
             rental = self.rentals_.get(entry.get("rental_id"))
             if rental is None:
                 # Платёж без аренды (зачисление по заявке): берём аренду
-                # клиента, шедшую в день платежа - как и SQL.
+                # клиента, шедшую в день платежа, а если её не было -
+                # ближайшую по времени. Как и SQL.
                 day = entry["created_at"].date()
-                candidates = [r for r in self.rentals_.values()
-                              if r["client_id"] == entry["client_id"]
-                              and r["started_on"] <= day
-                              and (r.get("closed_on") is None or r["closed_on"] >= day)]
-                rental = candidates[-1] if candidates else None
+                own = [r for r in self.rentals_.values()
+                       if r["client_id"] == entry["client_id"]]
+                covering = [r for r in own
+                            if r["started_on"] <= day
+                            and (r.get("closed_on") is None or r["closed_on"] >= day)]
+                if covering:
+                    rental = covering[-1]
+                elif own:
+                    rental = min(own, key=lambda r: (abs((r["started_on"] - day).days),
+                                                     r["id"]))
             if rental is None:
                 continue
             model = model_of(rental.get("bike_id"))

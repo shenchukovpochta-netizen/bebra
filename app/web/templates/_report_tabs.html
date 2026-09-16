@@ -1,0 +1,15 @@
+{# Вкладки отчётов. Закрытые правами не показываем: оператор не должен
+   упираться в «нет доступа» там, где для него ничего нет. #}
+<nav class="tabs">
+  <a href="/reports" {% if active == 'reports' %}class="on"{% endif %}>Отчёты</a>
+  {% if can_view(staff, 'finance') %}
+  <a href="/reports/payback" {% if active == 'payback' %}class="on"{% endif %}>Окупаемость</a>
+  <a href="/reports/referrals" {% if active == 'referrals' %}class="on"{% endif %}>Приглашения</a>
+  {% endif %}
+  {% if can_view(staff, 'clients') %}
+  <a href="/reports/channels" {% if active == 'channels' %}class="on"{% endif %}>Каналы</a>
+  {% endif %}
+  {% if can_view(staff, 'bikes') %}
+  <a href="/reports/integrity" {% if active == 'integrity' %}class="on"{% endif %}>Расхождения</a>
+  {% endif %}
+</nav>

@@ -84,7 +84,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/payback.html',
                   'app/web/templates/referrals.html',
                   'app/web/templates/channels.html',
-                  'app/web/templates/integrity.html')
+                  'app/web/templates/integrity.html',
+                  'app/web/templates/_report_tabs.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
