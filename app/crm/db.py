@@ -1270,3 +1270,39 @@ class CrmDB:
             await conn.execute("update crm.referrals set ledger_id = $2 where id = $1",
                                ref_id, ledger_id)
             return ledger_id
+
+    # ─────────────────── сотрудник и его Telegram ───────────────────
+
+    async def staff_by_tg(self, tg_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._STAFF_SELECT} where s.tg_id = $1", tg_id))
+
+    async def staff_by_link_code(self, code: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._STAFF_SELECT} where s.link_code = $1", code))
+
+    async def set_staff_link_code(self, staff_id: int, code: str | None) -> bool:
+        try:
+            await self.pool.execute(
+                "update crm.staff set link_code = $2 where id = $1", staff_id, code)
+        except asyncpg.UniqueViolationError:
+            return False
+        return True
+
+    async def link_staff_tg(self, staff_id: int, tg_id: int,
+                            username: str | None) -> bool:
+        """Привязать Telegram сотруднику и погасить код. False - этот
+        Telegram уже закреплён за другим сотрудником."""
+        try:
+            await self.pool.execute(
+                "update crm.staff set tg_id = $2, tg_username = $3, "
+                "link_code = null, linked_at = now() where id = $1",
+                staff_id, tg_id, username)
+        except asyncpg.UniqueViolationError:
+            return False
+        return True
+
+    async def unlink_staff_tg(self, staff_id: int) -> None:
+        await self.pool.execute(
+            "update crm.staff set tg_id = null, tg_username = null, "
+            "link_code = null, linked_at = null where id = $1", staff_id)

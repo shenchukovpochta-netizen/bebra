@@ -57,7 +57,12 @@ async def client_from_bot(crm: Any, user: dict) -> dict | None:
         client = await crm.client(client_id)
         # Друг по приглашению: переход уже записан на /start, теперь у него
         # есть карточка - связываем, иначе бонус платить будет некому.
-        await service.ref_signed(crm, client or {})
+        # Кабинет зовёт эту функцию напрямую, без своей обёртки: сбой
+        # программы приглашений не должен закрывать человеку кабинет.
+        try:
+            await service.ref_signed(crm, client or {})
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: приглашение клиента %s не связано", client_id)
         return await crm.client(client_id)
 
     # Номер договора и ФИО у бота свежее: договор подписан только что.
@@ -153,6 +158,10 @@ async def on_rental_started(crm: Any, user: dict, *, today: date) -> None:
             note=f"Аренда по договору № {user.get('contract_no') or '—'}: "
                  f"{logic.period_label(spec['started_on'], period_to)}",
             created_by="bot")
+        # Шаг воронки приглашений: аренду из бота оформляет не open_rental,
+        # и без этого друг перепрыгивал бы «взял велосипед» - а это
+        # основной путь выдачи, через договор и акт в боте.
+        await service.ref_rented(crm, client)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не заведена", user.get("contract_no"))
 

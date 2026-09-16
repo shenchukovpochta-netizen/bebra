@@ -54,7 +54,8 @@ $i18n = @('app/i18n/__init__.py', 'app/i18n/en.py', 'app/i18n/uz.py',
 $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
               'app/handlers/contract.py', 'app/handlers/faq.py',
-              'app/handlers/cabinet.py', 'app/handlers/fleet.py')
+              'app/handlers/cabinet.py', 'app/handlers/fleet.py',
+              'app/handlers/staff.py')
 # CRM: логика, база, биллинг, синхронизация с ботом; веб-панель со шаблонами.
 $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/billing.py', 'app/crm/service.py', 'app/crm/notify.py',
@@ -117,7 +118,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_issue.py', 'tests/test_dashboard.py', 'tests/test_mileage.py',
           'tests/test_access.py', 'tests/test_mrz.py', 'tests/test_service.py',
           'tests/test_stock_take.py', 'tests/test_payback.py',
-          'tests/test_referrals.py')
+          'tests/test_referrals.py', 'tests/test_staff_link.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

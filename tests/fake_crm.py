@@ -107,8 +107,36 @@ class FakeCrm:
         sid = self._id()
         self.staff[sid] = {"id": sid, "login": login, "password_hash": password_hash,
                            "name": name, "role": role, "active": True,
-                           "profile_id": profile_id, "created_at": self._now()}
+                           "profile_id": profile_id, "tg_id": None,
+                           "tg_username": None, "link_code": None, "linked_at": None,
+                           "created_at": self._now()}
         return sid
+
+    async def staff_by_tg(self, tg_id):
+        return next((self._staff_row(s) for s in self.staff.values()
+                     if s.get("tg_id") == tg_id), None)
+
+    async def staff_by_link_code(self, code):
+        return next((self._staff_row(s) for s in self.staff.values()
+                     if s.get("link_code") == code), None)
+
+    async def set_staff_link_code(self, staff_id, code):
+        if code and any(s.get("link_code") == code for s in self.staff.values()):
+            return False
+        self.staff[staff_id]["link_code"] = code
+        return True
+
+    async def link_staff_tg(self, staff_id, tg_id, username):
+        if any(s.get("tg_id") == tg_id and s["id"] != staff_id
+               for s in self.staff.values()):
+            return False
+        self.staff[staff_id].update(tg_id=tg_id, tg_username=username,
+                                    link_code=None, linked_at=self._now())
+        return True
+
+    async def unlink_staff_tg(self, staff_id):
+        self.staff[staff_id].update(tg_id=None, tg_username=None, link_code=None,
+                                    linked_at=None)
 
     async def set_staff_profile(self, staff_id, profile_id):
         self.staff[staff_id]["profile_id"] = profile_id

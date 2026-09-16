@@ -1379,3 +1379,29 @@ def ref_agents(rows: Iterable[dict]) -> list[dict]:
         cell["bonus"] = to_money(cell["bonus"])
     out.sort(key=lambda a: (a["paid"], a["signed"], a["click"]), reverse=True)
     return out
+
+
+# ─────────────────── сотрудник и его Telegram ───────────────────
+
+# Код привязки длиннее реферального: его вводят один раз и по нему
+# открывается доступ сотрудника, а не скидка.
+LINK_CODE_LEN = 8
+
+
+def make_link_code(rnd: Any = None) -> str:
+    rnd = rnd or random
+    return "".join(rnd.choice(REF_ALPHABET) for _ in range(LINK_CODE_LEN))
+
+
+def clean_link_code(raw: Any) -> str:
+    text = str(raw or "").strip().upper()
+    kept = "".join(ch for ch in text if ch in REF_ALPHABET)
+    return kept[:LINK_CODE_LEN] if len(kept) >= LINK_CODE_LEN else ""
+
+
+def staff_tg_label(staff: dict) -> str:
+    """Что показать в колонке Telegram: подключён, ждёт кода или ничего."""
+    if staff.get("tg_id"):
+        name = staff.get("tg_username")
+        return f"@{name}" if name else "Подключён"
+    return "Ждёт кода" if staff.get("link_code") else "—"

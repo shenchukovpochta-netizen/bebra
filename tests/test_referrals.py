@@ -267,6 +267,60 @@ class TestReferralsInBot(tc.CabinetCase):
                         "агент должен узнать о бонусе")
 
 
+@unittest.skipUnless(HAVE_AIOGRAM, "aiogram не установлен")
+class TestReferralFullCycle(tc.CabinetCase):
+    """Друг проходит весь цикл бота по приглашению: договор, оплата, акт.
+
+    Это основной путь выдачи в МАЙБАЙК - через бота, а не через панель.
+    Воронка обязана пройти все четыре шага именно на нём. Шаги цикла берём
+    у TestBotSync, но не наследуем его тесты - они уже прогоняются там.
+    """
+
+    ISSUE_FORM = tc.TestBotSync.ISSUE_FORM
+    register_up_to_sign = tc.TestBotSync.register_up_to_sign
+    confirm_pay = tc.TestBotSync.confirm_pay
+
+    async def test_invited_friend_walks_the_whole_funnel(self):
+        agent_id = await self.crm.create_client(full_name="Агент Агентов",
+                                                phone="+79991112233", tg_id=4242)
+        await self.crm.set_ref_code(agent_id, "AB3D9K")
+        await self.feed(tc.msg("/start AB3D9K"))
+        ref = await self.crm.referral_of_tg(tc.USER_ID)
+        self.assertEqual(ref["status"], "click")
+
+        await self.register_up_to_sign()
+        await self.feed(tc.cb("sign"))
+        friend = await self.crm.client_by_tg(tc.USER_ID)
+        self.assertEqual((await self.crm.referral_of_tg(tc.USER_ID))["status"],
+                         "signed", "договор подписан - связь закреплена")
+        self.assertEqual(friend["invited_by"], agent_id)
+
+        await self.confirm_pay()
+        await self.feed(tc.cb("act_sign"))
+        ref = await self.crm.referral_of_tg(tc.USER_ID)
+        self.assertEqual(ref["status"], "paid")
+        self.assertEqual(ref["bonus"], logic.REF_BONUS_DEFAULT)
+        rows = await self.crm.ledger_of(agent_id, limit=5)
+        self.assertEqual([r["kind"] for r in rows], ["adjust"])
+
+    async def test_funnel_marks_the_bike_step_before_payment(self):
+        """Аренду из бота оформляет не open_rental - шаг всё равно виден."""
+        agent_id = await self.crm.create_client(full_name="Агент Агентов",
+                                                phone="+79991112233", tg_id=4242)
+        await self.crm.set_ref_code(agent_id, "AB3D9K")
+        await self.crm.set_setting("ref_min_payment", "999999", by="test")
+        await self.feed(tc.msg("/start AB3D9K"))
+        await self.register_up_to_sign()
+        await self.feed(tc.cb("sign"))
+        await self.confirm_pay()
+        await self.feed(tc.cb("act_sign"))
+        ref = await self.crm.referral_of_tg(tc.USER_ID)
+        self.assertEqual(ref["status"], "rented",
+                         "велосипед выдан - шаг воронки отмечен")
+        self.assertEqual(await self.crm.ledger_of(agent_id, limit=5), [],
+                         "порог не пройден - бонуса нет")
+
+
 def cabinet_module():
     return importlib.import_module("app.handlers.cabinet")
 

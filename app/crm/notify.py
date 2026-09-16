@@ -106,3 +106,18 @@ async def referral_bonus(bot: Any, db: Any, agent: dict, friend: dict,
     text = i18n.t(lang, "CAB_REF_BONUS").format(
         name=bot_logic.esc(friend.get("full_name") or ""), amount=logic.money(amount))
     return await _send(bot, agent["tg_id"], text, kb.cabinet_entry(lang))
+
+
+async def order_assigned(bot: Any, crm: Any, order: dict, tech: dict) -> bool:
+    """Технику: на тебя назначен наряд. Язык русский: сотрудники местные,
+    а языковые пакеты - для клиентов."""
+    del crm
+    if not tech.get("tg_id") or bot is None:
+        return False
+    what = (f"Велосипед № {order.get('bike_code')} {order.get('bike_model') or ''}".strip()
+            if order.get("bike_id") else (order.get("object_note") or "Объект не указан"))
+    text = texts.STAFF_ORDER_ASSIGNED.format(
+        no=order.get("no") or "", object=bot_logic.esc(what),
+        complaint=bot_logic.esc(order.get("complaint") or "—"),
+        status=logic.ORDER_STATUSES.get(order.get("status"), order.get("status") or ""))
+    return await _send(bot, tech["tg_id"], text)

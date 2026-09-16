@@ -5,7 +5,7 @@
   <a class="btn ghost" href="/profiles">Профили доступа</a></div>
 <section class="card">
   <table>
-    <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Доступ</th><th>Новый пароль</th><th></th></tr>
+    <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Доступ</th><th>Telegram</th><th>Новый пароль</th><th></th></tr>
     {% for s in rows %}
     <tr class="{% if not s.active %}muted{% endif %}">
       <td>{{ s.login }}</td><td>{{ s.name }}</td>
@@ -20,12 +20,22 @@
         {% endif %}
       </td>
       <td>{{ 'да' if s.active else 'нет' }}</td>
+      <td>{{ staff_tg_label(s) }}
+        {% if can_manage %}
+        <form method="post" action="/staff/{{ s.id }}/telegram" class="inline-form">
+          {% if s.tg_id %}<input type="hidden" name="unlink" value="1">{% endif %}
+          <button type="submit" class="ghost">{{ 'Отвязать' if s.tg_id else 'Код' }}</button>
+        </form>
+        {% endif %}
+      </td>
       <td>{% if can_manage %}<form method="post" action="/staff/{{ s.id }}/password" class="inline-form"><input name="password" type="password" size="10" autocomplete="new-password"><button type="submit" class="ghost">Задать</button></form>{% endif %}</td>
       <td>{% if can_manage and s.id != staff.id %}<form method="post" action="/staff/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'Отключить' if s.active else 'Включить' }}</button></form>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
-  <p class="muted">Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале статусов и в записях по деньгам.</p>
+  <p class="muted">Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале статусов и в записях по деньгам.
+    Telegram нужен технику, чтобы наряды приходили ему в бот: нажмите «Код»
+    и передайте его сотруднику — он отправит боту «/staff КОД».</p>
 </section>
 {% if can_manage %}
 <section class="card narrow">

@@ -126,7 +126,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
-        REF_STATUSES=logic.REF_STATUSES,
+        REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         take_title=logic.take_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
@@ -1401,6 +1401,33 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"{target['login']}: профиль «{profile['name']}».")
         return redirect("/staff")
 
+    @app.post("/staff/{staff_id}/telegram")
+    async def staff_telegram(request: Request, staff_id: int) -> Response:
+        """Код привязки Telegram сотруднику - или отвязка.
+
+        Пароль от панели в переписку не отдают, а одноразовый код можно:
+        он гаснет при первом применении и открывает ровно одну связь.
+        """
+        if not may_edit(request, "staff"):
+            return denied(request, "staff")
+        person = await crm.staff_by_id(staff_id)
+        if person is None:
+            return render(request, "missing.html", status_code=404, what="Сотрудник")
+        if (await form(request)).get("unlink"):
+            await crm.unlink_staff_tg(staff_id)
+            flash(request, f"Telegram сотрудника {person['login']} отвязан.")
+            return redirect("/staff")
+        for _ in range(10):
+            code = logic.make_link_code()
+            if await crm.staff_by_link_code(code) is not None:
+                continue
+            if await crm.set_staff_link_code(staff_id, code):
+                flash(request, f"Код для {person['login']}: {code}. Пусть отправит "
+                               f"боту «/staff {code}» — код погаснет сразу после этого.")
+                return redirect("/staff")
+        flash(request, "Не удалось выдать код, попробуйте ещё раз.", "err")
+        return redirect("/staff")
+
     @app.post("/staff/{staff_id}/password")
     async def staff_password(request: Request, staff_id: int) -> Response:
         data = await form(request)
@@ -1519,6 +1546,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── сервис: наряды ───────────────────────
 
+    async def notify_tech(order_id: int, tech_id: int) -> None:
+        """Сказать технику о наряде в Telegram. Не привязан - промолчать:
+        наряд от этого не перестаёт существовать."""
+        tech = await crm.staff_by_id(tech_id)
+        if not tech or not tech.get("tg_id"):
+            return
+        order = await crm.work_order(order_id)
+        if order:
+            await notify.order_assigned(bot, crm, order, tech)
+
     @app.get("/service")
     async def service_desk(request: Request) -> Response:
         """Рабочий стол сервиса: что стоит в ремонте и кто этим занят.
@@ -1583,6 +1620,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect("/orders/new")
+        if tech_id:
+            await notify_tech(order_id, tech_id)
         flash(request, "Наряд открыт.")
         return redirect(f"/orders/{order_id}")
 
@@ -1656,6 +1695,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
         await crm.update_work_order(order_id, status=status.value, tech_id=tech_id,
                                     estimate=estimate.value, note=note.value)
+        # Только смена техника: иначе человек получал бы «на тебя наряд»
+        # при каждой правке сметы.
+        if tech_id and tech_id != order.get("tech_id"):
+            await notify_tech(order_id, tech_id)
         flash(request, "Наряд сохранён.")
         return redirect(f"/orders/{order_id}")
 

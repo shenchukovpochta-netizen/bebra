@@ -894,6 +894,24 @@ CAB_CLAIM_CREDITED = "Зачислено {amount}. Баланс клиента: 
 CAB_CLAIM_REJECTED_TOAST = "Заявка отклонена"
 CAB_DIGEST_INTRO = "💰 Сводка по оплатам на {today}"
 
+# ─ сотрудник и его Telegram ─
+STAFF_LINK_USAGE = (
+    "Привязка сотрудника: отправьте <code>/staff КОД</code>.\n"
+    "Код выдаёт панель на странице «Сотрудники»."
+)
+STAFF_LINK_BAD = "Код не подошёл. Попросите в панели новый: он одноразовый."
+STAFF_LINK_TAKEN = "Этот Telegram уже привязан к другому сотруднику."
+STAFF_LINK_NO_CRM = "CRM не подключена: привязка сотрудников недоступна."
+STAFF_LINKED = (
+    "✅ Готово, {name}. Наряды на ремонт будут приходить сюда."
+)
+STAFF_ORDER_ASSIGNED = (
+    "🔧 Наряд {no}\n"
+    "{object}\n"
+    "Жалоба: {complaint}\n"
+    "Этап: {status}"
+)
+
 # ─ парк из служебного чата ─
 FLEET_USAGE = (
     "Карточка велосипеда: <code>/bike B-03</code> (инвентарный номер, рама или мотор).\n"

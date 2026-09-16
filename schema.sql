@@ -828,3 +828,19 @@ create table if not exists crm.settings (
   updated_at timestamptz not null default now(),
   updated_by text
 );
+
+-- ─────────────────── сотрудник и его Telegram ───────────────────
+--
+-- Техник получает свои наряды в Telegram, а не ходит за ними в панель.
+-- Привязка самостоятельная: панель показывает одноразовый код, сотрудник
+-- отправляет боту «/staff <код>». Код живёт до первого применения -
+-- переслать его в общий чат безопаснее, чем пароль.
+
+alter table crm.staff add column if not exists tg_id bigint;
+alter table crm.staff add column if not exists tg_username text;
+alter table crm.staff add column if not exists link_code text;
+alter table crm.staff add column if not exists linked_at timestamptz;
+create unique index if not exists staff_tg_idx on crm.staff (tg_id)
+  where tg_id is not null;
+create unique index if not exists staff_link_code_idx on crm.staff (link_code)
+  where link_code is not null;

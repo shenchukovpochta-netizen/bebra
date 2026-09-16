@@ -34,6 +34,16 @@ def _is_faq(inner: Any) -> bool:
     return False
 
 
+def _is_staff_link(inner: Any) -> bool:
+    """«/staff <код>» - привязка сотрудника к боту.
+
+    Идёт мимо гейта подписки и анкеты: техник не клиент, канал он читать
+    не обязан, а ответ на анкетный вопрос из его кода получиться не должен.
+    """
+    return (isinstance(inner, Message)
+            and str(inner.text or "").strip().lower().startswith("/staff"))
+
+
 def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
     """(user_id, chat_id, kind, безопасный слепок для журнала).
 
@@ -169,7 +179,7 @@ class PipelineMiddleware(BaseMiddleware):
         # вопросов идёт МИМО гейта: это справка (адреса, тарифы, график),
         # и ночной лид должен получить её до подписки на канал -
         # регистрация при этом остаётся за гейтом, как и была.
-        if not _is_faq(inner) and \
+        if not _is_faq(inner) and not _is_staff_link(inner) and \
                 not await check_subscription(data["bot"], self.cfg.channel_id, user_id):
             lang = i18n.user_lang(user)
             await self._reply(

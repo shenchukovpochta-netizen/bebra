@@ -26,6 +26,7 @@ try:
     from app.crm import logic as crm_logic
     from app.handlers import cabinet, contract, menu, moderation, registration
     from app.handlers import faq as faq_handlers
+    from app.handlers import staff as staff_h
     from app.middlewares import PipelineMiddleware
     from app.services import files
     from app.services.crypto import Vault
@@ -51,7 +52,8 @@ OTHER_ID = 7007
 
 
 def build(cfg=None):
-    for module in (cabinet, contract, registration, moderation, faq_handlers, menu):
+    for module in (cabinet, staff_h, contract, registration, moderation,
+                   faq_handlers, menu):
         importlib.reload(module)
     cfg = cfg or make_config()
     db, crm, session = FakeDB(), FakeCrm(), FakeSession()
@@ -60,6 +62,7 @@ def build(cfg=None):
     dp = Dispatcher()
     dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault, crm))
     dp.include_router(cabinet.router)
+    dp.include_router(staff_h.router)
     dp.include_router(moderation.router)
     dp.include_router(contract.router)
     dp.include_router(registration.router)

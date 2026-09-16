@@ -24,6 +24,7 @@ from .config import Config
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, registration
+from .handlers import staff as staff_h
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
@@ -77,6 +78,7 @@ async def run() -> None:
     # а ответ оператора суммой на карточку заявки - не доехать до общего
     # обработчика реплаев модерации.
     dp.include_router(cabinet.router)
+    dp.include_router(staff_h.router)
     # Парк из служебного чата - до модерации: ответ на карточку велосипеда
     # иначе перехватил бы разбор ответов на карточки заявок.
     dp.include_router(fleet.router)
