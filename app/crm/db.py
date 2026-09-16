@@ -1087,3 +1087,77 @@ class CrmDB:
                 int(counts.get("found") or 0), int(counts.get("missing") or 0),
                 int(counts.get("extra") or 0))
             return [int(r["bike_id"]) for r in rows if r["bike_id"] is not None]
+
+    # ─────────────────────── окупаемость по моделям ───────────────────────
+
+    async def model_money(self, since: datetime, until: datetime) -> dict[str, dict]:
+        """Деньги, ремонт и дни аренды за период - в разрезе модели.
+
+        Платёж привязывается к модели через аренду. У части платежей
+        `rental_id` пуст (зачисление по заявке клиента из бота), поэтому
+        для них берётся аренда клиента, шедшая в день платежа: иначе
+        выручка модели просела бы ровно на самый частый способ оплаты.
+        """
+        money = _rows(await self.pool.fetch(
+            """
+            with attr as (
+              select l.kind, l.amount,
+                     coalesce(l.rental_id, (
+                       select r.id from crm.rentals r
+                       where r.client_id = l.client_id
+                         and r.started_on <= l.created_at::date
+                         and (r.closed_on is null or r.closed_on >= l.created_at::date)
+                       order by r.id desc limit 1)) as rental_id
+              from crm.ledger l
+              where l.created_at >= $1 and l.created_at < $2
+            )
+            select b.model,
+                   coalesce(sum(a.amount) filter (where a.kind = 'payment'), 0) as paid,
+                   coalesce(-sum(a.amount) filter (where a.kind in ('charge', 'fine')), 0)
+                     as charged
+            from attr a
+            join crm.rentals r on r.id = a.rental_id
+            join crm.bikes b on b.id = r.bike_id
+            group by b.model
+            """, since, until))
+        repairs = _rows(await self.pool.fetch(
+            """
+            select b.model, coalesce(sum(l.cost), 0) as repair_cost
+            from crm.bike_log l join crm.bikes b on b.id = l.bike_id
+            where l.kind = 'repair' and l.created_at >= $1 and l.created_at < $2
+            group by b.model
+            """, since, until))
+        works = _rows(await self.pool.fetch(
+            """
+            select b.model, coalesce(sum(o.total), 0) as works
+            from crm.work_orders o join crm.bikes b on b.id = o.bike_id
+            where o.payer = 'client' and o.status = 'done'
+              and o.closed_at >= $1 and o.closed_at < $2
+            group by b.model
+            """, since, until))
+        rented = _rows(await self.pool.fetch(
+            """
+            with s as (
+              select l.bike_id, l.to_status, l.changed_at,
+                     lead(l.changed_at) over (partition by l.bike_id
+                                              order by l.changed_at, l.id) as next_at
+              from crm.bike_status_log l
+            )
+            select b.model,
+                   sum(extract(epoch from (least(coalesce(s.next_at, now()), $2::timestamptz)
+                                           - greatest(s.changed_at, $1::timestamptz)))) / 86400
+                     as rented_days
+            from s join crm.bikes b on b.id = s.bike_id
+            where s.to_status = 'rented'
+              and s.changed_at < $2::timestamptz
+              and coalesce(s.next_at, now()) > $1::timestamptz
+            group by b.model
+            """, since, until))
+        out: dict[str, dict] = {}
+        for rows, keys in ((money, ("paid", "charged")), (repairs, ("repair_cost",)),
+                           (works, ("works",)), (rented, ("rented_days",))):
+            for row in rows:
+                cell = out.setdefault(row["model"], {})
+                for key in keys:
+                    cell[key] = row[key]
+        return out

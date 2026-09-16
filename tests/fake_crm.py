@@ -856,6 +856,72 @@ class FakeCrm:
             "extra": int(counts.get("extra") or 0)})
         return missing
 
+    # ─────────────────────── окупаемость по моделям ───────────────────────
+
+    async def model_money(self, since, until):
+        out: dict[str, dict] = {}
+
+        def cell(model):
+            return out.setdefault(model, {"paid": Decimal(0), "charged": Decimal(0),
+                                          "repair_cost": Decimal(0),
+                                          "works": Decimal(0),
+                                          "rented_days": Decimal(0)})
+
+        def model_of(bike_id):
+            bike = self.bikes_.get(bike_id)
+            return bike["model"] if bike else None
+
+        for entry in self.ledger_:
+            if not since <= entry["created_at"] < until:
+                continue
+            rental = self.rentals_.get(entry.get("rental_id"))
+            if rental is None:
+                # Платёж без аренды (зачисление по заявке): берём аренду
+                # клиента, шедшую в день платежа - как и SQL.
+                day = entry["created_at"].date()
+                candidates = [r for r in self.rentals_.values()
+                              if r["client_id"] == entry["client_id"]
+                              and r["started_on"] <= day
+                              and (r.get("closed_on") is None or r["closed_on"] >= day)]
+                rental = candidates[-1] if candidates else None
+            if rental is None:
+                continue
+            model = model_of(rental.get("bike_id"))
+            if model is None:
+                continue
+            if entry["kind"] == "payment":
+                cell(model)["paid"] += entry["amount"]
+            elif entry["kind"] in ("charge", "fine"):
+                cell(model)["charged"] -= entry["amount"]
+        for row in self.bike_log_:
+            if row["kind"] != "repair" or not since <= row["created_at"] < until:
+                continue
+            model = model_of(row["bike_id"])
+            if model:
+                cell(model)["repair_cost"] += Decimal(str(row.get("cost") or 0))
+        for order in self.orders_.values():
+            if (order["payer"] != "client" or order["status"] != "done"
+                    or not order.get("closed_at")
+                    or not since <= order["closed_at"] < until):
+                continue
+            model = model_of(order.get("bike_id"))
+            if model:
+                cell(model)["works"] += order["total"]
+        for bike_id, rows in self._log_by_bike().items():
+            model = model_of(bike_id)
+            if not model:
+                continue
+            own = crm_logic.days_by_status(rows, since, min(until, self._now()))
+            if own.get("rented"):
+                cell(model)["rented_days"] += own["rented"]
+        return out
+
+    def _log_by_bike(self):
+        out: dict[int, list[dict]] = {}
+        for row in self.status_log_:
+            out.setdefault(row["bike_id"], []).append(row)
+        return out
+
 
 class UniqueError(Exception):
     """Аналог asyncpg.UniqueViolationError: имя класса содержит «unique»."""

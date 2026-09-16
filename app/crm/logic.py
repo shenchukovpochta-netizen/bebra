@@ -1186,3 +1186,77 @@ def take_title(take: dict) -> str:
     if str(take.get("scope") or "") == "location":
         return f"Точка {take.get('location') or '—'}"
     return TAKE_SCOPES["all"]
+
+
+# ─────────────────────── окупаемость по моделям ───────────────────────
+
+# Дней в месяце для пересчёта амортизации на произвольный период.
+# Месяц берётся средним: отчёт за две недели не должен зависеть от того,
+# февраль это или июль.
+DAYS_IN_MONTH = Decimal("30.44")
+
+
+def payback_rows(bikes: Iterable[dict], money: dict[str, dict], *,
+                 days: Decimal | int) -> list[dict]:
+    """Окупаемость по моделям: что модель принесла и что съела за период.
+
+    Маржа считается со всем, что модель стоила: ремонт своего парка и
+    амортизация. Без амортизации модель с дешёвым прокатом и дорогой рамой
+    выглядит прибыльной ровно до того дня, когда парк надо обновлять.
+    Ремонт, оплаченный клиентом, идёт в плюс: это наш велосипед, починенный
+    за его счёт.
+    """
+    days = Decimal(str(days or 0))
+    fleet: dict[str, dict] = {}
+    for bike in bikes:
+        model = str(bike.get("model") or "—")
+        cell = fleet.setdefault(model, {"bikes": 0, "amortization": Decimal(0),
+                                        "priced": 0})
+        cell["bikes"] += 1
+        # Из парка выбывшие амортизацию не копят: списанный велосипед уже
+        # списан, проданный больше не наш.
+        if bike.get("status") not in OPERATIONAL_STATUSES:
+            continue
+        month = amortization_month(bike)
+        if month is not None:
+            cell["priced"] += 1
+            cell["amortization"] += month * days / DAYS_IN_MONTH
+    rows = []
+    for model in sorted(set(fleet) | set(money)):
+        cell = fleet.get(model, {"bikes": 0, "amortization": Decimal(0), "priced": 0})
+        cash = money.get(model, {})
+        paid = to_money(cash.get("paid") or 0)
+        works = to_money(cash.get("works") or 0)
+        repair = to_money(cash.get("repair_cost") or 0)
+        amortization = to_money(cell["amortization"])
+        earned = paid + works
+        margin = earned - repair - amortization
+        rented_days = Decimal(str(cash.get("rented_days") or 0))
+        rows.append({
+            "model": model, "bikes": cell["bikes"], "priced": cell["priced"],
+            "paid": paid, "charged": to_money(cash.get("charged") or 0),
+            "repair_cost": repair, "works": works, "amortization": amortization,
+            "margin": to_money(margin),
+            "margin_percent": (float(round(100 * margin / earned, 1)) if earned else None),
+            "rented_days": rented_days,
+            "check_per_day": (to_money(paid / rented_days) if rented_days > 0 else None),
+        })
+    rows.sort(key=lambda r: r["margin"], reverse=True)
+    return rows
+
+
+def payback_total(rows: Iterable[dict]) -> dict[str, Any]:
+    """Строка «Итого»: та же арифметика, что и по строкам."""
+    rows = list(rows)
+    total = {key: to_money(sum((r[key] for r in rows), Decimal(0)))
+             for key in ("paid", "charged", "repair_cost", "works", "amortization",
+                         "margin")}
+    total["bikes"] = sum(r["bikes"] for r in rows)
+    total["priced"] = sum(r["priced"] for r in rows)
+    total["rented_days"] = sum((r["rented_days"] for r in rows), Decimal(0))
+    earned = total["paid"] + total["works"]
+    total["margin_percent"] = (float(round(100 * total["margin"] / earned, 1))
+                               if earned else None)
+    total["check_per_day"] = (to_money(total["paid"] / total["rented_days"])
+                              if total["rented_days"] > 0 else None)
+    return total

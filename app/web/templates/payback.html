@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Окупаемость по моделям — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Окупаемость по моделям</h1>
+  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/payback" class="on">Окупаемость</a></nav>
+  <form method="get" class="search">
+    <input type="date" name="since" value="{{ since|iso }}">
+    <input type="date" name="until" value="{{ until|iso }}">
+    <button type="submit">Показать</button>
+  </form>
+  <a class="btn ghost" href="/reports/payback.csv?since={{ since|iso }}&until={{ until|iso }}">CSV</a>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>Модель</th><th>Великов</th><th class="opt">Дней в аренде</th><th>Чек/день</th>
+      <th>Оплачено</th><th class="opt">Начислено</th><th>Ремонт</th>
+      <th class="opt">Работы клиентам</th><th>Амортизация</th><th>Маржа</th><th>Маржа %</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.model }}</td>
+    <td class="num">{{ r.bikes }}{% if r.priced < r.bikes %} <small class="muted" title="у остальных не задана цена покупки">цена у {{ r.priced }}</small>{% endif %}</td>
+    <td class="num opt">{{ r.rented_days|round(1) }}</td>
+    <td class="num {% if r.check_per_day is none %}muted{% elif r.check_per_day >= CHECK_TARGET %}ok{% else %}bad{% endif %}">{% if r.check_per_day is none %}—{% else %}{{ money(r.check_per_day) }}{% endif %}</td>
+    <td class="num ok">{{ money(r.paid) }}</td>
+    <td class="num opt">{{ money(r.charged) }}</td>
+    <td class="num">{{ money(r.repair_cost) }}</td>
+    <td class="num opt">{{ money(r.works) }}</td>
+    <td class="num">{{ money(r.amortization) }}</td>
+    <td class="num {% if r.margin > 0 %}ok{% else %}bad{% endif %}">{{ money(r.margin) }}</td>
+    <td class="num {% if r.margin_percent is none %}muted{% elif r.margin_percent > 0 %}ok{% else %}bad{% endif %}">{% if r.margin_percent is none %}—{% else %}{{ r.margin_percent }} %{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="11" class="muted">За период нет ни денег, ни парка.</td></tr>{% endfor %}
+  {% if rows %}
+  <tr class="total">
+    <td><b>ИТОГО</b></td>
+    <td class="num">{{ total.bikes }}</td>
+    <td class="num opt">{{ total.rented_days|round(1) }}</td>
+    <td class="num">{% if total.check_per_day is none %}—{% else %}{{ money(total.check_per_day) }}{% endif %}</td>
+    <td class="num">{{ money(total.paid) }}</td>
+    <td class="num opt">{{ money(total.charged) }}</td>
+    <td class="num">{{ money(total.repair_cost) }}</td>
+    <td class="num opt">{{ money(total.works) }}</td>
+    <td class="num">{{ money(total.amortization) }}</td>
+    <td class="num {% if total.margin > 0 %}ok{% else %}bad{% endif %}">{{ money(total.margin) }}</td>
+    <td class="num">{% if total.margin_percent is none %}—{% else %}{{ total.margin_percent }} %{% endif %}</td>
+  </tr>
+  {% endif %}
+</table>
+<p class="muted">
+  <b>Маржа = оплачено + работы клиентам − ремонт − амортизация.</b>
+  Амортизация пересчитана с месячной на дни периода; она берётся только с
+  операционного парка — проданный и списанный велосипед её больше не копит.
+  Без амортизации модель с дешёвым прокатом и дорогой рамой выглядит
+  прибыльной ровно до того дня, когда парк надо обновлять.
+  «Оплачено» — деньги, пришедшие за период, «Начислено» — выставленное за
+  него же: разница между ними и есть долг клиентов.
+  Платёж относится к модели через аренду; если аренда в платеже не указана
+  (зачисление по заявке из бота), берётся аренда клиента на день платежа.
+  Чек/день — оплачено на один день аренды этой модели, цель {{ money(CHECK_TARGET) }}.
+  Ремонт чужой техники в отчёт не входит: у неё нет модели из нашего парка.
+</p>
+</div>
+{% endblock %}

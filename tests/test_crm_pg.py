@@ -453,6 +453,40 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             self.crm, scope="location", location="Павлюхина", note=None, by="staff:t")
         self.assertEqual((await self.crm.stock_take(second))["no"], "ПРТ-000002")
 
+    async def test_model_money_on_postgres(self):
+        """Окупаемость на живой базе: платёж без аренды всё равно находит
+        свою модель, а дни аренды берутся из журнала статусов."""
+        await self.seed()
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() - timedelta(days=3), contract_no="АВ-1", by="t")
+        # платёж с арендой и платёж без неё - как зачисление по заявке из бота
+        await self.crm.add_ledger(client_id=self.client_id, rental_id=rid,
+                                  kind="payment", amount=D("2000"), method="sbp",
+                                  note=None, created_by="t")
+        await self.crm.add_ledger(client_id=self.client_id, rental_id=None,
+                                  kind="payment", amount=D("1000"), method="sbp",
+                                  note=None, created_by="t")
+        await self.crm.create_repair(
+            self.bike_id, items=[{"node": "brake_pads", "parts_cost": D("800"),
+                                  "labor_cost": D("400"), "note": None}],
+            note=None, created_by="t")
+        now = datetime.now(UTC)
+        money = await self.crm.model_money(now - timedelta(days=30), now + timedelta(days=1))
+        cell = money["Kugoo V3"]
+        self.assertEqual(cell["paid"], D("3000.00"), "платёж без аренды тоже наш")
+        self.assertEqual(cell["charged"], D("3000.00"))
+        self.assertEqual(cell["repair_cost"], D("1200.00"))
+        self.assertGreater(cell["rented_days"], 0)
+
+        rows = logic.payback_rows(await self.crm.bikes(limit=100), money, days=30)
+        row = next(r for r in rows if r["model"] == "Kugoo V3")
+        self.assertEqual(row["paid"], D("3000.00"))
+        self.assertEqual(row["repair_cost"], D("1200.00"))
+        self.assertEqual(logic.payback_total(rows)["paid"], D("3000.00"))
+
 
 if __name__ == "__main__":
     unittest.main()

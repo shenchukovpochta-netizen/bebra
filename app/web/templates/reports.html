@@ -3,7 +3,9 @@
 {# Отчёты по ремонту нужны механику, деньги парка - нет: денежные блоки
    и колонки открыты только с доступом к разделу «Финансы». #}
 {% set money_ok = can_view(staff, 'finance') %}
-<div class="bar"><h1>Отчёты</h1></div>
+<div class="bar"><h1>Отчёты</h1>
+  {% if money_ok %}<a class="btn ghost" href="/reports/payback">Окупаемость по моделям</a>{% endif %}
+</div>
 <div class="tiles">
   <div class="tile"><b>{{ utilization }}%</b><span>сейчас в аренде: {{ rented }} из {{ fleet }} операционных</span></div>
   <div class="tile"><b>{{ bikes.get('repair', 0) + bikes.get('maintenance', 0) }}</b><span>в ремонте и на ТО</span></div>

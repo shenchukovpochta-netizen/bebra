@@ -181,5 +181,6 @@ tr.warn-row td{background:#FFF7EC}
 /* Пересчёт считают с телефоном в руках: на узком экране от строки нужны
    номер, отметка и кнопка, остальное уводим. */
 @media (max-width:700px){
-  table.take th.opt,table.take td.opt{display:none}
+  th.opt,td.opt{display:none}
 }
+tr.total td{border-top:2px solid var(--line);font-weight:600}

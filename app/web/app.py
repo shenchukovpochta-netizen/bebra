@@ -1230,6 +1230,53 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       repairs=await crm.repair_stats(since_year, now),
                       debtors=await crm.debtors(50))
 
+    async def payback_data(request: Request) -> dict:
+        """Окупаемость по моделям за период. Период - как в финансах:
+        с начала месяца по сегодня, если не задан другой."""
+        since = logic.check_date(request.query_params.get("since"),
+                                 default=date.today().replace(day=1))
+        until = logic.check_date(request.query_params.get("until"),
+                                 default=date.today())
+        if not since.ok or not until.ok:
+            since = logic.Check(True, date.today().replace(day=1))
+            until = logic.Check(True, date.today())
+        tz = datetime.now().astimezone().tzinfo
+        start = datetime.combine(since.value, datetime.min.time(), tzinfo=tz)
+        # Верхняя граница включительно по дате: отчёт «по сегодня» обязан
+        # содержать сегодняшние платежи.
+        end = datetime.combine(until.value + timedelta(days=1),
+                               datetime.min.time(), tzinfo=tz)
+        money = await crm.model_money(start, end)
+        rows = logic.payback_rows(await crm.bikes(limit=10000), money,
+                                  days=(until.value - since.value).days + 1)
+        return {"rows": rows, "total": logic.payback_total(rows),
+                "since": since.value, "until": until.value}
+
+    @app.get("/reports/payback")
+    async def payback_report(request: Request) -> Response:
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        return render(request, "payback.html", **await payback_data(request))
+
+    @app.get("/reports/payback.csv")
+    async def payback_csv(request: Request) -> Response:
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        data = await payback_data(request)
+        rows = [[r["model"], r["bikes"], round(float(r["rented_days"]), 1),
+                 r["check_per_day"], r["paid"], r["charged"], r["repair_cost"],
+                 r["works"], r["amortization"], r["margin"], r["margin_percent"]]
+                for r in data["rows"]]
+        total = data["total"]
+        rows.append(["ИТОГО", total["bikes"], round(float(total["rented_days"]), 1),
+                     total["check_per_day"], total["paid"], total["charged"],
+                     total["repair_cost"], total["works"], total["amortization"],
+                     total["margin"], total["margin_percent"]])
+        name = f"payback-{data['since']:%Y%m%d}-{data['until']:%Y%m%d}.csv"
+        return _csv(name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
+                           "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
+                           "Амортизация", "Маржа", "Маржа %"], rows)
+
     # ─────────────────────── сотрудники ───────────────────────
 
     async def profile_choices() -> list[dict]:
