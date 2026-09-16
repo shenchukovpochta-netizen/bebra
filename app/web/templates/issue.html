@@ -132,7 +132,7 @@
       <label class="choice">
         <input type="radio" name="bike" value="{{ b.id }}" {% if loop.first %}checked{% endif %} required>
         <b>№ {{ b.code }}</b>
-        <small>{{ b.location or 'не на точке' }}{% if b.idle_days is not none %} · простаивает {{ b.idle_days }} дн.{% endif %}{% if b.frame_no %} · рама {{ b.frame_no }}{% endif %}</small>
+        <small>{{ b.location or 'не на точке' }}{% if b.idle_days is not none %} · простаивает {{ b.idle_days }} дн.{% endif %} · {{ b.mileage_km or 0 }} км{% if b.frame_no %} · рама {{ b.frame_no }}{% endif %}</small>
         {% if b.note %}<small>{{ b.note }}</small>{% endif %}
       </label>
       {% endfor %}
@@ -163,6 +163,7 @@
       <dt>Велосипед</dt><dd><b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}</dd>
       <dt>Тариф</dt><dd>{{ tariff.name }} — {{ money(tariff.price) }} / {{ tariff.period_days }} дн. <span class="muted">({{ money(per_day) }} в день)</span></dd>
       <dt>Начало</dt><dd><input name="started_on" type="date" value="{{ started_on|iso }}" style="max-width:200px"></dd>
+      <dt>Пробег при выдаче</dt><dd><input name="mileage" inputmode="numeric" value="{{ mileage }}" required style="max-width:200px"> <span class="muted">км с дисплея; по нему посчитается накат за аренду</span></dd>
       <dt>Оплачено будет до</dt><dd>{{ ends_on|dmy }} <span class="muted">при оплате первого периода</span></dd>
       <dt>Договор №</dt><dd><input name="contract_no" value="{{ contract_no }}" placeholder="из бота или бумажный" style="max-width:260px"></dd>
     </dl>

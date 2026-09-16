@@ -17,18 +17,19 @@
 </div>
 <div class="card">
 <table>
-  <tr><th>№</th><th>Модель</th><th>Рама</th><th>АКБ</th><th>Точка</th><th>Статус</th><th>У кого</th></tr>
+  <tr><th>№</th><th>Модель</th><th>Рама</th><th>АКБ</th><th>Пробег</th><th>Точка</th><th>Статус</th><th>У кого</th></tr>
   {% for b in rows %}
   <tr>
     <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
     <td>{{ b.model }}</td>
     <td class="muted">{{ b.frame_no or '' }}</td>
     <td>{{ b.battery_count }}</td>
+    <td class="num muted">{{ '{:,}'.format(b.mileage_km or 0).replace(',', '\u00a0') }} км</td>
     <td class="muted">{{ b.location or '' }}</td>
     <td><span class="tag {{ b.status }}">{{ BIKE_STATUSES.get(b.status, b.status) }}</span></td>
     <td>{% if b.client_id %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="7" class="muted">Пусто.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="8" class="muted">Пусто.</td></tr>{% endfor %}
 </table>
 </div>
 {% endblock %}

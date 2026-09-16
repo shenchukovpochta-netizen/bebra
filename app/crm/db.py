@@ -18,7 +18,7 @@ import asyncpg
 BIKE_FIELDS = frozenset({
     "code", "model", "frame_no", "motor_no", "battery_count", "status",
     "purchase_price", "purchased_on", "note", "location", "service_months",
-    "residual_price", "battery_price", "battery_service_months",
+    "residual_price", "battery_price", "battery_service_months", "mileage_km",
 })
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
@@ -29,6 +29,7 @@ RENTAL_FIELDS = frozenset({
     "tariff_id", "tariff_name", "period_days", "price", "billing",
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
     "intent", "intent_until", "intent_by", "intent_at", "snooze_until",
+    "mileage_start", "mileage_end",
 })
 
 
@@ -459,7 +460,8 @@ class CrmDB:
                             tariff_id: int | None, tariff_name: str,
                             period_days: int, price: Decimal, billing: str,
                             started_on: date, contract_no: str | None,
-                            created_by: str | None) -> int:
+                            created_by: str | None,
+                            mileage_start: int | None = None) -> int:
         """Аренда и статус велосипеда - одной транзакцией.
 
         Уникальные индексы на активную аренду клиента и велосипеда бросают
@@ -471,15 +473,19 @@ class CrmDB:
                 """
                 insert into crm.rentals
                   (client_id, bike_id, tariff_id, tariff_name, period_days, price,
-                   billing, started_on, billed_until, contract_no, created_by)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)
+                   billing, started_on, billed_until, contract_no, created_by,
+                   mileage_start)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11)
                 returning id
                 """, client_id, bike_id, tariff_id, tariff_name, period_days,
-                price, billing, started_on, contract_no, created_by))
+                price, billing, started_on, contract_no, created_by, mileage_start))
             if bike_id is not None:
+                # greatest: пробег велосипеда не уменьшается никогда, даже
+                # если аренду задним числом оформили с меньшим числом.
                 await conn.execute(
-                    "update crm.bikes set status = 'rented', updated_at = now() "
-                    "where id = $1", bike_id)
+                    "update crm.bikes set status = 'rented', "
+                    "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
+                    "updated_at = now() where id = $1", bike_id, mileage_start)
             return rental_id
 
     async def update_rental(self, rental_id: int, **fields: Any) -> None:
@@ -490,24 +496,32 @@ class CrmDB:
 
     async def close_rental(self, rental_id: int, *, closed_on: date,
                            note: str | None, bike_status: str = "available",
-                           closed_by: str | None = None) -> bool:
-        """Закрыть аренду и освободить велосипед. False - уже закрыта."""
+                           closed_by: str | None = None,
+                           mileage_end: int | None = None) -> bool:
+        """Закрыть аренду и освободить велосипед. False - уже закрыта.
+
+        Пробег возврата пишется в ту же транзакцию, что и статус велосипеда:
+        иначе одометр парка и «накатал» у аренды разъезжались бы при сбое
+        между двумя запросами.
+        """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", closed_by or "")
             row = await conn.fetchrow(
                 """
                 update crm.rentals
                    set status = 'closed', closed_on = $2, close_note = $3,
-                       updated_at = now()
+                       mileage_end = coalesce($4, mileage_end), updated_at = now()
                  where id = $1 and status = 'active'
                 returning bike_id
-                """, rental_id, closed_on, note)
+                """, rental_id, closed_on, note, mileage_end)
             if row is None:
                 return False
             if row["bike_id"] is not None:
                 await conn.execute(
-                    "update crm.bikes set status = $2, updated_at = now() "
-                    "where id = $1 and status = 'rented'", row["bike_id"], bike_status)
+                    "update crm.bikes set status = $2, "
+                    "mileage_km = greatest(mileage_km, coalesce($3, mileage_km)), "
+                    "updated_at = now() where id = $1 and status = 'rented'",
+                    row["bike_id"], bike_status, mileage_end)
             return True
 
     async def charge_period(self, rental_id: int, client_id: int, *,

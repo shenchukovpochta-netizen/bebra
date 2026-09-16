@@ -230,12 +230,13 @@ class TestIssueWizard(tw.WebCase):
                                              "bike_id": self.bike_id,
                                              "started_on": date.today().isoformat(),
                                              "pay_amount": "3000", "pay_method": "cash",
-                                             "contract_no": ""})
+                                             "mileage": "1200", "contract_no": ""})
         self.assertEqual(r.status_code, 303)
         rental = self.run_(self.crm.active_rental_of(self.client_id))
         self.assertIsNotNone(rental)
         self.assertEqual(r.headers["location"], f"/rentals/{rental['id']}")
         self.assertEqual(rental["contract_no"], "АВ-2026-000001", "номер договора из бота")
+        self.assertEqual(rental["mileage_start"], 1200)
         self.assertEqual(self.run_(self.crm.bike(self.bike_id))["status"], "rented")
         self.assertEqual(self.run_(self.crm.client_balance(self.client_id)), D(0),
                          "начислен первый период и принята оплата")
@@ -252,7 +253,8 @@ class TestIssueWizard(tw.WebCase):
         r = self.client.post("/issue", data={"client_id": self.client_id,
                                              "tariff_id": self.tariff_id,
                                              "bike_id": self.bike_id,
-                                             "pay_amount": "0", "pay_method": "cash"})
+                                             "pay_amount": "0", "pay_method": "cash",
+                                             "mileage": "0"})
         self.assertEqual(r.status_code, 303)
         self.assertEqual(self.run_(self.crm.client_balance(self.client_id)), D(-3000))
         self.assertIn("без оплаты", self.get_ok(r.headers["location"]))
@@ -275,7 +277,7 @@ class TestIssueWizard(tw.WebCase):
             started_on=date.today(), contract_no=None, created_by="t"))
         r = self.client.post("/issue", data={"client_id": self.client_id,
                                              "tariff_id": self.tariff_id,
-                                             "bike_id": self.bike_id,
+                                             "bike_id": self.bike_id, "mileage": "0",
                                              "pay_amount": "3000", "pay_method": "cash"})
         self.assertEqual(r.status_code, 303)
         self.assertIn("В аренде", self.get_ok(r.headers["location"]))

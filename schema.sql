@@ -505,6 +505,13 @@ alter table crm.bikes add column if not exists residual_price numeric(12,2) not 
 alter table crm.bikes add column if not exists battery_price numeric(12,2);
 alter table crm.bikes add column if not exists battery_service_months integer not null default 15;
 
+-- Одометр. У велосипеда одно число - текущий пробег; у аренды два -
+-- на выдаче и на возврате, чтобы «накатал за аренду» читалось строкой,
+-- а не вычиталось по журналу. Пробег вводит оператор глазами с дисплея.
+alter table crm.bikes   add column if not exists mileage_km    integer not null default 0;
+alter table crm.rentals add column if not exists mileage_start integer;
+alter table crm.rentals add column if not exists mileage_end   integer;
+
 -- Сводка оператора: что клиент сказал по телефону про истекающий срок
 -- («продлит» / «сдаёт») и до какой даты строку отложили. intent_until -
 -- «оплачено до» на момент отметки: сдвинулась дата - намерение устарело.

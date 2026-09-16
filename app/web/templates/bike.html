@@ -15,6 +15,7 @@
     <label>Номер рамы <input name="frame_no" value="{{ bike.frame_no or '' }}"></label>
     <label>Номер мотора <input name="motor_no" value="{{ bike.motor_no or '' }}"></label>
     <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="{{ bike.battery_count }}"></label>
+    <label>Пробег, км <input name="mileage_km" inputmode="numeric" value="{{ bike.mileage_km or 0 }}"></label>
     <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}" {% if bike.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <label>Цена покупки <input name="purchase_price" value="{{ bike.purchase_price or '' }}"></label>
     <label>Дата покупки <input name="purchased_on" type="date" value="{{ bike.purchased_on|iso }}"></label>
@@ -25,7 +26,7 @@
     <label class="wide">Заметка <input name="note" value="{{ bike.note or '' }}"></label>
     <button type="submit">Сохранить</button>
   </form>
-  <p class="muted">Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
+  <p class="muted">Пробег растёт сам: его вписывают при выдаче и при возврате аренды, назад не крутится. Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
 <section class="card">
   <h2>Статус</h2>

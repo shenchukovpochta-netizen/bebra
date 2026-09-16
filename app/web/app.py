@@ -117,6 +117,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
         IDLE_TARGET_PERCENT=logic.IDLE_TARGET_PERCENT, CHECK_TARGET=logic.CHECK_TARGET,
         amortization_month=logic.amortization_month, fleet_losses=logic.fleet_losses,
+        ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
@@ -514,7 +515,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         residual = cost_field(data, "residual_price")
         bat_price = (logic.check_amount(data.get("battery_price"))
                      if (data.get("battery_price") or "").strip() else logic.Check(True, None))
-        for check in (residual, bat_price):
+        # Пробег правится руками: одометр могли не переписать при выдаче,
+        # а здесь поле пустое означает «не трогать», а не «обнулить».
+        mileage = logic.check_mileage(data.get("mileage_km"), required=False)
+        for check in (residual, bat_price, mileage):
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
@@ -524,7 +528,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "battery_count": int(batteries), "purchase_price": price.value,
                 "purchased_on": bought.value, "location": location or None,
                 "service_months": int(months), "residual_price": residual.value,
-                "battery_price": bat_price.value, "battery_service_months": int(bat_months)}
+                "battery_price": bat_price.value, "battery_service_months": int(bat_months),
+                **({"mileage_km": mileage.value} if mileage.value is not None else {})}
 
     @app.post("/bikes")
     async def bike_create(request: Request) -> Response:
@@ -767,6 +772,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
+                   mileage=int(ctx["bike"].get("mileage_km") or 0),
                    pay_default=plain_amount(
                        logic.issue_payment_default(tariff["price"], balance)),
                    contract_no=(client.get("contract_no")
@@ -812,7 +818,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         method = data.get("pay_method") or "sbp"
         contract = (logic.check_name(data.get("contract_no"), what="Договор")
                     if (data.get("contract_no") or "").strip() else logic.Check(True, None))
-        for check in (started, pay, contract):
+        # Пробег на выдаче обязателен: без него «накатал за аренду» не
+        # посчитать никогда, а переписать число с дисплея - секунда.
+        mileage = logic.check_mileage(data.get("mileage"),
+                                      current=bike.get("mileage_km"))
+        for check in (started, pay, contract, mileage):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect(back)
@@ -827,7 +837,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         try:
             rental_id = await service.open_rental(
                 crm, client=client, bike=bike, tariff=tariff, started_on=started.value,
-                contract_no=contract_no, by=who(request))
+                contract_no=contract_no, by=who(request), mileage=mileage.value)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(back)
@@ -919,7 +929,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   if x.get("rental_id") == rental_id]
         summary = summarize(rental if rental["status"] == "active" else None,
                             rental.get("balance", 0))
-        return render(request, "rental.html", rental=rental, summary=summary,
+        bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
+        return render(request, "rental.html", rental=rental, summary=summary, bike=bike,
                       intent=logic.intent_state(rental, summary, today=date.today()),
                       ledger=ledger, tariffs=await crm.tariffs(active_only=True))
 
@@ -963,19 +974,27 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         note = logic.check_note(data.get("note"))
         closed = logic.check_date(data.get("closed_on"), default=date.today())
-        if not note.ok or not closed.ok:
-            flash(request, note.error or closed.error, "err")
-            return redirect(f"/rentals/{rental_id}")
+        # Пробег возврата необязателен: велосипед могли принять без дисплея
+        # (разряжен, разбит). Тогда «накатал» у этой аренды останется пустым.
+        bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
+        floor = (bike or {}).get("mileage_km", rental.get("mileage_start"))
+        mileage = logic.check_mileage(data.get("mileage"), current=floor, required=False)
+        for check in (note, closed, mileage):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/rentals/{rental_id}")
         try:
             await service.close_rental(crm, rental, closed_on=closed.value, note=note.value,
                                        bike_status=data.get("bike_status") or "available",
-                                       by=who(request))
+                                       by=who(request), mileage=mileage.value)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/rentals/{rental_id}")
         client = await crm.client(rental["client_id"])
         await notify.rental_closed(bot, db, crm, client, rental)
-        flash(request, "Аренда закрыта, велосипед освобождён.")
+        km = logic.ridden({**rental, "mileage_end": mileage.value})
+        flash(request, "Аренда закрыта, велосипед освобождён."
+              + (f" Накатал {km} км." if km is not None else ""))
         return redirect(f"/rentals/{rental_id}")
 
     @app.post("/rentals/{rental_id}/tariff")

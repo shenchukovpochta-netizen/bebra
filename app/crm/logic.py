@@ -797,3 +797,56 @@ def loss_per_day(bikes_by_status: dict[str, int], *,
     idle = sum(by_status.values())
     return {"idle": idle, "by_status": by_status,
             "amount": (idle * rate).quantize(Decimal(1), rounding=ROUND_HALF_UP)}
+
+
+# ─────────────────────────── пробег ───────────────────────────
+#
+# Одометр велосипеда: число на дисплее, которое оператор переписывает
+# при выдаче и при возврате. Разница - накат за аренду: по нему видно,
+# кто возит по 60 км в день, а кто поставил велосипед во дворе.
+
+MAX_MILEAGE_KM = 300_000
+
+
+def check_mileage(raw: Any, *, current: Any = None, required: bool = True) -> Check:
+    """Пробег с одометра, в целых километрах.
+
+    Назад одометр не крутится: значение меньше прежнего - это либо опечатка
+    в цифрах, либо перепутанный велосипед. Принять молча значит испортить
+    и историю велосипеда, и «накатал» у аренды, поэтому такое отклоняется.
+    """
+    text = re.sub(r"[\s\u00a0]", "", str(raw or ""))
+    if not text:
+        return (Check(False, error="Пробег: число километров с одометра.")
+                if required else Check(True, None))
+    if not text.isdigit():
+        return Check(False, error="Пробег: целое число километров, например 4266.")
+    km = int(text)
+    if km > MAX_MILEAGE_KM:
+        return Check(False, error=f"Пробег: не больше {MAX_MILEAGE_KM} км.")
+    if current is not None and km < int(current):
+        return Check(False, error=f"Пробег меньше прежнего ({int(current)} км) - "
+                                  f"проверьте номер велосипеда и цифры.")
+    return Check(True, km)
+
+
+def ridden(rental: dict) -> int | None:
+    """Накат за аренду, км. None - одного из концов нет: аренда идёт
+    или пробег не записали."""
+    start, end = rental.get("mileage_start"), rental.get("mileage_end")
+    if start is None or end is None:
+        return None
+    return max(int(end) - int(start), 0)
+
+
+def ridden_per_day(rental: dict, *, days: int | None = None) -> int | None:
+    """Сколько накатывали в день за аренду. None - считать не из чего."""
+    km = ridden(rental)
+    if km is None:
+        return None
+    if days is None:
+        start, end = rental.get("started_on"), rental.get("closed_on")
+        days = (end - start).days if start and end else None
+    if not days or days <= 0:
+        return None
+    return int(round(km / days))

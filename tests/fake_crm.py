@@ -199,7 +199,7 @@ class FakeCrm:
                             "purchase_price": None, "purchased_on": None, "note": None,
                             "location": None, "service_months": 24,
                             "residual_price": Decimal(0), "battery_price": None,
-                            "battery_service_months": 15,
+                            "battery_service_months": 15, "mileage_km": 0,
                             "created_at": self._now(), "updated_at": self._now(),
                             **fields}
         self._log_status(bid, None, self.bikes_[bid]["status"], by)
@@ -341,7 +341,7 @@ class FakeCrm:
 
     async def create_rental(self, *, client_id, bike_id, tariff_id, tariff_name,
                             period_days, price, billing, started_on, contract_no,
-                            created_by):
+                            created_by, mileage_start=None):
         if self._active(client_id) is not None:
             raise UniqueError("rentals_active_client_idx")
         if bike_id is not None and any(r["bike_id"] == bike_id and r["status"] == "active"
@@ -357,25 +357,34 @@ class FakeCrm:
                               "notified_on": None, "notified_kind": None,
                               "intent": None, "intent_until": None, "intent_by": None,
                               "intent_at": None, "snooze_until": None,
+                              "mileage_start": mileage_start, "mileage_end": None,
                               "created_by": created_by, "created_at": self._now(),
                               "updated_at": self._now()}
         if bike_id is not None:
             self._log_status(bike_id, self.bikes_[bike_id]["status"], "rented", created_by)
             self.bikes_[bike_id]["status"] = "rented"
+            if mileage_start is not None:
+                self.bikes_[bike_id]["mileage_km"] = max(
+                    self.bikes_[bike_id].get("mileage_km") or 0, int(mileage_start))
         return rid
 
     async def update_rental(self, rental_id, **fields):
         self.rentals_[rental_id].update(fields)
 
     async def close_rental(self, rental_id, *, closed_on, note, bike_status="available",
-                           closed_by=None):
+                           closed_by=None, mileage_end=None):
         r = self.rentals_.get(rental_id)
         if r is None or r["status"] != "active":
             return False
         r.update(status="closed", closed_on=closed_on, close_note=note)
+        if mileage_end is not None:
+            r["mileage_end"] = int(mileage_end)
         if r["bike_id"] is not None and self.bikes_[r["bike_id"]]["status"] == "rented":
             self._log_status(r["bike_id"], "rented", bike_status, closed_by)
             self.bikes_[r["bike_id"]]["status"] = bike_status
+            if mileage_end is not None:
+                self.bikes_[r["bike_id"]]["mileage_km"] = max(
+                    self.bikes_[r["bike_id"]].get("mileage_km") or 0, int(mileage_end))
         return True
 
     async def charge_period(self, rental_id, client_id, *, period_from, period_to,

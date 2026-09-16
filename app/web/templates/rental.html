@@ -12,6 +12,10 @@
     <dt>Договор</dt><dd>{{ rental.contract_no or '—' }}</dd>
     <dt>Начало</dt><dd>{{ rental.started_on|dmy }}</dd>
     <dt>Начислено по</dt><dd>{{ rental.billed_until|dmy }}</dd>
+    {% set km = ridden(rental) %}
+    <dt>Пробег</dt><dd>{% if rental.mileage_start is none %}<span class="muted">не записан</span>
+      {%- else %}с {{ rental.mileage_start }} км{% if rental.mileage_end is not none %} до {{ rental.mileage_end }} км{% elif bike %} · сейчас {{ bike.mileage_km or 0 }} км{% endif %}
+      {%- if km is not none %} · <b>накатал {{ km }} км</b>{% set per = ridden_per_day(rental) %}{% if per %} <span class="muted">≈ {{ per }} км в день</span>{% endif %}{% endif %}{% endif %}</dd>
     <dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>
     <dt>Баланс клиента</dt><dd class="{% if rental.balance < 0 %}bad{% endif %}"><b>{{ money(rental.balance) }}</b></dd>
     {% if rental.status == 'active' %}<dt>Клиент сказал</dt><dd class="intent">{% if intent.intent %}<span class="tag intent-{{ intent.intent }}">{{ intent.label }}</span> <small class="muted">{{ rental.intent_by or '' }} · {{ rental.intent_at|dmy }}</small>{% else %}<span class="muted">пока ничего</span>{% endif %}
@@ -31,11 +35,12 @@
   <h2>Закрыть аренду</h2>
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
+    <label>Пробег при возврате, км <input name="mileage" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% else %}с дисплея{% endif %}"></label>
     <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="maintenance">на ТО</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option><option value="written_off">списан</option></select></label>
     <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
     <button type="submit" class="danger">Закрыть</button>
   </form>
-  <p class="muted">Начисления останавливаются, неиспользованный остаток периода не возвращается автоматически — при необходимости добавьте корректировку в карточке клиента.</p>
+  <p class="muted">Пробег необязателен: без него у аренды не будет «накатал». Начисления останавливаются, неиспользованный остаток периода не возвращается автоматически — при необходимости добавьте корректировку в карточке клиента.</p>
 </section>
 {% endif %}
 </div>

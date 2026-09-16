@@ -242,6 +242,34 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(fresh["intent_at"].tzinfo)
         self.assertIn("intent", (await self.crm.active_rentals())[0])
 
+    async def test_mileage_follows_rental(self):
+        """Одометр: выдача поднимает пробег парка, возврат пишет накат,
+        назад пробег не уезжает."""
+        await self.seed()
+        await self.crm.update_bike(self.bike_id, mileage_km=4266)
+        rid = await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
+                                           tariff_id=self.tariff_id, tariff_name="Неделя",
+                                           period_days=7, price=D("3000"), billing="auto",
+                                           started_on=date.today(), contract_no=None,
+                                           created_by="t", mileage_start=4300)
+        self.assertEqual((await self.crm.bike(self.bike_id))["mileage_km"], 4300)
+        self.assertEqual((await self.crm.rental(rid))["mileage_start"], 4300)
+        self.assertTrue(await self.crm.close_rental(rid, closed_on=date.today(), note=None,
+                                                    mileage_end=4586))
+        fresh = await self.crm.rental(rid)
+        self.assertEqual((fresh["mileage_start"], fresh["mileage_end"]), (4300, 4586))
+        self.assertEqual(logic.ridden(fresh), 286)
+        self.assertEqual((await self.crm.bike(self.bike_id))["mileage_km"], 4586)
+        # закрытие без пробега ничего не обнуляет
+        rid2 = await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
+                                            tariff_id=self.tariff_id, tariff_name="Неделя",
+                                            period_days=7, price=D("3000"), billing="auto",
+                                            started_on=date.today(), contract_no=None,
+                                            created_by="t")
+        await self.crm.close_rental(rid2, closed_on=date.today(), note=None)
+        self.assertIsNone((await self.crm.rental(rid2))["mileage_end"])
+        self.assertEqual((await self.crm.bike(self.bike_id))["mileage_km"], 4586)
+
     async def test_lists_reports_and_links(self):
         await self.seed()
         await self.crm.add_ledger(client_id=self.client_id, kind="charge", amount=D("-500"))

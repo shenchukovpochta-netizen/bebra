@@ -51,7 +51,7 @@ async def add_entry(crm: Any, client: dict, *, kind: str, amount: Decimal,
 
 async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict,
                       started_on: date, contract_no: str | None, by: str,
-                      billing: str = "auto") -> int:
+                      billing: str = "auto", mileage: int | None = None) -> int:
     """Оформить аренду и начислить первый период.
 
     Аренда с датой начала в будущем не начисляется заранее: первый период
@@ -72,7 +72,7 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             tariff_id=tariff.get("id"), tariff_name=tariff["name"],
             period_days=int(tariff["period_days"]), price=logic.to_money(tariff["price"]),
             billing=billing, started_on=started_on, contract_no=contract_no,
-            created_by=by)
+            created_by=by, mileage_start=mileage)
     except Exception as exc:                            # noqa: BLE001
         # Уникальные индексы на активную аренду: гонка двух операторов.
         if "unique" in type(exc).__name__.lower():
@@ -116,11 +116,13 @@ async def charge_all(crm: Any, *, today: date) -> int:
 
 
 async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | None,
-                       bike_status: str = "available", by: str | None = None) -> None:
+                       bike_status: str = "available", by: str | None = None,
+                       mileage: int | None = None) -> None:
     if bike_status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус велосипеда.")
     if not await crm.close_rental(rental["id"], closed_on=closed_on, note=note,
-                                  bike_status=bike_status, closed_by=by):
+                                  bike_status=bike_status, closed_by=by,
+                                  mileage_end=mileage):
         raise ServiceError("Аренда уже закрыта.")
 
 
