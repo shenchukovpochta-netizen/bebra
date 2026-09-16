@@ -6,6 +6,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /srv
 
+# tesseract читает машиночитаемую зону паспорта прямо здесь, на сервере:
+# наружу скан не уходит, и вопрос 152-ФЗ с передачей ПДн третьему лицу
+# не возникает вовсе. МЧЗ - только латиница и цифры, поэтому русских
+# языковых данных не нужно, хватает eng из базового пакета.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 # Только список зависимостей: слой не пересобирается при правке кода.
 # Единственный источник версий - requirements.txt, pyproject тянет его же.
 COPY requirements.txt ./

@@ -28,7 +28,7 @@ from .. import logic, tasks, texts
 from ..config import Config
 from ..db import Database, utcnow
 from ..services import contract as contract_service
-from ..services import files
+from ..services import files, ocr
 from ..services.crypto import Vault
 from . import keyboards as kb
 from . import parse
@@ -366,6 +366,9 @@ async def send_moderation_card(ctx: Ctx, tg_id: int) -> None:
         fields=_anketa_lines(data, anketa), tg_id=tg_id)
     if minor:
         caption += texts.CARD_MINOR_LINE
+    # Строка сверки МЧЗ - та же, что в телеграм-боте: карточки в двух
+    # мессенджерах должны показывать модератору одно и то же.
+    caption += await ocr.card_line(data, anketa)
     sent = await ctx.cl.send(
         chat_id=ctx.cfg.contract_chat_id, text=caption,
         attachments=[_image_attachment(data["doc_file_id"])],

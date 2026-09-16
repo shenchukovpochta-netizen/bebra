@@ -96,7 +96,8 @@ $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/unbounded-700-latin.woff2')
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
-              'app/services/contract.py', 'app/services/crypto.py')
+              'app/services/contract.py', 'app/services/crypto.py',
+              'app/services/mrz.py', 'app/services/ocr.py')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
@@ -107,7 +108,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_import.py', 'tests/test_review.py', 'tests/test_scripts.py',
           'tests/test_fleet.py', 'tests/test_web_pg.py', 'tests/test_bot_review.py',
           'tests/test_issue.py', 'tests/test_dashboard.py', 'tests/test_mileage.py',
-          'tests/test_access.py')
+          'tests/test_access.py', 'tests/test_mrz.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

@@ -17,7 +17,7 @@ from ..config import Config
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
-from ..services import files
+from ..services import files, ocr
 from ..services.crypto import Vault
 
 log = logging.getLogger(__name__)
@@ -802,7 +802,8 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
             crm_line = texts.CARD_CRM_LINE.format(status=logic.esc(flagged[0]),
                                                   note=logic.esc(flagged[1]))
     caption = logic.caption_with_fields(
-        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else "") + crm_line,
+        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else "") + crm_line
+        + await ocr.card_line(data, anketa),
         anketa_lines(data, anketa),
         number=logic.esc(data.get("contract_no") or "будет присвоен"),
         tg_id=tg_id,
