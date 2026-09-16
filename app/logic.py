@@ -1501,9 +1501,14 @@ def reminder_due(row: dict, *, before_days: int,
     «продлите аренду или верните велосипед» в этот момент - неправда.
     Оборудование оператор забирает обычным актом возврата, и напоминает
     о нём человек, а не бот.
+
+    Молчим и пока клиент подписывает Акт возврата: оператор уже прислал
+    данные возврата, велосипед на точке, и «продлите или верните» тут
+    так же неуместно, как после выкупа.
     """
     if (row.get("close_requested_at") or row.get("extend_until")
-            or row.get("buyout_done_at")):
+            or row.get("buyout_done_at")
+            or row.get("state") == WAIT_RETURN_SIGN):
         return None
     left = days_left(row.get("rent_until"), today=today)
     if left is None:

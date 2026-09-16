@@ -89,18 +89,48 @@ async def start_flow(answer, db: Database, user: dict) -> None:
     await answer(i18n.pick_prompt(), reply_markup=kb.lang_pick())
 
 
+# Состояния, из которых /start и кнопка меню означают «передумал»: вопрос
+# в поддержку и причина сдачи. Тот же набор, что в кабинете: без возврата
+# в меню следующее сообщение человека уезжало бы оператору - вопросом
+# или запросом на закрытие аренды с причиной «привет».
+DIALOG_STATES = (logic.WAIT_SUPPORT, logic.WAIT_CLOSE_REASON)
+
+
+def pending_text(user: dict) -> str:
+    """Что сказать тому, чья заявка ещё в работе: до решения - «на проверке»,
+    после одобрения - «готовим договор» (оператор вносит данные выдачи)."""
+    lang = i18n.user_lang(user)
+    if user.get("status") == logic.ST_APPROVED:
+        return i18n.t(lang, "APPROVED_WAIT_ISSUE")
+    return i18n.t(lang, "PENDING_WAIT")
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> None:
+    lang = i18n.user_lang(user)
+    if user["state"] == logic.PENDING:
+        # Заявка на проверке или уже одобрена и ждёт данных выдачи: /start
+        # здесь - «что там с моей заявкой», а не «заполнить заново». Иначе
+        # человек проходил анкету второй раз, а у модератора появлялась
+        # вторая карточка на того же клиента.
+        await message.answer(pending_text(user), reply_markup=kb.remove())
+        return
     if user["status"] == logic.ST_APPROVED:
-        # /start посреди вопроса в поддержку - это «передумал»: не вернуть
-        # состояние - и следующее сообщение молча уедет карточкой в чат
-        # модерации, хотя человек уже смотрит на меню.
-        if user["state"] == logic.WAIT_SUPPORT:
-            await db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
+        # /start посреди вопроса в поддержку или причины сдачи - это
+        # «передумал»: не вернуть состояние - и следующее сообщение молча
+        # уедет оператору, хотя человек уже смотрит на меню.
+        if user["state"] in DIALOG_STATES:
+            await db.patch(user["tg_id"], expected_state=user["state"],
                            state=logic.APPROVED)
-        lang = i18n.user_lang(user)
         await message.answer(i18n.t(lang, "ALREADY_REGISTERED"),
                              reply_markup=kb.main_menu(lang))
+        return
+    if user["status"] == logic.ST_REJECTED and user["state"] in PROMPTS:
+        # Отказ вернул человека на конкретный шаг, и текст отказа обещает
+        # «/start, чтобы продолжить с этого места». Повторяем вопрос шага,
+        # а не гоним через десять полей анкеты заново.
+        await message.answer(i18n.t(lang, PROMPTS[user["state"]]),
+                             reply_markup=_markup_for(user["state"], lang))
         return
     await start_flow(message.answer, db, user)
 
@@ -689,7 +719,7 @@ async def st_confirm_wrong(message: Message, user: dict) -> None:
 
 @router.message(StateIs(logic.PENDING))
 async def st_pending(message: Message, user: dict) -> None:
-    await message.answer(i18n.t(user.get("lang"), "PENDING_WAIT"))
+    await message.answer(pending_text(user))
 
 
 # ─────────────────────────── фоновые задачи ───────────────────────────

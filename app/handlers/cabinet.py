@@ -125,28 +125,39 @@ async def _open(message: Message, db: Database, crm: Any, user: dict) -> None:
     await show_home(message.answer, crm, user, await resolve_client(crm, user))
 
 
+# user приходит из middleware, но у апдейтов из служебного чата (ответ
+# оператора на карточку, команда парка) его нет: они идут мимо
+# пользовательского конвейера. Роутер стоит первым, поэтому такие
+# обработчики обязаны переживать user=None, а не падать на TypeError -
+# упавший апдейт остаётся в processing и переигрывается впустую.
+
 @router.message(Command("cabinet"))
-async def cmd_cabinet(message: Message, db: Database, user: dict,
+async def cmd_cabinet(message: Message, db: Database, user: dict | None = None,
                       crm: Any = None) -> None:
-    await _open(message, db, crm, user)
+    if user is not None:
+        await _open(message, db, crm, user)
 
 
 @router.message(F.text.in_(i18n.variants("BTN_CABINET")))
-async def btn_cabinet(message: Message, db: Database, user: dict,
+async def btn_cabinet(message: Message, db: Database, user: dict | None = None,
                       crm: Any = None) -> None:
-    await _open(message, db, crm, user)
+    if user is not None:
+        await _open(message, db, crm, user)
 
 
 # ─────────────────────────── привязка по контакту ───────────────────────────
 
 @router.message(F.contact, ~StateIs(logic.WAIT_CONTACT))
-async def link_by_contact(message: Message, db: Database, user: dict,
+async def link_by_contact(message: Message, db: Database, user: dict | None = None,
                           crm: Any = None) -> None:
     """Контакт вне шага анкеты - это привязка кабинета.
 
     Шаг анкеты WAIT_CONTACT исключён фильтром: там контакт - ответ
-    на вопрос регистрации, и его ждёт свой обработчик.
+    на вопрос регистрации, и его ждёт свой обработчик. Контакт ответом
+    в служебном чате (оператор переслал номер клиента коллеге) - не наш.
     """
+    if user is None:
+        return
     lang = i18n.user_lang(user)
     if crm is None:
         await message.answer(i18n.t(lang, "CAB_UNAVAILABLE"))

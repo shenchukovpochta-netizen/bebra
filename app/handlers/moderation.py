@@ -363,12 +363,26 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     Повторный ответ на то же приглашение обновляет данные: до подписи
     договора - переигрывает договор, после подписи, но до подписи акта -
     пересобирает и переотправляет акт приёма.
+
+    При активной аренде форма отвергается ДО записи: раньше срок, данные
+    и отметки напоминаний уже были перезаписаны к моменту, когда оператору
+    отвечали «не применить». Единственное исключение - клиент на подписи
+    акта выкупа нажал «Есть ошибка»: тогда обновляются только данные
+    выдачи (модель, цвет, выкупная стоимость), и акт уходит заново.
     """
     parsed, err = logic.parse_issue_form(message.text or message.caption)
     if parsed is None:
         await message.reply(err)
         return
     tg_id = target["tg_id"]
+    if logic.rental_is_active(target):
+        if target["state"] == logic.WAIT_BUYOUT_SIGN:
+            await _fix_buyout_act(message, bot, db, cfg, vault, target, parsed)
+            return
+        # Велосипед на руках - сначала возврат, потом новая выдача.
+        await message.reply(texts.RENT_ACTIVE_MOD)
+        return
+
     # Даты срока считаются здесь же: по ним бот напоминает об окончании.
     # Строку срока оператор пишет как привык - разбирает её logic.
     start, end = logic.rent_dates(parsed)
@@ -391,10 +405,7 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
         # Договор уже подписан - переигрывать его нельзя. Данные выдачи
         # либо обновляют текущий цикл, либо начинают повторную аренду.
         if target.get("act_in_signed_at"):
-            if not target.get("act_out_signed_at"):
-                # Велосипед на руках - сначала возврат, потом новая выдача.
-                await message.reply(texts.RENT_ACTIVE_MOD)
-                return
+            # Активная аренда отсечена выше, значит прошлый цикл закрыт.
             await _repeat_rent(message, bot, db, cfg, vault, target)
             return
         if target["state"] == logic.WAIT_PAYMENT:
@@ -407,12 +418,20 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
             await message.reply(texts.ISSUE_UPDATED_WAIT_PAY.format(
                 price=logic.esc(price)))
             return
+        # На подпись акта - с самой подписи (пересборка), из меню или из
+        # недописанного вопроса в поддержку (акт не собрался в прошлый раз).
+        # Не из чужого шага: expected_state закрывает и гонку двух операторов.
+        for state in (logic.WAIT_ACT_SIGN, logic.APPROVED, logic.WAIT_SUPPORT):
+            if await db.patch(tg_id, expected_state=state, state=logic.WAIT_ACT_SIGN):
+                break
+        else:
+            await message.reply(texts.MOD_REPLY_NOT_PENDING)
+            return
         row = await db.get_user(tg_id)
         data = dict(row) if row else dict(target)
-        await db.patch(tg_id, state=logic.WAIT_ACT_SIGN)
         await contract.send_act_in(bot, db, cfg, data,
                                    vault.decrypt(data.get("anketa_enc")))
-        await message.reply("Акт приёма пересобран и отправлен клиенту.")
+        await message.reply(texts.ACT_IN_RESENT_MOD)
         return
 
     try:
@@ -425,6 +444,31 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
             tg_id=tg_id, reason=logic.esc(str(exc))))
         return
     await message.reply(texts.ISSUE_SAVED)
+
+
+async def _fix_buyout_act(message: Message, bot: Bot, db: Database, cfg: Config,
+                          vault: Vault, target: dict, parsed: dict) -> None:
+    """Исправленные данные для Акта о переходе права собственности.
+
+    Меняются только данные выдачи: срок аренды, даты и отметки напоминаний
+    остаются - аренда идёт, и форма прислана не ради неё. Акт
+    пересобирается и уходит клиенту на ту же подпись.
+    """
+    tg_id = target["tg_id"]
+    if not await db.patch(tg_id, expected_state=logic.WAIT_BUYOUT_SIGN,
+                          issue_data=parsed):
+        await message.reply(texts.MOD_REPLY_NOT_PENDING)
+        return
+    await db.log_event(tg_id, "issue_data_set",
+                       {"by": message.from_user.id, "buyout_fix": True})
+    try:
+        await contract.send_buyout_act(bot, db, cfg, vault, tg_id, resend=True)
+    except (contract.ContractProblem, TelegramAPIError) as exc:
+        log.exception("акт выкупа для %s не пересобран", tg_id)
+        await message.reply(texts.BUYOUT_ALERT_FAILED.format(
+            tg_id=tg_id, reason=logic.esc(str(exc))))
+        return
+    await message.reply(texts.BUYOUT_ACT_RESENT_MOD)
 
 
 async def _apply_extension(bot: Bot, db: Database, target: int, before: dict,

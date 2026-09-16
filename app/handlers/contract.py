@@ -868,12 +868,16 @@ async def st_wait_return_sign(message: Message, bot: Bot, db: Database,
 # ─────────────────── Акт о переходе права собственности ───────────────────
 
 async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
-                          tg_id: int) -> None:
+                          tg_id: int, *, resend: bool = False) -> None:
     """Выкуп выплачен: выдать Акт о переходе права собственности на подпись.
 
     Вызывается из фонового прохода, когда график выкупа выбран целиком.
     Состояние переводится здесь же: до подписи собственность не перешла,
     и клиент должен видеть, чего от него ждут.
+
+    resend - клиент нажал «Есть ошибка», оператор поправил данные выдачи:
+    акт собирается заново и уходит на ту же подпись. Состояние не трогается
+    (клиент и так на ней), карточка оператору второй раз не нужна.
     """
     row = await db.get_user(tg_id)
     if row is None:
@@ -884,12 +888,15 @@ async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
     docx, _ = _build_act(cfg, cfg.buyout_template,
                          _act_context(cfg, data, anketa, signed_at=UNSIGNED))
 
+    if resend:
+        if data.get("state") != logic.WAIT_BUYOUT_SIGN:
+            raise ContractProblem(f"{tg_id} не на подписи акта выкупа")
     # expected_state обязателен: пока собирался документ, клиент мог начать
     # возврат или уйти в поддержку, и подмена состояния под ним оставила бы
     # его с мёртвой кнопкой на прошлом шаге.
-    if not await db.patch(tg_id, expected_state=logic.APPROVED,
-                          state=logic.WAIT_BUYOUT_SIGN,
-                          buyout_done_at=utcnow()):
+    elif not await db.patch(tg_id, expected_state=logic.APPROVED,
+                            state=logic.WAIT_BUYOUT_SIGN,
+                            buyout_done_at=utcnow()):
         raise ContractProblem(f"не удалось перевести {tg_id} на подпись выкупа")
 
     lang = i18n.user_lang(data)
@@ -902,7 +909,10 @@ async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
             bike=logic.esc(given["bike_model"])),
         reply_markup=kb.sign_buyout(lang),
     )
-    await db.log_event(tg_id, "buyout_act_sent", {"number": number})
+    await db.log_event(tg_id, "buyout_act_resent" if resend else "buyout_act_sent",
+                       {"number": number})
+    if resend:
+        return
 
     # Оператору - карточка: оборудование в выкуп не входит и его надо
     # принять, а велосипед в акт возврата больше не возвращается.
