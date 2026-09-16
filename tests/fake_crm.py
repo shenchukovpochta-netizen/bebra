@@ -31,6 +31,8 @@ class FakeCrm:
         self.order_items_: list[dict] = []
         self.takes_: dict[int, dict] = {}
         self.take_items_: list[dict] = []
+        self.referrals_: dict[int, dict] = {}
+        self.settings_: dict[str, str] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
@@ -385,6 +387,7 @@ class FakeCrm:
         self.clients_[cid] = {"id": cid, "full_name": full_name, "phone": phone,
                               "tg_id": tg_id, "username": username, "status": "active",
                               "contract_no": contract_no, "note": note, "source": source,
+                              "ref_code": None, "invited_by": None, "invited_at": None,
                               "created_at": self._now(), "updated_at": self._now()}
         return cid
 
@@ -921,6 +924,74 @@ class FakeCrm:
         for row in self.status_log_:
             out.setdefault(row["bike_id"], []).append(row)
         return out
+
+    # ─────────────────────── настройки и приглашения ───────────────────────
+
+    async def settings(self):
+        return dict(self.settings_)
+
+    async def set_setting(self, key, value, *, by):
+        self.settings_[key] = value
+
+    async def client_by_ref_code(self, code):
+        return next((dict(c) for c in self.clients_.values()
+                     if c.get("ref_code") == code), None)
+
+    async def set_ref_code(self, client_id, code):
+        if any(c.get("ref_code") == code for c in self.clients_.values()):
+            return False
+        self.clients_[client_id]["ref_code"] = code
+        return True
+
+    def _referral_row(self, ref):
+        agent = self.clients_.get(ref["agent_id"]) or {}
+        friend = self.clients_.get(ref.get("client_id")) or {}
+        return {**ref, "agent_name": agent.get("full_name"),
+                "agent_phone": agent.get("phone"), "ref_code": agent.get("ref_code"),
+                "friend_name": friend.get("full_name"),
+                "friend_phone": friend.get("phone")}
+
+    async def referrals(self, *, agent_id=None, since=None, until=None, limit=1000):
+        rows = [self._referral_row(r) for r in self.referrals_.values()
+                if (not agent_id or r["agent_id"] == agent_id)
+                and (since is None or r["created_at"] >= since)
+                and (until is None or r["created_at"] < until)]
+        rows.sort(key=lambda r: r["id"], reverse=True)
+        return rows[:limit]
+
+    async def referral_of_tg(self, tg_id):
+        return next((self._referral_row(r) for r in self.referrals_.values()
+                     if r["tg_id"] == tg_id), None)
+
+    async def referral_of_client(self, client_id):
+        return next((self._referral_row(r) for r in self.referrals_.values()
+                     if r.get("client_id") == client_id), None)
+
+    async def add_referral(self, *, agent_id, tg_id):
+        if any(r["tg_id"] == tg_id for r in self.referrals_.values()):
+            return None
+        ref_id = self._id()
+        self.referrals_[ref_id] = {
+            "id": ref_id, "agent_id": agent_id, "tg_id": tg_id, "client_id": None,
+            "status": "click", "bonus": Decimal(0), "ledger_id": None, "note": None,
+            "created_at": self._now(), "signed_at": None, "rented_at": None,
+            "paid_at": None}
+        return ref_id
+
+    async def update_referral(self, ref_id, **fields):
+        if ref_id in self.referrals_:
+            self.referrals_[ref_id].update(fields)
+
+    async def pay_referral_bonus(self, ref_id, *, agent_id, amount, note, created_by):
+        ref = self.referrals_.get(ref_id)
+        if ref is None or ref["status"] == "paid":
+            return None
+        ref.update(status="paid", paid_at=self._now(), bonus=Decimal(str(amount)))
+        ledger_id = await self.add_ledger(client_id=agent_id, kind="adjust",
+                                          amount=Decimal(str(amount)), note=note,
+                                          created_by=created_by)
+        ref["ledger_id"] = ledger_id
+        return ledger_id
 
 
 class UniqueError(Exception):

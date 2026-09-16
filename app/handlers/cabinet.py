@@ -374,6 +374,50 @@ async def cb_contract(callback: CallbackQuery, bot: Bot, db: Database, user: dic
         reply_markup=kb.cab_back(lang))
 
 
+async def _bot_username(bot: Bot) -> str:
+    """Имя бота для ссылки-приглашения. Недоступно - покажем один код."""
+    try:
+        return (await bot.get_me()).username or ""
+    except Exception as exc:                             # noqa: BLE001
+        log.warning("имя бота не получено: %s", exc)
+        return ""
+
+
+@router.callback_query(F.data == "cab:friends")
+async def cb_friends(callback: CallbackQuery, bot: Bot, user: dict,
+                     crm: Any = None) -> None:
+    """«Мои друзья»: код приглашения, ссылка и что по ней происходит.
+
+    Код выдаётся здесь же, при первом открытии экрана: заранее раздавать
+    его всем незачем - большинство клиентов этот экран не откроют.
+    """
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    await callback.answer()
+    lang = i18n.user_lang(user)
+    settings = crm_logic.ref_settings(await crm.settings())
+    if not settings["enabled"]:
+        await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_FRIENDS_OFF"),
+                               reply_markup=kb.cab_back(lang))
+        return
+    try:
+        code = await service.ref_code_of(crm, client)
+    except service.ServiceError as exc:
+        await bot.send_message(user["tg_id"], str(exc), reply_markup=kb.cab_back(lang))
+        return
+    rows = await crm.referrals(agent_id=client["id"], limit=1000)
+    funnel = crm_logic.ref_funnel(rows)
+    stats = i18n.t(lang, "CAB_FRIENDS_STATS").format(
+        click=funnel["click"], signed=funnel["signed"], rented=funnel["rented"],
+        paid=funnel["paid"], bonus=crm_logic.money(funnel["bonus"])) \
+        if rows else i18n.t(lang, "CAB_FRIENDS_EMPTY")
+    text = i18n.t(lang, "CAB_FRIENDS").format(
+        code=code, link=crm_logic.ref_link(await _bot_username(bot), code),
+        bonus=crm_logic.money(settings["bonus"]), stats=stats)
+    await bot.send_message(user["tg_id"], text, reply_markup=kb.cab_back(lang))
+
+
 # ─────────────────────────── операторская часть ───────────────────────────
 
 def _is_admin(user_id: int, cfg: Config) -> bool:
@@ -405,6 +449,17 @@ async def credit(bot: Bot, db: Database, crm: Any, claim: dict, amount: Any, *,
     client = await crm.client(claim["client_id"]) or claim
     await notify.payment_credited(bot, db, crm, {**client, "id": claim["client_id"]},
                                   amount)
+    # Бонус агенту, если этого клиента привёл друг. Сбой программы не
+    # должен откатывать зачисление - оно уже состоялось.
+    try:
+        bonus = await service.ref_paid(crm, {**client, "id": claim["client_id"]},
+                                       amount, by=f"tg:{who}")
+    except Exception:                                    # noqa: BLE001
+        log.exception("реферальный бонус за клиента %s не начислен",
+                      claim["client_id"])
+        bonus = None
+    if bonus:
+        await notify.referral_bonus(bot, db, bonus["agent"], client, bonus["bonus"])
     return await crm.client_balance(claim["client_id"])
 
 

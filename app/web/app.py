@@ -126,6 +126,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
+        REF_STATUSES=logic.REF_STATUSES,
         take_title=logic.take_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
@@ -336,6 +337,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       debtors=await crm.debtors(10),
                       month=await crm.ledger_totals(since=today.replace(day=1)))
 
+    async def referral_bonus(client: dict, amount: Decimal, by: str) -> None:
+        """Друг заплатил - начислить бонус агенту и сказать ему об этом.
+
+        Зовётся после каждого платежа клиента: платёж может прийти из
+        панели, из заявки и из выдачи, а бонус обязан начисляться один раз
+        и одинаково.
+        """
+        try:
+            bonus = await service.ref_paid(crm, client, amount, by=by)
+        except Exception:                                # noqa: BLE001
+            log.exception("реферальный бонус за клиента %s не начислен",
+                          client.get("id"))
+            return
+        if bonus:
+            await notify.referral_bonus(bot, db, bonus["agent"], client,
+                                        bonus["bonus"])
+
     async def period_metrics(*, days: int = 0, since: datetime | None = None,
                              until: datetime | None = None) -> dict:
         """Три числа за период: простой, средний чек, дни. По умолчанию -
@@ -508,6 +526,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                 rental_id=rental["id"] if rental else None)
         if kind.value == "payment":
             await notify.payment_credited(bot, db, crm, client, amount.value)
+            await referral_bonus(client, amount.value, who(request))
         flash(request, "Запись добавлена.")
         return redirect(f"/clients/{client_id}")
 
@@ -856,6 +875,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             full_name=fields["full_name"], phone=fields["phone"], note=fields["note"],
             tg_id=tg_id, username=(user or {}).get("username") if tg_id else None,
             contract_no=fields["contract_no"] or (user or {}).get("contract_no"))
+        if tg_id:
+            await service.ref_signed(crm, await crm.client(client_id) or {})
         flash(request, "Клиент добавлен." + (" Telegram подхвачен из бота." if tg_id else ""))
         return redirect(issue_url(client=client_id, bike=data.get("bike_id")))
 
@@ -907,6 +928,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             await service.add_entry(crm, client, kind="payment", amount=pay.value,
                                     method=method, note=f"При выдаче № {bike['code']}",
                                     by=who(request), rental_id=rental_id)
+            await referral_bonus(client, pay.value, who(request))
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
         if pay.value > 0:
@@ -1182,6 +1204,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/claims")
         client = await crm.client(claim["client_id"])
         await notify.payment_credited(bot, db, crm, client, amount.value)
+        await referral_bonus(client, amount.value, who(request))
         flash(request, f"Зачислено {logic.money(amount.value)} клиенту {client['full_name']}.")
         return redirect("/claims")
 
@@ -1276,6 +1299,46 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return _csv(name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
+
+    @app.get("/reports/referrals")
+    async def referrals_report(request: Request) -> Response:
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        since = logic.check_date(request.query_params.get("since"),
+                                 default=date.today().replace(day=1))
+        until = logic.check_date(request.query_params.get("until"),
+                                 default=date.today())
+        if not since.ok or not until.ok:
+            since = logic.Check(True, date.today().replace(day=1))
+            until = logic.Check(True, date.today())
+        tz = datetime.now().astimezone().tzinfo
+        start = datetime.combine(since.value, datetime.min.time(), tzinfo=tz)
+        end = datetime.combine(until.value + timedelta(days=1),
+                               datetime.min.time(), tzinfo=tz)
+        rows = await crm.referrals(since=start, until=end, limit=5000)
+        return render(request, "referrals.html", rows=rows,
+                      funnel=logic.ref_funnel(rows), agents=logic.ref_agents(rows),
+                      settings=logic.ref_settings(await crm.settings()),
+                      since=since.value, until=until.value)
+
+    @app.post("/reports/referrals")
+    async def referrals_settings(request: Request) -> Response:
+        """Настройки программы: включена ли, бонус и порог платежа."""
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        data = await form(request)
+        bonus = cost_field(data, "bonus")
+        minimum = cost_field(data, "min_payment")
+        for check in (bonus, minimum):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/reports/referrals")
+        await crm.set_setting("ref_enabled", "1" if data.get("enabled") else "0",
+                              by=who(request))
+        await crm.set_setting("ref_bonus", str(bonus.value), by=who(request))
+        await crm.set_setting("ref_min_payment", str(minimum.value), by=who(request))
+        flash(request, "Настройки программы сохранены.")
+        return redirect("/reports/referrals")
 
     # ─────────────────────── сотрудники ───────────────────────
 

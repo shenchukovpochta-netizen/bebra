@@ -57,8 +57,8 @@ Claude Code читает этот файл в начале каждой сесс
 
 `staff`, `access_profiles`, `tariffs`, `bikes`, `bike_status_log`, `bike_log`,
 `repair_nodes`, `repair_items`, `work_types`, `work_orders`, `work_order_items`,
-`stock_takes`, `stock_take_items`, `clients`, `rentals`, `ledger`,
-`payment_claims`.
+`stock_takes`, `stock_take_items`, `referrals`, `settings`, `clients`,
+`rentals`, `ledger`, `payment_claims`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -73,6 +73,9 @@ Claude Code читает этот файл в начале каждой сесс
 - **Пересчёт** (`stock_takes`): ведомость ПРТ снимает ожидаемый парк при
   открытии и не пересчитывает его на лету. Найденный потерянный возвращается
   в парк при закрытии сам, недостача в `lost` — только по галочке оператора.
+- **Приглашения** (`referrals`): путь друга от перехода по ссылке до
+  первого платежа. Бонус агенту — запись `ledger` вида `adjust`, а не
+  `payment`: платежи формируют средний чек, и бонус завысил бы его.
 - **АКБ** пока не отдельная сущность: у велосипеда счётчик, цена и срок
   службы АКБ для амортизации. Отдельная таблица — когда батареи начнут
   маркировать на точках.

@@ -18,7 +18,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from .. import logic as bot_logic
-from . import logic
+from . import logic, service
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +54,10 @@ async def client_from_bot(crm: Any, user: dict) -> dict | None:
             full_name=user.get("full_name") or "Без имени", phone=phone,
             tg_id=tg_id, username=user.get("username"), source="bot",
             contract_no=user.get("contract_no"))
+        client = await crm.client(client_id)
+        # Друг по приглашению: переход уже записан на /start, теперь у него
+        # есть карточка - связываем, иначе бонус платить будет некому.
+        await service.ref_signed(crm, client or {})
         return await crm.client(client_id)
 
     # Номер договора и ФИО у бота свежее: договор подписан только что.
@@ -96,6 +100,7 @@ async def on_payment_confirmed(crm: Any, user: dict, *, by: str) -> None:
                              method="sbp", created_by=by,
                              note=f"Оплата по договору № {user.get('contract_no') or '—'} "
                                   f"(подтверждена в боте)")
+        await service.ref_paid(crm, client, amount, by=by)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: платёж по договору %s не записан", user.get("contract_no"))
 
@@ -169,6 +174,7 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
                                  note=f"Продление по договору № "
                                       f"{user.get('contract_no') or '—'} "
                                       f"до {until.strftime('%d.%m.%Y')}")
+            await service.ref_paid(crm, client, amount, by=by)
         rental = await crm.active_rental_of(client["id"])
         if rental is None or rental.get("billing") != "manual":
             return

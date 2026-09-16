@@ -487,6 +487,47 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["repair_cost"], D("1200.00"))
         self.assertEqual(logic.payback_total(rows)["paid"], D("3000.00"))
 
+    async def test_referrals_on_postgres(self):
+        """Приглашения на живой базе: один переход на человека, бонус
+        один раз и записью вида adjust, а не платежом."""
+        await self.seed()
+        agent = await self.crm.client(self.client_id)
+        self.assertTrue(await self.crm.set_ref_code(agent["id"], "AB3D9K"))
+        # тот же код второму клиенту не достанется
+        other_id = await self.crm.create_client(full_name="Пётр", phone="+79995554433")
+        self.assertFalse(await self.crm.set_ref_code(other_id, "AB3D9K"))
+
+        ref_id = await self.crm.add_referral(agent_id=agent["id"], tg_id=9001)
+        self.assertIsNotNone(ref_id)
+        self.assertIsNone(await self.crm.add_referral(agent_id=other_id, tg_id=9001),
+                          "друг остаётся за первым агентом")
+
+        friend_id = await self.crm.create_client(full_name="Друг", phone="+79993334455",
+                                                 tg_id=9001)
+        await self.crm.update_referral(ref_id, client_id=friend_id, status="rented")
+        friend = await self.crm.client(friend_id)
+        paid = await service.ref_paid(self.crm, friend, D("3000"), by="test")
+        self.assertIsNotNone(paid)
+        self.assertEqual(paid["bonus"], logic.REF_BONUS_DEFAULT)
+        # повторный платёж бонуса не удваивает
+        self.assertIsNone(await service.ref_paid(self.crm, friend, D("3000"), by="test"))
+
+        rows = await self.crm.ledger_of(agent["id"], limit=10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "adjust")
+        now = datetime.now(UTC)
+        self.assertEqual(await self.crm.rental_revenue(now - timedelta(days=1), now),
+                         D(0), "бонус не арендная выручка и средний чек не поднимает")
+        funnel = logic.ref_funnel(await self.crm.referrals(agent_id=agent["id"]))
+        self.assertEqual((funnel["click"], funnel["paid"]), (1, 1))
+        self.assertEqual(funnel["bonus"], logic.REF_BONUS_DEFAULT)
+
+    async def test_settings_round_trip_on_postgres(self):
+        await self.crm.set_setting("ref_bonus", "700", by="staff:t")
+        await self.crm.set_setting("ref_bonus", "800", by="staff:t")
+        self.assertEqual(logic.ref_settings(await self.crm.settings())["bonus"],
+                         D("800.00"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,7 @@ BUTTONS_RU: dict[str, str] = {
     "BTN_CAB_TOPUP": "💳 Пополнить баланс",
     "BTN_CAB_HISTORY": "🧾 История",
     "BTN_CAB_CONTRACT": "📄 Договор",
+    "BTN_CAB_FRIENDS": "👥 Мои друзья",
     "BTN_CAB_REFRESH": "🔄 Обновить",
     "BTN_CAB_BACK": "◀️ Назад",
 }

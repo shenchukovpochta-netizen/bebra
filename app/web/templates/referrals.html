@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Приглашения — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Приглашения</h1>
+  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/payback">Окупаемость</a><a href="/reports/referrals" class="on">Приглашения</a></nav>
+  <form method="get" class="search">
+    <input type="date" name="since" value="{{ since|iso }}">
+    <input type="date" name="until" value="{{ until|iso }}">
+    <button type="submit">Показать</button>
+  </form>
+</div>
+
+{# Воронка: каждый шаг считает и тех, кто ушёл дальше, иначе она сужалась
+   бы задним числом и конверсия считалась бы от нуля. #}
+<div class="tiles">
+  <div class="tile"><b>{{ funnel.click }}</b><span>перешли по ссылке</span></div>
+  <div class="tile"><b>{{ funnel.signed }}</b><span>зарегистрировались</span></div>
+  <div class="tile"><b>{{ funnel.rented }}</b><span>взяли велосипед</span></div>
+  <div class="tile {% if funnel.paid %}good{% endif %}"><b>{{ funnel.paid }}</b><span>заплатили</span></div>
+  <div class="tile"><b>{{ money(funnel.bonus) }}</b><span>выплачено бонусов{% if funnel.price %}<br><small class="muted">{{ money(funnel.price) }} за клиента</small>{% endif %}</span></div>
+</div>
+
+<div class="card">
+  <h2>Агенты</h2>
+  <table>
+    <tr><th>Клиент</th><th>Код</th><th>Перешли</th><th>Зарегистрировались</th><th class="opt">Взяли велосипед</th><th>Заплатили</th><th>Начислено</th><th class="opt">Последний друг</th></tr>
+    {% for a in agents %}
+    <tr>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ a.agent_id }}">{{ a.agent_name }}</a>{% else %}{{ a.agent_name }}{% endif %}</td>
+      <td><code>{{ a.ref_code or '—' }}</code></td>
+      <td class="num">{{ a.click }}</td>
+      <td class="num">{{ a.signed }}</td>
+      <td class="num opt">{{ a.rented }}</td>
+      <td class="num {% if a.paid %}ok{% endif %}">{{ a.paid }}</td>
+      <td class="num">{{ money(a.bonus) }}</td>
+      <td class="opt">{{ a.last_friend or '—' }}{% if a.last_at %} <small class="muted">{{ a.last_at|dmy }}</small>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="8" class="muted">За период никого не приглашали.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Конверсия перехода в платящего клиента:
+    {% if funnel.conversion is none %}—{% else %}{{ funnel.conversion }} %{% endif %}.
+    Бонус — запись в журнале вида «корректировка», а не платёж: платежи
+    клиентов формируют средний чек парка, и бонус завысил бы его на деньги,
+    которых никто не вносил.</p>
+</div>
+
+<div class="card">
+  <h2>Приглашённые</h2>
+  <table>
+    <tr><th>Когда</th><th>Агент</th><th>Друг</th><th>Шаг</th><th class="opt">Бонус</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.created_at|dmy }}</td>
+      <td>{{ r.agent_name }}</td>
+      <td>{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.friend_name }}</a>{% else %}{{ r.friend_name or 'ещё не зарегистрировался' }}{% endif %}</td>
+      <td><span class="tag ref-{{ r.status }}">{{ REF_STATUSES[r.status] }}</span></td>
+      <td class="num opt">{% if r.status == 'paid' %}{{ money(r.bonus) }}{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="5" class="muted">Переходов не было.</td></tr>{% endfor %}
+  </table>
+</div>
+
+{% if can_edit(staff, 'finance') %}
+<div class="card">
+  <h2>Настройки программы</h2>
+  <form method="post" action="/reports/referrals" class="grid2">
+    <label>Бонус агенту<input name="bonus" value="{{ settings.bonus }}"></label>
+    <label>Платёж друга не меньше<input name="min_payment" value="{{ settings.min_payment }}"></label>
+    <label class="check wide"><input type="checkbox" name="enabled" value="1" {% if settings.enabled %}checked{% endif %}> Программа включена</label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">Бонус платится один раз за друга и только с платежа не
+    меньше порога: иначе хватило бы перевести сто рублей с собственной карты
+    на карту знакомого. Выключенная программа не показывает клиентам экран
+    «Мои друзья» и новых бонусов не начисляет.</p>
+</div>
+{% endif %}
+{% endblock %}

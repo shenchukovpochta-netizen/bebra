@@ -2,7 +2,7 @@
 {% block title %}Окупаемость по моделям — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Окупаемость по моделям</h1>
-  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/payback" class="on">Окупаемость</a></nav>
+  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/payback" class="on">Окупаемость</a><a href="/reports/referrals">Приглашения</a></nav>
   <form method="get" class="search">
     <input type="date" name="since" value="{{ since|iso }}">
     <input type="date" name="until" value="{{ until|iso }}">

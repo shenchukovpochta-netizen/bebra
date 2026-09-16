@@ -22,6 +22,7 @@ import hmac
 import html
 import json
 import os
+import random
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -1260,3 +1261,121 @@ def payback_total(rows: Iterable[dict]) -> dict[str, Any]:
     total["check_per_day"] = (to_money(total["paid"] / total["rented_days"])
                               if total["rented_days"] > 0 else None)
     return total
+
+
+# ─────────────────────── реферальная программа ───────────────────────
+
+REF_STATUSES: dict[str, str] = {
+    "click": "Перешёл", "signed": "Зарегистрировался",
+    "rented": "Взял велосипед", "paid": "Заплатил",
+}
+# Воронка идёт только вперёд: друг, уже взявший велосипед, не откатывается
+# в «перешёл» из-за повторного нажатия ссылки.
+REF_ORDER = ("click", "signed", "rented", "paid")
+
+# Код приглашения: без похожих символов (0/O, 1/I/L) - его диктуют голосом
+# и переписывают с экрана.
+REF_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+REF_CODE_LEN = 6
+REF_BONUS_DEFAULT = Decimal("500.00")
+# Бонус платится с первого платежа друга, но не за копейку: иначе хватило
+# бы перевести 10 ₽ с собственной карты на карту знакомого.
+REF_MIN_PAYMENT_DEFAULT = Decimal("1000.00")
+
+
+def make_ref_code(rnd: Any = None) -> str:
+    """Новый код приглашения. Уникальность проверяет база, а не эта функция."""
+    rnd = rnd or random
+    return "".join(rnd.choice(REF_ALPHABET) for _ in range(REF_CODE_LEN))
+
+
+def clean_ref_code(raw: Any) -> str:
+    """Код из ссылки или из сообщения: только буквы алфавита кода.
+
+    Человек присылает его как угодно - строчными, с пробелами, вместе с
+    «мой код». Всё лишнее отбрасывается, регистр поднимается.
+    """
+    text = str(raw or "").strip().upper()
+    kept = "".join(ch for ch in text if ch in REF_ALPHABET)
+    return kept[:REF_CODE_LEN] if len(kept) >= REF_CODE_LEN else ""
+
+
+def ref_link(bot_username: str, code: str) -> str:
+    """Ссылка-приглашение. Пустое имя бота - вернётся один код: показать
+    его всё равно надо, ссылку соберёт оператор."""
+    name = str(bot_username or "").lstrip("@")
+    return f"https://t.me/{name}?start={code}" if name else code
+
+
+def ref_status_at_least(status: str, target: str) -> bool:
+    try:
+        return REF_ORDER.index(status) >= REF_ORDER.index(target)
+    except ValueError:
+        return False
+
+
+def ref_settings(raw: dict[str, str] | None) -> dict[str, Any]:
+    """Настройки программы из таблицы настроек, с разумными значениями
+    по умолчанию: программа работает сразу, без обязательной настройки."""
+    raw = raw or {}
+
+    def money_or(key: str, default: Decimal) -> Decimal:
+        try:
+            value = to_money(Decimal(str(raw[key])))
+        except (KeyError, ArithmeticError, ValueError, TypeError):
+            return default
+        return value if value >= 0 else default
+
+    return {
+        "enabled": str(raw.get("ref_enabled", "1")) not in ("0", "", "false"),
+        "bonus": money_or("ref_bonus", REF_BONUS_DEFAULT),
+        "min_payment": money_or("ref_min_payment", REF_MIN_PAYMENT_DEFAULT),
+    }
+
+
+def ref_funnel(rows: Iterable[dict]) -> dict[str, Any]:
+    """Воронка программы: перешли → зарегистрировались → взяли → заплатили.
+
+    Каждый шаг считает и тех, кто ушёл дальше: друг, который уже заплатил,
+    остаётся и в «перешёл». Иначе воронка сужалась бы задним числом и
+    конверсия считалась бы от нуля.
+    """
+    rows = list(rows)
+    steps = {code: sum(1 for r in rows
+                       if ref_status_at_least(str(r.get("status") or ""), code))
+             for code in REF_ORDER}
+    paid_bonus = sum((to_money(r.get("bonus") or 0) for r in rows
+                      if r.get("status") == "paid"), Decimal(0))
+    steps["bonus"] = to_money(paid_bonus)
+    steps["conversion"] = (float(round(100 * steps["paid"] / steps["click"], 1))
+                           if steps["click"] else None)
+    # Во что обошёлся приведённый клиент: бонусы делятся на заплативших.
+    steps["price"] = (to_money(paid_bonus / steps["paid"]) if steps["paid"] else None)
+    return steps
+
+
+def ref_agents(rows: Iterable[dict]) -> list[dict]:
+    """Агенты по убыванию заплативших друзей: кого благодарить."""
+    agents: dict[int, dict] = {}
+    for row in rows:
+        agent_id = int(row["agent_id"])
+        cell = agents.setdefault(agent_id, {
+            "agent_id": agent_id, "agent_name": row.get("agent_name"),
+            "agent_phone": row.get("agent_phone"), "ref_code": row.get("ref_code"),
+            "click": 0, "signed": 0, "rented": 0, "paid": 0,
+            "bonus": Decimal(0), "last_at": None, "last_friend": None})
+        status = str(row.get("status") or "")
+        for code in REF_ORDER:
+            if ref_status_at_least(status, code):
+                cell[code] += 1
+        if status == "paid":
+            cell["bonus"] += to_money(row.get("bonus") or 0)
+        at = row.get("created_at")
+        if at is not None and (cell["last_at"] is None or at > cell["last_at"]):
+            cell["last_at"] = at
+            cell["last_friend"] = row.get("friend_name")
+    out = list(agents.values())
+    for cell in out:
+        cell["bonus"] = to_money(cell["bonus"])
+    out.sort(key=lambda a: (a["paid"], a["signed"], a["click"]), reverse=True)
+    return out

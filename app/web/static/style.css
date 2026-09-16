@@ -184,3 +184,7 @@ tr.warn-row td{background:#FFF7EC}
   th.opt,td.opt{display:none}
 }
 tr.total td{border-top:2px solid var(--line);font-weight:600}
+.tag.ref-click{background:var(--chip);color:var(--brand-dark)}
+.tag.ref-signed{background:#E8F4FF;color:#0B5A86}
+.tag.ref-rented{background:var(--brand);color:#fff}
+.tag.ref-paid{background:#E4F5E4;color:var(--ok)}

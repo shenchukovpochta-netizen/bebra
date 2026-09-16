@@ -8,11 +8,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
 from . import logic
+
+log = logging.getLogger(__name__)
 
 
 class ServiceError(Exception):
@@ -86,6 +89,13 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
                                       "tariff_name": tariff["name"],
                                       "billing": "auto", "status": "active"},
                          today=date.today())
+    # Шаг воронки приглашений. Учёт не вправе сорвать выдачу велосипеда,
+    # поэтому ошибка здесь только в логе.
+    try:
+        await ref_rented(crm, client)
+    except Exception:                                    # noqa: BLE001
+        log.exception("реферальная программа: аренда клиента %s не отмечена",
+                      client.get("id"))
     return rental_id
 
 
@@ -306,3 +316,106 @@ async def finish_stock_take(crm: Any, take: dict, *, by: str,
                 await crm.update_bike(int(bike["id"]), status="available", by=by)
                 returned += 1
     return {**counts, "lost": lost, "returned": returned}
+
+
+async def ref_code_of(crm: Any, client: dict) -> str:
+    """Код приглашения клиента: выдаётся при первом показе в кабинете.
+
+    Заранее коды не раздаются: у большинства клиентов этот экран никто
+    не откроет, а занятые коды мешали бы подбирать короткие.
+    """
+    if client.get("ref_code"):
+        return str(client["ref_code"])
+    for _ in range(10):
+        code = logic.make_ref_code()
+        if await crm.client_by_ref_code(code) is not None:
+            continue
+        if await crm.set_ref_code(client["id"], code):
+            client["ref_code"] = code
+            return code
+    raise ServiceError("Не удалось выдать код приглашения, попробуйте ещё раз.")
+
+
+async def ref_click(crm: Any, code: str, tg_id: int) -> dict | None:
+    """Переход по ссылке-приглашению. None - записывать нечего.
+
+    Пустой ответ - это норма: код чужой, свой собственный, человек уже
+    закреплён за другим агентом или уже наш клиент. Приглашать своих
+    клиентов заново программа не даёт - иначе бонус платился бы за тех,
+    кто и так катается.
+    """
+    code = logic.clean_ref_code(code)
+    if not code:
+        return None
+    agent = await crm.client_by_ref_code(code)
+    if agent is None or agent.get("status") != "active":
+        return None
+    if agent.get("tg_id") and int(agent["tg_id"]) == int(tg_id):
+        return None
+    if await crm.client_by_tg(tg_id) is not None:
+        return None
+    if await crm.referral_of_tg(tg_id) is not None:
+        return None
+    ref_id = await crm.add_referral(agent_id=agent["id"], tg_id=tg_id)
+    if ref_id is None:
+        return None
+    return await crm.referral_of_tg(tg_id)
+
+
+async def ref_signed(crm: Any, client: dict) -> dict | None:
+    """Друг завёл карточку: связать её с переходом.
+
+    Зовётся при появлении клиента с Telegram - из бота и из панели. Без
+    этого воронка обрывалась бы на «перешёл», а бонус платить было бы
+    не за кого.
+    """
+    tg_id = client.get("tg_id")
+    if not tg_id:
+        return None
+    ref = await crm.referral_of_tg(int(tg_id))
+    if ref is None or ref["agent_id"] == client["id"]:
+        return None
+    if ref.get("client_id") is None:
+        await crm.update_referral(ref["id"], client_id=client["id"],
+                                  status="signed", signed_at=datetime.now(UTC))
+        await crm.update_client(client["id"], invited_by=ref["agent_id"],
+                                invited_at=datetime.now(UTC))
+    return await crm.referral_of_tg(int(tg_id))
+
+
+async def ref_rented(crm: Any, client: dict) -> dict | None:
+    """Друг взял велосипед. Шаг воронки, деньгами ещё не пахнет."""
+    ref = await crm.referral_of_client(client["id"])
+    if ref is None or logic.ref_status_at_least(ref["status"], "rented"):
+        return ref
+    await crm.update_referral(ref["id"], status="rented", rented_at=datetime.now(UTC))
+    return await crm.referral_of_client(client["id"])
+
+
+async def ref_paid(crm: Any, client: dict, amount: Decimal, *,
+                   by: str = "referral") -> dict | None:
+    """Друг заплатил: начислить бонус агенту. None - платить не за что.
+
+    Бонус платится один раз и только с платежа не меньше порога: иначе
+    хватило бы перевести сто рублей с собственной карты на карту знакомого
+    и получить бонус.
+    """
+    ref = await crm.referral_of_client(client["id"])
+    if ref is None or ref["status"] == "paid":
+        return None
+    settings = logic.ref_settings(await crm.settings())
+    if not settings["enabled"] or settings["bonus"] <= 0:
+        return None
+    if logic.to_money(amount) < settings["min_payment"]:
+        return None
+    agent = await crm.client(ref["agent_id"])
+    if agent is None or agent.get("status") != "active":
+        return None
+    note = f"Бонус за друга: {client.get('full_name') or client['id']}"
+    ledger_id = await crm.pay_referral_bonus(
+        ref["id"], agent_id=agent["id"], amount=settings["bonus"], note=note,
+        created_by=by)
+    if ledger_id is None:
+        return None
+    return {**(await crm.referral_of_client(client["id"]) or {}),
+            "agent": agent, "bonus": settings["bonus"]}

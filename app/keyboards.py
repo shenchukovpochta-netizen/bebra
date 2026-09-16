@@ -300,6 +300,8 @@ def cabinet(lang: str = "ru") -> InlineKeyboardMarkup:
                               callback_data="cab:history"),
          InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_CONTRACT"),
                               callback_data="cab:contract")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_FRIENDS"),
+                              callback_data="cab:friends")],
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REFRESH"), callback_data="cab:home")],
     ])
 

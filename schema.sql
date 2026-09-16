@@ -779,3 +779,52 @@ create index if not exists stock_take_items_idx on crm.stock_take_items (take_id
 -- превратил бы «нашли 220 из 220» в «нашли 221».
 create unique index if not exists stock_take_items_one on crm.stock_take_items
   (take_id, bike_id) where bike_id is not null;
+
+-- ─────────────────────── реферальная программа ───────────────────────
+--
+-- Курьер приводит курьера: это самый дешёвый канал, который у проката
+-- вообще есть. Код приглашения выдаётся клиенту в кабинете бота, друг
+-- приходит по ссылке t.me/бот?start=<код>, и его путь виден целиком:
+-- перешёл → зарегистрировался → взял велосипед → заплатил.
+--
+-- Бонус агенту - запись в crm.ledger вида adjust, а не payment: платежи
+-- клиентов формируют средний чек парка, и бонус его бы завысил.
+
+alter table crm.clients add column if not exists ref_code text;
+alter table crm.clients add column if not exists invited_by bigint
+  references crm.clients (id);
+alter table crm.clients add column if not exists invited_at timestamptz;
+create unique index if not exists clients_ref_code_idx on crm.clients (ref_code)
+  where ref_code is not null;
+create index if not exists clients_invited_by_idx on crm.clients (invited_by);
+
+create table if not exists crm.referrals (
+  id         bigserial primary key,
+  agent_id   bigint      not null references crm.clients (id),
+  -- Друг сначала известен только по Telegram: карточки клиента у него
+  -- ещё нет, а переход уже был.
+  tg_id      bigint      not null,
+  client_id  bigint      references crm.clients (id),
+  status     text        not null default 'click',  -- click|signed|rented|paid
+  bonus      numeric(12,2) not null default 0,
+  ledger_id  bigint      references crm.ledger (id),
+  note       text,
+  created_at timestamptz not null default now(),
+  signed_at  timestamptz,
+  rented_at  timestamptz,
+  paid_at    timestamptz
+);
+-- Один переход на человека: перебрал ссылки трёх знакомых - друг остаётся
+-- за первым. Иначе бонус за одного и того же друга платился бы трижды.
+create unique index if not exists referrals_tg_idx on crm.referrals (tg_id);
+create index if not exists referrals_agent_idx on crm.referrals (agent_id, status);
+
+-- Настройки, которые меняет владелец, а не разработчик: размер бонуса и
+-- порог оплаты. Ключ-значение, потому что настроек всего несколько и
+-- отдельная таблица на каждую была бы дороже пользы.
+create table if not exists crm.settings (
+  key        text        primary key,
+  value      text        not null,
+  updated_at timestamptz not null default now(),
+  updated_by text
+);

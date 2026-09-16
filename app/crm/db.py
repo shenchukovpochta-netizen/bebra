@@ -24,11 +24,13 @@ BIKE_FIELDS = frozenset({
 })
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
-    "note", "source",
+    "note", "source", "ref_code", "invited_by", "invited_at",
 })
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
+REFERRAL_FIELDS = frozenset({"status", "client_id", "bonus", "ledger_id", "note",
+                             "signed_at", "rented_at", "paid_at"})
 TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
                          "found", "missing", "extra", "closed_at"})
 ORDER_FIELDS = frozenset({
@@ -1161,3 +1163,110 @@ class CrmDB:
                 for key in keys:
                     cell[key] = row[key]
         return out
+
+    # ─────────────────────── настройки ───────────────────────
+
+    async def settings(self) -> dict[str, str]:
+        rows = await self.pool.fetch("select key, value from crm.settings")
+        return {r["key"]: r["value"] for r in rows}
+
+    async def set_setting(self, key: str, value: str, *, by: str) -> None:
+        await self.pool.execute(
+            """
+            insert into crm.settings (key, value, updated_by) values ($1, $2, $3)
+            on conflict (key) do update
+              set value = excluded.value, updated_by = excluded.updated_by,
+                  updated_at = now()
+            """, key, value, by)
+
+    # ─────────────────────── реферальная программа ───────────────────────
+
+    async def client_by_ref_code(self, code: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.clients where ref_code = $1", code))
+
+    async def set_ref_code(self, client_id: int, code: str) -> bool:
+        """Закрепить код за клиентом. False - код уже занят, зовите снова."""
+        try:
+            await self.pool.execute(
+                "update crm.clients set ref_code = $2, updated_at = now() "
+                "where id = $1", client_id, code)
+        except asyncpg.UniqueViolationError:
+            return False
+        return True
+
+    _REFERRAL_SELECT = """
+        select r.*, a.full_name as agent_name, a.phone as agent_phone,
+               a.ref_code as ref_code, f.full_name as friend_name,
+               f.phone as friend_phone
+        from crm.referrals r
+        join crm.clients a on a.id = r.agent_id
+        left join crm.clients f on f.id = r.client_id
+    """
+
+    async def referrals(self, *, agent_id: int | None = None,
+                        since: datetime | None = None, until: datetime | None = None,
+                        limit: int = 1000) -> list[dict]:
+        conds, args = [], []
+        if agent_id:
+            args.append(agent_id)
+            conds.append(f"r.agent_id = ${len(args)}")
+        if since is not None:
+            args.append(since)
+            conds.append(f"r.created_at >= ${len(args)}")
+        if until is not None:
+            args.append(until)
+            conds.append(f"r.created_at < ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._REFERRAL_SELECT} {where} order by r.created_at desc, r.id desc "
+            f"limit ${len(args)}", *args))
+
+    async def referral_of_tg(self, tg_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._REFERRAL_SELECT} where r.tg_id = $1", tg_id))
+
+    async def referral_of_client(self, client_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._REFERRAL_SELECT} where r.client_id = $1", client_id))
+
+    async def add_referral(self, *, agent_id: int, tg_id: int) -> int | None:
+        """Записать переход. None - этот человек уже за кем-то закреплён."""
+        try:
+            return int(await self.pool.fetchval(
+                "insert into crm.referrals (agent_id, tg_id) values ($1, $2) "
+                "returning id", agent_id, tg_id))
+        except asyncpg.UniqueViolationError:
+            return None
+
+    async def update_referral(self, ref_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, REFERRAL_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.referrals set {sets} where id = $1", ref_id, *values)
+
+    async def pay_referral_bonus(self, ref_id: int, *, agent_id: int, amount: Decimal,
+                                 note: str, created_by: str) -> int | None:
+        """Начислить бонус агенту и отметить друга оплатившим - одной
+        транзакцией. None - бонус по этому другу уже платили.
+
+        Вид записи - adjust, а не payment: платежи клиентов формируют
+        средний чек парка, и бонус завысил бы его на деньги, которых
+        никто не вносил.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "update crm.referrals set status = 'paid', paid_at = now(), "
+                "bonus = $2 where id = $1 and status <> 'paid' returning id", ref_id,
+                amount)
+            if row is None:
+                return None
+            ledger_id = int(await conn.fetchval(
+                "insert into crm.ledger (client_id, kind, amount, note, created_by) "
+                "values ($1, 'adjust', $2, $3, $4) returning id",
+                agent_id, amount, note, created_by))
+            await conn.execute("update crm.referrals set ledger_id = $2 where id = $1",
+                               ref_id, ledger_id)
+            return ledger_id

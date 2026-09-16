@@ -8,12 +8,13 @@ from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from .. import i18n, logic, tasks, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import service as crm_service
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
@@ -105,10 +106,27 @@ def pending_text(user: dict) -> str:
     return i18n.t(lang, "PENDING_WAIT")
 
 
+async def _catch_invite(crm: Any, command: CommandObject | None, tg_id: int) -> None:
+    """Код приглашения из ссылки t.me/бот?start=<код>.
+
+    Переход записывается до анкеты: человек может уйти на полпути, и агент
+    всё равно должен увидеть, что по его ссылке приходили. Ошибка CRM
+    регистрацию не рушит - это учёт, а не цикл бота.
+    """
+    if crm is None or command is None or not (command.args or "").strip():
+        return
+    try:
+        await crm_service.ref_click(crm, command.args, tg_id)
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: переход по приглашению %s не записан", command.args)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, db: Database, cfg: Config, vault: Vault,
-                    user: dict) -> None:
+                    user: dict, command: CommandObject | None = None,
+                    crm: Any = None) -> None:
     lang = i18n.user_lang(user)
+    await _catch_invite(crm, command, user["tg_id"])
     if user["state"] == logic.PENDING:
         # Заявка на проверке или уже одобрена и ждёт данных выдачи: /start
         # здесь - «что там с моей заявкой», а не «заполнить заново». Иначе

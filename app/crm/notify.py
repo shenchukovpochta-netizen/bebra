@@ -94,3 +94,15 @@ async def rental_closed(bot: Any, db: Any, crm: Any, client: dict, rental: dict)
     text = i18n.t(lang, "CAB_RENTAL_CLOSED").format(
         bike=bot_logic.esc(bike or "—"), balance=logic.money(balance))
     return await _send(bot, client["tg_id"], text)
+
+
+async def referral_bonus(bot: Any, db: Any, agent: dict, friend: dict,
+                         amount: Any) -> bool:
+    """Агенту: друг заплатил, бонус на балансе. Деньги уже начислены -
+    недоставленное сообщение их не отменяет."""
+    if not agent.get("tg_id") or bot is None:
+        return False
+    lang = await _lang(db, agent["tg_id"])
+    text = i18n.t(lang, "CAB_REF_BONUS").format(
+        name=bot_logic.esc(friend.get("full_name") or ""), amount=logic.money(amount))
+    return await _send(bot, agent["tg_id"], text, kb.cabinet_entry(lang))
