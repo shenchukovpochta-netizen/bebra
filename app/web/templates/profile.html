@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ profile.name }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ profile.name }}{% if profile.built_in %} <span class="tag">встроенный</span>{% endif %}</h1>
+  <a class="btn ghost" href="/profiles">Все профили</a></div>
+
+{% if profile.built_in %}
+<p class="flash">Профиль «Владелец» открыт весь и не меняется — иначе панель можно было бы закрыть от самого себя без пути назад.</p>
+{% endif %}
+
+<form method="post" action="/profiles/{{ profile.id }}">
+  <section class="card">
+    <label style="max-width:420px">Название <input name="name" value="{{ profile.name }}" {% if profile.built_in or not can_manage %}disabled{% endif %} required></label>
+    <h2>Разделы</h2>
+    <table class="perms">
+      <tr><th>Раздел</th>{% for level in LEVEL_ORDER %}<th>{{ LEVELS[level] }}</th>{% endfor %}</tr>
+      {% for code, label in SECTIONS.items() %}
+      {% set cur = perms.sections.get(code, '') %}
+      <tr>
+        <td>{{ label }}</td>
+        {% for level in LEVEL_ORDER %}
+        <td><label class="cell"><input type="radio" name="s_{{ code }}" value="{{ level }}" {% if cur == level %}checked{% endif %} {% if profile.built_in or not can_manage %}disabled{% endif %}></label></td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </table>
+    <h2>Отдельные права</h2>
+    {% for code, label in ACTIONS.items() %}
+    <label class="check"><input type="checkbox" name="a_{{ code }}" value="1" {% if perms.actions.get(code) %}checked{% endif %} {% if profile.built_in or not can_manage %}disabled{% endif %}> {{ label }}</label>
+    {% endfor %}
+    <p class="muted">«Смотреть и менять» в разделе «Сотрудники» — это полный доступ: такой человек сможет выдать себе любые права. Давайте его только тем, кому доверяете парк целиком.</p>
+    {% if can_manage and not profile.built_in %}
+    <div class="issue-bar"><span class="spacer"></span><button type="submit">Сохранить права</button></div>
+    {% endif %}
+  </section>
+</form>
+
+<section class="card">
+  <h2>Кто на этом профиле <small class="muted">({{ staff_on_it|length }})</small></h2>
+  {% if staff_on_it %}
+  <p>{% for s in staff_on_it %}<a href="/staff">{{ s.name or s.login }}</a>{% if not s.active %} <span class="muted">(отключён)</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <p class="muted">Смена прав подхватится у них на следующем же клике.</p>
+  {% else %}
+  <p class="muted">Пока никого. Назначается в <a href="/staff">списке сотрудников</a>.</p>
+  {% endif %}
+  {% if can_manage and not profile.built_in and not staff_on_it %}
+  <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Удалить профиль «{{ profile.name }}»?')">
+    <button type="submit" class="ghost">Удалить профиль</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

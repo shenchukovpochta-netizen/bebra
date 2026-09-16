@@ -1,40 +1,43 @@
 {% extends "base.html" %}
+{% block title %}Сотрудники — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="bar"><h1>{{ staff.name or staff.login }} <small class="muted">{{ ROLES[staff.role] }}</small></h1>
-  <form method="post" action="/logout"><button type="submit" class="ghost">Выйти</button></form></div>
-<div class="cols">
-<section class="card narrow">
-  <h2>Сменить свой пароль</h2>
-  <form method="post" action="/me/password">
-    <label>Текущий <input name="old" type="password" autocomplete="current-password" required></label>
-    <label>Новый <input name="new" type="password" autocomplete="new-password" required></label>
-    <button type="submit">Сменить</button>
-  </form>
-</section>
-{% if admin %}
+<div class="bar"><h1>Сотрудники</h1>
+  <a class="btn ghost" href="/profiles">Профили доступа</a></div>
 <section class="card">
-  <h2>Сотрудники</h2>
   <table>
-    <tr><th>Логин</th><th>Имя</th><th>Роль</th><th>Доступ</th><th>Новый пароль</th><th></th></tr>
+    <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Доступ</th><th>Новый пароль</th><th></th></tr>
     {% for s in rows %}
     <tr class="{% if not s.active %}muted{% endif %}">
-      <td>{{ s.login }}</td><td>{{ s.name }}</td><td>{{ ROLES.get(s.role, s.role) }}</td>
+      <td>{{ s.login }}</td><td>{{ s.name }}</td>
+      <td>
+        {% if can_manage and s.id != staff.id %}
+        <form method="post" action="/staff/{{ s.id }}/profile" class="inline-form">
+          <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {% if p.id == s.profile_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
+          <button type="submit" class="ghost">Сменить</button>
+        </form>
+        {% else %}
+        <a href="/profiles/{{ s.profile_id }}">{{ s.profile_name or 'без профиля' }}</a>{% if s.id == staff.id %} <small class="muted">(вы)</small>{% endif %}
+        {% endif %}
+      </td>
       <td>{{ 'да' if s.active else 'нет' }}</td>
-      <td><form method="post" action="/staff/{{ s.id }}/password" class="inline-form"><input name="password" type="password" size="10" autocomplete="new-password"><button type="submit" class="ghost">Задать</button></form></td>
-      <td>{% if s.id != staff.id %}<form method="post" action="/staff/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'Отключить' if s.active else 'Включить' }}</button></form>{% endif %}</td>
+      <td>{% if can_manage %}<form method="post" action="/staff/{{ s.id }}/password" class="inline-form"><input name="password" type="password" size="10" autocomplete="new-password"><button type="submit" class="ghost">Задать</button></form>{% endif %}</td>
+      <td>{% if can_manage and s.id != staff.id %}<form method="post" action="/staff/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'Отключить' if s.active else 'Включить' }}</button></form>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
+  <p class="muted">Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале статусов и в записях по деньгам.</p>
+</section>
+{% if can_manage %}
+<section class="card narrow">
   <h2>Добавить</h2>
   <form method="post" action="/staff" class="grid2">
     <label>Логин <input name="login" required></label>
     <label>Имя <input name="name"></label>
     <label>Пароль <input name="password" type="password" autocomplete="new-password" required></label>
-    <label>Роль <select name="role"><option value="manager">Менеджер</option><option value="admin">Администратор</option></select></label>
+    <label>Профиль доступа <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {% if p.code == 'manager' %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select></label>
     <button type="submit">Добавить</button>
   </form>
-  <p class="muted">Менеджер делает всё, кроме управления сотрудниками. Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале.</p>
+  <p class="muted">Профиль решает, какие разделы человек увидит. Свой профиль сменить нельзя — чтобы не остаться без доступа к этой странице.</p>
 </section>
 {% endif %}
-</div>
 {% endblock %}

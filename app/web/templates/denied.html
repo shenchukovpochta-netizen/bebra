@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Нет доступа — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Нет доступа</h1>
+  <p>Профиль <b>{{ staff.profile_name or 'без профиля' }}</b> не открывает: <b>{{ what }}</b>.</p>
+  <p class="muted">Права выдаёт владелец в разделе «Сотрудники» → «Профили доступа».
+    Что открыто вам — видно в <a href="/me">своём кабинете</a>.</p>
+  <a class="btn ghost" href="{{ home_for(staff) }}">Назад в панель</a>
+</div>
+{% endblock %}

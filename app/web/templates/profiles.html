@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Профили доступа — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Профили доступа</h1>
+  <a class="btn ghost" href="/staff">Сотрудники</a></div>
+<section class="card">
+  <table>
+    <tr><th>Профиль</th><th>Разделы</th><th>Сотрудников</th></tr>
+    {% for p in rows %}
+    {% set perms = p.perms.get('sections') or {} %}
+    <tr>
+      <td><a href="/profiles/{{ p.id }}">{{ p.name }}</a>{% if p.built_in %} <span class="tag">встроенный</span>{% endif %}</td>
+      <td>{% for code, label in SECTIONS.items() %}{% if perms.get(code) %}<span class="tag {% if perms[code] == 'edit' %}ok{% endif %}">{{ label }}{% if perms[code] == 'view' %} · только смотреть{% endif %}</span> {% endif %}{% endfor %}
+        {% if not perms %}<span class="muted">ничего не открыто</span>{% endif %}</td>
+      <td>{{ p.staff_count }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">«Владелец» не меняется и не удаляется: это запасной ключ от панели. Остальные профили — ваши, правьте как удобно; права действуют сразу, перезаходить не нужно.</p>
+</section>
+{% if can_manage %}
+<section class="card narrow">
+  <h2>Новый профиль</h2>
+  <form method="post" action="/profiles">
+    <label>Название <input name="name" placeholder="Механик на Адоратского" required></label>
+    <button type="submit">Создать и настроить</button>
+  </form>
+  <p class="muted">Создастся пустым — разделы отметите на следующем экране.</p>
+</section>
+{% endif %}
+{% endblock %}

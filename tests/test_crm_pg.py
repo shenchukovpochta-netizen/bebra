@@ -24,7 +24,7 @@ try:
 
     from app.crm import logic, service
     from app.crm.db import CrmDB
-    from app.db import Database
+    from app.db import Database, _init_connection
     HAVE_PG = True
 except ImportError:                                    # pragma: no cover
     HAVE_PG = False
@@ -46,7 +46,8 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         cls.tmp.cleanup()
 
     async def asyncSetUp(self):
-        self.pool = await asyncpg.create_pool(self.pg.get_uri(), min_size=1, max_size=3)
+        self.pool = await asyncpg.create_pool(self.pg.get_uri(), min_size=1, max_size=3,
+                                              init=_init_connection)
         # Чистая схема на каждый тест: идемпотентный скрипт поверх drop.
         await self.pool.execute("drop schema if exists crm cascade; "
                                 "drop schema if exists bot cascade")
@@ -296,6 +297,54 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                           "A", "admin")
         staff = await self.crm.staff_by_id(sid)
         self.assertTrue(logic.verify_password("password-1", staff["password_hash"]))
+
+    async def test_access_profiles_match_the_code(self):
+        """Матрицу встроенных профилей держат в двух местах: schema.sql
+        кладёт её в базу, logic.BUILT_IN_PROFILES - в заглушку для тестов.
+        Разойдутся - панель будет пускать не туда, где её проверяли."""
+        rows = {p["code"]: p for p in await self.crm.access_profiles()}
+        self.assertEqual(list(rows), ["owner", "manager", "tech"])
+        for code, name, perms, built_in in logic.BUILT_IN_PROFILES:
+            row = rows[code]
+            self.assertEqual(row["name"], name, code)
+            self.assertEqual(row["built_in"], built_in, code)
+            self.assertEqual(logic.normalize_perms(row["perms"]),
+                             logic.normalize_perms(perms), code)
+            self.assertEqual(row["staff_count"], 0)
+
+    async def test_profile_crud_and_staff_backfill(self):
+        owner = await self.crm.access_profile_by_code("owner")
+        # сотрудник, заведённый до профилей, получает профиль повторным
+        # применением схемы - оно идемпотентно и в проде выполняется при старте
+        sid = await self.crm.create_staff("old", logic.hash_password("password-1"),
+                                          "Старый", "admin")
+        await self.pool.execute("update crm.staff set profile_id = null where id = $1", sid)
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual((await self.crm.staff_by_id(sid))["profile_code"], "owner")
+
+        pid = await self.crm.create_access_profile(
+            "Точка", {"sections": {"bikes": "edit"}, "actions": {}})
+        got = await self.crm.access_profile(pid)
+        self.assertEqual(logic.normalize_perms(got["perms"])["sections"], {"bikes": "edit"})
+        self.assertFalse(got["built_in"])
+        await self.crm.update_access_profile(
+            pid, name="Точка Павлюхина",
+            perms={"sections": {"bikes": "view"}, "actions": {"money_edit": True}})
+        got = await self.crm.access_profile(pid)
+        self.assertEqual(got["name"], "Точка Павлюхина")
+        self.assertTrue(logic.can_act({"perms": got["perms"]}, "money_edit"))
+        # встроенный не правится и не удаляется
+        await self.crm.update_access_profile(owner["id"], name="Хозяин", perms={})
+        self.assertEqual((await self.crm.access_profile(owner["id"]))["name"], "Владелец")
+        self.assertFalse(await self.crm.delete_access_profile(owner["id"]))
+        # занятый профиль держится сотрудником
+        await self.crm.set_staff_profile(sid, pid)
+        self.assertFalse(await self.crm.delete_access_profile(pid))
+        self.assertEqual({p["code"]: p["staff_count"]
+                          for p in await self.crm.access_profiles()}["owner"], 0)
+        await self.crm.set_staff_profile(sid, owner["id"])
+        self.assertTrue(await self.crm.delete_access_profile(pid))
+        self.assertIsNone(await self.crm.access_profile(pid))
 
 
 if __name__ == "__main__":

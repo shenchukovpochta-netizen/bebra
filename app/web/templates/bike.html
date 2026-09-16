@@ -3,12 +3,13 @@
 {% block content %}
 <div class="bar">
   <h1>{{ bike.code }} · {{ bike.model }} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
-  {% if bike.status == 'available' %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
+  {% if bike.status == 'available' and can_edit(staff, 'issue') %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
 </div>
 <div class="cols">
 <section class="card">
   <h2>Карточка</h2>
-  {% if bike.rental_id %}<p>Сейчас у <a href="/clients/{{ bike.client_id }}">{{ bike.full_name }}</a> — <a href="/rentals/{{ bike.rental_id }}">аренда #{{ bike.rental_id }}</a>.</p>{% endif %}
+  {% if bike.rental_id %}<p>Сейчас у {% if can_view(staff, 'clients') %}<a href="/clients/{{ bike.client_id }}">{{ bike.full_name }}</a>{% else %}{{ bike.full_name }}{% endif %} — {% if can_view(staff, 'rentals') %}<a href="/rentals/{{ bike.rental_id }}">аренда #{{ bike.rental_id }}</a>{% else %}аренда #{{ bike.rental_id }}{% endif %}.</p>{% endif %}
+  <fieldset {% if not can_edit(staff, 'bikes') %}disabled{% endif %} class="plain">
   <form method="post" action="/bikes/{{ bike.id }}/edit" class="grid2">
     <label>Инвентарный номер <input name="code" value="{{ bike.code }}" required></label>
     <label>Модель <input name="model" value="{{ bike.model }}" required></label>
@@ -26,8 +27,11 @@
     <label class="wide">Заметка <input name="note" value="{{ bike.note or '' }}"></label>
     <button type="submit">Сохранить</button>
   </form>
+  </fieldset>
+  {% if not can_edit(staff, 'bikes') %}<p class="muted">Парк вам открыт только на просмотр: карточка, ремонт и смена статуса — за механиком.</p>{% endif %}
   <p class="muted">Пробег растёт сам: его вписывают при выдаче и при возврате аренды, назад не крутится. Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
+{% if can_edit(staff, 'bikes') %}
 <section class="card">
   <h2>Статус</h2>
   {% if bike.rental_id %}
@@ -55,6 +59,7 @@
     <button type="submit">Записать</button>
   </form>
 </section>
+{% endif %}
 </div>
 <div class="cols">
 <section class="card">
@@ -81,7 +86,7 @@
   <table>
     <tr><th>#</th><th>Клиент</th><th>С</th><th>По</th><th>Статус</th></tr>
     {% for r in rentals %}
-    <tr><td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td><td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a></td>
+    <tr><td>{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ r.id }}">{{ r.id }}</a>{% else %}{{ r.id }}{% endif %}</td><td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
       <td>{{ r.started_on|dmy }}</td><td>{{ r.closed_on|dmy if r.closed_on else '' }}</td><td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
     {% else %}<tr><td colspan="5" class="muted">Ещё не выдавался.</td></tr>{% endfor %}
   </table>

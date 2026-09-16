@@ -60,24 +60,80 @@ class CrmDB:
     async def staff_count(self) -> int:
         return int(await self.pool.fetchval("select count(*) from crm.staff") or 0)
 
+    # Сотрудник всегда читается вместе со своим профилем: права нужны
+    # на каждом запросе, и второй поход в базу за ними - лишний.
+    _STAFF_SELECT = """
+        select s.*, p.name as profile_name, p.code as profile_code,
+               p.built_in as profile_built_in,
+               coalesce(p.perms, '{}'::jsonb) as perms
+        from crm.staff s
+        left join crm.access_profiles p on p.id = s.profile_id
+    """
+
     async def staff_by_login(self, login: str) -> dict | None:
         return _row(await self.pool.fetchrow(
-            "select * from crm.staff where login = $1", login))
+            f"{self._STAFF_SELECT} where s.login = $1", login))
 
     async def staff_by_id(self, staff_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
-            "select * from crm.staff where id = $1", staff_id))
+            f"{self._STAFF_SELECT} where s.id = $1", staff_id))
 
     async def staff_all(self) -> list[dict]:
         return _rows(await self.pool.fetch(
-            "select * from crm.staff order by active desc, id"))
+            f"{self._STAFF_SELECT} order by s.active desc, s.id"))
 
     async def create_staff(self, login: str, password_hash: str, name: str,
-                           role: str) -> int:
+                           role: str, profile_id: int | None = None) -> int:
         return int(await self.pool.fetchval(
-            "insert into crm.staff (login, password_hash, name, role) "
-            "values ($1, $2, $3, $4) returning id",
-            login, password_hash, name, role))
+            "insert into crm.staff (login, password_hash, name, role, profile_id) "
+            "values ($1, $2, $3, $4, $5) returning id",
+            login, password_hash, name, role, profile_id))
+
+    async def set_staff_profile(self, staff_id: int, profile_id: int | None) -> None:
+        await self.pool.execute(
+            "update crm.staff set profile_id = $2 where id = $1", staff_id, profile_id)
+
+    # ─────────────────────── профили доступа ───────────────────────
+
+    async def access_profiles(self) -> list[dict]:
+        """Профили со счётчиком сотрудников: сколько человек потеряет
+        доступ, если профиль изменить или удалить."""
+        return _rows(await self.pool.fetch(
+            """
+            select p.*, count(s.id) filter (where s.active) as staff_count
+            from crm.access_profiles p
+            left join crm.staff s on s.profile_id = p.id
+            group by p.id
+            order by p.built_in desc, p.name
+            """))
+
+    async def access_profile(self, profile_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.access_profiles where id = $1", profile_id))
+
+    async def access_profile_by_code(self, code: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.access_profiles where code = $1", code))
+
+    async def create_access_profile(self, name: str, perms: dict) -> int:
+        return int(await self.pool.fetchval(
+            "insert into crm.access_profiles (name, perms) values ($1, $2::jsonb) "
+            "returning id", name, perms))
+
+    async def update_access_profile(self, profile_id: int, *, name: str,
+                                    perms: dict) -> None:
+        await self.pool.execute(
+            "update crm.access_profiles set name = $2, perms = $3::jsonb, "
+            "updated_at = now() where id = $1 and not built_in",
+            profile_id, name, perms)
+
+    async def delete_access_profile(self, profile_id: int) -> bool:
+        """False - профиль встроенный или на нём ещё висят сотрудники."""
+        row = await self.pool.fetchrow(
+            "delete from crm.access_profiles where id = $1 and not built_in "
+            "and not exists (select 1 from crm.staff where profile_id = $1) "
+            "returning id", profile_id)
+        return row is not None
 
     async def set_staff_password(self, staff_id: int, password_hash: str) -> None:
         await self.pool.execute(

@@ -1,28 +1,30 @@
 {% extends "base.html" %}
 {% block title %}{{ client.full_name }} — {{ app_title }}{% endblock %}
 {% block content %}
+{% set money_ok = can_view(staff, 'finance') %}
 <div class="bar">
   <h1>{{ client.full_name }}
     {% if client.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[client.status] }}</span>{% endif %}</h1>
-  {% if not rental and client.status == 'active' %}<a class="btn" href="/issue?client={{ client.id }}">⚡ Выдать велосипед</a>{% endif %}
+  {% if not rental and client.status == 'active' and can_edit(staff, 'issue') %}<a class="btn" href="/issue?client={{ client.id }}">⚡ Выдать велосипед</a>{% endif %}
 </div>
 
 <div class="cols">
 <section class="card">
   <h2>Состояние</h2>
   <dl>
-    <dt>Баланс</dt><dd class="{% if balance < 0 %}bad{% endif %}"><b>{{ money(balance) }}</b></dd>
-    <dt>Аренда</dt><dd>{% if rental %}<a href="/rentals/{{ rental.id }}">{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}</a> · {{ rental.tariff_name }} — {{ money(rental.price) }} / {{ rental.period_days }} дн. ({{ BILLING[rental.billing] }}){% else %}<span class="muted">нет</span>{% endif %}</dd>
-    <dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>
+    {% if money_ok %}<dt>Баланс</dt><dd class="{% if balance < 0 %}bad{% endif %}"><b>{{ money(balance) }}</b></dd>{% endif %}
+    <dt>Аренда</dt><dd>{% if rental %}{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ rental.id }}">{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}</a>{% else %}{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}{% endif %} · {{ rental.tariff_name }}{% if money_ok %} — {{ money(rental.price) }}{% endif %} / {{ rental.period_days }} дн. ({{ BILLING[rental.billing] }}){% else %}<span class="muted">нет</span>{% endif %}</dd>
+    {% if money_ok %}<dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>{% endif %}
     <dt>Телефон</dt><dd>{{ client.phone }}</dd>
     <dt>Telegram</dt><dd>{% if client.tg_id %}✅ ID {{ client.tg_id }}{% if client.username %} · @{{ client.username }}{% endif %}{% else %}<span class="muted">не привязан — клиент отправляет боту /cabinet и делится контактом</span>{% endif %}</dd>
-    <dt>Договор</dt><dd>{{ client.contract_no or '—' }}{% if has_contract %} · <a href="/clients/{{ client.id }}/contract">скачать подписанный</a>{% endif %}</dd>
+    <dt>Договор</dt><dd>{{ client.contract_no or '—' }}{% if has_contract and can_act(staff, 'client_docs') %} · <a href="/clients/{{ client.id }}/contract">скачать подписанный</a>{% endif %}</dd>
     {% if bot_user %}<dt>В боте</dt><dd>статус {{ bot_user.status }}, шаг {{ bot_user.state }}{% if bot_user.rent_until %}, срок по форме выдачи до {{ bot_user.rent_until|dmy }}{% endif %}</dd>{% endif %}
     <dt>Источник</dt><dd>{{ {'bot': 'из бота', 'import': 'импорт из таблицы'}.get(client.source, 'заведён в панели') }} · {{ client.created_at|dmy }}</dd>
-    {% if claim %}<dt>Заявка</dt><dd class="warn">#{{ claim.id }} на зачисление ждёт проверки — <a href="/claims">обработать</a></dd>{% endif %}
+    {% if claim and can_view(staff, 'claims') %}<dt>Заявка</dt><dd class="warn">#{{ claim.id }} на зачисление ждёт проверки — <a href="/claims">обработать</a></dd>{% endif %}
   </dl>
 </section>
 
+{% if can_act(staff, 'money_edit') %}
 <section class="card">
   <h2>Записать в журнал</h2>
   <form method="post" action="/clients/{{ client.id }}/ledger" class="grid2">
@@ -39,8 +41,10 @@
   </form>
   <p class="muted">Платёж клиенту с привязанным Telegram уходит уведомлением с новой датой «оплачено до». Начисления за периоды делает биллинг сам.</p>
 </section>
+{% endif %}
 </div>
 
+{% if money_ok %}
 <section class="card">
   <h2>Журнал операций</h2>
   <table>
@@ -58,6 +62,7 @@
     {% else %}<tr><td colspan="7" class="muted">Записей нет.</td></tr>{% endfor %}
   </table>
 </section>
+{% endif %}
 
 <div class="cols">
 <section class="card">
@@ -74,6 +79,7 @@
 
 <section class="card">
   <h2>Карточка</h2>
+  <fieldset {% if not can_edit(staff, 'clients') %}disabled{% endif %} class="plain">
   <form method="post" action="/clients/{{ client.id }}/edit">
     <label>ФИО <input name="full_name" value="{{ client.full_name }}" required></label>
     <label>Телефон <input name="phone" value="{{ client.phone }}" required></label>
@@ -82,6 +88,7 @@
     <label>Заметка <textarea name="note" rows="3">{{ client.note or '' }}</textarea></label>
     <button type="submit">Сохранить</button>
   </form>
+  </fieldset>
   <p class="muted">Чёрный список закрывает кабинет в Telegram и оформление аренды; телефон остаётся в базе, и повторная регистрация с этим номером будет видна здесь.</p>
 </section>
 </div>

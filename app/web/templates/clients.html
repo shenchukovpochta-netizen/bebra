@@ -9,12 +9,13 @@
     </select>
     <button type="submit">Найти</button>
   </form>
-  <a class="btn" href="/clients/new">+ Клиент</a>
-  <a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}">CSV</a>
+  {% if can_edit(staff, 'clients') %}<a class="btn" href="/clients/new">+ Клиент</a>{% endif %}
+  {% if can_view(staff, 'finance') %}<a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}">CSV</a>{% endif %}
 </div>
 <div class="card">
 <table>
-  <tr><th>Клиент</th><th>Телефон</th><th>Telegram</th><th>Аренда</th><th>Оплачено</th><th>Баланс</th></tr>
+  {% set money_ok = can_view(staff, 'finance') %}
+  <tr><th>Клиент</th><th>Телефон</th><th>Telegram</th><th>Аренда</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}</tr>
   {% for c in rows %}
   <tr>
     <td><a href="/clients/{{ c.id }}">{{ c.full_name }}</a>
@@ -23,7 +24,7 @@
     <td>{% if c.tg_id %}✅{% if c.username %} @{{ c.username }}{% endif %}{% else %}<span class="muted">не привязан</span>{% endif %}</td>
     <td>{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
     <td>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}</td>
-    <td class="num {% if c.balance < 0 %}bad{% endif %}">{{ money(c.balance) }}</td>
+    {% if money_ok %}<td class="num {% if c.balance < 0 %}bad{% endif %}">{{ money(c.balance) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="6" class="muted">Никого не найдено.</td></tr>{% endfor %}
 </table>

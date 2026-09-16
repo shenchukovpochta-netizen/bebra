@@ -33,6 +33,8 @@ from .config import WebConfig
 log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
 PUBLIC = ("/login", "/static", "/healthz")
+# Свой кабинет доступен любому сотруднику, каким бы урезанным ни был профиль.
+ALWAYS_OPEN = ("/logout", "/me", "/me/password")
 SESSION_DAYS = 14
 # Перебор пароля: после LOGIN_LIMIT неудач по одному логину вход в него
 # закрыт на LOGIN_WINDOW секунд; отдельный, более щедрый предел на адрес
@@ -121,6 +123,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
+        SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
+        LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
+        can_act=logic.can_act, visible_sections=logic.visible_sections,
+        home_for=logic.home_for,
         today=date.today, bot_enabled=bot is not None,
     )
     templates.env.filters["dmy"] = _dmy
@@ -147,9 +153,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         staff = getattr(request.state, "staff", None)
         return f"staff:{staff['login']}" if staff else "staff:?"
 
-    def is_admin(request: Request) -> bool:
-        staff = getattr(request.state, "staff", None)
-        return bool(staff and staff.get("role") == "admin")
+    def may_view(request: Request, code: str) -> bool:
+        return logic.can_view(getattr(request.state, "staff", None), code)
+
+    def may_edit(request: Request, code: str) -> bool:
+        return logic.can_edit(getattr(request.state, "staff", None), code)
+
+    def denied(request: Request, code: str) -> Response:
+        """Отказ показывается страницей, а не голым 403: оператор должен
+        увидеть, какого права ему не хватает, и кому писать."""
+        return render(request, "denied.html", status_code=403,
+                      what=logic.SECTIONS.get(code) or logic.ACTIONS.get(code, code))
 
     async def auth(request: Request, call_next: Any) -> Response:
         request.state.staff = None
@@ -162,6 +176,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if request.state.staff is None and not path.startswith(PUBLIC):
             target = path + (f"?{request.url.query}" if request.url.query else "")
             return redirect("/login?next=" + quote(target, safe=""))
+        # Один страж на все маршруты раздела: забыть его в новом обработчике
+        # нельзя, поэтому дыры вида «страницу закрыли, а POST оставили» не
+        # появляются. Свой пароль и выход открыты всегда.
+        code = logic.section_for(path) if path not in ALWAYS_OPEN else None
+        if code and request.state.staff is not None:
+            allowed = (may_view(request, code) if request.method in ("GET", "HEAD")
+                       else may_edit(request, code))
+            if not allowed:
+                return denied(request, code)
         return await call_next(request)
 
     # Порядок важен: последний add_middleware - внешний. Сессия должна быть
@@ -240,9 +263,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         login_failures.pop(login_key, None)
         request.session.clear()
         request.session["staff_id"] = staff["id"]
-        target = data.get("next") or "/"
+        home = logic.home_for(staff)
+        target = data.get("next") or home
         if not target.startswith("/") or target.startswith("//"):
-            target = "/"
+            target = home
+        if target == "/" and home != "/":
+            target = home
         return redirect(target)
 
     @app.post("/logout")
@@ -250,20 +276,26 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         request.session.clear()
         return redirect("/login")
 
+    @app.get("/me")
+    async def my_page(request: Request) -> Response:
+        """Свой кабинет: пароль и список выданных прав. Открыт всем —
+        сотрудник должен видеть, что ему разрешено, не спрашивая владельца."""
+        return render(request, "me.html")
+
     @app.post("/me/password")
     async def my_password(request: Request) -> Response:
         data = await form(request)
         staff = request.state.staff
         if not logic.verify_password(data.get("old") or "", staff.get("password_hash")):
             flash(request, "Текущий пароль неверный.", "err")
-            return redirect("/staff")
+            return redirect("/me")
         check = logic.check_password(data.get("new"))
         if not check.ok:
             flash(request, check.error, "err")
-            return redirect("/staff")
+            return redirect("/me")
         await crm.set_staff_password(staff["id"], logic.hash_password(check.value))
         flash(request, "Пароль изменён.")
-        return redirect("/staff")
+        return redirect("/me")
 
     # ─────────────────────── дашборд ───────────────────────
 
@@ -342,6 +374,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/clients.csv")
     async def clients_csv(request: Request) -> Response:
+        # В выгрузке колонка «Баланс»: она уезжает файлом, поэтому право
+        # на финансы обязательно - на самой странице баланс тоже скрыт.
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
         rows = []
@@ -362,6 +398,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/clients/new")
     async def client_new(request: Request) -> Response:
+        # «Завести нового» - правка раздела, а не просмотр: страж судит
+        # по методу запроса и такую страницу пропустил бы.
+        if not may_edit(request, "clients"):
+            return denied(request, "clients")
         return render(request, "client_form.html", client=None)
 
     async def _client_fields(request: Request, data: dict, *, current: dict | None) -> dict | None:
@@ -432,6 +472,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/clients/{client_id}/ledger")
     async def client_ledger_add(request: Request, client_id: int) -> Response:
+        if not logic.can_act(request.state.staff, "money_edit"):
+            return denied(request, "money_edit")
         client = await crm.client(client_id)
         if client is None:
             return render(request, "missing.html", status_code=404, what="Клиент")
@@ -459,6 +501,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/clients/{client_id}/contract")
     async def client_contract(request: Request, client_id: int) -> Response:
+        # В договоре паспортные данные: право на него отдельное от карточки.
+        if not logic.can_act(request.state.staff, "client_docs"):
+            return denied(request, "client_docs")
         client = await crm.client(client_id)
         if client is None or not client.get("tg_id"):
             return render(request, "missing.html", status_code=404, what="Договор")
@@ -484,6 +529,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/bikes/new")
     async def bike_new(request: Request) -> Response:
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
         return render(request, "bike_form.html", bike=None)
 
     def _bike_fields(request: Request, data: dict) -> dict | None:
@@ -870,6 +917,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/rentals/new")
     async def rental_new(request: Request) -> Response:
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
         clients_all = await crm.clients(status="active")
         free_clients = [c for c in clients_all if not c.get("rental_id")]
         client_id = request.query_params.get("client")
@@ -1170,36 +1219,67 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── сотрудники ───────────────────────
 
+    async def profile_choices() -> list[dict]:
+        return await crm.access_profiles()
+
+    def role_for(profile: dict | None) -> str:
+        """Старая колонка role остаётся: журнал и импорт её пишут. Права
+        решает профиль, role лишь повторяет его крупным планом."""
+        return "admin" if (profile or {}).get("code") == "owner" else "manager"
+
     @app.get("/staff")
     async def staff_page(request: Request) -> Response:
-        rows = await crm.staff_all() if is_admin(request) else []
-        return render(request, "staff.html", rows=rows, admin=is_admin(request))
+        return render(request, "staff.html", rows=await crm.staff_all(),
+                      profiles=await profile_choices(),
+                      can_manage=may_edit(request, "staff"))
 
     @app.post("/staff")
     async def staff_create(request: Request) -> Response:
-        if not is_admin(request):
-            return Response("Только для администратора", status_code=403)
         data = await form(request)
         login_check = logic.check_login(data.get("login"))
         password = logic.check_password(data.get("password"))
         name = logic.check_name(data.get("name") or data.get("login"), what="Имя")
-        role = logic.check_choice(data.get("role") or "manager", logic.ROLES, what="Роль")
-        for check in (login_check, password, name, role):
+        for check in (login_check, password, name):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/staff")
+        profile = await crm.access_profile(int(data.get("profile_id") or 0)) \
+            if (data.get("profile_id") or "").isdigit() else None
+        if profile is None:
+            flash(request, "Выберите профиль доступа.", "err")
+            return redirect("/staff")
         if await crm.staff_by_login(login_check.value) is not None:
             flash(request, "Такой логин уже есть.", "err")
             return redirect("/staff")
         await crm.create_staff(login_check.value, logic.hash_password(password.value),
-                               name.value, role.value)
-        flash(request, f"Сотрудник {login_check.value} добавлен.")
+                               name.value, role_for(profile), profile["id"])
+        flash(request, f"Сотрудник {login_check.value} добавлен — профиль "
+                       f"«{profile['name']}».")
+        return redirect("/staff")
+
+    @app.post("/staff/{staff_id}/profile")
+    async def staff_set_profile(request: Request, staff_id: int) -> Response:
+        data = await form(request)
+        target = await crm.staff_by_id(staff_id)
+        if target is None:
+            return render(request, "missing.html", status_code=404, what="Сотрудник")
+        if target["id"] == request.state.staff["id"]:
+            # Иначе владелец одним движением снимает с себя доступ к этой же
+            # странице и чинить это придётся руками в базе.
+            flash(request, "Свой профиль менять нельзя — попросите другого "
+                           "сотрудника с доступом к разделу.", "err")
+            return redirect("/staff")
+        profile = await crm.access_profile(int(data.get("profile_id") or 0)) \
+            if (data.get("profile_id") or "").isdigit() else None
+        if profile is None:
+            flash(request, "Такого профиля нет.", "err")
+            return redirect("/staff")
+        await crm.set_staff_profile(staff_id, profile["id"])
+        flash(request, f"{target['login']}: профиль «{profile['name']}».")
         return redirect("/staff")
 
     @app.post("/staff/{staff_id}/password")
     async def staff_password(request: Request, staff_id: int) -> Response:
-        if not is_admin(request):
-            return Response("Только для администратора", status_code=403)
         data = await form(request)
         password = logic.check_password(data.get("password"))
         if not password.ok:
@@ -1213,8 +1293,6 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/staff/{staff_id}/toggle")
     async def staff_toggle(request: Request, staff_id: int) -> Response:
-        if not is_admin(request):
-            return Response("Только для администратора", status_code=403)
         target = await crm.staff_by_id(staff_id)
         if target is None:
             return render(request, "missing.html", status_code=404, what="Сотрудник")
@@ -1225,18 +1303,105 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Доступ " + ("включён." if not target["active"] else "отключён."))
         return redirect("/staff")
 
+    # ─────────────────────── профили доступа ───────────────────────
+
+    def name_taken(exc: Exception) -> bool:
+        """Уникальный индекс на название профиля - единственная ошибка,
+        которую здесь можно объяснить оператору; всё прочее наверх."""
+        return "unique" in type(exc).__name__.lower()
+
+    def perms_from_form(data: Any) -> dict:
+        """Матрица из формы: по полю на раздел, галочки на действия."""
+        return logic.normalize_perms({
+            "sections": {code: (data.get(f"s_{code}") or "") for code in logic.SECTIONS},
+            "actions": {code: bool(data.get(f"a_{code}")) for code in logic.ACTIONS},
+        })
+
+    @app.get("/profiles")
+    async def profiles_page(request: Request) -> Response:
+        return render(request, "profiles.html", rows=await crm.access_profiles(),
+                      can_manage=may_edit(request, "staff"))
+
+    @app.get("/profiles/{profile_id}")
+    async def profile_page(request: Request, profile_id: int) -> Response:
+        profile = await crm.access_profile(profile_id)
+        if profile is None:
+            return render(request, "missing.html", status_code=404, what="Профиль")
+        staff_on_it = [s for s in await crm.staff_all()
+                       if s.get("profile_id") == profile_id]
+        return render(request, "profile.html", profile=profile,
+                      perms=logic.normalize_perms(profile.get("perms")),
+                      staff_on_it=staff_on_it, can_manage=may_edit(request, "staff"))
+
+    @app.post("/profiles")
+    async def profile_create(request: Request) -> Response:
+        data = await form(request)
+        name = logic.check_profile_name(data.get("name"))
+        if not name.ok:
+            flash(request, name.error, "err")
+            return redirect("/profiles")
+        try:
+            profile_id = await crm.create_access_profile(name.value, perms_from_form(data))
+        except Exception as exc:                           # noqa: BLE001
+            if not name_taken(exc):
+                raise
+            flash(request, "Профиль с таким названием уже есть.", "err")
+            return redirect("/profiles")
+        flash(request, f"Профиль «{name.value}» создан — отметьте разделы.")
+        return redirect(f"/profiles/{profile_id}")
+
+    @app.post("/profiles/{profile_id}")
+    async def profile_save(request: Request, profile_id: int) -> Response:
+        data = await form(request)
+        profile = await crm.access_profile(profile_id)
+        if profile is None:
+            return render(request, "missing.html", status_code=404, what="Профиль")
+        if profile["built_in"]:
+            flash(request, "Профиль «Владелец» не меняется: это запасной ключ "
+                           "от панели.", "err")
+            return redirect(f"/profiles/{profile_id}")
+        name = logic.check_profile_name(data.get("name"))
+        if not name.ok:
+            flash(request, name.error, "err")
+            return redirect(f"/profiles/{profile_id}")
+        perms = perms_from_form(data)
+        me = request.state.staff
+        if me.get("profile_id") == profile_id and perms["sections"].get("staff") != "edit":
+            flash(request, "Это ваш профиль: доступ к разделу «Сотрудники» "
+                           "снимать нельзя — некому будет его вернуть.", "err")
+            return redirect(f"/profiles/{profile_id}")
+        try:
+            await crm.update_access_profile(profile_id, name=name.value, perms=perms)
+        except Exception as exc:                           # noqa: BLE001
+            if not name_taken(exc):
+                raise
+            flash(request, "Профиль с таким названием уже есть.", "err")
+            return redirect(f"/profiles/{profile_id}")
+        # Сотрудники подхватят новые права со следующего запроса: права
+        # читаются из базы на каждом, а не кладутся в сессию при входе.
+        flash(request, "Права сохранены.")
+        return redirect(f"/profiles/{profile_id}")
+
+    @app.post("/profiles/{profile_id}/delete")
+    async def profile_delete(request: Request, profile_id: int) -> Response:
+        profile = await crm.access_profile(profile_id)
+        if profile is None:
+            return render(request, "missing.html", status_code=404, what="Профиль")
+        if not await crm.delete_access_profile(profile_id):
+            flash(request, "Профиль встроенный или на нём ещё есть сотрудники — "
+                           "сначала переведите их.", "err")
+            return redirect(f"/profiles/{profile_id}")
+        flash(request, f"Профиль «{profile['name']}» удалён.")
+        return redirect("/profiles")
+
     # ─────────────────────── импорт таблицы ───────────────────────
 
     @app.get("/import")
     async def import_page(request: Request) -> Response:
-        if not is_admin(request):
-            return Response("Только для администратора", status_code=403)
         return render(request, "import.html", report=None, applied=False)
 
     @app.post("/import")
     async def import_run(request: Request) -> Response:
-        if not is_admin(request):
-            return Response("Только для администратора", status_code=403)
         data = await request.form()
         upload = data.get("file")
         apply = data.get("apply") == "1"
@@ -1280,7 +1445,8 @@ async def ensure_admin(crm: Any, cfg: WebConfig) -> str | None:
     if await crm.staff_count() > 0:
         return None
     password = cfg.admin_password or logic.generate_password()
+    owner = await crm.access_profile_by_code("owner")
     await crm.create_staff(cfg.admin_login, logic.hash_password(password),
-                           "Администратор", "admin")
+                           "Администратор", "admin", owner["id"] if owner else None)
     return None if cfg.admin_password else password
 

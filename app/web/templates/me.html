@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ staff.name or staff.login }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ staff.name or staff.login }}
+    <small class="muted">{{ staff.profile_name or 'без профиля' }}</small></h1>
+  <form method="post" action="/logout"><button type="submit" class="ghost">Выйти</button></form></div>
+<div class="cols">
+<section class="card narrow">
+  <h2>Сменить свой пароль</h2>
+  <form method="post" action="/me/password">
+    <label>Текущий <input name="old" type="password" autocomplete="current-password" required></label>
+    <label>Новый <input name="new" type="password" autocomplete="new-password" required></label>
+    <button type="submit">Сменить</button>
+  </form>
+  <p class="muted">Логин <b>{{ staff.login }}</b>. Пароль знаете только вы: восстановить его нельзя, можно только задать новый — попросите владельца.</p>
+</section>
+<section class="card">
+  <h2>Что вам открыто</h2>
+  <table>
+    <tr><th>Раздел</th><th>Доступ</th></tr>
+    {% for code, label in SECTIONS.items() %}
+    <tr class="{% if not can_view(staff, code) %}muted{% endif %}">
+      <td>{{ label }}</td><td>{{ LEVELS[can_edit(staff, code) and 'edit' or (can_view(staff, code) and 'view' or '')] }}</td>
+    </tr>
+    {% endfor %}
+    {% for code, label in ACTIONS.items() %}
+    <tr class="{% if not can_act(staff, code) %}muted{% endif %}">
+      <td>{{ label }}</td><td>{{ 'разрешено' if can_act(staff, code) else 'нет' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Права меняет владелец: новые действуют сразу, без перезахода.</p>
+</section>
+</div>
+{% endblock %}

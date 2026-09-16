@@ -16,6 +16,7 @@ from app.crm import logic as crm_logic
 class FakeCrm:
     def __init__(self) -> None:
         self.staff: dict[int, dict] = {}
+        self.profiles_: dict[int, dict] = {}
         self.tariffs_: dict[int, dict] = {}
         self.bikes_: dict[int, dict] = {}
         self.clients_: dict[int, dict] = {}
@@ -26,10 +27,27 @@ class FakeCrm:
         self.status_log_: list[dict] = []
         self.repair_items_: list[dict] = []
         self._seq = 0
+        # Профили нумеруются отдельно: иначе встроенные съедали бы первые
+        # id, и клиент из seed() перестал бы быть первым.
+        self._profile_seq = 0
+        self._seed_profiles()
 
     def _id(self) -> int:
         self._seq += 1
         return self._seq
+
+    def _profile_id(self) -> int:
+        self._profile_seq += 1
+        return self._profile_seq
+
+    def _seed_profiles(self) -> None:
+        """Те же встроенные профили, что кладёт schema.sql."""
+        for code, name, perms, built_in in crm_logic.BUILT_IN_PROFILES:
+            pid = self._profile_id()
+            self.profiles_[pid] = {"id": pid, "code": code, "name": name,
+                                   "perms": dict(perms), "built_in": built_in,
+                                   "created_at": self._now(),
+                                   "updated_at": self._now()}
 
     @staticmethod
     def _now() -> datetime:
@@ -39,30 +57,86 @@ class FakeCrm:
     async def staff_count(self):
         return len(self.staff)
 
+    def _staff_row(self, s):
+        """Сотрудник всегда с правами своего профиля - как join в CrmDB."""
+        p = self.profiles_.get(s.get("profile_id")) or {}
+        return {**s, "profile_name": p.get("name"), "profile_code": p.get("code"),
+                "profile_built_in": bool(p.get("built_in")),
+                "perms": dict(p.get("perms") or {})}
+
     async def staff_by_login(self, login):
-        return next((dict(s) for s in self.staff.values() if s["login"] == login), None)
+        return next((self._staff_row(s) for s in self.staff.values()
+                     if s["login"] == login), None)
 
     async def staff_by_id(self, staff_id):
         s = self.staff.get(staff_id)
-        return dict(s) if s else None
+        return self._staff_row(s) if s else None
 
     async def staff_all(self):
-        return [dict(s) for s in self.staff.values()]
+        rows = sorted(self.staff.values(), key=lambda s: (not s["active"], s["id"]))
+        return [self._staff_row(s) for s in rows]
 
-    async def create_staff(self, login, password_hash, name, role):
+    async def create_staff(self, login, password_hash, name, role, profile_id=None):
         if any(s["login"] == login for s in self.staff.values()):
             raise UniqueError("login")
         sid = self._id()
         self.staff[sid] = {"id": sid, "login": login, "password_hash": password_hash,
                            "name": name, "role": role, "active": True,
-                           "created_at": self._now()}
+                           "profile_id": profile_id, "created_at": self._now()}
         return sid
+
+    async def set_staff_profile(self, staff_id, profile_id):
+        self.staff[staff_id]["profile_id"] = profile_id
 
     async def set_staff_password(self, staff_id, password_hash):
         self.staff[staff_id]["password_hash"] = password_hash
 
     async def set_staff_active(self, staff_id, active):
         self.staff[staff_id]["active"] = active
+
+    # ─── профили доступа ───
+    async def access_profiles(self):
+        rows = []
+        for p in self.profiles_.values():
+            staff_count = sum(1 for s in self.staff.values()
+                              if s.get("profile_id") == p["id"] and s["active"])
+            rows.append({**p, "perms": dict(p["perms"]), "staff_count": staff_count})
+        return sorted(rows, key=lambda p: (not p["built_in"], p["name"]))
+
+    async def access_profile(self, profile_id):
+        p = self.profiles_.get(profile_id)
+        return {**p, "perms": dict(p["perms"])} if p else None
+
+    async def access_profile_by_code(self, code):
+        p = next((p for p in self.profiles_.values() if p["code"] == code), None)
+        return {**p, "perms": dict(p["perms"])} if p else None
+
+    async def create_access_profile(self, name, perms):
+        if any(p["name"] == name for p in self.profiles_.values()):
+            raise UniqueError("name")
+        pid = self._profile_id()
+        self.profiles_[pid] = {"id": pid, "code": None, "name": name,
+                               "perms": dict(perms), "built_in": False,
+                               "created_at": self._now(), "updated_at": self._now()}
+        return pid
+
+    async def update_access_profile(self, profile_id, *, name, perms):
+        p = self.profiles_.get(profile_id)
+        if not p or p["built_in"]:
+            return
+        if any(o["name"] == name and o["id"] != profile_id
+               for o in self.profiles_.values()):
+            raise UniqueError("name")
+        p.update(name=name, perms=dict(perms), updated_at=self._now())
+
+    async def delete_access_profile(self, profile_id):
+        p = self.profiles_.get(profile_id)
+        if not p or p["built_in"]:
+            return False
+        if any(s.get("profile_id") == profile_id for s in self.staff.values()):
+            return False
+        del self.profiles_[profile_id]
+        return True
 
     # ─── тарифы ───
     async def tariffs(self, *, active_only=False):

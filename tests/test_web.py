@@ -137,19 +137,23 @@ class TestAuth(WebCase):
         self.assertEqual(self.login("ivan", "password-1").status_code, 401)
 
     def test_manager_cannot_manage_staff(self):
-        run(self.crm.create_staff("ivan", logic.hash_password("password-1"), "Иван", "manager"))
+        manager = run(self.crm.access_profile_by_code("manager"))
+        run(self.crm.create_staff("ivan", logic.hash_password("password-1"), "Иван",
+                                  "manager", manager["id"]))
         self.login("ivan", "password-1")
-        page = self.get_ok("/staff")
-        self.assertNotIn("Добавить", page)
+        self.assertEqual(self.client.get("/staff").status_code, 403)
         r = self.client.post("/staff", data={"login": "x", "password": "password-2"})
         self.assertEqual(r.status_code, 403)
 
     def test_admin_adds_staff_and_changes_password(self):
         self.login()
+        manager = run(self.crm.access_profile_by_code("manager"))
         self.client.post("/staff", data={"login": "Ivan", "name": "Иван",
-                                         "password": "password-1", "role": "manager"})
+                                         "password": "password-1",
+                                         "profile_id": manager["id"]})
         staff = run(self.crm.staff_by_login("ivan"))
         self.assertIsNotNone(staff)
+        self.assertEqual(staff["profile_code"], "manager")
         self.client.post(f"/staff/{staff['id']}/password", data={"password": "password-2"})
         self.assertTrue(logic.verify_password(
             "password-2", run(self.crm.staff_by_id(staff["id"]))["password_hash"]))

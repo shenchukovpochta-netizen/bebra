@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
+{# Сводка режется профилем: без доступа к финансам рубли не показываются
+   вовсе, иначе право «смотреть сводку» обходило бы право на деньги. #}
+{% set money_ok = can_view(staff, 'finance') %}
 <section class="card three">
-  <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %, чек {{ money(CHECK_TARGET) }}/день</span></div>
+  <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }}/день{% endif %}</span></div>
   <div class="tiles">
     <a class="tile" href="/bikes"><b>{{ operational }}</b><span>операционный парк<br><small class="muted">без утерянных, проданных, списанных</small></span></a>
     <div class="tile {% if metrics.idle_percent is none %}{% elif metrics.idle_ok %}good{% else %}warn{% endif %}">
       <b>{% if metrics.idle_percent is none %}—{% else %}{{ metrics.idle_percent }} %{% endif %}</b>
       <span>простой парка<br><small class="muted">{% if metrics.operational_days %}свободны {{ metrics.idle_breakdown.available|round(0)|int }} · ремонт {{ metrics.idle_breakdown.repair|round(0)|int }} · ТО {{ metrics.idle_breakdown.maintenance|round(0)|int }} велосипеде-дней{% else %}журнал статусов ещё пуст{% endif %}</small></span>
     </div>
+    {% if money_ok %}
     <div class="tile {% if metrics.avg_check is none %}{% elif metrics.check_ok %}good{% else %}warn{% endif %}">
       <b>{% if metrics.avg_check is none %}—{% else %}{{ money(metrics.avg_check) }}{% endif %}</b>
       <span>средний чек в день<br><small class="muted">{% if metrics.rented_days %}на {{ metrics.rented_days|round(0)|int }} велосипеде-дней аренды{% else %}аренд за период не было{% endif %}</small></span>
@@ -16,7 +20,10 @@
       <b>{% if metrics.operational_days %}{{ money(losses.lost) }}{% else %}—{% endif %}</b>
       <span>потеряно на простое<br><small class="muted">{% if metrics.operational_days %}ремонт {{ money(losses.by_status.repair) }} · свободны {{ money(losses.by_status.available) }}{% if losses.efficiency_percent is not none %} · КПД парка {{ losses.efficiency_percent }} %{% endif %}{% else %}журнал статусов ещё пуст{% endif %}</small></span>
     </div>
+    {% endif %}
+    {% if money_ok and can_view(staff, 'reports') %}
     <a class="tile" href="/reports"><b>{{ money(amortization) }}</b><span>отложить на парк в этом месяце<br><small class="muted">амортизация рам и АКБ</small></span></a>
+    {% endif %}
   </div>
   {% if idle_by_location %}
   <ul class="inline">
@@ -26,37 +33,42 @@
 </section>
 
 <div class="tiles">
-  <a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>
-  <a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>
+  {% if can_view(staff, 'rentals') %}<a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>{% endif %}
+  {% if can_view(staff, 'clients') %}<a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>{% endif %}
   <a class="tile" href="/bikes?status=available"><b>{{ bikes.get('available', 0) }}</b><span>свободных из {{ counts.bikes }}</span></a>
-  <a class="tile {% if counts.claims %}hot{% endif %}" href="/claims"><b>{{ counts.claims }}</b><span>заявок на зачисление</span></a>
+  {% if can_view(staff, 'claims') %}<a class="tile {% if counts.claims %}hot{% endif %}" href="/claims"><b>{{ counts.claims }}</b><span>заявок на зачисление</span></a>{% endif %}
+  {% if money_ok %}
   <div class="tile"><b>{{ money(month.get('payment', 0)) }}</b><span>поступило за месяц</span></div>
   <div class="tile"><b>{{ money(-(month.get('charge', 0) + month.get('fine', 0))) }}</b><span>начислено за месяц</span></div>
+  {% endif %}
 </div>
 
 <div class="cols">
+{% if can_view(staff, 'rentals') %}
 <section class="card">
   <h2>Истекает аренда <small class="muted">· просрочка и ближайшие {{ before_days }} дн.</small></h2>
-  <p class="muted">Свободных сейчас <b>{{ forecast.now }}</b>{% if forecast.today or forecast.tomorrow %} · сдают сегодня <b>{{ forecast.today }}</b>, завтра <b>{{ forecast.tomorrow }}</b>{% endif %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}</p>
+  <p class="muted">Свободных сейчас <b>{{ forecast.now }}</b>{% if forecast.today or forecast.tomorrow %} · сдают сегодня <b>{{ forecast.today }}</b>, завтра <b>{{ forecast.tomorrow }}</b>{% endif %}{% if money_ok %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}{% endif %}</p>
   {% if expiring %}
   <table>
-    <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th><th>Баланс</th><th>Клиент сказал</th></tr>
+    <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}<th>Клиент сказал</th></tr>
     {% for r in expiring %}
     <tr>
-      <td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a><br><a class="muted" href="tel:{{ r.phone }}">{{ r.phone }}</a>{% if not r.tg_id %} <span class="muted" title="без Telegram">·</span>{% endif %}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}<br><a class="muted" href="tel:{{ r.phone }}">{{ r.phone }}</a>{% if not r.tg_id %} <span class="muted" title="без Telegram">·</span>{% endif %}</td>
       <td>{{ r.bike_code or '—' }}</td>
       <td>{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}</td>
-      <td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>
+      {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
       <td class="intent">
         {% if r.intent %}<span class="tag intent-{{ r.intent }}">{{ r.intent_label }}</span>{% endif %}
-        <form method="post" action="/rentals/{{ r.id }}/intent"><input type="hidden" name="next" value="/"><button name="intent" value="renew" class="ghost" title="Клиент продлевает">✓ продлит</button><button name="intent" value="return" class="ghost" title="Клиент сдаёт велосипед">↩ сдаёт</button><button name="intent" value="snooze" class="ghost" title="Скрыть до завтра">⏰ завтра</button></form>
+        {% if can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/intent"><input type="hidden" name="next" value="/"><button name="intent" value="renew" class="ghost" title="Клиент продлевает">✓ продлит</button><button name="intent" value="return" class="ghost" title="Клиент сдаёт велосипед">↩ сдаёт</button><button name="intent" value="snooze" class="ghost" title="Скрыть до завтра">⏰ завтра</button></form>{% endif %}
       </td>
     </tr>
     {% endfor %}
   </table>
   {% else %}<p class="muted">Все аренды оплачены, платежей на ближайшие дни нет.</p>{% endif %}
 </section>
+{% endif %}
 
+{% if can_view(staff, 'claims') %}
 <section class="card">
   <h2>Заявки на зачисление</h2>
   {% if claims %}
@@ -65,15 +77,16 @@
     {% for c in claims %}
     <tr>
       <td>{{ c.id }}</td>
-      <td><a href="/clients/{{ c.client_id }}">{{ c.full_name }}</a><br><small class="muted">{{ c.created_at|dmy }}</small></td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ c.client_id }}">{{ c.full_name }}</a>{% else %}{{ c.full_name }}{% endif %}<br><small class="muted">{{ c.created_at|dmy }}</small></td>
       <td class="num">{{ money(c.amount_hint) }}</td>
       <td>{% if c.receipt_file_id %}есть{% else %}—{% endif %}</td>
-      <td><a class="btn" href="/claims">Обработать</a></td>
+      <td>{% if can_edit(staff, 'claims') %}<a class="btn" href="/claims">Обработать</a>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
   {% else %}<p class="muted">Открытых заявок нет.</p>{% endif %}
 </section>
+{% endif %}
 </div>
 
 <div class="cols">
@@ -84,17 +97,21 @@
       <li><a href="/bikes?status={{ code }}">{{ label }}: <b>{{ bikes.get(code, 0) }}</b></a></li>
     {% endfor %}
   </ul>
-  <p><a class="btn" href="/issue">⚡ Быстрая выдача</a> <a class="btn ghost" href="/clients/new">+ Клиент</a> <a class="btn ghost" href="/bikes/new">+ Велосипед</a></p>
+  <p>{% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'clients') %}<a class="btn ghost" href="/clients/new">+ Клиент</a> {% endif %}{% if can_edit(staff, 'bikes') %}<a class="btn ghost" href="/bikes/new">+ Велосипед</a>{% endif %}</p>
 </section>
+{% if money_ok %}
 <section class="card">
   <h2>Должники</h2>
   {% if debtors %}
-  <table>{% for d in debtors %}<tr><td><a href="/clients/{{ d.id }}">{{ d.full_name }}</a></td><td class="num bad">{{ money(d.balance) }}</td></tr>{% endfor %}</table>
+  <table>{% for d in debtors %}<tr><td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ d.id }}">{{ d.full_name }}</a>{% else %}{{ d.full_name }}{% endif %}</td><td class="num bad">{{ money(d.balance) }}</td></tr>{% endfor %}</table>
   {% else %}<p class="muted">Долгов нет.</p>{% endif %}
+  {% if can_edit(staff, 'finance') %}
   <form method="post" action="/billing/run" class="inline-form">
     <button class="ghost" type="submit" title="Начислить наступившие периоды прямо сейчас, не дожидаясь ночного прохода">Начислить сейчас</button>
     <small class="muted">Начисления идут сами раз в сутки; кнопка — если нужно увидеть новый период немедленно.</small>
   </form>
+  {% endif %}
 </section>
+{% endif %}
 </div>
 {% endblock %}

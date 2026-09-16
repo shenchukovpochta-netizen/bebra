@@ -7,20 +7,21 @@
     <a href="/rentals?status=closed" {% if status == 'closed' %}class="on"{% endif %}>Закрытые</a>
     <a href="/rentals?status=all" {% if status == 'all' %}class="on"{% endif %}>Все</a>
   </nav>
-  <a class="btn" href="/issue">⚡ Быстрая выдача</a> <a class="btn ghost" href="/rentals/new">Форма</a>
+  {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Форма</a>{% endif %}
 </div>
 <div class="card">
 <table>
-  <tr><th>#</th><th>Клиент</th><th>Велосипед</th><th>Тариф</th><th>С</th><th>Оплачено</th><th>Баланс</th></tr>
+  {% set money_ok = can_view(staff, 'finance') %}
+  <tr><th>#</th><th>Клиент</th><th>Велосипед</th><th>Тариф</th><th>С</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}</tr>
   {% for r in rows %}
   <tr>
     <td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td>
-    <td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a></td>
+    <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
     <td>{{ r.bike_code or '—' }} <span class="muted">{{ r.bike_model or '' }}</span></td>
-    <td>{{ r.tariff_name }} · {{ money(r.price) }}/{{ r.period_days }} дн. <small class="muted">{{ BILLING[r.billing] }}</small></td>
+    <td>{{ r.tariff_name }}{% if money_ok %} · {{ money(r.price) }}/{% else %} · {% endif %}{{ r.period_days }} дн. <small class="muted">{{ BILLING[r.billing] }}</small></td>
     <td>{{ r.started_on|dmy }}{% if r.closed_on %} — {{ r.closed_on|dmy }}{% endif %}</td>
     <td>{% if r.status == 'active' %}{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">закрыта</span>{% endif %}</td>
-    <td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>
+    {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Пусто.</td></tr>{% endfor %}
 </table>

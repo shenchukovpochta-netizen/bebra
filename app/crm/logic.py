@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import html
+import json
 import os
 import re
 from collections.abc import Iterable
@@ -850,3 +851,139 @@ def ridden_per_day(rental: dict, *, days: int | None = None) -> int | None:
     if not days or days <= 0:
         return None
     return int(round(km / days))
+
+
+# ─────────────────────────── доступы сотрудников ───────────────────────────
+#
+# У каждого сотрудника профиль доступа: матрица «раздел -> смотреть/менять»
+# плюс отдельные действия. Разделы совпадают с пунктами меню панели, чтобы
+# оператор видел ровно то, что ему разрешили, а не пустые страницы.
+
+SECTIONS: dict[str, str] = {
+    "dashboard": "Сводка",
+    "issue": "Быстрая выдача",
+    "clients": "Клиенты",
+    "rentals": "Аренды",
+    "bikes": "Парк",
+    "claims": "Заявки на зачисление",
+    "finance": "Финансы",
+    "tariffs": "Тарифы",
+    "reports": "Отчёты",
+    "import": "Импорт таблицы",
+    "staff": "Сотрудники и доступы",
+}
+
+# Действия, которые не сводятся к разделу: менеджер выдаёт велосипеды
+# и видит карточку клиента, но правку журнала и паспортные документы
+# ему открывают отдельно.
+ACTIONS: dict[str, str] = {
+    "money_edit": "Записи в журнал руками: платёж, штраф, возврат, корректировка",
+    "client_docs": "Паспортные документы клиента: скачивание подписанного договора",
+}
+
+LEVELS: dict[str, str] = {"": "нет доступа", "view": "смотреть", "edit": "смотреть и менять"}
+LEVEL_ORDER = ("", "view", "edit")
+
+# Путь -> раздел. Проверяется по префиксу, поэтому «/clients/7/ledger»
+# и «/clients.csv» попадают в «clients» без отдельной строки на каждый
+# маршрут. Точка в разделителях обязательна: без неё выгрузка CSV
+# оказалась бы вне раздела и открытой всем.
+SECTION_PATHS: tuple[tuple[str, str], ...] = (
+    ("/issue", "issue"),
+    ("/clients", "clients"),
+    ("/rentals", "rentals"),
+    ("/bikes", "bikes"),
+    ("/claims", "claims"),
+    ("/finance", "finance"),
+    ("/billing", "finance"),
+    ("/tariffs", "tariffs"),
+    ("/reports", "reports"),
+    ("/import", "import"),
+    ("/staff", "staff"),
+    ("/profiles", "staff"),
+)
+
+
+def section_for(path: str) -> str | None:
+    """Раздел, к которому относится адрес. None - общий (вход, свой пароль)."""
+    if path == "/":
+        return "dashboard"
+    for prefix, code in SECTION_PATHS:
+        if path == prefix or path.startswith((prefix + "/", prefix + ".")):
+            return code
+    return None
+
+
+def normalize_perms(raw: Any) -> dict[str, Any]:
+    """Матрица прав из формы или из базы - к одному виду.
+
+    Неизвестные разделы и действия отбрасываются: профиль старой версии
+    не должен открывать раздел, которого уже нет, и наоборот.
+    """
+    if isinstance(raw, str):                     # jsonb без кодека приходит строкой
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = {}
+    data = raw if isinstance(raw, dict) else {}
+    sections_raw = data.get("sections") if isinstance(data.get("sections"), dict) else {}
+    actions_raw = data.get("actions") if isinstance(data.get("actions"), dict) else {}
+    sections = {code: str(sections_raw.get(code) or "")
+                for code in SECTIONS if str(sections_raw.get(code) or "") in ("view", "edit")}
+    actions = {code: True for code in ACTIONS if actions_raw.get(code)}
+    return {"sections": sections, "actions": actions}
+
+
+def perms_of(staff: dict | None) -> dict[str, Any]:
+    return normalize_perms((staff or {}).get("perms"))
+
+
+def section_level(staff: dict | None, code: str) -> str:
+    return perms_of(staff)["sections"].get(code, "")
+
+
+def can_view(staff: dict | None, code: str) -> bool:
+    return section_level(staff, code) in ("view", "edit")
+
+
+def can_edit(staff: dict | None, code: str) -> bool:
+    return section_level(staff, code) == "edit"
+
+
+def can_act(staff: dict | None, action: str) -> bool:
+    return bool(perms_of(staff)["actions"].get(action))
+
+
+def visible_sections(staff: dict | None) -> list[str]:
+    """Разделы, которые показывать в меню, в порядке SECTIONS."""
+    return [code for code in SECTIONS if can_view(staff, code)]
+
+
+def home_for(staff: dict | None) -> str:
+    """Куда вести после входа. Профиль без сводки не должен упираться
+    в «нет доступа» на первом же экране."""
+    if can_view(staff, "dashboard"):
+        return "/"
+    first = next((code for code in visible_sections(staff) if code != "dashboard"), None)
+    if first is None:
+        return "/me"
+    return next(path for path, code in SECTION_PATHS if code == first)
+
+
+BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
+    ("owner", "Владелец",
+     {"sections": dict.fromkeys(SECTIONS, "edit"),
+      "actions": dict.fromkeys(ACTIONS, True)}, True),
+    ("manager", "Менеджер",
+     {"sections": {"dashboard": "view", "issue": "edit", "clients": "edit",
+                   "rentals": "edit", "bikes": "view", "claims": "edit",
+                   "finance": "view", "tariffs": "view", "reports": "view"},
+      "actions": {}}, False),
+    ("tech", "Механик",
+     {"sections": {"dashboard": "view", "bikes": "edit", "rentals": "view",
+                   "reports": "view"}, "actions": {}}, False),
+)
+
+
+def check_profile_name(raw: Any) -> Check:
+    return check_name(raw, what="Название профиля")

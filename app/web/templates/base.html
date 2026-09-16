@@ -11,19 +11,22 @@
 {% if staff %}
 <header class="top">
   <div class="top-inner">
-    <a class="brand" href="/" title="{{ app_title }}">{% include "_logo.html" %}<span class="brand-sub">CRM</span></a>
+    <a class="brand" href="{{ home_for(staff) }}" title="{{ app_title }}">{% include "_logo.html" %}<span class="brand-sub">CRM</span></a>
     <nav>
-      <a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>
-      <a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
-      <a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>
-      <a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>
-      <a href="/bikes" {% if request.url.path.startswith('/bikes') %}class="on"{% endif %}>Парк</a>
-      <a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>
-      <a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>
-      <a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>
-      <a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>
-      {% if staff.role == 'admin' %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}
-      <a href="/staff" class="me {% if request.url.path.startswith('/staff') %}on{% endif %}">{{ staff.name or staff.login }}</a>
+      {# меню = профиль доступа: закрытый раздел не показывается вовсе, чтобы
+         оператор не упирался в «нет доступа» там, где для него ничего нет #}
+      {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
+      {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>{% endif %}
+      {% if can_view(staff, 'clients') %}<a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>{% endif %}
+      {% if can_view(staff, 'rentals') %}<a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>{% endif %}
+      {% if can_view(staff, 'bikes') %}<a href="/bikes" {% if request.url.path.startswith('/bikes') %}class="on"{% endif %}>Парк</a>{% endif %}
+      {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
+      {% if can_view(staff, 'finance') %}<a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>{% endif %}
+      {% if can_view(staff, 'tariffs') %}<a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>{% endif %}
+      {% if can_view(staff, 'reports') %}<a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>{% endif %}
+      {% if can_view(staff, 'import') %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}
+      {% if can_view(staff, 'staff') %}<a href="/staff" {% if request.url.path.startswith('/staff') or request.url.path.startswith('/profiles') %}class="on"{% endif %}>Сотрудники</a>{% endif %}
+      <a href="/me" class="me {% if request.url.path.startswith('/me') %}on{% endif %}">{{ staff.name or staff.login }}</a>
     </nav>
   </div>
   <div class="top-bolt">{% include "_bolt.html" %}</div>

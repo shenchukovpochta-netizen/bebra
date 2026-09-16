@@ -13,7 +13,7 @@
     </select>
     <button type="submit">Найти</button>
   </form>
-  <a class="btn" href="/bikes/new">+ Велосипед</a>
+  {% if can_edit(staff, 'bikes') %}<a class="btn" href="/bikes/new">+ Велосипед</a>{% endif %}
 </div>
 <div class="card">
 <table>
@@ -27,7 +27,7 @@
     <td class="num muted">{{ '{:,}'.format(b.mileage_km or 0).replace(',', '\u00a0') }} км</td>
     <td class="muted">{{ b.location or '' }}</td>
     <td><span class="tag {{ b.status }}">{{ BIKE_STATUSES.get(b.status, b.status) }}</span></td>
-    <td>{% if b.client_id %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% endif %}</td>
+    <td>{% if b.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="8" class="muted">Пусто.</td></tr>{% endfor %}
 </table>

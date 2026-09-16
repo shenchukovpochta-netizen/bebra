@@ -142,3 +142,19 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 .intent button{padding:3px 8px;font-size:12px;border-radius:7px}
 .tag.intent-renew{background:#E4F5E4;color:var(--ok)}
 .tag.intent-return{background:#E8F4FF;color:#0B5A86}
+
+/* ── профили доступа: матрица «раздел × уровень» ── */
+.perms{max-width:620px}
+.perms th:not(:first-child),.perms td:not(:first-child){width:1%;text-align:center;white-space:nowrap}
+.perms td:first-child{width:auto}
+.perms label.cell{display:block;margin:0;cursor:pointer;padding:2px 10px}
+.perms label.cell input{width:auto;margin:0;accent-color:var(--brand)}
+label.check input[type=checkbox]{accent-color:var(--brand)}
+.perms tr:hover td{background:var(--chip)}
+.tag.ok{background:#E4F5E4;color:var(--ok)}
+@media (prefers-color-scheme:dark){.tag.ok{background:#1F3A21}}
+/* Форма только для просмотра: fieldset[disabled] гасит поля, но рамку
+   и отступы браузера в вёрстке карточки видеть не нужно. */
+fieldset.plain{border:0;margin:0;padding:0;min-width:0}
+fieldset[disabled] button{opacity:.45;cursor:not-allowed}
+fieldset[disabled] input,fieldset[disabled] select,fieldset[disabled] textarea{opacity:.7}

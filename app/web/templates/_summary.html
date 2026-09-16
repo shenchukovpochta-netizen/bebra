@@ -1,7 +1,10 @@
-{# Строка «оплачено до» для сводки, карточек клиента и аренды #}
+{# Строка «оплачено до» для сводки, карточек клиента и аренды.
+   Суммы показываются только тем, кому открыт раздел «Финансы»: срок
+   возврата нужен и механику, а долг клиента - нет. #}
+{% set with_money = can_view(staff, 'finance') %}
 {% if summary.active %}
   {% if summary.overdue %}
-    <span class="bad">просрочка {{ -summary.days_left }} дн. · к оплате {{ money(summary.due) }}</span>
+    <span class="bad">просрочка {{ -summary.days_left }} дн.{% if with_money %} · к оплате {{ money(summary.due) }}{% endif %}</span>
   {% elif summary.days_left == 0 %}
     <span class="warn">платёж сегодня</span>
   {% elif summary.days_left <= 2 %}
@@ -10,7 +13,7 @@
     <span class="ok">до {{ summary.covered_until|dmy }} · {{ summary.days_left }} дн.</span>
   {% endif %}
 {% elif summary.debt %}
-  <span class="bad">долг {{ money(summary.debt) }}</span>
+  {% if with_money %}<span class="bad">долг {{ money(summary.debt) }}</span>{% else %}<span class="muted">нет аренды</span>{% endif %}
 {% else %}
   <span class="muted">нет аренды</span>
 {% endif %}

@@ -341,6 +341,44 @@ create table if not exists crm.staff (
   created_at     timestamptz not null default now()
 );
 
+-- Профили доступа: матрица «раздел -> смотреть/менять» плюс отдельные
+-- действия (деньги руками, паспортные документы). Матрица лежит одним
+-- jsonb, а не таблицей связей: разделов десяток, читается она целиком
+-- и всегда вместе с сотрудником.
+--
+-- «Владелец» встроенный и неизменяемый: профиль, которым можно отобрать
+-- у себя же доступ к сотрудникам, запирает панель навсегда.
+create table if not exists crm.access_profiles (
+  id         bigserial primary key,
+  code       text        unique,          -- owner|manager|tech у встроенных
+  name       text        not null unique,
+  perms      jsonb       not null default '{}'::jsonb,
+  built_in   boolean     not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into crm.access_profiles (code, name, perms, built_in) values
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view"},"actions":{}}'::jsonb, false),
+  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","rentals":"view","reports":"view"},"actions":{}}'::jsonb, false)
+on conflict (code) do update set
+  -- встроенный профиль всегда подтягивается к коду, остальные - нет:
+  -- их матрицу правит владелец, и перезапись затирала бы его настройку.
+  perms = case when crm.access_profiles.built_in then excluded.perms
+               else crm.access_profiles.perms end,
+  built_in = excluded.built_in;
+
+alter table crm.staff add column if not exists profile_id bigint
+  references crm.access_profiles (id);
+
+-- Сотрудники, заведённые до профилей: администратор - владелец, остальные -
+-- менеджеры. Только там, где профиля ещё нет, поэтому повтор безопасен.
+update crm.staff s set profile_id = p.id
+  from crm.access_profiles p
+ where s.profile_id is null
+   and p.code = case when s.role = 'admin' then 'owner' else 'manager' end;
+
 -- Тарифы: цена за период. Аренда копирует цену и период к себе
 -- при оформлении, поэтому правка тарифа не меняет уже идущие аренды.
 create table if not exists crm.tariffs (

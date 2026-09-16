@@ -1,14 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Аренда #{{ rental.id }} — {{ app_title }}{% endblock %}
 {% block content %}
+{% set money_ok = can_view(staff, 'finance') %}
 <div class="bar"><h1>Аренда #{{ rental.id }} <span class="tag {{ rental.status }}">{{ RENTAL_STATUSES[rental.status] }}</span></h1></div>
 <div class="cols">
 <section class="card">
   <h2>Условия</h2>
   <dl>
-    <dt>Клиент</dt><dd><a href="/clients/{{ rental.client_id }}">{{ rental.full_name }}</a> · {{ rental.phone }}</dd>
+    <dt>Клиент</dt><dd>{% if can_view(staff, 'clients') %}<a href="/clients/{{ rental.client_id }}">{{ rental.full_name }}</a>{% else %}{{ rental.full_name }}{% endif %} · {{ rental.phone }}</dd>
     <dt>Велосипед</dt><dd>{% if rental.bike_id %}<a href="/bikes/{{ rental.bike_id }}">{{ rental.bike_code }}</a> {{ rental.bike_model }}{% else %}<span class="muted">не указан</span>{% endif %}</dd>
-    <dt>Тариф</dt><dd>{{ rental.tariff_name }} — {{ money(rental.price) }} / {{ rental.period_days }} дн., {{ BILLING[rental.billing] }}</dd>
+    <dt>Тариф</dt><dd>{{ rental.tariff_name }}{% if money_ok %} — {{ money(rental.price) }}{% endif %} / {{ rental.period_days }} дн., {{ BILLING[rental.billing] }}</dd>
     <dt>Договор</dt><dd>{{ rental.contract_no or '—' }}</dd>
     <dt>Начало</dt><dd>{{ rental.started_on|dmy }}</dd>
     <dt>Начислено по</dt><dd>{{ rental.billed_until|dmy }}</dd>
@@ -16,22 +17,26 @@
     <dt>Пробег</dt><dd>{% if rental.mileage_start is none %}<span class="muted">не записан</span>
       {%- else %}с {{ rental.mileage_start }} км{% if rental.mileage_end is not none %} до {{ rental.mileage_end }} км{% elif bike %} · сейчас {{ bike.mileage_km or 0 }} км{% endif %}
       {%- if km is not none %} · <b>накатал {{ km }} км</b>{% set per = ridden_per_day(rental) %}{% if per %} <span class="muted">≈ {{ per }} км в день</span>{% endif %}{% endif %}{% endif %}</dd>
+    {% if money_ok %}
     <dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>
     <dt>Баланс клиента</dt><dd class="{% if rental.balance < 0 %}bad{% endif %}"><b>{{ money(rental.balance) }}</b></dd>
+    {% endif %}
     {% if rental.status == 'active' %}<dt>Клиент сказал</dt><dd class="intent">{% if intent.intent %}<span class="tag intent-{{ intent.intent }}">{{ intent.label }}</span> <small class="muted">{{ rental.intent_by or '' }} · {{ rental.intent_at|dmy }}</small>{% else %}<span class="muted">пока ничего</span>{% endif %}
-      <form method="post" action="/rentals/{{ rental.id }}/intent"><input type="hidden" name="next" value="/rentals/{{ rental.id }}"><button name="intent" value="renew" class="ghost">✓ продлит</button><button name="intent" value="return" class="ghost">↩ сдаёт</button>{% if intent.intent or rental.snooze_until %}<button name="intent" value="clear" class="ghost">снять</button>{% endif %}</form></dd>{% endif %}
+      {% if can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ rental.id }}/intent"><input type="hidden" name="next" value="/rentals/{{ rental.id }}"><button name="intent" value="renew" class="ghost">✓ продлит</button><button name="intent" value="return" class="ghost">↩ сдаёт</button>{% if intent.intent or rental.snooze_until %}<button name="intent" value="clear" class="ghost">снять</button>{% endif %}</form>{% endif %}</dd>{% endif %}
     {% if rental.closed_on %}<dt>Закрыта</dt><dd>{{ rental.closed_on|dmy }}{% if rental.close_note %} — {{ rental.close_note }}{% endif %}</dd>{% endif %}
     <dt>Оформил</dt><dd class="muted">{{ rental.created_by or '—' }} · {{ rental.created_at|dmy }}</dd>
   </dl>
 </section>
-{% if rental.status == 'active' %}
+{% if rental.status == 'active' and can_edit(staff, 'rentals') %}
 <section class="card">
+  {% if money_ok %}
   <h2>Сменить тариф</h2>
   <form method="post" action="/rentals/{{ rental.id }}/tariff" class="grid2">
     <label>Тариф <select name="tariff_id">{% for t in tariffs %}<option value="{{ t.id }}" {% if t.id == rental.tariff_id %}selected{% endif %}>{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}</select></label>
     <label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <button type="submit">Применить со следующего периода</button>
   </form>
+  {% endif %}
   <h2>Закрыть аренду</h2>
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
@@ -44,6 +49,7 @@
 </section>
 {% endif %}
 </div>
+{% if money_ok %}
 <section class="card">
   <h2>Начисления по аренде</h2>
   <table>
@@ -55,4 +61,5 @@
     {% else %}<tr><td colspan="5" class="muted">Начислений нет.</td></tr>{% endfor %}
   </table>
 </section>
+{% endif %}
 {% endblock %}

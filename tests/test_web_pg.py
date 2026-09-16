@@ -19,7 +19,7 @@ try:
     from httpx import ASGITransport, AsyncClient
 
     from app.crm.db import CrmDB
-    from app.db import Database
+    from app.db import Database, _init_connection
     from app.web.app import create_app, ensure_admin
     from app.web.config import WebConfig
     from tests.test_import import ROWS, sheet
@@ -49,7 +49,8 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
         cls.tmp.cleanup()
 
     async def asyncSetUp(self):
-        self.pool = await asyncpg.create_pool(self.pg.get_uri(), min_size=1, max_size=3)
+        self.pool = await asyncpg.create_pool(self.pg.get_uri(), min_size=1, max_size=3,
+                                              init=_init_connection)
         await self.pool.execute("drop schema if exists crm cascade; "
                                 "drop schema if exists bot cascade")
         await Database(self.pool).apply_schema(SCHEMA)

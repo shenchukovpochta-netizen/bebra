@@ -1,8 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="bar"><h1>Тарифы</h1></div>
+{% set can = can_edit(staff, 'tariffs') %}
 <div class="cols">
 <section class="card">
+  <fieldset {% if not can %}disabled{% endif %} class="plain">
   <table>
     <tr><th>Название</th><th>Период</th><th>Цена</th><th>Заметка</th><th></th></tr>
     {% for t in rows %}
@@ -18,7 +20,10 @@
     </tr>
     {% else %}<tr><td colspan="5" class="muted">Тарифов пока нет.</td></tr>{% endfor %}
   </table>
+  </fieldset>
+  {% if not can %}<p class="muted">Тарифы вам открыты только на просмотр.</p>{% endif %}
 </section>
+{% if can %}
 <section class="card narrow">
   <h2>Новый тариф</h2>
   <form method="post" action="/tariffs">
@@ -30,5 +35,6 @@
   </form>
   <p class="muted">Идущие аренды хранят свою копию цены и периода: правка тарифа их не меняет. Выключенный тариф не предлагается при оформлении, но остаётся в истории.</p>
 </section>
+{% endif %}
 </div>
 {% endblock %}
