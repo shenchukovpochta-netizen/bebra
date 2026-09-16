@@ -221,6 +221,27 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.crm.close_rental(rid, closed_on=date.today(), note="x"))
         self.assertIsNone(await self.crm.active_rental_of(self.client_id))
 
+    async def test_rental_intent_columns(self):
+        """Намерение клиента и отсрочка хранятся на аренде и читаются обратно."""
+        from datetime import UTC, datetime
+        await self.seed()
+        rid = await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
+                                           tariff_id=self.tariff_id, tariff_name="Неделя",
+                                           period_days=7, price=D("3000"), billing="auto",
+                                           started_on=date.today(), contract_no=None,
+                                           created_by="t")
+        self.assertIsNone((await self.crm.rental(rid))["intent"])
+        when = datetime.now(UTC)
+        await self.crm.update_rental(rid, intent="return", intent_until=date.today(),
+                                     intent_by="staff:admin", intent_at=when,
+                                     snooze_until=date.today() + timedelta(days=1))
+        fresh = await self.crm.rental(rid)
+        self.assertEqual((fresh["intent"], fresh["intent_until"], fresh["intent_by"]),
+                         ("return", date.today(), "staff:admin"))
+        self.assertEqual(fresh["snooze_until"], date.today() + timedelta(days=1))
+        self.assertIsNotNone(fresh["intent_at"].tzinfo)
+        self.assertIn("intent", (await self.crm.active_rentals())[0])
+
     async def test_lists_reports_and_links(self):
         await self.seed()
         await self.crm.add_ledger(client_id=self.client_id, kind="charge", amount=D("-500"))

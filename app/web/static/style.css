@@ -136,3 +136,9 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 .tag.bot-none{background:var(--brand-pale);color:var(--brand-dark)}
 .tag.bot-signed,.tag.bot-renting{background:#E4F5E4;color:var(--ok)}
 .tag.bot-pending,.tag.bot-registering,.tag.bot-approved{background:#FFF3D6;color:#7A4B00}
+
+/* ── намерение клиента: сводка и карточка аренды ── */
+.intent form{display:inline-flex;flex-wrap:wrap;gap:4px;margin:4px 0 0}
+.intent button{padding:3px 8px;font-size:12px;border-radius:7px}
+.tag.intent-renew{background:#E4F5E4;color:var(--ok)}
+.tag.intent-return{background:#E8F4FF;color:#0B5A86}

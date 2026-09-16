@@ -11,15 +11,17 @@
 <section class="card">
   <h2>Три числа по месяцам</h2>
   <table>
-    <tr><th>Месяц</th><th>Простой</th><th>Чек/день</th><th>Дней аренды</th><th>Дней парка</th></tr>
-    {% for m in months_metrics %}
+    <tr><th>Месяц</th><th>Простой</th><th>Чек/день</th><th>Потери</th><th>КПД</th><th>Дней аренды</th><th>Дней парка</th></tr>
+    {% for m in months_metrics %}{% set l = fleet_losses(m) %}
     <tr><td>{{ m.month.strftime('%m.%Y') }}</td>
       <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
       <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
+      <td class="num {% if not m.operational_days %}muted{% elif l.lost %}bad{% else %}ok{% endif %}">{% if not m.operational_days %}—{% else %}{{ money(l.lost) }}{% endif %}</td>
+      <td class="num">{% if l.efficiency_percent is none %}—{% else %}{{ l.efficiency_percent }} %{% endif %}</td>
       <td class="num">{{ m.rented_days|round(0)|int }}</td><td class="num">{{ m.operational_days|round(0)|int }}</td></tr>
     {% endfor %}
   </table>
-  <p class="muted">Простой — доля велосипеде-дней вне аренды (свободен, бронь, ремонт, ТО) в днях операционного парка; цель меньше {{ IDLE_TARGET_PERCENT }} %. Чек — платежи клиентов за месяц на один день аренды; цель {{ money(CHECK_TARGET) }}. История статусов ведётся с момента появления велосипеда в CRM: импортированные из таблицы считаются с даты импорта.</p>
+  <p class="muted">Простой — доля велосипеде-дней вне аренды (свободен, бронь, ремонт, ТО) в днях операционного парка; цель меньше {{ IDLE_TARGET_PERCENT }} %. Чек — платежи клиентов за месяц на один день аренды; цель {{ money(CHECK_TARGET) }}. Потери — дни простоя × цель чека: столько не заработано, пока велосипеды стояли. КПД — поступившие деньги к потенциалу «каждый день парка по цели». История статусов ведётся с момента появления велосипеда в CRM: импортированные из таблицы считаются с даты импорта.</p>
 </section>
 <section class="card">
   <h2>Деньги по месяцам</h2>

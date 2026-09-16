@@ -355,6 +355,8 @@ class FakeCrm:
                               "started_on": started_on, "billed_until": started_on,
                               "status": "active", "closed_on": None, "close_note": None,
                               "notified_on": None, "notified_kind": None,
+                              "intent": None, "intent_until": None, "intent_by": None,
+                              "intent_at": None, "snooze_until": None,
                               "created_by": created_by, "created_at": self._now(),
                               "updated_at": self._now()}
         if bike_id is not None:

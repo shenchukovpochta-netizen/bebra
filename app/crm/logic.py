@@ -603,6 +603,7 @@ def fleet_metrics(days: dict[str, Any], revenue: Any) -> dict[str, Any]:
     avg_check = to_money(Decimal(str(revenue)) / rented) if rented >= 1 else None
     return {
         "operational_days": operational, "idle_days": idle, "rented_days": rented,
+        "revenue": to_money(Decimal(str(revenue))),
         "idle_percent": idle_percent, "avg_check": avg_check,
         "idle_ok": idle_percent is not None and idle_percent < IDLE_TARGET_PERCENT,
         "check_ok": avg_check is not None and avg_check >= CHECK_TARGET,
@@ -703,3 +704,96 @@ def issue_payment_default(price: Any, balance: Any) -> Decimal:
     отдельной строкой и закрывается своим платежом."""
     need = to_money(price) - max(to_money(balance), Decimal(0))
     return max(need, Decimal(0))
+
+
+# ─────────────────────────── сводка оператора ───────────────────────────
+#
+# «Истекает аренда»: кто на днях платит или уже просрочил, что клиент
+# сказал по телефону (продлит / сдаёт), кого отложили до завтра. Отсюда же
+# прогноз свободных велосипедов и потери в рублях: каждый день простоя -
+# это невыданный день по цели среднего чека.
+
+INTENTS = {"renew": "продлит", "return": "сдаёт"}
+
+
+def intent_state(rental: dict, summary: dict, *, today: date) -> dict[str, Any]:
+    """Намерение клиента, если оно ещё про текущий срок.
+
+    Намерение записывается вместе с датой «оплачено до» на тот момент:
+    сдвинулась дата - клиент заплатил или срок пересчитан, и старое «продлит»
+    больше ничего не значит. Отложенная строка (snooze_until в будущем)
+    прячется из виджета до этой даты.
+    """
+    intent = rental.get("intent")
+    if intent not in INTENTS or rental.get("intent_until") != summary.get("covered_until"):
+        intent = None
+    snooze = rental.get("snooze_until")
+    return {"intent": intent, "label": INTENTS.get(intent, ""),
+            "snoozed": bool(snooze and snooze > today)}
+
+
+def expiring(rows: Iterable[dict], *, today: date, before_days: int) -> list[dict]:
+    """Строки виджета «истекает аренда»: у кого платёж в ближайшие
+    before_days дней или просрочка. Просроченные первыми. Отложенные
+    не показываются, намерение - только актуальное."""
+    out = []
+    for r in rows:
+        s = r.get("summary") or {}
+        left = s.get("days_left")
+        if not s.get("active") or left is None or left > before_days:
+            continue
+        st = intent_state(r, s, today=today)
+        if st["snoozed"]:
+            continue
+        out.append({**r, "intent": st["intent"], "intent_label": st["label"]})
+    out.sort(key=lambda r: (r["summary"]["days_left"], r["id"]))
+    return out
+
+
+def free_forecast(free_now: int, expiring_rows: Iterable[dict]) -> dict[str, int]:
+    """Свободных сейчас и сколько вернётся: «сдаёт» сегодня (включая
+    просроченных) и завтра. Прогноз, а не факт: велосипед освобождается
+    актом возврата, а не словом по телефону."""
+    today_n = tomorrow_n = 0
+    for r in expiring_rows:
+        if r.get("intent") != "return":
+            continue
+        left = r["summary"]["days_left"]
+        if left <= 0:
+            today_n += 1
+        elif left == 1:
+            tomorrow_n += 1
+    return {"now": int(free_now), "today": today_n, "tomorrow": tomorrow_n}
+
+
+def fleet_losses(metrics: dict, *, rate: Any = CHECK_TARGET) -> dict[str, Any]:
+    """Потери в рублях за период по цели среднего чека.
+
+    Потенциал - каждый день операционного парка по цели; заработано -
+    выручка периода; потери - дни простоя по статусам × цель; КПД - доля
+    потенциала, ставшая деньгами. Цель, а не фактический чек: потери должны
+    показывать расстояние до цели, а не подстраиваться под слабый месяц.
+    """
+    # Целые рубли: потери - оценка по цели, копейки в ней выглядят
+    # точностью, которой нет.
+    rate = to_money(rate)
+    whole = Decimal(1)
+    by_status = {s: (Decimal(str(d)) * rate).quantize(whole, rounding=ROUND_HALF_UP)
+                 for s, d in (metrics.get("idle_breakdown") or {}).items()}
+    lost = sum(by_status.values(), Decimal(0))
+    potential = (Decimal(str(metrics.get("operational_days") or 0)) * rate).quantize(
+        whole, rounding=ROUND_HALF_UP)
+    earned = to_money(metrics.get("revenue") or 0)
+    efficiency = float(round(100 * earned / potential, 1)) if potential else None
+    return {"rate": rate, "potential": potential, "earned": earned, "lost": lost,
+            "by_status": by_status, "efficiency_percent": efficiency}
+
+
+def loss_per_day(bikes_by_status: dict[str, int], *,
+                 rate: Any = CHECK_TARGET) -> dict[str, Any]:
+    """Сколько парк теряет прямо сейчас за день: простаивающие × цель чека."""
+    rate = to_money(rate)
+    by_status = {s: int(bikes_by_status.get(s, 0)) for s in IDLE_STATUSES}
+    idle = sum(by_status.values())
+    return {"idle": idle, "by_status": by_status,
+            "amount": (idle * rate).quantize(Decimal(1), rounding=ROUND_HALF_UP)}

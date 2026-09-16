@@ -116,7 +116,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
         IDLE_TARGET_PERCENT=logic.IDLE_TARGET_PERCENT, CHECK_TARGET=logic.CHECK_TARGET,
-        amortization_month=logic.amortization_month,
+        amortization_month=logic.amortization_month, fleet_losses=logic.fleet_losses,
+        INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
         today=date.today, bot_enabled=bot is not None,
@@ -272,20 +273,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for r in rentals:
             s = summarize(r, r.get("balance", 0))
             rows.append({**r, "summary": s})
-        rows.sort(key=lambda r: (r["summary"]["days_left"] or 0, r["id"]))
-        attention = [r for r in rows
-                     if (r["summary"]["days_left"] or 0) <= cfg.remind_before_days]
+        today = date.today()
+        expiring = logic.expiring(rows, today=today, before_days=cfg.remind_before_days)
         bikes_by = await crm.bike_counts()
         fleet = await crm.bikes(limit=10000)
+        metrics = await period_metrics(days=30)
         return render(request, "dashboard.html",
                       counts=await crm.counts(), bikes=bikes_by,
                       operational=sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES),
-                      metrics=await period_metrics(days=30),
+                      metrics=metrics, losses=logic.fleet_losses(metrics),
+                      loss_today=logic.loss_per_day(bikes_by),
                       amortization=logic.amortization_total(fleet),
                       idle_by_location=idle_by_location(fleet),
                       claims=await crm.pending_claims(), rentals=rows,
-                      attention=attention, debtors=await crm.debtors(10),
-                      month=await crm.ledger_totals(since=date.today().replace(day=1)))
+                      expiring=expiring, before_days=cfg.remind_before_days,
+                      forecast=logic.free_forecast(bikes_by.get("available", 0), expiring),
+                      debtors=await crm.debtors(10),
+                      month=await crm.ledger_totals(since=today.replace(day=1)))
 
     async def period_metrics(*, days: int = 0, since: datetime | None = None,
                              until: datetime | None = None) -> dict:
@@ -913,10 +917,43 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Аренда")
         ledger = [x for x in await crm.ledger_of(rental["client_id"], 200)
                   if x.get("rental_id") == rental_id]
-        return render(request, "rental.html", rental=rental,
-                      summary=summarize(rental if rental["status"] == "active" else None,
-                                        rental.get("balance", 0)),
+        summary = summarize(rental if rental["status"] == "active" else None,
+                            rental.get("balance", 0))
+        return render(request, "rental.html", rental=rental, summary=summary,
+                      intent=logic.intent_state(rental, summary, today=date.today()),
                       ledger=ledger, tariffs=await crm.tariffs(active_only=True))
+
+    @app.post("/rentals/{rental_id}/intent")
+    async def rental_intent(request: Request, rental_id: int) -> Response:
+        """Что клиент сказал про истекающий срок: продлит, сдаёт, или
+        отложить строку до завтра. Хранится с датой «оплачено до» на момент
+        отметки, поэтому после оплаты устаревает само."""
+        data = await form(request)
+        nxt = data.get("next") or ""
+        back = nxt if nxt.startswith("/") and not nxt.startswith("//") else f"/rentals/{rental_id}"
+        rental = await crm.rental(rental_id)
+        if rental is None or rental["status"] != "active":
+            flash(request, "Аренда не идёт - отмечать нечего.", "err")
+            return redirect(back)
+        action = data.get("intent") or ""
+        name = rental["full_name"]
+        if action in logic.INTENTS:
+            summary = summarize(rental, rental.get("balance", 0))
+            await crm.update_rental(rental_id, intent=action,
+                                    intent_until=summary["covered_until"],
+                                    intent_by=who(request), intent_at=datetime.now(UTC),
+                                    snooze_until=None)
+            flash(request, f"{name}: {logic.INTENTS[action]}.")
+        elif action == "snooze":
+            await crm.update_rental(rental_id, snooze_until=date.today() + timedelta(days=1))
+            flash(request, f"{name}: отложено до завтра.")
+        elif action == "clear":
+            await crm.update_rental(rental_id, intent=None, intent_until=None, intent_by=None,
+                                    intent_at=None, snooze_until=None)
+            flash(request, f"{name}: отметка снята.")
+        else:
+            flash(request, "Неизвестное действие.", "err")
+        return redirect(back)
 
     @app.post("/rentals/{rental_id}/close")
     async def rental_close(request: Request, rental_id: int) -> Response:

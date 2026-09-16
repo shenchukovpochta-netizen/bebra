@@ -104,7 +104,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py',
           'tests/test_import.py', 'tests/test_review.py', 'tests/test_scripts.py',
           'tests/test_fleet.py', 'tests/test_web_pg.py', 'tests/test_bot_review.py',
-          'tests/test_issue.py')
+          'tests/test_issue.py', 'tests/test_dashboard.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

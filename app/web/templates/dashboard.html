@@ -12,6 +12,10 @@
       <b>{% if metrics.avg_check is none %}—{% else %}{{ money(metrics.avg_check) }}{% endif %}</b>
       <span>средний чек в день<br><small class="muted">{% if metrics.rented_days %}на {{ metrics.rented_days|round(0)|int }} велосипеде-дней аренды{% else %}аренд за период не было{% endif %}</small></span>
     </div>
+    <div class="tile {% if metrics.operational_days %}{% if losses.lost %}warn{% else %}good{% endif %}{% endif %}">
+      <b>{% if metrics.operational_days %}{{ money(losses.lost) }}{% else %}—{% endif %}</b>
+      <span>потеряно на простое<br><small class="muted">{% if metrics.operational_days %}ремонт {{ money(losses.by_status.repair) }} · свободны {{ money(losses.by_status.available) }}{% if losses.efficiency_percent is not none %} · КПД парка {{ losses.efficiency_percent }} %{% endif %}{% else %}журнал статусов ещё пуст{% endif %}</small></span>
+    </div>
     <a class="tile" href="/reports"><b>{{ money(amortization) }}</b><span>отложить на парк в этом месяце<br><small class="muted">амортизация рам и АКБ</small></span></a>
   </div>
   {% if idle_by_location %}
@@ -32,16 +36,21 @@
 
 <div class="cols">
 <section class="card">
-  <h2>Требуют внимания</h2>
-  {% if attention %}
+  <h2>Истекает аренда <small class="muted">· просрочка и ближайшие {{ before_days }} дн.</small></h2>
+  <p class="muted">Свободных сейчас <b>{{ forecast.now }}</b>{% if forecast.today or forecast.tomorrow %} · сдают сегодня <b>{{ forecast.today }}</b>, завтра <b>{{ forecast.tomorrow }}</b>{% endif %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}</p>
+  {% if expiring %}
   <table>
-    <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th><th>Баланс</th></tr>
-    {% for r in attention %}
+    <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th><th>Баланс</th><th>Клиент сказал</th></tr>
+    {% for r in expiring %}
     <tr>
-      <td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% if not r.tg_id %} <span class="muted" title="без Telegram">·</span>{% endif %}</td>
+      <td><a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a><br><a class="muted" href="tel:{{ r.phone }}">{{ r.phone }}</a>{% if not r.tg_id %} <span class="muted" title="без Telegram">·</span>{% endif %}</td>
       <td>{{ r.bike_code or '—' }}</td>
       <td>{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}</td>
       <td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>
+      <td class="intent">
+        {% if r.intent %}<span class="tag intent-{{ r.intent }}">{{ r.intent_label }}</span>{% endif %}
+        <form method="post" action="/rentals/{{ r.id }}/intent"><input type="hidden" name="next" value="/"><button name="intent" value="renew" class="ghost" title="Клиент продлевает">✓ продлит</button><button name="intent" value="return" class="ghost" title="Клиент сдаёт велосипед">↩ сдаёт</button><button name="intent" value="snooze" class="ghost" title="Скрыть до завтра">⏰ завтра</button></form>
+      </td>
     </tr>
     {% endfor %}
   </table>

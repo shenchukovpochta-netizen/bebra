@@ -505,6 +505,15 @@ alter table crm.bikes add column if not exists residual_price numeric(12,2) not 
 alter table crm.bikes add column if not exists battery_price numeric(12,2);
 alter table crm.bikes add column if not exists battery_service_months integer not null default 15;
 
+-- Сводка оператора: что клиент сказал по телефону про истекающий срок
+-- («продлит» / «сдаёт») и до какой даты строку отложили. intent_until -
+-- «оплачено до» на момент отметки: сдвинулась дата - намерение устарело.
+alter table crm.rentals add column if not exists intent        text;
+alter table crm.rentals add column if not exists intent_until  date;
+alter table crm.rentals add column if not exists intent_by     text;
+alter table crm.rentals add column if not exists intent_at     timestamptz;
+alter table crm.rentals add column if not exists snooze_until  date;
+
 create table if not exists crm.bike_status_log (
   id             bigserial primary key,
   bike_id        bigint      not null references crm.bikes (id),
