@@ -8,7 +8,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from . import i18n
+from . import i18n, logic
 
 # Все подписи кнопок идут через i18n.t(lang, "BTN_*"): русский - источник,
 # перевод подхватывается по языку клиента. Обработчики, которые ловят
@@ -133,6 +133,17 @@ def same_address(lang: str = "ru") -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def citizenship() -> ReplyKeyboardMarkup:
+    """Страны в две колонки. Не переводится намеренно: названия стран уходят
+    в договор, а договор русский - выбранное человеком должно совпасть с тем,
+    что будет напечатано. Своей страны в списке нет - её вписывают текстом."""
+    names = list(logic.CITIZENSHIPS)
+    rows = [[KeyboardButton(text=a) for a in names[i:i + 2]]
+            for i in range(0, len(names), 2)]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True,
+                               one_time_keyboard=True)
 
 
 def sign_contract(lang: str = "ru") -> InlineKeyboardMarkup:

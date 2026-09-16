@@ -76,9 +76,20 @@ T: dict[str, str] = {
     ),
     "ASK_BIRTH": "Date of birth — as DD.MM.YYYY.\nFor example: 07.03.1990",
     "ASK_BIRTH_PLACE": "Place of birth, as in your passport.\nFor example: gor. Kazan",
+    "ASK_CITIZENSHIP": (
+        "Citizenship — write the name of the country.\n"
+        "For example: Russia or Uzbekistan.\n"
+        "The next question depends on it: for a Russian passport we ask for the "
+        "issuing unit code, for another country's document — the expiry date."
+    ),
     "ASK_PASSPORT": "Passport series and number — 10 digits.\nFor example: 1234 567890",
     "ASK_PASSPORT_DATE": "Passport issue date — DD.MM.YYYY.\nFor example: 01.02.2015",
     "ASK_PASSPORT_CODE": "Issuing unit code — 6 digits.\nFor example: 160-002",
+    "ASK_PASSPORT_FOREIGN": (
+        "Document number — exactly as printed in it, letters and digits.\n"
+        "For example: AA1234567"
+    ),
+    "ASK_PASSPORT_EXPIRY": "Document expiry date — DD.MM.YYYY.\nFor example: 14.03.2029",
     "ASK_PASSPORT_ISSUER": (
         "Issuing authority — one full line, exactly as in the document.\n"
         "For example: OUFMS Rossii po Resp. Tatarstan v Vakhitovskom r-ne gor. Kazani"

@@ -79,9 +79,20 @@ T: dict[str, str] = {
     ),
     "ASK_BIRTH": "Tug'ilgan sana — KK.OO.YYYY ko'rinishida.\nMasalan: 07.03.1990",
     "ASK_BIRTH_PLACE": "Tug'ilgan joy, pasportdagidek.\nMasalan: gor. Kazan",
+    "ASK_CITIZENSHIP": (
+        "Fuqarolik — davlat nomini yozing.\n"
+        "Masalan: Rossiya yoki O'zbekiston.\n"
+        "Keyingi savol shunga bog'liq: RF pasporti uchun bo'linma kodini, "
+        "boshqa davlat hujjati uchun amal qilish muddatini so'raymiz."
+    ),
     "ASK_PASSPORT": "Pasport seriyasi va raqami — 10 ta raqam.\nMasalan: 1234 567890",
     "ASK_PASSPORT_DATE": "Pasport berilgan sana — KK.OO.YYYY.\nMasalan: 01.02.2015",
     "ASK_PASSPORT_CODE": "Bo'linma kodi — 6 ta raqam.\nMasalan: 160-002",
+    "ASK_PASSPORT_FOREIGN": (
+        "Hujjat raqami — unda yozilganidek, harf va raqamlar bilan.\n"
+        "Masalan: AA1234567"
+    ),
+    "ASK_PASSPORT_EXPIRY": "Hujjatning amal qilish muddati — KK.OO.YYYY.\nMasalan: 14.03.2029",
     "ASK_PASSPORT_ISSUER": (
         "Pasport kim tomonidan berilgan — hujjatdagidek, bir qatorda "
         "to'liq yozing.\n"

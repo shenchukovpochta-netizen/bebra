@@ -41,9 +41,11 @@ UNSIGNED = "не подписан"
 PROMPTS: dict[str, str] = {
     logic.WAIT_BIRTH: texts.ASK_BIRTH,
     logic.WAIT_BIRTH_PLACE: texts.ASK_BIRTH_PLACE,
+    logic.WAIT_CITIZENSHIP: texts.ASK_CITIZENSHIP,
     logic.WAIT_PASSPORT: texts.ASK_PASSPORT,
     logic.WAIT_PASSPORT_DATE: texts.ASK_PASSPORT_DATE,
     logic.WAIT_PASSPORT_CODE: texts.ASK_PASSPORT_CODE,
+    logic.WAIT_PASSPORT_EXPIRY: texts.ASK_PASSPORT_EXPIRY,
     logic.WAIT_PASSPORT_ISSUER: texts.ASK_PASSPORT_ISSUER,
     logic.WAIT_REG_ADDR: texts.ASK_REG_ADDR,
     logic.WAIT_LIVE_ADDR: texts.ASK_LIVE_ADDR,
@@ -52,6 +54,19 @@ PROMPTS: dict[str, str] = {
     logic.WAIT_DOC: texts.ASK_DOC,
     logic.WAIT_PARENT_CONSENT: texts.ASK_PARENT_CONSENT,
 }
+
+# Единственный вопрос, который у иностранца звучит иначе, - про номер
+# документа: «10 цифр» это про российский паспорт. Зеркало повторяет
+# разделение из app/handlers/registration.py.
+PROMPTS_FOREIGN: dict[str, str] = {
+    logic.WAIT_PASSPORT: texts.ASK_PASSPORT_FOREIGN,
+}
+
+
+def prompt_text(state: str, anketa: dict | None = None) -> str:
+    if logic.is_foreign(anketa) and state in PROMPTS_FOREIGN:
+        return PROMPTS_FOREIGN[state]
+    return PROMPTS[state]
 
 
 class Ctx:
@@ -78,8 +93,9 @@ def _prompt_keyboard(state: str) -> list | None:
     return None
 
 
-async def _ask(ctx: Ctx, user_id: int, state: str) -> None:
-    await _say(ctx, user_id, PROMPTS[state], _prompt_keyboard(state))
+async def _ask(ctx: Ctx, user_id: int, state: str,
+               anketa: dict | None = None) -> None:
+    await _say(ctx, user_id, prompt_text(state, anketa), _prompt_keyboard(state))
 
 
 # ─────────────────────────── старт и оферта ───────────────────────────
@@ -151,7 +167,9 @@ async def st_contact(ctx: Ctx, user: dict, attachments: list) -> None:
 async def _advance(ctx: Ctx, user: dict, step: logic.Step, value: str) -> None:
     anketa = ctx.vault.decrypt(user.get("anketa_enc"))
     anketa[step.field] = value
-    following = logic.next_state(step.state)
+    # Анкета уже с новым ответом: после шага гражданства дальше пойдёт
+    # та ветка, которую человек только что выбрал.
+    following = logic.next_state(step.state, anketa)
     if following == logic.WAIT_DOC and user.get("doc_file_id"):
         following = logic.state_after_doc(
             anketa, has_parent_consent=bool(user.get("parent_file_id")))
@@ -165,12 +183,14 @@ async def _advance(ctx: Ctx, user: dict, step: logic.Step, value: str) -> None:
     if to_confirm:
         await send_confirm(ctx, user)
         return
-    await _ask(ctx, user["tg_id"], following)
+    await _ask(ctx, user["tg_id"], following, anketa)
 
 
 async def st_anketa(ctx: Ctx, user: dict, text: str | None) -> None:
-    step = logic.ANKETA_BY_STATE[user["state"]]
     anketa = ctx.vault.decrypt(user.get("anketa_enc"))
+    step = logic.step_for(user["state"], anketa)
+    if step is None:                                # шага нет ни в одной ветке
+        return
 
     if step.state in (logic.WAIT_PHONE2, logic.WAIT_PHONE3):
         taken = [p for p in (logic.normalize_phone(user.get("phone")),
@@ -189,7 +209,7 @@ async def st_anketa(ctx: Ctx, user: dict, text: str | None) -> None:
         await _say(ctx, user["tg_id"], texts.PASSPORT_DATE_BEFORE_BIRTH)
         await ctx.db.patch(user["tg_id"], expected_state=step.state,
                            state=logic.WAIT_BIRTH)
-        await _ask(ctx, user["tg_id"], logic.WAIT_BIRTH)
+        await _ask(ctx, user["tg_id"], logic.WAIT_BIRTH, anketa)
         return
 
     await _advance(ctx, user, step, result.value)
@@ -202,7 +222,7 @@ async def cb_same_address(ctx: Ctx, user: dict, callback_id: str) -> None:
         return
     anketa = ctx.vault.decrypt(user.get("anketa_enc"))
     await ctx.cl.answer_callback(callback_id, texts.SAME_AS_REG)
-    await _advance(ctx, user, logic.ANKETA_BY_STATE[logic.WAIT_LIVE_ADDR],
+    await _advance(ctx, user, logic.step_for(logic.WAIT_LIVE_ADDR, anketa),
                    anketa.get("reg_address", ""))
 
 
@@ -336,7 +356,7 @@ def _anketa_lines(data: dict, anketa: dict) -> str:
     ctx_map = logic.contract_context(data, anketa, number="")
     return "\n".join(
         f"{label}: <b>{logic.esc(ctx_map.get(field, '—'))}</b>"
-        for field, label in logic.CONTRACT_LABELS
+        for field, label in logic.contract_labels(anketa)
     )
 
 

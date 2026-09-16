@@ -76,19 +76,38 @@ MINOR_PASSPORT_DATE = (date.today() - timedelta(days=365)).strftime("%d.%m.%Y")
 # Чат фиксации сдачи и номер темы в нём - туда уходит подписанный договор.
 FIX_CHAT, FIX_TOPIC = -1005555555555, 42
 
-# Ответы на шаги анкеты в порядке logic.ANKETA_STEPS.
-ANKETA_ANSWERS = (
-    "07.03.1990",
-    "гор. Казань",
-    "1234 567890",
-    "01.02.2015",
-    "160-002",
-    "ОУФМС России по Респ. Татарстан",
-    "г. Казань, ул. Баумана, д. 1, кв. 2",
-    "г. Казань, ул. Кремлёвская, д. 5, кв. 9",
-    "+7 900 111-22-33",
-    "+7 900 444-55-66",
-)
+# Ответы на шаги анкеты - по имени поля, а не по номеру. Порядок берётся
+# у logic: анкета ветвится на гражданстве, и позиционный список ломался бы
+# при каждой вставке шага (и молча съезжал бы в срезах).
+ANSWERS_BY_FIELD: dict[str, str] = {
+    "birth_date": "07.03.1990",
+    "birth_place": "гор. Казань",
+    "citizenship": "Россия",
+    "passport_number": "1234 567890",
+    "passport_date": "01.02.2015",
+    "passport_code": "160-002",
+    "passport_expiry": "14.03.2029",
+    "passport_issuer": "ОУФМС России по Респ. Татарстан",
+    "reg_address": "г. Казань, ул. Баумана, д. 1, кв. 2",
+    "live_address": "г. Казань, ул. Кремлёвская, д. 5, кв. 9",
+    "phone2": "+7 900 111-22-33",
+    "phone3": "+7 900 444-55-66",
+}
+
+
+def anketa_answers(anketa: dict | None = None, **override: str) -> tuple[str, ...]:
+    """Ответы в порядке шагов той ветки, которую задаёт anketa."""
+    values = {**ANSWERS_BY_FIELD, **override}
+    return tuple(values[step.field] for step in logic.anketa_steps(anketa))
+
+
+def answers_until(field: str, anketa: dict | None = None) -> tuple[str, ...]:
+    """Ответы по шаг с этим полем включительно."""
+    fields = [step.field for step in logic.anketa_steps(anketa)]
+    return anketa_answers(anketa)[:fields.index(field) + 1]
+
+
+ANKETA_ANSWERS = anketa_answers()
 
 
 # ─────────────────────────── заглушки ───────────────────────────
@@ -506,6 +525,102 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         for secret in ("1234 567890", "160-002", "Баумана"):
             self.assertNotIn(secret, stored)
 
+    # ─────────────── анкета иностранца ───────────────
+
+    async def fill_foreign_anketa(self, country: str = "Узбекистан"):
+        """Анкета по иностранной ветке: гражданство, потом её вопросы."""
+        for answer in anketa_answers({"citizenship": country},
+                                     citizenship=country,
+                                     passport_number="AA1234567",
+                                     passport_issuer="MVD UZBEKISTAN"):
+            await self.feed(msg(answer))
+
+    async def test_foreign_anketa_asks_expiry_instead_of_division_code(self):
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Каримов Азиз Улугбекович"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.feed(msg("07.03.1990"))
+        await self.feed(msg("гор. Самарканд"))
+        await self.feed(msg("Узбекистан"))
+        # дальше вопрос про номер документа - без «10 цифр»
+        sent = " ".join(self.session.sent())
+        self.assertIn("Номер документа", sent)
+        self.assertNotIn("10 цифр", sent)
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT)
+
+        await self.feed(msg("AA1234567"))                # буквы приняты
+        await self.feed(msg("01.02.2015"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT_EXPIRY,
+                         "у иностранца вместо кода подразделения - срок действия")
+        self.assertIn("Срок действия", " ".join(self.session.sent()))
+
+        await self.feed(msg("14.03.2029"))
+        await self.feed(msg("MVD UZBEKISTAN"))
+        await self.feed(msg("г. Казань, ул. Баумана, д. 1, кв. 2"))
+        await self.feed(msg("г. Казань, ул. Кремлёвская, д. 5, кв. 9"))
+        await self.feed(msg("+7 900 111-22-33"))
+        await self.feed(msg("+7 900 444-55-66"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_DOC)
+        anketa = self.anketa()
+        self.assertEqual(anketa["citizenship"], "Узбекистан")
+        self.assertEqual(anketa["passport_number"], "AA1234567")
+        self.assertEqual(anketa["passport_expiry"], "14.03.2029")
+        self.assertNotIn("passport_code", anketa)
+        self.assertTrue(logic.anketa_complete(anketa))
+
+    async def test_russian_passport_number_is_refused_for_a_foreigner(self):
+        """Номер короче шести знаков - опечатка на любом документе."""
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Каримов Азиз"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.feed(msg("07.03.1990"))
+        await self.feed(msg("гор. Самарканд"))
+        await self.feed(msg("Узбекистан"))
+        await self.feed(msg("AA12"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT)
+        self.assertIn("от 6 до 20", " ".join(self.session.sent()))
+
+    async def test_expired_document_is_refused_on_the_spot(self):
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Каримов Азиз"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.feed(msg("07.03.1990"))
+        await self.feed(msg("гор. Самарканд"))
+        await self.feed(msg("Узбекистан"))
+        await self.feed(msg("AA1234567"))
+        await self.feed(msg("01.02.2015"))
+        await self.feed(msg("01.02.2020"))               # срок уже прошёл
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT_EXPIRY)
+        self.assertIn("просрочен", " ".join(self.session.sent()))
+
+    async def test_moderation_card_of_a_foreigner_shows_citizenship_and_expiry(self):
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Каримов Азиз Улугбекович"))
+        await self.feed(cb("pdn_ok"))
+        await self.feed(cb("oferta_ok"))
+        await self.feed(msg(contact_user_id=USER_ID))
+        await self.fill_foreign_anketa()
+        await self.feed(msg(photo=True))
+        await self.feed(msg(photo=True, file_id="f2"))
+        await self.feed(cb("confirm"))
+        card = " ".join(self.session.sent())
+        self.assertIn("Гражданство", card)
+        self.assertIn("Узбекистан", card)
+        self.assertIn("Действует до", card)
+        self.assertIn("14.03.2029", card)
+        self.assertNotIn("Код подразделения", card,
+                         "у иностранца этого поля нет - пустая строка мешает сверять")
+
     async def test_bad_passport_does_not_advance(self):
         await self.feed(msg("/start"))
         await self.feed(cb("lang:ru"))
@@ -515,6 +630,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(msg(contact_user_id=USER_ID))
         await self.feed(msg("07.03.1990"))
         await self.feed(msg("гор. Казань"))
+        await self.feed(msg("Россия"))
         await self.feed(msg("12345"))                    # не 10 цифр
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PASSPORT)
         self.assertIn("10 цифр", " ".join(self.session.sent()))
@@ -538,8 +654,8 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
-        answers = (MINOR_BIRTH,) + ANKETA_ANSWERS[1:3] \
-            + (MINOR_PASSPORT_DATE,) + ANKETA_ANSWERS[4:]
+        answers = anketa_answers(birth_date=MINOR_BIRTH,
+                                 passport_date=MINOR_PASSPORT_DATE)
         for answer in answers:
             await self.feed(msg(answer))
         await self.feed(msg(photo=True))
@@ -687,7 +803,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
-        for answer in ANKETA_ANSWERS[:7]:
+        for answer in answers_until("reg_address"):
             await self.feed(msg(answer))
         await self.feed(msg("Совпадает с регистрацией"))
         anketa = self.anketa()
@@ -701,7 +817,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb("pdn_ok"))
         await self.feed(cb("oferta_ok"))
         await self.feed(msg(contact_user_id=USER_ID))
-        for answer in ANKETA_ANSWERS[:8]:
+        for answer in answers_until("live_address"):
             await self.feed(msg(answer))
         await self.feed(msg("+7 999 000-00-00"))         # это основной номер
         self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_PHONE2)
@@ -1731,6 +1847,7 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
     LONG_ANKETA = (
         "07.03.1990",
         "поселок городского типа Васильево Зеленодольского района " * 2 + "РТ",
+        "Россия",
         "1234 567890",
         "01.02.2015",
         "160-002",

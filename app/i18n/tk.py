@@ -76,9 +76,20 @@ T: dict[str, str] = {
     ),
     "ASK_BIRTH": "Doglan sene — GG.AA.ÝÝÝÝ görnüşinde.\nMeselem: 07.03.1990",
     "ASK_BIRTH_PLACE": "Doglan ýeriňiz, pasportdaky ýaly.\nMeselem: gor. Kazan",
+    "ASK_CITIZENSHIP": (
+        "Raýatlyk — ýurduň adyny ýazyň.\n"
+        "Meselem: Russiýa ýa-da Türkmenistan.\n"
+        "Indiki sorag şoňa bagly: RF pasporty üçin bölüm kodyny, "
+        "başga ýurduň resminamasy üçin hereket möhletini soraýarys."
+    ),
     "ASK_PASSPORT": "Pasportyň seriýasy we belgisi — 10 san.\nMeselem: 1234 567890",
     "ASK_PASSPORT_DATE": "Pasportyň berlen senesi — GG.AA.ÝÝÝÝ.\nMeselem: 01.02.2015",
     "ASK_PASSPORT_CODE": "Bölümiň kody — 6 san.\nMeselem: 160-002",
+    "ASK_PASSPORT_FOREIGN": (
+        "Resminamanyň belgisi — onda ýazylyşy ýaly, harplar we sanlar bilen.\n"
+        "Meselem: AA1234567"
+    ),
+    "ASK_PASSPORT_EXPIRY": "Resminamanyň hereket möhleti — GG.AA.ÝÝÝÝ.\nMeselem: 14.03.2029",
     "ASK_PASSPORT_ISSUER": (
         "Pasporty kimiň berendigi — resminamadaky ýaly, bir setirde doly "
         "ýazyň.\n"

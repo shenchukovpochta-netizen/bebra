@@ -106,7 +106,8 @@ def pending_text(user: dict) -> str:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> None:
+async def cmd_start(message: Message, db: Database, cfg: Config, vault: Vault,
+                    user: dict) -> None:
     lang = i18n.user_lang(user)
     if user["state"] == logic.PENDING:
         # Заявка на проверке или уже одобрена и ждёт данных выдачи: /start
@@ -129,8 +130,9 @@ async def cmd_start(message: Message, db: Database, cfg: Config, user: dict) -> 
         # Отказ вернул человека на конкретный шаг, и текст отказа обещает
         # «/start, чтобы продолжить с этого места». Повторяем вопрос шага,
         # а не гоним через десять полей анкеты заново.
-        await message.answer(i18n.t(lang, PROMPTS[user["state"]]),
-                             reply_markup=_markup_for(user["state"], lang))
+        await message.answer(
+            i18n.t(lang, prompt_key(user["state"], vault.decrypt(user.get("anketa_enc")))),
+            reply_markup=_markup_for(user["state"], lang))
         return
     await start_flow(message.answer, db, user)
 
@@ -366,9 +368,11 @@ async def st_contact_wrong(message: Message, user: dict) -> None:
 PROMPTS: dict[str, str] = {
     logic.WAIT_BIRTH: "ASK_BIRTH",
     logic.WAIT_BIRTH_PLACE: "ASK_BIRTH_PLACE",
+    logic.WAIT_CITIZENSHIP: "ASK_CITIZENSHIP",
     logic.WAIT_PASSPORT: "ASK_PASSPORT",
     logic.WAIT_PASSPORT_DATE: "ASK_PASSPORT_DATE",
     logic.WAIT_PASSPORT_CODE: "ASK_PASSPORT_CODE",
+    logic.WAIT_PASSPORT_EXPIRY: "ASK_PASSPORT_EXPIRY",
     logic.WAIT_PASSPORT_ISSUER: "ASK_PASSPORT_ISSUER",
     logic.WAIT_REG_ADDR: "ASK_REG_ADDR",
     logic.WAIT_LIVE_ADDR: "ASK_LIVE_ADDR",
@@ -377,6 +381,21 @@ PROMPTS: dict[str, str] = {
     logic.WAIT_DOC: "ASK_DOC",
     logic.WAIT_PARENT_CONSENT: "ASK_PARENT_CONSENT",
 }
+
+# Из всех вопросов про документ у иностранца другой ровно один: «10 цифр» -
+# это про российский паспорт, а у него номер буквенно-цифровой. Остальные
+# («дата выдачи», «кем выдан», «фото документа») сформулированы так, что
+# подходят любому документу, и второй копии не требуют.
+PROMPTS_FOREIGN: dict[str, str] = {
+    logic.WAIT_PASSPORT: "ASK_PASSPORT_FOREIGN",
+}
+
+
+def prompt_key(state: str, anketa: dict | None = None) -> str:
+    """Ключ текста вопроса с оглядкой на гражданство."""
+    if logic.is_foreign(anketa) and state in PROMPTS_FOREIGN:
+        return PROMPTS_FOREIGN[state]
+    return PROMPTS[state]
 
 # Ответ «совпадает» принимается на любом языке: кнопка печатает подпись
 # reply-клавиатуры текстом сообщения.
@@ -389,6 +408,8 @@ def _markup_for(state: str, lang: str) -> Any:
     экономит человеку ввод длинной строки."""
     if state == logic.WAIT_LIVE_ADDR:
         return kb.same_address(lang)
+    if state == logic.WAIT_CITIZENSHIP:
+        return kb.citizenship()
     return kb.remove()
 
 
@@ -403,7 +424,9 @@ async def _advance(message: Message, bot: Bot, db: Database, vault: Vault,
     """
     anketa = vault.decrypt(user.get("anketa_enc"))
     anketa[step.field] = value
-    following = logic.next_state(step.state)
+    # Анкета уже с новым ответом: если это был шаг гражданства, дальше
+    # пойдёт та ветка, которую человек только что выбрал.
+    following = logic.next_state(step.state, anketa)
 
     # Документ уже загружен - значит человек вернулся сюда после отказа
     # с причиной вроде «телефоны не подходят». Гонять его переснимать паспорт
@@ -426,7 +449,7 @@ async def _advance(message: Message, bot: Bot, db: Database, vault: Vault,
         await send_confirm(bot, user)
         return
     lang = i18n.user_lang(user)
-    await message.answer(i18n.t(lang, PROMPTS[following]),
+    await message.answer(i18n.t(lang, prompt_key(following, anketa)),
                          reply_markup=_markup_for(following, lang))
 
 
@@ -439,8 +462,10 @@ async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
     в середину: какой-нибудь переход неизбежно остаётся указывать на старого
     соседа. Порядок и проверки лежат в таблице logic.ANKETA_STEPS.
     """
-    step = logic.ANKETA_BY_STATE[user["state"]]
     anketa = vault.decrypt(user.get("anketa_enc"))
+    step = logic.step_for(user["state"], anketa)
+    if step is None:                                    # шага нет ни в одной ветке
+        return
 
     if step.state == logic.WAIT_LIVE_ADDR and \
             message.text.strip().lower() in SAME_ADDRESS_ANSWERS:
@@ -471,7 +496,7 @@ async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
         lang = i18n.user_lang(user)
         await message.answer(i18n.t(lang, "PASSPORT_DATE_BEFORE_BIRTH"))
         await db.patch(user["tg_id"], expected_state=step.state, state=logic.WAIT_BIRTH)
-        await message.answer(i18n.t(lang, PROMPTS[logic.WAIT_BIRTH]))
+        await message.answer(i18n.t(lang, prompt_key(logic.WAIT_BIRTH, anketa)))
         return
 
     await _advance(message, bot, db, vault, user, step, result.value)
@@ -738,7 +763,7 @@ def anketa_lines(data: dict, anketa: dict) -> str:
     ctx = logic.contract_context(data, anketa, number="")
     return "\n".join(
         f"{label}: <b>{logic.esc(ctx.get(field, '—'))}</b>"
-        for field, label in logic.CONTRACT_LABELS
+        for field, label in logic.contract_labels(anketa)
     )
 
 

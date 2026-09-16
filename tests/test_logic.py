@@ -416,6 +416,19 @@ class TestFlowOrder(unittest.TestCase):
         self.assertEqual(seen[-1], logic.CONFIRM)
         self.assertEqual(seen, list(logic.FLOW))
 
+    def test_foreign_branch_walks_to_confirm_too(self):
+        foreign = {"citizenship": "Узбекистан"}
+        state, seen = logic.WAIT_FIO, []
+        while state is not None:
+            seen.append(state)
+            state = logic.next_state(state, foreign)
+        self.assertEqual(seen[-1], logic.CONFIRM)
+        self.assertIn(logic.WAIT_PASSPORT_EXPIRY, seen)
+        self.assertNotIn(logic.WAIT_PASSPORT_CODE, seen)
+        self.assertEqual(seen, list(logic.flow_for(foreign)))
+        for state in seen:
+            self.assertTrue(logic.is_known_state(state), state)
+
     def test_unknown_state_has_no_successor(self):
         self.assertIsNone(logic.next_state("wait_selfie"))
         self.assertIsNone(logic.next_state(None))
@@ -424,12 +437,35 @@ class TestFlowOrder(unittest.TestCase):
         self.assertEqual(len(set(logic.ANKETA_FIELDS)), len(logic.ANKETA_FIELDS))
 
     def test_completeness(self):
-        full = {f: "x" for f in logic.ANKETA_FIELDS}
+        full = {f: "x" for f in logic.required_fields()}
         self.assertTrue(logic.anketa_complete(full))
         self.assertEqual(logic.missing_anketa_fields(full), ())
         partial = dict(full, passport_code="   ")
         self.assertFalse(logic.anketa_complete(partial))
         self.assertEqual(logic.missing_anketa_fields(partial), ("passport_code",))
+
+    def test_completeness_of_a_foreign_anketa(self):
+        """У иностранца обязателен срок действия, а код подразделения -
+        наоборот, лишний: его в документе нет."""
+        foreign = {"citizenship": "Узбекистан"}
+        full = {f: "x" for f in logic.required_fields(foreign)} | foreign
+        self.assertTrue(logic.anketa_complete(full))
+        self.assertNotIn("passport_code", logic.required_fields(foreign))
+        self.assertIn("passport_expiry", logic.required_fields(foreign))
+        self.assertEqual(logic.missing_anketa_fields(dict(full, passport_expiry="")),
+                         ("passport_expiry",))
+        # российская анкета без срока действия по-прежнему полная
+        self.assertTrue(logic.anketa_complete(
+            {f: "x" for f in logic.required_fields()} | {"citizenship": "Россия"}))
+
+    def test_anketa_without_citizenship_is_read_as_russian(self):
+        """Анкеты, заполненные до появления шага гражданства, обязаны
+        оставаться полными - иначе все, кто сейчас в середине регистрации,
+        пошли бы заново."""
+        legacy = {f: "x" for f in logic.required_fields()}
+        self.assertNotIn("citizenship", legacy)
+        self.assertFalse(logic.is_foreign(legacy))
+        self.assertTrue(logic.anketa_complete(legacy))
 
 
 class TestContractNumbering(unittest.TestCase):

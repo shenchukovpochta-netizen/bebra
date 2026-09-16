@@ -10,7 +10,7 @@ from __future__ import annotations
 import io
 import sys
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -35,6 +35,36 @@ GOOD = f"{LINE1}\n{LINE2}\n"
 ANKETA = {"fio": "Иванов Иван Иванович", "passport_number": "1234 567890",
           "birth_date": "15.03.1995", "passport_date": "20.06.2015",
           "passport_code": "160-002"}
+
+# Загранпаспорт Узбекистана AA1234567, Каримов Азиз Улугбекович,
+# род. 15.03.1995, действует до 14.03.2029.
+UZ1 = "P<UZBKARIMOV<<AZIZ<ULUGBEKOVICH<<<<<<<<<<<<<"
+UZ2 = "AA12345678UZB9503157M2903149<<<<<<<<<<<<<<08"
+UZ = f"{UZ1}\n{UZ2}\n"
+UZ_ANKETA = {"passport_number": "AA1234567", "birth_date": "15.03.1995",
+             "passport_expiry": "14.03.2029", "citizenship": "Узбекистан"}
+
+# Карта (ВНЖ) 820123456 гражданина Таджикистана Рахмонова Фируза,
+# род. 12.07.1988, действует до 30.11.2027.
+TJ = ("IDRUS8201234567<<<<<<<<<<<<<<<\n"
+      "8807124M2711302TJK<<<<<<<<<<<4\n"
+      "RAHMONOV<<FIRUZ<<<<<<<<<<<<<<<\n")
+TJ_ANKETA = {"passport_number": "820123456", "birth_date": "12.07.1988",
+             "passport_expiry": "30.11.2027", "citizenship": "Таджикистан"}
+
+
+def uz_passport(expiry: str) -> str:
+    """Тот же узбекский паспорт с другим сроком действия.
+
+    Контрольные цифры пересчитываются здесь же: подменить дату и оставить
+    старую цифру - значит проверить не срок, а поломку поля.
+    """
+    number, birth, personal = "AA1234567", "950315", "<" * 14
+    body = (number + mrz.check_digit(number) + "UZB" + birth
+            + mrz.check_digit(birth) + "M" + expiry + mrz.check_digit(expiry)
+            + personal + mrz.check_digit(personal))
+    second = body + mrz.check_digit(body[0:10] + body[13:20] + body[21:43])
+    return f"{UZ1}\n{second}\n"
 
 
 class TestCheckDigit(unittest.TestCase):
@@ -112,6 +142,148 @@ class TestParse(unittest.TestCase):
         m = mrz.parse(f"{line1}\n{LINE2}\n", today=TODAY)
         self.assertEqual(m.surname, "PETROV")
         self.assertEqual(m.given, "PETR")
+
+
+class TestForeignDocuments(unittest.TestCase):
+    """Загранпаспорт и пластиковая карта: у них свои поля и своя раскладка."""
+
+    def test_foreign_passport(self):
+        m = mrz.parse(UZ, today=TODAY)
+        self.assertEqual(m.kind, mrz.PASSPORT)
+        self.assertTrue(m.foreign)
+        self.assertEqual(m.country, "UZB")
+        self.assertEqual(m.citizenship, "Узбекистан")
+        self.assertEqual(m.surname, "KARIMOV")
+        self.assertEqual(m.given, "AZIZ ULUGBEKOVICH")
+        self.assertEqual(m.passport_number, "AA1234567")
+        self.assertEqual(m.birth_date, date(1995, 3, 15))
+        self.assertEqual(m.passport_expiry, date(2029, 3, 14))
+        self.assertFalse(m.expired(today=TODAY))
+        self.assertEqual(m.failed, ())
+        # даты выдачи и кода подразделения в загранпаспорте нет вовсе
+        self.assertIsNone(m.passport_date)
+        self.assertEqual(m.passport_code, "")
+
+    def test_id_card(self):
+        m = mrz.parse(TJ, today=TODAY)
+        self.assertEqual(m.kind, mrz.ID_CARD)
+        self.assertTrue(m.foreign)
+        self.assertEqual(m.citizenship, "Таджикистан")
+        self.assertEqual(m.surname, "RAHMONOV")
+        self.assertEqual(m.given, "FIRUZ")
+        self.assertEqual(m.passport_number, "820123456")
+        self.assertEqual(m.birth_date, date(1988, 7, 12))
+        self.assertEqual(m.passport_expiry, date(2027, 11, 30))
+        self.assertEqual(m.failed, ())
+
+    def test_russian_passport_is_still_not_foreign(self):
+        m = mrz.parse(GOOD, today=TODAY)
+        self.assertEqual(m.kind, mrz.RF_INTERNAL)
+        self.assertFalse(m.foreign)
+        self.assertIsNone(m.passport_expiry, "у внутреннего паспорта срока нет")
+        self.assertIsNone(m.expired(today=TODAY))
+
+    def test_letters_in_the_number_are_not_corrected_to_digits(self):
+        """«O» в номере загранпаспорта может быть настоящей буквой.
+
+        Цифровая правка распознавания применима к датам и к номеру
+        внутреннего паспорта РФ, где букв не бывает, но не здесь.
+        """
+        m = mrz.parse(UZ, today=TODAY)
+        self.assertEqual(m.passport_number, "AA1234567", "буквы серии остались")
+
+    def test_unknown_country_code_is_shown_as_is(self):
+        self.assertEqual(mrz.country_name("ZZZ"), "ZZZ")
+        self.assertEqual(mrz.country_name("uzb"), "Узбекистан")
+        self.assertEqual(mrz.country_name(""), "")
+
+    def test_titles(self):
+        self.assertEqual(mrz.title(mrz.parse(UZ, today=TODAY)),
+                         "загранпаспорт (Узбекистан)")
+        self.assertEqual(mrz.title(mrz.parse(TJ, today=TODAY)),
+                         "карта (ВНЖ, РВП или удостоверение) (Таджикистан)")
+        self.assertEqual(mrz.title(mrz.parse(GOOD, today=TODAY)), "паспорт РФ")
+        self.assertEqual(mrz.title(None), "")
+
+    def test_bad_check_digit_drops_the_foreign_number(self):
+        broken = UZ2[:9] + "9" + UZ2[10:]
+        m = mrz.parse(f"{UZ1}\n{broken}\n", today=TODAY)
+        self.assertEqual(m.passport_number, "")
+        self.assertIn("номер документа", m.failed)
+        self.assertEqual(m.birth_date, date(1995, 3, 15), "остальное цело")
+
+
+class TestExpiry(unittest.TestCase):
+    """Срок действия - то, ради чего это вообще читают у иностранца:
+    аренда на три недели по документу, который кончится через неделю."""
+
+    def test_valid_document_says_nothing(self):
+        m = mrz.parse(uz_passport("290314"), today=TODAY)
+        self.assertEqual(mrz.expiry_note(m, today=TODAY), "")
+        ok, line = mrz.summary(m, UZ_ANKETA, today=TODAY)
+        self.assertTrue(ok)
+        self.assertIn("сходится", line)
+
+    def test_expired_document_is_flagged_even_when_anketa_matches(self):
+        m = mrz.parse(uz_passport("190314"), today=TODAY)
+        self.assertTrue(m.expired(today=TODAY))
+        self.assertIn("просрочен", mrz.expiry_note(m, today=TODAY))
+        ok, line = mrz.summary(m, {**UZ_ANKETA, "passport_expiry": "14.03.2019"},
+                               today=TODAY)
+        self.assertFalse(ok, "просроченный документ - повод присмотреться")
+        self.assertIn("документ просрочен 14.03.2019", line)
+
+    def test_document_ending_soon_is_flagged(self):
+        m = mrz.parse(uz_passport("261005"), today=TODAY)
+        note = mrz.expiry_note(m, today=TODAY)
+        self.assertIn("кончается 05.10.2026", note)
+        self.assertIn("через 19 дн.", note)
+        ok, _ = mrz.summary(m, {**UZ_ANKETA, "passport_expiry": "05.10.2026"},
+                            today=TODAY)
+        self.assertFalse(ok)
+
+    def test_border_of_the_warning_window(self):
+        # ровно на границе окна - ещё предупреждаем, на день дальше - уже нет
+        edge = (TODAY + timedelta(days=mrz.EXPIRY_WARN_DAYS)).strftime("%y%m%d")
+        after = (TODAY + timedelta(days=mrz.EXPIRY_WARN_DAYS + 1)).strftime("%y%m%d")
+        self.assertIn("кончается", mrz.expiry_note(
+            mrz.parse(uz_passport(edge), today=TODAY), today=TODAY))
+        self.assertEqual(mrz.expiry_note(
+            mrz.parse(uz_passport(after), today=TODAY), today=TODAY), "")
+
+    def test_russian_passport_has_no_expiry_note(self):
+        self.assertEqual(mrz.expiry_note(mrz.parse(GOOD, today=TODAY), today=TODAY), "")
+
+
+class TestCompareForeign(unittest.TestCase):
+    def test_fields_compared_are_the_foreign_ones(self):
+        labels = [label for _, label in mrz.compared_for(mrz.parse(UZ, today=TODAY))]
+        self.assertEqual(labels, ["номер документа", "дата рождения",
+                                  "срок действия", "гражданство"])
+        rf_labels = [label for _, label in mrz.compared_for(mrz.parse(GOOD, today=TODAY))]
+        self.assertIn("код подразделения", rf_labels)
+        self.assertNotIn("срок действия", rf_labels)
+
+    def test_everything_matches(self):
+        result = mrz.compare(mrz.parse(UZ, today=TODAY), UZ_ANKETA)
+        self.assertEqual(result["differ"], [])
+        self.assertEqual(len(result["same"]), 4)
+
+    def test_wrong_citizenship_in_the_anketa(self):
+        result = mrz.compare(mrz.parse(UZ, today=TODAY),
+                             {**UZ_ANKETA, "citizenship": "Таджикистан"})
+        self.assertEqual(result["differ"],
+                         ["гражданство: в МЧЗ Узбекистан, в анкете Таджикистан"])
+
+    def test_id_card_matches_its_anketa(self):
+        result = mrz.compare(mrz.parse(TJ, today=TODAY), TJ_ANKETA)
+        self.assertEqual(result["differ"], [])
+        self.assertEqual(len(result["same"]), 4)
+
+    def test_empty_anketa_is_all_differences(self):
+        result = mrz.compare(mrz.parse(UZ, today=TODAY), {})
+        self.assertEqual(len(result["differ"]), 4)
+        self.assertTrue(all("в анкете пусто" in d for d in result["differ"]))
 
 
 class TestCompare(unittest.TestCase):

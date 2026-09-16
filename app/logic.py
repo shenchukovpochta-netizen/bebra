@@ -37,9 +37,11 @@ WAIT_CONTACT = "wait_contact"
 # договора обнаруживается только при споре, когда исправлять уже поздно.
 WAIT_BIRTH = "wait_birth"
 WAIT_BIRTH_PLACE = "wait_birth_place"
+WAIT_CITIZENSHIP = "wait_citizenship"
 WAIT_PASSPORT = "wait_passport"
 WAIT_PASSPORT_DATE = "wait_passport_date"
 WAIT_PASSPORT_CODE = "wait_passport_code"
+WAIT_PASSPORT_EXPIRY = "wait_passport_expiry"
 WAIT_PASSPORT_ISSUER = "wait_passport_issuer"
 WAIT_REG_ADDR = "wait_reg_addr"
 WAIT_LIVE_ADDR = "wait_live_addr"
@@ -98,8 +100,10 @@ SUBSCRIBED_STATUSES = frozenset({"creator", "administrator", "member"})
 # посреди регистрации.
 KNOWN_STATES = frozenset({
     NEW, WAIT_LANG, WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
-    WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_PASSPORT, WAIT_PASSPORT_DATE,
-    WAIT_PASSPORT_CODE, WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
+    WAIT_BIRTH, WAIT_BIRTH_PLACE, WAIT_CITIZENSHIP,
+    WAIT_PASSPORT, WAIT_PASSPORT_DATE,
+    WAIT_PASSPORT_CODE, WAIT_PASSPORT_EXPIRY,
+    WAIT_PASSPORT_ISSUER, WAIT_REG_ADDR, WAIT_LIVE_ADDR,
     WAIT_PHONE2, WAIT_PHONE3,
     WAIT_DOC, WAIT_DOC2, WAIT_PARENT_CONSENT, CONFIRM, PENDING, WAIT_SIGN,
     WAIT_PAYMENT, WAIT_ACT_SIGN, WAIT_RETURN_SIGN, WAIT_BUYOUT_SIGN, APPROVED,
@@ -182,13 +186,22 @@ def _no_markup(value: str) -> bool:
     return not re.search(r"[<>&]", value)
 
 
+# Дальше этого срок действия документа не выдают: заграничные паспорта
+# делают на 5-10 лет, вид на жительство - бессрочный или на 5. Сорок лет
+# в поле - это опечатка в годе, а не долгий документ.
+DOC_MAX_YEARS = 30
+
+
 def validate_date(raw: str | None, *, today: date | None = None,
-                  min_year: int = 1900) -> Validation:
+                  min_year: int = 1900, future_ok: bool = False) -> Validation:
     """Дата в виде ДД.ММ.ГГГГ.
 
     Точки, слэши и дефисы как разделители принимаются одинаково: набирают
     по-разному, а отказ «неверный формат» на верно введённой дате - самый
     частый способ потерять человека посреди анкеты.
+
+    future_ok нужен ровно одному полю - сроку действия документа; всё
+    остальное в анкете смотрит в прошлое, и дата в будущем там опечатка.
     """
     text = _clean(raw)
     m = re.fullmatch(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})", text)
@@ -201,8 +214,10 @@ def validate_date(raw: str | None, *, today: date | None = None,
         return Validation(False, error="Такой даты не существует. Проверьте число и месяц.")
     if value.year < min_year:
         return Validation(False, error=f"Год должен быть не раньше {min_year}.")
-    if value > (today or date.today()):
+    if not future_ok and value > (today or date.today()):
         return Validation(False, error="Дата не может быть в будущем.")
+    if future_ok and value.year > (today or date.today()).year + DOC_MAX_YEARS:
+        return Validation(False, error="Проверьте год: срок действия слишком далеко.")
     return Validation(True, value=value.strftime("%d.%m.%Y"))
 
 
@@ -263,6 +278,86 @@ def state_after_doc(anketa: dict | None, *, has_parent_consent: bool,
     if is_minor(anketa, today=today) and not has_parent_consent:
         return WAIT_PARENT_CONSENT
     return CONFIRM
+
+
+# Гражданство хранится названием страны по-русски: оно уходит в договор,
+# а договор русский. «Россия» - единственное значение, которое включает
+# российскую ветку анкеты; всё прочее считается иностранным.
+RUSSIA = "Россия"
+
+# Страны, откуда приезжают курьеры. Порядок - по тому, как часто приходят:
+# из этого списка собирается клавиатура, и первые кнопки должны закрывать
+# большинство. Своя страна вписывается текстом, список её не ограничивает.
+CITIZENSHIPS: tuple[str, ...] = (
+    RUSSIA, "Узбекистан", "Таджикистан", "Киргизия", "Казахстан",
+    "Азербайджан", "Армения", "Беларусь", "Туркменистан", "Украина",
+    "Молдавия", "Грузия",
+)
+
+
+def is_foreign(anketa: dict | None) -> bool:
+    """Иностранец ли. Пустое гражданство - россиянин.
+
+    Так анкеты, заполненные до появления этого шага, остаются полными:
+    у них гражданства нет, и российская ветка для них верна.
+    """
+    value = str((anketa or {}).get("citizenship") or "").strip()
+    return bool(value) and value.casefold() != RUSSIA.casefold()
+
+
+def validate_citizenship(raw: str | None) -> Validation:
+    """Гражданство: кнопка из списка или название страны текстом."""
+    text = _clean(raw)
+    if not 2 <= len(text) <= 60:
+        return Validation(
+            False, error="Гражданство - название страны, например Узбекистан.")
+    if not _no_markup(text):
+        return Validation(False, error="Недопустимы символы < > и &.")
+    # Кнопку и ручной ввод приводим к одному написанию: иначе «россия»
+    # и «Россия» разошлись бы по разным веткам анкеты.
+    for known in CITIZENSHIPS:
+        if known.casefold() == text.casefold():
+            return Validation(True, value=known)
+    return Validation(True, value=text[:1].upper() + text[1:])
+
+
+def validate_passport_number_foreign(raw: str | None) -> Validation:
+    """Номер документа иностранца: буквы и цифры, 6-20 знаков.
+
+    Единого формата у паспортов разных стран нет: «AA1234567» у Узбекистана,
+    «N01234567» у Таджикистана, чистые цифры у карт. Поэтому проверяется
+    только то, что общее: длина и отсутствие постороннего. Пробелы и дефисы
+    убираются, буквы поднимаются в заглавные - так же, как их печатает МЧЗ,
+    и сверка с ней сходится без приведения на каждом шаге.
+    """
+    text = re.sub(r"[\s\-]", "", str(raw or "")).upper()
+    if not re.fullmatch(r"[A-ZА-Я0-9]{6,20}", text):
+        return Validation(
+            False,
+            error="Номер документа - от 6 до 20 букв и цифр, как в документе. "
+                  "Например: AA1234567.",
+        )
+    return Validation(True, value=text)
+
+
+def validate_passport_expiry(raw: str | None, *,
+                             today: date | None = None) -> Validation:
+    """Срок действия документа: дата, и она должна быть впереди.
+
+    Просроченный документ ловится здесь, а не на модераторе: оформлять
+    аренду по нему всё равно нельзя, и лучше сказать об этом сразу.
+    """
+    check = validate_date(raw, future_ok=True)
+    if not check.ok:
+        return check
+    value = parse_date(check.value)
+    if value is not None and value <= (today or date.today()):
+        return Validation(
+            False,
+            error="Документ просрочен: срок действия уже прошёл. "
+                  "Нужен действующий документ.",
+        )
+    return check
 
 
 def validate_passport_number(raw: str | None) -> Validation:
@@ -373,51 +468,120 @@ class Step:
     validate: Callable[..., Validation]
 
 
-ANKETA_STEPS: tuple[Step, ...] = (
+# Анкета ветвится на гражданстве: у российского паспорта есть код
+# подразделения и нет срока действия, у документа иностранца - наоборот.
+# Общая часть одна, различаются только четыре шага про документ.
+_STEPS_HEAD: tuple[Step, ...] = (
     Step(WAIT_BIRTH, "birth_date", validate_birth_date),
     Step(WAIT_BIRTH_PLACE, "birth_place", validate_birth_place),
+    Step(WAIT_CITIZENSHIP, "citizenship", validate_citizenship),
+)
+_STEPS_DOC_RU: tuple[Step, ...] = (
     Step(WAIT_PASSPORT, "passport_number", validate_passport_number),
     Step(WAIT_PASSPORT_DATE, "passport_date", validate_date),
     Step(WAIT_PASSPORT_CODE, "passport_code", validate_passport_code),
     Step(WAIT_PASSPORT_ISSUER, "passport_issuer", validate_passport_issuer),
+)
+_STEPS_DOC_FOREIGN: tuple[Step, ...] = (
+    Step(WAIT_PASSPORT, "passport_number", validate_passport_number_foreign),
+    Step(WAIT_PASSPORT_DATE, "passport_date", validate_date),
+    Step(WAIT_PASSPORT_EXPIRY, "passport_expiry", validate_passport_expiry),
+    Step(WAIT_PASSPORT_ISSUER, "passport_issuer", validate_passport_issuer),
+)
+_STEPS_TAIL: tuple[Step, ...] = (
     Step(WAIT_REG_ADDR, "reg_address", validate_address),
     Step(WAIT_LIVE_ADDR, "live_address", validate_address),
     Step(WAIT_PHONE2, "phone2", validate_phone),
     Step(WAIT_PHONE3, "phone3", validate_phone),
 )
 
-ANKETA_BY_STATE = {step.state: step for step in ANKETA_STEPS}
-ANKETA_FIELDS = tuple(step.field for step in ANKETA_STEPS)
+
+def anketa_steps(anketa: dict | None = None) -> tuple[Step, ...]:
+    """Шаги анкеты для конкретного человека. Без анкеты - российская ветка."""
+    doc = _STEPS_DOC_FOREIGN if is_foreign(anketa) else _STEPS_DOC_RU
+    return _STEPS_HEAD + doc + _STEPS_TAIL
+
+
+ANKETA_STEPS: tuple[Step, ...] = anketa_steps()
+
+# Все шаги обеих веток: по этому словарю обработчик решает, относится ли
+# сообщение к анкете вообще. Какой именно шаг - отвечает step_for, и только
+# он знает про гражданство.
+ANKETA_BY_STATE: dict[str, Step] = {
+    step.state: step for step in _STEPS_HEAD + _STEPS_DOC_RU + _STEPS_DOC_FOREIGN
+    + _STEPS_TAIL
+}
+
+
+def step_for(state: str, anketa: dict | None = None) -> Step | None:
+    """Шаг по состоянию с оглядкой на гражданство.
+
+    Состояние WAIT_PASSPORT есть в обеих ветках, но проверки у него разные:
+    десять цифр у россиянина и буквы с цифрами у иностранца.
+    """
+    for step in anketa_steps(anketa):
+        if step.state == state:
+            return step
+    return ANKETA_BY_STATE.get(state)
+
+
+def anketa_fields(anketa: dict | None = None) -> tuple[str, ...]:
+    return tuple(step.field for step in anketa_steps(anketa))
+
+
+ANKETA_FIELDS = anketa_fields()
+
+# Гражданство в обязательные не входит: анкеты, заполненные до появления
+# этого шага, гражданства не имеют, и требовать его - значит отправить
+# всех, кто сейчас в середине регистрации, начинать заново. Пустое
+# гражданство читается как «Россия» (см. is_foreign), и договор от этого
+# не страдает.
+OPTIONAL_FIELDS = frozenset({"citizenship"})
+
+
+def required_fields(anketa: dict | None = None) -> tuple[str, ...]:
+    return tuple(f for f in anketa_fields(anketa) if f not in OPTIONAL_FIELDS)
+
 
 # Полный порядок шагов. next_state ходит по нему, поэтому переход появляется
 # автоматически, стоит вписать шаг в таблицу выше.
 # Шаг согласия родителя стоит в таблице, но проходят его только 16-17-летние:
 # обработчик документа выбирает следующий шаг через state_after_doc, а не
 # по этой таблице.
-FLOW: tuple[str, ...] = (
-    WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
-    *(step.state for step in ANKETA_STEPS),
-    WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM,
-)
+def flow_for(anketa: dict | None = None) -> tuple[str, ...]:
+    return (
+        WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
+        *(step.state for step in anketa_steps(anketa)),
+        WAIT_DOC, WAIT_PARENT_CONSENT, CONFIRM,
+    )
 
 
-def next_state(state: str | None) -> str | None:
-    """Следующий шаг по порядку. None - дальше по таблице ничего нет."""
+FLOW: tuple[str, ...] = flow_for()
+
+
+def next_state(state: str | None, anketa: dict | None = None) -> str | None:
+    """Следующий шаг по порядку. None - дальше по таблице ничего нет.
+
+    Анкета нужна, потому что после гражданства ветки расходятся: у иностранца
+    вместо кода подразделения спрашивают срок действия документа.
+    """
+    flow = flow_for(anketa)
     try:
-        index = FLOW.index(state)
+        index = flow.index(state)
     except ValueError:
         return None
-    return FLOW[index + 1] if index + 1 < len(FLOW) else None
+    return flow[index + 1] if index + 1 < len(flow) else None
 
 
 def anketa_complete(anketa: dict | None) -> bool:
     data = anketa or {}
-    return all(str(data.get(f) or "").strip() for f in ANKETA_FIELDS)
+    return all(str(data.get(f) or "").strip() for f in required_fields(data))
 
 
 def missing_anketa_fields(anketa: dict | None) -> tuple[str, ...]:
     data = anketa or {}
-    return tuple(f for f in ANKETA_FIELDS if not str(data.get(f) or "").strip())
+    return tuple(f for f in required_fields(data)
+                 if not str(data.get(f) or "").strip())
 
 
 def passport_date_consistent(anketa: dict | None) -> bool:
@@ -425,12 +589,18 @@ def passport_date_consistent(anketa: dict | None) -> bool:
 
     Ловит перепутанные местами даты: «выдан 07.03.1990, родился 12.04.2015»
     в договор уходит молча, а на бумаге это очевидная ерунда.
+
+    Порог в 14 лет - российский: паспорт РФ раньше не выдают. Загранпаспорт
+    делают и грудному ребёнку, поэтому иностранцу проверяется только то, что
+    документ выдан не раньше, чем он родился.
     """
     data = anketa or {}
     born = parse_date(data.get("birth_date"))
     issued = parse_date(data.get("passport_date"))
     if born is None or issued is None:
         return True                      # нечего сверять, проверит свой валидатор
+    if is_foreign(data):
+        return issued >= born
     years = issued.year - born.year - ((issued.month, issued.day) < (born.month, born.day))
     return years >= PASSPORT_MIN_AGE
 
@@ -655,6 +825,30 @@ CONTRACT_LABELS: tuple[tuple[str, str], ...] = (
     ("phone3", "Телефон третий"),
 )
 
+# То же для иностранца: вместо кода подразделения - гражданство и срок
+# действия документа. Пустой код подразделения строкой «—» в карточке
+# только мешает сверять, а срок действия - наоборот, главное, на что там
+# нужно смотреть.
+CONTRACT_LABELS_FOREIGN: tuple[tuple[str, str], ...] = (
+    ("fio", "ФИО"),
+    ("citizenship", "Гражданство"),
+    ("birth_date", "Дата рождения"),
+    ("birth_place", "Место рождения"),
+    ("passport_number", "Документ"),
+    ("passport_date", "Дата выдачи"),
+    ("passport_expiry", "Действует до"),
+    ("passport_issuer", "Кем выдан"),
+    ("reg_address", "Адрес регистрации"),
+    ("live_address", "Адрес проживания"),
+    ("phone", "Телефон основной"),
+    ("phone2", "Телефон дополнительный"),
+    ("phone3", "Телефон третий"),
+)
+
+
+def contract_labels(anketa: dict | None = None) -> tuple[tuple[str, str], ...]:
+    return CONTRACT_LABELS_FOREIGN if is_foreign(anketa) else CONTRACT_LABELS
+
 
 # Абзац для договора с 16-17-летним. Подставляется в {{ minor_clause }}:
 # у взрослого на этом месте пустота, у несовершеннолетнего - оговорка,
@@ -683,8 +877,11 @@ def contract_context(user: dict, anketa: dict | None, *, number: str,
         "tg_id": str(user.get("tg_id") or ""),
         "username": f"@{user['username']}" if user.get("username") else "",
     }
-    for field_name in ANKETA_FIELDS:
+    # Поля обеих веток: у россиянина пустым останется срок действия,
+    # у иностранца - код подразделения, и в договоре на их месте прочерк.
+    for field_name in set(anketa_fields()) | set(anketa_fields({"citizenship": "-"})):
         ctx[field_name] = str(data.get(field_name) or "")
+    ctx["citizenship"] = str(data.get("citizenship") or RUSSIA)
     result = {k: (v.strip() or "—") for k, v in ctx.items()}
     # После прочерков, а не до: пустая оговорка у взрослого должна остаться
     # пустой строкой, «—» отдельным абзацем посреди договора выглядит браком.
