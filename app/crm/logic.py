@@ -1503,3 +1503,98 @@ def channel_rows(clients: Iterable[dict], *, months: int = 12,
 
 def channel_label(code: str) -> str:
     return CLIENT_CHANNELS.get(code, "не спросили")
+
+
+# ─────────────────────── расхождения в данных ───────────────────────
+
+# Что проверяем. Формулировки - для человека, который будет это чинить:
+# не «нарушение инварианта», а что именно пойдёт не так.
+INTEGRITY_KINDS: dict[str, str] = {
+    "rented_no_rental": "Числится в аренде, а аренды нет",
+    "rental_no_bike_status": "Аренда идёт, а велосипед не в аренде",
+    "rental_without_bike": "Аренда без велосипеда",
+    "order_on_rented": "Наряд открыт на велосипед, который у клиента",
+    "repair_no_order": "В ремонте, а наряда нет",
+    "lost_with_rental": "Числится утерянным, а аренда идёт",
+    "debt_without_rental": "Долг есть, а аренды нет",
+}
+# Долг, ниже которого разбираться не с чем: копейки округления и
+# недоплаты в пару рублей висят у половины базы.
+DEBT_NOISE = Decimal(500)
+
+
+def integrity_issues(bikes: Iterable[dict], rentals: Iterable[dict],
+                     orders_by_bike: dict[int, dict],
+                     debtors: Iterable[dict] = ()) -> list[dict]:
+    """Расхождения между парком, арендами и нарядами.
+
+    Расхождение - это не «некрасиво в базе», а невидимый простой: велосипед,
+    числящийся в аренде без аренды, не попадает ни в выдачу, ни в ремонт,
+    и никто про него не вспомнит, пока не придёт пересчёт.
+    """
+    bikes = list(bikes)
+    rentals = [r for r in rentals if r.get("status") == "active"]
+    rented_bikes = {int(r["bike_id"]): r for r in rentals if r.get("bike_id")}
+    by_id = {int(b["id"]): b for b in bikes}
+    issues: list[dict] = []
+
+    def add(kind: str, *, bike: dict | None = None, rental: dict | None = None,
+            what: str = "") -> None:
+        issues.append({"kind": kind, "title": INTEGRITY_KINDS[kind], "bike": bike,
+                       "rental": rental, "what": what})
+
+    for bike in bikes:
+        bike_id = int(bike["id"])
+        status = bike.get("status")
+        if status == "rented" and bike_id not in rented_bikes:
+            add("rented_no_rental", bike=bike,
+                what="Выдать его нельзя, в простой он не попадает.")
+        if status == "lost" and bike_id in rented_bikes:
+            add("lost_with_rental", bike=bike, rental=rented_bikes[bike_id],
+                what="Либо велосипед у клиента, либо он потерян.")
+        order = orders_by_bike.get(bike_id)
+        if order and status == "rented":
+            add("order_on_rented", bike=bike, rental=rented_bikes.get(bike_id),
+                what=f"Наряд {order.get('no')} висит на велосипеде у клиента.")
+        if status == "repair" and not order:
+            add("repair_no_order", bike=bike,
+                what="Работой никто не занят, а простой копится.")
+    for rental in rentals:
+        bike_id = rental.get("bike_id")
+        if not bike_id:
+            add("rental_without_bike", rental=rental,
+                what="Непонятно, что у клиента на руках.")
+            continue
+        bike = by_id.get(int(bike_id))
+        if bike is not None and bike.get("status") != "rented":
+            add("rental_no_bike_status", bike=bike, rental=rental,
+                what=f"Велосипед числится «{BIKE_STATUSES.get(bike.get('status'), '—')}»"
+                     " и может уйти второму клиенту.")
+    active_clients = {int(r["client_id"]) for r in rentals if r.get("client_id")}
+    for debtor in debtors:
+        if int(debtor.get("id") or 0) in active_clients:
+            continue
+        debt = -to_money(debtor.get("balance") or 0)
+        if debt >= DEBT_NOISE:
+            issues.append({"kind": "debt_without_rental",
+                           "title": INTEGRITY_KINDS["debt_without_rental"],
+                           "bike": None, "rental": None, "client": debtor,
+                           "what": f"{money(debt)} за клиентом, аренда закрыта."})
+    return issues
+
+
+def integrity_summary(issues: Iterable[dict]) -> dict[str, int]:
+    """Сколько расхождений какого вида: для плиток и для сообщения в чат."""
+    out: dict[str, int] = {}
+    for issue in issues:
+        out[issue["kind"]] = out.get(issue["kind"], 0) + 1
+    out["total"] = sum(out.values())
+    return out
+
+
+def integrity_digest(issues: Iterable[dict]) -> str:
+    """Строки для служебного чата. Пусто - расхождений нет, молчим."""
+    summary = integrity_summary(issues)
+    lines = [f"• {INTEGRITY_KINDS[kind]}: {count}"
+             for kind, count in summary.items() if kind in INTEGRITY_KINDS and count]
+    return "\n".join(lines)

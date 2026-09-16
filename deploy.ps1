@@ -83,7 +83,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/stock_take.html',
                   'app/web/templates/payback.html',
                   'app/web/templates/referrals.html',
-                  'app/web/templates/channels.html')
+                  'app/web/templates/channels.html',
+                  'app/web/templates/integrity.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -120,7 +121,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_access.py', 'tests/test_mrz.py', 'tests/test_service.py',
           'tests/test_stock_take.py', 'tests/test_payback.py',
           'tests/test_referrals.py', 'tests/test_staff_link.py',
-          'tests/test_shopwindow.py', 'tests/test_channels.py')
+          'tests/test_shopwindow.py', 'tests/test_channels.py',
+          'tests/test_integrity.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

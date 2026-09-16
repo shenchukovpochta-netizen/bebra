@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Расхождения — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Расхождения</h1>
+  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/integrity" class="on">Расхождения</a></nav>
+</div>
+
+{% if not issues %}
+<div class="card"><p>Расхождений нет: парк, аренды и наряды сходятся.</p></div>
+{% else %}
+<div class="tiles">
+  {% for kind, label in INTEGRITY_KINDS.items() %}{% if summary.get(kind) %}
+  <div class="tile warn"><b>{{ summary[kind] }}</b><span>{{ label|lower }}</span></div>
+  {% endif %}{% endfor %}
+</div>
+<div class="card">
+<table>
+  <tr><th>Что не так</th><th>Велосипед</th><th>Клиент</th><th>Чем это грозит</th></tr>
+  {% for i in issues %}
+  <tr>
+    <td>{{ i.title }}</td>
+    <td>{% if i.bike %}<a href="/bikes/{{ i.bike.id }}">№ {{ i.bike.code }}</a> {{ i.bike.model }}{% else %}—{% endif %}</td>
+    <td>
+      {% set person = i.client or i.rental %}
+      {% if person and person.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ person.client_id }}">{{ person.full_name }}</a>
+      {% elif person and person.id and i.client and can_view(staff, 'clients') %}<a href="/clients/{{ person.id }}">{{ person.full_name }}</a>
+      {% elif person %}{{ person.full_name or '—' }}{% else %}—{% endif %}
+    </td>
+    <td class="muted">{{ i.what }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="muted">Расхождение — это не «некрасиво в базе», а невидимый простой:
+  велосипед, числящийся в аренде без аренды, не попадает ни в выдачу, ни в
+  ремонт, и про него не вспомнят до пересчёта. Долги меньше
+  {{ money(DEBT_NOISE) }} в список не идут — это округления и недоплаты
+  в пару рублей.</p>
+</div>
+{% endif %}
+{% endblock %}

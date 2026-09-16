@@ -128,6 +128,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
+        INTEGRITY_KINDS=logic.INTEGRITY_KINDS, DEBT_NOISE=logic.DEBT_NOISE,
         take_title=logic.take_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
@@ -1305,6 +1306,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return _csv(name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
+
+    async def integrity_data() -> list[dict]:
+        """Расхождения между парком, арендами и нарядами."""
+        return logic.integrity_issues(
+            await crm.bikes(limit=10000), await crm.active_rentals(),
+            await crm.open_orders_by_bike(), await crm.debtors(200))
+
+    @app.get("/reports/integrity")
+    async def integrity_report(request: Request) -> Response:
+        """Расхождение - это не «некрасиво в базе», а невидимый простой."""
+        if not may_view(request, "bikes"):
+            return denied(request, "bikes")
+        issues = await integrity_data()
+        return render(request, "integrity.html", issues=issues,
+                      summary=logic.integrity_summary(issues))
 
     @app.get("/reports/channels")
     async def channels_report(request: Request) -> Response:

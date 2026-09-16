@@ -89,6 +89,26 @@ async def post_free_bikes(bot: Any, crm: Any, cfg: Any) -> bool:
     return True
 
 
+async def report_integrity(bot: Any, crm: Any, cfg: Any) -> int:
+    """Расхождения - в служебный чат. Возвращает число расхождений.
+
+    Молчим, когда всё сходится: ежедневное «расхождений нет» перестают
+    читать через неделю, а вместе с ним и то, ради чего сообщение есть.
+    """
+    issues = logic.integrity_issues(
+        await crm.bikes(limit=10000), await crm.active_rentals(),
+        await crm.open_orders_by_bike(), await crm.debtors(200))
+    if not issues:
+        return 0
+    text = texts.INTEGRITY_DIGEST.format(total=len(issues),
+                                         lines=logic.integrity_digest(issues))
+    try:
+        await bot.send_message(cfg.contract_chat_id, text)
+    except TelegramAPIError:
+        log.exception("сводка о расхождениях не доставлена")
+    return len(issues)
+
+
 async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> None:
     """Начислить, напомнить, отчитаться. Каждый шаг отдельно в try:
     сбой одного не должен отменять остальные."""
@@ -105,6 +125,12 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> No
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: проход напоминаний не удался")
         return
+    try:
+        found = await report_integrity(bot, crm, cfg)
+        if found:
+            log.info("CRM: расхождений в данных найдено %s", found)
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: проверка расхождений не удалась")
     try:
         if await post_free_bikes(bot, crm, cfg):
             log.info("CRM: пост о свободных велосипедах отправлен")
