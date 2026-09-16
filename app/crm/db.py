@@ -24,7 +24,7 @@ BIKE_FIELDS = frozenset({
 })
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
-    "note", "source", "ref_code", "invited_by", "invited_at",
+    "note", "source", "channel", "ref_code", "invited_by", "invited_at",
 })
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
@@ -1306,3 +1306,10 @@ class CrmDB:
         await self.pool.execute(
             "update crm.staff set tg_id = null, tg_username = null, "
             "link_code = null, linked_at = null where id = $1", staff_id)
+
+    async def clients_since(self, since: datetime) -> list[dict]:
+        """Карточки, заведённые с даты: отчёту по каналам нужны только
+        дата и канал, а не балансы всей базы."""
+        return _rows(await self.pool.fetch(
+            "select id, full_name, channel, source, created_at from crm.clients "
+            "where created_at >= $1 order by created_at", since))

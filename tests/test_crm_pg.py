@@ -528,6 +528,22 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logic.ref_settings(await self.crm.settings())["bonus"],
                          D("800.00"))
 
+    async def test_client_channel_on_postgres(self):
+        """Канал привлечения на живой базе: пишется, читается, считается."""
+        await self.seed()
+        await self.crm.update_client(self.client_id, channel="avito")
+        self.assertEqual((await self.crm.client(self.client_id))["channel"], "avito")
+        rows = await self.crm.clients_since(datetime.now(UTC) - timedelta(days=1))
+        self.assertEqual([r["channel"] for r in rows], ["avito"])
+        data = logic.channel_rows(rows, months=3)
+        self.assertEqual(data["totals"]["avito"], 1)
+        # приглашённому каналу «сарафан» проставляется само
+        friend_id = await self.crm.create_client(full_name="Друг", phone="+79993334455",
+                                                 tg_id=9002)
+        await self.crm.add_referral(agent_id=self.client_id, tg_id=9002)
+        await service.ref_signed(self.crm, await self.crm.client(friend_id))
+        self.assertEqual((await self.crm.client(friend_id))["channel"], "referral")
+
 
 if __name__ == "__main__":
     unittest.main()

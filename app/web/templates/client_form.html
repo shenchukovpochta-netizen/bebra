@@ -7,6 +7,7 @@
   <label>Телефон <input name="phone" placeholder="+7 900 123-45-67" required></label>
   <label>Номер договора <input name="contract_no"></label>
   <label>Статус <select name="status">{% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+  <label>Откуда узнал <select name="channel"><option value="">не спросили</option>{% for code, label in CLIENT_CHANNELS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
   <label>Заметка <textarea name="note" rows="3"></textarea></label>
   <button type="submit">Сохранить</button>
 </form>

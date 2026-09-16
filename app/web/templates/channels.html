@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Клиенты и каналы — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Клиенты и каналы</h1>
+  <nav class="tabs"><a href="/reports">Отчёты</a><a href="/reports/channels" class="on">Каналы</a></nav>
+  <a class="btn ghost" href="/reports/channels.csv">CSV</a>
+</div>
+<div class="card">
+<table>
+  <tr><th>Месяц</th>{% for code in columns %}<th>{{ channel_label(code) }}</th>{% endfor %}<th>Всего</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.month.strftime('%m.%Y') }}</td>
+    {% for code in columns %}<td class="num {% if not r.cells[code] %}muted{% endif %}">{{ r.cells[code] }}</td>{% endfor %}
+    <td class="num">{{ r.total }}</td>
+  </tr>
+  {% endfor %}
+  <tr class="total">
+    <td><b>ИТОГО</b></td>
+    {% for code in columns %}<td class="num">{{ totals.get(code, 0) }}</td>{% endfor %}
+    <td class="num">{{ total }}</td>
+  </tr>
+</table>
+{% if not columns %}<p class="muted">За год новых клиентов не было.</p>{% endif %}
+<p class="muted">Считаются карточки по дате появления. «Не спросили» — канал
+  не заполнен: это честный пробел, а не «другое». Спрашивайте при выдаче и
+  ставьте в карточке клиента — по этой таблице потом решают, куда давать
+  рекламу. «Сарафан» проставляется сам, когда клиента привёл друг по
+  приглашению.</p>
+</div>
+{% endblock %}

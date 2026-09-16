@@ -844,3 +844,9 @@ create unique index if not exists staff_tg_idx on crm.staff (tg_id)
   where tg_id is not null;
 create unique index if not exists staff_link_code_idx on crm.staff (link_code)
   where link_code is not null;
+
+-- Канал привлечения: откуда клиент про нас узнал. Не то же, что source
+-- (manual|bot|import) - тот говорит, каким путём завелась карточка,
+-- а канал отвечает на вопрос «куда давать рекламу».
+alter table crm.clients add column if not exists channel text;
+create index if not exists clients_channel_idx on crm.clients (channel);

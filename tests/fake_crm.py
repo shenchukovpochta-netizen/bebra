@@ -415,9 +415,16 @@ class FakeCrm:
         self.clients_[cid] = {"id": cid, "full_name": full_name, "phone": phone,
                               "tg_id": tg_id, "username": username, "status": "active",
                               "contract_no": contract_no, "note": note, "source": source,
-                              "ref_code": None, "invited_by": None, "invited_at": None,
+                              "channel": None, "ref_code": None,
+                              "invited_by": None, "invited_at": None,
                               "created_at": self._now(), "updated_at": self._now()}
         return cid
+
+    async def clients_since(self, since):
+        return [{"id": c["id"], "full_name": c["full_name"],
+                 "channel": c.get("channel"), "source": c.get("source"),
+                 "created_at": c["created_at"]}
+                for c in self.clients_.values() if c["created_at"] >= since]
 
     async def update_client(self, client_id, **fields):
         self.clients_[client_id].update(fields)

@@ -378,8 +378,12 @@ async def ref_signed(crm: Any, client: dict) -> dict | None:
     if ref.get("client_id") is None:
         await crm.update_referral(ref["id"], client_id=client["id"],
                                   status="signed", signed_at=datetime.now(UTC))
-        await crm.update_client(client["id"], invited_by=ref["agent_id"],
-                                invited_at=datetime.now(UTC))
+        patch: dict[str, Any] = {"invited_by": ref["agent_id"],
+                                 "invited_at": datetime.now(UTC)}
+        # Канал привлечения известен без вопросов: клиента привёл друг.
+        if not client.get("channel"):
+            patch["channel"] = "referral"
+        await crm.update_client(client["id"], **patch)
     return await crm.referral_of_tg(int(tg_id))
 
 

@@ -1433,3 +1433,73 @@ def free_bikes_post(bikes: Iterable[dict], tariffs: Iterable[dict], *,
     total = sum(by_model.values())
     return {"lines": "\n".join(lines), "total": total,
             "price": money(cheapest) if cheapest is not None else ""}
+
+
+# ─────────────────── откуда пришёл клиент ───────────────────
+
+# Каналы привлечения. Порядок - по тому, как часто приходят курьеры;
+# «сарафан» проставляется сам, когда клиента привёл друг по приглашению.
+CLIENT_CHANNELS: dict[str, str] = {
+    "avito": "Авито",
+    "2gis": "2ГИС",
+    "yandex_maps": "Яндекс Карты",
+    "referral": "Сарафан (по приглашению)",
+    "channel": "Наш Telegram-канал",
+    "site": "Сайт",
+    "other": "Другое",
+}
+
+
+def check_channel(raw: Any) -> Check:
+    """Канал привлечения. Пусто - «не спросили», это нормальное состояние."""
+    value = str(raw or "").strip()
+    if not value:
+        return Check(True, None)
+    return check_choice(value, CLIENT_CHANNELS, what="Канал привлечения")
+
+
+def channel_rows(clients: Iterable[dict], *, months: int = 12,
+                 today: date | None = None) -> dict[str, Any]:
+    """Новые клиенты по месяцам и каналам: куда давать рекламу.
+
+    Считаются по дате появления карточки. Клиент без канала попадает
+    в «не спросили»: честнее показать пробел, чем размазать его по
+    известным каналам.
+    """
+    today = today or date.today()
+    first = today.replace(day=1)
+    scale: list[date] = []
+    for _ in range(months):
+        scale.append(first)
+        first = (first - timedelta(days=1)).replace(day=1)
+    scale.reverse()
+    known = set(scale)
+    grid: dict[date, dict[str, int]] = {m: {} for m in scale}
+    totals: dict[str, int] = {}
+    for client in clients:
+        created = client.get("created_at")
+        if created is None:
+            continue
+        day = created.date() if isinstance(created, datetime) else created
+        month = day.replace(day=1)
+        if month not in known:
+            continue
+        channel = str(client.get("channel") or "")
+        channel = channel if channel in CLIENT_CHANNELS else ""
+        grid[month][channel] = grid[month].get(channel, 0) + 1
+        totals[channel] = totals.get(channel, 0) + 1
+    # Колонки - только те каналы, по которым кто-то пришёл: пустые
+    # столбцы занимают ширину и ничего не говорят.
+    columns = [code for code in CLIENT_CHANNELS if totals.get(code)]
+    if totals.get(""):
+        columns.append("")
+    rows = [{"month": month,
+             "cells": {code: grid[month].get(code, 0) for code in columns},
+             "total": sum(grid[month].values())}
+            for month in scale]
+    return {"columns": columns, "rows": rows, "totals": totals,
+            "total": sum(totals.values())}
+
+
+def channel_label(code: str) -> str:
+    return CLIENT_CHANNELS.get(code, "не спросили")

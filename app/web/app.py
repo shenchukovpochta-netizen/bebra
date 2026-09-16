@@ -127,6 +127,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
+        CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
         take_title=logic.take_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
@@ -442,7 +443,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                     what="Статус")
         contract = logic.check_name(data.get("contract_no"), what="Договор") \
             if (data.get("contract_no") or "").strip() else logic.Check(True, None)
-        for check in (name, note, status, contract):
+        channel = logic.check_channel(data.get("channel"))
+        for check in (name, note, status, contract, channel):
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
@@ -454,7 +456,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, f"Этот телефон уже у клиента «{other['full_name']}».", "err")
             return None
         return {"full_name": name.value, "phone": phone, "note": note.value,
-                "status": status.value, "contract_no": contract.value}
+                "status": status.value, "contract_no": contract.value,
+                "channel": channel.value}
 
     @app.post("/clients")
     async def client_create(request: Request) -> Response:
@@ -465,8 +468,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         client_id = await crm.create_client(full_name=fields["full_name"],
                                             phone=fields["phone"], note=fields["note"],
                                             contract_no=fields["contract_no"])
+        patch = {key: fields[key] for key in ("channel",) if fields.get(key)}
         if fields["status"] != "active":
-            await crm.update_client(client_id, status=fields["status"])
+            patch["status"] = fields["status"]
+        if patch:
+            await crm.update_client(client_id, **patch)
         flash(request, "Клиент добавлен.")
         return redirect(f"/clients/{client_id}")
 
@@ -1299,6 +1305,42 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return _csv(name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
+
+    @app.get("/reports/channels")
+    async def channels_report(request: Request) -> Response:
+        """Откуда приходят клиенты - по месяцам. Куда давать рекламу.
+
+        Это разрез клиентской базы, поэтому и право нужно на клиентов:
+        механику с доступом к отчётам парка она ни к чему.
+        """
+        if not may_view(request, "clients"):
+            return denied(request, "clients")
+        months = 12
+        now = datetime.now().astimezone()
+        since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(months - 1):
+            since = (since - timedelta(days=1)).replace(day=1)
+        data = logic.channel_rows(await crm.clients_since(since), months=months,
+                                  today=now.date())
+        return render(request, "channels.html", **data)
+
+    @app.get("/reports/channels.csv")
+    async def channels_csv(request: Request) -> Response:
+        if not may_view(request, "clients"):
+            return denied(request, "clients")
+        now = datetime.now().astimezone()
+        since = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(11):
+            since = (since - timedelta(days=1)).replace(day=1)
+        data = logic.channel_rows(await crm.clients_since(since), months=12,
+                                  today=now.date())
+        header = ["Месяц", *(logic.channel_label(c) for c in data["columns"]), "Всего"]
+        rows = [[r["month"].strftime("%m.%Y"),
+                 *(r["cells"][c] for c in data["columns"]), r["total"]]
+                for r in data["rows"]]
+        rows.append(["ИТОГО", *(data["totals"].get(c, 0) for c in data["columns"]),
+                     data["total"]])
+        return _csv("channels.csv", header, rows)
 
     @app.get("/reports/referrals")
     async def referrals_report(request: Request) -> Response:
