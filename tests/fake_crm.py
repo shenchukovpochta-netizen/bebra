@@ -26,11 +26,19 @@ class FakeCrm:
         self.bike_log_: list[dict] = []
         self.status_log_: list[dict] = []
         self.repair_items_: list[dict] = []
+        self.work_types_: dict[int, dict] = {}
+        self.orders_: dict[int, dict] = {}
+        self.order_items_: list[dict] = []
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
         self._profile_seq = 0
+        # Виды работ нумеруются отдельно по той же причине, что и профили:
+        # иначе каталог съедал бы первые id, и клиент из seed() перестал бы
+        # быть первым.
+        self._work_type_seq = 0
         self._seed_profiles()
+        self._seed_work_types()
 
     def _id(self) -> int:
         self._seq += 1
@@ -39,6 +47,19 @@ class FakeCrm:
     def _profile_id(self) -> int:
         self._profile_seq += 1
         return self._profile_seq
+
+    def _seed_work_types(self) -> None:
+        """Пара видов работ, как их кладёт schema.sql: тестам нужен
+        непустой каталог, полный список там ни к чему."""
+        for title, category, minutes, price, node in (
+                ("Замена камеры", "Ходовая", 15, Decimal(200), "tube_tire"),
+                ("Диагностика электрики", "Электрика", 45, Decimal(600), "wiring")):
+            self._work_type_seq += 1
+            tid = self._work_type_seq
+            self.work_types_[tid] = {
+                "id": tid, "title": title, "category": category, "minutes": minutes,
+                "price": price, "node": node, "active": True, "sort": 100,
+                "created_at": self._now()}
 
     def _seed_profiles(self) -> None:
         """Те же встроенные профили, что кладёт schema.sql."""
@@ -599,6 +620,135 @@ class FakeCrm:
         p.update(status=status, resolved_by=resolved_by, ledger_id=ledger_id,
                  resolved_at=self._now())
         return True
+
+    # ─── сервис: виды работ ───
+    async def work_types(self, *, active_only=False):
+        rows = []
+        for t in self.work_types_.values():
+            if active_only and not t["active"]:
+                continue
+            used = sum(1 for i in self.order_items_ if i.get("work_type_id") == t["id"])
+            rows.append({**t, "used": used})
+        return sorted(rows, key=lambda t: (not t["active"], t["sort"], t["title"]))
+
+    async def work_type(self, type_id):
+        t = self.work_types_.get(type_id)
+        return dict(t) if t else None
+
+    async def create_work_type(self, *, title, category, minutes, price, node):
+        if any(t["title"] == title for t in self.work_types_.values()):
+            raise UniqueError("title")
+        self._work_type_seq += 1
+        tid = self._work_type_seq
+        self.work_types_[tid] = {"id": tid, "title": title, "category": category,
+                                 "minutes": minutes, "price": price, "node": node,
+                                 "active": True, "sort": 100,
+                                 "created_at": self._now()}
+        return tid
+
+    async def update_work_type(self, type_id, **fields):
+        if fields:
+            self.work_types_[type_id].update(fields)
+
+    # ─── сервис: наряды ───
+    def _order_row(self, o):
+        bike = self.bikes_.get(o.get("bike_id")) or {}
+        client = self.clients_.get(o.get("client_id")) or {}
+        tech = self.staff.get(o.get("tech_id")) or {}
+        return {**o, "bike_code": bike.get("code"), "bike_model": bike.get("model"),
+                "bike_status": bike.get("status"), "client_name": client.get("full_name"),
+                "client_phone": client.get("phone"), "tech_name": tech.get("name"),
+                "tech_login": tech.get("login")}
+
+    async def work_orders(self, *, status=None, payer=None, tech_id=None,
+                          bike_id=None, open_only=False, limit=300):
+        rows = []
+        for o in self.orders_.values():
+            if status and o["status"] != status:
+                continue
+            if payer and o["payer"] != payer:
+                continue
+            if tech_id and o.get("tech_id") != tech_id:
+                continue
+            if bike_id and o.get("bike_id") != bike_id:
+                continue
+            if open_only and o["status"] not in crm_logic.ORDER_OPEN:
+                continue
+            rows.append(self._order_row(o))
+        rows.sort(key=lambda o: (o["opened_at"], o["id"]), reverse=True)
+        return rows[:limit]
+
+    async def work_order(self, order_id):
+        o = self.orders_.get(order_id)
+        return self._order_row(o) if o else None
+
+    async def open_order_of(self, bike_id):
+        o = next((o for o in self.orders_.values()
+                  if o.get("bike_id") == bike_id and o["status"] in crm_logic.ORDER_OPEN),
+                 None)
+        return self._order_row(o) if o else None
+
+    async def open_orders_by_bike(self):
+        out = {}
+        for o in self.orders_.values():
+            if o.get("bike_id") and o["status"] in crm_logic.ORDER_OPEN:
+                out[o["bike_id"]] = self._order_row(o)
+        return out
+
+    async def create_work_order(self, *, bike_id, payer, client_id, complaint,
+                                object_note, tech_id, estimate, created_by):
+        if bike_id and any(o.get("bike_id") == bike_id
+                           and o["status"] in crm_logic.ORDER_OPEN
+                           for o in self.orders_.values()):
+            raise UniqueError("work_orders_one_open")
+        oid = self._id()
+        number = len(self.orders_) + 1
+        self.orders_[oid] = {
+            "id": oid, "no": crm_logic.order_no(number), "bike_id": bike_id,
+            "object_note": object_note, "payer": payer, "client_id": client_id,
+            "status": "new", "tech_id": tech_id, "complaint": complaint,
+            "estimate": Decimal(str(estimate or 0)), "total": Decimal(0),
+            "cost": Decimal(0), "paid_at": None, "note": None,
+            "created_by": created_by, "opened_at": self._now(),
+            "closed_at": None, "log_id": None}
+        return oid
+
+    async def update_work_order(self, order_id, **fields):
+        if fields:
+            self.orders_[order_id].update(fields)
+
+    async def order_items(self, order_id):
+        return [dict(i) for i in self.order_items_ if i["order_id"] == order_id]
+
+    async def add_order_item(self, order_id, *, title, node, work_type_id, qty,
+                             price, parts_cost, labor_cost, note=None):
+        iid = self._id()
+        self.order_items_.append({
+            "id": iid, "order_id": order_id, "work_type_id": work_type_id,
+            "title": title, "node": node, "qty": int(qty),
+            "price": Decimal(str(price or 0)),
+            "parts_cost": Decimal(str(parts_cost or 0)),
+            "labor_cost": Decimal(str(labor_cost or 0)),
+            "note": note, "created_at": self._now()})
+        return iid
+
+    async def delete_order_item(self, order_id, item_id):
+        before = len(self.order_items_)
+        self.order_items_ = [i for i in self.order_items_
+                             if not (i["id"] == item_id and i["order_id"] == order_id)]
+        return len(self.order_items_) < before
+
+    async def order_stats(self, since, until):
+        closed = [o for o in self.orders_.values()
+                  if o["status"] == "done" and o.get("closed_at")
+                  and since <= o["closed_at"] < until]
+        return {
+            "closed": len(closed),
+            "client_orders": sum(1 for o in closed if o["payer"] == "client"),
+            "revenue": sum((o["total"] for o in closed if o["payer"] == "client"),
+                           Decimal(0)),
+            "cost": sum((o["cost"] for o in closed), Decimal(0)),
+        }
 
 
 class UniqueError(Exception):

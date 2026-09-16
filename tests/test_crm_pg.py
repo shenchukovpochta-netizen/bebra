@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -345,6 +345,68 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.set_staff_profile(sid, owner["id"])
         self.assertTrue(await self.crm.delete_access_profile(pid))
         self.assertIsNone(await self.crm.access_profile(pid))
+
+    async def test_work_order_lifecycle_on_postgres(self):
+        """Наряд от открытия до закрытия на настоящей базе: номер, запрет
+        второго открытого наряда и запись ремонта в журнал велосипеда."""
+        await self.seed()
+        bike = await self.crm.bike(self.bike_id)
+        order_id = await service.open_order(
+            self.crm, bike=bike, payer="own", client=None, complaint="не едет",
+            object_note=None, tech_id=None, estimate=D(0), by="t")
+        order = await self.crm.work_order(order_id)
+        self.assertEqual(order["no"], "РЕМ-000001")
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "repair")
+
+        # второй открытый наряд на тот же велосипед не пройдёт
+        with self.assertRaises(service.ServiceError):
+            await service.open_order(
+                self.crm, bike=await self.crm.bike(self.bike_id), payer="own",
+                client=None, complaint=None, object_note=None, tech_id=None,
+                estimate=D(0), by="t")
+
+        types = await self.crm.work_types(active_only=True)
+        self.assertTrue(types, "каталог работ кладётся схемой")
+        work = next(t for t in types if t["node"])
+        await self.crm.add_order_item(
+            order_id, title=work["title"], node=work["node"],
+            work_type_id=work["id"], qty=2, price=D("200"),
+            parts_cost=D("50"), labor_cost=D("30"))
+        totals = await service.close_order(self.crm, order, by="t")
+        self.assertEqual(totals["total"], D("400.00"))
+        self.assertEqual(totals["cost"], D("160.00"))
+
+        closed = await self.crm.work_order(order_id)
+        self.assertEqual(closed["status"], "done")
+        self.assertIsNotNone(closed["log_id"])
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "available")
+        log = await self.crm.bike_log(self.bike_id, kind="repair")
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["cost"], D("160.00"))
+
+        # после закрытия номер продолжает расти
+        second = await service.open_order(
+            self.crm, bike=await self.crm.bike(self.bike_id), payer="own",
+            client=None, complaint=None, object_note=None, tech_id=None,
+            estimate=D(0), by="t")
+        self.assertEqual((await self.crm.work_order(second))["no"], "РЕМ-000002")
+
+    async def test_client_repair_revenue_is_not_rental_revenue(self):
+        """Красная линия CLAUDE.md: выручка чужого ремонта не в журнале."""
+        await self.seed()
+        order_id = await service.open_order(
+            self.crm, bike=None, payer="client", client=None, complaint=None,
+            object_note="Самокат Kugoo", tech_id=None, estimate=D("1500"), by="t")
+        await self.crm.add_order_item(
+            order_id, title="Диагностика", node=None, work_type_id=None, qty=1,
+            price=D("1500"), parts_cost=D("200"), labor_cost=D("100"))
+        await service.close_order(self.crm, await self.crm.work_order(order_id), by="t")
+        now = datetime.now(UTC)
+        stats = await self.crm.order_stats(now - timedelta(days=1), now + timedelta(days=1))
+        self.assertEqual(stats["closed"], 1)
+        self.assertEqual(stats["revenue"], D("1500.00"))
+        self.assertEqual(await self.crm.rental_revenue(now - timedelta(days=1), now), D(0),
+                         "арендная выручка чужим ремонтом не растёт")
 
 
 if __name__ == "__main__":

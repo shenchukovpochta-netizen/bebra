@@ -4,7 +4,20 @@
 <div class="bar">
   <h1>{{ bike.code }} · {{ bike.model }} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
   {% if bike.status == 'available' and can_edit(staff, 'issue') %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
+  {% if can_edit(staff, 'service') %}
+    {% if order %}<a class="btn ghost" href="/orders/{{ order.id }}">Наряд {{ order.no }}</a>
+    {% else %}<a class="btn ghost" href="/orders/new?bike={{ bike.id }}">+ Наряд</a>{% endif %}
+  {% endif %}
 </div>
+{# Рассинхрон наряда и статуса: наряд открыт, а велосипед числится свободным -
+   именно так его выдают клиенту прямо из мастерской. #}
+{% if order and bike.status not in ('repair', 'maintenance', 'rented') %}
+<p class="flash err">Наряд {{ order.no }} открыт, а статус — «{{ BIKE_STATUSES.get(bike.status, bike.status) }}».
+  Переведите велосипед в ремонт, иначе он попадёт в выдачу как свободный.</p>
+{% elif not order and bike.status == 'repair' and can_view(staff, 'service') %}
+<p class="flash">Велосипед в ремонте, но наряда нет — работой никто не занят.
+  {% if can_edit(staff, 'service') %}<a href="/orders/new?bike={{ bike.id }}">Открыть наряд</a>{% endif %}</p>
+{% endif %}
 <div class="cols">
 <section class="card">
   <h2>Карточка</h2>

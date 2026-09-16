@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -135,3 +135,80 @@ async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -
                             period_days=int(tariff["period_days"]),
                             price=logic.to_money(tariff["price"]), billing=billing)
 
+
+
+# ─────────────────────────── сервис: наряды ───────────────────────────
+
+async def open_order(crm: Any, *, bike: dict | None, payer: str,
+                     client: dict | None, complaint: str | None,
+                     object_note: str | None, tech_id: int | None,
+                     estimate: Decimal, by: str) -> int:
+    """Открыть наряд и увести велосипед в ремонт.
+
+    Статус велосипеда меняется здесь же: наряд открыт, а велосипед числится
+    свободным - это тот самый рассинхрон, из-за которого его выдают клиенту
+    прямо из мастерской.
+    """
+    if payer not in logic.PAYERS:
+        raise ServiceError("Неизвестный плательщик наряда.")
+    if payer == "client" and client is None and not (object_note or "").strip():
+        raise ServiceError("Клиентский ремонт: укажите клиента или что за объект.")
+    if bike is None and not (object_note or "").strip():
+        raise ServiceError("Укажите велосипед из парка или что за объект.")
+    if bike is not None and await crm.open_order_of(bike["id"]) is not None:
+        raise ServiceError("По этому велосипеду уже открыт наряд.")
+    try:
+        order_id = await crm.create_work_order(
+            bike_id=bike["id"] if bike else None, payer=payer,
+            client_id=client["id"] if client else None, complaint=complaint,
+            object_note=object_note, tech_id=tech_id,
+            estimate=logic.to_money(estimate), created_by=by)
+    except Exception as exc:                            # noqa: BLE001
+        # Уникальный индекс на открытый наряд:два оператора нажали разом.
+        if "unique" in type(exc).__name__.lower():
+            raise ServiceError("По этому велосипеду уже открыт наряд.") from exc
+        raise
+    # Свой велосипед уходит в ремонт; в аренде он остаётся у клиента -
+    # снимать аренду наряд не вправе, это делает возврат.
+    if bike is not None and bike.get("status") == "available":
+        await crm.update_bike(bike["id"], status="repair", by=by)
+    return order_id
+
+
+async def close_order(crm: Any, order: dict, *, by: str,
+                      bike_status: str = "available") -> dict:
+    """Закрыть наряд: посчитать итоги, записать ремонт в журнал велосипеда
+    и вернуть велосипед в парк.
+
+    Ремонт своего парка по-прежнему пишется в bike_log и repair_items -
+    отчёт «что ломается» собран по ним, и наряд его не подменяет, а
+    наполняет. Деньги клиентского ремонта остаются на наряде и в crm.ledger
+    не попадают: журнал - это аренда, и средний чек считается по нему.
+    """
+    if not logic.order_is_open(order):
+        raise ServiceError("Наряд уже закрыт.")
+    items = await crm.order_items(order["id"])
+    totals = logic.order_totals(items)
+    log_id = None
+    # Пишем через тот же create_repair, что и ручной ремонт: шапка и позиции
+    # одной транзакцией, отчёт «что ломается» собирается по ним и наряда
+    # не знает вовсе.
+    nodes = [{"node": i["node"],
+              "parts_cost": logic.to_money(i.get("parts_cost") or 0) * int(i.get("qty") or 1),
+              "labor_cost": logic.to_money(i.get("labor_cost") or 0) * int(i.get("qty") or 1),
+              "note": i.get("title")}
+             for i in items if i.get("node")]
+    if order.get("bike_id") and nodes:
+        log_id = await crm.create_repair(
+            order["bike_id"], items=nodes,
+            note="Наряд " + str(order.get("no") or ""), created_by=by)
+    await crm.update_work_order(order["id"], status="done",
+                                total=totals["total"], cost=totals["cost"],
+                                closed_at=datetime.now(UTC), log_id=log_id)
+    if order.get("bike_id"):
+        bike = await crm.bike(order["bike_id"])
+        # Из аренды велосипед наряд не забирает и не возвращает: там его
+        # судьбу решает закрытие аренды.
+        if bike and bike.get("status") in ("repair", "maintenance"):
+            await crm.update_bike(order["bike_id"], status=bike_status, by=by)
+    return totals

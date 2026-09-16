@@ -123,6 +123,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
+        ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
+        WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
         can_act=logic.can_act, visible_sections=logic.visible_sections,
@@ -225,6 +227,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if raw in ("", "0", "0.0", "0.00"):
             return logic.Check(True, Decimal(0))
         return logic.check_amount(raw)
+
+    def count_field(data: dict, name: str, *, what: str, default: str = "1",
+                    limit: int = 999) -> logic.Check:
+        """Небольшое целое из формы: количество в наряде, минуты норматива."""
+        raw = (data.get(name) or "").strip() or default
+        if not raw.isdigit() or not 0 <= int(raw) <= limit:
+            return logic.Check(False, error=f"{what}: целое число от 0 до {limit}.")
+        return logic.Check(True, int(raw))
 
     def summarize(rental: dict | None, balance: Any) -> dict:
         return logic.rental_summary(rental, balance, today=date.today())
@@ -603,6 +613,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       rentals=await crm.bike_rentals(bike_id),
                       status_log=await crm.bike_status_log(bike_id),
                       nodes=await crm.repair_nodes(),
+                      order=await crm.open_order_of(bike_id),
                       amortization=logic.amortization_month(bike))
 
     @app.post("/bikes/{bike_id}/edit")
@@ -1393,6 +1404,242 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect(f"/profiles/{profile_id}")
         flash(request, f"Профиль «{profile['name']}» удалён.")
         return redirect("/profiles")
+
+    # ─────────────────────── сервис: наряды ───────────────────────
+
+    @app.get("/service")
+    async def service_desk(request: Request) -> Response:
+        """Рабочий стол сервиса: что стоит в ремонте и кто этим занят.
+
+        Первыми - велосипеды в ремонте без наряда: они копят простой, а
+        в отчётах выглядят как обычный ремонт, которым кто-то занимается.
+        """
+        bikes = await crm.bikes(limit=10000)
+        since = await crm.bike_status_since()
+        today, now = date.today(), datetime.now(UTC)
+        for bike in bikes:
+            bike["idle_days"] = logic.idle_days(since.get(bike["id"]), now=now)
+        rows = logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today)
+        return render(request, "service.html", rows=rows,
+                      summary=logic.service_summary(rows),
+                      orders=await crm.work_orders(open_only=True, limit=200))
+
+    @app.get("/orders")
+    async def orders_page(request: Request) -> Response:
+        status = request.query_params.get("status") or ""
+        payer = request.query_params.get("payer") or ""
+        rows = await crm.work_orders(status=status or None, payer=payer or None,
+                                     limit=300)
+        for order in rows:
+            order["days"] = logic.order_days(order, today=date.today())
+        return render(request, "orders.html", rows=rows, status=status, payer=payer)
+
+    @app.get("/orders/new")
+    async def order_new(request: Request) -> Response:
+        if not may_edit(request, "service"):
+            return denied(request, "service")
+        bike_id = request.query_params.get("bike")
+        bike = await crm.bike(int(bike_id)) if (bike_id or "").isdigit() else None
+        return render(request, "order_form.html", bike=bike,
+                      bikes=await crm.bikes(limit=10000),
+                      techs=await crm.staff_all())
+
+    @app.post("/orders")
+    async def order_create(request: Request) -> Response:
+        data = await form(request)
+        payer = logic.check_payer(data.get("payer") or "own")
+        if not payer.ok:
+            flash(request, payer.error, "err")
+            return redirect("/orders/new")
+        bike = await crm.bike(int(data["bike_id"])) \
+            if (data.get("bike_id") or "").isdigit() else None
+        client = await crm.client(int(data["client_id"])) \
+            if (data.get("client_id") or "").isdigit() else None
+        estimate = cost_field(data, "estimate")
+        complaint = logic.check_note(data.get("complaint"))
+        for check in (estimate, complaint):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/orders/new")
+        tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
+        try:
+            order_id = await service.open_order(
+                crm, bike=bike, payer=payer.value, client=client,
+                complaint=complaint.value,
+                object_note=(data.get("object_note") or "").strip() or None,
+                tech_id=tech_id, estimate=estimate.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/orders/new")
+        flash(request, "Наряд открыт.")
+        return redirect(f"/orders/{order_id}")
+
+    @app.get("/orders/{order_id}")
+    async def order_page(request: Request, order_id: int) -> Response:
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        items = await crm.order_items(order_id)
+        return render(request, "order.html", order=order, items=items,
+                      totals=logic.order_totals(items),
+                      days=logic.order_days(order, today=date.today()),
+                      types=await crm.work_types(active_only=True),
+                      techs=await crm.staff_all())
+
+    @app.post("/orders/{order_id}/items")
+    async def order_add_item(request: Request, order_id: int) -> Response:
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        if not logic.order_is_open(order):
+            flash(request, "Наряд закрыт - строки больше не добавляются.", "err")
+            return redirect(f"/orders/{order_id}")
+        data = await form(request)
+        work_type = await crm.work_type(int(data["work_type_id"])) \
+            if (data.get("work_type_id") or "").isdigit() else None
+        title = logic.check_name(data.get("title") or (work_type or {}).get("title"),
+                                 what="Работа")
+        qty = count_field(data, "qty", what="Количество", limit=99)
+        price = cost_field(data, "price")
+        parts = cost_field(data, "parts_cost")
+        labor = cost_field(data, "labor_cost")
+        for check in (title, qty, price, parts, labor):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/orders/{order_id}")
+        node = (data.get("node") or (work_type or {}).get("node") or "").strip() or None
+        if node and not logic.check_choice(node, logic.REPAIR_NODES).ok:
+            node = None
+        await crm.add_order_item(
+            order_id, title=title.value, node=node,
+            work_type_id=(work_type or {}).get("id"), qty=qty.value,
+            price=price.value, parts_cost=parts.value, labor_cost=labor.value)
+        flash(request, "Строка добавлена.")
+        return redirect(f"/orders/{order_id}")
+
+    @app.post("/orders/{order_id}/items/{item_id}/delete")
+    async def order_delete_item(request: Request, order_id: int,
+                                item_id: int) -> Response:
+        if not await crm.delete_order_item(order_id, item_id):
+            flash(request, "Строки уже нет.", "err")
+        return redirect(f"/orders/{order_id}")
+
+    @app.post("/orders/{order_id}/edit")
+    async def order_edit(request: Request, order_id: int) -> Response:
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        data = await form(request)
+        status = logic.check_order_status(data.get("status") or order["status"])
+        estimate = cost_field(data, "estimate")
+        note = logic.check_note(data.get("note"))
+        for check in (status, estimate, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/orders/{order_id}")
+        if status.value == "done":
+            flash(request, "Готовый наряд закрывается кнопкой «Закрыть наряд»: "
+                           "она считает сумму и пишет ремонт в журнал.", "err")
+            return redirect(f"/orders/{order_id}")
+        tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
+        await crm.update_work_order(order_id, status=status.value, tech_id=tech_id,
+                                    estimate=estimate.value, note=note.value)
+        flash(request, "Наряд сохранён.")
+        return redirect(f"/orders/{order_id}")
+
+    @app.post("/orders/{order_id}/close")
+    async def order_close(request: Request, order_id: int) -> Response:
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        data = await form(request)
+        bike_status = logic.check_choice(data.get("bike_status") or "available",
+                                         logic.BIKE_MANUAL_STATUSES, what="Статус")
+        if not bike_status.ok:
+            flash(request, bike_status.error, "err")
+            return redirect(f"/orders/{order_id}")
+        try:
+            totals = await service.close_order(crm, order, by=who(request),
+                                               bike_status=bike_status.value)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/orders/{order_id}")
+        flash(request, f"Наряд закрыт: клиенту {logic.money(totals['total'])}, "
+                       f"себестоимость {logic.money(totals['cost'])}.")
+        return redirect(f"/orders/{order_id}")
+
+    @app.post("/orders/{order_id}/paid")
+    async def order_paid(request: Request, order_id: int) -> Response:
+        """Отметка об оплате клиентского ремонта.
+
+        Деньги остаются на наряде и в crm.ledger не попадают: журнал -
+        это аренда, по нему считается средний чек парка.
+        """
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        if order["payer"] != "client":
+            flash(request, "Свой ремонт клиент не оплачивает.", "err")
+            return redirect(f"/orders/{order_id}")
+        await crm.update_work_order(order_id, paid_at=datetime.now(UTC))
+        flash(request, "Отмечено как оплаченный.")
+        return redirect(f"/orders/{order_id}")
+
+    # ─────────────────────── сервис: виды работ ───────────────────────
+
+    @app.get("/work-types")
+    async def work_types_page(request: Request) -> Response:
+        return render(request, "work_types.html", rows=await crm.work_types(),
+                      can_manage=may_edit(request, "service"))
+
+    @app.post("/work-types")
+    async def work_type_create(request: Request) -> Response:
+        data = await form(request)
+        title = logic.check_name(data.get("title"), what="Наименование")
+        minutes = count_field(data, "minutes", what="Время", default="0", limit=999)
+        price = cost_field(data, "price")
+        for check in (title, minutes, price):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/work-types")
+        category = (data.get("category") or "Прочее").strip()
+        if category not in logic.WORK_CATEGORIES:
+            category = "Прочее"
+        node = (data.get("node") or "").strip() or None
+        if node and not logic.check_choice(node, logic.REPAIR_NODES).ok:
+            node = None
+        try:
+            await crm.create_work_type(title=title.value, category=category,
+                                       minutes=minutes.value, price=price.value,
+                                       node=node)
+        except Exception as exc:                        # noqa: BLE001
+            if not name_taken(exc):
+                raise
+            flash(request, "Работа с таким названием уже есть.", "err")
+            return redirect("/work-types")
+        flash(request, "Вид работ добавлен.")
+        return redirect("/work-types")
+
+    @app.post("/work-types/{type_id}")
+    async def work_type_edit(request: Request, type_id: int) -> Response:
+        if await crm.work_type(type_id) is None:
+            return render(request, "missing.html", status_code=404, what="Вид работ")
+        data = await form(request)
+        if data.get("action") == "toggle":
+            current = await crm.work_type(type_id)
+            await crm.update_work_type(type_id, active=not current["active"])
+            return redirect("/work-types")
+        title = logic.check_name(data.get("title"), what="Наименование")
+        minutes = count_field(data, "minutes", what="Время", default="0", limit=999)
+        price = cost_field(data, "price")
+        for check in (title, minutes, price):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/work-types")
+        await crm.update_work_type(type_id, title=title.value, price=price.value,
+                                   minutes=minutes.value)
+        flash(request, "Сохранено.")
+        return redirect("/work-types")
 
     # ─────────────────────── импорт таблицы ───────────────────────
 

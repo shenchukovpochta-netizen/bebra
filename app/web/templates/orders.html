@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Наряды — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Наряды</h1>
+  <nav class="tabs"><a href="/service">Рабочий стол</a><a href="/orders" class="on">Наряды</a><a href="/work-types">Виды работ</a></nav>
+  <form method="get" class="search">
+    <select name="status"><option value="">все статусы</option>{% for code, label in ORDER_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <select name="payer"><option value="">любой плательщик</option>{% for code, label in PAYERS.items() %}<option value="{{ code }}" {% if payer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <button type="submit">Показать</button>
+  </form>
+  {% if can_edit(staff, 'service') %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
+</div>
+<div class="card">
+<table>
+  {% set money_ok = can_view(staff, 'finance') %}
+  <tr><th>№</th><th>Открыт</th><th>Объект</th><th>Статус</th><th>Плательщик</th><th>Клиент</th><th>Техник</th><th>Суток</th>{% if money_ok %}<th>Сумма</th>{% endif %}</tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/orders/{{ r.id }}">{{ r.no }}</a></td>
+    <td>{{ r.opened_at|dmy }}</td>
+    <td>{% if r.bike_id %}№ {{ r.bike_code }} {{ r.bike_model }}{% else %}{{ r.object_note or '—' }}{% endif %}</td>
+    <td><span class="tag order-{{ r.status }}">{{ ORDER_STATUSES[r.status] }}</span></td>
+    <td>{{ PAYERS[r.payer] }}</td>
+    <td>{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.client_name }}</a>{% else %}{{ r.client_name or '' }}{% endif %}</td>
+    <td>{{ r.tech_name or '—' }}</td>
+    <td class="num">{{ r.days }}</td>
+    {% if money_ok %}<td class="num">{{ money(r.total if r.status == 'done' else r.estimate) }}</td>{% endif %}
+  </tr>
+  {% else %}<tr><td colspan="9" class="muted">Нарядов нет.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

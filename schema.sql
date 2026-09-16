@@ -359,9 +359,9 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view"},"actions":{}}'::jsonb, false),
-  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","rentals":"view","reports":"view"},"actions":{}}'::jsonb, false)
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view"},"actions":{}}'::jsonb, false),
+  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","service":"edit","rentals":"view","reports":"view"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
   -- их матрицу правит владелец, и перезапись затирала бы его настройку.
@@ -640,3 +640,138 @@ create table if not exists crm.repair_items (
 );
 create index if not exists repair_items_idx on crm.repair_items (bike_id, created_at);
 create index if not exists repair_items_node_idx on crm.repair_items (node, created_at);
+
+-- ─────────────────────── сервис: виды работ и наряды ───────────────────────
+--
+-- Ремонт был только записью факта: «что сделали и сколько стоило». Наряд -
+-- это процесс вокруг него: кто взял, на каком этапе, сколько суток стоит
+-- и за чей счёт. Отсюда же второе направление бизнеса - ремонт чужой
+-- техники: у наряда есть плательщик.
+--
+-- Деньги за чужой ремонт в crm.ledger НЕ попадают. Журнал - это аренда,
+-- и средний чек считается по нему; смешать их значит испортить главную
+-- метрику парка. Выручка наряда живёт на самом наряде, а в отчётах стоит
+-- отдельным столбцом.
+
+create table if not exists crm.work_types (
+  id         bigserial primary key,
+  title      text        not null unique,
+  category   text        not null default 'Прочее',
+  minutes    integer     not null default 0,     -- нормативное время
+  price      numeric(12,2) not null default 0,   -- цена клиенту
+  node       text        references crm.repair_nodes (code),
+  active     boolean     not null default true,
+  sort       integer     not null default 100,
+  created_at timestamptz not null default now()
+);
+create index if not exists work_types_idx on crm.work_types (active, sort, title);
+
+-- Наряд. Номер человекочитаемый и сквозной: на него ссылаются в переписке
+-- и в чате сервиса, поэтому он не равен id.
+create table if not exists crm.work_orders (
+  id          bigserial primary key,
+  no          text        not null unique,       -- РЕМ-000001
+  bike_id     bigint      references crm.bikes (id),
+  -- Чужая техника: своего велосипеда в парке нет, есть описание объекта.
+  object_note text,
+  payer       text        not null default 'own',   -- own|client
+  client_id   bigint      references crm.clients (id),
+  status      text        not null default 'new',   -- new|in_work|waiting|done|cancelled
+  tech_id     bigint      references crm.staff (id),
+  complaint   text,                                  -- с чем обратились
+  estimate    numeric(12,2) not null default 0,      -- смета, согласована с клиентом
+  total       numeric(12,2) not null default 0,      -- к оплате клиенту
+  cost        numeric(12,2) not null default 0,      -- себестоимость: запчасти и работа
+  paid_at     timestamptz,
+  note        text,
+  created_by  text,
+  opened_at   timestamptz not null default now(),
+  closed_at   timestamptz,
+  log_id      bigint      references crm.bike_log (id)  -- запись ремонта после закрытия
+);
+create index if not exists work_orders_open_idx on crm.work_orders (status, opened_at desc);
+create index if not exists work_orders_bike_idx on crm.work_orders (bike_id, opened_at desc);
+create index if not exists work_orders_tech_idx on crm.work_orders (tech_id, status);
+-- Один открытый наряд на велосипед: два параллельных - это два техника,
+-- которые не знают друг о друге, и двойная смета клиенту.
+create unique index if not exists work_orders_one_open on crm.work_orders (bike_id)
+  where bike_id is not null and status in ('new', 'in_work', 'waiting');
+
+create table if not exists crm.work_order_items (
+  id           bigserial primary key,
+  order_id     bigint      not null references crm.work_orders (id) on delete cascade,
+  work_type_id bigint      references crm.work_types (id),
+  title        text        not null,               -- копия названия на момент наряда
+  node         text        references crm.repair_nodes (code),
+  qty          integer     not null default 1,
+  price        numeric(12,2) not null default 0,   -- клиенту за единицу
+  parts_cost   numeric(12,2) not null default 0,   -- себестоимость запчастей
+  labor_cost   numeric(12,2) not null default 0,   -- себестоимость работы
+  note         text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists work_order_items_idx on crm.work_order_items (order_id, id);
+
+-- Каталог работ на старте: то, что чинят чаще всего. Цены - заглушка,
+-- правятся в панели; название уникально, поэтому повтор безопасен.
+insert into crm.work_types (title, category, minutes, price, node, sort) values
+  ('Замена АКБ',                  'Электрика', 15, 200, 'battery',      10),
+  ('Диагностика электрики',       'Электрика', 45, 600, 'wiring',       20),
+  ('Замена дисплея',              'Электрика', 30, 500, 'wiring',       30),
+  ('Замена зарядного устройства', 'Электрика', 10, 150, 'charger',      40),
+  ('Замена контроллера',          'Электрика', 60, 900, 'controller',   50),
+  ('Замена мотор-колеса',         'Электрика', 90, 1500, 'motor_wheel', 60),
+  ('Замена камеры',               'Ходовая',   15, 200, 'tube_tire',    70),
+  ('Замена покрышки',             'Ходовая',   20, 250, 'tube_tire',    80),
+  ('Замена тормозных колодок',    'Тормоза',   20, 300, 'brake_pads',   90),
+  ('Прокачка тормозов',           'Тормоза',   30, 400, 'brake_line',  100),
+  ('Замена тормозного диска',     'Тормоза',   25, 350, 'brake_disc',  110),
+  ('Правка колеса',               'Ходовая',   30, 400, 'wheel_rear',  120),
+  ('Замена цепи',                 'Ходовая',   25, 300, 'chain_guard', 130),
+  ('Техобслуживание',             'ТО',        60, 700, 'other',       140),
+  ('Замена фары',                 'Свет',      15, 200, 'headlight',   150),
+  ('Замена подножки',             'Прочее',    10, 150, 'kickstand',   160)
+on conflict (title) do nothing;
+
+-- ─────────────────────── пересчёт техники ───────────────────────
+--
+-- Из ~190 велосипедов ~25 числятся потерянными. Пересчёт - единственный
+-- способ узнать это не по памяти: список ожидаемого против того, что
+-- нашли руками на точке.
+--
+-- Ведомость остаётся навсегда: «не нашли» - это не мнение оператора,
+-- а документ с датой, точкой и тем, кто считал.
+
+create table if not exists crm.stock_takes (
+  id         bigserial primary key,
+  no         text        not null unique,        -- ПРТ-000001
+  scope      text        not null default 'all', -- all|location
+  location   text,
+  status     text        not null default 'open', -- open|done
+  expected   integer     not null default 0,
+  found      integer     not null default 0,
+  missing    integer     not null default 0,
+  extra      integer     not null default 0,
+  note       text,
+  created_by text,
+  started_at timestamptz not null default now(),
+  closed_at  timestamptz
+);
+create index if not exists stock_takes_idx on crm.stock_takes (started_at desc);
+
+-- Строка ведомости. bike_id пуст у «лишних»: нашли то, чего в парке нет,
+-- и записать это надо до того, как заведут карточку.
+create table if not exists crm.stock_take_items (
+  id         bigserial primary key,
+  take_id    bigint      not null references crm.stock_takes (id) on delete cascade,
+  bike_id    bigint      references crm.bikes (id),
+  code       text,                                -- что прочитали на раме
+  state      text        not null,                -- expected|found|missing|extra
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists stock_take_items_idx on crm.stock_take_items (take_id, state);
+-- Один велосипед в ведомости один раз: дважды отмеченный найденным
+-- превратил бы «нашли 220 из 220» в «нашли 221».
+create unique index if not exists stock_take_items_one on crm.stock_take_items
+  (take_id, bike_id) where bike_id is not null;

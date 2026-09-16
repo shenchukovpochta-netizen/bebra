@@ -865,6 +865,7 @@ SECTIONS: dict[str, str] = {
     "clients": "Клиенты",
     "rentals": "Аренды",
     "bikes": "Парк",
+    "service": "Сервис: наряды и виды работ",
     "claims": "Заявки на зачисление",
     "finance": "Финансы",
     "tariffs": "Тарифы",
@@ -893,6 +894,9 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/clients", "clients"),
     ("/rentals", "rentals"),
     ("/bikes", "bikes"),
+    ("/service", "service"),
+    ("/orders", "service"),
+    ("/work-types", "service"),
     ("/claims", "claims"),
     ("/finance", "finance"),
     ("/billing", "finance"),
@@ -976,14 +980,137 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
       "actions": dict.fromkeys(ACTIONS, True)}, True),
     ("manager", "Менеджер",
      {"sections": {"dashboard": "view", "issue": "edit", "clients": "edit",
-                   "rentals": "edit", "bikes": "view", "claims": "edit",
-                   "finance": "view", "tariffs": "view", "reports": "view"},
+                   "rentals": "edit", "bikes": "view", "service": "view",
+                   "claims": "edit", "finance": "view", "tariffs": "view",
+                   "reports": "view"},
       "actions": {}}, False),
     ("tech", "Механик",
-     {"sections": {"dashboard": "view", "bikes": "edit", "rentals": "view",
-                   "reports": "view"}, "actions": {}}, False),
+     {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
+                   "rentals": "view", "reports": "view"}, "actions": {}}, False),
 )
 
 
 def check_profile_name(raw: Any) -> Check:
     return check_name(raw, what="Название профиля")
+
+
+# ─────────────────────────── сервис: наряды ───────────────────────────
+#
+# Ремонт как запись факта был и раньше: bike_log вида repair плюс позиции
+# по узлам. Наряд - процесс вокруг него: кто взял, на каком этапе, сколько
+# суток стоит и за чей счёт. Отсюда же ремонт чужой техники.
+#
+# Деньги наряда в crm.ledger не попадают намеренно: журнал - это аренда,
+# по нему считается средний чек, и выручка чужого ремонта его бы испортила.
+
+ORDER_STATUSES: dict[str, str] = {
+    "new": "Новый",
+    "in_work": "В работе",
+    "waiting": "Ждёт запчасть",
+    "done": "Готов",
+    "cancelled": "Отменён",
+}
+# Наряд в этих состояниях держит велосипед: он не свободен и не выдаётся.
+ORDER_OPEN = ("new", "in_work", "waiting")
+
+PAYERS: dict[str, str] = {"own": "Наш", "client": "Клиент"}
+
+WORK_CATEGORIES: tuple[str, ...] = (
+    "Электрика", "Тормоза", "Ходовая", "Свет", "ТО", "Прочее",
+)
+
+# Сколько суток наряд может стоять, прежде чем это станет заметно.
+# Велосипед в ремонте - это велосипед вне аренды, то есть прямой простой.
+ORDER_STUCK_DAYS = 3
+
+
+def order_no(number: int) -> str:
+    """Человекочитаемый номер наряда: на него ссылаются в переписке."""
+    return f"РЕМ-{int(number):06d}"
+
+
+def check_order_status(raw: Any) -> Check:
+    return check_choice(raw, ORDER_STATUSES, what="Статус наряда")
+
+
+def check_payer(raw: Any) -> Check:
+    return check_choice(raw, PAYERS, what="Плательщик")
+
+
+def item_total(item: dict) -> Decimal:
+    """Строка наряда клиенту: цена за единицу на количество."""
+    return to_money(item.get("price") or 0) * int(item.get("qty") or 1)
+
+
+def item_cost(item: dict) -> Decimal:
+    """Себестоимость строки: запчасти плюс работа, тоже на количество."""
+    parts = to_money(item.get("parts_cost") or 0) + to_money(item.get("labor_cost") or 0)
+    return parts * int(item.get("qty") or 1)
+
+
+def order_totals(items: Iterable[dict]) -> dict[str, Decimal]:
+    """Итоги наряда по его строкам.
+
+    Считается здесь, а не в базе: сумма наряда обязана совпадать с тем,
+    что оператор видит на экране, а не с тем, что когда-то записали.
+    """
+    rows = list(items)
+    total = sum((item_total(i) for i in rows), Decimal(0))
+    cost = sum((item_cost(i) for i in rows), Decimal(0))
+    return {"total": to_money(total), "cost": to_money(cost),
+            "margin": to_money(total - cost), "lines": len(rows)}
+
+
+def order_days(order: dict, *, today: date | None = None) -> int:
+    """Суток в работе. Закрытый наряд считается по дате закрытия."""
+    opened = order.get("opened_at")
+    if opened is None:
+        return 0
+    start = opened.date() if isinstance(opened, datetime) else opened
+    closed = order.get("closed_at")
+    end = closed.date() if isinstance(closed, datetime) else (closed or today or date.today())
+    return max((end - start).days, 0)
+
+
+def order_is_open(order: dict | None) -> bool:
+    return bool(order) and str(order.get("status") or "") in ORDER_OPEN
+
+
+def order_stuck(order: dict, *, today: date | None = None) -> bool:
+    """Наряд стоит дольше нормы - велосипед копит простой."""
+    return order_is_open(order) and order_days(order, today=today) >= ORDER_STUCK_DAYS
+
+
+def service_rows(bikes: Iterable[dict], orders_by_bike: dict[int, dict], *,
+                 today: date | None = None) -> list[dict]:
+    """Рабочий стол сервиса: велосипеды в ремонте и что с ними.
+
+    Главная строка здесь - «в ремонте, а наряда нет»: велосипед стоит,
+    никто им не занят, и в отчёте простоя он выглядит как обычный ремонт.
+    Такие идут первыми и по убыванию суток.
+    """
+    today = today or date.today()
+    rows = []
+    for bike in bikes:
+        if bike.get("status") not in ("repair", "maintenance"):
+            continue
+        order = orders_by_bike.get(bike["id"])
+        days = order_days(order, today=today) if order else (bike.get("idle_days") or 0)
+        rows.append({**bike, "order": order,
+                     "stage": ORDER_STATUSES.get((order or {}).get("status"), "Без наряда"),
+                     "days": days,
+                     "stuck": (not order) or order_stuck(order, today=today)})
+    # Без наряда - в начало: это и есть потерянные велосипеды сервиса.
+    rows.sort(key=lambda r: (r["order"] is not None, -r["days"]))
+    return rows
+
+
+def service_summary(rows: Iterable[dict]) -> dict[str, int]:
+    """Сводка рабочего стола: сколько стоит и сколько из них без наряда."""
+    rows = list(rows)
+    return {
+        "total": len(rows),
+        "no_order": sum(1 for r in rows if r["order"] is None),
+        "stuck": sum(1 for r in rows if r["stuck"]),
+        "days": sum(r["days"] for r in rows),
+    }

@@ -20,6 +20,7 @@
       {% if can_view(staff, 'clients') %}<a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>{% endif %}
       {% if can_view(staff, 'rentals') %}<a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>{% endif %}
       {% if can_view(staff, 'bikes') %}<a href="/bikes" {% if request.url.path.startswith('/bikes') %}class="on"{% endif %}>Парк</a>{% endif %}
+      {% if can_view(staff, 'service') %}<a href="/service" {% if request.url.path.startswith(('/service', '/orders', '/work-types')) %}class="on"{% endif %}>Сервис</a>{% endif %}
       {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
       {% if can_view(staff, 'finance') %}<a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>{% endif %}
       {% if can_view(staff, 'tariffs') %}<a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>{% endif %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Виды работ — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Виды работ</h1>
+  <nav class="tabs"><a href="/service">Рабочий стол</a><a href="/orders">Наряды</a><a href="/work-types" class="on">Виды работ</a></nav>
+</div>
+<div class="cols">
+<section class="card">
+  <fieldset {% if not can_manage %}disabled{% endif %} class="plain">
+  <table>
+    <tr><th>Наименование</th><th>Категория</th><th>Время</th><th>Цена клиенту</th><th>Использований</th><th></th></tr>
+    {% for t in rows %}
+    <tr class="{% if not t.active %}muted{% endif %}">
+      <form method="post" action="/work-types/{{ t.id }}">
+      <td><input name="title" value="{{ t.title }}"></td>
+      <td>{{ t.category }}</td>
+      <td><input name="minutes" value="{{ t.minutes }}" size="3"> мин</td>
+      <td><input name="price" value="{{ t.price }}" size="7"> ₽</td>
+      <td class="num">{{ t.used }}</td>
+      <td class="actions"><button type="submit" class="ghost">Сохранить</button>
+        <button type="submit" name="action" value="toggle" class="ghost">{{ 'Выключить' if t.active else 'Включить' }}</button></td>
+      </form>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">Каталог пуст.</td></tr>{% endfor %}
+  </table>
+  </fieldset>
+  {% if not can_manage %}<p class="muted">Виды работ вам открыты только на просмотр.</p>{% endif %}
+</section>
+{% if can_manage %}
+<section class="card narrow">
+  <h2>Новый вид работ</h2>
+  <form method="post" action="/work-types">
+    <label>Наименование <input name="title" placeholder="Замена камеры" required></label>
+    <label>Категория <select name="category">{% for c in WORK_CATEGORIES %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select></label>
+    <label>Время, мин <input name="minutes" inputmode="numeric" value="15"></label>
+    <label>Цена клиенту, ₽ <input name="price" inputmode="decimal" placeholder="200"></label>
+    <label>Узел <select name="node"><option value="">— не привязан —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}">{{ title }}</option>{% endfor %}</select></label>
+    <button type="submit">Добавить</button>
+  </form>
+  <p class="muted">Узел нужен, чтобы закрытый наряд попал в отчёт «что ломается»: строка без узла в него не войдёт. Время — норматив, по нему видно, сходится ли цена с работой техника.</p>
+</section>
+{% endif %}
+</div>
+{% endblock %}

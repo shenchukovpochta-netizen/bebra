@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Сервис — {{ app_title }}{% endblock %}
+{% block content %}
+{% set can = can_edit(staff, 'service') %}
+<div class="bar"><h1>Рабочий стол сервиса</h1>
+  <nav class="tabs"><a href="/service" class="on">Рабочий стол</a><a href="/orders">Наряды</a><a href="/work-types">Виды работ</a></nav>
+  {% if can %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
+</div>
+
+<div class="tiles">
+  <div class="tile {% if summary.no_order %}hot{% endif %}"><b>{{ summary.no_order }}</b><span>в ремонте без наряда<br><small class="muted">никто ими не занят</small></span></div>
+  <div class="tile"><b>{{ summary.total }}</b><span>всего в сервисе</span></div>
+  <div class="tile {% if summary.stuck %}warn{% endif %}"><b>{{ summary.stuck }}</b><span>стоят дольше {{ ORDER_STUCK_DAYS }} дн.</span></div>
+  {% if can_view(staff, 'finance') %}
+  <div class="tile"><b>{{ money(CHECK_TARGET * summary.days) }}</b><span>потеряно, пока стоят<br><small class="muted">{{ summary.days }} велосипеде-дней по цели</small></span></div>
+  {% endif %}
+</div>
+
+<section class="card">
+  <h2>Велосипеды в сервисе</h2>
+  {% if rows %}
+  <table>
+    <tr><th>Велосипед</th><th>Модель</th><th>Этап</th><th>Суток</th><th>Наряд</th><th>Техник</th><th>Чей ремонт</th><th>Жалоба</th></tr>
+    {% for r in rows %}
+    <tr class="{% if r.stuck %}warn-row{% endif %}">
+      <td><a href="/bikes/{{ r.id }}">№ {{ r.code }}</a></td>
+      <td>{{ r.model }}</td>
+      <td>{% if r.order %}<span class="tag order-{{ r.order.status }}">{{ r.stage }}</span>{% else %}<span class="tag bad">Без наряда</span>{% endif %}</td>
+      <td class="num {% if r.stuck %}bad{% endif %}">{{ r.days }}</td>
+      <td>{% if r.order %}<a href="/orders/{{ r.order.id }}">{{ r.order.no }}</a>{% elif can %}<a href="/orders/new?bike={{ r.id }}">открыть</a>{% else %}—{% endif %}</td>
+      <td>{{ r.order.tech_name if r.order and r.order.tech_name else '—' }}</td>
+      <td>{% if r.order %}{{ PAYERS[r.order.payer] }}{% else %}—{% endif %}</td>
+      <td class="muted">{{ (r.order.complaint if r.order else r.note) or '' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">«Без наряда» — велосипед в ремонте, но работой никто не занят: он копит простой, а в отчётах выглядит как обычный ремонт. Такие стоят первыми.</p>
+  {% else %}<p class="muted">В сервисе пусто — весь операционный парк свободен или в аренде.</p>{% endif %}
+</section>
+{% endblock %}

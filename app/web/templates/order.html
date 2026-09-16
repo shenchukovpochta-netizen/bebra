@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Наряд {{ order.no }} — {{ app_title }}{% endblock %}
+{% block content %}
+{% set can = can_edit(staff, 'service') %}
+{% set money_ok = can_view(staff, 'finance') %}
+{% set open_now = order.status in ('new', 'in_work', 'waiting') %}
+<div class="bar">
+  <h1>Наряд {{ order.no }} <span class="tag order-{{ order.status }}">{{ ORDER_STATUSES[order.status] }}</span></h1>
+  <a class="btn ghost" href="/orders">Все наряды</a>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Что чиним</h2>
+  <dl>
+    <dt>Объект</dt><dd>{% if order.bike_id %}<a href="/bikes/{{ order.bike_id }}">№ {{ order.bike_code }}</a> {{ order.bike_model }}{% else %}{{ order.object_note or '—' }}{% endif %}</dd>
+    <dt>Плательщик</dt><dd>{{ PAYERS[order.payer] }}{% if order.payer == 'client' %} · {% if order.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ order.client_id }}">{{ order.client_name }}</a>{% else %}{{ order.client_name or order.object_note or '—' }}{% endif %}{% endif %}</dd>
+    <dt>Жалоба</dt><dd>{{ order.complaint or '—' }}</dd>
+    <dt>Открыт</dt><dd>{{ order.opened_at|dmy }} · {{ order.created_by or '' }}</dd>
+    <dt>Суток в работе</dt><dd class="{% if open_now and days >= ORDER_STUCK_DAYS %}bad{% endif %}"><b>{{ days }}</b>{% if open_now and days >= ORDER_STUCK_DAYS %} — велосипед копит простой{% endif %}</dd>
+    {% if order.closed_at %}<dt>Закрыт</dt><dd>{{ order.closed_at|dmy }}</dd>{% endif %}
+    {% if order.payer == 'client' and money_ok %}<dt>Оплата</dt><dd>{% if order.paid_at %}получена {{ order.paid_at|dmy }}{% else %}<span class="warn">не отмечена</span>{% endif %}</dd>{% endif %}
+    {% if money_ok %}<dt>Смета</dt><dd>{{ money(order.estimate) }}{% if order.status == 'done' %} · итог <b>{{ money(order.total) }}</b>{% endif %}</dd>{% endif %}
+  </dl>
+  {% if can and open_now %}
+  <h2>Изменить</h2>
+  <form method="post" action="/orders/{{ order.id }}/edit" class="grid2">
+    <label>Статус <select name="status">{% for code, label in ORDER_STATUSES.items() %}{% if code != 'done' %}<option value="{{ code }}" {% if order.status == code %}selected{% endif %}>{{ label }}</option>{% endif %}{% endfor %}</select></label>
+    <label>Техник <select name="tech_id"><option value="">не назначен</option>{% for t in techs %}<option value="{{ t.id }}" {% if order.tech_id == t.id %}selected{% endif %}>{{ t.name or t.login }}</option>{% endfor %}</select></label>
+    <label>Смета, ₽ <input name="estimate" inputmode="decimal" value="{{ order.estimate }}"></label>
+    <label>Заметка <input name="note" value="{{ order.note or '' }}"></label>
+    <button type="submit">Сохранить</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Работы и запчасти</h2>
+  <table>
+    <tr><th>Работа</th><th>Узел</th><th>Кол-во</th>{% if money_ok %}<th>Клиенту</th><th>Себест.</th>{% endif %}<th></th></tr>
+    {% for i in items %}
+    <tr>
+      <td>{{ i.title }}</td>
+      <td class="muted">{{ REPAIR_NODES.get(i.node, '—') }}</td>
+      <td class="num">{{ i.qty }}</td>
+      {% if money_ok %}<td class="num">{{ money(i.price * i.qty) }}</td><td class="num muted">{{ money((i.parts_cost + i.labor_cost) * i.qty) }}</td>{% endif %}
+      <td>{% if can and open_now %}<form method="post" action="/orders/{{ order.id }}/items/{{ i.id }}/delete"><button type="submit" class="ghost">убрать</button></form>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">Строк пока нет.</td></tr>{% endfor %}
+    {% if items and money_ok %}
+    <tr><td colspan="3"><b>Итого</b></td><td class="num"><b>{{ money(totals.total) }}</b></td><td class="num muted">{{ money(totals.cost) }}</td><td></td></tr>
+    {% endif %}
+  </table>
+  {% if can and open_now %}
+  <h2>Добавить строку</h2>
+  <form method="post" action="/orders/{{ order.id }}/items" class="grid2">
+    <label class="wide">Из каталога <select name="work_type_id"><option value="">— вписать руками —</option>{% for t in types %}<option value="{{ t.id }}">{{ t.title }} · {{ money(t.price) }}</option>{% endfor %}</select></label>
+    <label>Или название <input name="title" placeholder="если не из каталога"></label>
+    <label>Узел <select name="node"><option value="">— из каталога —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}">{{ title }}</option>{% endfor %}</select></label>
+    <label>Количество <input name="qty" inputmode="numeric" value="1"></label>
+    <label>Цена клиенту, ₽ <input name="price" inputmode="decimal" placeholder="0"></label>
+    <label>Запчасти, ₽ <input name="parts_cost" inputmode="decimal" placeholder="0"></label>
+    <label>Работа, ₽ <input name="labor_cost" inputmode="decimal" placeholder="0"></label>
+    <button type="submit">Добавить</button>
+  </form>
+  <p class="muted">Цена клиенту — то, что он платит; запчасти и работа — наша себестоимость. У своего ремонта цену клиенту можно оставить нулём: в журнал велосипеда уйдёт себестоимость.</p>
+  {% endif %}
+</section>
+</div>
+
+{% if can and open_now %}
+<section class="card narrow">
+  <h2>Закрыть наряд</h2>
+  <form method="post" action="/orders/{{ order.id }}/close" class="grid2">
+    {# У чужой техники возвращать в парк нечего: велосипеда в нём нет. #}
+    {% if order.bike_id %}<label>Велосипед после ремонта <select name="bike_status">{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'available' %}selected{% endif %}>{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>{% endif %}
+    <button type="submit">✓ Закрыть наряд</button>
+  </form>
+  <p class="muted">Закрытие считает сумму по строкам, пишет ремонт в журнал велосипеда (отчёт «что ломается» собирается по нему) и возвращает велосипед в парк. Выручка клиентского ремонта остаётся на наряде и в журнал аренды не попадает.</p>
+</section>
+{% endif %}
+{% if order.payer == 'client' and order.status == 'done' and not order.paid_at and can %}
+<section class="card narrow">
+  <form method="post" action="/orders/{{ order.id }}/paid">
+    <button type="submit">Отметить оплату {{ money(order.total) }}</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

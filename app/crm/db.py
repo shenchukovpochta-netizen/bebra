@@ -14,6 +14,8 @@ from typing import Any
 
 import asyncpg
 
+from . import logic
+
 # Белые списки колонок для UPDATE: имена подставляются в SQL текстом.
 BIKE_FIELDS = frozenset({
     "code", "model", "frame_no", "motor_no", "battery_count", "status",
@@ -25,6 +27,12 @@ CLIENT_FIELDS = frozenset({
     "note", "source",
 })
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
+WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
+                              "active", "sort"})
+ORDER_FIELDS = frozenset({
+    "status", "tech_id", "complaint", "object_note", "estimate", "note",
+    "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
+})
 RENTAL_FIELDS = frozenset({
     "tariff_id", "tariff_name", "period_days", "price", "billing",
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
@@ -799,3 +807,158 @@ class CrmDB:
             returning id
             """, claim_id, status, resolved_by, ledger_id)
         return row is not None
+
+    # ─────────────────────── сервис: виды работ ───────────────────────
+
+    async def work_types(self, *, active_only: bool = False) -> list[dict]:
+        """Каталог работ со счётчиком использований: по нему видно, какие
+        позиции живые, а какие завели и забыли."""
+        where = "where t.active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"""
+            select t.*, count(i.id) as used
+            from crm.work_types t
+            left join crm.work_order_items i on i.work_type_id = t.id
+            {where}
+            group by t.id
+            order by t.active desc, t.sort, t.title
+            """))
+
+    async def work_type(self, type_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.work_types where id = $1", type_id))
+
+    async def create_work_type(self, *, title: str, category: str, minutes: int,
+                               price: Decimal, node: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.work_types (title, category, minutes, price, node)
+            values ($1, $2, $3, $4, $5) returning id
+            """, title, category, minutes, price, node))
+
+    async def update_work_type(self, type_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, WORK_TYPE_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.work_types set {sets} where id = $1", type_id, *values)
+
+    # ─────────────────────── сервис: наряды ───────────────────────
+
+    _ORDER_SELECT = """
+        select o.*, b.code as bike_code, b.model as bike_model, b.status as bike_status,
+               c.full_name as client_name, c.phone as client_phone,
+               s.name as tech_name, s.login as tech_login
+        from crm.work_orders o
+        left join crm.bikes b on b.id = o.bike_id
+        left join crm.clients c on c.id = o.client_id
+        left join crm.staff s on s.id = o.tech_id
+    """
+
+    async def work_orders(self, *, status: str | None = None, payer: str | None = None,
+                          tech_id: int | None = None, bike_id: int | None = None,
+                          open_only: bool = False, limit: int = 300) -> list[dict]:
+        where, values = [], []
+        if status:
+            values.append(status)
+            where.append(f"o.status = ${len(values)}")
+        if payer:
+            values.append(payer)
+            where.append(f"o.payer = ${len(values)}")
+        if tech_id:
+            values.append(tech_id)
+            where.append(f"o.tech_id = ${len(values)}")
+        if bike_id:
+            values.append(bike_id)
+            where.append(f"o.bike_id = ${len(values)}")
+        if open_only:
+            where.append("o.status in ('new', 'in_work', 'waiting')")
+        values.append(limit)
+        clause = ("where " + " and ".join(where)) if where else ""
+        return _rows(await self.pool.fetch(
+            f"{self._ORDER_SELECT} {clause} order by o.opened_at desc, o.id desc "
+            f"limit ${len(values)}", *values))
+
+    async def work_order(self, order_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._ORDER_SELECT} where o.id = $1", order_id))
+
+    async def open_order_of(self, bike_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._ORDER_SELECT} where o.bike_id = $1 "
+            "and o.status in ('new', 'in_work', 'waiting')", bike_id))
+
+    async def open_orders_by_bike(self) -> dict[int, dict]:
+        """Открытые наряды разом: рабочему столу нужен наряд у каждой
+        строки, и запрос на велосипед превратил бы экран в сотню запросов."""
+        rows = _rows(await self.pool.fetch(
+            f"{self._ORDER_SELECT} where o.bike_id is not null "
+            "and o.status in ('new', 'in_work', 'waiting')"))
+        return {int(r["bike_id"]): r for r in rows}
+
+    async def create_work_order(self, *, bike_id: int | None, payer: str,
+                                client_id: int | None, complaint: str | None,
+                                object_note: str | None, tech_id: int | None,
+                                estimate: Decimal, created_by: str) -> int:
+        """Наряд с человекочитаемым номером. Номер берётся из счётчика
+        самой таблицы в той же транзакции: две одновременные кнопки
+        «открыть наряд» не должны получить один и тот же РЕМ-."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("lock table crm.work_orders in share row exclusive mode")
+            next_no = int(await conn.fetchval(
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.work_orders") or 1)
+            return int(await conn.fetchval(
+                """
+                insert into crm.work_orders
+                    (no, bike_id, payer, client_id, complaint, object_note,
+                     tech_id, estimate, created_by)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id
+                """, logic.order_no(next_no), bike_id, payer, client_id, complaint,
+                object_note, tech_id, estimate, created_by))
+
+    async def update_work_order(self, order_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, ORDER_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.work_orders set {sets} where id = $1", order_id, *values)
+
+    async def order_items(self, order_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.work_order_items where order_id = $1 order by id",
+            order_id))
+
+    async def add_order_item(self, order_id: int, *, title: str, node: str | None,
+                             work_type_id: int | None, qty: int, price: Decimal,
+                             parts_cost: Decimal, labor_cost: Decimal,
+                             note: str | None = None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.work_order_items
+                (order_id, work_type_id, title, node, qty, price,
+                 parts_cost, labor_cost, note)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id
+            """, order_id, work_type_id, title, node, qty, price,
+            parts_cost, labor_cost, note))
+
+    async def delete_order_item(self, order_id: int, item_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "delete from crm.work_order_items where id = $1 and order_id = $2 "
+            "returning id", item_id, order_id)
+        return row is not None
+
+    async def order_stats(self, since: datetime, until: datetime) -> dict[str, Any]:
+        """Итоги сервиса за период: сколько закрыто и сколько заработано
+        на чужой технике. Выручка чужого ремонта считается отдельно от
+        аренды - в crm.ledger она не попадает намеренно."""
+        row = await self.pool.fetchrow(
+            """
+            select count(*) as closed,
+                   count(*) filter (where payer = 'client') as client_orders,
+                   coalesce(sum(total) filter (where payer = 'client'), 0) as revenue,
+                   coalesce(sum(cost), 0) as cost
+            from crm.work_orders
+            where status = 'done' and closed_at >= $1 and closed_at < $2
+            """, since, until)
+        return dict(row) if row else {}
