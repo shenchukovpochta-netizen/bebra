@@ -77,7 +77,9 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/profiles.html', 'app/web/templates/profile.html',
                   'app/web/templates/service.html', 'app/web/templates/orders.html',
                   'app/web/templates/order.html', 'app/web/templates/order_form.html',
-                  'app/web/templates/work_types.html')
+                  'app/web/templates/work_types.html',
+                  'app/web/templates/stock_takes.html',
+                  'app/web/templates/stock_take.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -111,7 +113,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_import.py', 'tests/test_review.py', 'tests/test_scripts.py',
           'tests/test_fleet.py', 'tests/test_web_pg.py', 'tests/test_bot_review.py',
           'tests/test_issue.py', 'tests/test_dashboard.py', 'tests/test_mileage.py',
-          'tests/test_access.py', 'tests/test_mrz.py', 'tests/test_service.py')
+          'tests/test_access.py', 'tests/test_mrz.py', 'tests/test_service.py',
+          'tests/test_stock_take.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

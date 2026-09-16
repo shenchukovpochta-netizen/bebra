@@ -894,6 +894,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/clients", "clients"),
     ("/rentals", "rentals"),
     ("/bikes", "bikes"),
+    ("/stock-takes", "bikes"),
     ("/service", "service"),
     ("/orders", "service"),
     ("/work-types", "service"),
@@ -1114,3 +1115,74 @@ def service_summary(rows: Iterable[dict]) -> dict[str, int]:
         "stuck": sum(1 for r in rows if r["stuck"]),
         "days": sum(r["days"] for r in rows),
     }
+
+
+# ───────────────────────── пересчёт техники ─────────────────────────
+
+TAKE_SCOPES: dict[str, str] = {"all": "Весь парк", "location": "Одна точка"}
+TAKE_STATES: dict[str, str] = {
+    "expected": "Не отмечен", "found": "На месте",
+    "missing": "Не нашли", "extra": "Лишний",
+}
+# Кого ждём увидеть на точке. rented - у курьера, его на месте нет и быть
+# не должно; sold и written_off из парка вышли. lost в ведомость не ставим:
+# он уже потерян, а если найдётся - попадёт в неё лишним, ради этого
+# пересчёт и затевается.
+TAKE_EXPECTED_STATUSES = ("available", "repair", "maintenance", "reserved")
+
+
+def take_no(number: int) -> str:
+    """Номер ведомости: на неё ссылаются в акте и в переписке с точкой."""
+    return f"ПРТ-{int(number):06d}"
+
+
+def check_scope(raw: Any) -> Check:
+    return check_choice(raw, TAKE_SCOPES, what="Область пересчёта")
+
+
+def take_is_open(take: dict | None) -> bool:
+    return bool(take) and str((take or {}).get("status") or "") == "open"
+
+
+def expected_bikes(bikes: Iterable[dict], *, scope: str,
+                   location: str | None = None) -> list[dict]:
+    """Кого ждём на точке в момент открытия ведомости.
+
+    Снимок делается один раз при открытии: если считать «ожидалось» на лету,
+    велосипед, выданный клиенту посреди пересчёта, молча исчезнет из
+    недостачи и пропажу никто не увидит.
+    """
+    rows = [b for b in bikes if b.get("status") in TAKE_EXPECTED_STATUSES]
+    if scope == "location":
+        rows = [b for b in rows if (b.get("location") or "") == (location or "")]
+    return sorted(rows, key=lambda b: str(b.get("code") or ""))
+
+
+def take_counts(items: Iterable[dict]) -> dict[str, int]:
+    """Счётчики ведомости по её строкам."""
+    rows = list(items)
+    counts = {state: 0 for state in TAKE_STATES}
+    for item in rows:
+        state = str(item.get("state") or "")
+        if state in counts:
+            counts[state] += 1
+    # Ожидалось - вся ведомость без лишних: те в парке не числились.
+    counts["total"] = len(rows) - counts["extra"]
+    counts["left"] = counts["expected"]
+    return counts
+
+
+def take_progress(counts: dict[str, int]) -> int:
+    """Сколько процентов ведомости пройдено - для полосы на экране."""
+    total = int(counts.get("total") or 0)
+    if total <= 0:
+        return 0
+    done = int(counts.get("found") or 0) + int(counts.get("missing") or 0)
+    return min(int(round(done * 100 / total)), 100)
+
+
+def take_title(take: dict) -> str:
+    """Подпись ведомости: что считали и где."""
+    if str(take.get("scope") or "") == "location":
+        return f"Точка {take.get('location') or '—'}"
+    return TAKE_SCOPES["all"]

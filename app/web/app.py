@@ -125,6 +125,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
+        TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
+        take_title=logic.take_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
         can_act=logic.can_act, visible_sections=logic.visible_sections,
@@ -1640,6 +1642,150 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                    minutes=minutes.value)
         flash(request, "Сохранено.")
         return redirect("/work-types")
+
+    # ─────────────────────── пересчёт техники ───────────────────────
+
+    @app.get("/stock-takes")
+    async def stock_takes_page(request: Request) -> Response:
+        return render(request, "stock_takes.html",
+                      rows=await crm.stock_takes(limit=100),
+                      current=await crm.open_stock_take())
+
+    @app.post("/stock-takes")
+    async def stock_take_start(request: Request) -> Response:
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        data = await form(request)
+        scope = logic.check_scope(data.get("scope") or "all")
+        note = logic.check_note(data.get("note"))
+        for check in (scope, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/stock-takes")
+        location = (data.get("location") or "").strip() or None
+        try:
+            take_id = await service.start_stock_take(
+                crm, scope=scope.value, location=location, note=note.value,
+                by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/stock-takes")
+        flash(request, "Пересчёт начат: отмечайте технику, которую видите.")
+        return redirect(f"/stock-takes/{take_id}")
+
+    @app.get("/stock-takes/{take_id}")
+    async def stock_take_page(request: Request, take_id: int) -> Response:
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        items = await crm.take_items(take_id)
+        counts = logic.take_counts(items)
+        return render(request, "stock_take.html", take=take, items=items,
+                      counts=counts, progress=logic.take_progress(counts))
+
+    @app.post("/stock-takes/{take_id}/scan")
+    async def stock_take_scan(request: Request, take_id: int) -> Response:
+        """Отметка по номеру на раме: один ввод - одна единица техники."""
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        if not logic.take_is_open(take):
+            flash(request, "Пересчёт закрыт.", "err")
+            return redirect(f"/stock-takes/{take_id}")
+        data = await form(request)
+        code = logic.check_code(data.get("code"))
+        if not code.ok:
+            flash(request, code.error, "err")
+            return redirect(f"/stock-takes/{take_id}")
+        result = await service.take_add_found(crm, take, code.value)
+        flash(request, result["message"], "ok" if result["state"] == "found" else "err")
+        return redirect(f"/stock-takes/{take_id}")
+
+    @app.post("/stock-takes/{take_id}/items/{item_id}")
+    async def stock_take_item(request: Request, take_id: int, item_id: int) -> Response:
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        if not logic.take_is_open(take):
+            flash(request, "Пересчёт закрыт.", "err")
+            return redirect(f"/stock-takes/{take_id}")
+        data = await form(request)
+        state = logic.check_choice(data.get("state"), ("found", "expected", "missing"),
+                                   what="Отметка")
+        if not state.ok:
+            flash(request, state.error, "err")
+            return redirect(f"/stock-takes/{take_id}")
+        if not await crm.set_take_item(take_id, item_id, state=state.value):
+            flash(request, "Строки уже нет.", "err")
+        return redirect(f"/stock-takes/{take_id}")
+
+    @app.post("/stock-takes/{take_id}/items/{item_id}/delete")
+    async def stock_take_item_delete(request: Request, take_id: int,
+                                     item_id: int) -> Response:
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        if not logic.take_is_open(take):
+            flash(request, "Пересчёт закрыт.", "err")
+            return redirect(f"/stock-takes/{take_id}")
+        item = await crm.take_item(take_id, item_id)
+        # Убрать можно только лишнюю строку: снести ожидаемую - это стереть
+        # недостачу, ради которой пересчёт и делают.
+        if item is None or item["state"] != "extra":
+            flash(request, "Убрать можно только лишнюю строку.", "err")
+            return redirect(f"/stock-takes/{take_id}")
+        await crm.delete_take_item(take_id, item_id)
+        flash(request, "Лишняя строка убрана.")
+        return redirect(f"/stock-takes/{take_id}")
+
+    @app.post("/stock-takes/{take_id}/mark-all")
+    async def stock_take_mark_all(request: Request, take_id: int) -> Response:
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        if not logic.take_is_open(take):
+            flash(request, "Пересчёт закрыт.", "err")
+            return redirect(f"/stock-takes/{take_id}")
+        data = await form(request)
+        state = "expected" if (data.get("state") or "") == "expected" else "found"
+        hit = await crm.mark_take_all(take_id, state=state)
+        flash(request, f"Отмечено строк: {hit}." if state == "found"
+              else f"Снято отметок: {hit}.")
+        return redirect(f"/stock-takes/{take_id}")
+
+    @app.post("/stock-takes/{take_id}/close")
+    async def stock_take_close(request: Request, take_id: int) -> Response:
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        data = await form(request)
+        try:
+            result = await service.finish_stock_take(
+                crm, take, by=who(request),
+                lose_missing=bool(data.get("lose_missing")),
+                return_found=bool(data.get("return_found")))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/stock-takes/{take_id}")
+        parts = [f"нашли {result['found']} из {result['total']}"]
+        if result["missing"]:
+            parts.append(f"не нашли {result['missing']}")
+        if result["lost"]:
+            parts.append(f"переведено в «Утерян»: {result['lost']}")
+        if result["returned"]:
+            parts.append(f"вернулось в парк: {result['returned']}")
+        flash(request, "Пересчёт закрыт: " + ", ".join(parts) + ".")
+        return redirect(f"/stock-takes/{take_id}")
 
     # ─────────────────────── импорт таблицы ───────────────────────
 

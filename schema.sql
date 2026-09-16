@@ -758,6 +758,10 @@ create table if not exists crm.stock_takes (
   closed_at  timestamptz
 );
 create index if not exists stock_takes_idx on crm.stock_takes (started_at desc);
+-- Открытая ведомость одна: два пересчёта разом делят парк пополам,
+-- и в каждом половина техники оказывается «не найдена».
+create unique index if not exists stock_takes_one_open on crm.stock_takes ((status))
+  where status = 'open';
 
 -- Строка ведомости. bike_id пуст у «лишних»: нашли то, чего в парке нет,
 -- и записать это надо до того, как заведут карточку.

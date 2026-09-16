@@ -29,6 +29,8 @@ CLIENT_FIELDS = frozenset({
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
+TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
+                         "found", "missing", "extra", "closed_at"})
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
@@ -962,3 +964,126 @@ class CrmDB:
             where status = 'done' and closed_at >= $1 and closed_at < $2
             """, since, until)
         return dict(row) if row else {}
+
+    # ─────────────────────── пересчёт техники ───────────────────────
+
+    async def stock_takes(self, *, limit: int = 100) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.stock_takes order by started_at desc, id desc limit $1",
+            limit))
+
+    async def stock_take(self, take_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.stock_takes where id = $1", take_id))
+
+    async def open_stock_take(self) -> dict | None:
+        """Текущая ведомость. Она одна: индекс не даёт открыть вторую."""
+        return _row(await self.pool.fetchrow(
+            "select * from crm.stock_takes where status = 'open' "
+            "order by id desc limit 1"))
+
+    async def create_stock_take(self, *, scope: str, location: str | None,
+                                note: str | None, bike_ids: list[int],
+                                created_by: str) -> int:
+        """Открыть ведомость и сразу записать в неё снимок ожидаемого парка.
+
+        Номер и строки - одной транзакцией: ведомость без строк оператор
+        примет за «всё сошлось», а это просто недописанный документ.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("lock table crm.stock_takes in share row exclusive mode")
+            next_no = int(await conn.fetchval(
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.stock_takes") or 1)
+            take_id = int(await conn.fetchval(
+                """
+                insert into crm.stock_takes (no, scope, location, note, expected, created_by)
+                values ($1, $2, $3, $4, $5, $6) returning id
+                """, logic.take_no(next_no), scope, location, note,
+                len(bike_ids), created_by))
+            if bike_ids:
+                await conn.executemany(
+                    "insert into crm.stock_take_items (take_id, bike_id, state) "
+                    "values ($1, $2, 'expected')",
+                    [(take_id, bike_id) for bike_id in bike_ids])
+            return take_id
+
+    async def update_stock_take(self, take_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, TAKE_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.stock_takes set {sets} where id = $1", take_id, *values)
+
+    _TAKE_ITEM_SELECT = """
+        select i.*, b.code as bike_code, b.model as bike_model,
+               b.status as bike_status, b.location as bike_location
+        from crm.stock_take_items i
+        left join crm.bikes b on b.id = i.bike_id
+    """
+
+    async def take_items(self, take_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            f"{self._TAKE_ITEM_SELECT} where i.take_id = $1 "
+            "order by coalesce(b.code, i.code), i.id", take_id))
+
+    async def take_item(self, take_id: int, item_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TAKE_ITEM_SELECT} where i.take_id = $1 and i.id = $2",
+            take_id, item_id))
+
+    async def take_item_of_bike(self, take_id: int, bike_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TAKE_ITEM_SELECT} where i.take_id = $1 and i.bike_id = $2",
+            take_id, bike_id))
+
+    async def set_take_item(self, take_id: int, item_id: int, *, state: str,
+                            note: str | None = None) -> bool:
+        row = await self.pool.fetchrow(
+            "update crm.stock_take_items set state = $3, note = coalesce($4, note) "
+            "where take_id = $1 and id = $2 returning id",
+            take_id, item_id, state, note)
+        return row is not None
+
+    async def mark_take_all(self, take_id: int, *, state: str) -> int:
+        """Кнопка «всё на месте» и обратная ей: одним запросом по ведомости."""
+        source = "found" if state == "expected" else "expected"
+        return int(await self.pool.fetchval(
+            "with upd as (update crm.stock_take_items set state = $2 "
+            "where take_id = $1 and state = $3 returning 1) "
+            "select count(*) from upd", take_id, state, source) or 0)
+
+    async def add_take_item(self, take_id: int, *, bike_id: int | None, code: str | None,
+                            state: str = "extra", note: str | None = None) -> int:
+        return int(await self.pool.fetchval(
+            "insert into crm.stock_take_items (take_id, bike_id, code, state, note) "
+            "values ($1, $2, $3, $4, $5) returning id",
+            take_id, bike_id, code, state, note))
+
+    async def delete_take_item(self, take_id: int, item_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "delete from crm.stock_take_items where take_id = $1 and id = $2 "
+            "returning id", take_id, item_id)
+        return row is not None
+
+    async def close_stock_take(self, take_id: int, *, counts: dict[str, int],
+                               closed_at: datetime) -> list[int]:
+        """Закрыть ведомость: неотмеченное становится недостачей.
+
+        Возвращает id велосипедов, которых не нашли: что с ними делать -
+        решает не база.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                "update crm.stock_take_items set state = 'missing' "
+                "where take_id = $1 and state = 'expected' returning bike_id", take_id)
+            await conn.execute(
+                """
+                update crm.stock_takes
+                set status = 'done', closed_at = $2, expected = $3, found = $4,
+                    missing = $5, extra = $6
+                where id = $1
+                """, take_id, closed_at, int(counts.get("total") or 0),
+                int(counts.get("found") or 0), int(counts.get("missing") or 0),
+                int(counts.get("extra") or 0))
+            return [int(r["bike_id"]) for r in rows if r["bike_id"] is not None]

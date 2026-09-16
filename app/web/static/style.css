@@ -171,4 +171,15 @@ tr.warn-row td{background:#FFF7EC}
   .tag.order-waiting{background:#123048;color:#BEE2FF}
   .tag.order-done{background:#1F3A21}
   tr.warn-row td{background:#3A2E1C}
+  .tag.take-found{background:#1F3A21}
+  .tag.take-extra{background:#4A3A18;color:#FFD9A0}
+}
+.tag.take-found{background:#E4F5E4;color:var(--ok)}
+.tag.take-missing{background:var(--ink);color:#fff}
+.tag.take-extra{background:#FFF3D6;color:#7A4B00}
+.tag.take-expected{background:var(--chip);color:var(--brand-dark)}
+/* Пересчёт считают с телефоном в руках: на узком экране от строки нужны
+   номер, отметка и кнопка, остальное уводим. */
+@media (max-width:700px){
+  table.take th.opt,table.take td.opt{display:none}
 }

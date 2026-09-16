@@ -408,6 +408,51 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.crm.rental_revenue(now - timedelta(days=1), now), D(0),
                          "арендная выручка чужим ремонтом не растёт")
 
+    async def test_stock_take_on_postgres(self):
+        """Пересчёт на живой базе: нумерация, одна открытая ведомость,
+        недостача и возврат найденного потерянного в парк."""
+        await self.seed()
+        lost_id = await self.crm.create_bike(code="B-9", model="Kugoo V3",
+                                             location="Павлюхина")
+        await self.crm.update_bike(lost_id, status="lost", by="t")
+        take_id = await service.start_stock_take(
+            self.crm, scope="all", location=None, note="Плановый", by="staff:t")
+        take = await self.crm.stock_take(take_id)
+        self.assertEqual(take["no"], "ПРТ-000001")
+        self.assertEqual(take["expected"], 1, "потерянный в ведомость не ставится")
+
+        # вторую ведомость не открыть: держит частичный уникальный индекс
+        with self.assertRaises(service.ServiceError):
+            await service.start_stock_take(self.crm, scope="all", location=None,
+                                           note=None, by="staff:t")
+
+        found = await service.take_add_found(self.crm, take, "B-9")
+        self.assertEqual(found["state"], "extra")
+        # тот же номер второй раз: строка не задваивается и лишний
+        # не превращается в «нашли» - иначе найдено было бы больше, чем ждали
+        again = await service.take_add_found(self.crm, take, "B-9")
+        self.assertEqual(again["state"], "extra")
+        self.assertIn("уже записан лишним", again["message"])
+        self.assertEqual(len(await self.crm.take_items(take_id)), 2)
+
+        result = await service.finish_stock_take(self.crm, take, by="staff:t",
+                                                 lose_missing=True, return_found=True)
+        self.assertEqual((result["found"], result["missing"], result["extra"]),
+                         (0, 1, 1))
+        self.assertEqual(result["lost"], 1)
+        self.assertEqual(result["returned"], 1)
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "lost")
+        self.assertEqual((await self.crm.bike(lost_id))["status"], "available")
+        closed = await self.crm.stock_take(take_id)
+        self.assertEqual(closed["status"], "done")
+        self.assertEqual(closed["missing"], 1)
+        self.assertIsNone(await self.crm.open_stock_take())
+
+        # после закрытия номер продолжает расти
+        second = await service.start_stock_take(
+            self.crm, scope="location", location="Павлюхина", note=None, by="staff:t")
+        self.assertEqual((await self.crm.stock_take(second))["no"], "ПРТ-000002")
+
 
 if __name__ == "__main__":
     unittest.main()

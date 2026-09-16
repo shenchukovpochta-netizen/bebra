@@ -212,3 +212,97 @@ async def close_order(crm: Any, order: dict, *, by: str,
         if bike and bike.get("status") in ("repair", "maintenance"):
             await crm.update_bike(order["bike_id"], status=bike_status, by=by)
     return totals
+
+
+async def start_stock_take(crm: Any, *, scope: str, location: str | None,
+                           note: str | None, by: str) -> int:
+    """Открыть ведомость пересчёта со снимком ожидаемого парка."""
+    if scope not in logic.TAKE_SCOPES:
+        raise ServiceError("Неизвестная область пересчёта.")
+    if scope == "location" and not (location or "").strip():
+        raise ServiceError("Пересчёт по точке: выберите точку.")
+    if await crm.open_stock_take() is not None:
+        raise ServiceError("Пересчёт уже идёт. Закройте его, прежде чем начинать новый.")
+    bikes = await crm.bikes(limit=10000)
+    expected = logic.expected_bikes(bikes, scope=scope, location=location)
+    if not expected:
+        raise ServiceError("Считать нечего: на этой точке нет техники, "
+                           "которую ждут на месте.")
+    try:
+        return await crm.create_stock_take(
+            scope=scope, location=location if scope == "location" else None,
+            note=note, bike_ids=[int(b["id"]) for b in expected], created_by=by)
+    except Exception as exc:                            # noqa: BLE001
+        if "unique" in type(exc).__name__.lower():
+            raise ServiceError("Пересчёт уже идёт.") from exc
+        raise
+
+
+async def take_add_found(crm: Any, take: dict, code: str) -> dict:
+    """Отметить велосипед по номеру на раме: так считают с телефона в руках.
+
+    Три исхода, и все три нужны: ждали и нашли, не ждали, но нашли
+    (числится у клиента, на другой точке или вовсе потерян), и номера
+    такого в парке нет.
+    """
+    bike = await crm.bike_by_code(code)
+    if bike is None:
+        item_id = await crm.add_take_item(take["id"], bike_id=None, code=code,
+                                          state="extra", note="Нет такого в парке")
+        return {"item_id": item_id, "state": "extra", "bike": None,
+                "message": f"{code}: такого номера в парке нет. Записал лишним."}
+    item = await crm.take_item_of_bike(take["id"], int(bike["id"]))
+    if item is None:
+        note = f"Числится: {logic.BIKE_STATUSES.get(bike.get('status'), '—')}"
+        item_id = await crm.add_take_item(take["id"], bike_id=int(bike["id"]),
+                                          code=bike["code"], state="extra", note=note)
+        return {"item_id": item_id, "state": "extra", "bike": bike,
+                "message": f"{bike['code']} не ждали здесь: {note.lower()}. "
+                           "Записал лишним."}
+    if item["state"] in ("found", "extra"):
+        # Лишний остаётся лишним: в «ожидалось» его не ждали, и отметка
+        # «на месте» надула бы «нашли столько-то из стольких-то».
+        said = "уже отмечен" if item["state"] == "found" else "уже записан лишним"
+        return {"item_id": int(item["id"]), "state": item["state"], "bike": bike,
+                "message": f"{bike['code']} {said}."}
+    await crm.set_take_item(take["id"], int(item["id"]), state="found")
+    return {"item_id": int(item["id"]), "state": "found", "bike": bike,
+            "message": f"{bike['code']} на месте."}
+
+
+async def finish_stock_take(crm: Any, take: dict, *, by: str,
+                            lose_missing: bool = False,
+                            return_found: bool = True) -> dict:
+    """Закрыть ведомость и применить её результат к парку.
+
+    Ведомость сама по себе ничего не меняет: пропустить один велосипед
+    глазами легко, а статус «Утерян» потом никто не снимет. Поэтому
+    недостачу в потери переводят отдельной галочкой, а вот найденный
+    потерянный возвращается в парк сразу - он физически стоит на точке.
+    """
+    if not logic.take_is_open(take):
+        raise ServiceError("Пересчёт уже закрыт.")
+    items = await crm.take_items(take["id"])
+    counts = logic.take_counts(items)
+    # Неотмеченное станет недостачей при закрытии - учитываем это заранее.
+    counts = {**counts, "missing": counts["missing"] + counts["expected"], "expected": 0}
+    missing_ids = await crm.close_stock_take(
+        take["id"], counts=counts, closed_at=datetime.now(UTC))
+    lost, returned = 0, 0
+    if lose_missing:
+        for bike_id in missing_ids:
+            bike = await crm.bike(bike_id)
+            # В аренде велосипед потеряться не может: он у клиента, и это
+            # разговор с клиентом, а не отметка в ведомости.
+            if bike and bike.get("status") in logic.TAKE_EXPECTED_STATUSES:
+                await crm.update_bike(bike_id, status="lost", by=by)
+                lost += 1
+    if return_found:
+        for item in items:
+            if item.get("state") != "extra" or not item.get("bike_id"):
+                continue
+            bike = await crm.bike(int(item["bike_id"]))
+            if bike and bike.get("status") == "lost":
+                await crm.update_bike(int(bike["id"]), status="available", by=by)
+                returned += 1
+    return {**counts, "lost": lost, "returned": returned}

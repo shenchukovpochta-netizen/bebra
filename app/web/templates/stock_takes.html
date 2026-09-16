@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Пересчёт техники — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Пересчёт техники</h1>
+  <nav class="tabs"><a href="/bikes">Парк</a><a href="/stock-takes" class="on">Пересчёт</a></nav>
+</div>
+
+{% if current %}
+<div class="card">
+  <p>Идёт пересчёт <a href="/stock-takes/{{ current.id }}">{{ current.no }}</a> —
+     {{ take_title(current) }}, начат {{ current.started_at|dmy }}.
+     Пока он не закрыт, новый не начать.</p>
+</div>
+{% elif can_edit(staff, 'bikes') %}
+<div class="card">
+  <h2>Новый пересчёт</h2>
+  {# Ведомость снимает парк на момент открытия: ждём то, что должно
+     лежать на точке. Велосипеды в аренде в неё не попадают - они у курьеров. #}
+  <form method="post" action="/stock-takes" class="grid2">
+    <label>Что считаем
+      <select name="scope">{% for code, label in TAKE_SCOPES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
+    </label>
+    <label>Точка
+      <select name="location"><option value="">—</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select>
+    </label>
+    <label class="wide">Комментарий<input type="text" name="note" placeholder="Плановый пересчёт парка"></label>
+    <button type="submit">Начать пересчёт</button>
+  </form>
+  <p class="muted">Считается техника, которую ждут на точке: свободная,
+    в ремонте, на ТО и забронированная. Велосипеды в аренде не считаются —
+    они у курьеров.</p>
+</div>
+{% endif %}
+
+<div class="card">
+<table>
+  <tr><th>№</th><th>Дата</th><th>Что считали</th><th>Ожидалось</th><th>Нашли</th><th>Не нашли</th><th>Лишние</th><th>Кто провёл</th><th>Комментарий</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/stock-takes/{{ r.id }}">{{ r.no }}</a></td>
+    <td>{{ r.started_at|dmy }}</td>
+    <td>{{ take_title(r) }}{% if r.status == 'open' %} <span class="tag">идёт</span>{% endif %}</td>
+    <td class="num">{{ r.expected }}</td>
+    <td class="num">{{ r.found }}</td>
+    <td class="num {% if r.missing %}bad{% endif %}">{{ r.missing }}</td>
+    <td class="num">{{ r.extra }}</td>
+    <td>{{ r.created_by or '—' }}</td>
+    <td>{{ r.note or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="9" class="muted">Пересчётов ещё не было.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

@@ -29,6 +29,8 @@ class FakeCrm:
         self.work_types_: dict[int, dict] = {}
         self.orders_: dict[int, dict] = {}
         self.order_items_: list[dict] = []
+        self.takes_: dict[int, dict] = {}
+        self.take_items_: list[dict] = []
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
@@ -749,6 +751,110 @@ class FakeCrm:
                            Decimal(0)),
             "cost": sum((o["cost"] for o in closed), Decimal(0)),
         }
+
+    # ─────────────────────── пересчёт техники ───────────────────────
+
+    async def stock_takes(self, *, limit=100):
+        rows = sorted(self.takes_.values(), key=lambda t: t["id"], reverse=True)
+        return [dict(t) for t in rows[:limit]]
+
+    async def stock_take(self, take_id):
+        t = self.takes_.get(take_id)
+        return dict(t) if t else None
+
+    async def open_stock_take(self):
+        rows = [t for t in self.takes_.values() if t["status"] == "open"]
+        return dict(rows[-1]) if rows else None
+
+    async def create_stock_take(self, *, scope, location, note, bike_ids, created_by):
+        if any(t["status"] == "open" for t in self.takes_.values()):
+            raise UniqueError("stock_takes_one_open")
+        take_id = self._id()
+        self.takes_[take_id] = {
+            "id": take_id, "no": crm_logic.take_no(len(self.takes_) + 1), "scope": scope,
+            "location": location, "status": "open", "expected": len(bike_ids),
+            "found": 0, "missing": 0, "extra": 0, "note": note,
+            "created_by": created_by, "started_at": self._now(), "closed_at": None}
+        for bike_id in bike_ids:
+            self.take_items_.append({
+                "id": self._id(), "take_id": take_id, "bike_id": bike_id,
+                "code": None, "state": "expected", "note": None,
+                "created_at": self._now()})
+        return take_id
+
+    async def update_stock_take(self, take_id, **fields):
+        if take_id in self.takes_:
+            self.takes_[take_id].update(fields)
+
+    def _take_item_row(self, item):
+        bike = self.bikes_.get(item.get("bike_id"))
+        return {**item,
+                "bike_code": bike["code"] if bike else None,
+                "bike_model": bike["model"] if bike else None,
+                "bike_status": bike["status"] if bike else None,
+                "bike_location": bike.get("location") if bike else None}
+
+    async def take_items(self, take_id):
+        rows = [self._take_item_row(i) for i in self.take_items_
+                if i["take_id"] == take_id]
+        return sorted(rows, key=lambda i: (i["bike_code"] or i["code"] or "", i["id"]))
+
+    async def take_item(self, take_id, item_id):
+        return next((self._take_item_row(i) for i in self.take_items_
+                     if i["take_id"] == take_id and i["id"] == item_id), None)
+
+    async def take_item_of_bike(self, take_id, bike_id):
+        return next((self._take_item_row(i) for i in self.take_items_
+                     if i["take_id"] == take_id and i["bike_id"] == bike_id), None)
+
+    async def set_take_item(self, take_id, item_id, *, state, note=None):
+        for item in self.take_items_:
+            if item["take_id"] == take_id and item["id"] == item_id:
+                item["state"] = state
+                item["note"] = note or item["note"]
+                return True
+        return False
+
+    async def mark_take_all(self, take_id, *, state):
+        source = "found" if state == "expected" else "expected"
+        hit = 0
+        for item in self.take_items_:
+            if item["take_id"] == take_id and item["state"] == source:
+                item["state"] = state
+                hit += 1
+        return hit
+
+    async def add_take_item(self, take_id, *, bike_id, code, state="extra", note=None):
+        if bike_id is not None and any(
+                i["take_id"] == take_id and i["bike_id"] == bike_id
+                for i in self.take_items_):
+            raise UniqueError("stock_take_items_one")
+        item_id = self._id()
+        self.take_items_.append({"id": item_id, "take_id": take_id, "bike_id": bike_id,
+                                 "code": code, "state": state, "note": note,
+                                 "created_at": self._now()})
+        return item_id
+
+    async def delete_take_item(self, take_id, item_id):
+        before = len(self.take_items_)
+        self.take_items_ = [i for i in self.take_items_
+                            if not (i["take_id"] == take_id and i["id"] == item_id)]
+        return len(self.take_items_) < before
+
+    async def close_stock_take(self, take_id, *, counts, closed_at):
+        missing = []
+        for item in self.take_items_:
+            if item["take_id"] == take_id and item["state"] == "expected":
+                item["state"] = "missing"
+                if item["bike_id"] is not None:
+                    missing.append(int(item["bike_id"]))
+        self.takes_[take_id].update({
+            "status": "done", "closed_at": closed_at,
+            "expected": int(counts.get("total") or 0),
+            "found": int(counts.get("found") or 0),
+            "missing": int(counts.get("missing") or 0),
+            "extra": int(counts.get("extra") or 0)})
+        return missing
 
 
 class UniqueError(Exception):

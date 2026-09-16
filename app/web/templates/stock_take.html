@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ take.no }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ take.no }} · {{ take_title(take) }}</h1>
+  <nav class="tabs"><a href="/stock-takes">Все пересчёты</a></nav>
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ counts.total }}</b><span>ожидалось</span></div>
+  <div class="tile"><b>{{ counts.found }}</b><span>на месте</span></div>
+  <div class="tile {% if counts.missing %}warn{% endif %}"><b>{{ counts.missing }}</b><span>не нашли</span></div>
+  <div class="tile {% if counts.extra %}warn{% endif %}"><b>{{ counts.extra }}</b><span>лишние</span></div>
+  {% if take.status == 'open' %}<div class="tile"><b>{{ progress }} %</b><span>пройдено</span></div>{% endif %}
+</div>
+
+{% set editable = take.status == 'open' and can_edit(staff, 'bikes') %}
+{% if editable %}
+<div class="card">
+  <h2>Отметить по номеру</h2>
+  {# Считают с телефоном в руках: прочитал номер на раме - ввёл. Экран
+     сразу говорит, ждали эту единицу здесь или нет. #}
+  <form method="post" action="/stock-takes/{{ take.id }}/scan" class="grid2">
+    <label class="wide">Номер на раме<input type="text" name="code" autofocus autocomplete="off" placeholder="510001"></label>
+    <button type="submit">Отметить</button>
+  </form>
+  <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
+    <input type="hidden" name="state" value="found"><button type="submit" class="ghost">Всё на месте</button>
+  </form>
+  <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
+    <input type="hidden" name="state" value="expected"><button type="submit" class="ghost">Снять отметки</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+<table class="take">
+  <tr><th>№</th><th class="opt">Модель</th><th>Числится</th><th class="opt">Точка</th><th>Отметка</th><th class="opt">Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
+  {% for i in items %}
+  <tr>
+    <td>{% if i.bike_id %}<a href="/bikes/{{ i.bike_id }}">{{ i.bike_code or i.code }}</a>{% else %}{{ i.code or '—' }}{% endif %}</td>
+    <td class="opt">{{ i.bike_model or '—' }}</td>
+    <td>{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}{% else %}нет в парке{% endif %}</td>
+    <td class="opt">{{ i.bike_location or '—' }}</td>
+    <td><span class="tag take-{{ i.state }}">{{ TAKE_STATES[i.state] }}</span></td>
+    <td class="opt">{{ i.note or '' }}</td>
+    {% if editable %}
+    <td>
+      {% if i.state == 'extra' %}
+      <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/delete">
+        <button type="submit" class="ghost">убрать</button>
+      </form>
+      {% elif i.state == 'found' %}
+      <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}">
+        <input type="hidden" name="state" value="expected"><button type="submit" class="ghost">снять</button>
+      </form>
+      {% else %}
+      <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}">
+        <input type="hidden" name="state" value="found"><button type="submit" class="ghost">на месте</button>
+      </form>
+      {% endif %}
+    </td>
+    {% endif %}
+  </tr>
+  {% else %}<tr><td colspan="7" class="muted">Ведомость пуста.</td></tr>{% endfor %}
+</table>
+</div>
+
+{% if editable %}
+<div class="card">
+  <h2>Закрыть пересчёт</h2>
+  <p>Неотмеченные строки станут недостачей: сейчас их {{ counts.left }}.</p>
+  <form method="post" action="/stock-takes/{{ take.id }}/close">
+    {# Статус «Утерян» снимает велосипед с операционного парка, и обратно
+       его никто не вернёт. Поэтому недостача переводится в потери руками. #}
+    <label class="check"><input type="checkbox" name="lose_missing" value="1">
+      Перевести ненайденные в «Утерян»</label>
+    <label class="check"><input type="checkbox" name="return_found" value="1" checked>
+      Вернуть найденные потерянные в «Свободен»</label>
+    <button type="submit">Закрыть пересчёт</button>
+  </form>
+</div>
+{% elif take.status == 'done' %}
+<div class="card">
+  <p>Пересчёт закрыт {{ take.closed_at|dmy }}. Ожидалось {{ take.expected }},
+     нашли {{ take.found }}, не нашли {{ take.missing }}, лишних {{ take.extra }}.</p>
+</div>
+{% endif %}
+{% endblock %}
