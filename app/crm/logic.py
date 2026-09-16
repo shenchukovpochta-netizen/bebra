@@ -1405,3 +1405,31 @@ def staff_tg_label(staff: dict) -> str:
         name = staff.get("tg_username")
         return f"@{name}" if name else "Подключён"
     return "Ждёт кода" if staff.get("link_code") else "—"
+
+
+# ─────────────────── витрина свободных велосипедов ───────────────────
+
+def free_bikes_post(bikes: Iterable[dict], tariffs: Iterable[dict], *,
+                    limit: int = 8) -> dict[str, Any] | None:
+    """Данные поста «сегодня свободно» для канала. None - постить нечего.
+
+    Свободный велосипед - это прямой простой, а канал читают те самые
+    курьеры. Номера рам в пост не идут: клиенту нужна модель и цена,
+    а не инвентарный номер.
+    """
+    by_model: dict[str, int] = {}
+    for bike in bikes:
+        if bike.get("status") != "available":
+            continue
+        by_model[str(bike.get("model") or "Без модели")] = \
+            by_model.get(str(bike.get("model") or "Без модели"), 0) + 1
+    if not by_model:
+        return None
+    rows = sorted(by_model.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    lines = [f"• {model} — {count} шт." for model, count in rows]
+    prices = [t for t in tariffs if t.get("active")]
+    cheapest = min((to_money(t["price"]) / max(int(t.get("period_days") or 1), 1)
+                    for t in prices), default=None)
+    total = sum(by_model.values())
+    return {"lines": "\n".join(lines), "total": total,
+            "price": money(cheapest) if cheapest is not None else ""}

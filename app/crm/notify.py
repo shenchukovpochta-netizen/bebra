@@ -121,3 +121,21 @@ async def order_assigned(bot: Any, crm: Any, order: dict, tech: dict) -> bool:
         complaint=bot_logic.esc(order.get("complaint") or "—"),
         status=logic.ORDER_STATUSES.get(order.get("status"), order.get("status") or ""))
     return await _send(bot, tech["tg_id"], text)
+
+
+async def repair_ready(bot: Any, db: Any, client: dict, order: dict,
+                       total: Any) -> bool:
+    """Клиенту: его техника из наряда готова и сколько это стоило.
+
+    Только по клиентским нарядам: свой парк чинится молча, там ждать
+    нечего и некому.
+    """
+    del db
+    if not client.get("tg_id") or bot is None:
+        return False
+    what = (f"Велосипед № {order.get('bike_code')}" if order.get("bike_id")
+            else (order.get("object_note") or "Ваша техника"))
+    text = texts.REPAIR_READY.format(
+        no=order.get("no") or "", object=bot_logic.esc(what),
+        total=logic.money(total))
+    return await _send(bot, client["tg_id"], text)

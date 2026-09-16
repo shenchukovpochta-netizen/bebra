@@ -1319,6 +1319,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "referrals.html", rows=rows,
                       funnel=logic.ref_funnel(rows), agents=logic.ref_agents(rows),
                       settings=logic.ref_settings(await crm.settings()),
+                      free_bikes=str((await crm.settings()).get("free_bikes_post", "0"))
+                      not in ("0", "", "false"),
                       since=since.value, until=until.value)
 
     @app.post("/reports/referrals")
@@ -1337,6 +1339,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                               by=who(request))
         await crm.set_setting("ref_bonus", str(bonus.value), by=who(request))
         await crm.set_setting("ref_min_payment", str(minimum.value), by=who(request))
+        await crm.set_setting("free_bikes_post", "1" if data.get("free_bikes") else "0",
+                              by=who(request))
         flash(request, "Настройки программы сохранены.")
         return redirect("/reports/referrals")
 
@@ -1719,6 +1723,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/orders/{order_id}")
+        # Клиентский ремонт - это человек, который ждёт свою технику.
+        # Свой парк чинится молча: ждать там нечего и некому.
+        if order.get("payer") == "client" and order.get("client_id"):
+            client = await crm.client(order["client_id"])
+            if client:
+                await notify.repair_ready(bot, db, client, order, totals["total"])
         flash(request, f"Наряд закрыт: клиенту {logic.money(totals['total'])}, "
                        f"себестоимость {logic.money(totals['cost'])}.")
         return redirect(f"/orders/{order_id}")

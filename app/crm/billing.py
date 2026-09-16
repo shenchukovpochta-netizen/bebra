@@ -65,6 +65,30 @@ async def remind_once(bot: Any, db: Any, crm: Any, cfg: Any, *,
     return sent, logic.digest(rentals, today=today, before_days=cfg.remind_before_days)
 
 
+async def post_free_bikes(bot: Any, crm: Any, cfg: Any) -> bool:
+    """Пост «сегодня свободно» в клиентский канал. False - не постили.
+
+    Свободный велосипед - прямой простой, а канал читают те самые курьеры,
+    ради которых парк и стоит. Выключатель - в настройках программы, чтобы
+    не спамить в межсезонье.
+    """
+    if not getattr(cfg, "channel_id", None):
+        return False
+    settings = await crm.settings()
+    if str(settings.get("free_bikes_post", "0")) in ("0", "", "false"):
+        return False
+    post = logic.free_bikes_post(await crm.bikes(limit=10000),
+                                 await crm.tariffs(active_only=True))
+    if post is None:
+        return False
+    try:
+        await bot.send_message(cfg.channel_id, texts.FREE_BIKES_POST.format(**post))
+    except TelegramAPIError:
+        log.exception("пост о свободных велосипедах не доставлен")
+        return False
+    return True
+
+
 async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> None:
     """Начислить, напомнить, отчитаться. Каждый шаг отдельно в try:
     сбой одного не должен отменять остальные."""
@@ -81,6 +105,11 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> No
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: проход напоминаний не удался")
         return
+    try:
+        if await post_free_bikes(bot, crm, cfg):
+            log.info("CRM: пост о свободных велосипедах отправлен")
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: пост о свободных велосипедах не собран")
     if digest:
         text = (texts.CAB_DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
                 + "\n\n" + digest)
