@@ -267,3 +267,24 @@ pre.preview{white-space:pre-wrap;font:inherit;background:var(--soft,#f3f1ee);
 pre.agreement{white-space:pre-wrap;font:inherit;font-size:14px;line-height:1.5}
 code.hash{font-size:12px;word-break:break-all}
 p.small{font-size:13px}
+
+/* Столбики графика: чистый CSS, без библиотеки. Триста килобайт ради
+   двадцати столбиков - это дорого для страницы, которую открывают
+   с телефона на точке. */
+.bars{position:relative;display:flex;align-items:flex-end;gap:4px;
+      height:180px;padding:18px 0 0;margin:8px 0 12px;overflow-x:auto}
+.bar-col{flex:1 0 18px;display:flex;flex-direction:column;justify-content:flex-end;
+         align-items:center;height:100%;min-width:18px}
+.bar-val{width:100%;min-height:2px;border-radius:4px 4px 0 0;
+         background:var(--ok);transition:height .2s}
+.bar-val.over{background:#E04B43}
+.bar-num{font-size:11px;line-height:1.2;margin-top:2px}
+.bar-day{font-size:10px;line-height:1.2}
+.bar-norm{position:absolute;left:0;right:0;border-top:1px dashed var(--muted);
+          pointer-events:none}
+.bar-norm span{position:absolute;right:0;top:-14px;font-size:10px;color:var(--muted);
+               background:var(--card);padding:0 4px}
+@media (max-width:700px){
+  .bars{height:140px}
+  .bar-num{display:none}
+}

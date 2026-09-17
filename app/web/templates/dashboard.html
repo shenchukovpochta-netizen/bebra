@@ -67,11 +67,15 @@
   <form method="post" action="/plan" class="grid2">
     <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented }}" size="5"></label>
     <label>Чек в день <input name="plan_check" value="{{ plan.check }}" size="8"></label>
+    <label>Норма в ремонте <input name="plan_repair" value="{{ plan.repair }}" size="5"></label>
+    <label>Норма подменных <input name="plan_spare" value="{{ plan.spare }}" size="5"></label>
     <button type="submit">Сохранить план</button>
   </form>
   <p class="muted">Умолчания взяты из трёх чисел: парк {{ plan.fleet }} при простое
     меньше {{ IDLE_TARGET_PERCENT }} % и чеке {{ money(CHECK_TARGET) }}. План —
     то, что двигают, а не то, что придумывают с нуля.</p>
+  <p class="muted">Нормы ремонта и подменных попадают на плитки парка ниже и
+    на график сервиса: превышение видно сразу, а не в конце месяца.</p>
   {% endif %}
 </section>
 {% endif %}
@@ -126,12 +130,25 @@
 
 <div class="cols">
 <section class="card">
-  <h2>Парк</h2>
+  <h2>Парк <span class="muted">· операционный {{ operational }}</span></h2>
+  <div class="tiles">
+    {% for t in tiles %}
+    <div class="tile {% if t.bad %}warn{% endif %}">
+      <b>{% if t.code == 'spare' %}{{ t.value }}{% else %}<a href="/bikes?status={{ t.code }}">{{ t.value }}</a>{% endif %}</b>
+      <span>{{ t.title|lower }}
+        {% if t.percent is not none %}<br><small class="muted">{{ t.percent }} %</small>{% endif %}
+        {% if t.norm %}<br><small class="{% if t.bad %}bad{% else %}muted{% endif %}">норма {{ t.norm }}{% if t.over %} · +{{ t.diff }} сверх{% elif t.under %} · {{ t.diff }} до нормы{% endif %}</small>{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
   <ul class="inline">
     {% for code, label in BIKE_STATUSES.items() %}
       <li><a href="/bikes?status={{ code }}">{{ label }}: <b>{{ bikes.get(code, 0) }}</b></a></li>
     {% endfor %}
   </ul>
+  <p class="muted">Проценты — от операционного парка: потерянные, проданные
+    и списанные в знаменатель не попадают никогда.</p>
   <p>{% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'clients') %}<a class="btn ghost" href="/clients/new">+ Клиент</a> {% endif %}{% if can_edit(staff, 'bikes') %}<a class="btn ghost" href="/bikes/new">+ Велосипед</a>{% endif %}</p>
 </section>
 {% if money_ok %}

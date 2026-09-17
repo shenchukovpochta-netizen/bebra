@@ -2263,7 +2263,81 @@ def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
     check = to_money(raw.get("plan_check") or CHECK_TARGET)
     if check <= 0:
         check = CHECK_TARGET
-    return {"rented": rented, "check": check, "fleet": fleet}
+    # Нормы парка. Ремонт по умолчанию - половина допустимого простоя:
+    # вторая половина уходит на «свободен» и «на ТО». Подменных - 2 % парка,
+    # меньше двух штук держать бессмысленно.
+    repair = number("plan_repair",
+                    max(int(round(fleet * IDLE_TARGET_PERCENT / 200)), 1))
+    spare = number("plan_spare", max(int(round(fleet * Decimal("0.02"))), 2))
+    return {"rented": rented, "check": check, "fleet": fleet,
+            "repair": repair, "spare": spare}
+
+
+# Плитки парка на сводке: статус, подпись и откуда берётся норма.
+# Норма есть не у всех: «в аренде» - чем больше, тем лучше, и «сверх
+# нормы» там было бы издевательством.
+FLEET_TILES: tuple[tuple[str, str, str | None, str], ...] = (
+    ("rented", "У клиента", "rented", "min"),
+    ("repair", "В ремонте", "repair", "max"),
+    ("available", "Свободны", None, ""),
+    ("maintenance", "На ТО", None, ""),
+    ("new", "На сборке", None, ""),
+)
+
+
+def fleet_tiles(counts: Mapping[str, int], plan: Mapping[str, Any] | None = None,
+                *, spare: int = 0) -> list[dict]:
+    """Плитки парка с нормой и пометкой «сверх нормы».
+
+    Норма `min` - чем меньше факт, тем хуже (велосипедов в аренде);
+    `max` - наоборот, чем больше, тем хуже (велосипедов в ремонте).
+    Проценты считаются от операционного парка, а не от всего: `lost` и
+    `sold` в знаменатель не попадают никогда.
+    """
+    plan = plan or {}
+    base = sum(int(counts.get(code, 0)) for code in OPERATIONAL_STATUSES)
+    out = []
+    for code, title, plan_key, sense in FLEET_TILES:
+        value = int(counts.get(code, 0))
+        norm = int(plan.get(plan_key) or 0) if plan_key else 0
+        over = bool(norm) and sense == "max" and value > norm
+        under = bool(norm) and sense == "min" and value < norm
+        out.append({
+            "code": code, "title": title, "value": value, "norm": norm or None,
+            "sense": sense,
+            "percent": round(100 * value / base, 1) if base else None,
+            "over": over, "under": under,
+            "bad": over or under,
+            "diff": value - norm if norm else 0,
+        })
+    if plan.get("spare"):
+        norm = int(plan["spare"])
+        out.append({"code": "spare", "title": "Подменные", "value": int(spare),
+                    "norm": norm, "sense": "min",
+                    "percent": round(100 * spare / base, 1) if base else None,
+                    "over": False, "under": spare < norm, "bad": spare < norm,
+                    "diff": int(spare) - norm})
+    return out
+
+
+def repair_chart(by_day: Mapping[date, Any], norm: int = 0) -> dict[str, Any]:
+    """График «в ремонте по дням»: сколько дней в норме, сколько сверх.
+
+    Дробные велосипеде-дни округляются к ближайшему целому: «4,6 в
+    ремонте» на столбике не читается, а решение принимают по целым.
+    """
+    days = []
+    for day in sorted(by_day):
+        value = Decimal(str(by_day[day] or 0))
+        count = int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        days.append({"day": day, "value": count, "over": bool(norm) and count > norm})
+    top = max([d["value"] for d in days] + [norm, 1])
+    for row in days:
+        row["height"] = int(round(100 * row["value"] / top))
+    return {"days": days, "norm": norm, "top": top,
+            "ok_days": sum(1 for d in days if not d["over"]),
+            "over_days": sum(1 for d in days if d["over"]),
+            "peak": max((d["value"] for d in days), default=0)}
 
 
 def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,

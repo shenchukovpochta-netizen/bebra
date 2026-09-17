@@ -1611,6 +1611,42 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spend[0]["cost"], D("1200.00"))
         self.assertEqual(spend[0]["orders"], 2)
 
+    async def test_bikes_in_status_by_day_on_postgres(self):
+        """Суточная разбивка: полдня в ремонте - это 0,5, а не 0 и не 1."""
+        await self.seed()
+        today = date.today()
+        tz = datetime.now().astimezone().tzinfo
+        noon = datetime.combine(today, datetime.min.time(), tzinfo=tz) \
+            + timedelta(hours=12)
+        # Журнал пишет триггер; подменяем время записей, чтобы получить
+        # ровно полсуток ремонта - на живой базе это и проверяем.
+        await self.crm.update_bike(self.bike_id, status="repair", by="staff:t")
+        await self.pool.execute(
+            "update crm.bike_status_log set changed_at = $2 "
+            "where bike_id = $1 and to_status = 'available'",
+            self.bike_id, noon - timedelta(days=10))
+        await self.pool.execute(
+            "update crm.bike_status_log set changed_at = $2 "
+            "where bike_id = $1 and to_status = 'repair'", self.bike_id, noon)
+        by_day = await self.crm.bikes_in_status_by_day("repair", today, today)
+        self.assertEqual(set(by_day), {today})
+        # Ремонт идёт с полудня по «сейчас»: доля суток, а не 0 и не 1.
+        # Ждём ровно столько, сколько прошло, с запасом на время запроса.
+        want = D(str((datetime.now(tz) - noon).total_seconds() / 86400))
+        self.assertAlmostEqual(by_day[today], want, delta=D("0.001"))
+        self.assertGreater(by_day[today], D("0"))
+        self.assertLess(by_day[today], D("1"))
+
+        # Дни без ремонта в ряду остаются нулями, а не пропадают: иначе
+        # на графике будет дыра. И не единицами: greatest/least в
+        # Postgres игнорируют NULL, и на этом легко получить сутки
+        # ремонта там, где ремонта не было вовсе.
+        week = await self.crm.bikes_in_status_by_day(
+            "repair", today - timedelta(days=3), today)
+        self.assertEqual(len(week), 4)
+        self.assertEqual(week[today - timedelta(days=3)], D("0"))
+        self.assertEqual(week[today - timedelta(days=1)], D("0"))
+
 
 if __name__ == "__main__":
     unittest.main()

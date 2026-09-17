@@ -17,6 +17,49 @@
 </div>
 
 <section class="card">
+  <h2>В ремонте по дням <span class="muted">· {{ month|dmy }} · норма {{ chart.norm }}</span></h2>
+  {# Столбики чистым CSS: высота в процентах от пика. Библиотека графиков
+     ради двадцати столбиков - это триста килобайт на страницу, которую
+     открывают с телефона на точке. #}
+  <div class="bars" role="img"
+       aria-label="Велосипедов в ремонте по дням месяца, норма {{ chart.norm }}">
+    {% for d in chart.days %}
+    <div class="bar-col" title="{{ d.day|dmy }}: {{ d.value }} в ремонте">
+      <div class="bar-val {% if d.over %}over{% endif %}" style="height:{{ d.height }}%"></div>
+      <div class="bar-num {% if d.over %}bad{% endif %}">{{ d.value }}</div>
+      <div class="bar-day muted">{{ d.day.day }}</div>
+    </div>
+    {% endfor %}
+    {% if chart.norm %}
+    <div class="bar-norm" style="bottom:{{ (100 * chart.norm / chart.top)|round|int }}%"
+         aria-hidden="true"><span>норма {{ chart.norm }}</span></div>
+    {% endif %}
+  </div>
+  <p class="muted">{{ chart.ok_days }} суток в норме · {{ chart.over_days }} с превышением ·
+    пик {{ chart.peak }}. Норма ремонта правится в плане месяца на сводке.
+    Считается среднее за сутки: велосипед, заехавший в ремонт в обед и
+    уехавший к вечеру, — это полдня простоя, и округлять его до нуля или
+    до единицы одинаково неверно.</p>
+</section>
+
+<section class="card">
+  <h2>Парк против нормы</h2>
+  <div class="tiles">
+    {% for t in tiles %}
+    <div class="tile {% if t.bad %}warn{% endif %}">
+      <b>{{ t.value }}</b>
+      <span>{{ t.title|lower }}
+        {% if t.percent is not none %}<br><small class="muted">{{ t.percent }} % операционного парка</small>{% endif %}
+        {% if t.norm %}<br><small class="{% if t.bad %}bad{% else %}muted{% endif %}">норма {{ t.norm }}{% if t.over %} · +{{ t.diff }} сверх{% elif t.under %} · {{ t.diff }} до нормы{% endif %}</small>{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted">Проценты считаются от операционного парка: потерянные,
+    проданные и списанные в знаменатель не попадают никогда.</p>
+</section>
+
+<section class="card">
   <h2>Велосипеды в сервисе</h2>
   {% if rows %}
   <table>

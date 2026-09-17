@@ -400,6 +400,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       soon=soon,
                       counts=await crm.counts(), bikes=bikes_by,
                       operational=operational,
+                      tiles=logic.fleet_tiles(
+                          bikes_by, plan,
+                          spare=sum(1 for b in fleet if b.get("spare")
+                                    and b.get("status") in logic.OPERATIONAL_STATUSES)),
                       metrics=metrics, losses=logic.fleet_losses(metrics),
                       loss_today=logic.loss_per_day(bikes_by),
                       amortization=logic.amortization_total(fleet, own_batteries),
@@ -428,12 +432,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rented = count_field(data, "plan_rented", what="Велосипедов в аренде",
                              default="0", limit=9999)
         check = cost_field(data, "plan_check")
-        for field in (rented, check):
+        repair = count_field(data, "plan_repair", what="Норма ремонта",
+                             default="0", limit=9999)
+        spare = count_field(data, "plan_spare", what="Норма подменных",
+                            default="0", limit=9999)
+        for field in (rented, check, repair, spare):
             if not field.ok:
                 flash(request, field.error, "err")
                 return redirect("/")
         await crm.set_setting("plan_rented", str(rented.value), by=who(request))
         await crm.set_setting("plan_check", str(check.value), by=who(request))
+        await crm.set_setting("plan_repair", str(repair.value), by=who(request))
+        await crm.set_setting("plan_spare", str(spare.value), by=who(request))
         flash(request, "План на месяц сохранён.")
         return redirect("/")
 
@@ -2462,8 +2472,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for bike in bikes:
             bike["idle_days"] = logic.idle_days(since.get(bike["id"]), now=now)
         rows = logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today)
+        settings = await crm.settings()
+        counts = await crm.bike_counts()
+        plan = logic.month_plan(settings, fleet=sum(
+            counts.get(code, 0) for code in logic.OPERATIONAL_STATUSES))
+        # График за месяц: по нему видно, ремонт у нас ровный или
+        # скачет - и когда именно скакнул.
+        first = today.replace(day=1)
+        chart = logic.repair_chart(
+            await crm.bikes_in_status_by_day("repair", first, today),
+            norm=int(plan["repair"]))
         return render(request, "service.html", rows=rows,
                       summary=logic.service_summary(rows),
+                      chart=chart, plan=plan, month=first,
+                      tiles=logic.fleet_tiles(
+                          counts, plan,
+                          spare=sum(1 for b in bikes if b.get("spare")
+                                    and b.get("status") in logic.OPERATIONAL_STATUSES)),
                       orders=await crm.work_orders(open_only=True, limit=200))
 
     @app.get("/orders")

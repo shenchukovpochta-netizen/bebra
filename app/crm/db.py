@@ -350,6 +350,45 @@ class CrmDB:
             """, since, until)
         return {r["status"]: Decimal(str(r["days"])) for r in rows if r["days"] and r["days"] > 0}
 
+    async def bikes_in_status_by_day(self, status: str, since: date,
+                                     until: date) -> dict[date, Decimal]:
+        """Сколько велосипедов стояло в статусе каждый день периода.
+
+        Считается среднее за сутки, а не «сколько было в полночь»:
+        велосипед, заехавший в ремонт в обед и уехавший к вечеру, - это
+        полдня простоя, и округлять его до нуля или до единицы одинаково
+        неверно. Дробь на графике округляется в шаблоне.
+        """
+        rows = await self.pool.fetch(
+            """
+            with days as (
+              select generate_series($2::date, $3::date, interval '1 day')::date as day
+            ), s as (
+              select bike_id, to_status, changed_at,
+                     lead(changed_at) over (partition by bike_id
+                                            order by changed_at, id) as next_at
+                from crm.bike_status_log
+            )
+            select d.day,
+                   -- case, а не просто greatest/least: в Postgres они
+                   -- игнорируют NULL, и у дня без единого совпадения
+                   -- «greatest(NULL, день)» давал целые сутки ремонта
+                   -- на пустом месте.
+                   coalesce(sum(case when s.bike_id is null then 0 else
+                       extract(epoch from (
+                           least(coalesce(s.next_at, now()),
+                                 (d.day + 1)::timestamptz)
+                         - greatest(s.changed_at, d.day::timestamptz))) / 86400
+                   end), 0) as bikes
+              from days d
+              left join s on s.to_status = $1
+                         and s.changed_at < (d.day + 1)::timestamptz
+                         and coalesce(s.next_at, now()) > d.day::timestamptz
+             group by d.day
+             order by d.day
+            """, status, since, until)
+        return {r["day"]: Decimal(str(r["bikes"] or 0)) for r in rows}
+
     async def rental_revenue(self, since: datetime, until: datetime) -> Decimal:
         """Арендная выручка за период - все платежи клиентов. Ремонт чужой
         техники сюда не попадает: он не в журнале клиентов."""

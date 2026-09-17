@@ -392,6 +392,35 @@ class FakeCrm:
             out[b["status"]] = out.get(b["status"], 0) + 1
         return out
 
+    async def bikes_in_status_by_day(self, status, since, until):
+        """Та же арифметика, что в SQL: среднее за сутки, а не «в полночь»."""
+        from datetime import datetime as _dt
+        from datetime import time as _time
+        from datetime import timedelta as _td
+        tz = self._now().tzinfo
+        out = {}
+        day = since
+        while day <= until:
+            start = _dt.combine(day, _time.min, tzinfo=tz)
+            end = start + _td(days=1)
+            total = Decimal(0)
+            per_bike = {}
+            for row in sorted(self.status_log_,
+                              key=lambda r: (r["bike_id"], r["changed_at"], r["id"])):
+                per_bike.setdefault(row["bike_id"], []).append(row)
+            for rows in per_bike.values():
+                for i, row in enumerate(rows):
+                    if row["to_status"] != status:
+                        continue
+                    began = row["changed_at"]
+                    ended = rows[i + 1]["changed_at"] if i + 1 < len(rows) else self._now()
+                    lo, hi = max(began, start), min(ended, end)
+                    if hi > lo:
+                        total += Decimal(str((hi - lo).total_seconds() / 86400))
+            out[day] = total
+            day += _td(days=1)
+        return out
+
     async def bike_log(self, bike_id, limit=50, kind=None):
         return [dict(x) for x in reversed(self.bike_log_)
                 if x["bike_id"] == bike_id and (not kind or x["kind"] == kind)][:limit]
