@@ -3,7 +3,7 @@
 {% block content %}
 {% set can = can_edit(staff, 'service') %}
 {% set money_ok = can_view(staff, 'finance') %}
-{% set open_now = order.status in ('new', 'in_work', 'waiting') %}
+{% set open_now = order.status in ORDER_OPEN %}
 <div class="bar">
   <h1>Наряд {{ order.no }} <span class="tag order-{{ order.status }}">{{ ORDER_STATUSES[order.status] }}</span></h1>
   <a class="btn ghost" href="/orders">Все наряды</a>
@@ -25,7 +25,13 @@
   {% if can and open_now %}
   <h2>Изменить</h2>
   <form method="post" action="/orders/{{ order.id }}/edit" class="grid2">
-    <label>Статус <select name="status">{% for code, label in ORDER_STATUSES.items() %}{% if code != 'done' %}<option value="{{ code }}" {% if order.status == code %}selected{% endif %}>{{ label }}</option>{% endif %}{% endfor %}</select></label>
+    {# На согласовании статус руками не меняют: список его не содержит, и
+       выпадающий «Новый» молча сбросил бы ожидание ответа клиента. #}
+    {% if order.status == 'approve' %}
+    <label>Статус <input value="На согласовании — ответьте за клиента ниже" disabled></label>
+    {% else %}
+    <label>Статус <select name="status">{% for code in ORDER_MANUAL_STATUSES %}<option value="{{ code }}" {% if order.status == code %}selected{% endif %}>{{ ORDER_STATUSES[code] }}</option>{% endfor %}</select></label>
+    {% endif %}
     <label>Техник <select name="tech_id"><option value="">не назначен</option>{% for t in techs %}<option value="{{ t.id }}" {% if order.tech_id == t.id %}selected{% endif %}>{{ t.name or t.login }}</option>{% endfor %}</select></label>
     <label>Смета, ₽ <input name="estimate" inputmode="decimal" value="{{ order.estimate }}"></label>
     <label>Заметка <input name="note" value="{{ order.note or '' }}"></label>
@@ -76,6 +82,75 @@
   {% endif %}
 </section>
 </div>
+
+{% if order.payer == 'client' %}
+<div class="cols">
+<section class="card">
+  <h2>Смета
+    {% if estimate.stage == 'approved' %}<span class="tag ok">согласована</span>
+    {% elif estimate.stage == 'declined' %}<span class="tag bad">отказ</span>
+    {% elif estimate.stage == 'waiting' %}<span class="tag rented">ждём ответа</span>
+    {% else %}<span class="tag">не отправлена</span>{% endif %}
+  </h2>
+  <dl>
+    {% if money_ok %}<dt>К оплате</dt><dd><b>{{ money(client_total) }}</b> по строкам наряда</dd>{% endif %}
+    {% if order.estimate_sent_at %}<dt>Отправлена</dt><dd>{{ order.estimate_sent_at|dmy }}</dd>{% endif %}
+    {% if estimate.stage == 'waiting' and estimate.too_silent %}
+    <dt>Молчит</dt><dd class="bad">{{ estimate.silent_days }} дн. — техника разобрана и стоит</dd>{% endif %}
+    {% if order.approved_at %}<dt>Согласовал</dt><dd>{{ estimate.by or '—' }} · {{ order.approved_at|dmy }}</dd>{% endif %}
+    {% if order.declined_at %}<dt>Отказ</dt><dd>{{ order.declined_at|dmy }}</dd>{% endif %}
+  </dl>
+  {% if can and open_now %}
+  {% if estimate.stage in ('draft', 'waiting') %}
+  <form method="post" action="/orders/{{ order.id }}/estimate" class="inline-form">
+    <button type="submit" name="action" value="send">
+      {{ 'Отправить смету клиенту' if estimate.stage == 'draft' else 'Отправить заново' }}</button>
+  </form>
+  {% endif %}
+  {% if order.status == 'approve' %}
+  <h3>Согласовать вживую</h3>
+  <form method="post" action="/orders/{{ order.id }}/estimate" class="inline-form">
+    <button type="submit" name="action" value="agree" class="ghost">Клиент согласен</button>
+    <button type="submit" name="action" value="decline" class="ghost danger">Отказался</button>
+  </form>
+  <p class="muted">Клиент стоит рядом и сказал «да» — не ждать же кнопки
+    в боте. Кто согласовал, запишется: на спор «я такого не заказывал»
+    это ответ.</p>
+  {% endif %}
+  {% endif %}
+  <p class="muted">Смета собирается из строк наряда, а не из поля: клиент
+    должен видеть, за что платит. Себестоимость в неё не идёт.</p>
+</section>
+
+<section class="card">
+  <h2>Счёт клиенту
+    {% if invoice.stage == 'paid' %}<span class="tag ok">оплачен</span>
+    {% elif invoice.stage == 'sent' %}<span class="tag rented">выставлен</span>
+    {% else %}<span class="tag">ещё не выставлен</span>{% endif %}
+  </h2>
+  {% if invoices %}
+  <table>
+    <tr><th>Счёт</th><th class="num">Сумма</th><th>Состояние</th></tr>
+    {% for v in invoices %}
+    <tr>
+      <td><a href="/payments/{{ v.id }}">{{ v.no }}</a></td>
+      <td class="num">{{ money(v.amount) }}</td>
+      <td>{% if v.status == 'paid' %}<span class="tag ok">оплачен</span>{% else %}{{ PAY_STATUSES.get(v.status, '—') }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% if can and not order.paid_at %}
+  <form method="post" action="/orders/{{ order.id }}/invoice" class="inline-form">
+    <button type="submit">Выставить счёт со ссылкой</button>
+  </form>
+  {% endif %}
+  <p class="muted">Оплата ремонта в журнал аренды не попадает: журнал —
+    это аренда, и средний чек считается по нему. Выручка ремонта живёт
+    на наряде.</p>
+</section>
+</div>
+{% endif %}
 
 {% if can and open_now %}
 <section class="card narrow">

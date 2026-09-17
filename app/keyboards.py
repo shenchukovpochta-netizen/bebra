@@ -361,3 +361,12 @@ def fleet_card(bike_id: int, status: str, rented: bool) -> InlineKeyboardMarkup:
     row = [InlineKeyboardButton(text=label, callback_data=f"bk:{bike_id}:{code}")
            for code, label in options if code != status]
     return InlineKeyboardMarkup(inline_keyboard=[row[:2], row[2:]])
+
+
+def estimate_answer(order_id: int) -> InlineKeyboardMarkup:
+    """Под сметой: согласен или нет. Третьего варианта нет намеренно -
+    «подумаю» оставляет технику разобранной на неопределённый срок."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен", callback_data=f"est:ok:{order_id}"),
+         InlineKeyboardButton(text="✖️ Не надо", callback_data=f"est:no:{order_id}")],
+    ])

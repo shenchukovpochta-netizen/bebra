@@ -10,6 +10,13 @@
   </form>
   {% if can_edit(staff, 'service') %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
 </div>
+{# «На согласовании» вынесено кнопкой: это самый дорогой статус - техника
+   разобрана и ждёт, а в выпадающем списке его не видно. #}
+<nav class="tabs"><a href="/orders" class="{% if not status %}on{% endif %}">Все</a>
+  <a href="/orders?status=approve" class="{% if status == 'approve' %}on{% endif %}">На согласовании</a>
+  <a href="/orders?status=waiting" class="{% if status == 'waiting' %}on{% endif %}">Ждут запчасть</a>
+  <a href="/orders?status=done&payer=client" class="{% if status == 'done' %}on{% endif %}">Закрытые клиентские</a>
+</nav>
 <div class="card">
 <table>
   {% set money_ok = can_view(staff, 'finance') %}
@@ -27,6 +34,10 @@
     {% if money_ok %}<td class="num">{{ money(r.total if r.status == 'done' else r.estimate) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="9" class="muted">Нарядов нет.</td></tr>{% endfor %}
+  {% if money_ok and unpaid.count %}
+  <tr class="total"><td colspan="8">Закрыто, но не оплачено клиентами · {{ unpaid.count }}</td>
+    <td class="num bad">{{ money(unpaid.sum) }}</td></tr>
+  {% endif %}
 </table>
 </div>
 {% endblock %}

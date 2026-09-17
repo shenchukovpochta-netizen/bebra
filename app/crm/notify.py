@@ -224,3 +224,23 @@ async def autocharge_fail(bot: Any, client: dict, amount: Any,
         mask=logic.card_mask((card or {}).get("mask")) or "----",
         amount=logic.money(amount), reason=human)
     return await _send(bot, client["tg_id"], text)
+
+
+async def estimate(bot: Any, client: dict, order: dict, items: list[dict],
+                   total: Any) -> bool:
+    """Клиенту: смета с кнопками «согласен» / «не надо».
+
+    Нет в боте - False, и оператор согласует вживую: без этого клиент
+    без Telegram не мог бы ответить вовсе.
+    """
+    if not client.get("tg_id") or bot is None:
+        return False
+    what = (f"Велосипед № {bot_logic.esc(order.get('bike_code'))}"
+            if order.get("bike_id")
+            else bot_logic.esc(order.get("object_note") or "Ваша техника"))
+    text = texts.ESTIMATE.format(
+        no=order.get("no") or "", object=what,
+        lines=bot_logic.esc(logic.estimate_lines(items)),
+        total=logic.money(total))
+    return await _send(bot, client["tg_id"], text,
+                       kb.estimate_answer(int(order["id"])))

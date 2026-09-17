@@ -1173,3 +1173,103 @@ async def _tell_autocharge(crm: Any, bot: Any, client: dict, card: dict,
         crm, code, client["id"],
         (lambda: notify.autocharge_ok(bot, client, amount, card, until)) if ok
         else (lambda: notify.autocharge_fail(bot, client, amount, card, reason)))
+
+
+# ─────────────────── смета и счёт за ремонт ───────────────────
+
+
+async def send_estimate(crm: Any, order: dict, *, by: str, bot: Any = None) -> dict:
+    """Отправить смету клиенту и поставить наряд на согласование.
+
+    Смета собирается из строк наряда, а не из поля «смета»: клиент должен
+    видеть, за что платит. Пустой наряд согласовывать нечего - на этом и
+    останавливаемся, вместо того чтобы прислать человеку «0 ₽».
+    """
+    if not logic.order_is_open(order):
+        raise ServiceError("Наряд закрыт, согласовывать нечего.")
+    if order.get("payer") != "client":
+        raise ServiceError("Свой ремонт согласовывать не с кем: "
+                           "смета нужна там, где платит клиент.")
+    items = await crm.order_items(order["id"])
+    total = logic.order_totals_client(items)
+    if not items or total <= 0:
+        raise ServiceError("В наряде нет строк с ценой клиенту — "
+                           "смету собрать не из чего.")
+    client = (await crm.client(int(order["client_id"]))
+              if order.get("client_id") else None)
+    await crm.update_work_order(
+        order["id"], status="approve", estimate=total,
+        estimate_sent_at=datetime.now(UTC), approved_at=None,
+        approved_by=None, declined_at=None)
+    sent = False
+    if client is not None:
+        sent = await notices.send_client(
+            crm, "estimate_sent", client["id"],
+            lambda: notify.estimate(bot, client, order, items, total))
+    return {"total": total, "items": items, "sent": sent}
+
+
+async def answer_estimate(crm: Any, order: dict, *, agree: bool, by: str) -> dict:
+    """Ответ на смету: согласовано или отказ.
+
+    Отказ закрывает наряд отменой: держать открытым то, от чего клиент
+    отказался, значит вечно видеть его в «в работе» и считать простой.
+    """
+    if order.get("status") != "approve":
+        raise ServiceError("Наряд не на согласовании.")
+    now = datetime.now(UTC)
+    if agree:
+        await crm.update_work_order(order["id"], status="in_work",
+                                    approved_at=now, approved_by=by,
+                                    declined_at=None)
+    else:
+        await crm.update_work_order(order["id"], status="cancelled",
+                                    declined_at=now, closed_at=now)
+        if order.get("bike_id"):
+            bike = await crm.bike(order["bike_id"])
+            if bike and bike.get("status") in ("repair", "maintenance"):
+                await crm.update_bike(order["bike_id"], status="available", by=by)
+    return {"agree": agree, "by": by}
+
+
+async def invoice_order(crm: Any, order: dict, *, by: str,
+                        acquiring: Any = None) -> dict:
+    """Счёт клиенту за ремонт.
+
+    Тот же счёт, что и за аренду, но привязан к наряду - и поэтому его
+    оплата в crm.ledger не попадает: журнал это аренда, средний чек
+    считается по нему, и ремонт чужого самоката его бы завысил.
+    """
+    if order.get("payer") != "client":
+        raise ServiceError("Свой ремонт клиенту не выставляют.")
+    if order.get("paid_at"):
+        raise ServiceError("Ремонт уже оплачен.")
+    amount = logic.to_money(order.get("total") or order.get("estimate"))
+    if amount <= 0:
+        raise ServiceError("Сумма ремонта не посчитана: закройте наряд "
+                           "или соберите смету.")
+    client = (await crm.client(int(order["client_id"]))
+              if order.get("client_id") else None)
+    if client is None:
+        raise ServiceError("У наряда нет клиента, которому выставить счёт.")
+    what = (f"№ {order['bike_code']}" if order.get("bike_code")
+            else (order.get("object_note") or "техника"))
+    purpose = f"Ремонт {what}, наряд {order.get('no') or ''}".strip()
+    order_id = await crm.create_pay_order(
+        client_id=client["id"], rental_id=None, amount=amount, purpose=purpose,
+        kind="repair", work_order_id=order["id"], created_by=by)
+    if acquiring is None or not getattr(acquiring, "token", ""):
+        await crm.mark_pay_failed(
+            order_id, error="Эквайринг не настроен: ссылку выдать нечем")
+        return await crm.pay_order(order_id)
+    try:
+        got = await acquiring.payment_link(
+            amount=amount, purpose=purpose, client_phone=client.get("phone"),
+            client_email=client.get("email"))
+    except Exception as err:                            # noqa: BLE001
+        log.warning("ссылка на оплату ремонта не получена", exc_info=True)
+        await crm.mark_pay_failed(order_id, error=str(err))
+        return await crm.pay_order(order_id)
+    await crm.set_pay_link(order_id, link=got.get("link") or "",
+                           operation_id=got.get("operation_id"))
+    return await crm.pay_order(order_id)

@@ -1146,6 +1146,75 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.crm.purge_notice_log(30), 2)
         self.assertEqual(await self.crm.notice_log(), [])
 
+    async def test_repair_invoice_stays_out_of_the_ledger(self):
+        """Красная линия на живой базе: ремонт не попадает в журнал аренды."""
+        await self.seed()
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="client", client_id=self.client_id,
+            complaint="стук", object_note=None, tech_id=None,
+            estimate=D(0), created_by="staff:t")
+        await self.crm.add_order_item(
+            order_id, title="Замена колодок", node="brake_pads",
+            work_type_id=None, qty=1, price=D("1500"), parts_cost=D("300"),
+            labor_cost=D("200"), note=None)
+        await self.crm.update_work_order(order_id, status="done",
+                                         total=D("1500"), cost=D("500"))
+        order = await self.crm.work_order(order_id)
+
+        invoice = await service.invoice_order(self.crm, order, by="staff:t",
+                                              acquiring=None)
+        self.assertEqual(invoice["kind"], "repair")
+        self.assertEqual(invoice["work_order_id"], order_id)
+        self.assertEqual(await self.crm.client_balance(self.client_id), D(0))
+        self.assertEqual([i["id"] for i in
+                          await self.crm.work_order_invoices(order_id)],
+                         [invoice["id"]])
+
+        # Оплата ремонта: наряд помечен, журнал пуст.
+        self.assertIsNone(await self.crm.mark_pay_paid(invoice["id"],
+                                                       method="card"),
+                          "записи в журнале быть не должно")
+        self.assertEqual(await self.crm.client_balance(self.client_id), D(0))
+        self.assertEqual(await self.crm.ledger_of(self.client_id), [])
+        self.assertIsNotNone((await self.crm.work_order(order_id))["paid_at"])
+        self.assertEqual((await self.crm.pay_order(invoice["id"]))["status"],
+                         "paid")
+
+        # А счёт за аренду по-прежнему ложится в журнал.
+        rent = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("3000"),
+            purpose="Аренда велосипеда", created_by="staff:t")
+        self.assertIsNotNone(await self.crm.mark_pay_paid(rent, method="card"))
+        self.assertEqual(await self.crm.client_balance(self.client_id),
+                         D("3000.00"))
+
+    async def test_estimate_columns_survive_reapply(self):
+        """Согласование сметы на живой базе: статус и отметки."""
+        await self.seed()
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="client", client_id=self.client_id,
+            complaint="стук", object_note=None, tech_id=None,
+            estimate=D(0), created_by="staff:t")
+        await self.crm.add_order_item(
+            order_id, title="Диагностика", node="wiring", work_type_id=None,
+            qty=1, price=D("600"), parts_cost=D(0), labor_cost=D(0), note=None)
+        got = await service.send_estimate(
+            self.crm, await self.crm.work_order(order_id), by="staff:t")
+        self.assertEqual(got["total"], D("600.00"))
+        order = await self.crm.work_order(order_id)
+        self.assertEqual(order["status"], "approve")
+        self.assertIsNotNone(order["estimate_sent_at"])
+
+        await service.answer_estimate(self.crm, order, agree=True, by="клиент")
+        order = await self.crm.work_order(order_id)
+        self.assertEqual((order["status"], order["approved_by"]),
+                         ("in_work", "клиент"))
+        # Повторное применение схемы колонок не теряет.
+        db = Database(self.pool)
+        await db.apply_schema(SCHEMA)
+        self.assertEqual((await self.crm.work_order(order_id))["approved_by"],
+                         "клиент")
+
 
 if __name__ == "__main__":
     unittest.main()

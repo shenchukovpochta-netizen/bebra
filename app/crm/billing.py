@@ -224,6 +224,36 @@ async def ask_for_review(crm: Any, bot: Any, *, state: dict, today: date) -> int
     return sent
 
 
+async def report_silent_estimates(bot: Any, crm: Any, cfg: Any, *,
+                                  chat_id: Any = None) -> int:
+    """Наряды, которые молчат на согласовании. Молчим, когда таких нет.
+
+    Это самый дорогой простой: техника разобрана, клиент не отвечает, а
+    место в сервисе занято. Раньше такой наряд было видно только в
+    списке, и то если туда заглянуть.
+    """
+    rows = [o for o in await crm.work_orders(status="approve", limit=200)
+            if logic.estimate_state(o)["too_silent"]]
+    if not rows:
+        return 0
+    lines = [f"🔧 Молчат на согласовании: {len(rows)}"]
+    for order in rows[:10]:
+        state = logic.estimate_state(order)
+        what = order.get("bike_code") or order.get("object_note") or "—"
+        lines.append(f"• {order.get('no')} — {what}, "
+                     f"{logic.money(order.get('estimate'))}, "
+                     f"{state['silent_days']} дн.")
+    try:
+        await bot.send_message(chat_id or cfg.contract_chat_id, "\n".join(lines))
+        await notices.record(crm, "order_waiting", status="sent")
+    except TelegramAPIError as exc:
+        log.exception("сводка по согласованиям не доставлена")
+        await notices.record(crm, "order_waiting", status="failed",
+                             detail=str(exc))
+        return 0
+    return len(rows)
+
+
 # Сколько дней держать точки трекеров. Две недели назад - это «где он
 # ездил на прошлой неделе», дальше вопросов уже не задают.
 TRACK_KEEP_DAYS = 30
@@ -307,6 +337,16 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
                 log.info("CRM: пост о свободных велосипедах отправлен")
         except Exception:                                # noqa: BLE001
             log.exception("CRM: пост о свободных велосипедах не собран")
+
+    if due("order_waiting"):
+        notices.mark(done, "order_waiting", today)
+        try:
+            silent = await report_silent_estimates(bot, crm, cfg,
+                                                   chat_id=chat("order_waiting"))
+            if silent:
+                log.info("CRM: нарядов молчит на согласовании %s", silent)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: сводка по согласованиям не собрана")
 
     if due("maintenance_invite"):
         notices.mark(done, "maintenance_invite", today)

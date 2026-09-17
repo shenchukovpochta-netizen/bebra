@@ -1600,3 +1600,26 @@ create table if not exists crm.notice_log (
 create index if not exists notice_log_idx on crm.notice_log (created_at desc);
 create index if not exists notice_log_code_idx
   on crm.notice_log (code, created_at desc);
+
+-- ────────────────────── смета и счёт за ремонт ──────────────────────
+--
+-- Смета - это не «число в поле». Клиенту уходит перечень работ и цена,
+-- и он на неё отвечает: пока не ответил, наряд стоит в «на согласовании»
+-- и техник за него не берётся. Отказ - тоже ответ: наряд закрывается,
+-- а не висит.
+alter table crm.work_orders add column if not exists estimate_sent_at timestamptz;
+alter table crm.work_orders add column if not exists approved_at timestamptz;
+-- Кто согласовал: «клиент» - нажал кнопку в боте, имя оператора - сказал
+-- вживую. Различие нужно: на спор «я такого не заказывал» это ответ.
+alter table crm.work_orders add column if not exists approved_by text;
+alter table crm.work_orders add column if not exists declined_at timestamptz;
+
+-- Счёт за ремонт - тот же счёт, что и за аренду, но привязан к наряду.
+-- Красная линия: оплата ремонта в crm.ledger НЕ попадает - журнал это
+-- аренда, и средний чек считается по нему. Выручка ремонта живёт на
+-- наряде, поэтому оплаченный счёт с нарядом ставит work_orders.paid_at
+-- и ничего не пишет в журнал.
+alter table crm.pay_orders add column if not exists work_order_id bigint
+  references crm.work_orders (id);
+create index if not exists pay_orders_work_idx
+  on crm.pay_orders (work_order_id) where work_order_id is not null;

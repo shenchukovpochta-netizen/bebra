@@ -151,6 +151,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
+        ORDER_MANUAL_STATUSES=logic.ORDER_MANUAL_STATUSES,
+        ORDER_OPEN=logic.ORDER_OPEN,
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
@@ -1964,7 +1966,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                      limit=300)
         for order in rows:
             order["days"] = logic.order_days(order, today=date.today())
-        return render(request, "orders.html", rows=rows, status=status, payer=payer)
+        # Итог «сколько за ремонт ещё не заплатили» считается по всем
+        # закрытым клиентским нарядам, а не по видимой странице: иначе
+        # он менялся бы от фильтра и ничего не значил.
+        return render(request, "orders.html", rows=rows, status=status, payer=payer,
+                      unpaid=logic.orders_unpaid(
+                          await crm.work_orders(payer="client", limit=1000)))
 
     @app.get("/orders/new")
     async def order_new(request: Request) -> Response:
@@ -2015,13 +2022,77 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Наряд")
         items = await crm.order_items(order_id)
         stocks = await crm.stock_map()
+        invoices = await crm.work_order_invoices(order_id)
         return render(request, "order.html", order=order, items=items,
                       totals=logic.order_totals(items),
+                      client_total=logic.order_totals_client(items),
+                      estimate=logic.estimate_state(order),
+                      invoice=logic.invoice_state(order, invoices),
+                      invoices=invoices,
                       days=logic.order_days(order, today=date.today()),
                       types=await crm.work_types(active_only=True),
                       techs=await crm.staff_all(),
                       parts=logic.part_rows(await crm.parts(active_only=True), stocks),
                       may_stock=may_view(request, "inventory"))
+
+    @app.post("/orders/{order_id}/estimate")
+    async def order_estimate(request: Request, order_id: int) -> Response:
+        """Смета: отправить клиенту или согласовать вживую."""
+        if not may_edit(request, "service"):
+            return denied(request, "service")
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        action = (await form(request)).get("action") or "send"
+        back = f"/orders/{order_id}"
+        try:
+            if action == "send":
+                got = await service.send_estimate(crm, order, by=who(request),
+                                                  bot=bot)
+                flash(request, f"Смета на {logic.money(got['total'])} отправлена."
+                      if got["sent"] else
+                      "Смета собрана, но клиента нет в боте — "
+                      "согласуйте вживую.", "ok" if got["sent"] else "err")
+            elif action in ("agree", "decline"):
+                # «Согласовать вживую»: клиент стоит рядом и сказал «да».
+                # Пишем, кто именно согласовал - на спор «я такого не
+                # заказывал» это ответ.
+                await service.answer_estimate(crm, order, agree=action == "agree",
+                                              by=who(request))
+                flash(request, "Согласовано, наряд в работе."
+                      if action == "agree" else "Отказ: наряд отменён.")
+            else:
+                flash(request, "Непонятное действие.", "err")
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+        return redirect(back)
+
+    @app.post("/orders/{order_id}/invoice")
+    async def order_invoice(request: Request, order_id: int) -> Response:
+        """Счёт клиенту за ремонт со ссылкой на оплату."""
+        if not may_edit(request, "service"):
+            return denied(request, "service")
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        try:
+            invoice = await service.invoice_order(crm, order, by=who(request),
+                                                  acquiring=acquiring())
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/orders/{order_id}")
+        if invoice.get("status") == "failed":
+            flash(request, f"Счёт {invoice['no']} заведён, но ссылки нет: "
+                           f"{invoice.get('error') or 'банк не ответил'}", "err")
+        else:
+            sent = await notices.send_client(
+                crm, "repair_invoice", invoice["client_id"],
+                lambda: notify.pay_link(bot, db, invoice))
+            flash(request, f"Счёт {invoice['no']} на "
+                           f"{logic.money(invoice['amount'])} "
+                  + ("отправлен клиенту." if sent else
+                     "готов — передайте ссылку клиенту сами."))
+        return redirect(f"/orders/{order_id}")
 
     @app.post("/orders/{order_id}/items")
     async def order_add_item(request: Request, order_id: int) -> Response:
@@ -2106,6 +2177,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if status.value == "done":
             flash(request, "Готовый наряд закрывается кнопкой «Закрыть наряд»: "
                            "она считает сумму и пишет ремонт в журнал.", "err")
+            return redirect(f"/orders/{order_id}")
+        if order["status"] == "approve" and status.value != "approve":
+            # Форма на согласовании статус не отдаёт, но запрос можно
+            # послать и мимо неё: молча снять ожидание ответа нельзя.
+            flash(request, "Наряд на согласовании: ответьте за клиента "
+                           "или отправьте смету заново.", "err")
             return redirect(f"/orders/{order_id}")
         tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
         await crm.update_work_order(order_id, status=status.value, tech_id=tech_id,

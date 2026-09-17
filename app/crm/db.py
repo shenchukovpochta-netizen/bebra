@@ -62,6 +62,7 @@ TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
+    "estimate_sent_at", "approved_at", "approved_by", "declined_at",
 })
 RENTAL_FIELDS = frozenset({
     "search_at", "search_by", "search_note",
@@ -2634,6 +2635,7 @@ class CrmDB:
 
     async def create_pay_order(self, *, client_id: int, rental_id: int | None,
                                amount: Decimal, purpose: str, kind: str = "link",
+                               work_order_id: int | None = None,
                                created_by: str | None = None) -> int:
         """Счёт с человекочитаемым номером. Номер берётся в той же
         транзакции, что и вставка: две кнопки «выставить счёт» подряд не
@@ -2646,10 +2648,11 @@ class CrmDB:
             return int(await conn.fetchval(
                 """
                 insert into crm.pay_orders
-                    (no, client_id, rental_id, amount, purpose, kind, created_by)
-                values ($1, $2, $3, $4, $5, $6, $7) returning id
+                    (no, client_id, rental_id, amount, purpose, kind,
+                     work_order_id, created_by)
+                values ($1, $2, $3, $4, $5, $6, $7, $8) returning id
                 """, logic.pay_no(next_no), client_id, rental_id, _money(amount),
-                purpose, kind, created_by))
+                purpose, kind, work_order_id, created_by))
 
     async def set_pay_link(self, order_id: int, *, link: str,
                            operation_id: str | None) -> None:
@@ -2674,6 +2677,17 @@ class CrmDB:
             order = await conn.fetchrow(
                 "select * from crm.pay_orders where id = $1 for update", order_id)
             if order is None or order["status"] == "paid":
+                return None
+            if order["work_order_id"] is not None:
+                # Красная линия: выручка чужого ремонта в crm.ledger не
+                # попадает - журнал это аренда, и средний чек считается
+                # по нему. Оплата ремонта живёт на наряде.
+                await conn.execute(
+                    "update crm.work_orders set paid_at = now() where id = $1",
+                    order["work_order_id"])
+                await conn.execute(
+                    "update crm.pay_orders set status = 'paid', paid_at = now(), "
+                    "checked_at = now(), error = null where id = $1", order_id)
                 return None
             ledger_id = int(await conn.fetchval(
                 """
@@ -2741,6 +2755,11 @@ class CrmDB:
              where p.status in ('new', 'sent') and p.operation_id is not null
              order by p.id limit $1
             """, limit))
+
+    async def work_order_invoices(self, order_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.pay_orders where work_order_id = $1 "
+            "order by id desc", order_id))
 
     async def save_card_token(self, *, client_id: int, token: str,
                               mask: str | None = None,

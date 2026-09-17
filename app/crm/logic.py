@@ -1081,12 +1081,17 @@ def check_profile_name(raw: Any) -> Check:
 ORDER_STATUSES: dict[str, str] = {
     "new": "Новый",
     "in_work": "В работе",
+    "approve": "На согласовании",
     "waiting": "Ждёт запчасть",
     "done": "Готов",
     "cancelled": "Отменён",
 }
 # Наряд в этих состояниях держит велосипед: он не свободен и не выдаётся.
-ORDER_OPEN = ("new", "in_work", "waiting")
+# «На согласовании» - тоже: техника разобрана и ждёт ответа клиента.
+ORDER_OPEN = ("new", "in_work", "approve", "waiting")
+# Статусы, которые ставит человек в форме. «На согласовании» ставит
+# отправка сметы, а не выпадающий список: без сметы согласовывать нечего.
+ORDER_MANUAL_STATUSES = ("new", "in_work", "waiting", "cancelled")
 
 PAYERS: dict[str, str] = {"own": "Наш", "client": "Клиент"}
 
@@ -3213,6 +3218,16 @@ NOTICES: dict[str, dict[str, Any]] = {
         "title": "Списание с карты не прошло",
         "hint": "Банк отказал: на карте нет денег или она недействительна.",
     },
+    "estimate_sent": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Смета на ремонт",
+        "hint": "Перечень работ и цена с кнопками «согласен» и «не надо».",
+    },
+    "repair_invoice": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Счёт за ремонт",
+        "hint": "Ссылка на оплату ремонта с чеком.",
+    },
     "repair_ready": {
         "group": "client", "target": "client", "hour": None,
         "title": "Техника готова после ремонта",
@@ -3265,9 +3280,15 @@ NOTICES: dict[str, dict[str, Any]] = {
         "hint": "Наряд стоял в «ждёт запчасть» и теперь может ехать дальше.",
     },
     "order_waiting": {
+        "group": "team", "target": "chat", "hour": 10,
+        "title": "Наряд молчит на согласовании",
+        "hint": "Клиенту отправили смету, ответа нет дольше суток, "
+                "а техника разобрана и стоит.",
+    },
+    "order_answer": {
         "group": "team", "target": "chat", "hour": None,
-        "title": "Наряд ждёт согласования сметы",
-        "hint": "Клиенту отправили смету, ответа нет.",
+        "title": "Клиент ответил на смету",
+        "hint": "Согласовал или отказался - техник ждёт именно этого.",
     },
     # ─ в канал ─
     "free_bikes": {
@@ -3387,3 +3408,91 @@ def review_links(settings: Mapping[str, Any] | None = None) -> list[dict[str, st
         if url.startswith(("http://", "https://")):
             out.append({"key": key, "title": title, "url": url})
     return out
+
+
+# ────────────────────── смета и счёт за ремонт ──────────────────────
+#
+# Смета - перечень работ с ценой, а не число в поле. Отправили клиенту -
+# наряд встал в «на согласовании» и ждёт ответа; техник за разобранную
+# технику не берётся, пока клиент не сказал «да».
+
+# Сколько наряд может молчать на согласовании, прежде чем это станет
+# заметно. Сутки: за день клиент кнопку видит, а техника стоит зря.
+ESTIMATE_SILENT_DAYS = 1
+
+
+def estimate_lines(items: Iterable[Mapping[str, Any]]) -> str:
+    """Смета словами клиента: что делаем и сколько это стоит.
+
+    Себестоимость сюда не идёт никогда: клиенту незачем знать, во что
+    запчасть обошлась нам, а нам - объяснять разницу.
+    """
+    lines = []
+    for item in items:
+        qty = int(item.get("qty") or 1)
+        price = to_money(item.get("price")) * qty
+        title = str(item.get("title") or "работа")
+        lines.append(f"• {title}"
+                     + (f" × {qty}" if qty > 1 else "")
+                     + f" — {money(price)}")
+    return "\n".join(lines)
+
+
+def order_totals_client(items: Iterable[Mapping[str, Any]]) -> Decimal:
+    """Сколько к оплате клиенту. Отдельно от order_totals: там ещё и
+    себестоимость, а в смету она не идёт."""
+    return to_money(sum(to_money(i.get("price")) * int(i.get("qty") or 1)
+                        for i in items))
+
+
+def estimate_state(order: Mapping[str, Any] | None,
+                   *, now: datetime | None = None) -> dict[str, Any]:
+    """Где смета: не отправляли, ждём ответа, согласована, отказ."""
+    order = order or {}
+    sent = order.get("estimate_sent_at")
+    approved = order.get("approved_at")
+    declined = order.get("declined_at")
+    if declined:
+        stage, title = "declined", "Клиент отказался"
+    elif approved:
+        stage, title = "approved", "Согласована"
+    elif sent:
+        stage, title = "waiting", "Ждём ответа клиента"
+    else:
+        stage, title = "draft", "Не отправлена"
+    silent = 0
+    if stage == "waiting" and isinstance(sent, datetime):
+        now = now or datetime.now(sent.tzinfo or UTC)
+        silent = max((now - sent).days, 0)
+    return {"stage": stage, "title": title, "silent_days": silent,
+            "too_silent": silent >= ESTIMATE_SILENT_DAYS,
+            "by": order.get("approved_by")}
+
+
+def invoice_state(order: Mapping[str, Any] | None,
+                  invoices: Iterable[Mapping[str, Any]] | None = None
+                  ) -> dict[str, Any]:
+    """Выставлен ли счёт за ремонт и оплачен ли он.
+
+    Оплата ремонта в журнал аренды не попадает - поэтому «оплачено»
+    здесь читается с наряда (`paid_at`), а не из баланса клиента.
+    """
+    order = order or {}
+    rows = [i for i in (invoices or [])
+            if str(i.get("status") or "") != "cancelled"]
+    paid = order.get("paid_at") is not None
+    if paid:
+        return {"stage": "paid", "title": "Оплачен", "invoice": None}
+    waiting = next((i for i in rows if i.get("status") in PAY_OPEN), None)
+    if waiting is not None:
+        return {"stage": "sent", "title": "Счёт выставлен", "invoice": waiting}
+    return {"stage": "none", "title": "Ещё не выставлен", "invoice": None}
+
+
+def orders_unpaid(orders: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Сколько закрытых клиентских нарядов ещё не оплачено - в итог списка."""
+    rows = [o for o in orders
+            if o.get("payer") == "client" and o.get("status") == "done"
+            and not o.get("paid_at")]
+    return {"count": len(rows),
+            "sum": to_money(sum(to_money(o.get("total")) for o in rows))}

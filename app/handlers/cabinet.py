@@ -561,3 +561,60 @@ async def claim_amount_reply(message: Message, bot: Bot, db: Database, cfg: Conf
         return
     await message.reply(texts.CAB_CLAIM_CREDITED.format(
         amount=crm_logic.money(check.value), balance=crm_logic.money(balance)))
+
+
+@router.callback_query(F.data.startswith("est:"))
+async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
+                      crm: Any = None) -> None:
+    """Ответ клиента на смету: согласен или нет.
+
+    Проверяем, что наряд именно его: callback_data подделывается легко,
+    а чужой наряд отменить или согласовать клиент не должен.
+    """
+    parts = str(callback.data or "").split(":")
+    if crm is None or len(parts) != 3 or not parts[2].isdigit():
+        await callback.answer()
+        return
+    agree = parts[1] == "ok"
+    order = await crm.work_order(int(parts[2]))
+    client = await crm.client_by_tg(user["tg_id"]) if user.get("tg_id") else None
+    if (order is None or client is None
+            or order.get("client_id") != client["id"]):
+        await callback.answer("Наряд не найден", show_alert=True)
+        return
+    if order.get("status") != "approve":
+        await callback.answer("По этому наряду уже решили", show_alert=True)
+        return
+    try:
+        await service.answer_estimate(crm, order, agree=agree, by="клиент")
+    except service.ServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("Принято")
+    lang = i18n.user_lang(user)
+    del lang                      # текст ответа одинаков на всех языках
+    await bot.send_message(
+        user["tg_id"],
+        (texts.ESTIMATE_OK if agree else texts.ESTIMATE_NO).format(
+            no=order.get("no") or ""))
+    # Технику держит наряд, и техник ждёт именно этого ответа.
+    await _tell_estimate_answer(bot, crm, cfg, order, client, agree=agree)
+
+
+async def _tell_estimate_answer(bot: Bot, crm: Any, cfg: Config, order: dict,
+                                client: dict, *, agree: bool) -> None:
+    if not await notices.allowed(crm, "order_answer"):
+        return
+    mark = "✅ согласовал" if agree else "✖️ отказался"
+    text = (f"🔧 Клиент {mark}: наряд {order.get('no')}\n"
+            f"{client.get('full_name') or '—'} · "
+            f"{crm_logic.money(order.get('estimate'))}")
+    try:
+        await bot.send_message(cfg.contract_chat_id, text)
+    except Exception as err:                             # noqa: BLE001
+        log.warning("ответ на смету не доставлен в чат: %s", err)
+        await notices.record(crm, "order_answer", status="failed",
+                             client_id=client["id"], detail=str(err))
+        return
+    await notices.record(crm, "order_answer", status="sent",
+                         client_id=client["id"])

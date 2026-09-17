@@ -2085,13 +2085,14 @@ class FakeCrm:
     # ─────────────────── приём оплаты ───────────────────
 
     async def create_pay_order(self, *, client_id, rental_id, amount, purpose,
-                               kind="link", created_by=None):
+                               kind="link", work_order_id=None, created_by=None):
         oid = self._id()
         number = len(self.pay_orders_) + 1
         self.pay_orders_[oid] = {
             "id": oid, "no": crm_logic.pay_no(number), "client_id": client_id,
             "rental_id": rental_id, "amount": Decimal(amount), "purpose": purpose,
             "kind": kind, "status": "new", "provider": "tochka",
+            "work_order_id": work_order_id,
             "operation_id": None, "link": None, "error": None, "ledger_id": None,
             "created_by": created_by, "created_at": self._now(),
             "sent_at": None, "paid_at": None, "checked_at": None}
@@ -2111,6 +2112,14 @@ class FakeCrm:
     async def mark_pay_paid(self, order_id, *, method="card", by=None):
         order = self.pay_orders_.get(order_id)
         if order is None or order["status"] == "paid":
+            return None
+        if order.get("work_order_id") is not None:
+            # Красная линия: выручка ремонта в журнал аренды не идёт.
+            work = self.orders_.get(order["work_order_id"])
+            if work is not None:
+                work["paid_at"] = self._now()
+            order.update(status="paid", paid_at=self._now(),
+                         checked_at=self._now(), error=None)
             return None
         ledger_id = await self.add_ledger(
             client_id=order["client_id"], rental_id=order["rental_id"],
@@ -2159,6 +2168,12 @@ class FakeCrm:
                 if o["status"] in ("new", "sent") and o["operation_id"]]
         rows.sort(key=lambda o: o["id"])
         return rows[:limit]
+
+    async def work_order_invoices(self, order_id):
+        rows = [self._pay_row(o) for o in self.pay_orders_.values()
+                if o.get("work_order_id") == order_id]
+        rows.sort(key=lambda o: o["id"], reverse=True)
+        return rows
 
     async def save_card_token(self, *, client_id, token, mask=None, expires=None,
                               provider="tochka"):
