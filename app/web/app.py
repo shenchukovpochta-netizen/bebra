@@ -1998,6 +1998,87 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
 
+    async def period_of(request: Request) -> dict:
+        """Период отчёта: как в финансах - с начала месяца по сегодня."""
+        since = logic.check_date(request.query_params.get("since"),
+                                 default=date.today().replace(day=1))
+        until = logic.check_date(request.query_params.get("until"),
+                                 default=date.today())
+        if not since.ok or not until.ok:
+            since = logic.Check(True, date.today().replace(day=1))
+            until = logic.Check(True, date.today())
+        tz = datetime.now().astimezone().tzinfo
+        start = datetime.combine(since.value, datetime.min.time(), tzinfo=tz)
+        # Верхняя граница включительно по дате: отчёт «по сегодня» обязан
+        # содержать сегодняшние наряды.
+        end = datetime.combine(until.value + timedelta(days=1),
+                               datetime.min.time(), tzinfo=tz)
+        return {"since": since.value, "until": until.value,
+                "start": start, "end": end,
+                "days": (until.value - since.value).days + 1}
+
+    @app.get("/reports/techs")
+    async def techs_report(request: Request) -> Response:
+        """Выработка техников: кто сколько закрыл и на сколько."""
+        if not may_view(request, "service"):
+            return denied(request, "service")
+        span = await period_of(request)
+        rows = logic.tech_rows(await crm.tech_work(span["start"], span["end"]))
+        return render(request, "techs.html", rows=rows,
+                      total=logic.tech_total(rows), **span)
+
+    @app.get("/reports/techs.csv")
+    async def techs_csv(request: Request) -> Response:
+        if not may_view(request, "service"):
+            return denied(request, "service")
+        span = await period_of(request)
+        rows = logic.tech_rows(await crm.tech_work(span["start"], span["end"]))
+        total = logic.tech_total(rows)
+        data = [[r["tech"], r["orders"], r["client_orders"], r["avg_days"],
+                 r["total"], r["cost"], r["works"], r["avg_total"]] for r in rows]
+        data.append(["ИТОГО", total["orders"], total["client_orders"], "",
+                     total["total"], total["cost"], total["works"],
+                     total["avg_total"]])
+        return _csv(f"techs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}.csv",
+                    ["Техник", "Нарядов", "Из них клиентских", "Средн. суток",
+                     "Сумма", "Запчасти", "Работы", "Средний наряд"], data)
+
+    @app.get("/reports/model-parts")
+    async def model_parts_report(request: Request) -> Response:
+        """Траты по моделям: какая модель дороже всех в запчастях."""
+        if not may_view(request, "service"):
+            return denied(request, "service")
+        span = await period_of(request)
+        rows = logic.model_parts_rows(
+            await crm.model_parts(span["start"], span["end"]),
+            await crm.bikes(limit=10000), days=span["days"])
+        return render(request, "model_parts.html", rows=rows,
+                      total=logic.spend_total(rows), **span)
+
+    @app.get("/reports/spend")
+    async def spend_report(request: Request) -> Response:
+        """Расход склада за период: что уходит и на сколько."""
+        if not may_view(request, "inventory"):
+            return denied(request, "inventory")
+        span = await period_of(request)
+        rows = logic.spend_rows(await crm.part_spend(span["start"], span["end"]))
+        return render(request, "spend.html", rows=rows,
+                      total=logic.spend_total(rows), **span)
+
+    @app.get("/reports/spend.csv")
+    async def spend_csv(request: Request) -> Response:
+        if not may_view(request, "inventory"):
+            return denied(request, "inventory")
+        span = await period_of(request)
+        rows = logic.spend_rows(await crm.part_spend(span["start"], span["end"]))
+        total = logic.spend_total(rows)
+        data = [[r["title"], r["node_title"], r["qty"], r["unit"], r["orders"],
+                 r["cost"]] for r in rows]
+        data.append(["ИТОГО", "", total["qty"], "", "", total["cost"]])
+        return _csv(f"spend-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}.csv",
+                    ["Позиция", "Узел", "Ушло", "Ед.", "Нарядов", "Себестоимость"],
+                    data)
+
     async def integrity_data() -> list[dict]:
         """Расхождения между парком, арендами и нарядами."""
         return logic.integrity_issues(

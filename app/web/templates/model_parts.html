@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Траты по моделям — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Траты по моделям</h1>
+  {% with active = 'model_parts' %}{% include '_report_tabs.html' %}{% endwith %}
+  <form method="get" class="search">
+    <input type="date" name="since" value="{{ since|iso }}">
+    <input type="date" name="until" value="{{ until|iso }}">
+    <button type="submit">Показать</button>
+  </form>
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ money(total.cost) }}</b><span>запчастей в наряды<br><small class="muted">за {{ days }} дн.</small></span></div>
+  <div class="tile"><b>{{ total.qty }}</b><span>штук ушло</span></div>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>Модель</th><th class="opt">Великов</th><th>Нарядов</th><th class="opt">Штук</th>
+      <th>Запчасти</th><th>На велосипед</th><th class="opt">На велосипед в день</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.model }}</td>
+    <td class="num opt">{{ r.bikes or '—' }}</td>
+    <td class="num">{{ r.orders }}</td>
+    <td class="num opt">{{ r.qty }}</td>
+    <td class="num">{{ money(r.cost) }}</td>
+    <td class="num">{% if r.per_bike is none %}<span class="muted">—</span>{% else %}{{ money(r.per_bike) }}{% endif %}</td>
+    <td class="num opt muted">{% if r.per_bike_day is none %}—{% else %}{{ money(r.per_bike_day) }}{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="muted">За период запчасти в наряды не уходили.</td></tr>{% endfor %}
+</table>
+<p class="muted">Само по себе «модель съела 40 000 ₽» ничего не говорит:
+  у одной модели в парке пятьдесят штук, у другой пять. Поэтому рядом —
+  трата на один велосипед и на велосипед в день; сравнивать надо их.</p>
+<p class="muted">Наряды чужой техники идут отдельной строкой: их запчасти
+  оплачены клиентом и к нашему парку отношения не имеют. Считается
+  себестоимость со склада, а не цена клиенту.</p>
+</div>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Расход склада — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Расход склада</h1>
+  {% with active = 'spend' %}{% include '_report_tabs.html' %}{% endwith %}
+  <form method="get" class="search">
+    <input type="date" name="since" value="{{ since|iso }}">
+    <input type="date" name="until" value="{{ until|iso }}">
+    <button type="submit">Показать</button>
+  </form>
+  <a class="btn ghost" href="/reports/spend.csv?since={{ since|iso }}&until={{ until|iso }}">CSV</a>
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ money(total.cost) }}</b><span>ушло со склада<br><small class="muted">за {{ days }} дн., по себестоимости</small></span></div>
+  <div class="tile"><b>{{ total.qty }}</b><span>штук</span></div>
+  <div class="tile"><b>{{ total.titles }}</b><span>позиций</span></div>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>Позиция</th><th class="opt">Узел</th><th>Ушло</th><th>Нарядов</th><th>Себестоимость</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/parts/{{ r.id }}">{{ r.title }}</a></td>
+    <td class="opt muted">{{ r.node_title }}</td>
+    <td class="num">{{ r.qty }} {{ r.unit }}</td>
+    <td class="num">{{ r.orders or '—' }}</td>
+    <td class="num">{{ money(r.cost) }}</td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted">За период со склада ничего не уходило.</td></tr>{% endfor %}
+  {% if rows %}
+  <tr><td><b>ИТОГО</b></td><td class="opt"></td><td class="num"><b>{{ total.qty }}</b></td>
+      <td></td><td class="num"><b>{{ money(total.cost) }}</b></td></tr>
+  {% endif %}
+</table>
+<p class="muted">Расход — это всё, что уменьшило остаток: ушло в наряд,
+  выдано со склада, списано, снято пересчётом. Приход сюда не попадает.
+  Считается себестоимость, по которой позиция лежала на складе.</p>
+</div>
+{% endblock %}

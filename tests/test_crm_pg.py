@@ -1559,6 +1559,58 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["moved_at"], rode)
         self.assertEqual(row["last_seen"], stopped)
 
+    async def test_service_reports_on_postgres(self):
+        """Отчёты сервиса на живой базе: сумма сходится с нарядами."""
+        await self.seed()
+        tech_id = await self.crm.create_staff(
+            "homyakov", logic.hash_password("homyakov-pass"), name="Хомяков И.",
+            role="tech", profile_id=None)
+        part_id = await self.crm.create_part(
+            title="Камера", node="tube_tire", unit="шт", cost=D("300"),
+            price=D("600"), min_stock=2, model=None, note=None)
+        first = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None, complaint="стук",
+            object_note=None, tech_id=tech_id, estimate=D("0"), created_by="t")
+        second = await self.crm.create_work_order(
+            bike_id=None, payer="client", client_id=self.client_id,
+            complaint="чужой самокат", object_note="самокат", tech_id=None,
+            estimate=D("0"), created_by="t")
+        now = datetime.now(UTC)
+        await self.crm.update_work_order(first, status="done", total=D("2000"),
+                                         cost=D("900"), closed_at=now)
+        await self.crm.update_work_order(second, status="done", total=D("1000"),
+                                         cost=D("300"), closed_at=now)
+        await self.crm.add_part_move(part_id=part_id, kind="order", qty=-3,
+                                     cost=D("-900"), order_id=first,
+                                     created_by="t")
+        await self.crm.add_part_move(part_id=part_id, kind="order", qty=-1,
+                                     cost=D("-300"), order_id=second,
+                                     created_by="t")
+        since, until = now - timedelta(days=1), now + timedelta(days=1)
+
+        techs = logic.tech_rows(await self.crm.tech_work(since, until))
+        by_name = {r["tech"]: r for r in techs}
+        self.assertEqual(by_name["Хомяков И."]["orders"], 1)
+        self.assertIn("не назначен", by_name,
+                      "наряд без техника не теряется - иначе сумма не сойдётся")
+        total = logic.tech_total(techs)
+        self.assertEqual(total["total"], D("3000.00"))
+        self.assertEqual(total["works"], D("1800.00"))
+
+        models = logic.model_parts_rows(
+            await self.crm.model_parts(since, until),
+            await self.crm.bikes(limit=100), days=2)
+        by_model = {r["model"]: r for r in models}
+        self.assertEqual(by_model["Kugoo V3"]["cost"], D("900.00"))
+        self.assertEqual(by_model["чужая техника"]["cost"], D("300.00"),
+                         "чужая техника отдельной строкой: не наш парк")
+
+        spend = logic.spend_rows(await self.crm.part_spend(since, until))
+        self.assertEqual(len(spend), 1)
+        self.assertEqual(spend[0]["qty"], 4)
+        self.assertEqual(spend[0]["cost"], D("1200.00"))
+        self.assertEqual(spend[0]["orders"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

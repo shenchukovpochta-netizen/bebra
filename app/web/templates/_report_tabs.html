@@ -6,6 +6,13 @@
   <a href="/reports/payback" {% if active == 'payback' %}class="on"{% endif %}>Окупаемость</a>
   <a href="/reports/referrals" {% if active == 'referrals' %}class="on"{% endif %}>Приглашения</a>
   {% endif %}
+  {% if can_view(staff, 'service') %}
+  <a href="/reports/techs" {% if active == 'techs' %}class="on"{% endif %}>По сотрудникам</a>
+  <a href="/reports/model-parts" {% if active == 'model_parts' %}class="on"{% endif %}>Траты по моделям</a>
+  {% endif %}
+  {% if can_view(staff, 'inventory') %}
+  <a href="/reports/spend" {% if active == 'spend' %}class="on"{% endif %}>Расход</a>
+  {% endif %}
   {% if can_view(staff, 'clients') %}
   <a href="/reports/channels" {% if active == 'channels' %}class="on"{% endif %}>Каналы</a>
   {% endif %}

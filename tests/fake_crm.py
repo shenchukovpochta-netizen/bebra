@@ -984,6 +984,71 @@ class FakeCrm:
             "extra": int(counts.get("extra") or 0)})
         return missing
 
+    # ─────────────────────── отчёты сервиса ───────────────────────
+
+    async def tech_work(self, since, until):
+        by_tech = {}
+        for order in self.orders_.values():
+            closed = order.get("closed_at")
+            if order.get("status") != "done" or closed is None:
+                continue
+            if not (since <= closed < until):
+                continue
+            staff = self.staff.get(order.get("tech_id")) or {}
+            name = staff.get("name") or staff.get("login") or "не назначен"
+            cell = by_tech.setdefault(name, {
+                "tech": name, "tech_id": order.get("tech_id"), "orders": 0,
+                "client_orders": 0, "total": Decimal(0), "cost": Decimal(0),
+                "days": 0.0})
+            cell["orders"] += 1
+            if order.get("payer") == "client":
+                cell["client_orders"] += 1
+            cell["total"] += Decimal(order.get("total") or 0)
+            cell["cost"] += Decimal(order.get("cost") or 0)
+            opened = order.get("opened_at")
+            if opened is not None:
+                cell["days"] += max((closed - opened).total_seconds() / 86400, 0)
+        return sorted(by_tech.values(), key=lambda r: (-r["total"], -r["orders"]))
+
+    async def model_parts(self, since, until):
+        by_model = {}
+        for move in self.part_moves_:
+            if move.get("kind") != "order" or not move.get("order_id"):
+                continue
+            when = move.get("created_at")
+            if when is None or not (since <= when < until):
+                continue
+            order = self.orders_.get(move["order_id"]) or {}
+            bike = self.bikes_.get(order.get("bike_id")) or {}
+            model = bike.get("model") or "чужая техника"
+            cell = by_model.setdefault(model, {"model": model, "orders": set(),
+                                               "qty": 0, "cost": Decimal(0)})
+            cell["orders"].add(move["order_id"])
+            cell["qty"] += int(move.get("qty") or 0)
+            cell["cost"] += Decimal(move.get("cost") or 0)
+        rows = [{**cell, "orders": len(cell["orders"])} for cell in by_model.values()]
+        return sorted(rows, key=lambda r: -r["cost"])
+
+    async def part_spend(self, since, until):
+        by_part = {}
+        for move in self.part_moves_:
+            if int(move.get("qty") or 0) >= 0:
+                continue
+            when = move.get("created_at")
+            if when is None or not (since <= when < until):
+                continue
+            part = self.parts_.get(move["part_id"]) or {}
+            cell = by_part.setdefault(move["part_id"], {
+                "id": move["part_id"], "title": part.get("title"),
+                "node": part.get("node"), "unit": part.get("unit") or "шт",
+                "qty": 0, "cost": Decimal(0), "orders": set()})
+            cell["qty"] += int(move.get("qty") or 0)
+            cell["cost"] += Decimal(move.get("cost") or 0)
+            if move.get("order_id"):
+                cell["orders"].add(move["order_id"])
+        rows = [{**cell, "orders": len(cell["orders"])} for cell in by_part.values()]
+        return sorted(rows, key=lambda r: (r["cost"], r["qty"]))
+
     # ─────────────────────── окупаемость по моделям ───────────────────────
 
     async def model_money(self, since, until):

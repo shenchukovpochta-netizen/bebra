@@ -1421,6 +1421,106 @@ def take_title(take: dict) -> str:
     return f"{what} · {where}" if what else where
 
 
+# ─────────────────────── отчёты сервиса ───────────────────────
+#
+# Три вопроса, на которые окупаемость по моделям не отвечает: кто из
+# техников сколько сделал, какая модель дороже всех обходится в
+# запчастях и что вообще уходит со склада.
+
+def tech_rows(rows: Iterable[dict]) -> list[dict]:
+    """Выработка техников: наряды, деньги и средний срок ремонта."""
+    out = []
+    for row in rows:
+        orders = int(row.get("orders") or 0)
+        total = to_money(row.get("total"))
+        cost = to_money(row.get("cost"))
+        days = Decimal(str(row.get("days") or 0))
+        out.append({
+            **row,
+            "orders": orders,
+            "client_orders": int(row.get("client_orders") or 0),
+            "total": total, "cost": cost,
+            # Работы - это то, что осталось от суммы наряда за вычетом
+            # запчастей: по ней и видно, сколько человек наработал
+            # руками, а не сколько прошло через него железа.
+            "works": to_money(total - cost),
+            "avg_days": (days / orders).quantize(Decimal("0.1"),
+                                                 rounding=ROUND_HALF_UP)
+            if orders else Decimal(0),
+            "avg_total": to_money(total / orders) if orders else Decimal(0),
+        })
+    return out
+
+
+def tech_total(rows: Iterable[dict]) -> dict[str, Any]:
+    rows = list(rows)
+    orders = sum(r["orders"] for r in rows)
+    total = to_money(sum((r["total"] for r in rows), Decimal(0)))
+    cost = to_money(sum((r["cost"] for r in rows), Decimal(0)))
+    return {"orders": orders, "total": total, "cost": cost,
+            "works": to_money(total - cost),
+            "client_orders": sum(r["client_orders"] for r in rows),
+            "avg_total": to_money(total / orders) if orders else Decimal(0)}
+
+
+def model_parts_rows(rows: Iterable[dict], bikes: Iterable[dict] | None = None,
+                     *, days: Any = 0) -> list[dict]:
+    """Траты по моделям: во сколько обходятся запчасти на велосипед.
+
+    Само по себе «модель съела 40 000 ₽» ничего не говорит: у одной
+    модели в парке пятьдесят штук, у другой пять. Поэтому рядом - трата
+    на один велосипед и на велосипед в день.
+    """
+    fleet: dict[str, int] = {}
+    for bike in bikes or []:
+        if bike.get("status") in OPERATIONAL_STATUSES:
+            model = str(bike.get("model") or "—")
+            fleet[model] = fleet.get(model, 0) + 1
+    span = Decimal(str(days or 0))
+    out = []
+    for row in rows:
+        model = str(row.get("model") or "—")
+        # В движениях расход отрицательный; человеку знак здесь ничего
+        # не добавляет - «модель съела −4 500 ₽» читается хуже.
+        cost = abs(to_money(row.get("cost")))
+        count = fleet.get(model, 0)
+        per_bike = to_money(cost / count) if count else None
+        out.append({
+            **row, "model": model, "cost": cost,
+            "orders": int(row.get("orders") or 0),
+            "qty": abs(int(row.get("qty") or 0)),
+            "bikes": count,
+            "per_bike": per_bike,
+            "per_bike_day": (per_bike / span).quantize(CENT,
+                                                       rounding=ROUND_HALF_UP)
+            if per_bike is not None and span > 0 else None,
+        })
+    out.sort(key=lambda r: -r["cost"])
+    return out
+
+
+def spend_rows(rows: Iterable[dict]) -> list[dict]:
+    """Расход склада: qty и cost в движениях отрицательные - показываем
+    человеку положительные числа, знак здесь ничего не добавляет."""
+    out = []
+    for row in rows:
+        out.append({**row,
+                    "qty": abs(int(row.get("qty") or 0)),
+                    "cost": abs(to_money(row.get("cost"))),
+                    "orders": int(row.get("orders") or 0),
+                    "node_title": REPAIR_NODES.get(str(row.get("node") or ""),
+                                                   "—")})
+    out.sort(key=lambda r: -r["cost"])
+    return out
+
+
+def spend_total(rows: Iterable[dict]) -> dict[str, Any]:
+    rows = list(rows)
+    return {"qty": sum(r["qty"] for r in rows),
+            "cost": to_money(sum((r["cost"] for r in rows), Decimal(0))),
+            "titles": len(rows)}
+
+
 # ─────────────────────── окупаемость по моделям ───────────────────────
 
 # Дней в месяце для пересчёта амортизации на произвольный период.

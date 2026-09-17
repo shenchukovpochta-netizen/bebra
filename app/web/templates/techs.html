@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}По сотрудникам — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Выработка техников</h1>
+  {% with active = 'techs' %}{% include '_report_tabs.html' %}{% endwith %}
+  <form method="get" class="search">
+    <input type="date" name="since" value="{{ since|iso }}">
+    <input type="date" name="until" value="{{ until|iso }}">
+    <button type="submit">Показать</button>
+  </form>
+  <a class="btn ghost" href="/reports/techs.csv?since={{ since|iso }}&until={{ until|iso }}">CSV</a>
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ total.orders }}</b><span>нарядов закрыто<br><small class="muted">за {{ days }} дн.</small></span></div>
+  <div class="tile"><b>{{ money(total.works) }}</b><span>работами<br><small class="muted">сумма нарядов за вычетом запчастей</small></span></div>
+  <div class="tile"><b>{{ money(total.cost) }}</b><span>запчастями</span></div>
+  <div class="tile"><b>{{ money(total.avg_total) }}</b><span>средний наряд</span></div>
+</div>
+
+<div class="card">
+<div class="table-wrap">
+<table>
+  <tr><th>Техник</th><th>Нарядов</th><th class="opt">Из них клиентских</th>
+      <th class="opt">Средн. суток</th><th>Работы</th><th class="opt">Запчасти</th>
+      <th>Сумма</th><th class="opt">Средний наряд</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.tech }}</td>
+    <td class="num">{{ r.orders }}</td>
+    <td class="num opt">{{ r.client_orders or '—' }}</td>
+    <td class="num opt">{{ r.avg_days }}</td>
+    <td class="num">{{ money(r.works) }}</td>
+    <td class="num opt muted">{{ money(r.cost) }}</td>
+    <td class="num"><b>{{ money(r.total) }}</b></td>
+    <td class="num opt muted">{{ money(r.avg_total) }}</td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="muted">За период нет закрытых нарядов.</td></tr>{% endfor %}
+  {% if rows %}
+  <tr><td><b>ИТОГО</b></td><td class="num"><b>{{ total.orders }}</b></td>
+      <td class="num opt">{{ total.client_orders }}</td><td class="opt"></td>
+      <td class="num"><b>{{ money(total.works) }}</b></td>
+      <td class="num opt muted">{{ money(total.cost) }}</td>
+      <td class="num"><b>{{ money(total.total) }}</b></td>
+      <td class="num opt muted">{{ money(total.avg_total) }}</td></tr>
+  {% endif %}
+</table>
+</div>
+<p class="muted">Считаются <b>закрытые</b> наряды: открытый ещё ничего не
+  сделал, а «взял в работу» — не выработка. Наряд без техника не теряется,
+  он идёт строкой «не назначен»: иначе сумма отчёта не сошлась бы с суммой
+  нарядов, и это заметили бы первым делом.</p>
+<p class="muted"><b>Работы</b> — сумма наряда за вычетом запчастей: по ней
+  видно, сколько человек наработал руками, а не сколько прошло через него
+  железа. «Средн. суток» — сколько наряд в среднем висел открытым.</p>
+</div>
+{% endblock %}

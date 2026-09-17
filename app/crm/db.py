@@ -1177,6 +1177,71 @@ class CrmDB:
                               if r["battery_id"] is not None],
             }
 
+    # ─────────────────────── отчёты сервиса ───────────────────────
+
+    async def tech_work(self, since: datetime, until: datetime) -> list[dict]:
+        """Выработка техников за период: сколько закрыл и на сколько.
+
+        Считаются закрытые наряды: открытый ещё ничего не сделал, а
+        «взял в работу» - не выработка. Наряд без техника не теряется,
+        он идёт строкой «не назначен»: иначе сумма отчёта не сойдётся
+        с суммой нарядов, и это заметят.
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select coalesce(s.name, s.login, 'не назначен') as tech,
+                   o.tech_id,
+                   count(*)                                 as orders,
+                   count(*) filter (where o.payer = 'client') as client_orders,
+                   coalesce(sum(o.total), 0)                as total,
+                   coalesce(sum(o.cost), 0)                 as cost,
+                   coalesce(sum(extract(epoch from (o.closed_at - o.opened_at))
+                                / 86400.0), 0)              as days
+              from crm.work_orders o
+              left join crm.staff s on s.id = o.tech_id
+             where o.status = 'done' and o.closed_at >= $1 and o.closed_at < $2
+             group by 1, 2
+             order by total desc, orders desc
+            """, since, until))
+
+    async def model_parts(self, since: datetime, until: datetime) -> list[dict]:
+        """Траты по моделям: сколько запчастей съела каждая модель.
+
+        Модель берётся у велосипеда наряда - она текст, как и везде в
+        парке. Наряд чужой техники (без велосипеда) идёт отдельной
+        строкой: его запчасти оплачены клиентом и к нашему парку
+        отношения не имеют.
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select coalesce(b.model, 'чужая техника') as model,
+                   count(distinct o.id)               as orders,
+                   coalesce(sum(m.qty), 0)            as qty,
+                   coalesce(sum(m.cost), 0)           as cost
+              from crm.part_moves m
+              join crm.work_orders o on o.id = m.order_id
+              left join crm.bikes b on b.id = o.bike_id
+             where m.kind = 'order' and m.created_at >= $1 and m.created_at < $2
+             group by 1
+             order by cost desc
+            """, since, until))
+
+    async def part_spend(self, since: datetime, until: datetime) -> list[dict]:
+        """Расход склада за период: что уходит и на сколько."""
+        return _rows(await self.pool.fetch(
+            """
+            select p.id, p.title, p.node, p.unit,
+                   coalesce(sum(m.qty), 0)  as qty,
+                   coalesce(sum(m.cost), 0) as cost,
+                   count(distinct m.order_id) filter (where m.order_id is not null)
+                                             as orders
+              from crm.part_moves m
+              join crm.parts p on p.id = m.part_id
+             where m.qty < 0 and m.created_at >= $1 and m.created_at < $2
+             group by p.id, p.title, p.node, p.unit
+             order by cost, qty
+            """, since, until))
+
     # ─────────────────────── окупаемость по моделям ───────────────────────
 
     async def model_money(self, since: datetime, until: datetime) -> dict[str, dict]:
