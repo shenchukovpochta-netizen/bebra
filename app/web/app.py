@@ -27,7 +27,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
-from ..crm import import_xlsx, logic, notify, service
+from ..crm import company, import_xlsx, logic, notify, service
+from ..services import contract as contract_service
 from .config import WebConfig
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
+        COMPANY_FIELDS=company.COMPANY_FIELDS,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
         SWAP_REASONS=logic.SWAP_REASONS, in_search=logic.in_search,
@@ -2052,6 +2054,79 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                    minutes=minutes.value)
         flash(request, "Сохранено.")
         return redirect("/work-types")
+
+    # ─────────────────── реквизиты и шаблоны документов ───────────────────
+
+    def template_rows(request: Request) -> list[dict]:
+        """Шаблоны документов: что есть, читается ли и какие в нём поля.
+
+        Панель не хранит шаблоны у себя - она показывает те, из которых бот
+        собирает документы прямо сейчас. Проверка чтением: битый файл лучше
+        увидеть здесь, чем в момент, когда клиенту уже сказали «договор готов».
+        """
+        del request
+        rows = []
+        for title, path in (("Договор аренды", cfg_path("contract_template")),
+                            ("Акт приёма-передачи", cfg_path("act_in_template")),
+                            ("Акт возврата", cfg_path("act_out_template")),
+                            ("Согласие на обработку ПДн", cfg_path("soglasie_template")),
+                            ("Договор выкупа", cfg_path("buyout_template")),
+                            ("Политика обработки ПДн", cfg_path("pdn_policy_file"))):
+            row = {"title": title, "path": str(path) if path else "—",
+                   "ok": False, "fields": [], "error": ""}
+            if path is None:
+                row["error"] = "путь не задан"
+            elif not _file_exists(str(path)):
+                row["error"] = "файла нет на диске"
+            else:
+                row["size"] = os.path.getsize(str(path))
+                try:
+                    data = contract_service.load_template(Path(str(path)))
+                    row["ok"] = True
+                    row["fields"] = sorted(contract_service.placeholders(data))
+                except Exception as exc:                 # noqa: BLE001
+                    row["error"] = str(exc)
+            rows.append(row)
+        return rows
+
+    def cfg_path(name: str) -> Any:
+        return getattr(cfg, name, None)
+
+    @app.get("/company")
+    async def company_page(request: Request) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        settings = await crm.settings()
+        return render(request, "company.html",
+                      values={code: settings.get(code, "")
+                              for code in company.COMPANY_FIELDS},
+                      templates=template_rows(request))
+
+    @app.post("/company")
+    async def company_save(request: Request) -> Response:
+        """Реквизиты организации: их подставляют договор и акты.
+
+        Бот - другой процесс, он подхватывает правку снимком в течение
+        нескольких минут; в панели об этом написано прямо.
+        """
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        clean: dict[str, str] = {}
+        for code, label in company.COMPANY_FIELDS.items():
+            value, error = company.check_value(data.get(code))
+            if error:
+                flash(request, f"{label}: {error}.", "err")
+                return redirect("/company")
+            clean[code] = value
+        for code, value in clean.items():
+            await crm.set_setting(code, value, by=who(request))
+        # Панель и бот читают одни и те же настройки: снимок в этом
+        # процессе обновляем сразу, чтобы не ждать своего же TTL.
+        company.set_snapshot(await crm.settings())
+        flash(request, "Реквизиты сохранены. Бот подхватит их в течение "
+                       "нескольких минут.")
+        return redirect("/company")
 
     # ─────────────────── закупки основных средств ───────────────────
 

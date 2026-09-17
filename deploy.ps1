@@ -58,7 +58,7 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/staff.py')
 # CRM: логика, база, биллинг, синхронизация с ботом; веб-панель со шаблонами.
 $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
-         'app/crm/billing.py', 'app/crm/service.py', 'app/crm/notify.py',
+         'app/crm/billing.py', 'app/crm/service.py', 'app/crm/company.py', 'app/crm/notify.py',
          'app/crm/sync.py', 'app/crm/import_xlsx.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
@@ -94,7 +94,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/part_orders.html',
                   'app/web/templates/suppliers.html',
                   'app/web/templates/search.html',
-                  'app/web/templates/assets.html')
+                  'app/web/templates/assets.html',
+                  'app/web/templates/company.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -134,7 +135,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_shopwindow.py', 'tests/test_channels.py',
           'tests/test_integrity.py',
           'tests/test_parts.py', 'tests/test_swap.py',
-          'tests/test_search.py', 'tests/test_plan.py', 'tests/test_assets.py')
+          'tests/test_search.py', 'tests/test_plan.py', 'tests/test_assets.py', 'tests/test_company.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

@@ -359,7 +359,7 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
   ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
   ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set

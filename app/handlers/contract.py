@@ -23,6 +23,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import company
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
@@ -57,6 +58,10 @@ def _context(cfg: Config, data: dict, anketa: dict, *, number: str,
     # обязаны совпадать с тем, по которым ретеншен реально удаляет сканы.
     ctx["purge_days"] = str(cfg.purge_approved_days)
     ctx["signed_at"] = signed_at
+    # Реквизиты организации: их правит владелец в панели, а не разработчик
+    # в шаблоне. Незаполненное поле станет прочерком, а шаблон со своими
+    # реквизитами текстом эти подстановки просто не встретит.
+    ctx.update(company.context(company.snapshot()))
     return ctx
 
 

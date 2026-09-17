@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 from . import i18n, logic
 from . import keyboards as kb
 from .config import Config
+from .crm import company
 from .db import Database
 from .filters import is_service_chat
 from .services.crypto import Vault
@@ -153,6 +154,10 @@ class PipelineMiddleware(BaseMiddleware):
         data["cfg"] = self.cfg
         data["vault"] = self.vault
         data["crm"] = self.crm
+        # Реквизиты организации живут в базе, а правит их панель - другой
+        # процесс. Снимок обновляется здесь: запрос раз в несколько минут
+        # дешевле, чем договор со вчерашними реквизитами.
+        await company.refresh(self.crm)
 
         # Модерация идёт мимо всего пользовательского конвейера: у админа нет
         # анкеты, рейт-лимит и подписка к нему не относятся.

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Реквизиты и документы — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Реквизиты и документы</h1></div>
+
+<div class="card">
+  <h2>Реквизиты организации</h2>
+  {# Их подставляют договор и акты вместо вписанных в шаблон текстом:
+     менять реквизиты должен владелец, а не тот, кто правит docx. #}
+  <form method="post" action="/company" class="grid2">
+    {% for code, label in COMPANY_FIELDS.items() %}
+    <label{% if code in ('company_name', 'company_address') %} class="wide"{% endif %}>{{ label }}
+      <input name="{{ code }}" value="{{ values[code] }}"{% if not can_edit(staff, 'settings') %} disabled{% endif %}></label>
+    {% endfor %}
+    {% if can_edit(staff, 'settings') %}<button type="submit">Сохранить</button>{% endif %}
+  </form>
+  <p class="muted">В шаблонах эти поля доступны как <code>{{ '{{ company_name }}' }}</code>,
+    <code>{{ '{{ company_inn }}' }}</code> и так далее. Незаполненное поле
+    станет прочерком. Шаблон, где реквизиты вписаны текстом, не меняется —
+    он этих подстановок просто не встретит. Бот подхватывает правку в
+    течение нескольких минут: панель и бот — разные процессы, общая у них
+    только база.</p>
+</div>
+
+<div class="card">
+  <h2>Шаблоны документов</h2>
+  <table>
+    <tr><th>Документ</th><th>Состояние</th><th class="opt">Файл</th><th class="opt">Подстановки</th></tr>
+    {% for t in templates %}
+    <tr>
+      <td>{{ t.title }}</td>
+      <td>{% if t.ok %}<span class="tag ok">читается</span>{% else %}<span class="tag bad">{{ t.error }}</span>{% endif %}</td>
+      <td class="opt muted">{{ t.path }}{% if t.size %} · {{ (t.size / 1024)|round|int }} КБ{% endif %}</td>
+      <td class="opt muted">{% if t.fields %}{{ t.fields|length }}: {{ t.fields[:6]|join(', ') }}{% if t.fields|length > 6 %}…{% endif %}{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Панель показывает те шаблоны, из которых бот собирает
+    документы прямо сейчас, и проверяет их чтением: битый файл лучше увидеть
+    здесь, чем в момент, когда клиенту уже сказали «договор готов». Замена
+    шаблона — это файл на сервере рядом с ботом (пути в INSTALL.md): загрузка
+    через панель дала бы возможность подменить договор любому, у кого есть
+    доступ к разделу.</p>
+</div>
+{% endblock %}

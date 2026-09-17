@@ -858,6 +858,7 @@ SECTIONS: dict[str, str] = {
     "reports": "Отчёты",
     "import": "Импорт таблицы",
     "staff": "Сотрудники и доступы",
+    "settings": "Настройки: реквизиты и документы",
 }
 
 # Действия, которые не сводятся к разделу: менеджер выдаёт велосипеды
@@ -899,6 +900,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/import", "import"),
     ("/staff", "staff"),
     ("/profiles", "staff"),
+    ("/company", "settings"),
 )
 
 
