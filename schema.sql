@@ -359,9 +359,9 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view"},"actions":{}}'::jsonb, false),
-  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","service":"edit","rentals":"view","reports":"view"},"actions":{}}'::jsonb, false)
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
   -- их матрицу правит владелец, и перезапись затирала бы его настройку.
@@ -850,3 +850,104 @@ create unique index if not exists staff_link_code_idx on crm.staff (link_code)
 -- а канал отвечает на вопрос «куда давать рекламу».
 alter table crm.clients add column if not exists channel text;
 create index if not exists clients_channel_idx on crm.clients (channel);
+
+-- ───────────────────────────── склад запчастей ─────────────────────────────
+--
+-- Ремонт до склада считался «с потолка»: механик писал сумму запчастей
+-- руками, а сколько их на полке, знал только он. Склад отвечает на два
+-- вопроса: что стоит ремонт на самом деле и что пора заказать.
+--
+-- Запчасть привязана к узлу из crm.repair_nodes, а не к своему дереву
+-- категорий: тогда отчёт «что ломается» и остаток на полке смотрят на
+-- один справочник, и видно, есть ли запас по тому узлу, который сыплется.
+--
+-- Остатка колонкой нет намеренно - как и баланса у клиента: остаток есть
+-- сумма движений. Иначе первая же гонка двух операторов разведёт колонку
+-- и журнал, и верить будет нечему.
+
+create table if not exists crm.suppliers (
+  id         bigserial primary key,
+  name       text        not null unique,
+  phone      text,
+  note       text,
+  active     boolean     not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists crm.parts (
+  id         bigserial primary key,
+  title      text        not null unique,
+  node       text        references crm.repair_nodes (code),
+  unit       text        not null default 'шт',
+  -- Средняя себестоимость: пересчитывается при каждом приходе.
+  -- Цена клиенту - то, во что позиция встаёт в наряде за его счёт.
+  cost       numeric(12,2) not null default 0,
+  price      numeric(12,2) not null default 0,
+  -- Неснижаемый остаток: ниже него позиция попадает в «пора заказать».
+  min_stock  integer     not null default 0,
+  model      text,                               -- совместимость; пусто - все
+  active     boolean     not null default true,
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists parts_node_idx on crm.parts (node);
+
+-- Документ склада: приход ПРХ-000001 или списание СПС-000001.
+create table if not exists crm.part_docs (
+  id          bigserial primary key,
+  no          text        not null unique,
+  kind        text        not null,              -- receipt|write_off
+  supplier_id bigint      references crm.suppliers (id),
+  total       numeric(12,2) not null default 0,
+  note        text,
+  created_by  text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists part_docs_idx on crm.part_docs (kind, created_at desc);
+
+-- Движение склада. qty со знаком: приход плюс, расход минус.
+create table if not exists crm.part_moves (
+  id         bigserial primary key,
+  part_id    bigint      not null references crm.parts (id),
+  -- receipt - приход, order - ушло в наряд, issue - выдали со склада,
+  -- write_off - списание, count - правка по факту пересчёта.
+  kind       text        not null,
+  qty        integer     not null,
+  cost       numeric(12,2) not null default 0,   -- себестоимость единицы
+  doc_id     bigint      references crm.part_docs (id) on delete cascade,
+  order_id   bigint      references crm.work_orders (id),
+  note       text,
+  created_by text,
+  created_at timestamptz not null default now()
+);
+create index if not exists part_moves_part_idx on crm.part_moves (part_id, created_at desc);
+create index if not exists part_moves_order_idx on crm.part_moves (order_id);
+
+-- Заказ запчастей поставщику: ЗАП-000001. Приёмка превращается в приход.
+create table if not exists crm.part_orders (
+  id          bigserial primary key,
+  no          text        not null unique,
+  supplier_id bigint      references crm.suppliers (id),
+  status      text        not null default 'new',   -- new|ordered|received|cancelled
+  total       numeric(12,2) not null default 0,
+  note        text,
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  ordered_at  timestamptz,
+  closed_at   timestamptz,
+  doc_id      bigint      references crm.part_docs (id)
+);
+create table if not exists crm.part_order_items (
+  id         bigserial primary key,
+  order_id   bigint      not null references crm.part_orders (id) on delete cascade,
+  part_id    bigint      not null references crm.parts (id),
+  qty        integer     not null default 1,
+  price      numeric(12,2) not null default 0,
+  -- Откуда взялась потребность: наряд ждёт запчасть, остаток ниже
+  -- неснижаемого или вписали руками. По этому полю видно, кому верить.
+  source     text        not null default 'manual',  -- order|min_stock|manual
+  work_order_id bigint   references crm.work_orders (id),
+  created_at timestamptz not null default now()
+);
+create unique index if not exists part_order_items_one on crm.part_order_items
+  (order_id, part_id);

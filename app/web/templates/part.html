@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ part.title }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ part.title }}</h1>
+  {% with active = 'parts' %}{% include "_parts_tabs.html" %}{% endwith %}
+</div>
+
+{% set money_ok = can_view(staff, 'finance') %}
+<div class="tiles">
+  <div class="tile {% if stock < part.min_stock %}warn{% endif %}"><b>{{ stock }} {{ part.unit }}</b><span>на полке{% if stock < part.min_stock %}<br><small class="muted">неснижаемый {{ part.min_stock }}</small>{% endif %}</span></div>
+  {% if money_ok %}
+  <div class="tile"><b>{{ money(part.cost) }}</b><span>себестоимость средняя</span></div>
+  <div class="tile"><b>{{ money(part.price) }}</b><span>цена клиенту</span></div>
+  <div class="tile"><b>{{ money(part.cost * (stock if stock > 0 else 0)) }}</b><span>лежит на складе</span></div>
+  {% endif %}
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Движения</h2>
+  <table>
+    <tr><th>Когда</th><th>Что</th><th>Кол-во</th>{% if money_ok %}<th>Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
+    {% for m in moves %}
+    <tr>
+      <td>{{ m.created_at|dmy }}</td>
+      <td>{{ MOVE_KINDS[m.kind] }}{% if m.note %} <small class="muted">{{ m.note }}</small>{% endif %}</td>
+      <td class="num {% if m.qty > 0 %}ok{% else %}bad{% endif %}">{{ '%+d'|format(m.qty) }}</td>
+      {% if money_ok %}<td class="num">{{ money(m.cost) }}</td>{% endif %}
+      <td class="opt">{% if m.order_no %}<a href="/orders/{{ m.order_id }}">{{ m.order_no }}</a>{% else %}{{ m.doc_no or '—' }}{% endif %}</td>
+      <td class="opt muted">{{ m.created_by or '' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">Движений не было.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<section class="card">
+  {% if can_edit(staff, 'inventory') %}
+  <h2>Пересчёт</h2>
+  {# Расхождение пишется движением, а не правкой остатка: это документ
+     с датой и автором, а не тихое исправление числа. #}
+  <form method="post" action="/parts/{{ part.id }}/count" class="grid2">
+    <label>Факт на полке <input name="fact" value="{{ stock }}" size="5"></label>
+    <label>Комментарий <input name="note" placeholder="пересчёт на точке"></label>
+    <button type="submit">Привести к факту</button>
+  </form>
+
+  <h2>Карточка</h2>
+  <form method="post" action="/parts/{{ part.id }}/edit" class="grid2">
+    <label class="wide">Название <input name="title" value="{{ part.title }}" required></label>
+    <label>Узел <select name="node"><option value="">не привязан</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}" {% if part.node == code %}selected{% endif %}>{{ title }}</option>{% endfor %}</select></label>
+    <label>Единица <select name="unit">{% for u in PART_UNITS %}<option value="{{ u }}" {% if part.unit == u %}selected{% endif %}>{{ u }}</option>{% endfor %}</select></label>
+    <label>Цена клиенту <input name="price" value="{{ part.price }}"></label>
+    <label>Неснижаемый остаток <input name="min_stock" value="{{ part.min_stock }}"></label>
+    <label class="wide">Совместимость <input name="model" value="{{ part.model or '' }}" placeholder="пусто — подходит ко всем"></label>
+    <label class="wide">Заметка <textarea name="note" rows="2">{{ part.note or '' }}</textarea></label>
+    <label class="check wide"><input type="checkbox" name="active" value="1" {% if part.active %}checked{% endif %}> В работе (снятая галочка — архив)</label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">Себестоимость правится только приходом: поставить её руками — значит разойтись со складом на первом же ремонте.</p>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

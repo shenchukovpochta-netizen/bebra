@@ -1,0 +1,9 @@
+{# Вкладки склада: один и тот же ряд на всех его экранах. #}
+<nav class="tabs">
+  <a href="/parts" {% if active == 'parts' %}class="on"{% endif %}>Остатки</a>
+  <a href="/part-orders" {% if active == 'orders' %}class="on"{% endif %}>Заказ запчастей</a>
+  <a href="/parts/receipts" {% if active == 'receipts' %}class="on"{% endif %}>Приходы</a>
+  <a href="/parts/write-offs" {% if active == 'write_offs' %}class="on"{% endif %}>Списания</a>
+  <a href="/parts/moves" {% if active == 'moves' %}class="on"{% endif %}>Движения</a>
+  <a href="/suppliers" {% if active == 'suppliers' %}class="on"{% endif %}>Поставщики</a>
+</nav>

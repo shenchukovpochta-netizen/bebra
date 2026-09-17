@@ -29,6 +29,11 @@ CLIENT_FIELDS = frozenset({
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
+SUPPLIER_FIELDS = frozenset({"name", "phone", "note", "active"})
+PART_FIELDS = frozenset({"title", "node", "unit", "cost", "price", "min_stock",
+                         "model", "active", "note"})
+PART_ORDER_FIELDS = frozenset({"supplier_id", "status", "total", "note",
+                               "ordered_at", "closed_at", "doc_id"})
 REFERRAL_FIELDS = frozenset({"status", "client_id", "bonus", "ledger_id", "note",
                              "signed_at", "rented_at", "paid_at"})
 TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
@@ -1320,3 +1325,321 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select id, full_name, channel, source, created_at from crm.clients "
             "where created_at >= $1 order by created_at", since))
+
+    # ───────────────────────── склад: поставщики ─────────────────────────
+
+    async def suppliers(self, *, active_only: bool = False) -> list[dict]:
+        where = "where s.active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"""
+            select s.*, count(d.id) as receipts,
+                   coalesce(sum(d.total), 0) as spent,
+                   max(d.created_at) as last_at
+            from crm.suppliers s
+            left join crm.part_docs d on d.supplier_id = s.id and d.kind = 'receipt'
+            {where}
+            group by s.id
+            order by s.active desc, s.name
+            """))
+
+    async def supplier(self, supplier_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.suppliers where id = $1", supplier_id))
+
+    async def create_supplier(self, *, name: str, phone: str | None,
+                              note: str | None) -> int:
+        return int(await self.pool.fetchval(
+            "insert into crm.suppliers (name, phone, note) values ($1, $2, $3) "
+            "returning id", name, phone, note))
+
+    async def update_supplier(self, supplier_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, SUPPLIER_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.suppliers set {sets} where id = $1", supplier_id, *values)
+
+    # ───────────────────────── склад: номенклатура ─────────────────────────
+
+    _PART_SELECT = """
+        select p.*, n.title as node_title
+        from crm.parts p
+        left join crm.repair_nodes n on n.code = p.node
+    """
+
+    async def parts(self, *, active_only: bool = False, node: str | None = None,
+                    q: str | None = None) -> list[dict]:
+        conds, args = [], []
+        if active_only:
+            conds.append("p.active")
+        if node:
+            args.append(node)
+            conds.append(f"p.node = ${len(args)}")
+        if q:
+            args.append(f"%{q.strip()}%")
+            conds.append(f"(p.title ilike ${len(args)} or p.model ilike ${len(args)})")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        return _rows(await self.pool.fetch(
+            f"{self._PART_SELECT} {where} order by p.title", *args))
+
+    async def part(self, part_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._PART_SELECT} where p.id = $1", part_id))
+
+    async def part_by_title(self, title: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.parts where lower(title) = lower($1)", title))
+
+    async def create_part(self, *, title: str, node: str | None, unit: str,
+                          cost: Decimal, price: Decimal, min_stock: int,
+                          model: str | None, note: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.parts (title, node, unit, cost, price, min_stock,
+                                   model, note)
+            values ($1, $2, $3, $4, $5, $6, $7, $8) returning id
+            """, title, node, unit, cost, price, min_stock, model, note))
+
+    async def update_part(self, part_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, PART_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.parts set {sets} where id = $1", part_id, *values)
+
+    async def stock_map(self) -> dict[int, int]:
+        """Остатки всех позиций разом: экран остатков - это весь склад,
+        и запрос на позицию превратил бы его в сотню запросов."""
+        rows = await self.pool.fetch(
+            "select part_id, sum(qty) as stock from crm.part_moves group by part_id")
+        return {int(r["part_id"]): int(r["stock"] or 0) for r in rows}
+
+    async def part_stock(self, part_id: int) -> int:
+        return int(await self.pool.fetchval(
+            "select coalesce(sum(qty), 0) from crm.part_moves where part_id = $1",
+            part_id) or 0)
+
+    # ───────────────────────── склад: движения ─────────────────────────
+
+    _MOVE_SELECT = """
+        select m.*, p.title as part_title, p.unit as part_unit,
+               d.no as doc_no, d.kind as doc_kind, o.no as order_no
+        from crm.part_moves m
+        join crm.parts p on p.id = m.part_id
+        left join crm.part_docs d on d.id = m.doc_id
+        left join crm.work_orders o on o.id = m.order_id
+    """
+
+    async def part_moves(self, *, part_id: int | None = None, kind: str | None = None,
+                         order_id: int | None = None, limit: int = 300) -> list[dict]:
+        conds, args = [], []
+        if part_id:
+            args.append(part_id)
+            conds.append(f"m.part_id = ${len(args)}")
+        if kind:
+            args.append(kind)
+            conds.append(f"m.kind = ${len(args)}")
+        if order_id:
+            args.append(order_id)
+            conds.append(f"m.order_id = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._MOVE_SELECT} {where} order by m.created_at desc, m.id desc "
+            f"limit ${len(args)}", *args))
+
+    async def add_part_move(self, *, part_id: int, kind: str, qty: int,
+                            cost: Decimal, doc_id: int | None = None,
+                            order_id: int | None = None, note: str | None = None,
+                            created_by: str | None = None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.part_moves (part_id, kind, qty, cost, doc_id, order_id,
+                                        note, created_by)
+            values ($1, $2, $3, $4, $5, $6, $7, $8) returning id
+            """, part_id, kind, qty, cost, doc_id, order_id, note, created_by))
+
+    # ───────────────────────── склад: документы ─────────────────────────
+
+    async def part_docs(self, *, kind: str | None = None,
+                        limit: int = 200) -> list[dict]:
+        conds, args = [], []
+        if kind:
+            args.append(kind)
+            conds.append(f"d.kind = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"""
+            select d.*, s.name as supplier_name, count(m.id) as lines
+            from crm.part_docs d
+            left join crm.suppliers s on s.id = d.supplier_id
+            left join crm.part_moves m on m.doc_id = d.id
+            {where}
+            group by d.id, s.name
+            order by d.created_at desc, d.id desc
+            limit ${len(args)}
+            """, *args))
+
+    async def part_doc(self, doc_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            """
+            select d.*, s.name as supplier_name
+            from crm.part_docs d
+            left join crm.suppliers s on s.id = d.supplier_id
+            where d.id = $1
+            """, doc_id))
+
+    async def create_part_doc(self, *, kind: str, supplier_id: int | None,
+                              lines: list[dict], note: str | None,
+                              created_by: str) -> int:
+        """Документ склада, его движения и пересчёт себестоимости - одной
+        транзакцией.
+
+        Средняя себестоимость пересчитывается здесь же: между вставкой
+        движения и правкой цены не должно быть окна, в котором наряд
+        спишет запчасть по старой цене.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("lock table crm.part_docs in share row exclusive mode")
+            next_no = int(await conn.fetchval(
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.part_docs where kind = $1", kind) or 1)
+            total = sum((Decimal(str(line["price"])) * int(line["qty"])
+                         for line in lines), Decimal(0)) if kind == "receipt" else \
+                sum((Decimal(str(line.get("cost") or 0)) * int(line["qty"])
+                     for line in lines), Decimal(0))
+            doc_id = int(await conn.fetchval(
+                """
+                insert into crm.part_docs (no, kind, supplier_id, total, note, created_by)
+                values ($1, $2, $3, $4, $5, $6) returning id
+                """, logic.doc_no(kind, next_no), kind, supplier_id, total, note,
+                created_by))
+            for line in lines:
+                part_id, qty = int(line["part_id"]), int(line["qty"])
+                if kind == "receipt":
+                    row = await conn.fetchrow(
+                        "select p.cost, coalesce(sum(m.qty), 0) as stock from crm.parts p "
+                        "left join crm.part_moves m on m.part_id = p.id "
+                        "where p.id = $1 group by p.cost", part_id)
+                    cost = logic.average_cost(int(row["stock"] or 0), row["cost"], qty,
+                                              line["price"])
+                    await conn.execute("update crm.parts set cost = $2 where id = $1",
+                                       part_id, cost)
+                    move_qty, move_cost = qty, Decimal(str(line["price"]))
+                else:
+                    cost = Decimal(str(line.get("cost") or 0))
+                    move_qty, move_cost = -qty, cost
+                await conn.execute(
+                    """
+                    insert into crm.part_moves (part_id, kind, qty, cost, doc_id,
+                                                note, created_by)
+                    values ($1, $2, $3, $4, $5, $6, $7)
+                    """, part_id, kind, move_qty, move_cost, doc_id,
+                    line.get("note"), created_by)
+            return doc_id
+
+    # ───────────────────────── склад: заказы ─────────────────────────
+
+    _PART_ORDER_SELECT = """
+        select o.*, s.name as supplier_name, count(i.id) as lines
+        from crm.part_orders o
+        left join crm.suppliers s on s.id = o.supplier_id
+        left join crm.part_order_items i on i.order_id = o.id
+    """
+
+    async def part_orders(self, *, status: str | None = None,
+                          limit: int = 200) -> list[dict]:
+        conds, args = [], []
+        if status:
+            args.append(status)
+            conds.append(f"o.status = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._PART_ORDER_SELECT} {where} group by o.id, s.name "
+            f"order by o.created_at desc, o.id desc limit ${len(args)}", *args))
+
+    async def part_order(self, order_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._PART_ORDER_SELECT} where o.id = $1 group by o.id, s.name",
+            order_id))
+
+    async def open_part_order(self) -> dict | None:
+        """Собираемый заказ. Он один: потребности копятся в общий список,
+        а не расползаются по десятку черновиков."""
+        return _row(await self.pool.fetchrow(
+            f"{self._PART_ORDER_SELECT} where o.status = 'new' "
+            "group by o.id, s.name order by o.id desc limit 1"))
+
+    async def create_part_order(self, *, supplier_id: int | None, note: str | None,
+                                created_by: str) -> int:
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("lock table crm.part_orders in share row exclusive mode")
+            next_no = int(await conn.fetchval(
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.part_orders") or 1)
+            return int(await conn.fetchval(
+                """
+                insert into crm.part_orders (no, supplier_id, note, created_by)
+                values ($1, $2, $3, $4) returning id
+                """, logic.part_order_no(next_no), supplier_id, note, created_by))
+
+    async def update_part_order(self, order_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, PART_ORDER_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.part_orders set {sets} where id = $1", order_id, *values)
+
+    async def part_order_items(self, order_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            """
+            select i.*, p.title, p.unit, p.node, w.no as work_order_no
+            from crm.part_order_items i
+            join crm.parts p on p.id = i.part_id
+            left join crm.work_orders w on w.id = i.work_order_id
+            where i.order_id = $1 order by p.title
+            """, order_id))
+
+    async def add_part_order_item(self, order_id: int, *, part_id: int, qty: int,
+                                  price: Decimal, source: str,
+                                  work_order_id: int | None = None) -> int | None:
+        """Строка заказа. None - эта позиция в заказе уже есть."""
+        try:
+            return int(await self.pool.fetchval(
+                """
+                insert into crm.part_order_items (order_id, part_id, qty, price,
+                                                  source, work_order_id)
+                values ($1, $2, $3, $4, $5, $6) returning id
+                """, order_id, part_id, qty, price, source, work_order_id))
+        except asyncpg.UniqueViolationError:
+            return None
+
+    async def delete_part_order_item(self, order_id: int, item_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "delete from crm.part_order_items where order_id = $1 and id = $2 "
+            "returning id", order_id, item_id)
+        return row is not None
+
+    async def waiting_orders_parts(self) -> list[dict]:
+        """Наряды в состоянии «ждёт запчасть» с их узлами: из них и
+        собирается половина потребностей склада."""
+        return _rows(await self.pool.fetch(
+            """
+            select o.id as work_order_id, o.no as work_order_no, b.code as bike_code,
+                   i.node, coalesce(n.title, 'Без узла') as node_title,
+                   p.id as part_id, coalesce(p.title, coalesce(n.title, 'Без узла'))
+                     as title, sum(i.qty) as qty
+            from crm.work_orders o
+            left join crm.work_order_items i on i.order_id = o.id
+            left join crm.bikes b on b.id = o.bike_id
+            left join crm.repair_nodes n on n.code = i.node
+            left join lateral (
+              select p.id, p.title from crm.parts p
+              where p.node = i.node and p.active order by p.id limit 1
+            ) p on true
+            where o.status = 'waiting'
+            group by o.id, o.no, b.code, i.node, n.title, p.id, p.title
+            order by o.no
+            """))

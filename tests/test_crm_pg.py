@@ -553,6 +553,77 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await service.ref_signed(self.crm, await self.crm.client(friend_id))
         self.assertEqual((await self.crm.client(friend_id))["channel"], "referral")
 
+    async def test_warehouse_on_postgres(self):
+        """Склад на живой базе: средневзвешенная себестоимость, нумерация
+        документов, расход в наряд и остаток как сумма движений."""
+        await self.seed()
+        part_id = await self.crm.create_part(
+            title="Колодки дисковые", node="brake_pads", unit="шт", cost=D(0),
+            price=D("600"), min_stock=10, model=None, note=None)
+        supplier_id = await self.crm.create_supplier(name="ВелоЗапчасть", phone=None,
+                                                     note=None)
+        first = await service.receive_parts(
+            self.crm, supplier_id=supplier_id,
+            lines=[{"part_id": part_id, "qty": 4, "price": D("300")}],
+            note=None, by="staff:t")
+        self.assertEqual((await self.crm.part_doc(first))["no"], "ПРХ-000001")
+        self.assertEqual((await self.crm.part(part_id))["cost"], D("300.00"))
+
+        await service.receive_parts(
+            self.crm, supplier_id=supplier_id,
+            lines=[{"part_id": part_id, "qty": 6, "price": D("400")}],
+            note=None, by="staff:t")
+        part = await self.crm.part(part_id)
+        self.assertEqual(part["cost"], D("360.00"), "средневзвешенная, а не последняя")
+        self.assertEqual(await self.crm.part_stock(part_id), 10)
+
+        order_id = await service.open_order(
+            self.crm, bike=await self.crm.bike(self.bike_id), payer="own", client=None,
+            complaint="не тормозит", object_note=None, tech_id=None, estimate=D(0),
+            by="staff:t")
+        order = await self.crm.work_order(order_id)
+        await service.issue_part_to_order(self.crm, order, part, 2, by="staff:t")
+        self.assertEqual(await self.crm.part_stock(part_id), 8)
+        with self.assertRaises(service.ServiceError):
+            await service.issue_part_to_order(self.crm, order, part, 99, by="staff:t")
+
+        await service.close_order(self.crm, order, by="staff:t")
+        log = await self.crm.bike_log(self.bike_id, kind="repair")
+        self.assertEqual(log[0]["cost"], D("720.00"), "две колодки по 360")
+
+        # списание и пересчёт - тоже движения
+        await service.write_off_parts(
+            self.crm, lines=[{"part_id": part_id, "qty": 1}], note="брак", by="staff:t")
+        self.assertEqual(await self.crm.part_stock(part_id), 7)
+        result = await service.count_part(self.crm, await self.crm.part(part_id), 6,
+                                          by="staff:t")
+        self.assertEqual((result["delta"], result["stock"]), (-1, 6))
+        stocks = await self.crm.stock_map()
+        self.assertEqual(stocks[part_id], 6)
+
+    async def test_part_order_cycle_on_postgres(self):
+        await self.seed()
+        part_id = await self.crm.create_part(
+            title="Контроллер", node="controller", unit="шт", cost=D("2500"),
+            price=D("4000"), min_stock=2, model=None, note=None)
+        collected = await service.collect_part_needs(self.crm, by="staff:t")
+        self.assertEqual(collected["added"], 1)
+        order = collected["order"]
+        self.assertEqual(order["no"], "ЗАП-000001")
+        # повторный сбор не задваивает строки
+        again = await service.collect_part_needs(self.crm, by="staff:t")
+        self.assertEqual(again["added"], 0)
+        items = await self.crm.part_order_items(order["id"])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["qty"], 2)
+
+        doc_id = await service.receive_part_order(self.crm, order, by="staff:t")
+        self.assertEqual(await self.crm.part_stock(part_id), 2)
+        self.assertEqual((await self.crm.part_doc(doc_id))["kind"], "receipt")
+        with self.assertRaises(service.ServiceError):
+            await service.receive_part_order(
+                self.crm, await self.crm.part_order(order["id"]), by="staff:t")
+
 
 if __name__ == "__main__":
     unittest.main()

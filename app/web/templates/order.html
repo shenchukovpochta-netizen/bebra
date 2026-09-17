@@ -53,6 +53,15 @@
   </table>
   {% if can and open_now %}
   <h2>Добавить строку</h2>
+  {% if may_stock and parts %}
+  {# Со склада: себестоимость берётся оттуда, а остаток уменьшается тем же
+     действием - иначе запчасть «уходит» в ремонт только на словах. #}
+  <form method="post" action="/orders/{{ order.id }}/parts" class="grid2">
+    <label class="wide">Со склада <select name="part_id">{% for p in parts %}<option value="{{ p.id }}" {% if p.stock <= 0 %}disabled{% endif %}>{{ p.title }} · на полке {{ p.stock }} {{ p.unit }} · {{ money(p.price) }}</option>{% endfor %}</select></label>
+    <label>Количество <input name="qty" value="1" size="4"></label>
+    <button type="submit">Списать в наряд</button>
+  </form>
+  {% endif %}
   <form method="post" action="/orders/{{ order.id }}/items" class="grid2">
     <label class="wide">Из каталога <select name="work_type_id"><option value="">— вписать руками —</option>{% for t in types %}<option value="{{ t.id }}">{{ t.title }} · {{ money(t.price) }}</option>{% endfor %}</select></label>
     <label>Или название <input name="title" placeholder="если не из каталога"></label>

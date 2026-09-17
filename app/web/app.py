@@ -128,6 +128,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
+        MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
+        PART_ORDER_STATUSES=logic.PART_ORDER_STATUSES,
+        NEED_SOURCES=logic.NEED_SOURCES, PART_UNITS=logic.PART_UNITS,
         INTEGRITY_KINDS=logic.INTEGRITY_KINDS, DEBT_NOISE=logic.DEBT_NOISE,
         take_title=logic.take_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
@@ -1693,11 +1696,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if order is None:
             return render(request, "missing.html", status_code=404, what="Наряд")
         items = await crm.order_items(order_id)
+        stocks = await crm.stock_map()
         return render(request, "order.html", order=order, items=items,
                       totals=logic.order_totals(items),
                       days=logic.order_days(order, today=date.today()),
                       types=await crm.work_types(active_only=True),
-                      techs=await crm.staff_all())
+                      techs=await crm.staff_all(),
+                      parts=logic.part_rows(await crm.parts(active_only=True), stocks),
+                      may_stock=may_view(request, "inventory"))
 
     @app.post("/orders/{order_id}/items")
     async def order_add_item(request: Request, order_id: int) -> Response:
@@ -1728,6 +1734,35 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             work_type_id=(work_type or {}).get("id"), qty=qty.value,
             price=price.value, parts_cost=parts.value, labor_cost=labor.value)
         flash(request, "Строка добавлена.")
+        return redirect(f"/orders/{order_id}")
+
+    @app.post("/orders/{order_id}/parts")
+    async def order_take_part(request: Request, order_id: int) -> Response:
+        """Списать запчасть со склада в наряд.
+
+        Себестоимость строки берётся со склада, а не с потолка: до склада
+        механик писал её руками, и отчёт по ремонту ничего не значил.
+        """
+        order = await crm.work_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Наряд")
+        if not may_edit(request, "service"):
+            return denied(request, "service")
+        data = await form(request)
+        part = await crm.part(int(data["part_id"])) \
+            if (data.get("part_id") or "").isdigit() else None
+        qty = count_field(data, "qty", what="Количество", default="1", limit=999)
+        if part is None or not qty.ok:
+            flash(request, qty.error or "Выберите позицию склада.", "err")
+            return redirect(f"/orders/{order_id}")
+        try:
+            result = await service.issue_part_to_order(crm, order, part, qty.value,
+                                                       by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/orders/{order_id}")
+        flash(request, f"«{part['title']}» списано со склада: {result['qty']} шт., "
+                       f"на полке осталось {result['stock_left']}.")
         return redirect(f"/orders/{order_id}")
 
     @app.post("/orders/{order_id}/items/{item_id}/delete")
@@ -1863,6 +1898,330 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                    minutes=minutes.value)
         flash(request, "Сохранено.")
         return redirect("/work-types")
+
+    # ─────────────────────── склад запчастей ───────────────────────
+
+    def doc_lines(data: dict, *, limit: int = 8) -> list[dict]:
+        """Строки складского документа из формы без JS: фиксированное число
+        пустых строк, заполненные берём, пустые молча пропускаем."""
+        lines = []
+        for i in range(limit):
+            part_id = (data.get(f"part_id_{i}") or "").strip()
+            qty = (data.get(f"qty_{i}") or "").strip()
+            if not part_id.isdigit() or not qty.isdigit() or int(qty) <= 0:
+                continue
+            price = cost_field(data, f"price_{i}")
+            lines.append({"part_id": int(part_id), "qty": int(qty),
+                          "price": price.value if price.ok else Decimal(0)})
+        return lines
+
+    @app.get("/parts")
+    async def parts_page(request: Request) -> Response:
+        node = request.query_params.get("node") or ""
+        q = request.query_params.get("q") or ""
+        rows = logic.part_rows(await crm.parts(node=node or None, q=q or None),
+                               await crm.stock_map())
+        return render(request, "parts.html", rows=rows,
+                      summary=logic.stock_summary(rows), node=node, q=q,
+                      nodes=await crm.repair_nodes())
+
+    @app.get("/parts/new")
+    async def part_new(request: Request) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        return render(request, "part_form.html", part=None,
+                      nodes=await crm.repair_nodes())
+
+    @app.post("/parts")
+    async def part_create(request: Request) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        data = await form(request)
+        fields = part_fields(request, data)
+        if fields is None:
+            return redirect("/parts/new")
+        try:
+            part_id = await crm.create_part(**fields)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Позиция с таким названием уже есть.", "err")
+                return redirect("/parts/new")
+            raise
+        flash(request, "Позиция заведена.")
+        return redirect(f"/parts/{part_id}")
+
+    def part_fields(request: Request, data: dict) -> dict | None:
+        title = logic.check_name(data.get("title"), what="Название")
+        unit = logic.check_unit(data.get("unit"))
+        cost = cost_field(data, "cost")
+        price = cost_field(data, "price")
+        minimum = count_field(data, "min_stock", what="Неснижаемый остаток",
+                              default="0", limit=9999)
+        note = logic.check_note(data.get("note"))
+        for check in (title, unit, cost, price, minimum, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return None
+        node = (data.get("node") or "").strip() or None
+        if node and not logic.check_choice(node, logic.REPAIR_NODES).ok:
+            node = None
+        return {"title": title.value, "node": node, "unit": unit.value,
+                "cost": cost.value, "price": price.value, "min_stock": minimum.value,
+                "model": (data.get("model") or "").strip() or None, "note": note.value}
+
+    @app.get("/parts/receipts")
+    async def part_receipts(request: Request) -> Response:
+        return render(request, "part_docs.html", kind="receipt",
+                      rows=await crm.part_docs(kind="receipt"),
+                      parts=await crm.parts(active_only=True),
+                      suppliers=await crm.suppliers(active_only=True))
+
+    @app.post("/parts/receipts")
+    async def part_receipt_create(request: Request) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        data = await form(request)
+        note = logic.check_note(data.get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+            return redirect("/parts/receipts")
+        supplier_id = int(data["supplier_id"]) \
+            if (data.get("supplier_id") or "").isdigit() else None
+        try:
+            doc_id = await service.receive_parts(
+                crm, supplier_id=supplier_id, lines=doc_lines(data),
+                note=note.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/parts/receipts")
+        doc = await crm.part_doc(doc_id)
+        flash(request, f"Приход {doc['no']} проведён на {logic.money(doc['total'])}.")
+        return redirect("/parts/receipts")
+
+    @app.get("/parts/write-offs")
+    async def part_write_offs(request: Request) -> Response:
+        return render(request, "part_docs.html", kind="write_off",
+                      rows=await crm.part_docs(kind="write_off"),
+                      parts=await crm.parts(active_only=True), suppliers=[])
+
+    @app.post("/parts/write-offs")
+    async def part_write_off_create(request: Request) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        data = await form(request)
+        note = logic.check_note(data.get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+            return redirect("/parts/write-offs")
+        try:
+            doc_id = await service.write_off_parts(
+                crm, lines=doc_lines(data, limit=5), note=note.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/parts/write-offs")
+        doc = await crm.part_doc(doc_id)
+        flash(request, f"Списание {doc['no']} проведено.")
+        return redirect("/parts/write-offs")
+
+    @app.get("/parts/moves")
+    async def part_moves_page(request: Request) -> Response:
+        kind = request.query_params.get("kind") or ""
+        return render(request, "part_moves.html", kind=kind,
+                      rows=await crm.part_moves(kind=kind or None, limit=300))
+
+    @app.get("/parts/{part_id}")
+    async def part_card(request: Request, part_id: int) -> Response:
+        part = await crm.part(part_id)
+        if part is None:
+            return render(request, "missing.html", status_code=404, what="Позиция")
+        return render(request, "part.html", part=part,
+                      stock=await crm.part_stock(part_id),
+                      moves=await crm.part_moves(part_id=part_id, limit=100),
+                      nodes=await crm.repair_nodes())
+
+    @app.post("/parts/{part_id}/edit")
+    async def part_edit(request: Request, part_id: int) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        part = await crm.part(part_id)
+        if part is None:
+            return render(request, "missing.html", status_code=404, what="Позиция")
+        data = await form(request)
+        fields = part_fields(request, data)
+        if fields is None:
+            return redirect(f"/parts/{part_id}")
+        # Себестоимость правится только приходом: руками её поставить -
+        # значит разойтись со складом на первом же ремонте.
+        fields.pop("cost", None)
+        fields["active"] = bool(data.get("active"))
+        await crm.update_part(part_id, **fields)
+        flash(request, "Позиция сохранена.")
+        return redirect(f"/parts/{part_id}")
+
+    @app.post("/parts/{part_id}/count")
+    async def part_count(request: Request, part_id: int) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        part = await crm.part(part_id)
+        if part is None:
+            return render(request, "missing.html", status_code=404, what="Позиция")
+        data = await form(request)
+        fact = count_field(data, "fact", what="Факт на полке", default="0", limit=99999)
+        if not fact.ok:
+            flash(request, fact.error, "err")
+            return redirect(f"/parts/{part_id}")
+        try:
+            result = await service.count_part(crm, part, fact.value, by=who(request),
+                                              note=(data.get("note") or "").strip() or None)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/parts/{part_id}")
+        if result["delta"] == 0:
+            flash(request, "Сошлось: остаток и факт совпадают.")
+        else:
+            flash(request, f"Поправлено на {result['delta']:+d}, "
+                           f"остаток {result['stock']}.")
+        return redirect(f"/parts/{part_id}")
+
+    # ─────────────────────── склад: поставщики ───────────────────────
+
+    @app.get("/suppliers")
+    async def suppliers_page(request: Request) -> Response:
+        return render(request, "suppliers.html", rows=await crm.suppliers())
+
+    @app.post("/suppliers")
+    async def supplier_create(request: Request) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        data = await form(request)
+        name = logic.check_name(data.get("name"), what="Поставщик")
+        note = logic.check_note(data.get("note"))
+        for check in (name, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/suppliers")
+        phone = bot_logic.normalize_phone(data.get("phone")) \
+            if (data.get("phone") or "").strip() else None
+        try:
+            await crm.create_supplier(name=name.value, phone=phone, note=note.value)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Такой поставщик уже есть.", "err")
+                return redirect("/suppliers")
+            raise
+        flash(request, "Поставщик добавлен.")
+        return redirect("/suppliers")
+
+    @app.post("/suppliers/{supplier_id}/toggle")
+    async def supplier_toggle(request: Request, supplier_id: int) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        supplier = await crm.supplier(supplier_id)
+        if supplier is None:
+            return render(request, "missing.html", status_code=404, what="Поставщик")
+        await crm.update_supplier(supplier_id, active=not supplier["active"])
+        return redirect("/suppliers")
+
+    # ─────────────────────── склад: заказ запчастей ───────────────────────
+
+    @app.get("/part-orders")
+    async def part_orders_page(request: Request) -> Response:
+        rows = logic.part_rows(await crm.parts(active_only=True), await crm.stock_map())
+        order = await crm.open_part_order()
+        return render(request, "part_orders.html",
+                      needs=logic.part_needs(rows, await crm.waiting_orders_parts()),
+                      orders=await crm.part_orders(limit=100), current=order,
+                      items=await crm.part_order_items(order["id"]) if order else [],
+                      parts=await crm.parts(active_only=True),
+                      suppliers=await crm.suppliers(active_only=True))
+
+    @app.post("/part-orders/collect")
+    async def part_order_collect(request: Request) -> Response:
+        """Собрать потребности в заказ одной кнопкой."""
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        result = await service.collect_part_needs(crm, by=who(request))
+        if result["added"]:
+            flash(request, f"В заказ {result['order']['no']} добавлено строк: "
+                           f"{result['added']}.")
+        else:
+            flash(request, "Новых потребностей нет: всё уже в заказе.")
+        return redirect("/part-orders")
+
+    @app.post("/part-orders/items")
+    async def part_order_add_item(request: Request) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        data = await form(request)
+        part = await crm.part(int(data["part_id"])) \
+            if (data.get("part_id") or "").isdigit() else None
+        qty = count_field(data, "qty", what="Количество", default="1", limit=9999)
+        if part is None or not qty.ok:
+            flash(request, qty.error or "Выберите позицию.", "err")
+            return redirect("/part-orders")
+        order = await crm.open_part_order()
+        if order is None:
+            order_id = await crm.create_part_order(supplier_id=None, note=None,
+                                                   created_by=who(request))
+            order = await crm.part_order(order_id)
+        added = await crm.add_part_order_item(
+            order["id"], part_id=part["id"], qty=qty.value,
+            price=logic.to_money(part.get("cost") or 0), source="manual")
+        flash(request, "Позиция добавлена в заказ." if added
+              else "Эта позиция в заказе уже есть.", "ok" if added else "err")
+        return redirect("/part-orders")
+
+    @app.post("/part-orders/{order_id}/items/{item_id}/delete")
+    async def part_order_delete_item(request: Request, order_id: int,
+                                     item_id: int) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        if not await crm.delete_part_order_item(order_id, item_id):
+            flash(request, "Строки уже нет.", "err")
+        return redirect("/part-orders")
+
+    @app.post("/part-orders/{order_id}/status")
+    async def part_order_status(request: Request, order_id: int) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        order = await crm.part_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Заказ")
+        data = await form(request)
+        status = logic.check_choice(data.get("status"), ("ordered", "cancelled"),
+                                    what="Статус заказа")
+        if not status.ok:
+            flash(request, status.error, "err")
+            return redirect("/part-orders")
+        supplier_id = int(data["supplier_id"]) \
+            if (data.get("supplier_id") or "").isdigit() else order.get("supplier_id")
+        items = await crm.part_order_items(order_id)
+        patch = {"status": status.value, "supplier_id": supplier_id,
+                 "total": logic.order_total(items)}
+        if status.value == "ordered":
+            patch["ordered_at"] = datetime.now(UTC)
+        else:
+            patch["closed_at"] = datetime.now(UTC)
+        await crm.update_part_order(order_id, **patch)
+        flash(request, "Заказ отправлен поставщику." if status.value == "ordered"
+              else "Заказ отменён.")
+        return redirect("/part-orders")
+
+    @app.post("/part-orders/{order_id}/receive")
+    async def part_order_receive(request: Request, order_id: int) -> Response:
+        if not may_edit(request, "inventory"):
+            return denied(request, "inventory")
+        order = await crm.part_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Заказ")
+        try:
+            doc_id = await service.receive_part_order(crm, order, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/part-orders")
+        doc = await crm.part_doc(doc_id)
+        flash(request, f"Заказ принят: приход {doc['no']} на {logic.money(doc['total'])}.")
+        return redirect("/part-orders")
 
     # ─────────────────────── пересчёт техники ───────────────────────
 

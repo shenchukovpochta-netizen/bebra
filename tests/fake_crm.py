@@ -32,6 +32,12 @@ class FakeCrm:
         self.takes_: dict[int, dict] = {}
         self.take_items_: list[dict] = []
         self.referrals_: dict[int, dict] = {}
+        self.suppliers_: dict[int, dict] = {}
+        self.parts_: dict[int, dict] = {}
+        self.part_moves_: list[dict] = []
+        self.part_docs_: dict[int, dict] = {}
+        self.part_orders_: dict[int, dict] = {}
+        self.part_order_items_: list[dict] = []
         self.settings_: dict[str, str] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
@@ -1033,6 +1039,231 @@ class FakeCrm:
                                           created_by=created_by)
         ref["ledger_id"] = ledger_id
         return ledger_id
+
+    # ─────────────────────────── склад запчастей ───────────────────────────
+
+    async def suppliers(self, *, active_only=False):
+        rows = []
+        for sup in self.suppliers_.values():
+            if active_only and not sup["active"]:
+                continue
+            docs = [d for d in self.part_docs_.values()
+                    if d["supplier_id"] == sup["id"] and d["kind"] == "receipt"]
+            rows.append({**sup, "receipts": len(docs),
+                         "spent": sum((d["total"] for d in docs), Decimal(0)),
+                         "last_at": max((d["created_at"] for d in docs), default=None)})
+        return sorted(rows, key=lambda s: (not s["active"], s["name"]))
+
+    async def supplier(self, supplier_id):
+        sup = self.suppliers_.get(supplier_id)
+        return dict(sup) if sup else None
+
+    async def create_supplier(self, *, name, phone, note):
+        if any(s["name"] == name for s in self.suppliers_.values()):
+            raise UniqueError("supplier name")
+        sid = self._id()
+        self.suppliers_[sid] = {"id": sid, "name": name, "phone": phone, "note": note,
+                                "active": True, "created_at": self._now()}
+        return sid
+
+    async def update_supplier(self, supplier_id, **fields):
+        if supplier_id in self.suppliers_:
+            self.suppliers_[supplier_id].update(fields)
+
+    def _part_row(self, part):
+        return {**part, "node_title": crm_logic.REPAIR_NODES.get(part.get("node"))}
+
+    async def parts(self, *, active_only=False, node=None, q=None):
+        rows = [self._part_row(p) for p in self.parts_.values()
+                if (not active_only or p["active"])
+                and (not node or p.get("node") == node)
+                and (not q or q.lower() in f"{p['title']} {p.get('model') or ''}".lower())]
+        return sorted(rows, key=lambda p: p["title"])
+
+    async def part(self, part_id):
+        part = self.parts_.get(part_id)
+        return self._part_row(part) if part else None
+
+    async def part_by_title(self, title):
+        return next((self._part_row(p) for p in self.parts_.values()
+                     if p["title"].lower() == str(title).lower()), None)
+
+    async def create_part(self, *, title, node, unit, cost, price, min_stock,
+                          model, note):
+        if any(p["title"].lower() == title.lower() for p in self.parts_.values()):
+            raise UniqueError("part title")
+        pid = self._id()
+        self.parts_[pid] = {"id": pid, "title": title, "node": node, "unit": unit,
+                            "cost": Decimal(str(cost)), "price": Decimal(str(price)),
+                            "min_stock": int(min_stock), "model": model,
+                            "active": True, "note": note, "created_at": self._now()}
+        return pid
+
+    async def update_part(self, part_id, **fields):
+        if part_id in self.parts_:
+            self.parts_[part_id].update(fields)
+
+    async def stock_map(self):
+        out: dict[int, int] = {}
+        for move in self.part_moves_:
+            out[move["part_id"]] = out.get(move["part_id"], 0) + int(move["qty"])
+        return out
+
+    async def part_stock(self, part_id):
+        return sum(int(m["qty"]) for m in self.part_moves_ if m["part_id"] == part_id)
+
+    def _move_row(self, move):
+        part = self.parts_.get(move["part_id"]) or {}
+        doc = self.part_docs_.get(move.get("doc_id")) or {}
+        order = self.orders_.get(move.get("order_id")) or {}
+        return {**move, "part_title": part.get("title"), "part_unit": part.get("unit"),
+                "doc_no": doc.get("no"), "doc_kind": doc.get("kind"),
+                "order_no": order.get("no")}
+
+    async def part_moves(self, *, part_id=None, kind=None, order_id=None, limit=300):
+        rows = [self._move_row(m) for m in self.part_moves_
+                if (not part_id or m["part_id"] == part_id)
+                and (not kind or m["kind"] == kind)
+                and (not order_id or m.get("order_id") == order_id)]
+        rows.sort(key=lambda m: m["id"], reverse=True)
+        return rows[:limit]
+
+    async def add_part_move(self, *, part_id, kind, qty, cost, doc_id=None,
+                            order_id=None, note=None, created_by=None):
+        move_id = self._id()
+        self.part_moves_.append({"id": move_id, "part_id": part_id, "kind": kind,
+                                 "qty": int(qty), "cost": Decimal(str(cost)),
+                                 "doc_id": doc_id, "order_id": order_id, "note": note,
+                                 "created_by": created_by, "created_at": self._now()})
+        return move_id
+
+    async def part_docs(self, *, kind=None, limit=200):
+        rows = []
+        for doc in self.part_docs_.values():
+            if kind and doc["kind"] != kind:
+                continue
+            sup = self.suppliers_.get(doc.get("supplier_id")) or {}
+            lines = sum(1 for m in self.part_moves_ if m.get("doc_id") == doc["id"])
+            rows.append({**doc, "supplier_name": sup.get("name"), "lines": lines})
+        rows.sort(key=lambda d: d["id"], reverse=True)
+        return rows[:limit]
+
+    async def part_doc(self, doc_id):
+        doc = self.part_docs_.get(doc_id)
+        if doc is None:
+            return None
+        sup = self.suppliers_.get(doc.get("supplier_id")) or {}
+        return {**doc, "supplier_name": sup.get("name")}
+
+    async def create_part_doc(self, *, kind, supplier_id, lines, note, created_by):
+        doc_id = self._id()
+        same = [d for d in self.part_docs_.values() if d["kind"] == kind]
+        if kind == "receipt":
+            total = sum((Decimal(str(line["price"])) * int(line["qty"])
+                         for line in lines), Decimal(0))
+        else:
+            total = sum((Decimal(str(line.get("cost") or 0)) * int(line["qty"])
+                         for line in lines), Decimal(0))
+        self.part_docs_[doc_id] = {
+            "id": doc_id, "no": crm_logic.doc_no(kind, len(same) + 1), "kind": kind,
+            "supplier_id": supplier_id, "total": total, "note": note,
+            "created_by": created_by, "created_at": self._now()}
+        for line in lines:
+            part_id, qty = int(line["part_id"]), int(line["qty"])
+            part = self.parts_[part_id]
+            if kind == "receipt":
+                stock = await self.part_stock(part_id)
+                part["cost"] = crm_logic.average_cost(stock, part["cost"], qty,
+                                                      line["price"])
+                move_qty, move_cost = qty, Decimal(str(line["price"]))
+            else:
+                move_qty = -qty
+                move_cost = Decimal(str(line.get("cost") or 0))
+            await self.add_part_move(part_id=part_id, kind=kind, qty=move_qty,
+                                     cost=move_cost, doc_id=doc_id,
+                                     note=line.get("note"), created_by=created_by)
+        return doc_id
+
+    def _part_order_row(self, order):
+        sup = self.suppliers_.get(order.get("supplier_id")) or {}
+        lines = sum(1 for i in self.part_order_items_ if i["order_id"] == order["id"])
+        return {**order, "supplier_name": sup.get("name"), "lines": lines}
+
+    async def part_orders(self, *, status=None, limit=200):
+        rows = [self._part_order_row(o) for o in self.part_orders_.values()
+                if not status or o["status"] == status]
+        rows.sort(key=lambda o: o["id"], reverse=True)
+        return rows[:limit]
+
+    async def part_order(self, order_id):
+        order = self.part_orders_.get(order_id)
+        return self._part_order_row(order) if order else None
+
+    async def open_part_order(self):
+        rows = [o for o in self.part_orders_.values() if o["status"] == "new"]
+        return self._part_order_row(rows[-1]) if rows else None
+
+    async def create_part_order(self, *, supplier_id, note, created_by):
+        order_id = self._id()
+        self.part_orders_[order_id] = {
+            "id": order_id, "no": crm_logic.part_order_no(len(self.part_orders_) + 1),
+            "supplier_id": supplier_id, "status": "new", "total": Decimal(0),
+            "note": note, "created_by": created_by, "created_at": self._now(),
+            "ordered_at": None, "closed_at": None, "doc_id": None}
+        return order_id
+
+    async def update_part_order(self, order_id, **fields):
+        if order_id in self.part_orders_:
+            self.part_orders_[order_id].update(fields)
+
+    async def part_order_items(self, order_id):
+        rows = []
+        for item in self.part_order_items_:
+            if item["order_id"] != order_id:
+                continue
+            part = self.parts_.get(item["part_id"]) or {}
+            work = self.orders_.get(item.get("work_order_id")) or {}
+            rows.append({**item, "title": part.get("title"), "unit": part.get("unit"),
+                         "node": part.get("node"), "work_order_no": work.get("no")})
+        return sorted(rows, key=lambda i: i["title"] or "")
+
+    async def add_part_order_item(self, order_id, *, part_id, qty, price, source,
+                                  work_order_id=None):
+        if any(i["order_id"] == order_id and i["part_id"] == part_id
+               for i in self.part_order_items_):
+            return None
+        item_id = self._id()
+        self.part_order_items_.append({
+            "id": item_id, "order_id": order_id, "part_id": part_id, "qty": int(qty),
+            "price": Decimal(str(price)), "source": source,
+            "work_order_id": work_order_id, "created_at": self._now()})
+        return item_id
+
+    async def delete_part_order_item(self, order_id, item_id):
+        before = len(self.part_order_items_)
+        self.part_order_items_ = [i for i in self.part_order_items_
+                                  if not (i["order_id"] == order_id
+                                          and i["id"] == item_id)]
+        return len(self.part_order_items_) < before
+
+    async def waiting_orders_parts(self):
+        rows = []
+        for order in self.orders_.values():
+            if order["status"] != "waiting":
+                continue
+            bike = self.bikes_.get(order.get("bike_id")) or {}
+            items = [i for i in self.order_items_ if i["order_id"] == order["id"]]
+            for item in items:
+                part = next((p for p in self.parts_.values()
+                             if p.get("node") and p["node"] == item.get("node")
+                             and p["active"]), None)
+                title = (part or {}).get("title") or crm_logic.REPAIR_NODES.get(
+                    item.get("node"), "Без узла")
+                rows.append({"work_order_id": order["id"], "work_order_no": order["no"],
+                             "bike_code": bike.get("code"), "node": item.get("node"),
+                             "part_id": (part or {}).get("id"), "title": title,
+                             "qty": int(item.get("qty") or 1)})
+        return rows
 
 
 class UniqueError(Exception):

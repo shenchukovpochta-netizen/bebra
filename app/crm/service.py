@@ -423,3 +423,134 @@ async def ref_paid(crm: Any, client: dict, amount: Decimal, *,
         return None
     return {**(await crm.referral_of_client(client["id"]) or {}),
             "agent": agent, "bonus": settings["bonus"]}
+
+
+async def receive_parts(crm: Any, *, supplier_id: int | None, lines: list[dict],
+                        note: str | None, by: str) -> int:
+    """Приход на склад. Пересчёт средней себестоимости - внутри, в базе."""
+    clean = [line for line in lines if int(line.get("qty") or 0) > 0]
+    if not clean:
+        raise ServiceError("Приход пуст: укажите хотя бы одну позицию с количеством.")
+    return await crm.create_part_doc(kind="receipt", supplier_id=supplier_id,
+                                     lines=clean, note=note, created_by=by)
+
+
+async def write_off_parts(crm: Any, *, lines: list[dict], note: str | None,
+                          by: str) -> int:
+    """Списание со склада: брак, потеря, износ. Причина обязательна -
+    списание без причины через месяц никто не объяснит."""
+    clean = [line for line in lines if int(line.get("qty") or 0) > 0]
+    if not clean:
+        raise ServiceError("Списание пусто: укажите позицию и количество.")
+    if not (note or "").strip():
+        raise ServiceError("Укажите причину списания.")
+    for line in clean:
+        part = await crm.part(int(line["part_id"]))
+        if part is None:
+            raise ServiceError("Такой позиции на складе нет.")
+        stock = await crm.part_stock(part["id"])
+        if int(line["qty"]) > stock:
+            raise ServiceError(
+                f"«{part['title']}»: на складе {stock}, списать больше нельзя.")
+        line["cost"] = part["cost"]
+    return await crm.create_part_doc(kind="write_off", supplier_id=None, lines=clean,
+                                     note=note, created_by=by)
+
+
+async def issue_part_to_order(crm: Any, order: dict, part: dict, qty: int, *,
+                              by: str) -> dict:
+    """Списать запчасть со склада в наряд и вернуть строку наряда.
+
+    Ради этого склад и заводился: до него себестоимость ремонта писали
+    руками, и она ничего не значила. Здесь она берётся со склада, а остаток
+    на полке уменьшается тем же действием.
+    """
+    qty = int(qty)
+    if qty <= 0:
+        raise ServiceError("Количество: должно быть больше нуля.")
+    if not logic.order_is_open(order):
+        raise ServiceError("Наряд закрыт - списывать в него нечего.")
+    stock = await crm.part_stock(part["id"])
+    if qty > stock:
+        raise ServiceError(f"«{part['title']}»: на складе {stock}. "
+                           "Закажите запчасть или спишите меньше.")
+    cost = logic.to_money(part.get("cost") or 0)
+    await crm.add_part_move(part_id=part["id"], kind="order", qty=-qty, cost=cost,
+                            order_id=order["id"], created_by=by,
+                            note=f"Наряд {order.get('no') or ''}".strip())
+    item_id = await crm.add_order_item(
+        order["id"], title=part["title"], node=part.get("node"), work_type_id=None,
+        qty=qty, price=logic.to_money(part.get("price") or 0), parts_cost=cost,
+        labor_cost=Decimal(0), note="Со склада")
+    return {"item_id": item_id, "cost": cost, "qty": qty,
+            "stock_left": stock - qty}
+
+
+async def count_part(crm: Any, part: dict, fact: int, *, by: str,
+                     note: str | None = None) -> dict:
+    """Пересчёт позиции: привести остаток к факту на полке.
+
+    Пишется движением, а не правкой остатка: расхождение - это документ
+    с датой и автором, а не тихое исправление числа.
+    """
+    fact = int(fact)
+    if fact < 0:
+        raise ServiceError("Факт: не может быть отрицательным.")
+    stock = await crm.part_stock(part["id"])
+    delta = fact - stock
+    if delta == 0:
+        return {"delta": 0, "stock": stock}
+    await crm.add_part_move(
+        part_id=part["id"], kind="count", qty=delta,
+        cost=logic.to_money(part.get("cost") or 0), created_by=by,
+        note=note or ("Излишек по пересчёту" if delta > 0 else "Недостача по пересчёту"))
+    return {"delta": delta, "stock": fact}
+
+
+async def collect_part_needs(crm: Any, *, by: str) -> dict:
+    """Собрать потребности склада в заказ: нехватка и наряды, ждущие запчасть.
+
+    Заказ один и собирается дополнением: нажали второй раз - добавились
+    только новые строки, уже внесённые руками не задваиваются.
+    """
+    rows = logic.part_rows(await crm.parts(active_only=True), await crm.stock_map())
+    needs = logic.part_needs(rows, await crm.waiting_orders_parts())
+    order = await crm.open_part_order()
+    if order is None:
+        order_id = await crm.create_part_order(supplier_id=None, note=None, created_by=by)
+        order = await crm.part_order(order_id)
+    added = 0
+    by_id = {int(r["id"]): r for r in rows}
+    for need in needs:
+        part_id = need.get("part_id")
+        if not part_id:
+            continue
+        part = by_id.get(int(part_id))
+        price = logic.to_money((part or {}).get("cost") or 0)
+        if await crm.add_part_order_item(
+                order["id"], part_id=int(part_id), qty=max(int(need["qty"]), 1),
+                price=price, source=need["source"],
+                work_order_id=need.get("work_order_id")) is not None:
+            added += 1
+    return {"order": await crm.part_order(order["id"]), "added": added,
+            "needs": len(needs)}
+
+
+async def receive_part_order(crm: Any, order: dict, *, by: str) -> int:
+    """Приёмка заказа: строки становятся приходом на склад."""
+    if order["status"] == "received":
+        raise ServiceError("Заказ уже принят.")
+    if order["status"] == "cancelled":
+        raise ServiceError("Заказ отменён.")
+    items = await crm.part_order_items(order["id"])
+    if not items:
+        raise ServiceError("В заказе нет строк.")
+    doc_id = await receive_parts(
+        crm, supplier_id=order.get("supplier_id"),
+        lines=[{"part_id": i["part_id"], "qty": i["qty"], "price": i["price"]}
+               for i in items],
+        note=f"Заказ {order.get('no') or ''}".strip(), by=by)
+    await crm.update_part_order(order["id"], status="received",
+                                closed_at=datetime.now(UTC), doc_id=doc_id,
+                                total=logic.order_total(items))
+    return doc_id

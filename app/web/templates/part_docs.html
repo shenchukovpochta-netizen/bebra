@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% set title_text = 'Приходы' if kind == 'receipt' else 'Списания' %}
+{% block title %}{{ title_text }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ title_text }}</h1>
+  {% with active = 'receipts' if kind == 'receipt' else 'write_offs' %}{% include "_parts_tabs.html" %}{% endwith %}
+</div>
+
+{% if can_edit(staff, 'inventory') %}
+<div class="card">
+  <h2>{{ 'Новый приход' if kind == 'receipt' else 'Новое списание' }}</h2>
+  {# Строк фиксированное число: панель обходится без JS, а пустые строки
+     молча пропускаются. #}
+  <form method="post" action="{{ '/parts/receipts' if kind == 'receipt' else '/parts/write-offs' }}">
+    {% if kind == 'receipt' %}
+    <label>Поставщик <select name="supplier_id"><option value="">не указан</option>{% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></label>
+    {% endif %}
+    <table>
+      <tr><th>Позиция</th><th>Кол-во</th>{% if kind == 'receipt' %}<th>Цена за единицу</th>{% endif %}</tr>
+      {% for i in range(8 if kind == 'receipt' else 5) %}
+      <tr>
+        <td><select name="part_id_{{ i }}"><option value="">—</option>{% for p in parts %}<option value="{{ p.id }}">{{ p.title }}</option>{% endfor %}</select></td>
+        <td><input name="qty_{{ i }}" size="4" inputmode="numeric"></td>
+        {% if kind == 'receipt' %}<td><input name="price_{{ i }}" size="8"></td>{% endif %}
+      </tr>
+      {% endfor %}
+    </table>
+    <label>{{ 'Комментарий' if kind == 'receipt' else 'Причина (обязательно)' }}
+      <input name="note" {% if kind != 'receipt' %}placeholder="брак, потеря, износ"{% endif %}></label>
+    <button type="submit">Провести</button>
+  </form>
+  {% if kind == 'receipt' %}<p class="muted">Приход пересчитывает среднюю себестоимость позиции.</p>{% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+<table>
+  <tr><th>№</th><th>Дата</th>{% if kind == 'receipt' %}<th>Поставщик</th>{% endif %}<th>Позиций</th>{% if can_view(staff, 'finance') %}<th>Сумма</th>{% endif %}<th class="opt">Комментарий</th><th class="opt">Кто</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.no }}</td>
+    <td>{{ r.created_at|dmy }}</td>
+    {% if kind == 'receipt' %}<td>{{ r.supplier_name or '—' }}</td>{% endif %}
+    <td class="num">{{ r.lines }}</td>
+    {% if can_view(staff, 'finance') %}<td class="num">{{ money(r.total) }}</td>{% endif %}
+    <td class="opt">{{ r.note or '' }}</td>
+    <td class="opt muted">{{ r.created_by or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="muted">Документов нет.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

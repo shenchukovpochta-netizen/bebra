@@ -57,8 +57,9 @@ Claude Code читает этот файл в начале каждой сесс
 
 `staff`, `access_profiles`, `tariffs`, `bikes`, `bike_status_log`, `bike_log`,
 `repair_nodes`, `repair_items`, `work_types`, `work_orders`, `work_order_items`,
-`stock_takes`, `stock_take_items`, `referrals`, `settings`, `clients`,
-`rentals`, `ledger`, `payment_claims`.
+`stock_takes`, `stock_take_items`, `referrals`, `settings`, `suppliers`,
+`parts`, `part_docs`, `part_moves`, `part_orders`, `part_order_items`,
+`clients`, `rentals`, `ledger`, `payment_claims`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -73,6 +74,10 @@ Claude Code читает этот файл в начале каждой сесс
 - **Пересчёт** (`stock_takes`): ведомость ПРТ снимает ожидаемый парк при
   открытии и не пересчитывает его на лету. Найденный потерянный возвращается
   в парк при закрытии сам, недостача в `lost` — только по галочке оператора.
+- **Склад** (`parts`): остаток - сумма `part_moves`, отдельной колонки нет,
+  как и колонки баланса у клиента. Запчасть привязана к узлу из
+  `repair_nodes`, себестоимость средневзвешенная и правится только
+  приходом. Расход в наряд пишет `work_order_items.parts_cost` со склада.
 - **Расхождения**: парк, аренды и наряды проверяются на несходимость
   (`logic.integrity_issues`) — отчётом в панели и раз в сутки в чат.
 - **Сотрудник и Telegram**: `staff.tg_id` ставится самим сотрудником по

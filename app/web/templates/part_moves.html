@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Движения склада — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Движения склада</h1>
+  {% with active = 'moves' %}{% include "_parts_tabs.html" %}{% endwith %}
+  <form method="get" class="search">
+    <select name="kind"><option value="">все движения</option>{% for code, label in MOVE_KINDS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <button type="submit">Показать</button>
+  </form>
+</div>
+<div class="card">
+<table>
+  <tr><th>Когда</th><th>Позиция</th><th>Что</th><th>Кол-во</th>{% if can_view(staff, 'finance') %}<th>Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
+  {% for m in rows %}
+  <tr>
+    <td>{{ m.created_at|dmy }}</td>
+    <td><a href="/parts/{{ m.part_id }}">{{ m.part_title }}</a></td>
+    <td>{{ MOVE_KINDS[m.kind] }}{% if m.note %} <small class="muted">{{ m.note }}</small>{% endif %}</td>
+    <td class="num {% if m.qty > 0 %}ok{% else %}bad{% endif %}">{{ '%+d'|format(m.qty) }} {{ m.part_unit }}</td>
+    {% if can_view(staff, 'finance') %}<td class="num">{{ money(m.cost) }}</td>{% endif %}
+    <td class="opt">{% if m.order_no %}<a href="/orders/{{ m.order_id }}">{{ m.order_no }}</a>{% else %}{{ m.doc_no or '—' }}{% endif %}</td>
+    <td class="opt muted">{{ m.created_by or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="muted">Движений нет.</td></tr>{% endfor %}
+</table>
+</div>
+{% endblock %}

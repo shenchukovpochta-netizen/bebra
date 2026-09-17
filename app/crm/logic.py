@@ -867,6 +867,7 @@ SECTIONS: dict[str, str] = {
     "rentals": "Аренды",
     "bikes": "Парк",
     "service": "Сервис: наряды и виды работ",
+    "inventory": "Склад: запчасти, приходы, заказы",
     "claims": "Заявки на зачисление",
     "finance": "Финансы",
     "tariffs": "Тарифы",
@@ -899,6 +900,9 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/service", "service"),
     ("/orders", "service"),
     ("/work-types", "service"),
+    ("/parts", "inventory"),
+    ("/suppliers", "inventory"),
+    ("/part-orders", "inventory"),
     ("/claims", "claims"),
     ("/finance", "finance"),
     ("/billing", "finance"),
@@ -984,11 +988,12 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
      {"sections": {"dashboard": "view", "issue": "edit", "clients": "edit",
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
-                   "reports": "view"},
+                   "reports": "view", "inventory": "view"},
       "actions": {}}, False),
     ("tech", "Механик",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
-                   "rentals": "view", "reports": "view"}, "actions": {}}, False),
+                   "rentals": "view", "reports": "view", "inventory": "edit"},
+      "actions": {}}, False),
 )
 
 
@@ -1598,3 +1603,150 @@ def integrity_digest(issues: Iterable[dict]) -> str:
     lines = [f"• {INTEGRITY_KINDS[kind]}: {count}"
              for kind, count in summary.items() if kind in INTEGRITY_KINDS and count]
     return "\n".join(lines)
+
+
+# ───────────────────────────── склад запчастей ─────────────────────────────
+
+MOVE_KINDS: dict[str, str] = {
+    "receipt": "Приход", "order": "В наряд", "issue": "Выдали со склада",
+    "write_off": "Списание", "count": "Пересчёт",
+}
+# Движения, которые увеличивают остаток. Знак всё равно лежит в qty -
+# этот набор нужен подписям и фильтрам, а не арифметике.
+MOVE_IN = ("receipt",)
+DOC_KINDS: dict[str, str] = {"receipt": "Приход", "write_off": "Списание"}
+DOC_PREFIX = {"receipt": "ПРХ", "write_off": "СПС"}
+PART_ORDER_STATUSES: dict[str, str] = {
+    "new": "Собирается", "ordered": "Заказано", "received": "Принято",
+    "cancelled": "Отменён",
+}
+NEED_SOURCES: dict[str, str] = {
+    "order": "Наряд ждёт запчасть", "min_stock": "Ниже неснижаемого",
+    "manual": "Вписали руками",
+}
+PART_UNITS: tuple[str, ...] = ("шт", "компл.", "м", "л", "кг")
+
+
+def doc_no(kind: str, number: int) -> str:
+    """Номер складского документа: ПРХ-000001, СПС-000001."""
+    return f"{DOC_PREFIX.get(kind, 'ДОК')}-{int(number):06d}"
+
+
+def part_order_no(number: int) -> str:
+    return f"ЗАП-{int(number):06d}"
+
+
+def check_move_kind(raw: Any) -> Check:
+    return check_choice(raw, MOVE_KINDS, what="Вид движения")
+
+
+def check_unit(raw: Any) -> Check:
+    value = str(raw or "").strip() or "шт"
+    if len(value) > 12:
+        return Check(False, error="Единица: не длиннее 12 символов.")
+    return Check(True, value)
+
+
+def stock_of(moves: Iterable[dict]) -> int:
+    """Остаток позиции - сумма её движений. Отдельной колонки нет
+    намеренно: та разошлась бы с журналом на первой же гонке."""
+    return sum(int(m.get("qty") or 0) for m in moves)
+
+
+def average_cost(stock: int, cost: Any, qty: int, price: Any) -> Decimal:
+    """Средняя себестоимость после прихода.
+
+    Считается по средневзвешенной, а не по последней цене: иначе один
+    дорогой приход задрал бы себестоимость всех ремонтов на складе,
+    где лежит десяток старых дешёвых деталей.
+    """
+    stock, qty = max(int(stock), 0), int(qty)
+    old_sum = to_money(cost) * stock
+    new_sum = to_money(price) * qty
+    total = stock + qty
+    if total <= 0:
+        return to_money(price)
+    return to_money((old_sum + new_sum) / total)
+
+
+def part_rows(parts: Iterable[dict], stocks: dict[int, int]) -> list[dict]:
+    """Остатки склада: позиция, сколько на полке и чего не хватает.
+
+    Первыми - те, чей остаток ниже неснижаемого: это и есть список
+    «что заказать», и он должен быть виден без прокрутки.
+    """
+    rows = []
+    for part in parts:
+        stock = int(stocks.get(int(part["id"]), 0))
+        minimum = int(part.get("min_stock") or 0)
+        rows.append({**part, "stock": stock,
+                     "short": max(minimum - stock, 0),
+                     "below": stock < minimum,
+                     "cost_total": to_money(part.get("cost") or 0) * max(stock, 0),
+                     "price_total": to_money(part.get("price") or 0) * max(stock, 0)})
+    rows.sort(key=lambda r: (not r["below"], -r["short"], str(r.get("title") or "")))
+    return rows
+
+
+def stock_summary(rows: Iterable[dict]) -> dict[str, Any]:
+    rows = list(rows)
+    return {
+        "positions": len(rows),
+        "below": sum(1 for r in rows if r["below"]),
+        "empty": sum(1 for r in rows if r["stock"] <= 0),
+        "cost": to_money(sum((r["cost_total"] for r in rows), Decimal(0))),
+    }
+
+
+def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = ()) -> list[dict]:
+    """Что заказывать: нехватка до неснижаемого и наряды, ждущие запчасть.
+
+    Наряд в состоянии «ждёт запчасть» - это велосипед, который стоит
+    и копит простой, поэтому его строки идут первыми, даже если на полке
+    всё в норме.
+
+    Потребности по одной позиции складываются: нехватка до неснижаемого
+    считается от сегодняшнего остатка, а наряд заберёт ещё одну сверх.
+    Иначе в заказ ушла бы только первая строка - уникальный индекс не даёт
+    положить позицию в заказ дважды, и вторая потребность пропала бы молча.
+    """
+    needs: list[dict] = []
+    by_part: dict[int, dict] = {}
+
+    def add(need: dict) -> None:
+        part_id = need.get("part_id")
+        if not part_id:
+            # Узел, под который позиции ещё не завели: складывать не с чем,
+            # и в заказ она не пойдёт, пока её не заведут.
+            needs.append(need)
+            return
+        seen = by_part.get(int(part_id))
+        if seen is None:
+            by_part[int(part_id)] = need
+            needs.append(need)
+            return
+        seen["qty"] += need["qty"]
+        if need["source"] == "order" and seen["source"] != "order":
+            # Наряд важнее: за ним стоит велосипед, а не полка.
+            seen.update(source="order", work_order_id=need["work_order_id"],
+                        work_order_no=need["work_order_no"],
+                        bike_code=need["bike_code"])
+
+    for order in waiting:
+        add({"source": "order", "part_id": order.get("part_id"),
+             "title": order.get("title") or "", "qty": int(order.get("qty") or 1),
+             "work_order_id": order.get("work_order_id"),
+             "work_order_no": order.get("work_order_no"),
+             "bike_code": order.get("bike_code")})
+    for row in rows:
+        if row["below"] and row.get("active", True):
+            add({"source": "min_stock", "part_id": int(row["id"]),
+                 "title": row.get("title") or "", "qty": row["short"],
+                 "work_order_id": None, "work_order_no": None, "bike_code": None})
+    needs.sort(key=lambda n: (n["source"] != "order", n["title"]))
+    return needs
+
+
+def order_total(items: Iterable[dict]) -> Decimal:
+    return to_money(sum((to_money(i.get("price") or 0) * int(i.get("qty") or 1)
+                         for i in items), Decimal(0)))

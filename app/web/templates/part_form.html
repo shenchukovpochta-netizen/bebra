@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Новая позиция — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+<h1>Новая позиция склада</h1>
+<form method="post" action="/parts" class="grid2">
+  <label class="wide">Название <input name="title" required placeholder="Колодки дисковые"></label>
+  <label>Узел <select name="node"><option value="">не привязан</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}">{{ title }}</option>{% endfor %}</select></label>
+  <label>Единица <select name="unit">{% for u in PART_UNITS %}<option value="{{ u }}">{{ u }}</option>{% endfor %}</select></label>
+  <label>Цена клиенту <input name="price" value="0"></label>
+  <label>Неснижаемый остаток <input name="min_stock" value="0"></label>
+  <label>Совместимость <input name="model" placeholder="пусто — подходит ко всем"></label>
+  <label class="wide">Заметка <textarea name="note" rows="2"></textarea></label>
+  <button type="submit">Завести</button>
+</form>
+<p class="muted">Себестоимость не задаётся руками: она считается по приходам.
+  Узел — из того же справочника, что и ремонт: тогда видно, есть ли запас
+  по узлу, который чаще всего ломается.</p>
+</div>
+{% endblock %}
