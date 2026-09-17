@@ -1420,3 +1420,83 @@ create table if not exists crm.sign_events (
   note       text
 );
 create index if not exists sign_events_idx on crm.sign_events (request_id, id);
+
+-- ────── каталог и цены проката: данные владельца ──────
+--
+-- Цена зависит от модели: Monster Truck+ и Kugoo V3 Pro стоят по-разному,
+-- и плоский тариф «неделя — 3 000» это различие терял. tariffs.model -
+-- название модели из каталога; пусто значит «для любой модели», такие
+-- тарифы остаются запасными.
+
+alter table crm.tariffs add column if not exists model text;
+-- Одна цена на связку «модель + срок» среди действующих: два тарифа
+-- на одно и то же - это спор о цене прямо на выдаче.
+create unique index if not exists tariffs_model_period_idx
+  on crm.tariffs (coalesce(model, ''), period_days) where active;
+
+-- Характеристики модели: их спрашивает каждый второй курьер, и раньше
+-- ответ жил в голове оператора.
+alter table crm.bike_models add column if not exists weight_kg     numeric(6,2);
+alter table crm.bike_models add column if not exists speed_kmh     integer;
+alter table crm.bike_models add column if not exists range_km      integer;
+alter table crm.bike_models add column if not exists charge_hours  numeric(4,1);
+alter table crm.bike_models add column if not exists wheel_size    text;
+alter table crm.bike_models add column if not exists motor_watt    integer;
+alter table crm.bike_models add column if not exists max_load_kg   integer;
+alter table crm.bike_models add column if not exists size_note     text;
+alter table crm.bike_models add column if not exists photo_url     text;
+alter table crm.bike_models add column if not exists description   text;
+
+-- Пункт выдачи: адрес, телефон, режим и координаты - для карты и для
+-- ответа «где забрать».
+alter table crm.locations add column if not exists public_title text;
+alter table crm.locations add column if not exists phone        text;
+alter table crm.locations add column if not exists hours        text;
+alter table crm.locations add column if not exists lat          double precision;
+alter table crm.locations add column if not exists lon          double precision;
+
+update crm.locations set
+  public_title = coalesce(public_title, 'Май Байк — сервис и аренда, Павлюхина'),
+  address = coalesce(address, 'г. Казань, ул. Павлюхина, 97А'),
+  phone = coalesce(phone, '+7 (904) 676-49-26'),
+  hours = coalesce(hours, 'пн-вс: 10:00-19:00'),
+  lat = coalesce(lat, 55.766900), lon = coalesce(lon, 49.148580)
+ where name = 'Павлюхина';
+update crm.locations set
+  public_title = coalesce(public_title, 'Май Байк — сервис и аренда, Адоратского'),
+  address = coalesce(address, 'г. Казань, ул. Адоратского, 11А'),
+  phone = coalesce(phone, '+7 (904) 676-49-26'),
+  hours = coalesce(hours, 'пн-вс: 10:00-19:00'),
+  lat = coalesce(lat, 55.824319), lon = coalesce(lon, 49.147018)
+ where name = 'Адоратского';
+
+-- Каталог моделей и цены - из таблицы владельца. on conflict do nothing:
+-- правки в панели важнее сида, перезаписывать их при каждом старте нельзя.
+insert into crm.bike_models (title, brand, battery_slots, weight_kg, speed_kmh,
+                             range_km, charge_hours, wheel_size, motor_watt,
+                             max_load_kg, size_note, description)
+values
+  ('Monster Truck + (Два АКБ)', 'Monster', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
+   '120х43х110', 'Работаем 7/0, бесплатное обслуживание'),
+  ('Monster Truck + с задними амортизаторами', 'Monster', 2, 52, 60, 70, 6,
+   '16 дюймов', 1200, 120, '120х43х110', 'Работаем 7/0, бесплатное обслуживание'),
+  ('Kugoo V3 Pro (Два АКБ)', 'Kugoo', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
+   '125х43х110', 'Работаем 7/0, бесплатное обслуживание'),
+  ('Kugoo V3 Pro + (Два АКБ)', 'Kugoo', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
+   '125х43х110', 'Работаем 7/0, бесплатное обслуживание')
+on conflict (title) do nothing;
+
+insert into crm.tariffs (name, model, period_days, price, sort) values
+  ('Неделя',   'Monster Truck + (Два АКБ)',                 7,  3000, 10),
+  ('Две недели','Monster Truck + (Два АКБ)',               14,  5400, 20),
+  ('Месяц',    'Monster Truck + (Два АКБ)',                30, 11000, 30),
+  ('Неделя',   'Monster Truck + с задними амортизаторами',  7,  3300, 11),
+  ('Две недели','Monster Truck + с задними амортизаторами',14,  5900, 21),
+  ('Месяц',    'Monster Truck + с задними амортизаторами', 30, 12000, 31),
+  ('Неделя',   'Kugoo V3 Pro (Два АКБ)',                    7,  3500, 12),
+  ('Две недели','Kugoo V3 Pro (Два АКБ)',                  14,  6000, 22),
+  ('Месяц',    'Kugoo V3 Pro (Два АКБ)',                   30, 12500, 32),
+  ('Неделя',   'Kugoo V3 Pro + (Два АКБ)',                  7,  3500, 13),
+  ('Две недели','Kugoo V3 Pro + (Два АКБ)',                14,  6000, 23),
+  ('Месяц',    'Kugoo V3 Pro + (Два АКБ)',                 30, 12500, 33)
+on conflict do nothing;

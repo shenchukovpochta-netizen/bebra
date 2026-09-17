@@ -1014,6 +1014,44 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_token["id"], created["id"])
         self.assertEqual(by_token["full_name"], "Иванов Иван")
 
+    async def test_catalog_and_prices_from_the_owner_table(self):
+        """Каталог, цены и пункты приезжают со схемой и не двоятся."""
+        models = {m["title"]: m for m in await self.crm.bike_models()}
+        self.assertIn("Monster Truck + (Два АКБ)", models)
+        self.assertEqual(models["Kugoo V3 Pro (Два АКБ)"]["speed_kmh"], 60)
+        self.assertEqual(models["Kugoo V3 Pro (Два АКБ)"]["motor_watt"], 1200)
+        self.assertEqual(models["Monster Truck + (Два АКБ)"]["size_note"],
+                         "120х43х110")
+
+        tariffs = await self.crm.tariffs(active_only=True)
+        truck = logic.tariffs_for_model(tariffs, "Monster Truck + (Два АКБ)")
+        self.assertEqual({int(t["period_days"]): t["price"] for t in truck},
+                         {7: D("3000.00"), 14: D("5400.00"), 30: D("11000.00")})
+        kugoo = logic.tariffs_for_model(tariffs, "Kugoo V3 Pro (Два АКБ)")
+        self.assertEqual({int(t["period_days"]): t["price"] for t in kugoo},
+                         {7: D("3500.00"), 14: D("6000.00"), 30: D("12500.00")})
+
+        # Второй такой же срок у той же модели база не примет.
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_tariff("Неделя", 7, D("4000"), None,
+                                         model="Kugoo V3 Pro (Два АКБ)")
+        # А выключенный тариф места не занимает: цену можно переиграть.
+        old_id = int(kugoo[0]["id"])
+        await self.crm.update_tariff(old_id, active=False)
+        new_id = await self.crm.create_tariff("Неделя", 7, D("4000"), None,
+                                              model="Kugoo V3 Pro (Два АКБ)")
+        self.assertNotEqual(new_id, old_id)
+
+        points = {p["name"]: p for p in await self.crm.locations()}
+        self.assertAlmostEqual(points["Павлюхина"]["lat"], 55.7669, places=4)
+        self.assertEqual(points["Адоратского"]["hours"], "пн-вс: 10:00-19:00")
+        self.assertIn("Адоратского, 11А", points["Адоратского"]["address"])
+
+        # Повторное применение схемы ничего не дублирует.
+        db = Database(self.pool)
+        await db.apply_schema(SCHEMA)
+        self.assertEqual(len(await self.crm.bike_models()), len(models))
+
 
 if __name__ == "__main__":
     unittest.main()

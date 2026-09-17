@@ -655,6 +655,37 @@ def per_day(price: Any, period_days: Any) -> Decimal:
     return (to_money(price) / days).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+def tariffs_for_model(tariffs: Iterable[dict], model: Any) -> list[dict]:
+    """Тарифы для модели: её собственные, а если их нет - общие.
+
+    Цена зависит от модели: Monster Truck+ и Kugoo V3 Pro стоят
+    по-разному. Тариф без модели остаётся запасным - он работает, пока
+    у модели нет своей цены.
+    """
+    rows = [dict(t) for t in tariffs]
+    name = str(model or "").strip()
+    own = [t for t in rows if str(t.get("model") or "").strip() == name and name]
+    return own or [t for t in rows if not str(t.get("model") or "").strip()]
+
+
+def match_tariff(tariffs: Iterable[dict], tariff: Mapping[str, Any] | None,
+                 model: Any) -> dict | None:
+    """Тот же срок, но по цене выбранной модели.
+
+    Оператор выбирает тариф и модель на одном экране, и модель он может
+    сменить последней. Подставлять чужую цену нельзя, отправлять его
+    на шаг назад - грубо: берём тариф того же срока у нужной модели.
+    """
+    if tariff is None:
+        return None
+    rows = tariffs_for_model(tariffs, model)
+    same = [t for t in rows if int(t.get("id") or 0) == int(tariff.get("id") or 0)]
+    if same:
+        return same[0]
+    days = int(tariff.get("period_days") or 0)
+    return next((t for t in rows if int(t.get("period_days") or 0) == days), None)
+
+
 def tariff_tiles(tariffs: Iterable[dict]) -> list[dict]:
     """Плитки тарифов для выбора, от короткого к длинному.
 

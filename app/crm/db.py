@@ -28,15 +28,21 @@ CLIENT_FIELDS = frozenset({
     "note", "source", "channel", "ref_code", "invited_by", "invited_at",
     "max_id",
 })
-TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
+TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active",
+                          "sort", "model"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
 BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location",
                             "bike_id", "rental_id", "cycles", "purchase_price",
                             "purchased_on", "service_months", "note"})
-LOCATION_FIELDS = frozenset({"city", "name", "address", "note", "active", "sort"})
+LOCATION_FIELDS = frozenset({"city", "name", "address", "note", "active", "sort",
+                            "public_title", "phone", "hours", "lat", "lon"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
-                               "battery_slots", "active", "note"})
+                               "battery_slots", "active", "note",
+                               "weight_kg", "speed_kmh", "range_km",
+                               "charge_hours", "wheel_size", "motor_watt",
+                               "max_load_kg", "size_note", "photo_url",
+                               "description"})
 BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
                                   "price", "service_months", "active", "note"})
 TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
@@ -200,11 +206,11 @@ class CrmDB:
             "select * from crm.tariffs where id = $1", tariff_id))
 
     async def create_tariff(self, name: str, period_days: int, price: Decimal,
-                            note: str | None) -> int:
+                            note: str | None, model: str | None = None) -> int:
         return int(await self.pool.fetchval(
-            "insert into crm.tariffs (name, period_days, price, note) "
-            "values ($1, $2, $3, $4) returning id",
-            name, period_days, price, note))
+            "insert into crm.tariffs (name, period_days, price, note, model) "
+            "values ($1, $2, $3, $4, $5) returning id",
+            name, period_days, price, note, model))
 
     async def update_tariff(self, tariff_id: int, **fields: Any) -> None:
         sets, values = _set_clause(fields, TARIFF_FIELDS, 2)
@@ -1839,10 +1845,16 @@ class CrmDB:
         return [r["name"] for r in rows]
 
     async def create_location(self, *, name: str, city: str, address: str | None,
-                              note: str | None) -> int:
+                              note: str | None, **extra: Any) -> int:
+        unknown = set(extra) - LOCATION_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        cols = ["name", "city", "address", "note", *extra]
+        values = [name, city, address, note, *extra.values()]
+        places = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
         return int(await self.pool.fetchval(
-            "insert into crm.locations (name, city, address, note) "
-            "values ($1, $2, $3, $4) returning id", name, city, address, note))
+            f"insert into crm.locations ({', '.join(cols)}) "
+            f"values ({places}) returning id", *values))
 
     async def update_location(self, location_id: int, **fields: Any) -> None:
         if not fields:
@@ -1869,12 +1881,20 @@ class CrmDB:
 
     async def create_bike_model(self, *, title: str, brand: str | None,
                                 factory_title: str | None, battery_slots: int,
-                                note: str | None) -> int:
+                                note: str | None, **specs: Any) -> int:
+        """Модель с характеристиками. Их спрашивает каждый второй курьер,
+        и раньше ответ жил в голове оператора."""
+        unknown = set(specs) - BIKE_MODEL_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        cols = ["title", "brand", "factory_title", "battery_slots", "note",
+                *specs]
+        values = [title, brand, factory_title, battery_slots, note,
+                  *specs.values()]
+        places = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
         return int(await self.pool.fetchval(
-            """
-            insert into crm.bike_models (title, brand, factory_title, battery_slots, note)
-            values ($1, $2, $3, $4, $5) returning id
-            """, title, brand, factory_title, battery_slots, note))
+            f"insert into crm.bike_models ({', '.join(cols)}) "
+            f"values ({places}) returning id", *values))
 
     async def update_bike_model(self, model_id: int, **fields: Any) -> None:
         if not fields:

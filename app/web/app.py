@@ -918,8 +918,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             # Дальше идти некуда: сначала закрыть аренду или снять блокировку.
             return render(request, "issue.html", **ctx)
         available = await crm.bikes(status="available")
-        ctx["tariffs"] = logic.tariff_tiles(await crm.tariffs(active_only=True))
+        all_tariffs = await crm.tariffs(active_only=True)
         ctx["models"] = logic.model_availability(available)
+        # Цена зависит от модели, поэтому плитки тарифов собираются под
+        # выбранную: пока модели нет, показываем цены первой свободной -
+        # пустой экран «выберите модель» оператору ничего не даёт.
+        picked_model = (ctx["model"] or (ctx["bike"] or {}).get("model")
+                        or (ctx["models"][0]["model"] if ctx["models"] else ""))
+        ctx["tariff_model"] = picked_model
+        ctx["tariffs"] = logic.tariff_tiles(
+            logic.tariffs_for_model(all_tariffs, picked_model))
         # Клиенту, который приедет завтра, можно обещать конкретный день:
         # прогноз считается по «оплачено до», а не по слову оператора.
         ctx["soon"] = logic.freeing_soon(await crm.active_rentals())
@@ -927,6 +935,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             ctx["tariff"] = await crm.tariff(int(p["tariff"]))
         if ctx["bike"] is not None:
             ctx["model"] = ctx["bike"]["model"]
+        # Модель могли сменить последней: тариф берём того же срока, но
+        # по цене выбранной модели. Иначе клиент платил бы за Kugoo
+        # цену Monster Truck.
+        if ctx["tariff"] is not None and ctx["model"]:
+            fixed = logic.match_tariff(all_tariffs, ctx["tariff"], ctx["model"])
+            if fixed is None:
+                flash(request, f"Для модели «{ctx['model']}» нет тарифа на "
+                               f"{ctx['tariff']['period_days']} дн. — "
+                               "заведите его в тарифах.", "err")
+                ctx["tariff"] = None
+            elif int(fixed["id"]) != int(ctx["tariff"]["id"]):
+                ctx["tariff"] = fixed
         tariff = ctx["tariff"]
         if tariff is None or not ctx["model"]:
             return render(request, "issue.html", **ctx)
@@ -1001,6 +1021,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if client is None or tariff is None or bike is None:
             flash(request, "Выберите клиента, тариф и велосипед.", "err")
             return redirect(back)
+        # Последняя проверка перед деньгами: цена должна быть ценой этой
+        # модели, а не той, с которой оператор начинал.
+        fixed = logic.match_tariff(await crm.tariffs(active_only=True), tariff,
+                                   bike.get("model"))
+        if fixed is None:
+            flash(request, f"Для модели «{bike.get('model')}» нет тарифа "
+                           f"на {tariff['period_days']} дн.", "err")
+            return redirect(back)
+        tariff = fixed
         started = logic.check_date(data.get("started_on"), default=date.today())
         pay = cost_field(data, "pay_amount")
         method = data.get("pay_method") or "sbp"
@@ -1336,7 +1365,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/tariffs")
     async def tariffs(request: Request) -> Response:
-        return render(request, "tariffs.html", rows=await crm.tariffs())
+        rows = await crm.tariffs()
+        models = await crm.bike_models(active_only=True)
+        # Модели, у которых нет ни одной своей цены: на выдаче они уедут
+        # на запасной тариф, и это стоит видеть до выдачи, а не после.
+        priced = {str(t.get("model") or "") for t in rows if t.get("active")}
+        return render(request, "tariffs.html", rows=rows, models=models,
+                      unpriced=[m["title"] for m in models
+                                if m["title"] not in priced],
+                      has_common=any(not t.get("model") for t in rows
+                                     if t.get("active")))
 
     def _tariff_fields(request: Request, data: dict) -> dict | None:
         name = logic.check_name(data.get("name"), what="Название")
@@ -1348,13 +1386,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, check.error, "err")
                 return None
         return {"name": name.value, "period_days": period.value, "price": price.value,
-                "note": note.value}
+                "note": note.value,
+                "model": (data.get("model") or "").strip() or None}
 
     @app.post("/tariffs")
     async def tariff_create(request: Request) -> Response:
         fields = _tariff_fields(request, await form(request))
         if fields is not None:
-            await crm.create_tariff(**fields)
+            try:
+                await crm.create_tariff(**fields)
+            except Exception as exc:                    # noqa: BLE001
+                if "unique" in type(exc).__name__.lower():
+                    flash(request, "Такой срок для этой модели уже есть — "
+                                   "исправьте цену в существующем тарифе.", "err")
+                    return redirect("/tariffs")
+                raise
             flash(request, "Тариф добавлен.")
         return redirect("/tariffs")
 
@@ -1370,7 +1416,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/tariffs")
         fields = _tariff_fields(request, data)
         if fields is not None:
-            await crm.update_tariff(tariff_id, **fields)
+            try:
+                await crm.update_tariff(tariff_id, **fields)
+            except Exception as exc:                    # noqa: BLE001
+                if "unique" in type(exc).__name__.lower():
+                    flash(request, "Такой срок для этой модели уже есть.", "err")
+                    return redirect("/tariffs")
+                raise
             flash(request, "Тариф сохранён.")
         return redirect("/tariffs")
 
@@ -2202,6 +2254,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "settings")
         return render(request, "locations.html", rows=await crm.locations())
 
+    def location_extra(data: dict) -> dict:
+        """Телефон, режим и координаты пункта: по ним клиент находит точку,
+        а карта - центр города, когда трекеров ещё нет."""
+        def coord(name: str) -> float | None:
+            raw = (data.get(name) or "").strip().replace(",", ".")
+            try:
+                value = float(raw) if raw else None
+            except (TypeError, ValueError):
+                return None
+            return value if value is not None and -180 <= value <= 180 else None
+
+        return {"public_title": (data.get("public_title") or "").strip() or None,
+                "phone": (data.get("phone") or "").strip() or None,
+                "hours": (data.get("hours") or "").strip() or None,
+                "lat": coord("lat"), "lon": coord("lon")}
+
     @app.post("/locations")
     async def location_create(request: Request) -> Response:
         if not may_edit(request, "settings"):
@@ -2215,15 +2283,34 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, check.error, "err")
                 return redirect("/locations")
         try:
-            await crm.create_location(name=name.value, city=city.value,
-                                      address=(data.get("address") or "").strip() or None,
-                                      note=note.value)
+            await crm.create_location(
+                name=name.value, city=city.value,
+                address=(data.get("address") or "").strip() or None,
+                note=note.value, **location_extra(data))
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "Точка с таким названием уже есть.", "err")
                 return redirect("/locations")
             raise
         flash(request, "Точка добавлена.")
+        return redirect("/locations")
+
+    @app.post("/locations/{location_id}")
+    async def location_edit(request: Request, location_id: int) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        rows = [x for x in await crm.locations() if x["id"] == location_id]
+        if not rows:
+            return render(request, "missing.html", status_code=404, what="Точка")
+        data = await form(request)
+        note = logic.check_note(data.get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+            return redirect("/locations")
+        await crm.update_location(
+            location_id, address=(data.get("address") or "").strip() or None,
+            note=note.value, **location_extra(data))
+        flash(request, "Точка сохранена.")
         return redirect("/locations")
 
     @app.post("/locations/{location_id}/toggle")
@@ -2245,12 +2332,43 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "settings")
         bikes = await crm.bike_models()
         batteries = await crm.battery_models()
+        tariffs = [t for t in await crm.tariffs(active_only=True) if t.get("model")]
+        prices: dict[str, list] = {}
+        for tariff in sorted(tariffs, key=lambda t: int(t["period_days"])):
+            prices.setdefault(str(tariff["model"]), []).append(tariff)
+        # Названия в парке и в каталоге связаны текстом: расхождение
+        # стоит показать здесь, а не выяснять на выдаче.
+        known = {m["title"] for m in bikes}
+        park = {str(b.get("model") or "").strip()
+                for b in await crm.bikes(limit=10000)}
         return render(request, "models.html", bike_models=bikes,
-                      battery_models=batteries,
+                      battery_models=batteries, prices=prices,
+                      unknown_models=sorted(m for m in park if m and m not in known),
                       matrix=logic.compat_matrix(
                           [m for m in bikes if m["active"]],
                           [m for m in batteries if m["active"]],
                           await crm.compat_pairs()))
+
+    def model_specs(data: dict) -> dict:
+        """Характеристики модели из формы. Пустое поле - это «не знаем»,
+        а не ноль: «максимальная скорость 0» хуже прочерка."""
+        def number(name: str, cast: Any) -> Any:
+            raw = (data.get(name) or "").strip().replace(",", ".")
+            try:
+                return cast(raw) if raw else None
+            except (TypeError, ValueError):
+                return None
+
+        return {"weight_kg": number("weight_kg", Decimal),
+                "speed_kmh": number("speed_kmh", int),
+                "range_km": number("range_km", int),
+                "charge_hours": number("charge_hours", Decimal),
+                "motor_watt": number("motor_watt", int),
+                "max_load_kg": number("max_load_kg", int),
+                "wheel_size": (data.get("wheel_size") or "").strip() or None,
+                "size_note": (data.get("size_note") or "").strip() or None,
+                "photo_url": (data.get("photo_url") or "").strip() or None,
+                "description": (data.get("description") or "").strip() or None}
 
     @app.post("/models/bikes")
     async def bike_model_create(request: Request) -> Response:
@@ -2265,17 +2383,41 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/models")
+        specs = model_specs(data)
         try:
             await crm.create_bike_model(
                 title=title.value, brand=(data.get("brand") or "").strip() or None,
                 factory_title=(data.get("factory_title") or "").strip() or None,
-                battery_slots=slots.value, note=note.value)
+                battery_slots=slots.value, note=note.value, **specs)
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "Такая модель уже есть.", "err")
                 return redirect("/models")
             raise
         flash(request, "Модель добавлена.")
+        return redirect("/models")
+
+    @app.post("/models/bikes/{model_id}")
+    async def bike_model_edit(request: Request, model_id: int) -> Response:
+        """Характеристики правятся после заведения: в первый раз их обычно
+        переписывают с коробки, а коробка не всегда под рукой."""
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if await crm.bike_model(model_id) is None:
+            return render(request, "missing.html", status_code=404, what="Модель")
+        data = await form(request)
+        if (data.get("action") or "") == "toggle":
+            model = await crm.bike_model(model_id)
+            await crm.update_bike_model(model_id, active=not model["active"])
+            flash(request, "Модель убрана в архив." if model["active"]
+                  else "Модель вернулась в каталог.")
+            return redirect("/models")
+        note = logic.check_note(data.get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+            return redirect("/models")
+        await crm.update_bike_model(model_id, note=note.value, **model_specs(data))
+        flash(request, "Модель сохранена.")
         return redirect("/models")
 
     @app.post("/models/batteries")

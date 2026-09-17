@@ -9,22 +9,61 @@
 <section class="card">
   <h2>Велосипеды</h2>
   <table>
-    <tr><th>Название</th><th class="opt">Заводское</th><th>Слотов АКБ</th><th>В парке</th></tr>
+    <tr><th>Название</th><th class="opt">Характеристики</th><th>Слотов</th><th>В парке</th><th>Цены</th></tr>
     {% for m in bike_models %}
     <tr class="{% if not m.active %}muted{% endif %}">
-      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}</td>
-      <td class="opt muted">{{ m.factory_title or '—' }}</td>
+      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}
+        {% if m.factory_title %}<br><small class="muted">заводское: {{ m.factory_title }}</small>{% endif %}</td>
+      <td class="opt muted">{% if m.speed_kmh %}{{ m.speed_kmh }} км/ч{% endif %}{% if m.range_km %} · {{ m.range_km }} км{% endif %}{% if m.motor_watt %} · {{ m.motor_watt }} Вт{% endif %}{% if m.weight_kg %} · {{ m.weight_kg|int }} кг{% endif %}{% if m.max_load_kg %} · до {{ m.max_load_kg }} кг{% endif %}</td>
       <td class="num">{{ m.battery_slots }}</td>
       <td class="num">{{ m.bikes }}</td>
+      <td>{% for t in prices.get(m.title, []) %}{{ t.name }} {{ money(t.price) }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">нет своих цен</span>{% endfor %}</td>
     </tr>
-    {% else %}<tr><td colspan="4" class="muted">Каталог пуст. Модели в карточках велосипедов от этого не ломаются — там текст.</td></tr>{% endfor %}
+    {% if can_edit(staff, 'settings') %}
+    <tr class="{% if not m.active %}muted{% endif %}">
+      <td colspan="5">
+        <form method="post" action="/models/bikes/{{ m.id }}" class="grid2">
+          <label>Вес, кг <input name="weight_kg" value="{{ m.weight_kg or '' }}"></label>
+          <label>Скорость, км/ч <input name="speed_kmh" value="{{ m.speed_kmh or '' }}"></label>
+          <label>Пробег на АКБ, км <input name="range_km" value="{{ m.range_km or '' }}"></label>
+          <label>Зарядка, часов <input name="charge_hours" value="{{ m.charge_hours or '' }}"></label>
+          <label>Колёса <input name="wheel_size" value="{{ m.wheel_size or '' }}"></label>
+          <label>Мотор, Вт <input name="motor_watt" value="{{ m.motor_watt or '' }}"></label>
+          <label>Нагрузка, кг <input name="max_load_kg" value="{{ m.max_load_kg or '' }}"></label>
+          <label>Габариты <input name="size_note" value="{{ m.size_note or '' }}"></label>
+          <label class="wide">Фото (ссылка) <input name="photo_url" value="{{ m.photo_url or '' }}"></label>
+          <label class="wide">Описание для клиента <input name="description" value="{{ m.description or '' }}"></label>
+          <label class="wide">Заметка <input name="note" value="{{ m.note or '' }}"></label>
+          <button type="submit">Сохранить</button>
+          <button type="submit" name="action" value="toggle" class="ghost">{{ 'В архив' if m.active else 'Вернуть' }}</button>
+        </form>
+      </td>
+    </tr>
+    {% endif %}
+    {% else %}<tr><td colspan="5" class="muted">Каталог пуст. Модели в карточках велосипедов от этого не ломаются — там текст.</td></tr>{% endfor %}
   </table>
+  {% if unknown_models %}
+  <p class="flash err">В парке есть модели, которых нет в каталоге:
+    {{ unknown_models|join(', ') }}. Названия должны совпадать буква в букву —
+    иначе цена и совместимость к ним не привяжутся.</p>
+  {% endif %}
   {% if can_edit(staff, 'settings') %}
+  <h3>Добавить модель</h3>
   <form method="post" action="/models/bikes" class="grid2">
     <label>Название для клиента <input name="title" required></label>
     <label>Бренд <input name="brand"></label>
     <label>Заводское название <input name="factory_title"></label>
     <label>Слотов АКБ <input name="battery_slots" value="2" size="3"></label>
+    <label>Вес, кг <input name="weight_kg" placeholder="52"></label>
+    <label>Скорость, км/ч <input name="speed_kmh" placeholder="60"></label>
+    <label>Пробег на АКБ, км <input name="range_km" placeholder="70"></label>
+    <label>Зарядка, часов <input name="charge_hours" placeholder="6"></label>
+    <label>Колёса <input name="wheel_size" placeholder="16 дюймов"></label>
+    <label>Мотор, Вт <input name="motor_watt" placeholder="1200"></label>
+    <label>Нагрузка, кг <input name="max_load_kg" placeholder="120"></label>
+    <label>Габариты <input name="size_note" placeholder="120х43х110"></label>
+    <label class="wide">Фото (ссылка) <input name="photo_url" placeholder="https://"></label>
+    <label class="wide">Описание для клиента <input name="description"></label>
     <button type="submit">Добавить</button>
   </form>
   {% endif %}

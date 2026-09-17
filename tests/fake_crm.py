@@ -225,11 +225,16 @@ class FakeCrm:
         t = self.tariffs_.get(tariff_id)
         return dict(t) if t else None
 
-    async def create_tariff(self, name, period_days, price, note):
+    async def create_tariff(self, name, period_days, price, note, model=None):
         tid = self._id()
+        if any(t["active"] and t["period_days"] == period_days
+               and (t.get("model") or "") == (model or "")
+               for t in self.tariffs_.values()):
+            raise UniqueError("tariff model period")
         self.tariffs_[tid] = {"id": tid, "name": name, "period_days": period_days,
                               "price": Decimal(price), "note": note, "active": True,
-                              "sort": 100, "created_at": self._now()}
+                              "sort": 100, "model": model,
+                              "created_at": self._now()}
         return tid
 
     async def update_tariff(self, tariff_id, **fields):
@@ -1425,13 +1430,15 @@ class FakeCrm:
     async def location_names(self):
         return [x["name"] for x in await self.locations(active_only=True)]
 
-    async def create_location(self, *, name, city, address, note):
+    async def create_location(self, *, name, city, address, note, **extra):
         if any(x["name"] == name for x in self.locations_.values()):
             raise UniqueError("location name")
         loc_id = self._id()
         self.locations_[loc_id] = {"id": loc_id, "name": name, "city": city,
                                    "address": address, "note": note, "active": True,
-                                   "sort": 100, "created_at": self._now()}
+                                   "sort": 100, "public_title": None, "phone": None,
+                                   "hours": None, "lat": None, "lon": None,
+                                   "created_at": self._now(), **extra}
         return loc_id
 
     async def update_location(self, location_id, **fields):
@@ -1452,7 +1459,7 @@ class FakeCrm:
         return dict(model) if model else None
 
     async def create_bike_model(self, *, title, brand, factory_title, battery_slots,
-                                note):
+                                note, **specs):
         if any(m["title"] == title for m in self.bike_models_.values()):
             raise UniqueError("bike model")
         model_id = self._id()
@@ -1460,7 +1467,12 @@ class FakeCrm:
                                        "factory_title": factory_title,
                                        "battery_slots": int(battery_slots),
                                        "active": True, "note": note,
-                                       "created_at": self._now()}
+                                       "weight_kg": None, "speed_kmh": None,
+                                       "range_km": None, "charge_hours": None,
+                                       "wheel_size": None, "motor_watt": None,
+                                       "max_load_kg": None, "size_note": None,
+                                       "photo_url": None, "description": None,
+                                       "created_at": self._now(), **specs}
         return model_id
 
     async def update_bike_model(self, model_id, **fields):
