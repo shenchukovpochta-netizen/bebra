@@ -25,6 +25,7 @@ import math
 import os
 import random
 import re
+import secrets
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -909,6 +910,10 @@ LEVEL_ORDER = ("", "view", "edit")
 SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/issue", "issue"),
     ("/clients", "clients"),
+    # Журнал подписаний - тот же раздел, что и клиенты: подписывает
+    # документы тот, кто ведёт клиента. Страница /sign/<токен> в список
+    # не входит: она открыта клиенту и стража раздела не знает.
+    ("/signings", "clients"),
     ("/rentals", "rentals"),
     ("/bikes", "bikes"),
     ("/batteries", "batteries"),
@@ -2820,3 +2825,120 @@ def campaign_rows(campaigns: Iterable[dict]) -> list[dict]:
     rows.sort(key=lambda c: c.get("created_at"), reverse=True)
     rows.sort(key=lambda c: c.get("status") != "sending")
     return rows
+
+
+# ───────────── простая электронная подпись (ПЭП) ─────────────
+#
+# Кнопка «подписываю» фиксирует согласие, но не доказывает его. Здесь -
+# арифметика доказательства: код живёт минуты, попыток немного, ссылка
+# протухает, а каждый шаг ложится в журнал вместе с хэшами документов.
+#
+# Сам код нигде не хранится: в базе только его хэш вместе с токеном
+# ссылки. Один и тот же код в двух заявках даст разные хэши.
+
+SIGN_STATUSES: dict[str, str] = {
+    "new": "Ждёт клиента", "code": "Код отправлен",
+    "signed": "Подписано", "cancelled": "Отменено",
+}
+SIGN_EVENTS: dict[str, str] = {
+    "created": "Заявка создана", "opened": "Клиент открыл документы",
+    "code_sent": "Код отправлен", "code_wrong": "Неверный код",
+    "signed": "Документы подписаны", "cancelled": "Отменено",
+    "expired": "Срок ссылки истёк",
+}
+SIGN_DOC_KINDS: dict[str, str] = {
+    "esign": "Соглашение об ЭП",
+    "contract": "Договор аренды",
+    "consent": "Согласие на обработку персональных данных",
+    "act_in": "Акт приёма-передачи",
+    "act_out": "Акт возврата",
+    "other": "Документ",
+}
+# Код живёт десять минут: за это время человек успевает прочитать
+# сообщение, а перехваченный код успевает протухнуть.
+SIGN_CODE_MINUTES = 10
+# Попыток на код. Пять - это опечатка и ещё четыре, дальше нужен новый.
+SIGN_MAX_ATTEMPTS = 5
+# Ссылка живёт неделю: оператор отправляет её заранее, клиент подписывает
+# на точке. Дольше держать открытую дверь незачем.
+SIGN_LINK_DAYS = 7
+
+
+def sign_no(number: int) -> str:
+    return f"ПЭП-{int(number):06d}"
+
+
+def make_sign_token() -> str:
+    """Токен ссылки: 32 шестнадцатеричных символа из системного источника."""
+    return secrets.token_hex(16)
+
+
+def make_sign_code() -> str:
+    """Код подтверждения: шесть цифр, включая ведущие нули."""
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_sign_code(token: str, code: str) -> str:
+    """Хэш кода вместе с токеном: одинаковый код в двух заявках даёт
+    разные хэши, а из базы код не восстановить."""
+    return hashlib.sha256(f"{token}:{code}".encode()).hexdigest()
+
+
+def clean_sign_code(raw: Any) -> str:
+    """Код из формы: цифры, всё остальное отбрасывается."""
+    return re.sub(r"\D", "", str(raw or ""))[:6]
+
+
+def sign_state(request: Mapping[str, Any], *,
+               now: datetime | None = None) -> dict[str, Any]:
+    """Состояние заявки: можно ли подписывать и сколько осталось."""
+    now = now or datetime.now(UTC)
+    expires = request.get("expires_at")
+    code_at = request.get("code_at")
+    code_left = None
+    if code_at is not None:
+        code_left = SIGN_CODE_MINUTES - (now - code_at).total_seconds() / 60
+    attempts = int(request.get("attempts") or 0)
+    signed = request.get("status") == "signed"
+    cancelled = request.get("status") == "cancelled"
+    expired = expires is not None and now >= expires
+    return {
+        "signed": signed, "cancelled": cancelled, "expired": expired,
+        "open": not (signed or cancelled or expired),
+        "code_valid": code_left is not None and code_left > 0
+        and attempts < SIGN_MAX_ATTEMPTS,
+        "code_left": round(code_left) if code_left is not None else None,
+        "attempts_left": max(SIGN_MAX_ATTEMPTS - attempts, 0),
+        "docs": list(request.get("docs") or []),
+    }
+
+
+def sign_docs_digest(docs: Iterable[Mapping[str, Any]]) -> str:
+    """Хэш пакета: хэши документов по порядку, склеенные и хэшированные.
+
+    По нему проверяют, что подписали именно этот набор, а не похожий:
+    подмена одного документа меняет общий хэш.
+    """
+    joined = "\n".join(str(doc.get("sha256") or "") for doc in docs)
+    return hashlib.sha256(joined.encode()).hexdigest()
+
+
+def sign_rows(requests: Iterable[dict], *,
+              now: datetime | None = None) -> list[dict]:
+    """Список заявок: незакрытые первыми, свежие сверху."""
+    now = now or datetime.now(UTC)
+    rows = [{**r, **{k: v for k, v in sign_state(r, now=now).items()
+                     if k != "docs"},
+             "docs_count": len(r.get("docs") or [])} for r in requests]
+    rows.sort(key=lambda r: r.get("created_at"), reverse=True)
+    rows.sort(key=lambda r: not r["open"])
+    return rows
+
+
+def sign_summary(rows: Iterable[dict]) -> dict[str, int]:
+    rows = list(rows)
+    return {"total": len(rows),
+            "open": sum(1 for r in rows if r.get("open")),
+            "signed": sum(1 for r in rows if r.get("status") == "signed"),
+            "expired": sum(1 for r in rows if r.get("expired")
+                           and r.get("status") != "signed")}

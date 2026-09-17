@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ req.no }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ req.no }}
+  {% if req.status == 'signed' %}<span class="tag ok">подписано</span>
+  {% elif state.cancelled %}<span class="tag muted">отменено</span>
+  {% elif state.expired %}<span class="tag muted">истёк срок</span>
+  {% else %}<span class="tag rented">{{ SIGN_STATUSES[req.status] }}</span>{% endif %}</h1>
+  <a class="btn ghost" href="/signings">Все подписания</a></div>
+
+<div class="cols">
+<section class="card">
+  <h2>Кому и что</h2>
+  <dl>
+    <dt>Клиент</dt><dd><a href="/clients/{{ req.client_id }}">{{ req.full_name }}</a> · {{ req.phone }}</dd>
+    <dt>Telegram</dt><dd>{% if req.tg_id %}привязан — код уйдёт в бот{% else %}<span class="muted">не привязан — код диктует оператор</span>{% endif %}</dd>
+    <dt>Ссылка</dt><dd><input value="{{ link }}" readonly onclick="this.select()" style="width:100%"></dd>
+    <dt>Срок ссылки</dt><dd>{{ req.expires_at|dmy }}</dd>
+    <dt>Хэш пакета</dt><dd><code class="hash">{{ digest }}</code></dd>
+    {% if req.signed_at %}
+    <dt>Подписано</dt><dd>{{ req.signed_at|dmy }}</dd>
+    <dt>Адрес</dt><dd class="muted">{{ req.signed_ip or '—' }}</dd>
+    <dt>Устройство</dt><dd class="muted">{{ (req.signed_agent or '—')[:120] }}</dd>
+    {% endif %}
+  </dl>
+
+  {% if can_edit(staff, 'clients') and state.open %}
+  <form method="post" action="/signings/{{ req.id }}/code" class="inline-form">
+    <button type="submit">Выдать код</button>
+  </form>
+  <form method="post" action="/signings/{{ req.id }}/cancel" class="inline-form">
+    <button type="submit" class="ghost">Отменить заявку</button>
+  </form>
+  {% if state.code_valid %}
+  <p class="muted">Код выдан, осталось ≈ {{ state.code_left }} мин,
+    попыток у клиента: {{ state.attempts_left }}.</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Документы пакета</h2>
+  <table>
+    <tr><th>Документ</th><th>SHA-256</th></tr>
+    {% for d in req.docs %}
+    <tr>
+      <td>{{ d.title }}</td>
+      <td><code class="hash">{{ d.sha256 or '— файла нет, подписывается перечнем' }}</code></td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Хэш пакета — это хэши документов по порядку, склеенные
+    и хэшированные ещё раз: подмена одного документа меняет общий хэш.</p>
+</section>
+</div>
+
+<section class="card">
+  <h2>Журнал</h2>
+  <table>
+    <tr><th>Когда</th><th>Что</th><th>Адрес</th><th class="opt">Устройство</th><th>Заметка</th></tr>
+    {% for e in events %}
+    <tr>
+      <td>{{ e.at|dmy }}</td>
+      <td>{{ SIGN_EVENTS.get(e.kind, e.kind) }}</td>
+      <td class="muted">{{ e.ip or '—' }}</td>
+      <td class="opt muted">{{ (e.user_agent or '')[:60] }}</td>
+      <td class="muted">{{ e.note or '' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Сам код не хранится нигде: в базе только его хэш вместе
+    с токеном ссылки.</p>
+</section>
+{% endblock %}

@@ -1,0 +1,20 @@
+{# Страница клиента: без меню, без входа в панель. Он здесь по ссылке
+   и должен видеть только документы и поле для кода. #}
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}Подписание документов{% endblock %}</title>
+<link rel="stylesheet" href="/static/fonts.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="sign-body">
+<main class="sign-main">
+  <a class="sign-logo" href="#">{% include "_logo.html" %}</a>
+  {% for kind, text in flash %}<div class="flash {{ kind }}">{{ text }}</div>{% endfor %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

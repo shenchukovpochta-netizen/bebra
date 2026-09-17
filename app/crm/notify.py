@@ -136,3 +136,16 @@ async def repair_ready(bot: Any, client: dict, order: dict, total: Any) -> bool:
         no=order.get("no") or "", object=bot_logic.esc(what),
         total=logic.money(total))
     return await _send(bot, client["tg_id"], text)
+
+
+async def sign_code(bot: Any, request: dict, code: str) -> bool:
+    """Код подтверждения клиенту в Telegram.
+
+    Не в боте - вернётся False, и оператор продиктует код голосом: без
+    этого клиент без Telegram подписать ничего не смог бы.
+    """
+    if not request.get("tg_id") or bot is None:
+        return False
+    return await _send(bot, request["tg_id"],
+                       texts.SIGN_CODE.format(code=code,
+                                              minutes=logic.SIGN_CODE_MINUTES))

@@ -1,0 +1,55 @@
+{% extends "sign_base.html" %}
+{% block title %}Подписание документов — {{ app_title }}{% endblock %}
+{% block content %}
+<h1>Подписание документов</h1>
+
+{% if req.status == 'signed' %}
+<div class="card">
+  <p><b>Документы подписаны {{ req.signed_at|dmy }}.</b></p>
+  <p class="muted">Экземпляры остаются доступны по этой ссылке. Хэш пакета —
+    <code class="hash">{{ digest }}</code>.</p>
+</div>
+{% elif state.cancelled %}
+<div class="card"><p>Заявка отменена оператором. Позвоните на точку — вам соберут новую ссылку.</p></div>
+{% elif state.expired %}
+<div class="card"><p>Срок ссылки истёк. Позвоните на точку — вам соберут новую.</p></div>
+{% endif %}
+
+<div class="card">
+  <h2>Ознакомьтесь с документами</h2>
+  <ul class="docs">
+    {% for d in req.docs %}
+    <li>
+      {% if d.kind == 'esign' %}<a href="/sign/{{ req.token }}/agreement" target="_blank" rel="noopener">{{ d.title }}</a>
+      {% elif d.path %}<a href="/sign/{{ req.token }}/doc/{{ loop.index0 }}">{{ d.title }}</a>
+      {% else %}{{ d.title }} <span class="muted">— подписывается перечнем</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted">Подписывая, вы подтверждаете, что прочитали эти документы
+    и согласны с ними. Подпись — код подтверждения; он равнозначен
+    собственноручной подписи (ст. 160 ГК РФ, 63-ФЗ).</p>
+</div>
+
+{% if state.open %}
+<div class="card">
+  <h2>Подпись</h2>
+  <form method="post" action="/sign/{{ req.token }}/code">
+    <button type="submit" class="wide-btn">🔑 Получить код</button>
+  </form>
+  <p class="muted">{% if req.tg_id %}Код придёт в Telegram и будет действовать {{ SIGN_CODE_MINUTES }} минут.{% else %}Код появится у оператора — он продиктует его по телефону. Действует {{ SIGN_CODE_MINUTES }} минут.{% endif %}</p>
+
+  <form method="post" action="/sign/{{ req.token }}">
+    <label>Код из шести цифр
+      <input name="code" inputmode="numeric" autocomplete="one-time-code"
+             pattern="[0-9 ]*" placeholder="— — — — — —" class="code-input" required></label>
+    <button type="submit" class="wide-btn primary">✍ Подписать документы</button>
+  </form>
+  {% if state.code_valid %}<p class="muted">Код выдан. Попыток осталось: {{ state.attempts_left }}.</p>{% endif %}
+</div>
+{% endif %}
+
+<p class="muted small">Никому не передавайте код: им подписывают документы
+  от вашего имени. Если код пришёл, а вы ничего не подписывали — позвоните
+  на точку.</p>
+{% endblock %}

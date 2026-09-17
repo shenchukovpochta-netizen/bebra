@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from . import logic
+from . import esign, logic
 
 log = logging.getLogger(__name__)
 
@@ -870,3 +870,111 @@ async def cancel_campaign(crm: Any, campaign: dict) -> int:
         left += 1
     await crm.set_campaign_status(campaign["id"], "cancelled")
     return left
+
+
+# ───────────── простая электронная подпись (ПЭП) ─────────────
+
+
+def sign_docs(client: dict, rental: dict | None,
+              bot_user: dict | None) -> list[dict]:
+    """Пакет документов для подписания.
+
+    Договор и согласие собирает бот при регистрации - у них уже есть
+    файлы и хэши, и пересобирать их в панели нечем: паспортные данные
+    зашифрованы ключом, которого у панели нет. Поэтому пакет ссылается
+    на то, что уже выдано, а не выдумывает второй экземпляр.
+    """
+    docs: list[dict] = []
+    user = bot_user or {}
+    contract_no = client.get("contract_no") or user.get("contract_no") or ""
+    if user.get("contract_sha256"):
+        docs.append({"kind": "contract",
+                     "title": f"Договор аренды{' № ' + contract_no if contract_no else ''}",
+                     "sha256": user["contract_sha256"],
+                     "path": user.get("contract_path")})
+    if user.get("soglasie_sha256"):
+        docs.append({"kind": "consent",
+                     "title": "Согласие на обработку персональных данных",
+                     "sha256": user["soglasie_sha256"],
+                     "path": user.get("soglasie_path")})
+    if rental is not None:
+        docs.append({"kind": "act_in",
+                     "title": f"Акт приёма-передачи по аренде № {rental['id']}",
+                     "sha256": "", "path": None})
+    return docs
+
+
+async def start_signing(crm: Any, *, client: dict, rental: dict | None,
+                        company: dict, bot_user: dict | None, by: str,
+                        now: datetime | None = None) -> dict:
+    """Создать заявку на подпись: пакет документов и соглашение об ЭП."""
+    if client.get("status") != "active":
+        raise ServiceError("Клиент заблокирован или в чёрном списке.")
+    now = now or datetime.now(UTC)
+    token = logic.make_sign_token()
+    docs = sign_docs(client, rental, bot_user)
+    # Номер заявки выдаёт база, а он стоит в тексте соглашения. Поэтому
+    # сначала заявка, потом соглашение с её номером: придумывать номер
+    # заранее значит разойтись с базой при первой же гонке операторов.
+    created = await crm.create_sign_request(
+        client_id=client["id"], rental_id=(rental or {}).get("id"), token=token,
+        docs=docs, agreement="",
+        expires_at=now + timedelta(days=logic.SIGN_LINK_DAYS), by=by)
+    agreement = esign.build_agreement(company, client, no=created["no"], docs=docs,
+                                      code_minutes=logic.SIGN_CODE_MINUTES)
+    docs = [{"kind": "esign", "title": "Соглашение об использовании ПЭП",
+             "sha256": esign.sha256_text(agreement), "path": None}, *docs]
+    await crm.set_sign_agreement(created["id"], agreement=agreement, docs=docs)
+    return {**created, "token": token, "docs": docs}
+
+
+async def issue_sign_code(crm: Any, request: dict, *, ip: str | None = None,
+                          agent: str | None = None,
+                          now: datetime | None = None) -> str:
+    """Выдать код подтверждения. Возвращает сам код - его увидит только
+    клиент в сообщении и оператор в панели, в базе останется лишь хэш."""
+    state = logic.sign_state(request, now=now)
+    if not state["open"]:
+        raise ServiceError("Ссылка недействительна: подписано, отменено "
+                           "или истёк срок.")
+    code = logic.make_sign_code()
+    await crm.set_sign_code(request["id"],
+                            code_hash=logic.hash_sign_code(request["token"], code))
+    await crm.log_sign_event(request["id"], kind="code_sent", ip=ip, agent=agent)
+    return code
+
+
+async def verify_sign(crm: Any, request: dict, raw_code: str, *,
+                      ip: str | None = None, agent: str | None = None,
+                      now: datetime | None = None) -> dict:
+    """Проверить код и подписать пакет.
+
+    Неверный код - это событие в журнале и минус попытка, а не молчание:
+    в споре важно видеть, сколько раз и когда пытались.
+    """
+    state = logic.sign_state(request, now=now)
+    if state["signed"]:
+        raise ServiceError("Документы уже подписаны.")
+    if not state["open"]:
+        raise ServiceError("Ссылка недействительна: отменено или истёк срок.")
+    if not request.get("code_hash"):
+        raise ServiceError("Сначала получите код.")
+    if not state["code_valid"]:
+        raise ServiceError("Код больше не действует — получите новый.")
+    code = logic.clean_sign_code(raw_code)
+    if len(code) != 6:
+        raise ServiceError("Код — шесть цифр.")
+    if logic.hash_sign_code(request["token"], code) != request["code_hash"]:
+        left = await crm.bump_sign_attempt(request["id"])
+        await crm.log_sign_event(request["id"], kind="code_wrong", ip=ip,
+                                 agent=agent,
+                                 note=f"попытка {left}")
+        raise ServiceError(
+            f"Неверный код. Осталось попыток: "
+            f"{max(logic.SIGN_MAX_ATTEMPTS - left, 0)}.")
+    if not await crm.mark_signed(request["id"], ip=ip, agent=agent):
+        raise ServiceError("Документы уже подписаны.")
+    digest = logic.sign_docs_digest(request.get("docs") or [])
+    await crm.log_sign_event(request["id"], kind="signed", ip=ip, agent=agent,
+                             note=f"хэш пакета {digest}")
+    return {"digest": digest, "docs": list(request.get("docs") or [])}

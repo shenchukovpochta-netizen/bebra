@@ -46,6 +46,8 @@ class FakeCrm:
         self.compat_: dict[tuple, bool] = {}
         self.batteries_: dict[int, dict] = {}
         self.battery_log_: list[dict] = []
+        self.signs_: dict[int, dict] = {}
+        self.sign_events_: list[dict] = []
         self.templates_: dict[int, dict] = {}
         self.campaigns_: dict[int, dict] = {}
         self.sends_: dict[int, dict] = {}
@@ -1618,6 +1620,80 @@ class FakeCrm:
                 count += 1
         return count
 
+
+    # ─── подписание документов (ПЭП) ───
+    def _sign_row(self, request):
+        client = self.clients_.get(request["client_id"]) or {}
+        return {**request, "full_name": client.get("full_name"),
+                "phone": client.get("phone"), "tg_id": client.get("tg_id")}
+
+    async def sign_requests(self, *, client_id=None, limit=200):
+        rows = [self._sign_row(r) for r in self.signs_.values()
+                if client_id is None or r["client_id"] == client_id]
+        return sorted(rows, key=lambda r: r["id"], reverse=True)[:limit]
+
+    async def sign_request(self, request_id):
+        request = self.signs_.get(request_id)
+        return self._sign_row(request) if request else None
+
+    async def sign_request_by_token(self, token):
+        return next((self._sign_row(r) for r in self.signs_.values()
+                     if r["token"] == token), None)
+
+    async def create_sign_request(self, *, client_id, rental_id, token, docs,
+                                  agreement, expires_at, by):
+        request_id = self._id()
+        number = crm_logic.sign_no(len(self.signs_) + 1)
+        self.signs_[request_id] = {
+            "id": request_id, "no": number, "client_id": client_id,
+            "rental_id": rental_id, "token": token, "docs": list(docs),
+            "agreement": agreement, "code_hash": None, "code_at": None,
+            "attempts": 0, "status": "new", "expires_at": expires_at,
+            "signed_at": None, "signed_ip": None, "signed_agent": None,
+            "note": None, "created_by": by, "created_at": self._now()}
+        await self.log_sign_event(request_id, kind="created", note=by)
+        return {"id": request_id, "no": number}
+
+    async def set_sign_agreement(self, request_id, *, agreement, docs):
+        request = self.signs_.get(request_id)
+        if request is not None:
+            request["agreement"] = agreement
+            request["docs"] = list(docs)
+
+    async def set_sign_code(self, request_id, *, code_hash):
+        request = self.signs_.get(request_id)
+        if request is not None and request["status"] in ("new", "code"):
+            request.update(code_hash=code_hash, code_at=self._now(), attempts=0,
+                           status="code")
+
+    async def bump_sign_attempt(self, request_id):
+        request = self.signs_[request_id]
+        request["attempts"] += 1
+        return request["attempts"]
+
+    async def mark_signed(self, request_id, *, ip, agent):
+        request = self.signs_.get(request_id)
+        if request is None or request["status"] not in ("new", "code"):
+            return False
+        request.update(status="signed", signed_at=self._now(), signed_ip=ip,
+                       signed_agent=agent, code_hash=None)
+        return True
+
+    async def cancel_sign_request(self, request_id, *, by):
+        request = self.signs_.get(request_id)
+        if request is not None and request["status"] in ("new", "code"):
+            request["status"] = "cancelled"
+        await self.log_sign_event(request_id, kind="cancelled", note=by)
+
+    async def log_sign_event(self, request_id, *, kind, ip=None, agent=None,
+                             note=None):
+        self.sign_events_.append({"id": self._id(), "request_id": request_id,
+                                  "kind": kind, "at": self._now(), "ip": ip,
+                                  "user_agent": agent, "note": note})
+
+    async def sign_events(self, request_id, limit=100):
+        return [dict(e) for e in self.sign_events_
+                if e["request_id"] == request_id][:limit]
 
     # ─── рассылки ───
     async def templates(self, *, active_only=False):

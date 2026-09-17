@@ -969,6 +969,51 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.set_campaign_status(created["id"], "done")
         self.assertEqual(await self.crm.sending_campaigns(), [])
 
+    async def test_signing_on_postgres(self):
+        """ПЭП на живой базе: пакет в jsonb, код только хэшем, подпись одна."""
+        await self.seed()
+        client = await self.crm.client(self.client_id)
+        company = {"company_name": "ИП Гарипов И. Р.", "company_inn": "166012345678"}
+        created = await service.start_signing(
+            self.crm, client=client, rental=None, company=company,
+            bot_user={"contract_sha256": "c" * 64, "contract_path": "/tmp/c.pdf",
+                      "contract_no": "АВ-2026-000042"},
+            by="staff:t")
+        self.assertEqual(created["no"], "ПЭП-000001")
+        row = await self.crm.sign_request(created["id"])
+        self.assertEqual([d["kind"] for d in row["docs"]], ["esign", "contract"],
+                         "jsonb вернулся списком, а не строкой")
+        self.assertIn("ПЭП-000001", row["agreement"])
+        self.assertEqual(row["status"], "new")
+
+        code = await service.issue_sign_code(self.crm, row, ip="10.0.0.1")
+        stored = await self.crm.sign_request(created["id"])
+        self.assertEqual(stored["status"], "code")
+        self.assertNotIn(code, stored["code_hash"])
+        self.assertEqual(stored["code_hash"],
+                         logic.hash_sign_code(row["token"], code))
+
+        with self.assertRaises(service.ServiceError):
+            await service.verify_sign(self.crm, stored, "000000", ip="10.0.0.1")
+        after = await self.crm.sign_request(created["id"])
+        self.assertEqual(after["attempts"], 1)
+
+        signed = await service.verify_sign(self.crm, after, code, ip="10.0.0.1",
+                                           agent="Mozilla/5.0")
+        self.assertEqual(signed["digest"], logic.sign_docs_digest(after["docs"]))
+        done = await self.crm.sign_request(created["id"])
+        self.assertEqual(done["status"], "signed")
+        self.assertEqual(done["signed_ip"], "10.0.0.1")
+        self.assertIsNone(done["code_hash"])
+        # Вторая подпись невозможна: обновление не находит строку.
+        self.assertFalse(await self.crm.mark_signed(created["id"], ip=None,
+                                                    agent=None))
+        kinds = [e["kind"] for e in await self.crm.sign_events(created["id"])]
+        self.assertEqual(kinds, ["created", "code_sent", "code_wrong", "signed"])
+        by_token = await self.crm.sign_request_by_token(row["token"])
+        self.assertEqual(by_token["id"], created["id"])
+        self.assertEqual(by_token["full_name"], "Иванов Иван")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -64,8 +64,9 @@ Claude Code читает этот файл в начале каждой сесс
 `purchases`, `locations`, `bike_models`, `battery_models`, `compat`,
 `batteries`, `battery_status_log`, `trackers`, `tracker_positions`,
 `tracker_alerts`, `cash_shifts`, `cash_moves`, `bank_txns`,
-`message_templates`, `campaigns`, `campaign_sends`, `clients`, `rentals`,
-`rental_bikes`, `ledger`, `payment_claims`.
+`message_templates`, `campaigns`, `campaign_sends`, `sign_requests`,
+`sign_events`, `clients`, `rentals`, `rental_bikes`, `ledger`,
+`payment_claims`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -113,6 +114,12 @@ Claude Code читает этот файл в начале каждой сесс
   велосипеда остался для парка без карточек; как только батарея привязана
   к велосипеду, от велосипеда берётся только рама (`frame_amortization`),
   иначе амортизация посчиталась бы дважды.
+- **ПЭП** (`sign_requests`, `sign_events`): заявка на подпись хранит пакет
+  документов с их SHA-256 и текст соглашения об ЭП ровно в том виде,
+  в каком его приняли. Код подтверждения живёт минуты и в базе лежит
+  только хэшем вместе с токеном ссылки. Страница `/sign/<токен>` открыта
+  клиенту без входа в панель (в `PUBLIC`), раздел `/signings` — нет.
+  Подписанная заявка неизменяема: это протокол, а не карточка.
 - **Рассылки** (`message_templates`, `campaigns`, `campaign_sends`): шаблон
   хранит текст для Telegram и для MAX отдельно (MAX разметку не понимает),
   подстановки — белым списком (`logic.TEMPLATE_FIELDS`). Кампания собирается

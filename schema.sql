@@ -1368,3 +1368,55 @@ create index if not exists campaign_sends_queue
 alter table crm.clients add column if not exists max_id bigint;
 create unique index if not exists clients_max_idx on crm.clients (max_id)
   where max_id is not null;
+
+-- ────────────── простая электронная подпись (ПЭП) ──────────────
+--
+-- Кнопка «подписываю» в боте фиксирует согласие, но не доказывает его:
+-- в споре нужно показать, ЧТО именно подписали, КОГДА, КАКИМ кодом и
+-- с какого адреса. Поэтому заявка на подпись хранит перечень документов
+-- с их хэшами, а каждый шаг пишется в журнал.
+--
+-- Сам код не хранится нигде: в базе только его хэш вместе с токеном
+-- ссылки. Утечка дампа не даёт подписать задним числом.
+
+create table if not exists crm.sign_requests (
+  id           bigserial primary key,
+  no           text        not null unique,   -- ПЭП-000001
+  client_id    bigint      not null references crm.clients (id),
+  rental_id    bigint      references crm.rentals (id),
+  -- Токен ссылки: клиент открывает страницу подписания по нему, без входа
+  -- в панель. Длинный и случайный - это и есть вся его защита.
+  token        text        not null unique,
+  -- Перечень подписываемых документов: [{kind, title, sha256, path}].
+  docs         jsonb       not null default '[]'::jsonb,
+  -- Текст соглашения об ЭП ровно в том виде, в каком его приняли.
+  agreement    text,
+  code_hash    text,                          -- sha256(токен + ':' + код)
+  code_at      timestamptz,
+  attempts     integer     not null default 0,
+  -- new|code|signed|cancelled
+  status       text        not null default 'new',
+  expires_at   timestamptz not null,
+  signed_at    timestamptz,
+  signed_ip    text,
+  signed_agent text,
+  note         text,
+  created_by   text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists sign_requests_client_idx
+  on crm.sign_requests (client_id, id desc);
+create index if not exists sign_requests_open_idx
+  on crm.sign_requests (status) where status in ('new', 'code');
+
+create table if not exists crm.sign_events (
+  id         bigserial primary key,
+  request_id bigint      not null references crm.sign_requests (id) on delete cascade,
+  -- created|opened|code_sent|code_wrong|signed|cancelled|expired
+  kind       text        not null,
+  at         timestamptz not null default now(),
+  ip         text,
+  user_agent text,
+  note       text
+);
+create index if not exists sign_events_idx on crm.sign_events (request_id, id);

@@ -2510,3 +2510,102 @@ class CrmDB:
                                 where other.max_id = $2 and other.phone <> $1)
             returning id
             """, phone, max_id)
+
+    # ───────────── простая электронная подпись (ПЭП) ─────────────
+
+    _SIGN_SELECT = """
+        select s.*, c.full_name, c.phone, c.tg_id
+          from crm.sign_requests s
+          join crm.clients c on c.id = s.client_id
+    """
+
+    async def sign_requests(self, *, client_id: int | None = None,
+                            limit: int = 200) -> list[dict]:
+        where = "where s.client_id = $2" if client_id else ""
+        args = [limit] + ([client_id] if client_id else [])
+        return _rows(await self.pool.fetch(
+            f"{self._SIGN_SELECT} {where} order by s.id desc limit $1", *args))
+
+    async def sign_request(self, request_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._SIGN_SELECT} where s.id = $1", request_id))
+
+    async def sign_request_by_token(self, token: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._SIGN_SELECT} where s.token = $1", token))
+
+    async def create_sign_request(self, *, client_id: int, rental_id: int | None,
+                                  token: str, docs: list[dict], agreement: str,
+                                  expires_at: datetime, by: str) -> dict:
+        """Завести заявку. Номер выдаётся в той же транзакции: две заявки,
+        созданные одновременно, иначе получат один номер."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            number = int(await conn.fetchval(
+                "select count(*) + 1 from crm.sign_requests"))
+            row = await conn.fetchrow(
+                """
+                insert into crm.sign_requests (no, client_id, rental_id, token,
+                                               docs, agreement, expires_at,
+                                               created_by)
+                values ($1, $2, $3, $4, $5, $6, $7, $8)
+                returning id, no
+                """, logic.sign_no(number), client_id, rental_id, token,
+                # Кодек json уже стоит на соединении: свой json.dumps здесь
+                # завернул бы список в строку, и обратно пришла бы строка.
+                docs, agreement, expires_at, by)
+            await conn.execute(
+                "insert into crm.sign_events (request_id, kind, note) "
+                "values ($1, 'created', $2)", row["id"], by)
+            return {"id": int(row["id"]), "no": row["no"]}
+
+    async def set_sign_agreement(self, request_id: int, *, agreement: str,
+                                 docs: list[dict]) -> None:
+        """Текст соглашения и итоговый пакет - сразу после создания заявки:
+        номер заявки стоит в тексте, а его выдаёт база."""
+        await self.pool.execute(
+            "update crm.sign_requests set agreement = $2, docs = $3 "
+            "where id = $1", request_id, agreement, docs)
+
+    async def set_sign_code(self, request_id: int, *, code_hash: str) -> None:
+        """Новый код обнуляет счётчик попыток: старые промахи к нему
+        отношения не имеют."""
+        await self.pool.execute(
+            "update crm.sign_requests set code_hash = $2, code_at = now(), "
+            "attempts = 0, status = 'code' where id = $1 and status in ('new', 'code')",
+            request_id, code_hash)
+
+    async def bump_sign_attempt(self, request_id: int) -> int:
+        return int(await self.pool.fetchval(
+            "update crm.sign_requests set attempts = attempts + 1 "
+            "where id = $1 returning attempts", request_id))
+
+    async def mark_signed(self, request_id: int, *, ip: str | None,
+                          agent: str | None) -> bool:
+        """Подписать. False - кто-то успел раньше: подпись одна на заявку."""
+        row = await self.pool.fetchrow(
+            """
+            update crm.sign_requests
+               set status = 'signed', signed_at = now(), signed_ip = $2,
+                   signed_agent = $3, code_hash = null
+             where id = $1 and status in ('new', 'code')
+            returning id
+            """, request_id, ip, agent)
+        return row is not None
+
+    async def cancel_sign_request(self, request_id: int, *, by: str) -> None:
+        await self.pool.execute(
+            "update crm.sign_requests set status = 'cancelled' "
+            "where id = $1 and status in ('new', 'code')", request_id)
+        await self.log_sign_event(request_id, kind="cancelled", note=by)
+
+    async def log_sign_event(self, request_id: int, *, kind: str,
+                             ip: str | None = None, agent: str | None = None,
+                             note: str | None = None) -> None:
+        await self.pool.execute(
+            "insert into crm.sign_events (request_id, kind, ip, user_agent, note) "
+            "values ($1, $2, $3, $4, $5)", request_id, kind, ip, agent, note)
+
+    async def sign_events(self, request_id: int, limit: int = 100) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.sign_events where request_id = $1 "
+            "order by id limit $2", request_id, limit))

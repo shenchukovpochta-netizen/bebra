@@ -60,7 +60,7 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
 $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/billing.py', 'app/crm/service.py', 'app/crm/company.py', 'app/crm/notify.py',
          'app/crm/sync.py', 'app/crm/import_xlsx.py', 'app/crm/tracking.py',
-         'app/crm/banking.py', 'app/crm/mailing.py')
+         'app/crm/banking.py', 'app/crm/mailing.py', 'app/crm/esign.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -112,7 +112,13 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/cash_shift.html',
                   'app/web/templates/bank.html',
                   'app/web/templates/mailing.html',
-                  'app/web/templates/campaign.html')
+                  'app/web/templates/campaign.html',
+                  'app/web/templates/signings.html',
+                  'app/web/templates/signing.html',
+                  'app/web/templates/sign_base.html',
+                  'app/web/templates/sign.html',
+                  'app/web/templates/sign_agreement.html',
+                  'app/web/templates/sign_missing.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -155,7 +161,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_parts.py', 'tests/test_swap.py',
           'tests/test_search.py', 'tests/test_plan.py', 'tests/test_assets.py', 'tests/test_company.py', 'tests/test_batteries.py',
           'tests/test_trackers.py', 'tests/test_cash.py',
-          'tests/test_mailing.py')
+          'tests/test_mailing.py', 'tests/test_esign.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

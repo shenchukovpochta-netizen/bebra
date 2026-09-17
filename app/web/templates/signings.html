@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Подписания — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Подписания</h1></div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ summary.signed }}</b><span>подписано</span></div>
+  <div class="tile {% if summary.open %}warn{% endif %}"><b>{{ summary.open }}</b><span>ждут клиента</span></div>
+  <div class="tile"><b>{{ summary.expired }}</b><span>истёк срок</span></div>
+  <div class="tile"><b>{{ summary.total }}</b><span>всего заявок</span></div>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>Заявка</th><th>Клиент</th><th>Документов</th><th>Состояние</th><th>Когда</th><th class="opt">Кто завёл</th></tr>
+  {% for r in rows %}
+  <tr class="{% if r.open %}warn-row{% endif %}">
+    <td><a href="/signings/{{ r.id }}">{{ r.no }}</a></td>
+    <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %} <span class="muted">{{ r.phone }}</span></td>
+    <td class="num">{{ r.docs_count }}</td>
+    <td>
+      {% if r.status == 'signed' %}<span class="tag ok">подписано</span>
+      {% elif r.cancelled %}<span class="tag muted">отменено</span>
+      {% elif r.expired %}<span class="tag muted">истёк срок</span>
+      {% else %}<span class="tag rented">{{ SIGN_STATUSES[r.status] }}</span>{% endif %}
+    </td>
+    <td>{% if r.signed_at %}{{ r.signed_at|dmy }}{% else %}{{ r.created_at|dmy }}{% endif %}</td>
+    <td class="opt muted">{{ r.created_by or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="muted">Заявок не было. Ссылку на подписание собирают в карточке клиента.</td></tr>{% endfor %}
+</table>
+<p class="muted">Заявка — это протокол: что подписали, когда, каким кодом
+  и с какого адреса. Подписанную заявку нельзя отменить или переписать,
+  иначе она перестанет быть доказательством.</p>
+</div>
+{% endblock %}

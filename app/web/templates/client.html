@@ -95,6 +95,24 @@
   </form>
   </fieldset>
   <p class="muted">Чёрный список закрывает кабинет в Telegram и оформление аренды; телефон остаётся в базе, и повторная регистрация с этим номером будет видна здесь.</p>
+  {% if can_edit(staff, 'clients') %}
+  {# Подписание по коду: ссылка клиенту, код в Telegram или голосом. #}
+  <form method="post" action="/clients/{{ client.id }}/sign" class="inline-form">
+    <button type="submit" class="ghost">✍ Собрать ссылку на подписание</button>
+  </form>
+  {% endif %}
+  {% if signings %}
+  <table>
+    <tr><th>Подписание</th><th>Когда</th><th>Состояние</th></tr>
+    {% for r in signings %}
+    <tr>
+      <td><a href="/signings/{{ r.id }}">{{ r.no }}</a></td>
+      <td>{{ (r.signed_at or r.created_at)|dmy }}</td>
+      <td>{% if r.status == 'signed' %}<span class="tag ok">подписано</span>{% else %}{{ SIGN_STATUSES[r.status] }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
 </section>
 </div>
 {% endblock %}

@@ -34,7 +34,9 @@ from .config import WebConfig
 
 log = logging.getLogger(__name__)
 HERE = Path(__file__).resolve().parent
-PUBLIC = ("/login", "/static", "/healthz")
+# Страница подписания открыта клиенту: он не сотрудник и в панель
+# не входит. Защита у неё одна - случайный токен в ссылке.
+PUBLIC = ("/login", "/static", "/healthz", "/sign/")
 # Свой кабинет доступен любому сотруднику, каким бы урезанным ни был профиль.
 ALWAYS_OPEN = ("/logout", "/me", "/me/password")
 SESSION_DAYS = 14
@@ -120,6 +122,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
         TRACKER_ALERTS=logic.TRACKER_ALERTS,
+        SIGN_STATUSES=logic.SIGN_STATUSES, SIGN_EVENTS=logic.SIGN_EVENTS,
+        SIGN_DOC_KINDS=logic.SIGN_DOC_KINDS,
+        SIGN_CODE_MINUTES=logic.SIGN_CODE_MINUTES,
         AUDIENCES=logic.AUDIENCES, CAMPAIGN_STATUSES=logic.CAMPAIGN_STATUSES,
         SEND_STATUSES=logic.SEND_STATUSES, SEND_CHANNELS=logic.SEND_CHANNELS,
         TEMPLATE_FIELDS=logic.TEMPLATE_FIELDS,
@@ -564,7 +569,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       ledger=await crm.ledger_of(client_id, 100),
                       rentals=await crm.client_rentals(client_id),
                       claim=await crm.pending_claim_of(client_id),
-                      bot_user=bot_user, has_contract=has_contract)
+                      bot_user=bot_user, has_contract=has_contract,
+                      signings=await crm.sign_requests(client_id=client_id,
+                                                       limit=20))
 
     @app.post("/clients/{client_id}/edit")
     async def client_edit(request: Request, client_id: int) -> Response:
@@ -2465,6 +2472,173 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"Батарея заменена на {new['code']}." if old is not None
               else f"Батарея {new['code']} выдана клиенту.")
         return redirect(f"/rentals/{rental_id}")
+
+    # ───────────── подписание документов (ПЭП) ─────────────
+
+    def sign_link(request: Request, token: str) -> str:
+        """Ссылка для клиента - абсолютная: её отправляют в мессенджер."""
+        return str(request.base_url).rstrip("/") + f"/sign/{token}"
+
+    async def sign_company() -> dict:
+        settings = await crm.settings()
+        return {code: settings.get(code, "") for code in company.COMPANY_FIELDS}
+
+    @app.get("/signings")
+    async def signings_page(request: Request) -> Response:
+        if not may_view(request, "clients"):
+            return denied(request, "clients")
+        rows = logic.sign_rows(await crm.sign_requests(limit=200))
+        return render(request, "signings.html", rows=rows,
+                      summary=logic.sign_summary(rows))
+
+    @app.post("/clients/{client_id}/sign")
+    async def sign_start(request: Request, client_id: int) -> Response:
+        """Собрать пакет документов и ссылку на подписание."""
+        if not may_edit(request, "clients"):
+            return denied(request, "clients")
+        client = await crm.client(client_id)
+        if client is None:
+            return render(request, "missing.html", status_code=404, what="Клиент")
+        bot_user = await db.get_user(client["tg_id"]) if client.get("tg_id") else None
+        try:
+            created = await service.start_signing(
+                crm, client=client, rental=await crm.active_rental_of(client_id),
+                company=await sign_company(),
+                bot_user=dict(bot_user) if bot_user else None, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/clients/{client_id}")
+        flash(request, f"Заявка на подпись {created['no']} готова. "
+                       "Отправьте клиенту ссылку и продиктуйте код, когда он "
+                       "его запросит.")
+        return redirect(f"/signings/{created['id']}")
+
+    @app.get("/signings/{request_id}")
+    async def sign_card(request: Request, request_id: int) -> Response:
+        if not may_view(request, "clients"):
+            return denied(request, "clients")
+        row = await crm.sign_request(request_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Заявка")
+        return render(request, "signing.html", req=row,
+                      state=logic.sign_state(row),
+                      link=sign_link(request, row["token"]),
+                      digest=logic.sign_docs_digest(row.get("docs") or []),
+                      events=await crm.sign_events(request_id))
+
+    @app.post("/signings/{request_id}/code")
+    async def sign_code_send(request: Request, request_id: int) -> Response:
+        """Код по просьбе оператора: клиент без Telegram узнаёт его
+        голосом, по телефону."""
+        if not may_edit(request, "clients"):
+            return denied(request, "clients")
+        row = await crm.sign_request(request_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Заявка")
+        try:
+            code = await service.issue_sign_code(crm, row, ip=client_ip(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/signings/{request_id}")
+        await notify.sign_code(bot, row, code)
+        request.session["sign_code"] = {"id": request_id, "code": code}
+        flash(request, f"Код {code} действует {logic.SIGN_CODE_MINUTES} минут."
+                       + (" Он же ушёл клиенту в Telegram." if row.get("tg_id")
+                          else " Клиент не в боте — продиктуйте код."))
+        return redirect(f"/signings/{request_id}")
+
+    @app.post("/signings/{request_id}/cancel")
+    async def sign_cancel(request: Request, request_id: int) -> Response:
+        if not may_edit(request, "clients"):
+            return denied(request, "clients")
+        row = await crm.sign_request(request_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Заявка")
+        if row["status"] == "signed":
+            flash(request, "Подписанное не отменяется: заявка - это протокол.",
+                  "err")
+            return redirect(f"/signings/{request_id}")
+        await crm.cancel_sign_request(request_id, by=who(request))
+        flash(request, "Заявка отменена, ссылка больше не работает.")
+        return redirect(f"/signings/{request_id}")
+
+    # ─── страница клиента: без входа в панель, по токену из ссылки ───
+
+    async def sign_by_token(token: str) -> dict | None:
+        return await crm.sign_request_by_token(token)
+
+    def agent_of(request: Request) -> str:
+        return (request.headers.get("user-agent") or "")[:300]
+
+    @app.get("/sign/{token}")
+    async def sign_page(request: Request, token: str) -> Response:
+        row = await sign_by_token(token)
+        if row is None:
+            return render(request, "sign_missing.html", status_code=404)
+        state = logic.sign_state(row)
+        if state["open"]:
+            await crm.log_sign_event(row["id"], kind="opened",
+                                     ip=client_ip(request), agent=agent_of(request))
+        return render(request, "sign.html", req=row, state=state,
+                      digest=logic.sign_docs_digest(row.get("docs") or []),
+                      company=await sign_company())
+
+    @app.get("/sign/{token}/agreement")
+    async def sign_agreement(request: Request, token: str) -> Response:
+        """Соглашение об ЭП - ровно тот текст, который подписывают."""
+        row = await sign_by_token(token)
+        if row is None:
+            return render(request, "sign_missing.html", status_code=404)
+        return render(request, "sign_agreement.html", req=row,
+                      text=row.get("agreement") or "")
+
+    @app.get("/sign/{token}/doc/{index}")
+    async def sign_doc(request: Request, token: str, index: int) -> Response:
+        """Файл из пакета. Отдаём только то, что лежит в самой заявке:
+        путь приходит не из запроса, а из её списка документов."""
+        row = await sign_by_token(token)
+        if row is None:
+            return render(request, "sign_missing.html", status_code=404)
+        docs = list(row.get("docs") or [])
+        if not 0 <= index < len(docs) or not docs[index].get("path"):
+            return render(request, "sign_missing.html", status_code=404)
+        path = Path(str(docs[index]["path"]))
+        if not path.is_file():
+            return render(request, "sign_missing.html", status_code=404)
+        return FileResponse(path, filename=f"{docs[index]['title']}{path.suffix}")
+
+    @app.post("/sign/{token}/code")
+    async def sign_ask_code(request: Request, token: str) -> Response:
+        row = await sign_by_token(token)
+        if row is None:
+            return render(request, "sign_missing.html", status_code=404)
+        try:
+            code = await service.issue_sign_code(crm, row, ip=client_ip(request),
+                                                 agent=agent_of(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/sign/{token}")
+        sent = await notify.sign_code(bot, row, code)
+        flash(request, "Код отправлен в Telegram." if sent
+              else "Код готов — позвоните оператору, он его продиктует.")
+        return redirect(f"/sign/{token}")
+
+    @app.post("/sign/{token}")
+    async def sign_submit(request: Request, token: str) -> Response:
+        row = await sign_by_token(token)
+        if row is None:
+            return render(request, "sign_missing.html", status_code=404)
+        data = await form(request)
+        try:
+            await service.verify_sign(crm, row, data.get("code"),
+                                      ip=client_ip(request),
+                                      agent=agent_of(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/sign/{token}")
+        flash(request, "Документы подписаны. Экземпляры остаются доступны "
+                       "по этой ссылке.")
+        return redirect(f"/sign/{token}")
 
     # ─────────────────────── рассылки ───────────────────────
 
