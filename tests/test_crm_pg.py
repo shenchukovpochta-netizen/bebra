@@ -1295,6 +1295,52 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([b["code"] for b in await self.crm.bikes_on_assembly()],
                          ["B-901"])
 
+    async def test_doc_templates_on_postgres(self):
+        """Свои шаблоны на живой базе: включённый ровно один."""
+        await self.seed()
+        self.assertEqual(await self.crm.doc_templates(), [])
+        first = await self.crm.add_doc_template(
+            kind="contract", filename="contract-0001.docx",
+            original="договор.docx", size_bytes=1234, sha256="a" * 64,
+            by="staff:t")
+        second = await self.crm.add_doc_template(
+            kind="contract", filename="contract-0002.docx",
+            original="договор-2.docx", size_bytes=2345, sha256="b" * 64,
+            by="staff:t")
+        # Загруженный шаблон сам по себе не включается.
+        self.assertIsNone(await self.crm.active_doc_template("contract"))
+
+        self.assertTrue(await self.crm.enable_doc_template(first))
+        self.assertEqual((await self.crm.active_doc_template("contract"))["id"],
+                         first)
+        # Второй включается вместо первого: частичный уникальный индекс
+        # не даст двум быть включёнными сразу.
+        self.assertTrue(await self.crm.enable_doc_template(second))
+        active = await self.crm.active_doc_template("contract")
+        self.assertEqual(active["id"], second)
+        self.assertEqual(sum(1 for r in await self.crm.doc_templates("contract")
+                             if r["active"]), 1)
+
+        # Включённый из архива не удаляется.
+        self.assertIsNone(await self.crm.drop_doc_template(second))
+        self.assertIsNotNone(await self.crm.drop_doc_template(first))
+
+        await self.crm.disable_doc_templates("contract")
+        self.assertIsNone(await self.crm.active_doc_template("contract"))
+        self.assertEqual(len(await self.crm.doc_templates("contract")), 1,
+                         "прошлая редакция остаётся в архиве")
+
+        # Подпись и печать: одна строка на вид, замена перезаписывает.
+        await self.crm.set_company_mark("stamp", filename="stamp.png",
+                                        size_bytes=10, by="staff:t")
+        await self.crm.set_company_mark("stamp", filename="stamp.png",
+                                        size_bytes=20, by="staff:t")
+        marks = await self.crm.company_marks()
+        self.assertEqual(len(marks), 1)
+        self.assertEqual(marks[0]["size_bytes"], 20)
+        await self.crm.drop_company_mark("stamp")
+        self.assertEqual(await self.crm.company_marks(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

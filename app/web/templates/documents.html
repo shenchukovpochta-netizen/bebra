@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Документы — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Документы</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/documents" class="on">Документы</a>
+    <a href="/locations">Точки</a><a href="/models">Каталог</a>
+    <a href="/notices">Уведомления</a><a href="/intake">Ввод техники</a></nav>
+</div>
+
+{% set can = can_edit(staff, 'settings') %}
+<section class="card">
+  <h2>Шаблоны <span class="muted">· своих {{ summary.mine }} из {{ summary.total }}</span></h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Документ</th><th>Чей шаблон</th><th></th></tr>
+    {% for r in rows %}
+    <tr class="{% if r.code_only %}muted{% endif %}">
+      <td><b>{{ r.title }}</b><br><small class="muted">{{ r.hint }}</small>
+        {% if r.active %}<br><small class="muted">{{ r.active.original or r.active.filename }} ·
+          {{ (r.active.size_bytes / 1024)|round|int }} КБ ·
+          {{ r.active.uploaded_at|dmy }}{% if r.active.uploaded_by %} · {{ r.active.uploaded_by }}{% endif %}</small>{% endif %}</td>
+      <td>
+        {% if r.code_only %}<span class="tag">собирается кодом</span>
+        {% elif r.mine %}<span class="tag ok">ваш</span>
+        {% else %}<span class="tag">наш</span>{% endif %}
+      </td>
+      <td class="stack">
+        {% if not r.code_only %}
+        {% if ours.get(r.kind) %}<a class="btn ghost" href="/documents/ours/{{ r.kind }}">Скачать наш</a>{% endif %}
+        {% if r.active %}
+        <a class="btn ghost" href="/documents/mine/{{ r.active.id }}">Скачать ваш</a>
+        {% if can %}
+        <form method="post" action="/documents/{{ r.kind }}" class="inline-form">
+          <button type="submit" name="action" value="ours" class="ghost">Вернуть наш</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        {% if can %}
+        <form method="post" action="/documents/{{ r.kind }}" class="inline-form"
+              enctype="multipart/form-data">
+          <input type="file" name="template" accept=".docx">
+          <button type="submit" name="action" value="upload">Загрузить свой</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% if r.archive %}
+    <tr class="muted">
+      <td colspan="3"><small>Архив:
+        {% for a in r.archive %}
+        <a href="/documents/mine/{{ a.id }}">{{ a.original or a.filename }}</a>
+        <span class="muted">({{ a.uploaded_at|dmy }})</span>
+        {% if can %}
+        <form method="post" action="/documents/{{ r.kind }}" class="inline-form">
+          <input type="hidden" name="template_id" value="{{ a.id }}">
+          <button type="submit" name="action" value="enable" class="ghost">включить</button>
+          <button type="submit" name="action" value="drop" class="ghost danger">убрать</button>
+        </form>
+        {% endif %}
+        {% if not loop.last %} · {% endif %}
+        {% endfor %}
+      </small></td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+  </table>
+  </div>
+  <p class="muted">У каждого вида документа всегда включён ровно один
+    шаблон: наш или ваш. Загрузили свой и включили — наш выключится сам.
+    Выключить оба нельзя: выдачу тогда нечем будет оформить.</p>
+  <p class="muted">Шаблон — это настоящий docx вашего юриста, в пустые
+    графы которого вписаны подстановки вида <code>{{ '{{ фио }}' }}</code>.
+    Вёрстка, шрифты и таблицы остаются нетронутыми — заполняются только
+    подстановки. Начните со скачивания нашего: все доступные поля уже
+    расставлены в нём.</p>
+  <p class="muted">Прошлые редакции остаются в архиве: вернуть старую
+    версию договора бывает нужно ровно тогда, когда спорят по уже
+    подписанному.</p>
+</section>
+
+<section class="card">
+  <h2>Подпись и печать</h2>
+  <div class="cols">
+  {% for kind, title in COMPANY_MARKS.items() %}
+  <div>
+    <h3>{{ title }}</h3>
+    {% if marks.get(kind) %}
+    <p><img src="/documents/marks/{{ kind }}" alt="{{ title }}"
+         style="max-height:120px;max-width:100%;background:#fff;padding:6px;border-radius:8px">
+      <br><small class="muted">{{ (marks[kind].size_bytes / 1024)|round|int }} КБ ·
+        {{ marks[kind].uploaded_at|dmy }}</small></p>
+    {% if can %}
+    <form method="post" action="/documents/marks/{{ kind }}" class="inline-form">
+      <button type="submit" name="action" value="drop" class="ghost danger">Убрать</button>
+    </form>
+    {% endif %}
+    {% else %}
+    <p class="muted">Не загружена — подстановка в документе просто исчезнет.</p>
+    {% endif %}
+    {% if can %}
+    <form method="post" action="/documents/marks/{{ kind }}" class="inline-form"
+          enctype="multipart/form-data">
+      <input type="file" name="mark" accept="image/png">
+      <button type="submit">{{ 'Заменить' if marks.get(kind) else 'Загрузить' }} PNG</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+  </div>
+  <p class="muted">PNG на прозрачном фоне, до 2 МБ. Картинка встаёт на
+    место подстановки <code>{{ '{{ signature }}' }}</code> или
+    <code>{{ '{{ stamp }}' }}</code> в шаблоне; нет подстановки — нет и
+    картинки, документ от этого не ломается.</p>
+  <p class="muted">Отпечаток документа считается по тексту и от картинки
+    не зависит: иначе проверить уже подписанный договор было бы нечем.</p>
+</section>
+{% endblock %}

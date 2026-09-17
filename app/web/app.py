@@ -28,7 +28,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
-from ..crm import company, import_xlsx, logic, notices, notify, service
+from ..crm import company, doctemplates, import_xlsx, logic, notices, notify, service
 from ..services import contract as contract_service
 from ..services import tochka
 from .config import WebConfig
@@ -139,6 +139,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
         PAY_STATUSES=logic.PAY_STATUSES, PAY_KINDS=logic.PAY_KINDS,
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
+        DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
+        BIKE_PASSPORT=logic.BIKE_PASSPORT,
         NOTICE_TARGETS=logic.NOTICE_TARGETS,
         NOTICE_STATUSES=logic.NOTICE_STATUSES,
         NOTICE_LOG_DAYS=logic.NOTICE_LOG_DAYS,
@@ -3400,6 +3402,176 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"{logic.money(txn['amount'])} зачислено: "
                        f"{client['full_name']}.")
         return redirect("/bank")
+
+    # ─────────────────── документы: свой шаблон ───────────────────
+
+    # Наши шаблоны лежат в образе бота; панель их только отдаёт на
+    # скачивание, чтобы было с чего начинать свой.
+    OUR_TEMPLATES = {
+        "contract": Path("app/contract_template.docx"),
+        "act_in": Path("app/act_priema_template.docx"),
+        "act_out": Path("app/act_vozvrata_template.docx"),
+        "buyout": Path("app/act_vykup_template.docx"),
+        "consent": Path("app/soglasie_template.docx"),
+    }
+
+    def our_template(kind: str) -> Path | None:
+        path = OUR_TEMPLATES.get(kind)
+        if path is None:
+            return None
+        here = Path(__file__).resolve().parent.parent.parent / path
+        return here if here.is_file() else None
+
+    @app.get("/documents")
+    async def documents_page(request: Request) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        stored = await crm.doc_templates()
+        return render(request, "documents.html",
+                      rows=logic.doc_rows(stored),
+                      summary=logic.doc_summary(stored),
+                      marks={m["kind"]: m for m in await crm.company_marks()},
+                      ours={k: our_template(k) is not None
+                            for k in logic.DOC_TEMPLATES})
+
+    @app.get("/documents/ours/{kind}")
+    async def document_ours(request: Request, kind: str) -> Response:
+        """Наш шаблон на скачивание: с него начинают свой."""
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        path = our_template(kind)
+        if path is None:
+            return render(request, "missing.html", status_code=404, what="Шаблон")
+        return FileResponse(path, filename=f"{kind}-наш{logic.DOC_SUFFIX}")
+
+    @app.get("/documents/mine/{template_id}")
+    async def document_mine(request: Request, template_id: int) -> Response:
+        """Загруженный шаблон: скачать и посмотреть, что именно включено."""
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        row = await crm.doc_template(template_id)
+        path = Path(cfg.doc_dir) / str((row or {}).get("filename") or "")
+        if row is None or not path.is_file():
+            return render(request, "missing.html", status_code=404, what="Шаблон")
+        return FileResponse(path, filename=str(row.get("original")
+                                               or row["filename"]))
+
+    @app.post("/documents/{kind}")
+    async def document_upload(request: Request, kind: str) -> Response:
+        """Загрузить свой шаблон, включить наш обратно или убрать из архива."""
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if kind not in logic.DOC_TEMPLATES or kind in logic.DOC_CODE_ONLY:
+            return render(request, "missing.html", status_code=404,
+                          what="Вид документа")
+        data = await request.form()
+        action = str(data.get("action") or "upload")
+        by = who(request)
+        if action == "ours":
+            await crm.disable_doc_templates(kind)
+            flash(request, f"«{logic.DOC_TEMPLATES[kind]['title']}»: "
+                           "вернули наш шаблон. Ваш остался в архиве.")
+            return redirect("/documents")
+        if action in ("enable", "drop"):
+            raw_id = str(data.get("template_id") or "")
+            row = (await crm.doc_template(int(raw_id))
+                   if raw_id.isdigit() else None)
+            if row is None or row["kind"] != kind:
+                flash(request, "Шаблон не найден.", "err")
+                return redirect("/documents")
+            if action == "enable":
+                await crm.enable_doc_template(row["id"])
+                flash(request, f"«{logic.DOC_TEMPLATES[kind]['title']}»: "
+                               "включён ваш шаблон.")
+            else:
+                dropped = await crm.drop_doc_template(row["id"])
+                if dropped is None:
+                    flash(request, "Включённый шаблон не удаляется: "
+                                   "сначала верните наш.", "err")
+                else:
+                    (Path(cfg.doc_dir) / str(dropped["filename"])).unlink(
+                        missing_ok=True)
+                    flash(request, "Шаблон убран из архива.")
+            return redirect("/documents")
+        upload = data.get("template")
+        filename = getattr(upload, "filename", "") or ""
+        raw = await upload.read() if filename else b""
+        if not raw:
+            flash(request, "Выберите файл шаблона.", "err")
+            return redirect("/documents")
+        try:
+            doctemplates.check_upload(raw, filename)
+        except contract_service.TemplateProblem as exc:
+            flash(request, str(exc), "err")
+            return redirect("/documents")
+        folder = Path(cfg.doc_dir)
+        number = len(await crm.doc_templates(kind)) + 1
+        name = logic.doc_filename(kind, number)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(raw)
+        except OSError as err:
+            log.warning("шаблон не сохранён: %s", err)
+            flash(request, "Шаблон не сохранился — попробуйте ещё раз.", "err")
+            return redirect("/documents")
+        template_id = await crm.add_doc_template(
+            kind=kind, filename=name, original=filename[:200],
+            size_bytes=len(raw), sha256=doctemplates.digest(raw), by=by)
+        await crm.enable_doc_template(template_id)
+        flash(request, f"«{logic.DOC_TEMPLATES[kind]['title']}»: ваш шаблон "
+                       "загружен и включён. Наш выключился сам.")
+        return redirect("/documents")
+
+    @app.post("/documents/marks/{kind}")
+    async def company_mark(request: Request, kind: str) -> Response:
+        """Подпись и печать: png на прозрачном фоне."""
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if kind not in logic.COMPANY_MARKS:
+            return render(request, "missing.html", status_code=404, what="Файл")
+        data = await request.form()
+        if str(data.get("action") or "") == "drop":
+            await crm.drop_company_mark(kind)
+            (Path(cfg.doc_dir) / logic.mark_filename(kind)).unlink(missing_ok=True)
+            flash(request, f"{logic.COMPANY_MARKS[kind]} убрана: "
+                           "подстановка в документах просто исчезнет.")
+            return redirect("/documents")
+        upload = data.get("mark")
+        filename = getattr(upload, "filename", "") or ""
+        raw = await upload.read() if filename else b""
+        if not raw:
+            flash(request, "Выберите файл.", "err")
+            return redirect("/documents")
+        if Path(filename).suffix.lower() not in logic.MARK_SUFFIXES:
+            flash(request, "Только png: прозрачный фон бывает только у него, "
+                           "а подпись на белом квадрате закроет текст.", "err")
+            return redirect("/documents")
+        if len(raw) > logic.MARK_MAX_BYTES:
+            flash(request, f"Файл больше "
+                           f"{logic.MARK_MAX_BYTES // (1024 * 1024)} МБ.", "err")
+            return redirect("/documents")
+        name = logic.mark_filename(kind)
+        try:
+            Path(cfg.doc_dir).mkdir(parents=True, exist_ok=True)
+            (Path(cfg.doc_dir) / name).write_bytes(raw)
+        except OSError as err:
+            log.warning("подпись не сохранена: %s", err)
+            flash(request, "Файл не сохранился — попробуйте ещё раз.", "err")
+            return redirect("/documents")
+        await crm.set_company_mark(kind, filename=name, size_bytes=len(raw),
+                                   by=who(request))
+        flash(request, f"{logic.COMPANY_MARKS[kind]} загружена: она встанет "
+                       "на место подстановки в шаблоне.")
+        return redirect("/documents")
+
+    @app.get("/documents/marks/{kind}")
+    async def company_mark_file(request: Request, kind: str) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        path = Path(cfg.doc_dir) / logic.mark_filename(kind)
+        if kind not in logic.COMPANY_MARKS or not path.is_file():
+            return render(request, "missing.html", status_code=404, what="Файл")
+        return FileResponse(path)
 
     # ─────────────────── ввод техники в эксплуатацию ───────────────────
 

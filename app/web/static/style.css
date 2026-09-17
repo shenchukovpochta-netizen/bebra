@@ -103,6 +103,12 @@ td.nowrap,th.nowrap{white-space:nowrap}
 td.actions{white-space:nowrap;text-align:right}
 td.actions button{padding:5px 10px;font-size:13px}
 input.mini{text-align:right;font-variant-numeric:tabular-nums}
+/* Действия над документом: кнопка скачивания и форма загрузки в
+   одну колонку слева. Справа они разъезжались - ссылка у края,
+   а форма под ней во всю ширину. */
+td.stack{text-align:left;white-space:normal}
+td.stack .inline-form{margin:6px 0}
+td.stack .btn,td.stack button{margin:2px 4px 2px 0}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
 .tag{display:inline-block;padding:2px 9px;border-radius:999px;background:var(--chip);font-size:12px;font-weight:500;vertical-align:middle;color:var(--brand-dark)}
 .tag.available,.tag.active{background:#E4F5E4;color:var(--ok)}

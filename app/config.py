@@ -142,6 +142,10 @@ class Config:
     contract_prefix: str = "АВ"
     # Шаблоны актов: приёма-передачи и возврата. Заполняются теми же
     # подстановками, что и договор.
+    # Каталог, куда панель кладёт загруженные владельцем шаблоны и
+    # подпись с печатью. Бот читает их оттуда снимком с коротким TTL:
+    # процессы разные, том общий.
+    doc_dir: Path = Path("/doctemplates")
     act_in_template: Path = Path("/srv/app/act_priema_template.docx")
     act_out_template: Path = Path("/srv/app/act_vozvrata_template.docx")
     # Акт о переходе права собственности: аренда с правом выкупа.
@@ -210,6 +214,7 @@ class Config:
             fix_topic_id=_int_or_none("FIX_TOPIC_ID"),
             contract_template=Path(
                 _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.docx")),
+            doc_dir=Path(_env("DOC_TEMPLATE_DIR", "/doctemplates")),
             act_in_template=Path(
                 _env("ACT_IN_TEMPLATE", "/srv/app/act_priema_template.docx")),
             act_out_template=Path(

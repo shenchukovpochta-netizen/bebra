@@ -984,6 +984,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/company", "settings"),
     ("/notices", "settings"),
     ("/intake", "settings"),
+    ("/documents", "settings"),
     ("/locations", "settings"),
     ("/models", "settings"),
 )
@@ -3721,3 +3722,76 @@ def check_plate(raw: Any) -> Check:
     if len(value) > 24:
         return Check(False, error="Госномер: не длиннее 24 символов.")
     return Check(True, value)
+
+
+# ────────────────── свои шаблоны документов ──────────────────
+#
+# У каждого вида документа всегда включён ровно один шаблон: наш или
+# ваш. Выключить оба нельзя - выдачу тогда нечем оформить.
+
+DOC_TEMPLATES: dict[str, dict[str, str]] = {
+    "esign": {"title": "Соглашение об ЭП",
+              "hint": "Собирается кодом, а не файлом: текст соглашения "
+                      "хранится в самой заявке на подпись."},
+    "contract": {"title": "Договор аренды",
+                 "hint": "Основной документ выдачи."},
+    "act_in": {"title": "Акт приёма-передачи",
+               "hint": "Что именно отдали клиенту."},
+    "consent": {"title": "Согласие на обработку ПДн",
+                "hint": "Приложение к договору, подписывается вместе с ним."},
+    "act_out": {"title": "Акт возврата",
+                "hint": "Чем закрывается аренда."},
+    "buyout": {"title": "Договор выкупа",
+               "hint": "Аренда с правом выкупа."},
+}
+# Соглашение об ЭП файлом не задаётся: его текст собирается кодом и
+# хранится в заявке ровно в том виде, в каком его приняли. Подменить его
+# файлом значило бы сломать доказательство.
+DOC_CODE_ONLY = ("esign",)
+# Свой шаблон - docx: подстановки заполняются в исходном файле юриста,
+# и pdf или odt так не заполнить.
+DOC_SUFFIX = ".docx"
+DOC_MAX_BYTES = 10 * 1024 * 1024
+
+COMPANY_MARKS: dict[str, str] = {
+    "signature": "Подпись",
+    "stamp": "Печать",
+}
+MARK_SUFFIXES = (".png",)
+MARK_MAX_BYTES = 2 * 1024 * 1024
+
+
+def doc_rows(stored: Iterable[Mapping[str, Any]] | None = None) -> list[dict]:
+    """Виды документов с тем, чей шаблон сейчас включён."""
+    rows_by_kind: dict[str, list[dict]] = {}
+    for row in stored or []:
+        rows_by_kind.setdefault(str(row.get("kind")), []).append(dict(row))
+    out = []
+    for kind, item in DOC_TEMPLATES.items():
+        own = rows_by_kind.get(kind, [])
+        active = next((r for r in own if r.get("active")), None)
+        out.append({
+            "kind": kind, "title": item["title"], "hint": item["hint"],
+            "code_only": kind in DOC_CODE_ONLY,
+            "mine": active is not None, "active": active,
+            "archive": [r for r in own if not r.get("active")],
+            "source": "ваш шаблон" if active else "наш шаблон",
+        })
+    return out
+
+
+def doc_summary(stored: Iterable[Mapping[str, Any]] | None = None) -> dict[str, int]:
+    rows = doc_rows(stored)
+    kinds = [r for r in rows if not r["code_only"]]
+    return {"total": len(kinds),
+            "mine": sum(1 for r in kinds if r["mine"])}
+
+
+def doc_filename(kind: str, number: int) -> str:
+    """Имя файла на диске собираем сами: имя из браузера - чужая строка,
+    и «../../» в ней не шутка."""
+    return f"{kind}-{int(number):04d}{DOC_SUFFIX}"
+
+
+def mark_filename(kind: str) -> str:
+    return f"{kind}.png"

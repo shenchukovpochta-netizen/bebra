@@ -51,6 +51,9 @@ LITERAL_IN_COMPOSE = {"POSTGRES_HOST", "POSTGRES_PORT", "STORAGE_DIR",
                       "CONTRACT_TEMPLATE", "ACT_IN_TEMPLATE", "ACT_OUT_TEMPLATE",
                       "BUYOUT_TEMPLATE",
                       "SOGLASIE_TEMPLATE", "PDN_POLICY_FILE",
+                      # Каталоги томов: значение задано устройством
+                      # контейнера, подставлять его из .env незачем.
+                      "DOC_TEMPLATE_DIR", "BIKE_PHOTO_DIR",
                       "AUTO_APPROVE", "RATE_SOFT", "RATE_HARD"}
 not_passed = config_vars - compose_vars - LITERAL_IN_COMPOSE
 if not_passed:

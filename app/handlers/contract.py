@@ -23,7 +23,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import company
+from ..crm import company, doctemplates
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
@@ -84,7 +84,9 @@ def _build_soglasie(cfg: Config, data: dict, anketa: dict, *, number: str,
     ctx = _context(cfg, data, anketa, number=number, signed_at=signed_at,
                    issued_at=issued_at)
     try:
-        return contract_service.build(cfg.soglasie_template, ctx)
+        return contract_service.build(
+            doctemplates.path_for("consent", cfg.soglasie_template, cfg.doc_dir),
+            ctx, doctemplates.mark_snapshot())
     except (contract_service.TemplateProblem, OSError) as exc:
         raise ContractProblem(str(exc)) from exc
 
@@ -96,7 +98,10 @@ async def _build(cfg: Config, data: dict, anketa: dict, *, number: str,
     try:
         # Шаблон - 5 МБ docx, сборка ~0,5 с чистого CPU: в потоке, чтобы
         # на это время не замирал весь бот.
-        return await asyncio.to_thread(contract_service.build, cfg.contract_template, ctx)
+        return await asyncio.to_thread(
+            contract_service.build,
+            doctemplates.path_for("contract", cfg.contract_template, cfg.doc_dir),
+            ctx, doctemplates.mark_snapshot())
     except (contract_service.TemplateProblem, OSError) as exc:
         raise ContractProblem(str(exc)) from exc
 
@@ -571,9 +576,20 @@ def _act_context(cfg: Config, data: dict, anketa: dict, *,
     return ctx
 
 
+def _act_kind(cfg: Config, template: Any) -> str:
+    """Какой это вид документа. Определяем по шаблону из настроек, а не
+    аргументом на каждом вызове: список вызовов длинный, и забытый
+    аргумент подсунул бы клиенту чужой акт."""
+    return {cfg.act_in_template: "act_in",
+            cfg.act_out_template: "act_out",
+            cfg.buyout_template: "buyout"}.get(template, "act_in")
+
+
 def _build_act(cfg: Config, template: Any, ctx: dict) -> tuple[bytes, str]:
     try:
-        return contract_service.build(template, ctx)
+        return contract_service.build(
+            doctemplates.path_for(_act_kind(cfg, template), template, cfg.doc_dir),
+            ctx, doctemplates.mark_snapshot())
     except (contract_service.TemplateProblem, OSError) as exc:
         raise ContractProblem(str(exc)) from exc
 

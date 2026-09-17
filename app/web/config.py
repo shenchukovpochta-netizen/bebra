@@ -41,6 +41,9 @@ class WebConfig:
     # паспортов панель читает и не пишет, а эти снимки пишет она сама -
     # значит, каталог у них разный, и том с ПДн остаётся read-only.
     bike_photo_dir: Path = Path("/bikes")
+    # Загруженные владельцем шаблоны документов, подпись и печать. Том
+    # общий с ботом: панель пишет, бот читает.
+    doc_dir: Path = Path("/doctemplates")
     # Служебный чат: панель пишет туда то же, что бот, - приход запчасти
     # под стоящий наряд. Пусто - командные сообщения из панели не уходят,
     # и это не ошибка: у панели может не быть своего бота.
@@ -68,6 +71,7 @@ class WebConfig:
             bot_token=_secret("BOT_TOKEN", required=False),
             storage_dir=Path(_env("STORAGE_DIR", "/files/kyc")),
             bike_photo_dir=Path(_env("BIKE_PHOTO_DIR", "/bikes")),
+            doc_dir=Path(_env("DOC_TEMPLATE_DIR", "/doctemplates")),
             port=_int("CRM_PORT", "8080"),
             remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
             title=_env("CRM_TITLE", "МАЙБАЙК"),

@@ -57,6 +57,8 @@ class FakeCrm:
         self.pay_orders_: dict[int, dict] = {}
         self.notices_: dict[str, dict] = {}
         self.bonuses_: dict[int, dict] = {}
+        self.doc_templates_: dict[int, dict] = {}
+        self.marks_: dict[str, dict] = {}
         self.notice_log_: list[dict] = []
         self.cards_: dict[int, dict] = {}
         self.trackers_: dict[int, dict] = {}
@@ -2360,6 +2362,67 @@ class FakeCrm:
         rows = [dict(b) for b in self.bikes_.values() if b.get("status") == "new"]
         rows.sort(key=lambda b: -b["id"])
         return rows[:limit]
+
+
+    # ────────── свои шаблоны документов ──────────
+
+    async def doc_templates(self, kind=None):
+        rows = [dict(t) for t in self.doc_templates_.values()
+                if kind is None or t["kind"] == kind]
+        rows.sort(key=lambda t: -t["id"])
+        return rows
+
+    async def active_doc_template(self, kind):
+        for t in self.doc_templates_.values():
+            if t["kind"] == kind and t["active"]:
+                return dict(t)
+        return None
+
+    async def add_doc_template(self, *, kind, filename, original, size_bytes,
+                               sha256, by=None):
+        tid = self._id()
+        self.doc_templates_[tid] = {
+            "id": tid, "kind": kind, "filename": filename, "original": original,
+            "size_bytes": size_bytes, "sha256": sha256, "active": False,
+            "note": None, "uploaded_by": by, "uploaded_at": self._now()}
+        return tid
+
+    async def enable_doc_template(self, template_id):
+        row = self.doc_templates_.get(template_id)
+        if row is None:
+            return False
+        for t in self.doc_templates_.values():
+            if t["kind"] == row["kind"]:
+                t["active"] = False
+        row["active"] = True
+        return True
+
+    async def disable_doc_templates(self, kind):
+        for t in self.doc_templates_.values():
+            if t["kind"] == kind:
+                t["active"] = False
+
+    async def doc_template(self, template_id):
+        row = self.doc_templates_.get(template_id)
+        return dict(row) if row else None
+
+    async def drop_doc_template(self, template_id):
+        row = self.doc_templates_.get(template_id)
+        if row is None or row["active"]:
+            return None
+        return dict(self.doc_templates_.pop(template_id))
+
+    async def company_marks(self):
+        return [dict(m) for m in sorted(self.marks_.values(),
+                                        key=lambda m: m["kind"])]
+
+    async def set_company_mark(self, kind, *, filename, size_bytes, by=None):
+        self.marks_[kind] = {"kind": kind, "filename": filename,
+                             "size_bytes": size_bytes, "uploaded_by": by,
+                             "uploaded_at": self._now()}
+
+    async def drop_company_mark(self, kind):
+        self.marks_.pop(kind, None)
 
 
 def _num(value):

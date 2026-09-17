@@ -2993,3 +2993,80 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.bikes where status = 'new' order by id desc limit $1",
             limit))
+
+    # ────────────── свои шаблоны документов ──────────────
+
+    async def doc_templates(self, kind: str | None = None) -> list[dict]:
+        if kind:
+            return _rows(await self.pool.fetch(
+                "select * from crm.doc_templates where kind = $1 "
+                "order by uploaded_at desc", kind))
+        return _rows(await self.pool.fetch(
+            "select * from crm.doc_templates order by kind, uploaded_at desc"))
+
+    async def active_doc_template(self, kind: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.doc_templates where kind = $1 and active", kind))
+
+    async def add_doc_template(self, *, kind: str, filename: str,
+                               original: str | None, size_bytes: int,
+                               sha256: str | None, by: str | None = None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.doc_templates (kind, filename, original, size_bytes,
+                                           sha256, uploaded_by)
+            values ($1, $2, $3, $4, $5, $6) returning id
+            """, kind, filename, original, size_bytes, sha256, by))
+
+    async def enable_doc_template(self, template_id: int) -> bool:
+        """Включить свой шаблон. Прежний включённый того же вида уходит
+        в архив: у вида всегда ровно один включённый, и уникальный
+        индекс не даст обойти это стороной."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select kind from crm.doc_templates where id = $1", template_id)
+            if row is None:
+                return False
+            await conn.execute(
+                "update crm.doc_templates set active = false "
+                "where kind = $1 and active", row["kind"])
+            await conn.execute(
+                "update crm.doc_templates set active = true where id = $1",
+                template_id)
+            return True
+
+    async def disable_doc_templates(self, kind: str) -> None:
+        """Вернуться на наш шаблон. Свой остаётся в архиве."""
+        await self.pool.execute(
+            "update crm.doc_templates set active = false where kind = $1", kind)
+
+    async def doc_template(self, template_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.doc_templates where id = $1", template_id))
+
+    async def drop_doc_template(self, template_id: int) -> dict | None:
+        """Убрать из архива. Включённый не удаляем: тогда вид документа
+        остался бы без шаблона вовсе."""
+        return _row(await self.pool.fetchrow(
+            "delete from crm.doc_templates where id = $1 and not active "
+            "returning *", template_id))
+
+    async def company_marks(self) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.company_marks order by kind"))
+
+    async def set_company_mark(self, kind: str, *, filename: str,
+                               size_bytes: int, by: str | None = None) -> None:
+        await self.pool.execute(
+            """
+            insert into crm.company_marks (kind, filename, size_bytes, uploaded_by,
+                                           uploaded_at)
+            values ($1, $2, $3, $4, now())
+            on conflict (kind) do update
+               set filename = excluded.filename, size_bytes = excluded.size_bytes,
+                   uploaded_by = excluded.uploaded_by, uploaded_at = now()
+            """, kind, filename, size_bytes, by)
+
+    async def drop_company_mark(self, kind: str) -> None:
+        await self.pool.execute(
+            "delete from crm.company_marks where kind = $1", kind)

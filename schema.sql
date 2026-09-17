@@ -1678,3 +1678,43 @@ alter table crm.bikes add column if not exists checked jsonb not null default '{
 alter table crm.bikes add column if not exists commissioned_at timestamptz;
 alter table crm.bikes add column if not exists commissioned_by text;
 create index if not exists bikes_new_idx on crm.bikes (status) where status = 'new';
+
+-- ────────────────── свои шаблоны документов ──────────────────
+--
+-- У каждого вида документа всегда включён ровно один шаблон: наш или
+-- ваш. Загрузили свой и включили - наш выключается сам. Выключить оба
+-- нельзя: выдачу тогда нечем оформить, и это не настройка, а поломка.
+--
+-- Сам файл лежит на диске (том `doctemplates`), здесь - только имя,
+-- размер и отпечаток: держать docx в базе значит возить его в каждом
+-- дампе и в каждом бэкапе.
+create table if not exists crm.doc_templates (
+  id          bigserial primary key,
+  kind        text        not null,          -- contract|act_in|act_out|…
+  filename    text        not null,          -- имя на диске, собираем сами
+  original    text,                          -- как файл назывался у владельца
+  size_bytes  integer     not null default 0,
+  sha256      text,
+  -- Включён ли ваш шаблон. Выключенный остаётся в архиве: вернуть
+  -- прошлую редакцию договора бывает нужно ровно тогда, когда спорят
+  -- по уже подписанному.
+  active      boolean     not null default false,
+  note        text,
+  uploaded_by text,
+  uploaded_at timestamptz not null default now()
+);
+create index if not exists doc_templates_kind_idx
+  on crm.doc_templates (kind, uploaded_at desc);
+-- Один включённый свой шаблон на вид.
+create unique index if not exists doc_templates_one_active
+  on crm.doc_templates (kind) where active;
+
+-- Подпись и печать организации. Не в `crm.settings`: там значения-строки,
+-- а это файлы, и им нужны размер и отпечаток, как шаблонам.
+create table if not exists crm.company_marks (
+  kind        text        primary key,       -- signature|stamp
+  filename    text        not null,
+  size_bytes  integer     not null default 0,
+  uploaded_by text,
+  uploaded_at timestamptz not null default now()
+);

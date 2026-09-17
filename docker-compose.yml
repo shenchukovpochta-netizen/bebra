@@ -164,9 +164,13 @@ services:
       TOCHKA_POLL_SECONDS: ${TOCHKA_POLL_SECONDS:-1800}
 
       STORAGE_DIR: /files/kyc
+      # Свои шаблоны документов и печать: их кладёт панель.
+      DOC_TEMPLATE_DIR: /doctemplates
       TZ: ${TZ:-Europe/Moscow}
     volumes:
       - kycfiles:/files
+      # Свои шаблоны документов и печать: панель их кладёт, бот читает.
+      - doctemplates:/doctemplates:ro
       # Правка документов не должна требовать пересборки образа.
       - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
       - ./app/act_priema_template.docx:/srv/app/act_priema_template.docx:ro
@@ -223,12 +227,14 @@ services:
       # Снимки сверки техники: панель их пишет, поэтому том свой, а
       # kycfiles с персональными данными остаётся read-only.
       BIKE_PHOTO_DIR: /bikes
+      DOC_TEMPLATE_DIR: /doctemplates
       TZ: ${TZ:-Europe/Moscow}
     ports:
       - "${CRM_BIND:-127.0.0.1}:${CRM_PORT:-8080}:8080"
     volumes:
       - kycfiles:/files:ro
       - bikefiles:/bikes
+      - doctemplates:/doctemplates
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -319,4 +325,7 @@ volumes:
   # Снимки сверки техники. Персональных данных в них нет, поэтому
   # и срока хранения нет: номер на раме не устаревает.
   bikefiles:
+  # Загруженные владельцем шаблоны договора и актов, подпись и
+  # печать. Панель пишет, бот читает: том общий, права разные.
+  doctemplates:
   caddydata:
