@@ -58,15 +58,18 @@ METHODS = {
 }
 
 BIKE_STATUSES = {
-    "available": "Свободен", "rented": "В аренде", "repair": "В ремонте",
-    "maintenance": "На ТО", "reserved": "Забронирован", "lost": "Утерян",
-    "sold": "Продан", "written_off": "Списан",
+    "new": "Новое на сборке", "available": "Свободен", "rented": "В аренде",
+    "repair": "В ремонте", "maintenance": "На ТО", "reserved": "Забронирован",
+    "lost": "Утерян", "sold": "Продан", "written_off": "Списан",
 }
-# Статусы, которые ставит оператор руками. rented - только через аренду.
+# Статусы, которые ставит оператор руками. rented - только через аренду,
+# new снимает ввод в эксплуатацию: он проверяет сверку, а список - нет.
 BIKE_MANUAL_STATUSES = ("available", "repair", "maintenance", "reserved", "lost", "sold",
                         "written_off")
 # Операционный парк - то, что зарабатывает или может заработать. Потерянные,
 # проданные и списанные в знаменатель простоя не попадают никогда.
+# Новое на сборке - тоже нет: оно ещё не в обороте, и считать его простоем
+# значило бы записать в убыток недособранный велосипед.
 OPERATIONAL_STATUSES = ("available", "rented", "repair", "maintenance", "reserved")
 # Простой: велосипед в парке, но не в аренде.
 IDLE_STATUSES = ("available", "reserved", "repair", "maintenance")
@@ -980,6 +983,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/profiles", "staff"),
     ("/company", "settings"),
     ("/notices", "settings"),
+    ("/intake", "settings"),
     ("/locations", "settings"),
     ("/models", "settings"),
 )
@@ -3627,3 +3631,93 @@ def bonus_totals(entries: Iterable[Mapping[str, Any]],
                                  + to_money(entry.get("amount")))
     return {"total": total, "share": share.quantize(Decimal("0.1")),
             "by_kind": by_kind, "count": len(rows)}
+
+
+# ────────────────── ввод техники в эксплуатацию ──────────────────
+#
+# Сверка - это не одна галочка «всё хорошо», а отметка по каждому полю
+# паспорта. Переписать номер из накладной сверкой не назвать: для того
+# и фотография, которую можно потребовать настройкой.
+
+BIKE_PASSPORT: dict[str, str] = {
+    "model": "Модель",
+    "code": "Номер наклейки",
+    "frame_no": "Серийный номер (на раме)",
+    "plate_no": "Госномер",
+    "tracker": "Трекер",
+}
+# Какие поля требуют фотографии, когда владелец её потребовал. Модель
+# фотографировать незачем: её видно и так.
+BIKE_PHOTO_FIELDS = ("frame_no", "plate_no")
+
+
+def bike_check_settings(settings: Mapping[str, Any] | None = None) -> dict[str, bool]:
+    settings = settings or {}
+    return {
+        # Выключено - список полей остаётся подсказкой, но кнопка ввода
+        # в эксплуатацию не заперта.
+        "required": str(settings.get("bike_check_required", "1"))
+        not in ("0", "", "false"),
+        "photo": str(settings.get("bike_photo_required", "0"))
+        not in ("0", "", "false"),
+    }
+
+
+def bike_field_value(bike: Mapping[str, Any], field: str) -> str:
+    """Что сверяем в этом поле. Трекер - это «привязан или нет»."""
+    if field == "tracker":
+        return "привязан" if bike.get("tracker_id") or bike.get("tracker_ok") else ""
+    return str(bike.get(field) or "").strip()
+
+
+def bike_checks(bike: Mapping[str, Any],
+                settings: Mapping[str, Any] | None = None) -> list[dict]:
+    """Строки сверки паспорта: что за поле, что в нём и сверено ли."""
+    checked = bike.get("checked")
+    checked = checked if isinstance(checked, Mapping) else {}
+    photo_needed = bike_check_settings(settings)["photo"]
+    rows = []
+    for field, title in BIKE_PASSPORT.items():
+        mark = checked.get(field)
+        mark = mark if isinstance(mark, Mapping) else {}
+        value = bike_field_value(bike, field)
+        needs_photo = photo_needed and field in BIKE_PHOTO_FIELDS
+        rows.append({
+            "field": field, "title": title, "value": value,
+            "filled": bool(value),
+            "at": mark.get("at"), "by": mark.get("by"), "photo": mark.get("photo"),
+            "needs_photo": needs_photo,
+            # Сверено = отметка есть, поле заполнено, и снимок приложен,
+            # если владелец его потребовал.
+            "ok": bool(mark.get("at")) and bool(value)
+            and (not needs_photo or bool(mark.get("photo"))),
+        })
+    return rows
+
+
+def bike_check_state(bike: Mapping[str, Any],
+                     settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    rows = bike_checks(bike, settings)
+    left = [r["title"] for r in rows if not r["ok"]]
+    required = bike_check_settings(settings)["required"]
+    return {"rows": rows, "left": left, "done": not left,
+            "required": required,
+            # Выпускать можно, когда сверено всё - или когда владелец
+            # сверку не требует: список тогда остаётся подсказкой.
+            "can_commission": (not left) or not required,
+            "new": str(bike.get("status") or "") == "new"}
+
+
+def check_plate(raw: Any) -> Check:
+    """Госномер: короткая строка, регистр приводим к верхнему.
+
+    Формат не проверяем: у велосипедов и мопедов таблички бывают разные,
+    и отвергнуть настоящий номер из-за нашего представления о нём хуже,
+    чем принять опечатку - её видно на фотографии.
+    """
+    value = " ".join(str(raw or "").split()).upper()
+    if not value:
+        return Check(True, None)
+    if len(value) > 24:
+        return Check(False, error="Госномер: не длиннее 24 символов.")
+    return Check(True, value)

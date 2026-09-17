@@ -96,13 +96,19 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIn("История статусов", page)
         await self.post(f"/bikes/{bike_id}/repair", node="brake_pads", parts_cost="400",
                         labor_cost="300", note="передние")
+        # Велосипед заведён «на сборке»: в оборот его выпускает сверка,
+        # а не смена статуса - её запрос отобьётся.
+        await self.crm.commission_bike(bike_id, by="staff:admin")
         await self.post(f"/bikes/{bike_id}/status", status="maintenance", note="ТО")
         page = await self.get_ok(f"/bikes/{bike_id}")
         self.assertIn("Тормоза: колодки: передние", page)
         self.assertIn("На ТО", page)
         log = await self.crm.bike_status_log(bike_id)
+        # Заводится велосипед «на сборке», выпускает его ввод в
+        # эксплуатацию, и обе смены статуса видны в журнале.
         self.assertEqual([(x["to_status"], x["changed_by"]) for x in log],
-                         [("maintenance", "staff:admin"), ("available", "staff:admin")])
+                         [("maintenance", "staff:admin"),
+                          ("available", "staff:admin"), ("new", "staff:admin")])
         await self.post(f"/bikes/{bike_id}/status", status="available")
 
         # клиент, тариф, аренда, зачисление заявки, закрытие со списанием

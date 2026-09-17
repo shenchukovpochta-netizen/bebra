@@ -120,6 +120,7 @@ button:hover,.btn:hover{background:var(--brand-dark);border-color:var(--brand-da
 button.ghost,.btn.ghost{background:transparent;color:var(--brand-dark)}
 button.ghost:hover,.btn.ghost:hover{background:var(--chip);color:var(--brand-dark)}
 @media (prefers-color-scheme:dark){button.ghost,.btn.ghost{color:var(--brand-soft)}}
+button:disabled,button:disabled:hover{background:var(--chip);border-color:var(--line);color:var(--muted);cursor:not-allowed}
 button.danger{border-color:var(--ink);background:var(--ink)}button.danger:hover{background:#000}
 button.ghost.danger{background:transparent;color:var(--bad)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;align-items:end}

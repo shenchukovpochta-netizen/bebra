@@ -285,7 +285,11 @@ class TestPages(WebCase):
         self.assertIn("уже занят", self.get_ok("/bikes/new"))
         self.client.post("/bikes", data={"code": "B-3", "model": "X", "frame_no": "FR2"})
         self.assertIn("номером рамы уже есть", self.get_ok("/bikes/new"))
-        # статус и журнал
+        # статус и журнал. Заведён велосипед «на сборке», и статус руками
+        # там не меняется: в оборот его выпускает сверка.
+        self.client.post(f"/bikes/{bike['id']}/status", data={"status": "repair"})
+        self.assertEqual(run(self.crm.bike(bike["id"]))["status"], "new")
+        run(self.crm.commission_bike(bike["id"], by="staff:admin"))
         self.client.post(f"/bikes/{bike['id']}/status", data={"status": "repair",
                                                               "note": "прокол"})
         self.assertEqual(run(self.crm.bike(bike["id"]))["status"], "repair")
@@ -500,10 +504,12 @@ class TestFleetMetricsPages(WebCase):
         page = self.client.get("/bikes", params={"location": "none"}).text
         self.assertIn("B-11", page)
         self.assertNotIn("B-9", page)
-        # автор первой записи журнала статусов - тот, кто завёл велосипед
+        # автор первой записи журнала статусов - тот, кто завёл велосипед.
+        # Заводится он «на сборке»: сверка требуется по умолчанию, и в
+        # выдачу велосипед попадёт только после ввода в эксплуатацию.
         log = run(self.crm.bike_status_log(bike["id"]))
         self.assertEqual((log[-1]["to_status"], log[-1]["changed_by"]),
-                         ("available", "staff:admin"))
+                         ("new", "staff:admin"))
 
     def test_repair_by_node_and_report(self):
         self.seed()

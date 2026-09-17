@@ -34,6 +34,10 @@ from ..services import tochka
 from .config import WebConfig
 
 log = logging.getLogger(__name__)
+
+# Снимок сверки техники: телефонное фото столько и весит, а всё,
+# что больше, - это чей-то скриншот экрана целиком.
+BIKE_PHOTO_MAX = 8 * 1024 * 1024
 HERE = Path(__file__).resolve().parent
 # Страница подписания открыта клиенту: он не сотрудник и в панель
 # не входит. Защита у неё одна - случайный токен в ссылке.
@@ -703,6 +707,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "bike_form.html", bike=None)
 
     def _bike_fields(request: Request, data: dict) -> dict | None:
+        plate = logic.check_plate(data.get("plate_no"))
+        if not plate.ok:
+            flash(request, plate.error, "err")
+            return None
         code = logic.check_code(data.get("code"))
         model = logic.check_name(data.get("model"), what="Модель")
         note = logic.check_note(data.get("note"))
@@ -748,6 +756,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 # Подменный держат под замены, а не под выдачу: своего
                 # статуса у него нет, он такой же свободный.
                 "spare": bool(data.get("spare")),
+                "plate_no": plate.value,
+                "plate_ok": bool(data.get("plate_ok")),
+                "tracker_ok": bool(data.get("tracker_ok")),
                 **({"mileage_km": mileage.value} if mileage.value is not None else {})}
 
     @app.post("/bikes")
@@ -762,8 +773,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if fields["frame_no"] and await crm.bike_by_frame(fields["frame_no"]) is not None:
             flash(request, "Велосипед с таким номером рамы уже есть.", "err")
             return redirect("/bikes/new")
+        # Новая техника заводится «на сборке», когда сверка требуется:
+        # велосипед, попавший в выдачу сразу после накладной, - это
+        # ровно то, ради чего сверку и заводили. Требование снято -
+        # ведём себя как раньше и не мешаем.
+        if logic.bike_check_settings(await crm.settings())["required"]:
+            fields = {**fields, "status": "new"}
         bike_id = await crm.create_bike(by=who(request), **fields)
-        flash(request, "Велосипед добавлен.")
+        flash(request, "Велосипед заведён на сборку: сверьте паспорт "
+                       "и введите в эксплуатацию."
+              if fields.get("status") == "new" else "Велосипед добавлен.")
         return redirect(f"/bikes/{bike_id}")
 
     @app.get("/bikes/{bike_id}")
@@ -771,12 +790,95 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         bike = await crm.bike(bike_id)
         if bike is None:
             return render(request, "missing.html", status_code=404, what="Велосипед")
+        settings = await crm.settings()
         return render(request, "bike.html", bike=bike, log=await crm.bike_log(bike_id),
                       rentals=await crm.bike_rentals(bike_id),
                       status_log=await crm.bike_status_log(bike_id),
                       nodes=await crm.repair_nodes(),
                       order=await crm.open_order_of(bike_id),
+                      passport=logic.bike_check_state(bike, settings),
                       amortization=logic.amortization_month(bike))
+
+    @app.post("/bikes/{bike_id}/check")
+    async def bike_check(request: Request, bike_id: int) -> Response:
+        """Сверка поля паспорта и ввод в эксплуатацию.
+
+        Форма приходит multipart: к номеру на раме прикладывают снимок,
+        когда владелец его потребовал.
+        """
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        bike = await crm.bike(bike_id)
+        if bike is None:
+            return render(request, "missing.html", status_code=404, what="Велосипед")
+        data = await request.form()
+        action = str(data.get("action") or "")
+        back = f"/bikes/{bike_id}"
+        try:
+            if action == "commission":
+                await service.commission_bike(crm, bike, by=who(request))
+                flash(request, f"Велосипед № {bike['code']} в обороте.")
+            elif action == "clear":
+                field = str(data.get("field") or "")
+                if field not in logic.BIKE_PASSPORT:
+                    flash(request, "Неизвестное поле паспорта.", "err")
+                    return redirect(back)
+                await crm.clear_bike_check(bike_id, field)
+                flash(request, f"{logic.BIKE_PASSPORT[field]}: сверка снята.")
+            else:
+                field = str(data.get("field") or "")
+                photo = await save_bike_photo(bike, field, data.get("photo"))
+                await service.check_bike_field(crm, bike, field,
+                                               by=who(request), photo=photo)
+                flash(request, f"{logic.BIKE_PASSPORT.get(field, field)}: сверено.")
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+        return redirect(back)
+
+    async def save_bike_photo(bike: dict, field: str, upload: Any) -> str | None:
+        """Снимок сверки на диск. Возвращает путь или None, если не прислали.
+
+        Имя собираем сами из номера велосипеда и поля: имя из браузера -
+        это чужая строка, и «../../etc/passwd» в ней не шутка.
+        """
+        filename = getattr(upload, "filename", "") or ""
+        if not filename:
+            return None
+        raw = await upload.read()
+        if not raw:
+            return None
+        if len(raw) > BIKE_PHOTO_MAX:
+            raise service.ServiceError(
+                f"Снимок больше {BIKE_PHOTO_MAX // (1024 * 1024)} МБ — "
+                "сфотографируйте меньшим размером.")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+            raise service.ServiceError("Снимок: только jpg, png или webp.")
+        folder = Path(cfg.bike_photo_dir)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            name = f"{int(bike['id'])}-{field}{suffix}"
+            (folder / name).write_bytes(raw)
+        except OSError as err:
+            log.warning("снимок сверки не сохранён: %s", err)
+            raise service.ServiceError(
+                "Снимок не сохранился — попробуйте ещё раз.") from err
+        return name
+
+    @app.get("/bikes/{bike_id}/photo/{field}")
+    async def bike_photo(request: Request, bike_id: int, field: str) -> Response:
+        """Снимок сверки. Имя берём из базы, а не из адреса: путь,
+        собранный из параметра запроса, уводит куда угодно."""
+        if not may_view(request, "bikes"):
+            return denied(request, "bikes")
+        bike = await crm.bike(bike_id)
+        marks = (bike or {}).get("checked") or {}
+        mark = marks.get(field) if isinstance(marks, dict) else None
+        name = (mark or {}).get("photo") if isinstance(mark, dict) else None
+        path = Path(cfg.bike_photo_dir) / str(name or "")
+        if not name or not path.is_file():
+            return render(request, "missing.html", status_code=404, what="Снимок")
+        return FileResponse(path)
 
     @app.post("/bikes/{bike_id}/edit")
     async def bike_edit(request: Request, bike_id: int) -> Response:
@@ -814,6 +916,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect(f"/bikes/{bike_id}")
         if bike.get("rental_id"):
             flash(request, "Велосипед в аренде: сначала закройте аренду.", "err")
+            return redirect(f"/bikes/{bike_id}")
+        if bike.get("status") == "new":
+            # Иначе «Свободен» из выпадающего списка выпускал бы технику
+            # в оборот мимо сверки - ровно то, что она и должна ловить.
+            flash(request, "Велосипед на сборке: выпускает его кнопка "
+                           "«Ввести в эксплуатацию», а не смена статуса.", "err")
             return redirect(f"/bikes/{bike_id}")
         await crm.update_bike(bike_id, by=who(request), status=status.value)
         await crm.add_bike_log(bike_id, "status",
@@ -3292,6 +3400,41 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"{logic.money(txn['amount'])} зачислено: "
                        f"{client['full_name']}.")
         return redirect("/bank")
+
+    # ─────────────────── ввод техники в эксплуатацию ───────────────────
+
+    @app.get("/intake")
+    async def intake_page(request: Request) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        settings = await crm.settings()
+        rows = await crm.bikes_on_assembly()
+        return render(request, "intake.html",
+                      checks=logic.bike_check_settings(settings),
+                      search=logic.search_settings(settings),
+                      rows=[{**b, "state": logic.bike_check_state(b, settings)}
+                            for b in rows])
+
+    @app.post("/intake")
+    async def intake_save(request: Request) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        by = who(request)
+        await crm.set_setting("bike_check_required",
+                              "1" if data.get("required") else "0", by=by)
+        await crm.set_setting("bike_photo_required",
+                              "1" if data.get("photo") else "0", by=by)
+        for key, what in (("search_after_days", "Розыск"),
+                          ("theft_after_days", "Кража")):
+            got = count_field(data, key, what=what, default="0", limit=365)
+            if not got.ok:
+                flash(request, got.error, "err")
+                return redirect("/intake")
+            if got.value:
+                await crm.set_setting(key, str(got.value), by=by)
+        flash(request, "Правила ввода техники сохранены.")
+        return redirect("/intake")
 
     # ─────────────────────── уведомления ───────────────────────
 

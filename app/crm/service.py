@@ -1335,3 +1335,48 @@ async def invoice_order(crm: Any, order: dict, *, by: str,
     await crm.set_pay_link(order_id, link=got.get("link") or "",
                            operation_id=got.get("operation_id"))
     return await crm.pay_order(order_id)
+
+
+# ────────────── ввод техники в эксплуатацию ──────────────
+
+
+async def commission_bike(crm: Any, bike: dict, *, by: str) -> None:
+    """Выпустить велосипед в оборот.
+
+    Проверка сверки здесь, а не в базе: владелец может её выключить, и
+    тогда список полей остаётся подсказкой. Запрещать выдачу настройкой,
+    которую сам же снял, система не должна.
+    """
+    if bike.get("status") != "new":
+        raise ServiceError("Велосипед уже в обороте.")
+    state = logic.bike_check_state(bike, await crm.settings())
+    if not state["can_commission"]:
+        raise ServiceError("Не сверено: " + ", ".join(state["left"])
+                           + ". Подтвердите поля паспорта или снимите "
+                             "требование сверки в настройках.")
+    if not await crm.commission_bike(bike["id"], by=by):
+        raise ServiceError("Велосипед уже выпустил кто-то другой.")
+
+
+async def check_bike_field(crm: Any, bike: dict, field: str, *, by: str,
+                           photo: str | None = None) -> None:
+    """Отметить поле паспорта сверенным.
+
+    Пустое поле сверять нечего: отметка на пустоте - это ровно то
+    «переписал из накладной», ради чего сверку и заводили.
+    """
+    if field not in logic.BIKE_PASSPORT:
+        raise ServiceError("Неизвестное поле паспорта.")
+    if not logic.bike_field_value(bike, field):
+        raise ServiceError(f"{logic.BIKE_PASSPORT[field]}: поле пустое — "
+                           "сверять нечего.")
+    settings = await crm.settings()
+    if (logic.bike_check_settings(settings)["photo"]
+            and field in logic.BIKE_PHOTO_FIELDS and not photo):
+        marks = bike.get("checked") or {}
+        was = marks.get(field) if isinstance(marks, dict) else None
+        if not (isinstance(was, dict) and was.get("photo")):
+            raise ServiceError(f"{logic.BIKE_PASSPORT[field]}: нужен снимок. "
+                               "Фотография доказывает, что человек смотрел "
+                               "на технику, а не переписал номер из накладной.")
+    await crm.mark_bike_checked(bike["id"], field, by=by, photo=photo)

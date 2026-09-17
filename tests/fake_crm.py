@@ -363,6 +363,9 @@ class FakeCrm:
                             "location": None, "service_months": 24,
                             "residual_price": Decimal(0), "battery_price": None,
                             "battery_service_months": 15, "mileage_km": 0,
+                            "plate_no": None, "plate_ok": False,
+                            "tracker_ok": False, "checked": {},
+                            "commissioned_at": None, "commissioned_by": None,
                             "created_at": self._now(), "updated_at": self._now(),
                             **fields}
         self._log_status(bid, None, self.bikes_[bid]["status"], by)
@@ -2325,6 +2328,38 @@ class FakeCrm:
     async def referrals_since(self, since):
         return [dict(r) for r in self.referrals_.values()
                 if r["created_at"].date() >= since]
+
+
+    # ────────── ввод техники в эксплуатацию ──────────
+
+    async def mark_bike_checked(self, bike_id, field, *, by, photo=None):
+        bike = self.bikes_.get(bike_id)
+        if bike is None:
+            return
+        mark = {"at": self._now().isoformat(timespec="seconds"), "by": by}
+        if photo:
+            mark["photo"] = photo
+        bike["checked"] = {**(bike.get("checked") or {}), field: mark}
+
+    async def clear_bike_check(self, bike_id, field):
+        bike = self.bikes_.get(bike_id)
+        if bike is not None:
+            bike["checked"] = {k: v for k, v in (bike.get("checked") or {}).items()
+                               if k != field}
+
+    async def commission_bike(self, bike_id, *, by):
+        bike = self.bikes_.get(bike_id)
+        if bike is None or bike.get("status") != "new":
+            return False
+        await self.update_bike(bike_id, status="available", by=by)
+        bike["commissioned_at"] = self._now()
+        bike["commissioned_by"] = by
+        return True
+
+    async def bikes_on_assembly(self, limit=200):
+        rows = [dict(b) for b in self.bikes_.values() if b.get("status") == "new"]
+        rows.sort(key=lambda b: -b["id"])
+        return rows[:limit]
 
 
 def _num(value):

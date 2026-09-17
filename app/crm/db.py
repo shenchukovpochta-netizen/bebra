@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -21,7 +21,8 @@ BIKE_FIELDS = frozenset({
     "code", "model", "frame_no", "motor_no", "battery_count", "status",
     "purchase_price", "purchased_on", "note", "location", "service_months",
     "residual_price", "battery_price", "battery_service_months", "mileage_km",
-    "spare",
+    "spare", "plate_no", "plate_ok", "tracker_ok", "checked",
+    "commissioned_at", "commissioned_by",
 })
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
@@ -2947,3 +2948,48 @@ class CrmDB:
     async def referrals_since(self, since: date) -> list[dict]:
         return _rows(await self.pool.fetch(
             "select * from crm.referrals where created_at >= $1::date", since))
+
+    # ────────────── ввод техники в эксплуатацию ──────────────
+
+    async def mark_bike_checked(self, bike_id: int, field: str, *, by: str,
+                                photo: str | None = None) -> None:
+        """Отметить поле паспорта сверенным.
+
+        jsonb правится слиянием в базе, а не чтением-записью в коде: два
+        техника, сверяющие соседние поля одновременно, иначе затёрли бы
+        отметки друг друга.
+        """
+        mark: dict[str, Any] = {"at": datetime.now(UTC).isoformat(timespec="seconds"),
+                                "by": by}
+        if photo:
+            mark["photo"] = photo
+        await self.pool.execute(
+            "update crm.bikes set checked = coalesce(checked, '{}'::jsonb) || $2::jsonb, "
+            "updated_at = now() where id = $1", bike_id, {field: mark})
+
+    async def clear_bike_check(self, bike_id: int, field: str) -> None:
+        await self.pool.execute(
+            "update crm.bikes set checked = coalesce(checked, '{}'::jsonb) - $2, "
+            "updated_at = now() where id = $1", bike_id, field)
+
+    async def commission_bike(self, bike_id: int, *, by: str) -> bool:
+        """Выпустить в оборот. False - велосипед уже не «на сборке».
+
+        Актёр ставится в той же транзакции: смену статуса пишет триггер
+        журнала, и без set_config автор записи потерялся бы.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            row = await conn.fetchrow(
+                """
+                update crm.bikes set status = 'available', commissioned_at = now(),
+                       commissioned_by = $2, updated_at = now()
+                 where id = $1 and status = 'new'
+                returning id
+                """, bike_id, by)
+            return row is not None
+
+    async def bikes_on_assembly(self, limit: int = 200) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.bikes where status = 'new' order by id desc limit $1",
+            limit))

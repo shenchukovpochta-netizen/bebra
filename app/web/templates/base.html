@@ -32,7 +32,7 @@
       {% if can_view(staff, 'reports') %}<a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>{% endif %}
       {% if can_view(staff, 'import') %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}
       {% if can_view(staff, 'staff') %}<a href="/staff" {% if request.url.path.startswith('/staff') or request.url.path.startswith('/profiles') %}class="on"{% endif %}>Сотрудники</a>{% endif %}
-      {% if can_view(staff, 'settings') %}<a href="/company" {% if request.url.path.startswith(('/company', '/locations', '/models', '/notices')) %}class="on"{% endif %}>Настройки</a>{% endif %}
+      {% if can_view(staff, 'settings') %}<a href="/company" {% if request.url.path.startswith(('/company', '/locations', '/models', '/notices', '/intake')) %}class="on"{% endif %}>Настройки</a>{% endif %}
       <a href="/me" class="me {% if request.url.path.startswith('/me') %}on{% endif %}">{{ staff.name or staff.login }}</a>
     </nav>
   </div>

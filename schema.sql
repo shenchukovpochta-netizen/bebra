@@ -1655,3 +1655,26 @@ create unique index if not exists bonuses_review_once
 -- Бонус другу - тоже один: приглашение отрабатывает однократно.
 create unique index if not exists bonuses_friend_once
   on crm.bonuses (client_id) where kind = 'friend';
+
+-- ────────────────── ввод техники в эксплуатацию ──────────────────
+--
+-- Новый велосипед не появляется в парке готовым: его собирают, клеят
+-- номер, ставят трекер и госномер. До сверки он в статусе `new` -
+-- «новое на сборке», и выдать его нельзя.
+--
+-- Сверка - это не галочка «всё хорошо», а отметка по каждому полю
+-- паспорта: кто и когда подтвердил, что номер на раме совпадает с тем,
+-- что в карточке. Переписать номер из накладной и сверкой это не
+-- назвать - для того и фотография.
+alter table crm.bikes add column if not exists plate_no text;
+-- Госномер и трекер установлены физически. Отдельно от номера: номер
+-- может быть выписан, а таблички на велосипеде ещё нет.
+alter table crm.bikes add column if not exists plate_ok boolean not null default false;
+alter table crm.bikes add column if not exists tracker_ok boolean not null default false;
+-- {"frame_no": {"at": "2026-09-17", "by": "staff:1", "photo": "…"}, …}
+-- jsonb, а не пять колонок: полей паспорта со временем станет больше,
+-- а колонка на каждое - это правка схемы на каждое.
+alter table crm.bikes add column if not exists checked jsonb not null default '{}'::jsonb;
+alter table crm.bikes add column if not exists commissioned_at timestamptz;
+alter table crm.bikes add column if not exists commissioned_by text;
+create index if not exists bikes_new_idx on crm.bikes (status) where status = 'new';

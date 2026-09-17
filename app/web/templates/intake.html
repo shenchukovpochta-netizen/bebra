@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Ввод техники — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Ввод техники в эксплуатацию</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/locations">Точки</a>
+    <a href="/models">Каталог</a><a href="/notices">Уведомления</a>
+    <a href="/intake" class="on">Ввод техники</a></nav>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Правила</h2>
+  <fieldset {% if not can_edit(staff, 'settings') %}disabled{% endif %} class="plain">
+  <form method="post" action="/intake">
+    <label class="check"><input type="checkbox" name="required"
+      {% if checks.required %}checked{% endif %}> Не выпускать технику в оборот без сверки</label>
+    <p class="muted">Включено: новый велосипед заводится в статусе «новое
+      на сборке» и выходит из него только кнопкой «Ввести в эксплуатацию»,
+      когда сверены все поля паспорта — модель, номер наклейки, серийный
+      номер, госномер и трекер. Выключено: список остаётся подсказкой,
+      но кнопка не заперта, а техника заводится сразу свободной.</p>
+
+    <label class="check"><input type="checkbox" name="photo"
+      {% if checks.photo %}checked{% endif %}> Требовать фотографию номера</label>
+    <p class="muted">Серийный номер и госномер без снимка сверенными не
+      считаются. Фотография доказывает, что человек смотрел на технику,
+      а не переписал номер из накладной.</p>
+
+    <h3>Розыск и кража</h3>
+    <div class="grid2">
+      <label>Ставить в розыск через, суток
+        <input name="search_after_days" inputmode="numeric" value="{{ search.search_after }}"></label>
+      <label>Предлагать признать украденным через, суток
+        <input name="theft_after_days" inputmode="numeric" value="{{ search.theft_after }}"></label>
+    </div>
+    <p class="muted">Велосипед в розыске остаётся в аренде, и начисление
+      идёт: пометка нужна, чтобы технику искали, а не чтобы списать долг.
+      Признание кражи — всегда кнопка человека, сама система ничего не
+      списывает.</p>
+    <button type="submit">Сохранить</button>
+  </form>
+  </fieldset>
+</section>
+
+<section class="card">
+  <h2>На сборке <span class="muted">· {{ rows|length }}</span></h2>
+  <table>
+    <tr><th>Номер</th><th>Модель</th><th>Сверка</th></tr>
+    {% for b in rows %}
+    <tr>
+      <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
+      <td>{{ b.model }}</td>
+      <td>{% if b.state.done %}<span class="tag ok">готов к выпуску</span>
+        {% else %}<span class="muted">{{ b.state.left|join(', ') }}</span>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="3" class="muted">Ничего не собирается —
+      весь парк в обороте.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Техника на сборке не попадает ни в выдачу, ни в
+    операционный парк и простоем не считается: записывать недособранный
+    велосипед в убыток незачем.</p>
+</section>
+</div>
+{% endblock %}

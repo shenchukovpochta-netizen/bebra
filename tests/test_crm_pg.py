@@ -1254,6 +1254,47 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(totals["by_kind"]["manual"], D("200.00"))
         self.assertIsNotNone(await self.crm.bonus_of(self.client_id, "review"))
 
+    async def test_intake_on_postgres(self):
+        """Сверка на живой базе: jsonb сливается, статус пишет триггер."""
+        await self.seed()
+        bike_id = await self.crm.create_bike(
+            code="B-900", model="Kugoo", frame_no="DEMO-900", status="new",
+            by="staff:t")
+        bike = await self.crm.bike(bike_id)
+        self.assertEqual(bike["status"], "new")
+        self.assertEqual(bike["checked"], {},
+                         "jsonb вернулся словарём, а не строкой")
+
+        await self.crm.mark_bike_checked(bike_id, "model", by="staff:t")
+        await self.crm.mark_bike_checked(bike_id, "frame_no", by="staff:t",
+                                         photo="900-frame.jpg")
+        bike = await self.crm.bike(bike_id)
+        # Слияние, а не перезапись: вторая отметка не съела первую.
+        self.assertEqual(set(bike["checked"]), {"model", "frame_no"})
+        self.assertEqual(bike["checked"]["frame_no"]["photo"], "900-frame.jpg")
+
+        await self.crm.clear_bike_check(bike_id, "model")
+        self.assertEqual(set((await self.crm.bike(bike_id))["checked"]),
+                         {"frame_no"})
+
+        # Ввод в эксплуатацию: статус меняется, автора пишет триггер.
+        self.assertTrue(await self.crm.commission_bike(bike_id, by="staff:t"))
+        bike = await self.crm.bike(bike_id)
+        self.assertEqual(bike["status"], "available")
+        self.assertIsNotNone(bike["commissioned_at"])
+        log = await self.crm.bike_status_log(bike_id)
+        self.assertEqual((log[0]["from_status"], log[0]["to_status"]),
+                         ("new", "available"))
+        self.assertEqual(log[0]["changed_by"], "staff:t")
+        # Второй раз выпустить нельзя.
+        self.assertFalse(await self.crm.commission_bike(bike_id, by="staff:t"))
+
+        # На сборке остались только те, кого не выпустили.
+        await self.crm.create_bike(code="B-901", model="Kugoo", status="new",
+                                   by="staff:t")
+        self.assertEqual([b["code"] for b in await self.crm.bikes_on_assembly()],
+                         ["B-901"])
+
 
 if __name__ == "__main__":
     unittest.main()

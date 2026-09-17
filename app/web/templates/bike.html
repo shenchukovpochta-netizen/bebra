@@ -28,6 +28,9 @@
     <label>Модель <input name="model" value="{{ bike.model }}" required></label>
     <label>Номер рамы <input name="frame_no" value="{{ bike.frame_no or '' }}"></label>
     <label>Номер мотора <input name="motor_no" value="{{ bike.motor_no or '' }}"></label>
+    <label>Госномер <input name="plate_no" value="{{ bike.plate_no or '' }}" placeholder="если выдан"></label>
+    <label class="check"><input type="checkbox" name="plate_ok" value="1" {% if bike.plate_ok %}checked{% endif %}> Госномер установлен</label>
+    <label class="check"><input type="checkbox" name="tracker_ok" value="1" {% if bike.tracker_ok %}checked{% endif %}> Трекер установлен</label>
     <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="{{ bike.battery_count }}"></label>
     <label>Пробег, км <input name="mileage_km" inputmode="numeric" value="{{ bike.mileage_km or 0 }}"></label>
     <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}" {% if bike.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
@@ -45,11 +48,72 @@
   {% if not can_edit(staff, 'bikes') %}<p class="muted">Парк вам открыт только на просмотр: карточка, ремонт и смена статуса — за механиком.</p>{% endif %}
   <p class="muted">Пробег растёт сам: его вписывают при выдаче и при возврате аренды, назад не крутится. Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
+<section class="card">
+  <h2>Паспорт и сверка
+    {% if passport.new %}<span class="tag">на сборке</span>
+    {% elif passport.done %}<span class="tag ok">сверен</span>
+    {% else %}<span class="tag bad">не сверен</span>{% endif %}
+  </h2>
+  <table>
+    <tr><th>Поле</th><th>Что в нём</th><th>Сверено</th><th></th></tr>
+    {% for r in passport.rows %}
+    <tr>
+      <td>{{ r.title }}</td>
+      <td>{% if r.filled %}{{ r.value }}{% else %}<span class="muted">не заполнено</span>{% endif %}</td>
+      <td>{% if r.ok %}<span class="tag ok">✓ {{ r.at[:10] }}</span>
+        {% if r.photo %}<br><a href="/bikes/{{ bike.id }}/photo/{{ r.field }}" target="_blank" rel="noopener">снимок</a>{% endif %}
+        {% elif r.at %}<span class="tag bad">нужен снимок</span>
+        {% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="actions nowrap">
+        {% if can_edit(staff, 'bikes') %}
+        {% if r.ok %}
+        <form method="post" action="/bikes/{{ bike.id }}/check" class="inline-form">
+          <input type="hidden" name="field" value="{{ r.field }}">
+          <button type="submit" name="action" value="clear" class="ghost">Снять</button>
+        </form>
+        {% else %}
+        <form method="post" action="/bikes/{{ bike.id }}/check" class="inline-form"
+              enctype="multipart/form-data">
+          <input type="hidden" name="field" value="{{ r.field }}">
+          {% if r.needs_photo %}<input type="file" name="photo" accept="image/*" capture="environment">{% endif %}
+          <button type="submit" name="action" value="check" class="ghost">Сверено</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if passport.new %}
+  {% if can_edit(staff, 'bikes') %}
+  <form method="post" action="/bikes/{{ bike.id }}/check" class="inline-form">
+    <button type="submit" name="action" value="commission"
+      {% if not passport.can_commission %}disabled{% endif %}>Ввести в эксплуатацию</button>
+  </form>
+  {% endif %}
+  {% if passport.left %}
+  <p class="flash {{ 'err' if passport.required else '' }}">Не сверено:
+    {{ passport.left|join(', ') }}.
+    {% if passport.required %}Пока не сверено, велосипед в оборот не выйдет.
+    {% else %}Сверка не требуется настройкой — список остаётся подсказкой.{% endif %}</p>
+  {% endif %}
+  <p class="muted">Из «нового на сборке» велосипед выходит только этой
+    кнопкой: он не попадает ни в выдачу, ни в операционный парк, и
+    простоем не считается — недособранный велосипед в убыток записывать
+    незачем.</p>
+  {% elif bike.commissioned_at %}
+  <p class="muted">В обороте с {{ bike.commissioned_at|dmy }}{% if bike.commissioned_by %} · {{ bike.commissioned_by }}{% endif %}.</p>
+  {% endif %}
+</section>
+
 {% if can_edit(staff, 'bikes') %}
 <section class="card">
   <h2>Статус</h2>
   {% if bike.rental_id %}
     <p class="muted">Пока идёт аренда, статус «в аренде» снимается только закрытием аренды.</p>
+  {% elif bike.status == 'new' %}
+    <p class="muted">Велосипед на сборке: в оборот его выпускает кнопка
+      «Ввести в эксплуатацию» — она проверяет сверку, а список статусов нет.</p>
   {% else %}
   <form method="post" action="/bikes/{{ bike.id }}/status" class="grid2">
     <label>Новый статус <select name="status">{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}" {% if bike.status == code %}selected{% endif %}>{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>

@@ -220,11 +220,15 @@ services:
       # Договоры клиентов лежат в хранилище бота; панель отдаёт их на
       # скачивание, поэтому том смонтирован только на чтение.
       STORAGE_DIR: /files/kyc
+      # Снимки сверки техники: панель их пишет, поэтому том свой, а
+      # kycfiles с персональными данными остаётся read-only.
+      BIKE_PHOTO_DIR: /bikes
       TZ: ${TZ:-Europe/Moscow}
     ports:
       - "${CRM_BIND:-127.0.0.1}:${CRM_PORT:-8080}:8080"
     volumes:
       - kycfiles:/files:ro
+      - bikefiles:/bikes
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -312,4 +316,7 @@ services:
 volumes:
   pgdata:
   kycfiles:
+  # Снимки сверки техники. Персональных данных в них нет, поэтому
+  # и срока хранения нет: номер на раме не устаревает.
+  bikefiles:
   caddydata:

@@ -37,6 +37,10 @@ class WebConfig:
     # Панель стоит за Caddy (задан CRM_DOMAIN): адрес клиента брать из
     # X-Forwarded-For, иначе все входы выглядят как один адрес прокси.
     trust_proxy: bool = False
+    # Снимки сверки техники. Отдельный каталог и отдельный том: сканы
+    # паспортов панель читает и не пишет, а эти снимки пишет она сама -
+    # значит, каталог у них разный, и том с ПДн остаётся read-only.
+    bike_photo_dir: Path = Path("/bikes")
     # Служебный чат: панель пишет туда то же, что бот, - приход запчасти
     # под стоящий наряд. Пусто - командные сообщения из панели не уходят,
     # и это не ошибка: у панели может не быть своего бота.
@@ -63,6 +67,7 @@ class WebConfig:
             admin_password=_secret("CRM_ADMIN_PASSWORD", required=False),
             bot_token=_secret("BOT_TOKEN", required=False),
             storage_dir=Path(_env("STORAGE_DIR", "/files/kyc")),
+            bike_photo_dir=Path(_env("BIKE_PHOTO_DIR", "/bikes")),
             port=_int("CRM_PORT", "8080"),
             remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
             title=_env("CRM_TITLE", "МАЙБАЙК"),
