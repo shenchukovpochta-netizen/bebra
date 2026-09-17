@@ -28,8 +28,8 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import company, notices, notify, service
 from ..crm import logic as crm_logic
-from ..crm import notices, notify, service
 from ..crm import sync as crm_sync
 from ..db import Database
 from ..filters import ServiceChatReply, StateIs, is_operator
@@ -73,7 +73,7 @@ def _file_exists(path: str) -> bool:
 
 
 def _support_url() -> str:
-    return logic.esc(texts.SUPPORT_CONTACT_URL)
+    return logic.esc(company.support_url())
 
 
 async def home_text(crm: Any, client: dict, lang: str, *, today: date | None = None) -> str:

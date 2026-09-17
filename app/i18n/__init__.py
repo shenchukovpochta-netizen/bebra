@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 from .. import texts
+from ..crm import company
 from ..faq_i18n import LANG_TITLES, LANGS, pick_prompt  # noqa: F401 - реэкспорт
 from . import ar, cv, en, fa, hi, tk, tt, uz
 
@@ -102,15 +103,19 @@ def t(lang: str | None, key: str) -> str:
     Возвращает ШАБЛОН: плейсхолдеры {number}/{price}/... подставляет
     вызывающий тем же .format(), что и раньше, - поэтому замена
     texts.X на t(lang, "X") не трогает остальную строку кода.
+
+    Контакт менеджера подставляется здесь: ссылка вшита и в русский
+    текст, и во все переводы, а меняет её владелец в панели - одна
+    замена на выходе дешевле девяти файлов с одной и той же строкой.
     """
     lang = norm(lang)
     if lang != "ru":
         val = PACKS[lang].get(key)
         if val:
-            return val
+            return company.with_contact(val)
     if key in BUTTONS_RU:
         return BUTTONS_RU[key]
-    return getattr(texts, key)
+    return company.with_contact(getattr(texts, key))
 
 
 def err(lang: str | None, message: str) -> str:

@@ -1855,3 +1855,28 @@ create index if not exists saved_views_idx
 -- фильтрами - это спор о том, который из них настоящий.
 create unique index if not exists saved_views_one_name
   on crm.saved_views (staff_id, section, lower(name));
+
+-- ────── мелочи: пробег в журнале статусов, контакты менеджера ──────
+--
+-- Пробег при каждой смене статуса. Раньше он записывался только при
+-- выдаче и возврате, и на вопрос «сколько накатал, пока был в ремонте»
+-- ответить было нечем. Колонку заполняет тот же триггер: отдельным
+-- запросом её забудут заполнить в первом же новом месте.
+
+alter table crm.bike_status_log add column if not exists mileage_km integer;
+
+create or replace function crm.log_bike_status() returns trigger
+language plpgsql as $$
+begin
+  if tg_op = 'INSERT' or old.status is distinct from new.status then
+    insert into crm.bike_status_log (bike_id, from_status, to_status, changed_at,
+                                     changed_by, mileage_km)
+    values (new.id,
+            case when tg_op = 'INSERT' then null else old.status end,
+            new.status, now(),
+            nullif(current_setting('crm.actor', true), ''),
+            new.mileage_km);
+  end if;
+  return new;
+end
+$$;

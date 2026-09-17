@@ -1389,16 +1389,40 @@ async def send_estimate(crm: Any, order: dict, *, by: str, bot: Any = None) -> d
 async def answer_estimate(crm: Any, order: dict, *, agree: bool, by: str) -> dict:
     """Ответ на смету: согласовано или отказ.
 
+    Согласовать можно и не отправляя смету в бота: клиент стоит у стойки
+    и говорит «да». Гнать его в переписку ради кнопки значит держать
+    технику разобранной лишний час - и ровно поэтому статус «на
+    согласовании» здесь не обязателен.
+
     Отказ закрывает наряд отменой: держать открытым то, от чего клиент
     отказался, значит вечно видеть его в «в работе» и считать простой.
     """
-    if order.get("status") != "approve":
-        raise ServiceError("Наряд не на согласовании.")
+    live = order.get("status") != "approve"
+    if live:
+        # Ответ бывает один: согласованное потом «отказался» отменило бы
+        # наряд, по которому уже работают.
+        if order.get("approved_at") or order.get("declined_at"):
+            raise ServiceError("По этой смете уже ответили.")
+        if not logic.order_is_open(order):
+            raise ServiceError("Наряд закрыт, согласовывать нечего.")
+        if order.get("payer") != "client":
+            raise ServiceError("Свой ремонт согласовывать не с кем: "
+                               "смета нужна там, где платит клиент.")
     now = datetime.now(UTC)
     if agree:
-        await crm.update_work_order(order["id"], status="in_work",
-                                    approved_at=now, approved_by=by,
-                                    declined_at=None)
+        fields: dict[str, Any] = {"status": "in_work", "approved_at": now,
+                                  "approved_by": by, "declined_at": None}
+        if live:
+            # Согласовали мимо отправки - сумму всё равно фиксируем по
+            # строкам наряда: иначе в смете останется ноль, и на спор
+            # «я такого не заказывал» отвечать будет нечем.
+            items = await crm.order_items(order["id"])
+            total = logic.order_totals_client(items)
+            if not items or total <= 0:
+                raise ServiceError("В наряде нет строк с ценой клиенту — "
+                                   "согласовывать нечего.")
+            fields["estimate"] = total
+        await crm.update_work_order(order["id"], **fields)
     else:
         await crm.update_work_order(order["id"], status="cancelled",
                                     declined_at=now, closed_at=now)

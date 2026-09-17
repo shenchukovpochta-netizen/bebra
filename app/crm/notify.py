@@ -15,7 +15,7 @@ from typing import Any
 from .. import i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
-from . import logic
+from . import company, logic
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ async def payment_rejected(bot: Any, db: Any, client: dict) -> bool:
         return False
     lang = await _lang(db, client["tg_id"])
     text = i18n.t(lang, "CAB_PAID_REJECTED").format(
-        url=bot_logic.esc(texts.SUPPORT_CONTACT_URL))
+        url=bot_logic.esc(company.support_url()))
     return await _send(bot, client["tg_id"], text)
 
 

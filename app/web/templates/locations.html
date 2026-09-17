@@ -4,12 +4,17 @@
 <div class="bar"><h1>Точки выдачи</h1>
   <nav class="tabs"><a href="/company">Реквизиты</a><a href="/documents">Документы</a><a href="/locations" class="on">Точки</a><a href="/models">Каталог</a><a href="/notices">Уведомления</a><a href="/intake">Ввод техники</a></nav>
 </div>
+{# Город - уровень над пунктом: с двумя точками в одном городе он лишний,
+   с точками в двух городах - единственный способ не перепутать «Восстания»
+   в Казани и «Восстания» где-то ещё. #}
+{% for g in cities %}
 <div class="card">
+<h2>{{ g.city }} <span class="muted">· {{ g.open }} из {{ g.total }} работает</span></h2>
 <table>
   <tr><th>Точка</th><th>Адрес и режим</th><th class="opt">Телефон</th><th class="opt">На карте</th><th>Работает</th></tr>
-  {% for r in rows %}
+  {% for r in g.rows %}
   <tr class="{% if not r.active %}muted{% endif %}">
-    <td><b>{{ r.name }}</b><br><small class="muted">{{ r.public_title or r.city }}</small></td>
+    <td><b>{{ r.name }}</b>{% if r.public_title %}<br><small class="muted">{{ r.public_title }}</small>{% endif %}</td>
     <td>{{ r.address or '—' }}{% if r.hours %}<br><small class="muted">{{ r.hours }}</small>{% endif %}</td>
     <td class="opt">{% if r.phone %}<a href="tel:{{ r.phone }}">{{ r.phone }}</a>{% else %}—{% endif %}</td>
     <td class="opt">{% if r.lat and r.lon %}<a href="{{ map_url(r.lat, r.lon) }}" target="_blank" rel="noopener">{{ '%.4f'|format(r.lat) }}, {{ '%.4f'|format(r.lon) }}</a>{% else %}<span class="muted">нет координат</span>{% endif %}</td>
@@ -19,7 +24,8 @@
   <tr class="{% if not r.active %}muted{% endif %}">
     <td colspan="5">
       <form method="post" action="/locations/{{ r.id }}" class="grid2">
-        <label class="wide">Название для курьеров <input name="public_title" value="{{ r.public_title or '' }}" placeholder="Май Байк — сервис и аренда, Павлюхина"></label>
+        <label>Город <input name="city" value="{{ r.city or '' }}"></label>
+        <label>Название для курьеров <input name="public_title" value="{{ r.public_title or '' }}" placeholder="Май Байк — сервис и аренда, Павлюхина"></label>
         <label class="wide">Адрес <input name="address" value="{{ r.address or '' }}"></label>
         <label>Телефон <input name="phone" value="{{ r.phone or '' }}"></label>
         <label>Режим работы <input name="hours" value="{{ r.hours or '' }}" placeholder="пн-вс: 10:00-19:00"></label>
@@ -33,9 +39,20 @@
   {% endif %}
   {% endfor %}
 </table>
+</div>
+{% else %}
+<div class="card"><p class="muted">Точек нет. Заведите первую — её название ляжет в карточку велосипеда.</p></div>
+{% endfor %}
+<div class="card">
 <p class="muted">Название точки — это то, что лежит в карточке велосипеда.
   Закрытая точка остаётся в карточках: велосипеды на ней никуда не делись,
-  и переписывать их ради красоты справочника значит потерять, где они стоят.</p>
+  и переписывать их ради красоты справочника значит потерять, где они стоят.
+  Переименование города переносит точку в другую группу и больше ничего
+  не задевает: в карточке парка стоит точка, а не город.</p>
+<p class="muted">Часового пояса у города нет намеренно. Вся система живёт
+  в Europe/Moscow — сроки аренды, начисления, отчёты, журнал статусов, —
+  и второй пояс пришлось бы протащить через каждый из них. Понадобится
+  город в другом поясе — это отдельная работа, а не колонка в справочнике.</p>
 </div>
 {% if can_edit(staff, 'settings') %}
 <div class="card narrow">

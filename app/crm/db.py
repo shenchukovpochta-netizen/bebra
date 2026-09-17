@@ -1282,7 +1282,9 @@ class CrmDB:
             select coalesce(b.model, 'чужая техника') as model,
                    count(distinct o.id)               as orders,
                    coalesce(sum(m.qty), 0)            as qty,
-                   coalesce(sum(m.cost), 0)           as cost
+                   -- cost в движении - себестоимость ЕДИНИЦЫ: три камеры
+                   -- по 300 стоят 900, а не 300.
+                   coalesce(sum(m.qty * m.cost), 0)   as cost
               from crm.part_moves m
               join crm.work_orders o on o.id = m.order_id
               left join crm.bikes b on b.id = o.bike_id
@@ -1296,8 +1298,10 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             """
             select p.id, p.title, p.node, p.unit,
-                   coalesce(sum(m.qty), 0)  as qty,
-                   coalesce(sum(m.cost), 0) as cost,
+                   coalesce(sum(m.qty), 0)          as qty,
+                   -- Себестоимость единицы на количество: иначе расход
+                   -- трёх камер выглядел бы ценой одной.
+                   coalesce(sum(m.qty * m.cost), 0) as cost,
                    count(distinct m.order_id) filter (where m.order_id is not null)
                                              as orders
               from crm.part_moves m
@@ -1306,6 +1310,23 @@ class CrmDB:
              group by p.id, p.title, p.node, p.unit
              order by cost, qty
             """, since, until))
+
+    async def stock_value_by_month(self) -> list[dict]:
+        """Движение денег на складе по месяцам: приход минус расход.
+
+        qty * cost, а не сумма cost: в движении лежит себестоимость
+        ЕДИНИЦЫ, и сложение одних только cost дало бы сумму ценников,
+        а не потраченные деньги. Накопительный итог считает логика -
+        база отдаёт ряд как есть, от первого движения.
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select date_trunc('month', created_at)::date as month,
+                   coalesce(sum(qty * cost), 0)          as value
+              from crm.part_moves
+             group by 1
+             order by 1
+            """))
 
     # ─────────────────────── окупаемость по моделям ───────────────────────
 

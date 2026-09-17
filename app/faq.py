@@ -24,6 +24,7 @@ from datetime import datetime
 
 from . import faq_i18n as i18n
 from . import texts
+from .crm import company
 from .logic import esc
 
 # ─────────────────────────── карточка фактов ───────────────────────────
@@ -385,7 +386,7 @@ def answer(intent: Intent, *, now: datetime | None = None,
         text = t.get("a_" + intent.code) or ANSWERS.get(intent.code, FALLBACK)
     if intent.visit and now is not None and not is_open(now):
         text += "\n" + t.get("after_hours", AFTER_HOURS)
-    return with_pay_url(text, pay_url)
+    return company.with_contact(with_pay_url(text, pay_url))
 
 
 def _price_i18n(t: dict[str, str], *, renter: bool, plan: str) -> str:
@@ -414,11 +415,12 @@ def menu_text(lang: str = "ru", *, registered: bool = True) -> str:
     """
     t = i18n.T.get(lang, {})
     if not t:
-        return texts.FAQ_MENU if registered else texts.FAQ_MENU_GUEST
+        return company.with_contact(
+            texts.FAQ_MENU if registered else texts.FAQ_MENU_GUEST)
     text = t["menu"]
     if not registered:
         text += "\n" + t["contact"]
-    return text
+    return company.with_contact(text)
 
 
 def with_pay_url(text: str, pay_url: str = PAY_URL) -> str:

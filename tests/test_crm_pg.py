@@ -1581,10 +1581,10 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.update_work_order(second, status="done", total=D("1000"),
                                          cost=D("300"), closed_at=now)
         await self.crm.add_part_move(part_id=part_id, kind="order", qty=-3,
-                                     cost=D("-900"), order_id=first,
+                                     cost=D("300"), order_id=first,
                                      created_by="t")
         await self.crm.add_part_move(part_id=part_id, kind="order", qty=-1,
-                                     cost=D("-300"), order_id=second,
+                                     cost=D("300"), order_id=second,
                                      created_by="t")
         since, until = now - timedelta(days=1), now + timedelta(days=1)
 
@@ -1701,6 +1701,49 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.crm.drop_saved_view(first, staff_id=other))
         self.assertTrue(await self.crm.drop_saved_view(first, staff_id=boss))
         self.assertEqual(await self.crm.saved_views(boss, "/rentals"), [])
+
+    async def test_stock_value_by_month_on_postgres(self):
+        """Деньги на полке: qty * себестоимость единицы, накопительно."""
+        await self.seed()
+        part_id = await self.crm.create_part(
+            title="Камера", node="tube_tire", unit="шт", cost=D("300"),
+            price=D("600"), min_stock=2, model=None, note=None)
+        await self.crm.add_part_move(part_id=part_id, kind="receipt", qty=10,
+                                     cost=D("300"), created_by="t")
+        await self.crm.add_part_move(part_id=part_id, kind="order", qty=-3,
+                                     cost=D("300"), created_by="t")
+        rows = await self.crm.stock_value_by_month()
+        self.assertEqual(len(rows), 1, "оба движения - в текущем месяце")
+        self.assertEqual(rows[0]["value"], D("2100.00"),
+                         "10 × 300 − 3 × 300: цена в движении за единицу")
+        self.assertEqual(rows[0]["month"], date.today().replace(day=1))
+        chart = logic.stock_value_chart(rows)
+        self.assertEqual(chart["now"], D("2100.00"))
+
+    async def test_status_log_keeps_the_mileage_on_postgres(self):
+        """Пробег снимается тем же триггером, что и статус."""
+        await self.seed()
+        await self.crm.update_bike(self.bike_id, status="repair",
+                                   mileage_km=4266, by="staff:оператор")
+        rows = await self.crm.bike_status_log(self.bike_id)
+        self.assertEqual(rows[0]["to_status"], "repair")
+        self.assertEqual(rows[0]["mileage_km"], 4266)
+        self.assertEqual(rows[0]["changed_by"], "staff:оператор")
+        # Смена статуса без нового одометра пишет прежний: пробег
+        # у велосипеда один, и обнулять его в журнале нечестно.
+        await self.crm.update_bike(self.bike_id, status="available",
+                                   by="staff:оператор")
+        rows = await self.crm.bike_status_log(self.bike_id)
+        self.assertEqual(rows[0]["to_status"], "available")
+        self.assertEqual(rows[0]["mileage_km"], 4266)
+
+    async def test_mileage_column_survives_reapply(self):
+        """schema.sql идемпотентен: повторный старт не теряет колонку."""
+        await Database(self.pool).apply_schema(SCHEMA)
+        rows = await self.crm.pool.fetch(
+            "select column_name from information_schema.columns "
+            "where table_schema = 'crm' and table_name = 'bike_status_log'")
+        self.assertIn("mileage_km", {r["column_name"] for r in rows})
 
 
 if __name__ == "__main__":

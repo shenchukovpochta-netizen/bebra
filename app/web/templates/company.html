@@ -14,6 +14,13 @@
     <label{% if code in ('company_name', 'company_address') %} class="wide"{% endif %}>{{ label }}
       <input name="{{ code }}" value="{{ values[code] }}"{% if not can_edit(staff, 'settings') %} disabled{% endif %}></label>
     {% endfor %}
+    {% for code, label in CONTACT_FIELDS.items() %}
+    <label class="wide">{{ label }}
+      <input name="{{ code }}" value="{{ values[code] }}" placeholder="{{ default_contact }}"{% if not can_edit(staff, 'settings') %} disabled{% endif %}>
+      <small class="muted">Это видит клиент в боте: «напишите нам напрямую…».
+        Можно «@имя» — развернём в ссылку. Пусто — работает зашитый
+        контакт {{ default_contact }}.</small></label>
+    {% endfor %}
     {% if can_edit(staff, 'settings') %}<button type="submit">Сохранить</button>{% endif %}
   </form>
   <p class="muted">В шаблонах эти поля доступны как <code>{{ '{{ company_name }}' }}</code>,
@@ -22,6 +29,11 @@
     он этих подстановок просто не встретит. Бот подхватывает правку в
     течение нескольких минут: панель и бот — разные процессы, общая у них
     только база.</p>
+  <p class="muted">Контакт менеджера — не реквизит: в документы он не идёт,
+    зато подставляется во все сообщения клиенту, включая переводы на
+    восемь языков. Меняется он здесь одной строкой: ссылка вшита в тексты
+    бота, и правка в девяти файлах разъехалась бы на первой же смене
+    аккаунта.</p>
 </div>
 
 <div class="card">

@@ -26,6 +26,7 @@ from typing import Any
 
 from .. import logic, tasks, texts
 from ..config import Config
+from ..crm import company
 from ..db import Database, utcnow
 from ..services import contract as contract_service
 from ..services import files, ocr
@@ -86,7 +87,10 @@ class Ctx:
 
 async def _say(ctx: Ctx, user_id: int, text: str,
                keyboard: list | None = None) -> None:
-    await ctx.cl.send(user_id=user_id, text=text, keyboard=keyboard)
+    # Контакт менеджера подставляется на выходе - как в основном боте:
+    # тексты у них общие, и вторая точка правки разъехалась бы с первой.
+    await ctx.cl.send(user_id=user_id, text=company.with_contact(text),
+                      keyboard=keyboard)
 
 
 def _prompt_keyboard(state: str) -> list | None:

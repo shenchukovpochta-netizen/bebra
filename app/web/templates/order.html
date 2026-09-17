@@ -107,15 +107,16 @@
       {{ 'Отправить смету клиенту' if estimate.stage == 'draft' else 'Отправить заново' }}</button>
   </form>
   {% endif %}
-  {% if order.status == 'approve' %}
+  {% if estimate.stage in ('draft', 'waiting') %}
   <h3>Согласовать вживую</h3>
   <form method="post" action="/orders/{{ order.id }}/estimate" class="inline-form">
     <button type="submit" name="action" value="agree" class="ghost">Клиент согласен</button>
     <button type="submit" name="action" value="decline" class="ghost danger">Отказался</button>
   </form>
   <p class="muted">Клиент стоит рядом и сказал «да» — не ждать же кнопки
-    в боте. Кто согласовал, запишется: на спор «я такого не заказывал»
-    это ответ.</p>
+    в боте, и отправлять смету перед этим незачем: сумма всё равно
+    возьмётся из строк наряда. Кто согласовал, запишется: на спор
+    «я такого не заказывал» это ответ.</p>
   {% endif %}
   {% endif %}
   <p class="muted">Смета собирается из строк наряда, а не из поля: клиент

@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from app import faq, i18n, texts  # noqa: E402
 from app.crm import (
     company,  # noqa: E402
     logic,  # noqa: E402
@@ -87,6 +88,61 @@ class TestCompanyLogic(unittest.TestCase):
                               f"{code}: реквизиты правит владелец")
 
 
+class TestManagerContact(unittest.TestCase):
+    """Контакт менеджера: одна настройка вместо ссылки в девяти файлах."""
+
+    def setUp(self):
+        company.reset()
+
+    def tearDown(self):
+        company.reset()
+
+    def test_handle_becomes_a_link_and_junk_is_refused(self):
+        self.assertEqual(company.check_contact(" @maybike_kazan "),
+                         ("https://t.me/maybike_kazan", ""))
+        self.assertEqual(company.check_contact("t.me/maybike"),
+                         ("https://t.me/maybike", ""))
+        self.assertEqual(company.check_contact("https://vk.me/maybike"),
+                         ("https://vk.me/maybike", ""))
+        self.assertIn("ссылка вида", company.check_contact("позвоните Ринату")[1])
+        self.assertIn("латиница", company.check_contact("@Ринат")[1])
+
+    def test_empty_means_the_built_in_contact(self):
+        self.assertEqual(company.check_contact(""), ("", ""))
+        self.assertEqual(company.support_url(), texts.SUPPORT_CONTACT_URL)
+        company.set_snapshot({"support_contact": ""})
+        self.assertEqual(company.support_url(), texts.SUPPORT_CONTACT_URL,
+                         "стёртое поле возвращает зашитый контакт, а не пустоту")
+
+    def test_setting_replaces_the_contact_in_every_text(self):
+        company.set_snapshot({"support_contact": "https://t.me/novy_menedzher"})
+        self.assertEqual(company.support_url(), "https://t.me/novy_menedzher")
+        for key in ("SUPPORT_PROMPT", "SUPPORT_SENT", "FAQ_GUEST_CONTACT",
+                    "CAB_UNAVAILABLE"):
+            text = i18n.t("ru", key)
+            self.assertIn("https://t.me/novy_menedzher", text, key)
+            self.assertNotIn(texts.SUPPORT_CONTACT_URL, text, key)
+
+    def test_translations_get_the_same_contact(self):
+        company.set_snapshot({"support_contact": "https://t.me/novy_menedzher"})
+        for lang in ("en", "uz", "tt", "ar"):
+            text = i18n.t(lang, "SUPPORT_PROMPT")
+            self.assertNotIn(texts.SUPPORT_CONTACT_URL, text, lang)
+
+    def test_faq_answers_carry_the_contact_too(self):
+        company.set_snapshot({"support_contact": "https://t.me/novy_menedzher"})
+        menu = faq.menu_text("ru", registered=False)
+        self.assertIn("https://t.me/novy_menedzher", menu)
+        self.assertNotIn(texts.SUPPORT_CONTACT_URL, menu)
+
+    def test_snapshot_keeps_the_contact_next_to_the_requisites(self):
+        company.set_snapshot({"company_inn": "1660",
+                              "support_contact": "https://t.me/x"})
+        self.assertEqual(company.snapshot()["support_contact"], "https://t.me/x")
+        self.assertNotIn("support_contact", company.context(company.snapshot()),
+                         "в документы контакт не идёт: это не реквизит")
+
+
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
 class TestCompanyInPanel(tw.WebCase):
     def setUp(self):
@@ -94,8 +150,13 @@ class TestCompanyInPanel(tw.WebCase):
         company.reset()
         self.login()
 
+    def tearDown(self):
+        # Снимок общий на процесс: оставленный здесь контакт подменил бы
+        # ссылку в тестах бота, которые идут следом.
+        company.reset()
+
     def save(self, **over):
-        data = {code: "" for code in company.COMPANY_FIELDS}
+        data = {code: "" for code in company.ALL_FIELDS}
         data.update({"company_name": "ИП Иванов Иван Иванович",
                      "company_inn": "166000000000"})
         data.update(over)
@@ -120,6 +181,27 @@ class TestCompanyInPanel(tw.WebCase):
         page = self.get_ok("/company")
         self.assertIn("Шаблоны документов", page)
         self.assertIn("Договор аренды", page)
+
+    def test_contact_is_saved_and_picked_up_by_this_process(self):
+        r = self.save(support_contact="@novy_menedzher")
+        self.assertEqual(r.status_code, 303)
+        settings = tw.run(self.crm.settings())
+        self.assertEqual(settings["support_contact"],
+                         "https://t.me/novy_menedzher",
+                         "@имя разворачивается в ссылку при сохранении")
+        self.assertEqual(company.support_url(), "https://t.me/novy_menedzher")
+        self.assertIn("https://t.me/novy_menedzher", self.get_ok("/company"))
+
+    def test_junk_contact_is_refused_and_nothing_is_saved(self):
+        self.save()
+        self.client.post("/company", data={
+            **{code: "" for code in company.ALL_FIELDS},
+            "company_name": "ИП Иванов Иван Иванович",
+            "support_contact": "позвоните Ринату"})
+        settings = tw.run(self.crm.settings())
+        self.assertEqual(settings.get("support_contact", ""), "")
+        self.assertEqual(settings["company_name"], "ИП Иванов Иван Иванович",
+                         "отказ на одном поле не должен стирать остальные")
 
     def test_only_the_owner_gets_the_section(self):
         profile = tw.run(self.crm.access_profile_by_code("manager"))

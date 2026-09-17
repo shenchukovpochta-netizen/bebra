@@ -342,6 +342,37 @@ class TestBatteryPanel(tw.WebCase):
                                                  "mode": "none"})
         self.assertEqual(tw.run(self.crm.compat_for_bike_model("Truck+")), [])
 
+    def test_points_are_grouped_by_city(self):
+        for name, city in (("Павлюхина", "Казань"), ("Адоратского", "Казань"),
+                           ("Соборная", "Челны")):
+            self.client.post("/locations", data={"name": name, "city": city,
+                                                 "address": "", "note": ""})
+        page = self.get_ok("/locations")
+        self.assertIn("Казань", page)
+        self.assertIn("Челны", page)
+        self.assertIn("2 из 2 работает", page, "счётчик считает точки города")
+        # Город правится прямо в строке точки - и она переезжает в свою группу.
+        loc = {x["name"]: x for x in tw.run(self.crm.locations())}["Соборная"]
+        r = self.client.post(f"/locations/{loc['id']}",
+                             data={"city": "Набережные Челны", "address": "",
+                                   "note": "", "public_title": "", "phone": "",
+                                   "hours": "", "lat": "", "lon": ""})
+        self.assertEqual(r.status_code, 303)
+        moved = {x["name"]: x for x in tw.run(self.crm.locations())}["Соборная"]
+        self.assertEqual(moved["city"], "Набережные Челны")
+        self.assertIn("Набережные Челны", self.get_ok("/locations"))
+
+    def test_point_edit_without_city_keeps_the_old_one(self):
+        self.client.post("/locations", data={"name": "Горького", "city": "Казань",
+                                             "address": "", "note": ""})
+        loc = tw.run(self.crm.locations())[0]
+        r = self.client.post(f"/locations/{loc['id']}",
+                             data={"address": "ул. Горького, 1", "note": "",
+                                   "public_title": "", "phone": "", "hours": "",
+                                   "lat": "", "lon": ""})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(tw.run(self.crm.locations())[0]["city"], "Казань")
+
     def test_closed_point_stays_in_the_cards(self):
         self.client.post("/locations", data={"name": "Горького", "city": "Казань",
                                              "address": "", "note": ""})

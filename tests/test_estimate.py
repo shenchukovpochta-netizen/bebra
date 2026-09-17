@@ -164,6 +164,56 @@ class TestEstimateFlow(tw.WebCase):
         self.assertEqual(_run(self.crm.bike(self.bike_id))["status"], "available",
                          "от чего отказались, то не держит место в сервисе")
 
+    def test_live_agreement_works_without_sending_the_estimate(self):
+        """Клиент стоит у стойки: гнать его в бота ради кнопки незачем."""
+        self.add_line()
+        _run(service.answer_estimate(self.crm, self.order(), agree=True,
+                                     by="staff:Пётр"))
+        order = self.order()
+        self.assertEqual(order["status"], "in_work")
+        self.assertEqual(order["approved_by"], "staff:Пётр")
+        self.assertEqual(order["estimate"], D(1500),
+                         "сумма берётся из строк наряда, а не остаётся нулём")
+        self.assertIsNone(order.get("estimate_sent_at"),
+                          "согласовали вживую - смету никуда не отправляли")
+
+    def test_live_refusal_cancels_the_order_and_frees_the_bike(self):
+        self.add_line()
+        _run(self.crm.update_bike(self.bike_id, status="repair", by="тест"))
+        _run(service.answer_estimate(self.crm, self.order(), agree=False,
+                                     by="staff:Пётр"))
+        order = self.order()
+        self.assertEqual(order["status"], "cancelled")
+        self.assertIsNotNone(order["declined_at"])
+        self.assertEqual(_run(self.crm.bike(self.bike_id))["status"], "available")
+
+    def test_live_agreement_needs_priced_lines(self):
+        with self.assertRaises(service.ServiceError):
+            _run(service.answer_estimate(self.crm, self.order(), agree=True,
+                                         by="staff:Пётр"))
+
+    def test_own_repair_is_not_agreed_live_either(self):
+        self.add_line()
+        _run(self.crm.update_work_order(self.order_id, payer="own"))
+        with self.assertRaises(service.ServiceError):
+            _run(service.answer_estimate(self.crm, self.order(), agree=True,
+                                         by="staff:Пётр"))
+
+    def test_closed_order_is_not_agreed_live(self):
+        self.add_line()
+        _run(self.crm.update_work_order(self.order_id, status="done"))
+        with self.assertRaises(service.ServiceError):
+            _run(service.answer_estimate(self.crm, self.order(), agree=True,
+                                         by="staff:Пётр"))
+
+    def test_live_answer_is_also_given_only_once(self):
+        self.add_line()
+        _run(service.answer_estimate(self.crm, self.order(), agree=True,
+                                     by="staff:Пётр"))
+        with self.assertRaises(service.ServiceError):
+            _run(service.answer_estimate(self.crm, self.order(), agree=False,
+                                         by="staff:Пётр"))
+
     def test_answer_only_once(self):
         self.add_line()
         _run(service.send_estimate(self.crm, self.order(), by="оператор",

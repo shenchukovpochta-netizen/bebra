@@ -24,6 +24,30 @@
   <div class="tile {% if summary.stale %}warn{% endif %}"><b>{{ summary.stale }}</b><span>лежит дольше {{ STOCK_STALE_DAYS }} дней<br><small class="muted">деньги на полке</small></span></div>
 </div>
 
+{% if chart and chart.months %}
+<section class="card">
+  <h2>Деньги на полке <span class="muted">· по месяцам</span></h2>
+  {# Те же CSS-столбики, что в ремонте и в выручке: библиотека графиков
+     ради двенадцати столбиков - лишние килобайты на странице, которую
+     открывают с телефона на точке. #}
+  <div class="bars" role="img" aria-label="Стоимость склада по месяцам">
+    {% for m in chart.months %}
+    <div class="bar-col" title="{{ m.month.strftime('%m.%Y') }}: {{ money(m.value) }}{% if m.moved %} · за месяц {{ money(m.moved) }}{% endif %}">
+      <div class="bar-val" style="height:{{ m.height }}%"></div>
+      <div class="bar-num">{{ (m.value / 1000)|round|int }}к</div>
+      <div class="bar-day muted">{{ m.month.strftime('%m') }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted">Сейчас на полке <b>{{ money(chart.now) }}</b>{% if chart.delta %} ·
+    за показанный период {{ '+' if chart.delta > 0 }}{{ money(chart.delta) }}{% endif %} ·
+    пик {{ money(chart.peak) }}. Считается накопительно от первого движения по цене,
+    которая стояла в самом движении, — поэтому с плиткой «склад по себестоимости»
+    последний столбик может не сойтись: та считает остаток по средней, а средняя
+    пересчитывается каждым приходом.</p>
+</section>
+{% endif %}
+
 <div class="card">
 {{ list.views(views, '/parts', tools, staff) }}
 <div class="table-wrap">

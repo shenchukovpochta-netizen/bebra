@@ -14,8 +14,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
+
+from .. import texts
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +39,17 @@ COMPANY_FIELDS: dict[str, str] = {
     "company_corr": "Корреспондентский счёт",
     "company_director": "Кто подписывает договоры",
 }
+
+# Контакты для клиента - отдельно от реквизитов: реквизиты идут в документы,
+# а это то, что клиент видит в боте. Ссылка на менеджера вшита в texts.py и
+# в восемь языковых пакетов, поэтому настройка подменяет её подстановкой в
+# готовый текст: иначе смена аккаунта означала бы правку девяти файлов.
+CONTACT_FIELDS: dict[str, str] = {
+    "support_contact": "Ссылка на менеджера",
+}
+
+# Всё, что панель пишет в настройки на этой странице, а бот читает снимком.
+ALL_FIELDS: dict[str, str] = {**COMPANY_FIELDS, **CONTACT_FIELDS}
 
 # Сколько живёт снимок. Реквизиты меняют раз в год, поэтому минуты
 # задержки после правки в панели никого не задевают, а запрос на каждый
@@ -78,7 +92,7 @@ def set_snapshot(values: dict[str, Any] | None) -> None:
     """Подменить снимок - для тестов и для первого чтения на старте."""
     global _snapshot, _loaded_at
     _snapshot = {code: str((values or {}).get(code) or "")
-                 for code in COMPANY_FIELDS}
+                 for code in ALL_FIELDS}
     _loaded_at = time.monotonic()
 
 
@@ -108,3 +122,52 @@ async def refresh(crm: Any, *, force: bool = False) -> dict[str, str]:
     except Exception:                                    # noqa: BLE001
         log.exception("реквизиты организации не перечитаны")
     return snapshot()
+
+
+# ─────────────────────── контакт менеджера ───────────────────────
+# Код настройки: ею подменяется контакт, зашитый в texts.SUPPORT_CONTACT_URL.
+CONTACT_SETTING = "support_contact"
+
+
+def check_contact(raw: Any) -> tuple[str, str]:
+    """Контакт менеджера из формы: (значение, ошибка).
+
+    Пусто - не ошибка, а «работает зашитый контакт»: стереть поле должно
+    быть можно, иначе владелец останется с чужой ссылкой навсегда.
+    «@имя» разворачивается в ссылку: контакт подставляется в обычный
+    текст сообщения, и кликабельной строку делает именно ссылка.
+    """
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return "", ""
+    if len(text) > VALUE_LIMIT:
+        return "", f"не длиннее {VALUE_LIMIT} символов"
+    if text.startswith("@"):
+        if not re.fullmatch(r"[A-Za-z0-9_]{4,32}", text[1:]):
+            return "", "имя в Telegram - латиница, цифры и подчёркивание"
+        return f"https://t.me/{text[1:]}", ""
+    if text.startswith("t.me/"):
+        text = "https://" + text
+    if not text.startswith(("http://", "https://")):
+        return "", "ссылка вида https://t.me/… или @имя"
+    return text, ""
+
+
+def support_url(values: dict[str, Any] | None = None) -> str:
+    """Контакт менеджера для клиента: настройка, иначе зашитый в texts."""
+    raw = str((values or _snapshot).get(CONTACT_SETTING) or "").strip()
+    return raw or texts.SUPPORT_CONTACT_URL
+
+
+def with_contact(text: str, url: str | None = None) -> str:
+    """Подставить контакт менеджера в готовый текст клиента.
+
+    replace, а не format: в текстах клиента встречаются фигурные скобки
+    сами по себе, и format упал бы на них уже на живом человеке.
+    Заменяется значение по умолчанию - оно одно на все языки, поэтому
+    один вызов чинит и русский текст, и восемь переводов сразу.
+    """
+    url = url or support_url()
+    if url == texts.SUPPORT_CONTACT_URL:
+        return text
+    return text.replace(texts.SUPPORT_CONTACT_URL, url)

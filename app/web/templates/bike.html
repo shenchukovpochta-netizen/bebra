@@ -71,8 +71,12 @@
   <form method="post" action="/bikes/{{ bike.id }}/status" class="grid2">
     <label>Новый статус <select name="status">{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}" {% if bike.status == code %}selected{% endif %}>{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>
     <label>Почему <input name="note" placeholder="необязательно"></label>
+    <label>Пробег, км <input name="mileage" inputmode="numeric" placeholder="{{ bike.mileage_km or 'необязательно' }}"></label>
     <button type="submit">Изменить</button>
   </form>
+  <p class="muted">Пробег здесь необязателен, но записанный попадёт в историю
+    статусов — по ней видно, сколько велосипед накатал между ремонтами,
+    а не только за аренду.</p>
   {% endif %}
   <h2>Ремонт</h2>
   <form method="post" action="/bikes/{{ bike.id }}/repair" class="grid2">
@@ -106,13 +110,17 @@
 <section class="card">
   <h2>История статусов</h2>
   <table>
-    <tr><th>Когда</th><th>Стало</th><th>Было</th><th>Кто</th></tr>
+    <tr><th>Когда</th><th>Стало</th><th>Было</th><th class="num opt">Пробег</th><th>Кто</th></tr>
     {% for x in status_log %}
     <tr><td>{{ x.changed_at|dmy }}</td><td><span class="tag {{ x.to_status }}">{{ BIKE_STATUSES.get(x.to_status, x.to_status) }}</span></td>
-      <td class="muted">{{ BIKE_STATUSES.get(x.from_status, x.from_status) if x.from_status else '—' }}</td><td class="muted">{{ x.changed_by or '' }}</td></tr>
+      <td class="muted">{{ BIKE_STATUSES.get(x.from_status, x.from_status) if x.from_status else '—' }}</td>
+      <td class="num muted opt">{% if x.mileage_km is none %}—{% else %}{{ x.mileage_km }} км{% endif %}</td>
+      <td class="muted">{{ x.changed_by or '' }}</td></tr>
     {% else %}<tr><td colspan="4" class="muted">Записей нет.</td></tr>{% endfor %}
   </table>
-  <p class="muted">Пишется базой при каждой смене статуса; по этому журналу считается простой.</p>
+  <p class="muted">Пишется базой при каждой смене статуса; по этому журналу
+    считается простой. Пробег записывается тем же триггером — по нему видно,
+    сколько велосипед накатал между ремонтами, а не только за аренду.</p>
   <h2>Аренды</h2>
   <table>
     <tr><th>#</th><th>Клиент</th><th>С</th><th>По</th><th>Статус</th></tr>

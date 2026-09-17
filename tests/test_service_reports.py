@@ -180,7 +180,7 @@ class TestReportPages(tw.WebCase):
     def test_model_parts_and_spend(self):
         order_id = self.closed_order()
         _run(self.crm.add_part_move(part_id=self.part_id, kind="order", qty=-3,
-                                    cost=D(-900), order_id=order_id,
+                                    cost=D(300), order_id=order_id,
                                     created_by="тест"))
         text = self.get_ok("/reports/model-parts")
         self.assertIn("Kugoo V3", text)
@@ -191,7 +191,7 @@ class TestReportPages(tw.WebCase):
     def test_spend_csv(self):
         order_id = self.closed_order()
         _run(self.crm.add_part_move(part_id=self.part_id, kind="order", qty=-3,
-                                    cost=D(-900), order_id=order_id,
+                                    cost=D(300), order_id=order_id,
                                     created_by="тест"))
         r = self.client.get("/reports/spend.csv")
         self.assertEqual(r.status_code, 200)

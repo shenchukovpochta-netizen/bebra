@@ -276,10 +276,12 @@ class FakeCrm:
         return sorted(rows, key=lambda b: b["code"])[:limit]
 
     def _log_status(self, bike_id, from_status, to_status, by=None):
-        """Аналог триггера crm.log_bike_status."""
+        """Аналог триггера crm.log_bike_status - вместе с пробегом."""
+        bike = self.bikes_.get(bike_id) or {}
         self.status_log_.append({"id": self._id(), "bike_id": bike_id,
                                  "from_status": from_status, "to_status": to_status,
-                                 "changed_at": self._now(), "changed_by": by or None})
+                                 "changed_at": self._now(), "changed_by": by or None,
+                                 "mileage_km": bike.get("mileage_km")})
 
     async def bike_status_log(self, bike_id, limit=30):
         rows = [dict(x) for x in self.status_log_ if x["bike_id"] == bike_id]
@@ -1072,7 +1074,8 @@ class FakeCrm:
                                                "qty": 0, "cost": Decimal(0)})
             cell["orders"].add(move["order_id"])
             cell["qty"] += int(move.get("qty") or 0)
-            cell["cost"] += Decimal(move.get("cost") or 0)
+            cell["cost"] += (Decimal(move.get("qty") or 0)
+                             * Decimal(move.get("cost") or 0))
         rows = [{**cell, "orders": len(cell["orders"])} for cell in by_model.values()]
         return sorted(rows, key=lambda r: -r["cost"])
 
@@ -1090,11 +1093,25 @@ class FakeCrm:
                 "node": part.get("node"), "unit": part.get("unit") or "шт",
                 "qty": 0, "cost": Decimal(0), "orders": set()})
             cell["qty"] += int(move.get("qty") or 0)
-            cell["cost"] += Decimal(move.get("cost") or 0)
+            cell["cost"] += (Decimal(move.get("qty") or 0)
+                             * Decimal(move.get("cost") or 0))
             if move.get("order_id"):
                 cell["orders"].add(move["order_id"])
         rows = [{**cell, "orders": len(cell["orders"])} for cell in by_part.values()]
         return sorted(rows, key=lambda r: (r["cost"], r["qty"]))
+
+    async def stock_value_by_month(self):
+        by_month = {}
+        for move in self.part_moves_:
+            when = move.get("created_at")
+            if when is None:
+                continue
+            day = when.date() if isinstance(when, datetime) else when
+            month = day.replace(day=1)
+            value = Decimal(move.get("qty") or 0) * Decimal(move.get("cost") or 0)
+            by_month[month] = by_month.get(month, Decimal(0)) + value
+        return [{"month": month, "value": by_month[month]}
+                for month in sorted(by_month)]
 
     # ─────────────────────── окупаемость по моделям ───────────────────────
 

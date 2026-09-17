@@ -28,6 +28,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
+from .. import texts
 from ..crm import company, doctemplates, import_xlsx, logic, notices, notify, service
 from ..services import contract as contract_service
 from ..services import tochka
@@ -262,6 +263,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
         COMPANY_FIELDS=company.COMPANY_FIELDS,
+        CONTACT_FIELDS=company.CONTACT_FIELDS,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
         SWAP_REASONS=logic.SWAP_REASONS, in_search=logic.in_search,
@@ -1159,8 +1161,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         status = logic.check_choice(data.get("status"), logic.BIKE_MANUAL_STATUSES,
                                     what="Статус")
         note = logic.check_note(data.get("note"))
-        if not status.ok or not note.ok:
-            flash(request, (status.error or note.error), "err")
+        # Пробег необязателен: в мастерскую велосипед иногда закатывают
+        # с мёртвым дисплеем. Зато записанный здесь попадает в журнал
+        # статусов тем же триггером - и «сколько накатал между ремонтами»
+        # становится видно без аренды.
+        mileage = logic.check_mileage(data.get("mileage"),
+                                      current=bike.get("mileage_km"),
+                                      required=False)
+        if not status.ok or not note.ok or not mileage.ok:
+            flash(request, (status.error or note.error or mileage.error), "err")
             return redirect(f"/bikes/{bike_id}")
         if bike.get("rental_id"):
             flash(request, "Велосипед в аренде: сначала закройте аренду.", "err")
@@ -1171,7 +1180,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Велосипед на сборке: выпускает его кнопка "
                            "«Ввести в эксплуатацию», а не смена статуса.", "err")
             return redirect(f"/bikes/{bike_id}")
-        await crm.update_bike(bike_id, by=who(request), status=status.value)
+        # Пробег пишется ТЕМ ЖЕ обновлением, что и статус: триггер снимает
+        # одометр со строки велосипеда, и отдельный апдейт записал бы
+        # в журнал старое число.
+        await crm.update_bike(
+            bike_id, by=who(request), status=status.value,
+            **({"mileage_km": mileage.value} if mileage.value is not None else {}))
         await crm.add_bike_log(bike_id, "status",
                                f"{logic.BIKE_STATUSES[status.value]}"
                                + (f": {note.value}" if note.value else ""),
@@ -3119,7 +3133,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         settings = await crm.settings()
         return render(request, "company.html",
                       values={code: settings.get(code, "")
-                              for code in company.COMPANY_FIELDS},
+                              for code in company.ALL_FIELDS},
+                      default_contact=texts.SUPPORT_CONTACT_URL,
                       templates=template_rows(request))
 
     @app.post("/company")
@@ -3133,8 +3148,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "settings")
         data = await form(request)
         clean: dict[str, str] = {}
-        for code, label in company.COMPANY_FIELDS.items():
-            value, error = company.check_value(data.get(code))
+        for code, label in company.ALL_FIELDS.items():
+            # Контакт менеджера проверяется строже реквизита: это ссылка,
+            # по которой пойдёт клиент, а не строка в шапке договора.
+            check = (company.check_contact if code in company.CONTACT_FIELDS
+                     else company.check_value)
+            value, error = check(data.get(code))
             if error:
                 flash(request, f"{label}: {error}.", "err")
                 return redirect("/company")
@@ -3144,7 +3163,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Панель и бот читают одни и те же настройки: снимок в этом
         # процессе обновляем сразу, чтобы не ждать своего же TTL.
         company.set_snapshot(await crm.settings())
-        flash(request, "Реквизиты сохранены. Бот подхватит их в течение "
+        flash(request, "Сохранено. Бот подхватит правку в течение "
                        "нескольких минут.")
         return redirect("/company")
 
@@ -3154,7 +3173,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def locations_page(request: Request) -> Response:
         if not may_view(request, "settings"):
             return denied(request, "settings")
-        return render(request, "locations.html", rows=await crm.locations())
+        rows = await crm.locations()
+        return render(request, "locations.html", rows=rows,
+                      cities=logic.by_city(rows))
 
     def location_extra(data: dict) -> dict:
         """Телефон, режим и координаты пункта: по ним клиент находит точку,
@@ -3206,12 +3227,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Точка")
         data = await form(request)
         note = logic.check_note(data.get("note"))
-        if not note.ok:
-            flash(request, note.error, "err")
-            return redirect("/locations")
+        city = logic.check_name(data.get("city") or rows[0]["city"], what="Город")
+        for check in (note, city):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/locations")
         await crm.update_location(
             location_id, address=(data.get("address") or "").strip() or None,
-            note=note.value, **location_extra(data))
+            note=note.value, city=city.value, **location_extra(data))
         flash(request, "Точка сохранена.")
         return redirect("/locations")
 
@@ -4771,9 +4794,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = logic.part_rows(await crm.parts(node=node or None, q=q or None),
                                await crm.stock_map(), await crm.part_last_moved())
         tools = list_tools(request, rows, allowed=PART_SORTS)
+        # График денег на полке - только тем, кому открыты деньги: это
+        # сумма, а не количество гаек.
+        chart = (logic.stock_value_chart(await crm.stock_value_by_month())
+                 if may_view(request, "finance") else None)
         return render(request, "parts.html", rows=tools["rows"], tools=tools,
                       summary=logic.stock_summary(tools["all_rows"]),
-                      node=node, q=q,
+                      node=node, q=q, chart=chart,
                       views=await views_of(request, "/parts"),
                       nodes=await crm.repair_nodes())
 

@@ -4566,3 +4566,87 @@ def doc_filename(kind: str, number: int) -> str:
 
 def mark_filename(kind: str) -> str:
     return f"{kind}.png"
+
+
+# ─────────────────────────── точки выдачи ───────────────────────────
+
+# Точка без города: в базе город обязателен, но старые строки и импорт
+# могли оставить его пустым - терять такую точку в списке нельзя.
+CITY_UNKNOWN = "Без города"
+
+
+def by_city(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Точки, сгруппированные по городу: город - уровень над пунктом.
+
+    Своего часового пояса у города нет намеренно. Вся система живёт
+    в одном (Europe/Moscow): сроки аренды, начисления, отчёты и журнал
+    статусов считаются в нём, и второй пояс пришлось бы протащить через
+    каждый из них. Появится город в другом поясе - это отдельная работа,
+    а не колонка в справочнике.
+    """
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        city = str(row.get("city") or "").strip() or CITY_UNKNOWN
+        groups.setdefault(city, []).append(dict(row))
+    return [{"city": city,
+             "rows": groups[city],
+             "open": sum(1 for r in groups[city] if r.get("active")),
+             "total": len(groups[city])}
+            for city in sorted(groups)]
+
+
+# ─────────────────────── стоимость склада по месяцам ───────────────────────
+
+# Сколько месяцев показываем: год - это вся сезонность проката,
+# от зимнего затишья до майского пика.
+STOCK_CHART_MONTHS = 12
+
+
+def stock_value_chart(rows: Iterable[Mapping[str, Any]], *,
+                      months: int = STOCK_CHART_MONTHS,
+                      today: date | None = None) -> dict[str, Any]:
+    """Стоимость склада по месяцам: сколько денег лежит на полке.
+
+    Считается накопительно от первого движения: склад - это остаток,
+    а не оборот месяца. Месяц без движений из ряда не выпадает - в нём
+    та же сумма, что и в прошлом, а дыра читалась бы как «склад исчез».
+
+    Цена берётся та, что стояла в движении. Плитка «склад по
+    себестоимости» считает сегодняшний остаток по СРЕДНЕЙ себестоимости,
+    которую пересчитывает каждый приход, - поэтому последний столбик
+    с ней может не сойтись, и это не ошибка ни того, ни другого.
+    """
+    today = today or date.today()
+    moved: dict[date, Decimal] = {}
+    for row in rows:
+        month = row.get("month")
+        if month is None:
+            continue
+        if isinstance(month, datetime):
+            month = month.date()
+        month = month.replace(day=1)
+        moved[month] = moved.get(month, Decimal(0)) + to_money(row.get("value"))
+    empty = {"months": [], "top": Decimal(0), "now": Decimal(0),
+             "delta": Decimal(0), "peak": Decimal(0)}
+    if not moved:
+        return empty
+    month, last = min(moved), today.replace(day=1)
+    series: list[dict] = []
+    total = Decimal(0)
+    while month <= last:
+        step = moved.get(month, Decimal(0))
+        total += step
+        series.append({"month": month, "value": total, "moved": step})
+        month = (month + timedelta(days=32)).replace(day=1)
+    shown = series[-months:] if months > 0 else series
+    if not shown:
+        return empty
+    top = max([r["value"] for r in shown] + [Decimal(1)])
+    for row in shown:
+        # Отрицательный остаток бывает только при кривых данных - рисуем
+        # его нулевым столбиком, но число показываем как есть.
+        row["height"] = int(round(100 * max(row["value"], Decimal(0)) / top))
+    started = shown[0]["value"] - shown[0]["moved"]
+    return {"months": shown, "top": top, "now": shown[-1]["value"],
+            "delta": shown[-1]["value"] - started,
+            "peak": max(r["value"] for r in shown)}

@@ -177,6 +177,41 @@ class TestMileageInPanel(tw.WebCase):
         self.assertEqual(r.status_code, 303)
         self.assertEqual(tw.run(self.crm.bike(self.bike_id))["mileage_km"], 4266)
 
+    # ─── пробег при смене статуса ───
+
+    def test_status_change_records_the_odometer_in_the_log(self):
+        r = self.client.post(f"/bikes/{self.bike_id}/status",
+                             data={"status": "repair", "note": "тормоза",
+                                   "mileage": "4500"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(tw.run(self.crm.bike(self.bike_id))["mileage_km"], 4500)
+        last = tw.run(self.crm.bike_status_log(self.bike_id))[0]
+        self.assertEqual(last["to_status"], "repair")
+        self.assertEqual(last["mileage_km"], 4500,
+                         "журнал статусов снимает одометр тем же движением")
+
+    def test_status_change_without_mileage_keeps_the_old_one(self):
+        r = self.client.post(f"/bikes/{self.bike_id}/status",
+                             data={"status": "repair", "note": ""})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(tw.run(self.crm.bike(self.bike_id))["mileage_km"], 4266)
+        self.assertEqual(tw.run(self.crm.bike_status_log(self.bike_id))[0]["mileage_km"],
+                         4266, "дисплей мёртв - пишем то, что знали раньше")
+
+    def test_status_change_refuses_a_smaller_odometer(self):
+        r = self.client.post(f"/bikes/{self.bike_id}/status",
+                             data={"status": "repair", "mileage": "100"})
+        self.assertEqual(r.status_code, 303)
+        bike = tw.run(self.crm.bike(self.bike_id))
+        self.assertEqual(bike["mileage_km"], 4266)
+        self.assertEqual(bike["status"], "available",
+                         "отказ на пробеге не должен менять статус наполовину")
+
+    def test_status_form_offers_the_mileage_field(self):
+        page = self.get_ok(f"/bikes/{self.bike_id}")
+        self.assertIn('name="mileage"', page)
+        self.assertIn("Пробег", page)
+
     def test_new_bike_accepts_mileage(self):
         r = self.client.post("/bikes", data={
             "code": "B-9", "model": "Truck+", "mileage_km": "1200",

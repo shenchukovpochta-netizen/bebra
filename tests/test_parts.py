@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app.crm import logic  # noqa: E402
+from app.crm import logic, service  # noqa: E402
 
 try:
     import test_web as tw
@@ -106,6 +107,44 @@ class TestStockLogic(unittest.TestCase):
                          D("750.50"))
 
 
+class TestStockValueChart(unittest.TestCase):
+    """Стоимость склада по месяцам: остаток, а не оборот месяца."""
+
+    def test_value_is_cumulative_and_gaps_are_filled(self):
+        chart = logic.stock_value_chart(
+            [{"month": date(2026, 6, 1), "value": D(10000)},
+             {"month": date(2026, 9, 1), "value": D(-4000)}],
+            today=date(2026, 9, 17))
+        self.assertEqual([m["month"].month for m in chart["months"]], [6, 7, 8, 9])
+        self.assertEqual([m["value"] for m in chart["months"]],
+                         [D(10000), D(10000), D(10000), D(6000)])
+        self.assertEqual(chart["now"], D(6000))
+        self.assertEqual(chart["peak"], D(10000))
+        self.assertEqual(chart["delta"], D(6000), "начинали с нуля")
+
+    def test_window_keeps_the_running_total_from_before_it(self):
+        rows = [{"month": date(2025, 1, 1), "value": D(50000)},
+                {"month": date(2026, 9, 1), "value": D(-5000)}]
+        chart = logic.stock_value_chart(rows, months=3, today=date(2026, 9, 17))
+        self.assertEqual([m["month"].month for m in chart["months"]], [7, 8, 9])
+        self.assertEqual(chart["now"], D(45000),
+                         "накопленное до окна не теряется")
+        self.assertEqual(chart["delta"], D(-5000),
+                         "за показанные месяцы склад похудел на расход")
+
+    def test_empty_stock_gives_an_empty_chart(self):
+        chart = logic.stock_value_chart([], today=date(2026, 9, 17))
+        self.assertEqual(chart["months"], [])
+        self.assertEqual(chart["now"], D(0))
+
+    def test_heights_are_percents_of_the_peak(self):
+        chart = logic.stock_value_chart(
+            [{"month": date(2026, 8, 1), "value": D(10000)},
+             {"month": date(2026, 9, 1), "value": D(-5000)}],
+            today=date(2026, 9, 17))
+        self.assertEqual([m["height"] for m in chart["months"]], [100, 50])
+
+
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
 class TestStockInPanel(tw.WebCase):
     def setUp(self):
@@ -129,6 +168,38 @@ class TestStockInPanel(tw.WebCase):
         return tw.run(self.crm.part_stock(self.part_id))
 
     # ─── приход ───
+
+    def test_chart_shows_the_money_on_the_shelf(self):
+        self.receive(qty="10", price="300")
+        page = self.get_ok("/parts")
+        self.assertIn("Деньги на полке", page)
+        self.assertIn("Сейчас на полке", page)
+        chart = logic.stock_value_chart(tw.run(self.crm.stock_value_by_month()))
+        self.assertEqual(chart["now"], D(3000), "10 колодок по 300")
+
+    def test_chart_counts_qty_times_unit_cost(self):
+        """В движении лежит цена ЕДИНИЦЫ: три по 300 - это 900, не 300."""
+        self.receive(qty="10", price="300")
+        order_id = tw.run(self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None,
+            complaint="тормоза", object_note=None, tech_id=None,
+            estimate=D(0), created_by="тест"))
+        order = tw.run(self.crm.work_order(order_id))
+        tw.run(service.issue_part_to_order(self.crm, order, self.part(), 3,
+                                           by="тест"))
+        chart = logic.stock_value_chart(tw.run(self.crm.stock_value_by_month()))
+        self.assertEqual(chart["now"], D(2100), "3000 − 3 × 300")
+
+    def test_chart_is_hidden_from_those_without_money(self):
+        self.receive()
+        profile = tw.run(self.crm.access_profile_by_code("tech"))
+        tw.run(self.crm.create_staff("mech", logic.hash_password("password-1"),
+                                     "Механик", "tech", profile["id"]))
+        self.client.post("/logout")
+        self.login("mech", "password-1")
+        page = self.client.get("/parts")
+        if page.status_code == 200:
+            self.assertNotIn("Деньги на полке", page.text)
 
     def test_receipt_fills_stock_and_cost(self):
         r = self.receive()
