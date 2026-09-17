@@ -149,3 +149,19 @@ async def sign_code(bot: Any, request: dict, code: str) -> bool:
     return await _send(bot, request["tg_id"],
                        texts.SIGN_CODE.format(code=code,
                                               minutes=logic.SIGN_CODE_MINUTES))
+
+
+async def pay_link(bot: Any, db: Any, order: dict) -> bool:
+    """Клиенту: ссылка на оплату счёта.
+
+    Нет в боте или ссылки нет - False, и оператор передаёт её сам.
+    Молча «отправлено» показывать нельзя: клиент стоит рядом и ждёт.
+    """
+    del db
+    link = str(order.get("link") or "")
+    if not link or not order.get("tg_id") or bot is None:
+        return False
+    text = texts.PAY_LINK.format(
+        no=order.get("no") or "", amount=logic.money(order.get("amount")),
+        purpose=bot_logic.esc(order.get("purpose")), link=bot_logic.esc(link))
+    return await _send(bot, order["tg_id"], text)

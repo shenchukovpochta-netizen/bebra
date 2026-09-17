@@ -978,3 +978,155 @@ async def verify_sign(crm: Any, request: dict, raw_code: str, *,
     await crm.log_sign_event(request["id"], kind="signed", ip=ip, agent=agent,
                              note=f"хэш пакета {digest}")
     return {"digest": digest, "docs": list(request.get("docs") or [])}
+
+
+# ─────────────────────── приём оплаты ───────────────────────
+
+
+async def create_pay_order(crm: Any, *, client: dict, rental: dict | None,
+                           amount: Decimal, by: str, kind: str = "link",
+                           acquiring: Any = None) -> dict:
+    """Выставить счёт и получить на него ссылку с чеком.
+
+    Счёт заводится до похода в банк: если банк не ответит, останется
+    запись с текстом отказа, а не молчание. Оператор увидит причину и
+    примет наличные, а не будет гадать, нажалась ли кнопка.
+    """
+    amount = logic.to_money(amount)
+    if amount <= 0:
+        raise ServiceError("Сумма счёта должна быть больше нуля")
+    purpose = logic.pay_purpose(client, rental)
+    order_id = await crm.create_pay_order(
+        client_id=client["id"], rental_id=(rental or {}).get("id"),
+        amount=amount, purpose=purpose, kind=kind, created_by=by)
+    if acquiring is None or not getattr(acquiring, "token", ""):
+        await crm.mark_pay_failed(
+            order_id, error="Эквайринг не настроен: ссылку выдать нечем")
+        return await crm.pay_order(order_id)
+    try:
+        got = await acquiring.payment_link(
+            amount=amount, purpose=purpose, client_phone=client.get("phone"),
+            client_email=client.get("email"))
+    except Exception as err:                            # noqa: BLE001
+        log.warning("ссылка на оплату не получена", exc_info=True)
+        await crm.mark_pay_failed(order_id, error=str(err))
+        return await crm.pay_order(order_id)
+    await crm.set_pay_link(order_id, link=got.get("link") or "",
+                           operation_id=got.get("operation_id"))
+    return await crm.pay_order(order_id)
+
+
+async def check_pay_order(crm: Any, order: dict, *, acquiring: Any) -> str:
+    """Спросить у банка про один счёт. Возвращает новое состояние.
+
+    Оплату записываем один раз: `mark_pay_paid` сам отказывается писать
+    в журнал повторно, поэтому лишний опрос ничего не ломает.
+    """
+    operation = str(order.get("operation_id") or "")
+    if not operation or acquiring is None:
+        return str(order.get("status") or "")
+    try:
+        state = await acquiring.payment_status(operation)
+    except Exception:                                   # noqa: BLE001
+        log.warning("статус счёта %s не получен", order.get("no"), exc_info=True)
+        await crm.touch_pay_order(order["id"])
+        return str(order.get("status") or "")
+    if state.get("state") == "paid":
+        await crm.mark_pay_paid(order["id"], method="card", by="эквайринг")
+        await _remember_card(crm, order, state.get("card") or {})
+        return "paid"
+    if state.get("state") == "dead":
+        await crm.mark_pay_failed(
+            order["id"], error=f"банк: {state.get('status') or 'оплата не прошла'}")
+        return "failed"
+    await crm.touch_pay_order(order["id"])
+    return str(order.get("status") or "")
+
+
+async def _remember_card(crm: Any, order: dict, card: dict) -> None:
+    """Сохранить карту, если банк отдал токен. Без токена автосписания
+    не будет - и выдумывать его нельзя."""
+    token = str(card.get("token") or "")
+    if not token:
+        return
+    try:
+        await crm.save_card_token(
+            client_id=order["client_id"], token=token,
+            mask=logic.card_mask(card.get("mask")),
+            expires=str(card.get("expires") or "") or None)
+    except Exception:                                   # noqa: BLE001
+        log.warning("карта клиента %s не сохранена", order.get("client_id"),
+                    exc_info=True)
+
+
+async def cancel_pay_order(crm: Any, order: dict, *, by: str) -> None:
+    if order.get("status") not in logic.PAY_OPEN:
+        raise ServiceError("Счёт уже закрыт")
+    await crm.cancel_pay_order(order["id"], by=by)
+
+
+async def credit_pay_order(crm: Any, order: dict, *, by: str,
+                           method: str = "cash") -> int | None:
+    """Закрыть счёт руками: клиент заплатил наличными или переводом.
+
+    Тот же счёт, тот же номер в назначении - но подтверждает человек, и
+    в журнале это видно по способу оплаты.
+    """
+    if order.get("status") == "paid":
+        raise ServiceError("Счёт уже оплачен")
+    if order.get("status") == "cancelled":
+        raise ServiceError("Счёт снят, оплачивать нечего")
+    return await crm.mark_pay_paid(order["id"], method=method, by=by)
+
+
+async def autocharge_once(crm: Any, *, acquiring: Any, today: date | None = None,
+                          limit: int = 50) -> dict:
+    """Суточный проход автосписания.
+
+    Списываем только уже начисленный долг: аренда платится вперёд, и
+    начисление на новый период создаёт биллинг, а не эта функция. Без
+    карты клиент сюда не попадает, а три отказа подряд снимают карту -
+    дальше долбить банк бессмысленно.
+    """
+    today = today or date.today()
+    settings = logic.pay_settings(await crm.settings())
+    if not settings["autocharge"]:
+        return {"charged": 0, "failed": 0, "skipped": "выключено"}
+    cards = {int(c["client_id"]): c for c in await crm.cards()}
+    if not cards:
+        return {"charged": 0, "failed": 0, "skipped": "нет привязанных карт"}
+    due = logic.autocharge_due(await crm.active_rentals(), today=today, cards=cards)
+    charged = failed = 0
+    for item in due[:limit]:
+        card = cards[item["client_id"]]
+        client = await crm.client(item["client_id"])
+        if client is None:
+            continue
+        # Счёт заводим напрямую: ссылка автосписанию не нужна, а через
+        # create_pay_order он бы сначала стал «отказом банка».
+        purpose = logic.pay_purpose(client, item["rental"])
+        order_id = await crm.create_pay_order(
+            client_id=client["id"], rental_id=item["rental"].get("id"),
+            amount=item["amount"], purpose=purpose, kind="auto",
+            created_by="автосписание")
+        try:
+            state = await acquiring.charge_saved_card(
+                token=card["token"], amount=item["amount"],
+                purpose=purpose, client_phone=client.get("phone"),
+                client_email=client.get("email"))
+        except Exception as err:                        # noqa: BLE001
+            log.warning("автосписание клиенту %s не прошло", item["client_id"],
+                        exc_info=True)
+            await crm.mark_pay_failed(order_id, error=str(err))
+            failed += 1
+            continue
+        if state.get("state") == "paid":
+            await crm.mark_pay_paid(order_id, method="card", by="автосписание")
+            await crm.touch_card(card["id"])
+            charged += 1
+        else:
+            await crm.mark_pay_failed(
+                order_id,
+                error=f"банк: {state.get('status') or 'списание не прошло'}")
+            failed += 1
+    return {"charged": charged, "failed": failed, "skipped": ""}

@@ -25,7 +25,7 @@
       {% if can_view(staff, 'service') %}<a href="/service" {% if request.url.path.startswith(('/service', '/orders', '/work-types')) %}class="on"{% endif %}>Сервис</a>{% endif %}
       {% if can_view(staff, 'inventory') %}<a href="/parts" {% if request.url.path.startswith(('/parts', '/part-orders', '/suppliers')) %}class="on"{% endif %}>Склад</a>{% endif %}
       {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
-      {% if can_view(staff, 'finance') %}<a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>{% endif %}
+      {% if can_view(staff, 'finance') %}<a href="/finance" {% if request.url.path.startswith(('/finance', '/payments')) %}class="on"{% endif %}>Финансы</a>{% endif %}
       {% if can_view(staff, 'cash') %}<a href="/cash" {% if request.url.path.startswith(('/cash', '/bank')) %}class="on"{% endif %}>Касса</a>{% endif %}
       {% if can_view(staff, 'mailing') %}<a href="/mailing" {% if request.url.path.startswith('/mailing') %}class="on"{% endif %}>Рассылки</a>{% endif %}
       {% if can_view(staff, 'tariffs') %}<a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>{% endif %}

@@ -37,6 +37,12 @@ class WebConfig:
     # Панель стоит за Caddy (задан CRM_DOMAIN): адрес клиента брать из
     # X-Forwarded-For, иначе все входы выглядят как один адрес прокси.
     trust_proxy: bool = False
+    # Эквайринг Точки. Панель ходит в банк ровно за одним - за ссылкой
+    # на оплату, которую оператор просит при клиенте. Опрос статусов
+    # остаётся в процессе бота: круг по счетам из трёх веб-процессов
+    # дёргал бы банк втройне, а нажатие кнопки - это один запрос.
+    tochka_token: str = ""
+    tochka_customer_code: str = ""
 
     @classmethod
     def load(cls) -> WebConfig:
@@ -58,4 +64,6 @@ class WebConfig:
             title=_env("CRM_TITLE", "МАЙБАЙК"),
             pay_url=_env("PAY_URL"),
             trust_proxy=bool(_env("CRM_DOMAIN", "")),
+            tochka_token=_secret("TOCHKA_TOKEN", required=False),
+            tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
         )

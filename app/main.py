@@ -21,7 +21,7 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
-from .crm import banking, mailing, tracking
+from .crm import banking, mailing, paying, tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, registration
@@ -115,6 +115,10 @@ async def run() -> None:
     banking_task = asyncio.create_task(
         banking.banking_loop(bot, crm, cfg, tochka,
                              interval=cfg.tochka_poll_seconds))
+    # Счета эквайринга - своим кругом, коротким: оператор ждёт отметки
+    # «оплачено», чтобы выдать велосипед, и полчаса ожидания на точке -
+    # это очередь. Здесь же суточное автосписание.
+    paying_task = asyncio.create_task(paying.paying_loop(bot, crm, cfg, tochka))
     # Рассылки: тот же текст уходит в Telegram и, если подключён бот MAX,
     # в MAX. Токен MAX здесь необязателен - без него MAX-клиентам
     # сообщения помечаются пропущенными, а не теряются молча.
@@ -151,9 +155,10 @@ async def run() -> None:
         reminders.cancel()
         tracking_task.cancel()
         banking_task.cancel()
+        paying_task.cancel()
         mailing_task.cancel()
         await asyncio.gather(retention, reminders, tracking_task, banking_task,
-                             mailing_task, return_exceptions=True)
+                             paying_task, mailing_task, return_exceptions=True)
         if max_client is not None:
             await max_client.close()
         await tasks.drain()

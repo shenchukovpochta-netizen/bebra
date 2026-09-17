@@ -30,6 +30,10 @@ ACQUIRING = "acquiring/v1.0"
 TIMEOUT = 30
 # Статусы готовности выписки у банка.
 READY = ("Ready", "Complete", "Completed")
+# Статусы операции эквайринга. Банк пишет их по-разному в разных версиях
+# ответа, поэтому сравниваем в верхнем регистре и без дефисов.
+PAID = ("APPROVED", "CONFIRMED", "SUCCESS", "PAID")
+DEAD = ("EXPIRED", "DECLINED", "REJECTED", "CANCELLED", "FAILED", "ERROR")
 
 
 class TochkaError(Exception):
@@ -213,6 +217,95 @@ class TochkaClient:
             close = getattr(session, "close", None)
             if close is not None:
                 await close()
+
+    async def payment_status(self, operation_id: str) -> dict:
+        """Что стало со ссылкой: оплатили, протухла или ещё ждём."""
+        if not self.token:
+            raise TochkaError("эквайринг Точки не настроен")
+        session = self._session()
+        try:
+            data = await self._json(
+                session, "GET", f"{ACQUIRING}/payments/{operation_id}")
+            return payment_state(data)
+        finally:
+            close = getattr(session, "close", None)
+            if close is not None:
+                await close()
+
+    async def charge_saved_card(self, *, token: str, amount: Decimal,
+                                purpose: str, client_email: str | None = None,
+                                client_phone: str | None = None) -> dict:
+        """Списать с ранее сохранённой карты.
+
+        Рекуррентные платежи банк включает магазину отдельно. Пока он их
+        не включил, этот вызов вернёт ошибку банка - и она уйдёт на счёт
+        как есть: молчаливое «ничего не произошло» оператор не увидит, а
+        текст отказа он покажет в банк и включит.
+        """
+        if not self.token or not self.customer_code:
+            raise TochkaError("эквайринг Точки не настроен")
+        if not token:
+            raise TochkaError("карта клиента не сохранена")
+        session = self._session()
+        try:
+            data = await self._json(
+                session, "POST", f"{ACQUIRING}/payments_with_receipt",
+                json={"Data": {
+                    "customerCode": self.customer_code,
+                    "amount": str(amount), "purpose": purpose[:210],
+                    "paymentMode": ["card"],
+                    "Recurrent": {"token": token},
+                    "Client": {"email": client_email, "phone": client_phone},
+                    "Items": receipt_items(purpose, amount)}})
+            state = payment_state(data)
+            payment = data.get("Data") or {}
+            state["operation_id"] = (state.get("operation_id")
+                                     or payment.get("operationId"))
+            return state
+        finally:
+            close = getattr(session, "close", None)
+            if close is not None:
+                await close()
+
+
+def payment_state(raw: Any) -> dict:
+    """Ответ банка об операции - к трём словам: paid, dead, pending.
+
+    Разбор отделён от сети, как и у выписки: проверять его без банка
+    иначе нечем, а именно здесь легче всего ошибиться.
+    """
+    data = raw if isinstance(raw, dict) else {}
+    body = data.get("Data") if isinstance(data.get("Data"), dict) else data
+    operation = body.get("Operation") if isinstance(body, dict) else None
+    if isinstance(operation, list):
+        operation = operation[0] if operation else {}
+    if not isinstance(operation, dict):
+        operation = body if isinstance(body, dict) else {}
+    status = str(operation.get("status") or operation.get("state") or "")
+    flat = status.upper().replace("-", "").replace("_", "")
+    state = "paid" if flat in PAID else "dead" if flat in DEAD else "pending"
+    return {"state": state, "status": status,
+            "operation_id": operation.get("operationId") or operation.get("id"),
+            "amount": _money(operation.get("amount")),
+            "paid_at": _moment(operation.get("paymentDate")
+                               or operation.get("createdAt")),
+            "card": _card(operation)}
+
+
+def _card(operation: dict) -> dict:
+    """Что банк рассказал о карте: токен для автосписания и хвост номера.
+
+    Токен приходит не всегда - он появляется только когда эквайринг
+    настроен на сохранение карты. Нет токена - автосписания не будет, и
+    это честнее, чем придумывать его самим.
+    """
+    card = operation.get("Card") if isinstance(operation.get("Card"), dict) else {}
+    token = (card.get("token") or card.get("cardToken")
+             or operation.get("cardToken") or operation.get("rebillId"))
+    pan = str(card.get("pan") or card.get("maskedPan") or "")
+    return {"token": str(token) if token else "",
+            "mask": pan[-4:] if len(pan) >= 4 else "",
+            "expires": str(card.get("expDate") or card.get("expiry") or "")}
 
 
 def _error(data: Any) -> str:

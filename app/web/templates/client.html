@@ -40,6 +40,15 @@
     <button type="submit">Записать</button>
   </form>
   <p class="muted">Платёж клиенту с привязанным Telegram уходит уведомлением с новой датой «оплачено до». Начисления за периоды делает биллинг сам.</p>
+  {# Счёт - не запись в журнал: денег ещё нет, поэтому отдельной формой. #}
+  <h3>Выставить счёт на оплату</h3>
+  <form method="post" action="/payments" class="inline-form">
+    <input type="hidden" name="client_id" value="{{ client.id }}">
+    <input name="amount" inputmode="decimal" placeholder="{{ pay_hint or '3000' }}" size="8" required>
+    <button type="submit">Ссылку с чеком</button>
+  </form>
+  <p class="muted">Ссылку пробивает банк вместе с чеком по 54-ФЗ. В журнал
+    счёт попадёт, когда клиент заплатит, — не раньше.</p>
 </section>
 {% endif %}
 </div>
@@ -100,6 +109,19 @@
   <form method="post" action="/clients/{{ client.id }}/sign" class="inline-form">
     <button type="submit" class="ghost">✍ Собрать ссылку на подписание</button>
   </form>
+  {% endif %}
+  {% if pay_orders %}
+  <h3>Счета</h3>
+  <table>
+    <tr><th>Счёт</th><th class="num">Сумма</th><th>Состояние</th></tr>
+    {% for r in pay_orders %}
+    <tr>
+      <td><a href="/payments/{{ r.id }}">{{ r.no }}</a></td>
+      <td class="num">{{ money(r.amount) }}</td>
+      <td>{% if r.status == 'paid' %}<span class="tag ok">оплачен</span>{% else %}{{ PAY_STATUSES.get(r.status, '—') }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
   {% endif %}
   {% if signings %}
   <table>

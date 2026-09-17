@@ -960,6 +960,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/claims", "claims"),
     ("/finance", "finance"),
     ("/billing", "finance"),
+    ("/payments", "finance"),
     ("/cash", "cash"),
     ("/bank", "cash"),
     ("/mailing", "mailing"),
@@ -2973,3 +2974,179 @@ def sign_summary(rows: Iterable[dict]) -> dict[str, int]:
             "signed": sum(1 for r in rows if r.get("status") == "signed"),
             "expired": sum(1 for r in rows if r.get("expired")
                            and r.get("status") != "signed")}
+
+
+# ────────────────────── приём оплаты ──────────────────────
+#
+# Счёт - это намерение, платёж - факт. Ссылка на оплату живёт в
+# `crm.pay_orders` и в журнал не попадает: журнал сложится в баланс
+# клиента, и выставленный счёт закрыл бы ему долг, которого никто не
+# платил. В `ledger` счёт превращается ровно один раз - когда банк
+# подтвердил оплату.
+
+PAY_STATUSES: dict[str, str] = {
+    "new": "Ссылка готовится",
+    "sent": "Ждём оплату",
+    "paid": "Оплачен",
+    "failed": "Отказ банка",
+    "cancelled": "Снят",
+}
+# Счёт ещё чего-то ждёт: такие опрашиваются у банка.
+PAY_OPEN = ("new", "sent")
+PAY_KINDS: dict[str, str] = {
+    "link": "Ссылка клиенту",
+    "auto": "Автосписание",
+}
+# Способы оплаты, которые оператор может выбрать в панели. Эквайринг
+# отличается от остальных: его подтверждает банк, а не человек.
+PAY_METHODS: dict[str, str] = {
+    "online": "Эквайринг (онлайн)",
+    "cash": "Наличные",
+    "transfer": "Перевод",
+}
+# Какому виду записи в журнале отвечает способ приёма.
+PAY_METHOD_LEDGER: dict[str, str] = {
+    "online": "card", "cash": "cash", "transfer": "transfer",
+}
+# Ссылка живёт сутки: дольше банк её всё равно не держит, а счёт
+# недельной давности в списке «ждём оплату» только мешает смотреть.
+PAY_LINK_HOURS = 24
+# Автосписание пробуем в этот час - после утреннего напоминания, чтобы
+# клиент успел положить деньги сам, и задолго до конца рабочего дня.
+AUTOCHARGE_HOUR = 12
+# Сколько раз подряд банк может отказать, прежде чем карта снимается:
+# три отказа - это не «на счету пусто сегодня», а мёртвая карта.
+AUTOCHARGE_FAILS = 3
+
+
+def pay_no(number: int) -> str:
+    return f"СЧТ-{int(number):06d}"
+
+
+def pay_methods(settings: Mapping[str, Any] | None = None) -> list[str]:
+    """Какие способы приёма открыты оператору.
+
+    Пусто в настройках - открыты все: пустая настройка на свежей базе
+    не должна запрещать принимать деньги.
+    """
+    raw = str((settings or {}).get("pay_methods") or "").strip()
+    if not raw:
+        return list(PAY_METHODS)
+    chosen = [m.strip() for m in raw.split(",") if m.strip() in PAY_METHODS]
+    return chosen or list(PAY_METHODS)
+
+
+def pay_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    settings = settings or {}
+
+    def flag(key: str) -> bool:
+        return str(settings.get(key) or "") == "1"
+
+    def hour(key: str, default: int) -> int:
+        try:
+            value = int(str(settings[key]))
+        except (KeyError, ValueError, TypeError):
+            return default
+        return value if 0 <= value <= 23 else default
+
+    return {"methods": pay_methods(settings),
+            "online": "online" in pay_methods(settings),
+            "autocharge": flag("autocharge"),
+            "autocharge_hour": hour("autocharge_hour", AUTOCHARGE_HOUR)}
+
+
+def card_mask(raw: Any) -> str:
+    """Четыре последние цифры карты. Больше не храним и не показываем."""
+    tail = re.sub(r"\D", "", str(raw or ""))[-4:]
+    return tail if len(tail) == 4 else ""
+
+
+def card_title(card: Mapping[str, Any] | None) -> str:
+    if not card:
+        return ""
+    mask = card_mask(card.get("mask"))
+    expires = str(card.get("expires") or "").strip()
+    return f"•••• {mask}{' · до ' + expires if expires else ''}" if mask else "карта привязана"
+
+
+def pay_expired(order: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    """Ссылка протухла: банк её уже не примет, опрашивать нечего."""
+    if order.get("status") not in PAY_OPEN:
+        return False
+    created = order.get("created_at")
+    if not isinstance(created, datetime):
+        return False
+    now = now or datetime.now(created.tzinfo or UTC)
+    return (now - created) > timedelta(hours=PAY_LINK_HOURS)
+
+
+def pay_rows(orders: Iterable[Mapping[str, Any]], *,
+             now: datetime | None = None) -> list[dict]:
+    """Счета для списка: сначала ждущие оплаты, потом всё остальное."""
+    rows = []
+    for order in orders:
+        row = dict(order)
+        row["status_title"] = PAY_STATUSES.get(row.get("status", ""), "—")
+        row["kind_title"] = PAY_KINDS.get(row.get("kind", ""), "—")
+        row["expired"] = pay_expired(row, now=now)
+        rows.append(row)
+    rows.sort(key=lambda r: r.get("created_at") or datetime.min, reverse=True)
+    rows.sort(key=lambda r: r.get("status") not in PAY_OPEN)
+    return rows
+
+
+def pay_summary(orders: Iterable[Mapping[str, Any]],
+                *, now: datetime | None = None) -> dict[str, Any]:
+    """Сколько ждём и сколько уже пришло эквайрингом."""
+    waiting = Decimal(0)
+    paid = Decimal(0)
+    counts = {"waiting": 0, "paid": 0, "failed": 0}
+    for order in orders:
+        amount = to_money(order.get("amount"))
+        status = order.get("status")
+        if status in PAY_OPEN and not pay_expired(order, now=now):
+            waiting += amount
+            counts["waiting"] += 1
+        elif status == "paid":
+            paid += amount
+            counts["paid"] += 1
+        elif status == "failed":
+            counts["failed"] += 1
+    return {**counts, "waiting_sum": to_money(waiting), "paid_sum": to_money(paid)}
+
+
+def pay_purpose(client: Mapping[str, Any] | None,
+                rental: Mapping[str, Any] | None = None) -> str:
+    """Назначение платежа. Номер договора здесь не для красоты: по нему
+    выписка банка потом узнаёт платёж и без нашего счёта."""
+    contract = str((client or {}).get("contract_no") or "").strip()
+    bike = str((rental or {}).get("bike_code") or "").strip()
+    head = "Аренда велосипеда" + (f" № {bike}" if bike else "")
+    return head + (f", договор {contract}" if contract else "")
+
+
+def autocharge_due(rentals: Iterable[Mapping[str, Any]],
+                   *, today: date | None = None,
+                   cards: Mapping[int, Any] | None = None) -> list[dict]:
+    """Кому сегодня можно списать с карты.
+
+    Списываем только то, что уже начислено и не оплачено: автосписание
+    закрывает долг, а не берёт вперёд «на всякий случай». Без карты и
+    без долга аренда сюда не попадает.
+    """
+    today = today or date.today()
+    cards = cards or {}
+    due = []
+    for rental in rentals:
+        if rental.get("status") != "active":
+            continue
+        client_id = rental.get("client_id")
+        if client_id is None or not cards.get(int(client_id)):
+            continue
+        debt = to_money(rental.get("balance"))
+        if debt >= 0:
+            continue
+        due.append({"rental": rental, "client_id": int(client_id),
+                    "amount": to_money(-debt)})
+    due.sort(key=lambda r: -r["amount"])
+    return due

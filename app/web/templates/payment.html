@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Счёт {{ order.no }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Счёт {{ order.no }}</h1>
+  <nav class="tabs"><a href="/payments">← Все счета</a></nav>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>{{ money(order.amount) }}
+    {% if order.status == 'paid' %}<span class="tag ok">Оплачен</span>
+    {% elif expired %}<span class="tag bad">Ссылка протухла</span>
+    {% elif order.status == 'failed' %}<span class="tag bad">Отказ банка</span>
+    {% elif order.status == 'cancelled' %}<span class="tag">Снят</span>
+    {% else %}<span class="tag rented">{{ PAY_STATUSES.get(order.status, '—') }}</span>{% endif %}
+  </h2>
+  <dl>
+    <dt>Клиент</dt><dd><a href="/clients/{{ order.client_id }}">{{ order.full_name }}</a>
+      {% if order.phone %}<br><small class="muted">{{ order.phone }}</small>{% endif %}</dd>
+    <dt>Назначение</dt><dd>{{ order.purpose }}</dd>
+    <dt>Вид</dt><dd>{{ PAY_KINDS.get(order.kind, '—') }}</dd>
+    <dt>Заведён</dt><dd>{{ order.created_at|dmy }}{% if order.created_by %} · {{ order.created_by }}{% endif %}</dd>
+    {% if order.paid_at %}<dt>Оплачен</dt><dd>{{ order.paid_at|dmy }}</dd>{% endif %}
+    {% if order.checked_at %}<dt>Спрашивали банк</dt><dd class="muted">{{ order.checked_at|dmy }}</dd>{% endif %}
+    {% if order.error %}<dt>Ответ банка</dt><dd class="bad">{{ order.error }}</dd>{% endif %}
+  </dl>
+  {% if order.link %}
+  <h3>Ссылка на оплату</h3>
+  <p><a href="{{ order.link }}" target="_blank" rel="noopener">{{ order.link }}</a></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Что сделать</h2>
+  {% if can_edit(staff, 'finance') %}
+  {% if order.status in ('new', 'sent') %}
+    {% if order.link %}
+    <form method="post" action="/payments/{{ order.id }}" class="inline-form">
+      <button type="submit" name="action" value="send">Отправить клиенту в Telegram</button>
+    </form>
+    {% endif %}
+    <h3>Принял деньги на точке</h3>
+    <form method="post" action="/payments/{{ order.id }}" class="inline-form">
+      {% if 'cash' in methods %}<button type="submit" name="action" value="cash" class="ghost">Наличными</button>{% endif %}
+      {% if 'transfer' in methods %}<button type="submit" name="action" value="transfer" class="ghost">Переводом</button>{% endif %}
+    </form>
+    <form method="post" action="/payments/{{ order.id }}" class="inline-form">
+      <button type="submit" name="action" value="cancel" class="ghost danger">Снять счёт</button>
+    </form>
+  {% elif order.status == 'paid' %}
+    <p class="flash">Деньги в журнале клиента{% if order.ledger_id %} записью #{{ order.ledger_id }}{% endif %}.
+      Второй раз этот счёт не зачислится.</p>
+  {% else %}
+    <p class="muted">Счёт закрыт. Нужна новая попытка — выставьте новый счёт.</p>
+  {% endif %}
+  {% else %}
+  <p class="muted">Счета вам открыты только на просмотр.</p>
+  {% endif %}
+
+  <h3>Карта клиента</h3>
+  {% if card %}
+  <p>{{ card_title(card) }}{% if card.used_at %} · списывали {{ card.used_at|dmy }}{% endif %}</p>
+  {% if can_edit(staff, 'finance') %}
+  <form method="post" action="/payments/{{ order.id }}" class="inline-form">
+    <button type="submit" name="action" value="drop_card" class="ghost danger">Отвязать карту</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <p class="muted">Карта не привязана: автосписания у этого клиента не будет.
+    Она появится сама, когда он оплатит ссылку и банк отдаст токен.</p>
+  {% endif %}
+</section>
+</div>
+{% endblock %}

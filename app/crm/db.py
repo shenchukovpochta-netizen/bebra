@@ -2629,3 +2629,149 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.sign_events where request_id = $1 "
             "order by id limit $2", request_id, limit))
+
+    # ─────────────────────── приём оплаты ───────────────────────
+
+    async def create_pay_order(self, *, client_id: int, rental_id: int | None,
+                               amount: Decimal, purpose: str, kind: str = "link",
+                               created_by: str | None = None) -> int:
+        """Счёт с человекочитаемым номером. Номер берётся в той же
+        транзакции, что и вставка: две кнопки «выставить счёт» подряд не
+        должны получить один и тот же СЧТ-."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("lock table crm.pay_orders in share row exclusive mode")
+            next_no = int(await conn.fetchval(
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.pay_orders") or 1)
+            return int(await conn.fetchval(
+                """
+                insert into crm.pay_orders
+                    (no, client_id, rental_id, amount, purpose, kind, created_by)
+                values ($1, $2, $3, $4, $5, $6, $7) returning id
+                """, logic.pay_no(next_no), client_id, rental_id, _money(amount),
+                purpose, kind, created_by))
+
+    async def set_pay_link(self, order_id: int, *, link: str,
+                           operation_id: str | None) -> None:
+        await self.pool.execute(
+            """
+            update crm.pay_orders
+               set link = $2, operation_id = $3, status = 'sent',
+                   sent_at = now(), error = null
+             where id = $1 and status = 'new'
+            """, order_id, link, operation_id)
+
+    async def mark_pay_paid(self, order_id: int, *, method: str = "card",
+                            by: str | None = None) -> int | None:
+        """Оплата подтверждена: счёт закрывается и ровно одной записью
+        ложится в журнал. Обе правки в одной транзакции - иначе рестарт
+        между ними оставил бы оплаченный счёт без денег в журнале.
+
+        Возвращает id записи журнала или None, если счёт уже закрыт: у
+        банка легко спросить статус дважды.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            order = await conn.fetchrow(
+                "select * from crm.pay_orders where id = $1 for update", order_id)
+            if order is None or order["status"] == "paid":
+                return None
+            ledger_id = int(await conn.fetchval(
+                """
+                insert into crm.ledger (client_id, rental_id, kind, amount,
+                                        method, note, created_by)
+                values ($1, $2, 'payment', $3, $4, $5, $6) returning id
+                """, order["client_id"], order["rental_id"], order["amount"],
+                method, f"Счёт {order['no']}", by or "эквайринг"))
+            await conn.execute(
+                "update crm.pay_orders set status = 'paid', paid_at = now(), "
+                "checked_at = now(), ledger_id = $2, error = null where id = $1",
+                order_id, ledger_id)
+            return ledger_id
+
+    async def mark_pay_failed(self, order_id: int, *, error: str) -> None:
+        await self.pool.execute(
+            "update crm.pay_orders set status = 'failed', checked_at = now(), "
+            "error = $2 where id = $1 and status <> 'paid'", order_id, error[:500])
+
+    async def touch_pay_order(self, order_id: int) -> None:
+        """Спросили у банка, ответ прежний. Отметка нужна, чтобы видеть,
+        что опрос вообще идёт."""
+        await self.pool.execute(
+            "update crm.pay_orders set checked_at = now() where id = $1", order_id)
+
+    async def cancel_pay_order(self, order_id: int, *, by: str) -> None:
+        await self.pool.execute(
+            "update crm.pay_orders set status = 'cancelled', checked_at = now(), "
+            "error = $2 where id = $1 and status in ('new', 'sent')",
+            order_id, f"снял {by}")
+
+    async def pay_order(self, order_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            """
+            select p.*, c.full_name, c.phone, c.tg_id, c.max_id, c.contract_no
+              from crm.pay_orders p join crm.clients c on c.id = p.client_id
+             where p.id = $1
+            """, order_id))
+
+    async def pay_orders(self, *, client_id: int | None = None,
+                         status: str | None = None, limit: int = 200) -> list[dict]:
+        conds: list[str] = []
+        args: list[Any] = []
+        if client_id is not None:
+            args.append(client_id)
+            conds.append(f"p.client_id = ${len(args)}")
+        if status:
+            args.append(status)
+            conds.append(f"p.status = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"""
+            select p.*, c.full_name, c.phone, c.tg_id, c.max_id, c.contract_no
+              from crm.pay_orders p join crm.clients c on c.id = p.client_id
+             {where} order by p.id desc limit ${len(args)}
+            """, *args))
+
+    async def open_pay_orders(self, limit: int = 200) -> list[dict]:
+        """Счета, у которых ещё можно спросить статус."""
+        return _rows(await self.pool.fetch(
+            """
+            select p.*, c.full_name, c.phone, c.tg_id, c.max_id, c.contract_no
+              from crm.pay_orders p join crm.clients c on c.id = p.client_id
+             where p.status in ('new', 'sent') and p.operation_id is not null
+             order by p.id limit $1
+            """, limit))
+
+    async def save_card_token(self, *, client_id: int, token: str,
+                              mask: str | None = None,
+                              expires: str | None = None,
+                              provider: str = "tochka") -> int:
+        """Привязать карту. Старая уходит: действующая карта одна, и
+        частичный уникальный индекс этого же требует."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "update crm.card_tokens set active = false "
+                "where client_id = $1 and provider = $2 and active",
+                client_id, provider)
+            return int(await conn.fetchval(
+                "insert into crm.card_tokens (client_id, provider, token, mask, expires) "
+                "values ($1, $2, $3, $4, $5) returning id",
+                client_id, provider, token, mask, expires))
+
+    async def card_of(self, client_id: int, provider: str = "tochka") -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.card_tokens where client_id = $1 and provider = $2 "
+            "and active", client_id, provider))
+
+    async def cards(self) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.card_tokens where active order by client_id"))
+
+    async def drop_card(self, client_id: int, provider: str = "tochka") -> None:
+        await self.pool.execute(
+            "update crm.card_tokens set active = false "
+            "where client_id = $1 and provider = $2 and active", client_id, provider)
+
+    async def touch_card(self, card_id: int) -> None:
+        await self.pool.execute(
+            "update crm.card_tokens set used_at = now() where id = $1", card_id)

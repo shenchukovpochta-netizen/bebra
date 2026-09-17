@@ -190,12 +190,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    secrets: [db_password, bot_token, crm_secret, crm_admin_password]
+    secrets: [db_password, bot_token, crm_secret, crm_admin_password, tochka_token]
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       BOT_TOKEN_FILE: /run/secrets/bot_token
       CRM_SECRET_FILE: /run/secrets/crm_secret
       CRM_ADMIN_PASSWORD_FILE: /run/secrets/crm_admin_password
+      # Эквайринг: панель ходит в банк ровно за ссылкой на оплату, по
+      # нажатию оператора. Опрос статусов остался в процессе бота.
+      TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
@@ -205,6 +208,7 @@ services:
       # Та же ссылка, что у бота: панель показывает её в предпросмотре
       # рассылки, чтобы оператор видел то же, что увидит клиент.
       PAY_URL: ${PAY_URL}
+      TOCHKA_CUSTOMER_CODE: ${TOCHKA_CUSTOMER_CODE}
       CRM_TITLE: ${CRM_TITLE:-МАЙБАЙК}
       # Непустой домен = панель за Caddy: адрес клиента из X-Forwarded-For.
       CRM_DOMAIN: ${CRM_DOMAIN:-}

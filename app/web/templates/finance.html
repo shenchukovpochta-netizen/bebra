@@ -2,6 +2,7 @@
 {% block content %}
 <div class="bar">
   <h1>Финансы</h1>
+  <nav class="tabs"><a href="/finance" class="on">Журнал</a><a href="/payments">Счета</a></nav>
   <form method="get" class="search">
     <input name="since" type="date" value="{{ since|iso }}">
     <input name="until" type="date" value="{{ until|iso }}">

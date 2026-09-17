@@ -54,6 +54,8 @@ class FakeCrm:
         self.shifts_: dict[int, dict] = {}
         self.cash_moves_: list[dict] = []
         self.bank_: dict[int, dict] = {}
+        self.pay_orders_: dict[int, dict] = {}
+        self.cards_: dict[int, dict] = {}
         self.trackers_: dict[int, dict] = {}
         self.positions_: list[dict] = []
         self.alerts_: dict[int, dict] = {}
@@ -2076,6 +2078,118 @@ class FakeCrm:
         alert = self.alerts_.get(alert_id)
         if alert and alert["handled_at"] is None:
             alert["handled_at"], alert["handled_by"] = self._now(), by
+
+
+    # ─────────────────── приём оплаты ───────────────────
+
+    async def create_pay_order(self, *, client_id, rental_id, amount, purpose,
+                               kind="link", created_by=None):
+        oid = self._id()
+        number = len(self.pay_orders_) + 1
+        self.pay_orders_[oid] = {
+            "id": oid, "no": crm_logic.pay_no(number), "client_id": client_id,
+            "rental_id": rental_id, "amount": Decimal(amount), "purpose": purpose,
+            "kind": kind, "status": "new", "provider": "tochka",
+            "operation_id": None, "link": None, "error": None, "ledger_id": None,
+            "created_by": created_by, "created_at": self._now(),
+            "sent_at": None, "paid_at": None, "checked_at": None}
+        return oid
+
+    async def set_pay_link(self, order_id, *, link, operation_id):
+        order = self.pay_orders_.get(order_id)
+        if order is None or order["status"] != "new":
+            return
+        # Одна операция банка - один счёт, как частичный уникальный индекс.
+        if operation_id and any(o["operation_id"] == operation_id
+                                for o in self.pay_orders_.values()):
+            raise UniqueError("operation_id")
+        order.update(link=link, operation_id=operation_id, status="sent",
+                     sent_at=self._now(), error=None)
+
+    async def mark_pay_paid(self, order_id, *, method="card", by=None):
+        order = self.pay_orders_.get(order_id)
+        if order is None or order["status"] == "paid":
+            return None
+        ledger_id = await self.add_ledger(
+            client_id=order["client_id"], rental_id=order["rental_id"],
+            kind="payment", amount=order["amount"], method=method,
+            note=f"Счёт {order['no']}", created_by=by or "эквайринг")
+        order.update(status="paid", paid_at=self._now(), checked_at=self._now(),
+                     ledger_id=ledger_id, error=None)
+        return ledger_id
+
+    async def mark_pay_failed(self, order_id, *, error):
+        order = self.pay_orders_.get(order_id)
+        if order is not None and order["status"] != "paid":
+            order.update(status="failed", checked_at=self._now(), error=error[:500])
+
+    async def touch_pay_order(self, order_id):
+        order = self.pay_orders_.get(order_id)
+        if order is not None:
+            order["checked_at"] = self._now()
+
+    async def cancel_pay_order(self, order_id, *, by):
+        order = self.pay_orders_.get(order_id)
+        if order is not None and order["status"] in ("new", "sent"):
+            order.update(status="cancelled", checked_at=self._now(),
+                         error=f"снял {by}")
+
+    def _pay_row(self, order):
+        client = self.clients_.get(order["client_id"], {})
+        return {**order, "full_name": client.get("full_name"),
+                "phone": client.get("phone"), "tg_id": client.get("tg_id"),
+                "max_id": client.get("max_id"),
+                "contract_no": client.get("contract_no")}
+
+    async def pay_order(self, order_id):
+        order = self.pay_orders_.get(order_id)
+        return self._pay_row(order) if order else None
+
+    async def pay_orders(self, *, client_id=None, status=None, limit=200):
+        rows = [self._pay_row(o) for o in self.pay_orders_.values()
+                if (client_id is None or o["client_id"] == client_id)
+                and (status is None or o["status"] == status)]
+        rows.sort(key=lambda o: o["id"], reverse=True)
+        return rows[:limit]
+
+    async def open_pay_orders(self, limit=200):
+        rows = [self._pay_row(o) for o in self.pay_orders_.values()
+                if o["status"] in ("new", "sent") and o["operation_id"]]
+        rows.sort(key=lambda o: o["id"])
+        return rows[:limit]
+
+    async def save_card_token(self, *, client_id, token, mask=None, expires=None,
+                              provider="tochka"):
+        for card in self.cards_.values():
+            if card["client_id"] == client_id and card["provider"] == provider:
+                card["active"] = False
+        cid = self._id()
+        self.cards_[cid] = {"id": cid, "client_id": client_id, "provider": provider,
+                            "token": token, "mask": mask, "expires": expires,
+                            "active": True, "created_at": self._now(),
+                            "used_at": None}
+        return cid
+
+    async def card_of(self, client_id, provider="tochka"):
+        for card in self.cards_.values():
+            if (card["client_id"] == client_id and card["provider"] == provider
+                    and card["active"]):
+                return dict(card)
+        return None
+
+    async def cards(self):
+        return [dict(c) for c in self.cards_.values() if c["active"]]
+
+    async def drop_card(self, client_id, provider="tochka"):
+        for card in self.cards_.values():
+            if (card["client_id"] == client_id and card["provider"] == provider
+                    and card["active"]):
+                card["active"] = False
+
+    async def touch_card(self, card_id):
+        card = self.cards_.get(card_id)
+        if card is not None:
+            card["used_at"] = self._now()
 
 
 def _num(value):

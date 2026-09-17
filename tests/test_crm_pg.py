@@ -1052,6 +1052,57 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await db.apply_schema(SCHEMA)
         self.assertEqual(len(await self.crm.bike_models()), len(models))
 
+    async def test_payments_on_postgres(self):
+        """Счета на живой базе: деньги в журнал один раз, карта одна."""
+        await self.seed()
+        client = await self.crm.client(self.client_id)
+        order_id = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("3500"),
+            purpose=logic.pay_purpose(client, None), created_by="staff:t")
+        order = await self.crm.pay_order(order_id)
+        self.assertEqual(order["no"], "СЧТ-000001")
+        self.assertEqual(order["status"], "new")
+        self.assertEqual(await self.crm.client_balance(self.client_id), D(0),
+                         "счёт баланса не трогает")
+
+        await self.crm.set_pay_link(order_id, link="https://pay/1",
+                                    operation_id="op-1")
+        sent = await self.crm.pay_order(order_id)
+        self.assertEqual(sent["status"], "sent")
+        self.assertEqual([o["id"] for o in await self.crm.open_pay_orders()],
+                         [order_id])
+
+        # Одна операция банка - один счёт: частичный уникальный индекс.
+        other = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("100"),
+            purpose="дубль", created_by="staff:t")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.set_pay_link(other, link="https://pay/2",
+                                        operation_id="op-1")
+
+        ledger_id = await self.crm.mark_pay_paid(order_id, method="card",
+                                                 by="эквайринг")
+        self.assertIsNotNone(ledger_id)
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("3500.00"))
+        # Второй ответ банка про тот же счёт денег не добавляет.
+        self.assertIsNone(await self.crm.mark_pay_paid(order_id))
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("3500.00"))
+        paid = await self.crm.pay_order(order_id)
+        self.assertEqual(paid["ledger_id"], ledger_id)
+        self.assertEqual(await self.crm.open_pay_orders(), [],
+                         "оплаченный счёт больше не опрашивается")
+
+        # Карта одна: привязка новой снимает старую.
+        await self.crm.save_card_token(client_id=self.client_id, token="tk1",
+                                       mask="4477")
+        await self.crm.save_card_token(client_id=self.client_id, token="tk2",
+                                       mask="1111")
+        card = await self.crm.card_of(self.client_id)
+        self.assertEqual(card["token"], "tk2")
+        self.assertEqual(len(await self.crm.cards()), 1)
+        await self.crm.drop_card(self.client_id)
+        self.assertIsNone(await self.crm.card_of(self.client_id))
+
 
 if __name__ == "__main__":
     unittest.main()

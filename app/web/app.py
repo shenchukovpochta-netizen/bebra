@@ -30,6 +30,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .. import logic as bot_logic
 from ..crm import company, import_xlsx, logic, notify, service
 from ..services import contract as contract_service
+from ..services import tochka
 from .config import WebConfig
 
 log = logging.getLogger(__name__)
@@ -132,6 +133,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         CASH_MOVE_KINDS=logic.CASH_MOVE_KINDS, CASH_STATUSES=logic.CASH_STATUSES,
         CASH_DIFF_NOISE=logic.CASH_DIFF_NOISE,
         BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
+        PAY_STATUSES=logic.PAY_STATUSES, PAY_KINDS=logic.PAY_KINDS,
+        PAY_METHODS=logic.PAY_METHODS, card_title=logic.card_title,
+        AUTOCHARGE_HOUR=logic.AUTOCHARGE_HOUR,
         map_url=logic.map_url,
         BATTERY_STATUSES=logic.BATTERY_STATUSES,
         BATTERY_MANUAL_STATUSES=logic.BATTERY_MANUAL_STATUSES,
@@ -572,7 +576,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       claim=await crm.pending_claim_of(client_id),
                       bot_user=bot_user, has_contract=has_contract,
                       signings=await crm.sign_requests(client_id=client_id,
-                                                       limit=20))
+                                                       limit=20),
+                      # Подсказка суммы счёта - ровно долг: чаще всего
+                      # выставляют его, и набирать заново незачем.
+                      pay_hint=(str(-logic.to_money(balance))
+                                if logic.to_money(balance) < 0 else ""),
+                      pay_orders=await crm.pay_orders(client_id=client_id,
+                                                      limit=10))
 
     @app.post("/clients/{client_id}/edit")
     async def client_edit(request: Request, client_id: int) -> Response:
@@ -3107,6 +3117,155 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"{logic.money(txn['amount'])} зачислено: "
                        f"{client['full_name']}.")
         return redirect("/bank")
+
+    # ─────────────────────── счета на оплату ───────────────────────
+
+    def acquiring() -> Any:
+        """Эквайринг Точки для одного запроса.
+
+        Панель ходит в банк только здесь и только по нажатию кнопки:
+        ссылку оператор просит при клиенте, и ждать круга опроса в
+        процессе бота ему негде. Сами опросы статусов там и остались.
+        """
+        if not (cfg.tochka_token and cfg.tochka_customer_code):
+            return None
+        return tochka.TochkaClient(token=cfg.tochka_token,
+                                   customer_code=cfg.tochka_customer_code)
+
+    @app.get("/payments")
+    async def payments_page(request: Request) -> Response:
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        status = request.query_params.get("status") or ""
+        orders = await crm.pay_orders(status=status or None, limit=200)
+        settings = logic.pay_settings(await crm.settings())
+        # В выпадающем списке - те, кто платит: должники и действующие
+        # аренды. Весь список клиентов сюда не влезает и не нужен.
+        picks = {c["id"]: c for c in await crm.debtors(200)}
+        for rental in await crm.active_rentals():
+            picks.setdefault(rental["client_id"],
+                             {"id": rental["client_id"],
+                              "full_name": rental.get("full_name"),
+                              "phone": rental.get("phone")})
+        return render(request, "payments.html",
+                      rows=logic.pay_rows(orders), status=status,
+                      settings=settings,
+                      summary=logic.pay_summary(
+                          await crm.pay_orders(limit=500)),
+                      online=acquiring() is not None,
+                      clients_for_pick=sorted(
+                          picks.values(), key=lambda c: str(c.get("full_name") or "")))
+
+    @app.post("/payments")
+    async def payment_create(request: Request) -> Response:
+        """Выставить счёт: сумма и клиент. Ссылку берём у банка сразу."""
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        data = await form(request)
+        client = (await crm.client(int(data["client_id"]))
+                  if (data.get("client_id") or "").isdigit() else None)
+        if client is None:
+            flash(request, "Выберите клиента, которому выставить счёт.", "err")
+            return redirect("/payments")
+        amount = logic.check_amount(data.get("amount"))
+        if not amount.ok:
+            flash(request, amount.error, "err")
+            return redirect("/payments")
+        rental = await crm.active_rental_of(client["id"])
+        order = await service.create_pay_order(
+            crm, client=client, rental=rental, amount=amount.value,
+            by=who(request), acquiring=acquiring())
+        if order.get("status") == "failed":
+            flash(request, f"Счёт {order['no']} заведён, но ссылки нет: "
+                           f"{order.get('error') or 'банк не ответил'}", "err")
+        else:
+            flash(request, f"Счёт {order['no']} на {logic.money(order['amount'])} "
+                           f"готов — отправьте ссылку клиенту.")
+        return redirect(f"/payments/{order['id']}")
+
+    @app.post("/payments/settings")
+    async def payments_settings(request: Request) -> Response:
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        data = await request.form()
+        methods = [m for m in data.getlist("methods") if m in logic.PAY_METHODS]
+        if not methods:
+            flash(request, "Хотя бы один способ приёма должен остаться.", "err")
+            return redirect("/payments")
+        hour = count_field({"hour": (data.get("autocharge_hour") or "")},
+                           "hour", what="Час автосписания",
+                           default=str(logic.AUTOCHARGE_HOUR), limit=23)
+        if not hour.ok:
+            flash(request, hour.error, "err")
+            return redirect("/payments")
+        by = who(request)
+        await crm.set_setting("pay_methods", ",".join(methods), by=by)
+        await crm.set_setting("autocharge",
+                              "1" if data.get("autocharge") else "0", by=by)
+        await crm.set_setting("autocharge_hour", str(hour.value), by=by)
+        flash(request, "Настройки приёма оплаты сохранены."
+              if not data.get("autocharge") else
+              "Автосписание включено: долг у клиентов с привязанной картой "
+              f"будет списываться в {hour.value}:00.")
+        return redirect("/payments")
+
+    # Раньше /payments/{order_id}: иначе «settings» уедет в число.
+    @app.get("/payments/{order_id}")
+    async def payment_page(request: Request, order_id: int) -> Response:
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        order = await crm.pay_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Счёт")
+        return render(request, "payment.html", order=order,
+                      expired=logic.pay_expired(order),
+                      card=await crm.card_of(order["client_id"]),
+                      methods=logic.pay_methods(await crm.settings()))
+
+    @app.post("/payments/{order_id}")
+    async def payment_handle(request: Request, order_id: int) -> Response:
+        """Действия по счёту: отправить клиенту, закрыть руками, снять."""
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        order = await crm.pay_order(order_id)
+        if order is None:
+            return render(request, "missing.html", status_code=404, what="Счёт")
+        action = (await form(request)).get("action") or "send"
+        back = f"/payments/{order_id}"
+        if action == "cancel":
+            try:
+                await service.cancel_pay_order(crm, order, by=who(request))
+            except service.ServiceError as exc:
+                flash(request, str(exc), "err")
+                return redirect(back)
+            flash(request, f"Счёт {order['no']} снят.")
+            return redirect(back)
+        if action == "send":
+            sent = await notify.pay_link(bot, db, order)
+            flash(request, "Ссылка отправлена клиенту." if sent else
+                  "Клиента нет в боте — скопируйте ссылку и передайте сами.",
+                  "ok" if sent else "err")
+            return redirect(back)
+        if action in ("cash", "transfer"):
+            try:
+                await service.credit_pay_order(crm, order, by=who(request),
+                                               method=action)
+            except service.ServiceError as exc:
+                flash(request, str(exc), "err")
+                return redirect(back)
+            client = await crm.client(order["client_id"])
+            if client is not None:
+                await referral_bonus(client, logic.to_money(order["amount"]),
+                                     who(request))
+            flash(request, f"{logic.money(order['amount'])} зачислено "
+                           f"по счёту {order['no']}.")
+            return redirect(back)
+        if action == "drop_card":
+            await crm.drop_card(order["client_id"])
+            flash(request, "Карта отвязана: автосписания больше не будет.")
+            return redirect(back)
+        flash(request, "Непонятное действие.", "err")
+        return redirect(back)
 
     # ─────────────────────── трекеры и карта ───────────────────────
 

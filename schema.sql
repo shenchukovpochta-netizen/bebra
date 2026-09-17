@@ -1500,3 +1500,63 @@ insert into crm.tariffs (name, model, period_days, price, sort) values
   ('Две недели','Kugoo V3 Pro + (Два АКБ)',                14,  6000, 23),
   ('Месяц',    'Kugoo V3 Pro + (Два АКБ)',                 30, 12500, 33)
 on conflict do nothing;
+
+-- ────────────────────── приём оплаты ──────────────────────
+--
+-- Ссылка на оплату - это ещё не деньги. Пока клиент не заплатил,
+-- в журнале ничего быть не должно: `ledger` - факт, а не намерение.
+-- Поэтому счёт живёт отдельной таблицей и попадает в журнал ровно один
+-- раз - когда банк подтвердил оплату, и `ledger_id` это фиксирует.
+--
+-- Автосписание - тот же счёт, только вида `auto`: его создаёт не
+-- оператор, а суточный проход. Отдельной таблицы под него нет
+-- намеренно: клиенту всё равно, кто нажал кнопку, а отчёт «сколько
+-- пришло эквайрингом» не должен складывать две сущности.
+create table if not exists crm.pay_orders (
+  id          bigserial primary key,
+  no          text        not null unique,       -- СЧТ-000001
+  client_id   bigint      not null references crm.clients (id),
+  rental_id   bigint      references crm.rentals (id),
+  amount      numeric(12,2) not null,
+  purpose     text        not null,
+  kind        text        not null default 'link',  -- link|auto
+  -- new: ссылка ещё не получена; sent: клиенту отдана; paid: банк
+  -- подтвердил; failed: банк отказал; cancelled: сняли руками.
+  status      text        not null default 'new',
+  provider    text        not null default 'tochka',
+  operation_id text,
+  link        text,
+  error       text,
+  ledger_id   bigint      references crm.ledger (id),
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  sent_at     timestamptz,
+  paid_at     timestamptz,
+  checked_at  timestamptz
+);
+-- Одна операция банка - один счёт: повторный ответ эквайринга не
+-- заведёт второй платёж.
+create unique index if not exists pay_orders_operation_idx
+  on crm.pay_orders (operation_id) where operation_id is not null;
+create index if not exists pay_orders_open_idx
+  on crm.pay_orders (status, created_at desc) where status in ('new', 'sent');
+create index if not exists pay_orders_client_idx
+  on crm.pay_orders (client_id, created_at desc);
+
+-- Карта клиента для автосписания. Номера карты здесь нет и быть не
+-- может: хранится токен эквайринга и четыре последние цифры, чтобы
+-- оператор и клиент понимали, о какой карте речь.
+create table if not exists crm.card_tokens (
+  id         bigserial primary key,
+  client_id  bigint      not null references crm.clients (id),
+  provider   text        not null default 'tochka',
+  token      text        not null,
+  mask       text,                              -- 4477
+  expires    text,                              -- 12/28
+  active     boolean     not null default true,
+  created_at timestamptz not null default now(),
+  used_at    timestamptz
+);
+-- Одна действующая карта на клиента: привязали новую - старая уходит.
+create unique index if not exists card_tokens_one
+  on crm.card_tokens (client_id, provider) where active;
