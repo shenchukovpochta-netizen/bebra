@@ -117,6 +117,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.globals.update(
         money=logic.money, money_signed=logic.money_signed, period_label=logic.period_label,
+        per_day=logic.per_day,
         KINDS=logic.KINDS, METHODS=logic.METHODS, BIKE_STATUSES=logic.BIKE_STATUSES,
         BIKE_MANUAL_STATUSES=logic.BIKE_MANUAL_STATUSES,
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
@@ -1366,6 +1367,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.get("/tariffs")
     async def tariffs(request: Request) -> Response:
         rows = await crm.tariffs()
+        # Порядок строки в таблице: сначала запасные «любая модель», дальше
+        # модели по алфавиту, внутри модели - по сроку. Иначе одинаковые
+        # тарифы разных моделей стоят вперемешку и цены не сравнить.
+        rows.sort(key=lambda t: (str(t.get("model") or "").lower(),
+                                 int(t.get("period_days") or 0)))
         models = await crm.bike_models(active_only=True)
         # Модели, у которых нет ни одной своей цены: на выдаче они уедут
         # на запасной тариф, и это стоит видеть до выдачи, а не после.

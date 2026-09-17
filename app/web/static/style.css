@@ -72,6 +72,37 @@ td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}
 td.num,th.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
 .card>table{display:block;overflow-x:auto}
+/* Таблица с редактируемыми строками: сами <form> стоят за таблицей, а
+   поля ссылаются на них атрибутом form - <form> внутри <tr> браузер
+   выносит наружу, и строка разъезжается. Прокрутку в этом случае берёт
+   на себя обёртка: таблица уже не прямой ребёнок карточки. */
+.table-wrap{overflow-x:auto}
+table.editable td{vertical-align:middle}
+/* Список моделей длинный, и без потолка <select> растягивает таблицу так,
+   что кнопки строки уезжают за край карточки. Текст в select браузер
+   обрезает сам, поэтому потолок безопаснее переноса. */
+table.editable td select{max-width:200px}
+table.editable td.grow{width:auto}
+table.editable td.grow input{width:100%;min-width:80px}
+.scroll-hint{display:none;color:var(--muted);font-size:13px;margin:6px 0 0}
+/* Ноутбук 13" и планшет: кнопки строки важнее справочных колонок, их и
+   убираем первыми - спрятанная за краем кнопка выглядит как сломанная
+   вёрстка. На телефоне строка не помещается никак, поэтому там прямо
+   говорим, что таблицу надо прокрутить вбок. */
+@media (max-width:1100px){
+  table.editable th.opt,table.editable td.opt{display:none}
+  table.editable td select{max-width:150px}
+}
+@media (max-width:960px){
+  table.editable td{padding:6px 5px}
+  table.editable td select{max-width:125px}
+  table.editable td.actions button{padding:4px 8px;font-size:12px}
+}
+@media (max-width:700px){.scroll-hint{display:block}}
+td.nowrap,th.nowrap{white-space:nowrap}
+td.actions{white-space:nowrap;text-align:right}
+td.actions button{padding:5px 10px;font-size:13px}
+input.mini{text-align:right;font-variant-numeric:tabular-nums}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
 .tag{display:inline-block;padding:2px 9px;border-radius:999px;background:var(--chip);font-size:12px;font-weight:500;vertical-align:middle;color:var(--brand-dark)}
 .tag.available,.tag.active{background:#E4F5E4;color:var(--ok)}
