@@ -3,6 +3,7 @@
 {% block content %}
 <div class="bar"><h1>Клиенты и каналы</h1>
   {% with active = 'channels' %}{% include '_report_tabs.html' %}{% endwith %}
+  <a class="btn ghost" href="/reports/channels.xlsx">Excel</a>
   <a class="btn ghost" href="/reports/channels.csv">CSV</a>
 </div>
 <div class="card">

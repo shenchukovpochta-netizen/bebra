@@ -1669,6 +1669,39 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          "заплатили больше, чем начислили - это не долг")
         self.assertEqual(chart["over_days"], 1)
 
+    async def test_saved_views_on_postgres(self):
+        """Свои фильтры: одно имя на список у сотрудника, чужой не трогаем."""
+        await self.seed()
+        boss = await self.crm.create_staff(
+            "boss", logic.hash_password("boss-pass-1"), name="Владелец",
+            role="admin", profile_id=None)
+        other = await self.crm.create_staff(
+            "sosed", logic.hash_password("sosed-pass-1"), name="Сосед",
+            role="admin", profile_id=None)
+        first = await self.crm.save_view(staff_id=boss, section="/rentals",
+                                         name="Мои должники",
+                                         query="status=active&view=debt")
+        # Второе сохранение под тем же именем обновляет набор, а не
+        # заводит второй: спорить, какой из них настоящий, не о чем.
+        again = await self.crm.save_view(staff_id=boss, section="/rentals",
+                                         name="мои должники",
+                                         query="status=closed")
+        self.assertEqual(first, again)
+        views = await self.crm.saved_views(boss, "/rentals")
+        self.assertEqual(len(views), 1)
+        self.assertEqual(views[0]["query"], "status=closed")
+
+        # Тот же список у другого сотрудника - свой.
+        await self.crm.save_view(staff_id=other, section="/rentals",
+                                 name="Мои должники", query="status=active")
+        self.assertEqual(len(await self.crm.saved_views(other, "/rentals")), 1)
+        self.assertEqual(len(await self.crm.saved_views(boss, "/rentals")), 1)
+
+        # Чужой фильтр не удаляется по одному лишь id.
+        self.assertFalse(await self.crm.drop_saved_view(first, staff_id=other))
+        self.assertTrue(await self.crm.drop_saved_view(first, staff_id=boss))
+        self.assertEqual(await self.crm.saved_views(boss, "/rentals"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,58 @@
+{# Инструменты списка: сортируемый заголовок, подвал и свои фильтры.
+   Один набор на все списки - каждый со своим устройством разъедется
+   на первой же правке. #}
+
+{% macro th(label, key, tools, cls='') %}
+{# Заголовок-ссылка. Повторный клик по той же колонке переворачивает
+   порядок: это ожидание, которое есть у всех, кто видел таблицу. #}
+{% set active = tools.sort == key %}
+{% set nxt = 'desc' if active and tools.dir != 'desc' else 'asc' %}
+<th class="{{ cls }}{% if active %} sorted{% endif %}">
+  <a href="?{{ tools.query }}{% if tools.query %}&{% endif %}sort={{ key }}&dir={{ nxt }}">{{ label }}{% if active %}<span class="caret">{{ '▾' if tools.dir == 'desc' else '▴' }}</span>{% endif %}</a>
+</th>
+{% endmacro %}
+
+{% macro footer(tools, section, cols, extra='') %}
+{# Подвал: сколько нашлось всего, размер страницы и страницы.
+   «Итого 77 аренд» при пятидесяти на экране - это и есть ответ на
+   вопрос, ради которого список открывали. #}
+<tr class="list-foot">
+  <td colspan="{{ cols }}">
+    <b>Итого {{ tools.total }}</b>{% if tools.shown != tools.total %} · показано {{ tools.shown }}{% endif %}
+    {% if extra %}· {{ extra }}{% endif %}
+    <span class="spacer"></span>
+    строк:
+    {% for size in LIST_SIZES %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}
+    {% if tools.pages > 1 %}
+    <span class="spacer"></span>
+    {% if tools.page > 1 %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}page={{ tools.page - 1 }}">←</a>{% endif %}
+    стр. {{ tools.page }} из {{ tools.pages }}
+    {% if tools.page < tools.pages %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}page={{ tools.page + 1 }}">→</a>{% endif %}
+    {% endif %}
+  </td>
+</tr>
+{% endmacro %}
+
+{% macro views(saved, section, tools, staff) %}
+{# Свои фильтры: строка запроса под именем, своя у каждого сотрудника.
+   Чужие в списке мешают, а общие на всех превращаются в свалку. #}
+<div class="saved-views">
+  <span class="muted">Мои фильтры:</span>
+  {% for v in saved %}
+  <a class="btn ghost" href="{{ section }}{% if v.query %}?{{ v.query }}{% endif %}">★ {{ v.name }}</a>
+  <form method="post" action="/views/{{ v.id }}/delete" class="inline-form">
+    <button type="submit" class="ghost danger" title="убрать фильтр">×</button>
+  </form>
+  {% else %}<span class="muted">пока нет</span>{% endfor %}
+  {% if tools.query %}
+  <form method="post" action="/views" class="inline-form">
+    <input type="hidden" name="section" value="{{ section }}">
+    <input type="hidden" name="query" value="{{ tools.query }}">
+    <input name="name" placeholder="назвать этот набор" required class="mini">
+    <button type="submit" class="ghost">Сохранить</button>
+  </form>
+  {% else %}
+  <span class="muted">— задайте фильтр, чтобы его сохранить</span>
+  {% endif %}
+</div>
+{% endmacro %}

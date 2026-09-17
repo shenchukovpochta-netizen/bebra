@@ -297,3 +297,16 @@ p.small{font-size:13px}
 .bar-col{position:relative}
 .bar-dot{position:absolute;left:50%;width:6px;height:6px;margin-left:-3px;
          border-radius:50%;background:var(--bad)}
+
+/* Сортируемый заголовок, подвал списка и свои фильтры. */
+th.sorted{background:var(--chip)}
+th a{color:inherit;text-decoration:none}
+th a:hover{text-decoration:underline}
+.caret{margin-left:4px;font-size:10px}
+tr.list-foot td{border-top:2px solid var(--line);font-size:13px}
+tr.list-foot .spacer{display:inline-block;width:18px}
+tr.list-foot a{margin:0 2px}
+tr.list-foot a.on{font-weight:700;text-decoration:underline}
+.saved-views{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+             margin:8px 0;font-size:13px}
+.saved-views .inline-form{display:inline-flex;gap:4px;margin:0}

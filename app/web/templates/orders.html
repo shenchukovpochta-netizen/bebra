@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Наряды — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Наряды</h1>
@@ -9,6 +10,7 @@
     <button type="submit">Показать</button>
   </form>
   {% if can_edit(staff, 'service') %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
+  <a class="btn ghost" href="/orders.xlsx?status={{ status }}&payer={{ payer }}">Excel</a>
   <a class="btn ghost" href="/orders.csv?status={{ status }}&payer={{ payer }}">CSV</a>
 </div>
 {# «На согласовании» вынесено кнопкой: это самый дорогой статус - техника
@@ -19,9 +21,21 @@
   <a href="/orders?status=done&payer=client" class="{% if status == 'done' %}on{% endif %}">Закрытые клиентские</a>
 </nav>
 <div class="card">
+{{ list.views(views, '/orders', tools, staff) }}
+<div class="table-wrap">
 <table>
   {% set money_ok = can_view(staff, 'finance') %}
-  <tr><th>№</th><th>Открыт</th><th>Объект</th><th>Статус</th><th>Плательщик</th><th>Клиент</th><th>Техник</th><th>Суток</th>{% if money_ok %}<th>Сумма</th>{% endif %}</tr>
+  <tr>
+    {{ list.th('№', 'no', tools) }}
+    {{ list.th('Открыт', 'opened', tools) }}
+    {{ list.th('Объект', 'bike', tools) }}
+    {{ list.th('Статус', 'status', tools) }}
+    {{ list.th('Плательщик', 'payer', tools) }}
+    {{ list.th('Клиент', 'client', tools) }}
+    {{ list.th('Техник', 'tech', tools) }}
+    <th>Суток</th>
+    {% if money_ok %}{{ list.th('Сумма', 'total', tools, 'num') }}{% endif %}
+  </tr>
   {% for r in rows %}
   <tr>
     <td><a href="/orders/{{ r.id }}">{{ r.no }}</a></td>
@@ -39,6 +53,10 @@
   <tr class="total"><td colspan="8">Закрыто, но не оплачено клиентами · {{ unpaid.count }}</td>
     <td class="num bad">{{ money(unpaid.sum) }}</td></tr>
   {% endif %}
+  {{ list.footer(tools, '/orders', 9,
+                 ('на сумму ' ~ money(total)) if money_ok and total else '') }}
 </table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
 </div>
 {% endblock %}

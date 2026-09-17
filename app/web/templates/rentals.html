@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block content %}
 <div class="bar">
   <h1>Аренды</h1>
@@ -9,6 +10,7 @@
     <a href="/rentals/search">Розыск</a>
   </nav>
   {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Форма</a>{% endif %}
+  <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}">Excel</a>
   <a class="btn ghost" href="/rentals.csv?status={{ status }}&view={{ view }}">CSV</a>
 </div>
 {# Состояния поверх статуса: «без техники» - не статус, а положение дел,
@@ -20,9 +22,19 @@
   <a href="/rentals?status={{ status }}&view=search" class="{% if view == 'search' %}on{% endif %}">В розыске{% if counts.search %} · {{ counts.search }}{% endif %}</a>
 </nav>
 <div class="card">
+{{ list.views(views, '/rentals', tools, staff) }}
+<div class="table-wrap">
 <table>
   {% set money_ok = can_view(staff, 'finance') %}
-  <tr><th>#</th><th>Клиент</th><th>Велосипед</th><th>Тариф</th><th>С</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}</tr>
+  <tr>
+    {{ list.th('#', 'no', tools) }}
+    {{ list.th('Клиент', 'client', tools) }}
+    {{ list.th('Велосипед', 'bike', tools) }}
+    {{ list.th('Тариф', 'tariff', tools) }}
+    {{ list.th('С', 'started', tools) }}
+    {{ list.th('Оплачено', 'paid', tools) }}
+    {% if money_ok %}{{ list.th('Баланс', 'debt', tools, 'num') }}{% endif %}
+  </tr>
   {% for r in rows %}
   <tr>
     <td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td>
@@ -34,6 +46,10 @@
     {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Пусто.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/rentals', 7,
+                 ('долг ' ~ money(-debt_total)) if money_ok and debt_total else '') }}
 </table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
 </div>
 {% endblock %}

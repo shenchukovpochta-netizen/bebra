@@ -1832,3 +1832,26 @@ create index if not exists tracker_alerts_open_idx
 -- аренде»: `last_seen` - это выход на связь, а стоящий велосипед выходит
 -- на связь исправно. Считать по журналу позиций нельзя - он живёт месяц.
 alter table crm.trackers add column if not exists moved_at timestamptz;
+
+-- ────── свои фильтры списков ──────
+--
+-- «Долг больше нуля, точка Павлюхина, отсортировать по суткам» - набор,
+-- который оператор собирает каждое утро заново. Сохранённый фильтр - это
+-- просто строка запроса под именем, своя у каждого сотрудника: чужие
+-- фильтры в списке мешают, а общие на всех превращаются в свалку.
+
+create table if not exists crm.saved_views (
+  id         bigserial primary key,
+  staff_id   bigint      not null references crm.staff (id) on delete cascade,
+  section    text        not null,          -- путь списка: /rentals, /bikes…
+  name       text        not null,
+  -- Строка запроса без «?»: q=..&status=..&sort=..
+  query      text        not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists saved_views_idx
+  on crm.saved_views (staff_id, section, id);
+-- Одно имя на список у сотрудника: два «моих должника» с разными
+-- фильтрами - это спор о том, который из них настоящий.
+create unique index if not exists saved_views_one_name
+  on crm.saved_views (staff_id, section, lower(name));

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Склад — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Склад</h1>
@@ -11,6 +12,7 @@
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'inventory') %}<a class="btn" href="/parts/new">+ Позиция</a>{% endif %}
+  <a class="btn ghost" href="/parts.xlsx?node={{ node }}&q={{ q|urlencode }}">Excel</a>
   <a class="btn ghost" href="/parts.csv?node={{ node }}&q={{ q|urlencode }}">CSV</a>
 </div>
 
@@ -23,6 +25,8 @@
 </div>
 
 <div class="card">
+{{ list.views(views, '/parts', tools, staff) }}
+<div class="table-wrap">
 <table>
   {% set money_ok = can_view(staff, 'finance') %}
   <tr><th>Позиция</th><th class="opt">Узел</th><th>На полке</th><th>Мин.</th><th class="opt num">Дней на складе</th>{% if money_ok %}<th>Себест.</th><th class="opt">Цена клиенту</th><th class="opt">Сумма</th>{% endif %}<th class="opt">Совместимость</th></tr>
@@ -41,6 +45,8 @@
     <td class="opt">{{ r.model or 'все' }}</td>
   </tr>
   {% else %}<tr><td colspan="9" class="muted">Склад пуст. Заведите позицию и проведите приход.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/parts', 9,
+                 ('на складе ' ~ money(summary.cost)) if money_ok and summary.cost else '') }}
 </table>
 <p class="muted">Первыми — те, чего не хватает до неснижаемого остатка.
   Себестоимость средняя: пересчитывается при каждом приходе, поэтому один

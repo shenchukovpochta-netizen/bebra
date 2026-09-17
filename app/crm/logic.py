@@ -26,7 +26,7 @@ import os
 import random
 import re
 import secrets
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -762,6 +762,98 @@ def tariff_tiles(tariffs: Iterable[dict]) -> list[dict]:
         out.append({**t, "per_day": day, "saving": saving if saving > 0 else Decimal(0),
                     "hits_target": day >= CHECK_TARGET})
     return out
+
+
+# ─────────────────────── инструменты списков ───────────────────────
+#
+# Сортировка кликом по заголовку, размер страницы и подвал с итогом -
+# одинаково нужны парку, арендам, нарядам и складу. Один набор правил на
+# все списки: каждый со своим устройством разъедется на первой правке.
+
+# Сколько строк показывать за раз. 50 - экран, 300 - «покажи всё»:
+# больше трёхсот строк на странице не читает никто, для этого есть
+# выгрузка.
+LIST_SIZES = (50, 100, 300)
+DEFAULT_LIST_SIZE = 50
+
+
+def check_list_size(raw: Any) -> int:
+    try:
+        value = int(str(raw or "").strip())
+    except ValueError:
+        return DEFAULT_LIST_SIZE
+    return value if value in LIST_SIZES else DEFAULT_LIST_SIZE
+
+
+def sort_rows(rows: Iterable[Mapping[str, Any]], key: Any, direction: Any, *,
+              allowed: Mapping[str, str] | None = None) -> list[dict]:
+    """Отсортировать список по колонке. Неизвестная колонка - как было.
+
+    Порядок не должен зависеть от того, у какой строки поле пустое:
+    None уходит в конец при любом направлении, иначе «сортировка по
+    клиенту» выносит наверх всё, что ещё не выдано.
+    """
+    rows = [dict(r) for r in rows]
+    field = str(allowed.get(str(key), "") if allowed else key or "").strip()
+    if not field:
+        return rows
+    down = str(direction or "").lower() in ("desc", "down", "-")
+
+    def order(row: Mapping[str, Any]) -> tuple:
+        value = row.get(field)
+        if value is None or value == "":
+            return (1, "")
+        if isinstance(value, bool):
+            return (0, int(value))
+        if isinstance(value, (int, float, Decimal)):
+            return (0, value)
+        if isinstance(value, (date, datetime)):
+            return (0, value.isoformat() if isinstance(value, date) else str(value))
+        return (0, str(value).casefold())
+
+    # Ключи разных типов не сравниваются между собой; внутри одной
+    # колонки тип один, но пустые значения дают ("", ) против (0, ).
+    numeric = all(isinstance(r.get(field), (int, float, Decimal, bool))
+                  or r.get(field) in (None, "") for r in rows)
+    if numeric:
+        def order(row: Mapping[str, Any]) -> tuple:      # noqa: F811
+            value = row.get(field)
+            return (1, 0) if value in (None, "") else (0, Decimal(str(value)))
+    rows.sort(key=order, reverse=down)
+    if down:
+        # reverse=True утащил бы пустые в начало - возвращаем их назад.
+        filled = [r for r in rows if r.get(field) not in (None, "")]
+        empty = [r for r in rows if r.get(field) in (None, "")]
+        rows = filled + empty
+    return rows
+
+
+def page_of(rows: Sequence[Mapping[str, Any]], size: int = DEFAULT_LIST_SIZE,
+            page: Any = 1) -> dict[str, Any]:
+    """Страница списка и всё, что нужно подвалу.
+
+    `total` - сколько строк нашлось всего, а не сколько показано: «итого
+    77 аренд» при пятидесяти на экране - это и есть ответ на вопрос,
+    ради которого открывали список.
+    """
+    size = size if size in LIST_SIZES else DEFAULT_LIST_SIZE
+    total = len(rows)
+    pages = max((total + size - 1) // size, 1)
+    try:
+        number = int(str(page or 1))
+    except ValueError:
+        number = 1
+    number = min(max(number, 1), pages)
+    start = (number - 1) * size
+    return {"rows": list(rows[start:start + size]), "total": total,
+            "page": number, "pages": pages, "size": size,
+            "shown": min(size, max(total - start, 0)),
+            "has_more": pages > 1}
+
+
+def sum_of(rows: Iterable[Mapping[str, Any]], field: str) -> Decimal:
+    """Сумма колонки по всем найденным строкам - для подвала списка."""
+    return to_money(sum((to_money(r.get(field)) for r in rows), Decimal(0)))
 
 
 # ─────────────────── позиции аренды сверх велосипеда ───────────────────

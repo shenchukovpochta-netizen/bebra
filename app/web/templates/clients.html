@@ -10,7 +10,8 @@
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'clients') %}<a class="btn" href="/clients/new">+ Клиент</a>{% endif %}
-  {% if can_view(staff, 'finance') %}<a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}">CSV</a>{% endif %}
+  {% if can_view(staff, 'finance') %}<a class="btn ghost" href="/clients.xlsx?q={{ q|urlencode }}&status={{ status|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}">CSV</a>{% endif %}
 </div>
 <div class="card">
 <table>

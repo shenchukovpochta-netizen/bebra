@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block content %}
 <div class="bar">
   <h1>Парк</h1>
@@ -15,23 +16,39 @@
   </form>
   {% if can_edit(staff, 'bikes') %}<a class="btn" href="/bikes/new">+ Велосипед</a>{% endif %}
   <a class="btn ghost" href="/stock-takes">Пересчёт</a>
+  <a class="btn ghost" href="/bikes.xlsx?q={{ q|urlencode }}&status={{ status }}&location={{ location|urlencode }}">Excel</a>
   <a class="btn ghost" href="/bikes.csv?q={{ q|urlencode }}&status={{ status }}&location={{ location|urlencode }}">CSV</a>
 </div>
 <div class="card">
+{{ list.views(views, '/bikes', tools, staff) }}
+<div class="table-wrap">
 <table>
-  <tr><th>№</th><th>Модель</th><th>Рама</th><th>АКБ</th><th>Пробег</th><th>Точка</th><th>Статус</th><th>У кого</th></tr>
+  <tr>
+    {{ list.th('№', 'code', tools) }}
+    {{ list.th('Модель', 'model', tools) }}
+    <th class="opt">Рама</th><th class="opt">АКБ</th>
+    {{ list.th('Пробег', 'mileage', tools, 'num') }}
+    {{ list.th('Точка', 'location', tools) }}
+    {{ list.th('Статус', 'status', tools) }}
+    {{ list.th('Простой', 'idle', tools, 'num opt') }}
+    {{ list.th('У кого', 'client', tools) }}
+  </tr>
   {% for b in rows %}
   <tr>
     <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
     <td>{{ b.model }}</td>
-    <td class="muted">{{ b.frame_no or '' }}</td>
-    <td>{{ b.battery_count }}</td>
+    <td class="muted opt">{{ b.frame_no or '' }}</td>
+    <td class="opt">{{ b.battery_count }}</td>
     <td class="num muted">{{ '{:,}'.format(b.mileage_km or 0).replace(',', '\u00a0') }} км</td>
     <td class="muted">{{ b.location or '' }}{% if b.spare %} · подменный{% endif %}</td>
     <td><span class="tag {{ b.status }}">{{ BIKE_STATUSES.get(b.status, b.status) }}</span></td>
+    <td class="num opt {% if b.idle_days and b.idle_days > 7 %}bad{% endif %}">{% if b.idle_days is none %}—{% else %}{{ b.idle_days }} сут.{% endif %}</td>
     <td>{% if b.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="8" class="muted">Пусто.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="muted">Пусто.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/bikes', 9) }}
 </table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
 </div>
 {% endblock %}

@@ -1856,6 +1856,41 @@ class CrmDB:
             order by o.no
             """))
 
+    # ─────────────────── свои фильтры списков ───────────────────
+
+    async def saved_views(self, staff_id: int, section: str) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.saved_views where staff_id = $1 and section = $2 "
+            "order by lower(name)", staff_id, section))
+
+    async def saved_view(self, view_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.saved_views where id = $1", view_id))
+
+    async def save_view(self, *, staff_id: int, section: str, name: str,
+                        query: str) -> int:
+        """Сохранить фильтр. Одно имя на список - второе перезаписывает.
+
+        Оператор, который сохраняет «мои должники» второй раз, хочет
+        обновить старый набор, а не завести второй с тем же именем.
+        """
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.saved_views (staff_id, section, name, query)
+            values ($1, $2, $3, $4)
+            on conflict (staff_id, section, lower(name))
+            do update set query = excluded.query, created_at = now()
+            returning id
+            """, staff_id, section, name, query))
+
+    async def drop_saved_view(self, view_id: int, *, staff_id: int) -> bool:
+        """Удалить свой фильтр. Чужой не трогается: id в адресе - чужая
+        строка, и «удалить по id» без владельца снесло бы соседу его набор."""
+        row = await self.pool.fetchrow(
+            "delete from crm.saved_views where id = $1 and staff_id = $2 "
+            "returning id", view_id, staff_id)
+        return row is not None
+
     # ─────────────────── позиции аренды сверх велосипеда ───────────────────
 
     async def rental_extras(self, rental_id: int, *,

@@ -8,6 +8,7 @@
     <input type="date" name="until" value="{{ until|iso }}">
     <button type="submit">Показать</button>
   </form>
+  <a class="btn ghost" href="/reports/techs.xlsx?since={{ since|iso }}&until={{ until|iso }}">Excel</a>
   <a class="btn ghost" href="/reports/techs.csv?since={{ since|iso }}&until={{ until|iso }}">CSV</a>
 </div>
 

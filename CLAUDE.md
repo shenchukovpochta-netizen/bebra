@@ -67,7 +67,7 @@ Claude Code читает этот файл в начале каждой сесс
 `tracker_alerts`, `cash_shifts`, `cash_moves`, `bank_txns`,
 `message_templates`, `campaigns`, `campaign_sends`, `sign_requests`,
 `sign_events`, `pay_orders`, `card_tokens`, `notices`, `notice_log`,
-`bonuses`, `doc_templates`, `company_marks`,
+`bonuses`, `doc_templates`, `company_marks`, `saved_views`,
 `clients`, `rentals`,
 `rental_bikes`, `rental_extras`, `ledger`, `payment_claims`.
 
@@ -111,6 +111,12 @@ Claude Code читает этот файл в начале каждой сесс
   как и колонки баланса у клиента. Запчасть привязана к узлу из
   `repair_nodes`, себестоимость средневзвешенная и правится только
   приходом. Расход в наряд пишет `work_order_items.parts_cost` со склада.
+- **Списки** (`logic.sort_rows`, `page_of`, `saved_views`): сортировка
+  только по белому списку колонок - имя поля из адреса чужая строка;
+  итог в подвале по всему найденному, а не по видимой странице.
+  Сохранённый фильтр - строка запроса под именем, своя у сотрудника.
+  Выгрузка в xlsx и csv (`_table`); строка с «=» остаётся строкой в
+  обоих. Неизвестное расширение - 404, а не «сделаю csv».
 - **Расхождения**: парк, аренды и наряды проверяются на несходимость
   (`logic.integrity_issues`) — отчётом в панели и раз в сутки в чат.
 - **Сотрудник и Telegram**: `staff.tg_id` ставится самим сотрудником по

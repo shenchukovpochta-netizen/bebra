@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -112,6 +112,96 @@ def _cell(value: Any) -> str:
     return text
 
 
+def _xlsx(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
+    """Тот же набор строк, но настоящей таблицей Excel.
+
+    CSV Excel открывает по-разному в зависимости от настроек локали, и
+    суммы в нём - текст: выгрузку приходится доводить руками. Здесь числа
+    остаются числами, даты датами, шапка закреплена - файл открывают и
+    сразу считают.
+
+    Защиты от формул тут не нужно: значение уезжает ячейкой своего типа,
+    и строка, начинающаяся с «=», лежит строкой - openpyxl не делает из
+    неё формулу.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Выгрузка"
+    sheet.append(list(header))
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    for row in rows:
+        sheet.append([_xlsx_cell(v) for v in row])
+    # Шапка не уезжает при прокрутке: в выгрузке парка 190 строк.
+    sheet.freeze_panes = "A2"
+    widths = [len(str(h)) for h in header]
+    for row in rows:
+        for i, value in enumerate(row[:len(widths)]):
+            widths[i] = max(widths[i], len(_cell(value)))
+    for i, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(i)].width = min(max(width + 2, 9), 42)
+    for column in sheet.iter_cols(min_row=2):
+        for cell in column:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "# ##0.00" if isinstance(cell.value, float) \
+                    else "# ##0"
+            elif isinstance(cell.value, datetime):
+                cell.number_format = "DD.MM.YYYY HH:MM"
+            elif isinstance(cell.value, date):
+                cell.number_format = "DD.MM.YYYY"
+            elif isinstance(cell.value, str) and cell.value.startswith("="):
+                # openpyxl по первому символу решает, что это формула.
+                # Имя клиента приходит из бота как набрал человек, и
+                # «=HYPERLINK(…)» в ФИО превратило бы выгрузку в ссылку
+                # у оператора. Говорим явно: это строка.
+                cell.data_type = "s"
+    buf = io.BytesIO()
+    book.save(buf)
+    return Response(
+        buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument."
+                   "spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _xlsx_cell(value: Any) -> Any:
+    """Значение как есть, чтобы Excel считал его числом или датой."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        # Excel не понимает часовой пояс: приводим к местному и снимаем его.
+        return _local(value).replace(tzinfo=None)
+    if isinstance(value, (int, float, date)):
+        return value
+    return str(value)
+
+
+# В каких видах отдаются выгрузки. xlsx - рабочий: числа остаются
+# числами и сумму можно поставить сразу. csv оставлен для тех, кто
+# грузит выгрузку во что-то своё.
+EXPORT_FORMATS = ("xlsx", "csv")
+
+
+def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]]) -> Response:
+    """Одна выгрузка в двух видах. Неизвестное расширение - 404.
+
+    Молча отдать csv на запрос `.pdf` значит соврать в имени файла, и
+    оператор откроет его один раз, а потом перестанет доверять выгрузке.
+    """
+    if fmt not in EXPORT_FORMATS:
+        raise HTTPException(status_code=404)
+    if fmt == "xlsx":
+        return _xlsx(f"{stem}.xlsx", header, rows)
+    return _csv(f"{stem}.csv", header, rows)
+
+
 def _iso(value: Any) -> str:
     return value.strftime("%Y-%m-%d") if isinstance(value, date) else ""
 
@@ -148,6 +238,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ALERT_SNOOZE_HOURS=logic.ALERT_SNOOZE_HOURS,
         BATTERY_PASSPORT=logic.BATTERY_PASSPORT,
         STOCK_STALE_DAYS=logic.STOCK_STALE_DAYS,
+        LIST_SIZES=logic.LIST_SIZES,
         NOTICE_TARGETS=logic.NOTICE_TARGETS,
         NOTICE_STATUSES=logic.NOTICE_STATUSES,
         NOTICE_LOG_DAYS=logic.NOTICE_LOG_DAYS,
@@ -432,6 +523,67 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           [{"kind": "all", "amount": month_totals.get("bonus", 0)}],
                           month_totals.get("payment", 0))["share"])
 
+    # ─────────────────── инструменты списков ───────────────────
+
+    def list_tools(request: Request, rows: list[dict], *,
+                   allowed: dict[str, str]) -> dict:
+        """Сортировка, страница и подвал - одинаково для всех списков."""
+        p = request.query_params
+        sort = p.get("sort") or ""
+        direction = p.get("dir") or "asc"
+        ordered = logic.sort_rows(rows, sort, direction, allowed=allowed) \
+            if sort in allowed else list(rows)
+        page = logic.page_of(ordered, logic.check_list_size(p.get("rows")),
+                             p.get("page"))
+        return {**page, "all_rows": ordered, "sort": sort, "dir": direction,
+                "query": clean_query(request, drop=("page",))}
+
+    def clean_query(request: Request, *, drop: tuple[str, ...] = ()) -> str:
+        """Строка запроса без указанных параметров - для ссылок сортировки."""
+        keep = [(k, v) for k, v in request.query_params.multi_items()
+                if k not in drop]
+        return "&".join(f"{k}={quote(str(v), safe='')}" for k, v in keep if v != "")
+
+    async def views_of(request: Request, section: str) -> list[dict]:
+        """Свои фильтры этого списка. Чужие не показываются."""
+        staff = getattr(request.state, "staff", None) or {}
+        if not staff.get("id"):
+            return []
+        return await crm.saved_views(int(staff["id"]), section)
+
+    @app.post("/views")
+    async def view_save(request: Request) -> Response:
+        """Сохранить текущий набор фильтров под именем."""
+        staff = getattr(request.state, "staff", None) or {}
+        data = await form(request)
+        section = str(data.get("section") or "")
+        back = section + (("?" + str(data.get("query") or ""))
+                          if data.get("query") else "")
+        if not staff.get("id") or not section.startswith("/"):
+            return redirect("/")
+        name = logic.check_name(data.get("name"), what="Название фильтра")
+        if not name.ok:
+            flash(request, name.error, "err")
+            return redirect(back)
+        await crm.save_view(staff_id=int(staff["id"]), section=section,
+                            name=name.value, query=str(data.get("query") or ""))
+        flash(request, f"Фильтр «{name.value}» сохранён.")
+        return redirect(back)
+
+    @app.post("/views/{view_id}/delete")
+    async def view_delete(request: Request, view_id: int) -> Response:
+        staff = getattr(request.state, "staff", None) or {}
+        data = await form(request)
+        view = await crm.saved_view(view_id)
+        back = str(view["section"]) if view else "/"
+        if not staff.get("id") or not await crm.drop_saved_view(
+                view_id, staff_id=int(staff["id"])):
+            flash(request, "Такого фильтра у вас нет.", "err")
+            return redirect(back)
+        del data
+        flash(request, "Фильтр убран.")
+        return redirect(back)
+
     async def standing_bikes(fleet: list[dict], limit: int = 5) -> list[dict]:
         """Велосипеды, которые стоят дольше всех, с ценой простоя."""
         since = await crm.bike_status_since()
@@ -556,8 +708,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             r["summary"] = summarize(rental, r.get("balance", 0))
         return render(request, "clients.html", rows=rows, q=q, status=status)
 
-    @app.get("/clients.csv")
-    async def clients_csv(request: Request) -> Response:
+    @app.get("/clients.{ext}")
+    async def clients_csv(request: Request, ext: str) -> Response:
         # В выгрузке колонка «Баланс»: она уезжает файлом, поэтому право
         # на финансы обязательно - на самой странице баланс тоже скрыт.
         if not may_view(request, "finance"):
@@ -576,7 +728,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                          logic.to_money(c.get("balance", 0)), c.get("bike_code"),
                          c.get("tariff_name"), s.get("covered_until"),
                          c.get("contract_no"), c.get("created_at")])
-        return _csv("clients.csv",
+        return _table(ext, "clients",
                     ["ФИО", "Телефон", "Статус", "Telegram", "Баланс", "Велосипед",
                      "Тариф", "Оплачено до", "Договор", "Добавлен"], rows)
 
@@ -735,18 +887,33 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── парк ───────────────────────
 
+    # Колонки, по которым можно сортировать список. Белым списком, а не
+    # именем поля из адреса: имя поля из запроса - это чужая строка.
+    BIKE_SORTS = {"code": "code", "model": "model", "status": "status",
+                  "location": "location", "mileage": "mileage_km",
+                  "client": "full_name", "idle": "idle_days"}
+
     @app.get("/bikes")
     async def bikes(request: Request) -> Response:
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
         location = request.query_params.get("location") or ""
+        rows = await crm.bikes(q=q or None, status=status or None,
+                               location=location or None, limit=10000)
+        since = await crm.bike_status_since()
+        now = datetime.now(UTC)
+        for bike in rows:
+            bike["idle_days"] = (logic.idle_days(since.get(bike["id"]), now=now)
+                                 if bike.get("status") in logic.IDLE_STATUSES
+                                 else None)
+        tools = list_tools(request, rows, allowed=BIKE_SORTS)
         return render(request, "bikes.html", q=q, status=status, location=location,
-                      rows=await crm.bikes(q=q or None, status=status or None,
-                                           location=location or None),
+                      rows=tools["rows"], tools=tools,
+                      views=await views_of(request, "/bikes"),
                       counts=await crm.bike_counts())
 
-    @app.get("/bikes.csv")
-    async def bikes_csv(request: Request) -> Response:
+    @app.get("/bikes.{ext}")
+    async def bikes_csv(request: Request, ext: str) -> Response:
         """Парк файлом. Фильтры те же, что на экране: выгружают то, что
         видят, а не «всё вообще»."""
         if not may_view(request, "bikes"):
@@ -769,7 +936,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if money_ok:
                 line.insert(6, logic.to_money(b.get("purchase_price") or 0))
             out.append(line)
-        return _csv("bikes.csv", header, out)
+        return _table(ext, "bikes", header, out)
 
     @app.get("/bikes/new")
     async def bike_new(request: Request) -> Response:
@@ -1402,6 +1569,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── аренды ───────────────────────
 
+    RENTAL_SORTS = {"no": "id", "client": "full_name", "bike": "bike_code",
+                    "started": "started_on", "paid": "billed_until",
+                    "debt": "balance", "tariff": "tariff_name"}
+    ORDER_SORTS = {"no": "no", "bike": "bike_code", "status": "status",
+                   "payer": "payer", "client": "client_name",
+                   "tech": "tech_name", "total": "total", "opened": "opened_at"}
+    PART_SORTS = {"title": "title", "node": "node_title", "stock": "stock",
+                  "cost": "cost", "price": "price", "days": "days_on_stock"}
+
     def rental_rows(rows: list[dict], view: str) -> list[dict]:
         """Аренды с посчитанной сводкой и фильтром вида.
 
@@ -1426,7 +1602,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         view = request.query_params.get("view") or ""
         rows = await crm.rentals(status=status if status != "all" else None)
         shown = rental_rows(rows, view)
-        return render(request, "rentals.html", rows=shown, status=status, view=view,
+        tools = list_tools(request, shown, allowed=RENTAL_SORTS)
+        return render(request, "rentals.html", rows=tools["rows"], tools=tools,
+                      status=status, view=view,
+                      views=await views_of(request, "/rentals"),
+                      debt_total=logic.sum_of(
+                          [r for r in tools["all_rows"]
+                           if logic.to_money(r.get("balance")) < 0], "balance"),
                       counts={
                           "nobike": sum(1 for r in rows if r["status"] == "active"
                                         and not r.get("bike_id")),
@@ -1434,8 +1616,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                       if logic.to_money(r.get("balance")) < 0),
                           "search": sum(1 for r in rows if logic.in_search(r))})
 
-    @app.get("/rentals.csv")
-    async def rentals_csv(request: Request) -> Response:
+    @app.get("/rentals.{ext}")
+    async def rentals_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "rentals"):
             return denied(request, "rentals")
         status = request.query_params.get("status") or "active"
@@ -1457,7 +1639,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if money_ok:
                 line.insert(7, logic.to_money(r.get("balance") or 0))
             out.append(line)
-        return _csv("rentals.csv", header, out)
+        return _table(ext, "rentals", header, out)
 
     @app.get("/rentals/new")
     async def rental_new(request: Request) -> Response:
@@ -1896,8 +2078,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "finance.html", rows=rows, totals=totals,
                       since=since.value, until=until.value, kind=kind)
 
-    @app.get("/finance.csv")
-    async def finance_csv(request: Request) -> Response:
+    @app.get("/finance.{ext}")
+    async def finance_csv(request: Request, ext: str) -> Response:
         since = logic.check_date(request.query_params.get("since"),
                                  default=date.today().replace(day=1))
         until = logic.check_date(request.query_params.get("until"), default=date.today())
@@ -1911,8 +2093,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                  x.get("note"), x.get("created_by")]
                 for x in await crm.ledger(since=since.value, until=until.value,
                                           kind=kind or None, limit=100000)]
-        name = f"finance-{since.value:%Y%m%d}-{until.value:%Y%m%d}.csv"
-        return _csv(name, ["Дата", "Клиент", "Вид", "Сумма", "Период", "Способ",
+        name = f"finance-{since.value:%Y%m%d}-{until.value:%Y%m%d}"
+        return _table(ext, name, ["Дата", "Клиент", "Вид", "Сумма", "Период", "Способ",
                            "Заметка", "Кто"], rows)
 
     @app.get("/claims")
@@ -2021,8 +2203,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "finance")
         return render(request, "payback.html", **await payback_data(request))
 
-    @app.get("/reports/payback.csv")
-    async def payback_csv(request: Request) -> Response:
+    @app.get("/reports/payback.{ext}")
+    async def payback_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "finance"):
             return denied(request, "finance")
         data = await payback_data(request)
@@ -2035,8 +2217,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                      total["check_per_day"], total["paid"], total["charged"],
                      total["repair_cost"], total["works"], total["amortization"],
                      total["margin"], total["margin_percent"]])
-        name = f"payback-{data['since']:%Y%m%d}-{data['until']:%Y%m%d}.csv"
-        return _csv(name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
+        name = f"payback-{data['since']:%Y%m%d}-{data['until']:%Y%m%d}"
+        return _table(ext, name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
 
@@ -2069,8 +2251,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "techs.html", rows=rows,
                       total=logic.tech_total(rows), **span)
 
-    @app.get("/reports/techs.csv")
-    async def techs_csv(request: Request) -> Response:
+    @app.get("/reports/techs.{ext}")
+    async def techs_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "service"):
             return denied(request, "service")
         span = await period_of(request)
@@ -2081,7 +2263,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data.append(["ИТОГО", total["orders"], total["client_orders"], "",
                      total["total"], total["cost"], total["works"],
                      total["avg_total"]])
-        return _csv(f"techs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}.csv",
+        return _table(ext, f"techs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
                     ["Техник", "Нарядов", "Из них клиентских", "Средн. суток",
                      "Сумма", "Запчасти", "Работы", "Средний наряд"], data)
 
@@ -2107,8 +2289,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "spend.html", rows=rows,
                       total=logic.spend_total(rows), **span)
 
-    @app.get("/reports/spend.csv")
-    async def spend_csv(request: Request) -> Response:
+    @app.get("/reports/spend.{ext}")
+    async def spend_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "inventory"):
             return denied(request, "inventory")
         span = await period_of(request)
@@ -2117,7 +2299,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = [[r["title"], r["node_title"], r["qty"], r["unit"], r["orders"],
                  r["cost"]] for r in rows]
         data.append(["ИТОГО", "", total["qty"], "", "", total["cost"]])
-        return _csv(f"spend-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}.csv",
+        return _table(ext, f"spend-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
                     ["Позиция", "Узел", "Ушло", "Ед.", "Нарядов", "Себестоимость"],
                     data)
 
@@ -2154,8 +2336,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                   today=now.date())
         return render(request, "channels.html", **data)
 
-    @app.get("/reports/channels.csv")
-    async def channels_csv(request: Request) -> Response:
+    @app.get("/reports/channels.{ext}")
+    async def channels_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "clients"):
             return denied(request, "clients")
         now = datetime.now().astimezone()
@@ -2170,7 +2352,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 for r in data["rows"]]
         rows.append(["ИТОГО", *(data["totals"].get(c, 0) for c in data["columns"]),
                      data["total"]])
-        return _csv("channels.csv", header, rows)
+        return _table(ext, "channels", header, rows)
 
     @app.get("/reports/referrals")
     async def referrals_report(request: Request) -> Response:
@@ -2534,12 +2716,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Итог «сколько за ремонт ещё не заплатили» считается по всем
         # закрытым клиентским нарядам, а не по видимой странице: иначе
         # он менялся бы от фильтра и ничего не значил.
-        return render(request, "orders.html", rows=rows, status=status, payer=payer,
+        tools = list_tools(request, rows, allowed=ORDER_SORTS)
+        return render(request, "orders.html", rows=tools["rows"], tools=tools,
+                      status=status, payer=payer,
+                      views=await views_of(request, "/orders"),
+                      total=logic.sum_of(tools["all_rows"], "total"),
                       unpaid=logic.orders_unpaid(
                           await crm.work_orders(payer="client", limit=1000)))
 
-    @app.get("/orders.csv")
-    async def orders_csv(request: Request) -> Response:
+    @app.get("/orders.{ext}")
+    async def orders_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "service"):
             return denied(request, "service")
         rows = await crm.work_orders(
@@ -2563,7 +2749,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 line.insert(8, logic.to_money(
                     o.get("total") if o["status"] == "done" else o.get("estimate")))
             out.append(line)
-        return _csv("orders.csv", header, out)
+        return _table(ext, "orders", header, out)
 
     @app.get("/orders/new")
     async def order_new(request: Request) -> Response:
@@ -4584,12 +4770,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         q = request.query_params.get("q") or ""
         rows = logic.part_rows(await crm.parts(node=node or None, q=q or None),
                                await crm.stock_map(), await crm.part_last_moved())
-        return render(request, "parts.html", rows=rows,
-                      summary=logic.stock_summary(rows), node=node, q=q,
+        tools = list_tools(request, rows, allowed=PART_SORTS)
+        return render(request, "parts.html", rows=tools["rows"], tools=tools,
+                      summary=logic.stock_summary(tools["all_rows"]),
+                      node=node, q=q,
+                      views=await views_of(request, "/parts"),
                       nodes=await crm.repair_nodes())
 
-    @app.get("/parts.csv")
-    async def parts_csv(request: Request) -> Response:
+    @app.get("/parts.{ext}")
+    async def parts_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "inventory"):
             return denied(request, "inventory")
         rows = logic.part_rows(
@@ -4611,7 +4800,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 line += [logic.to_money(r.get("cost") or 0), r["cost_total"],
                          logic.to_money(r.get("price") or 0), r["price_total"]]
             out.append(line)
-        return _csv("parts.csv", header, out)
+        return _table(ext, "parts", header, out)
 
     @app.get("/parts/new")
     async def part_new(request: Request) -> Response:

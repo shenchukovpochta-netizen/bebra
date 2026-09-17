@@ -40,6 +40,7 @@ class FakeCrm:
         self.part_order_items_: list[dict] = []
         self.rental_bikes_: list[dict] = []
         self.rental_extras_: dict[int, dict] = {}
+        self.views_: dict[int, dict] = {}
         self.purchases_: dict[int, dict] = {}
         self.locations_: dict[int, dict] = {}
         self.bike_models_: dict[int, dict] = {}
@@ -1791,6 +1792,37 @@ class FakeCrm:
                 continue
             await self.update_battery(battery_id, status="rented", rental_id=rental_id,
                                       bike_id=bike_id or battery.get("bike_id"), by=by)
+
+    # ─── свои фильтры списков ───
+    async def saved_views(self, staff_id, section):
+        rows = [dict(v) for v in self.views_.values()
+                if v["staff_id"] == staff_id and v["section"] == section]
+        return sorted(rows, key=lambda v: v["name"].lower())
+
+    async def saved_view(self, view_id):
+        row = self.views_.get(view_id)
+        return dict(row) if row else None
+
+    async def save_view(self, *, staff_id, section, name, query):
+        # Частичный уникальный индекс saved_views_one_name: второе
+        # сохранение под тем же именем перезаписывает набор.
+        for view in self.views_.values():
+            if (view["staff_id"] == staff_id and view["section"] == section
+                    and view["name"].lower() == name.lower()):
+                view["query"] = query
+                return view["id"]
+        view_id = self._id()
+        self.views_[view_id] = {"id": view_id, "staff_id": staff_id,
+                                "section": section, "name": name,
+                                "query": query, "created_at": self._now()}
+        return view_id
+
+    async def drop_saved_view(self, view_id, *, staff_id):
+        view = self.views_.get(view_id)
+        if view is None or view["staff_id"] != staff_id:
+            return False
+        del self.views_[view_id]
+        return True
 
     # ─── позиции аренды ───
     async def rental_extras(self, rental_id, *, live_only=False):
