@@ -1803,3 +1803,32 @@ alter table crm.stock_take_items add column if not exists battery_id bigint
 -- Одна батарея в ведомости один раз - по той же причине, что и велосипед.
 create unique index if not exists stock_take_items_one_battery
   on crm.stock_take_items (take_id, battery_id) where battery_id is not null;
+
+-- ────── тревога как задача ──────
+--
+-- Тревога была отметкой: подняли - сняли. На практике их разбирают, как
+-- задачи: одну берут в работу, другую откладывают до вечера, третью
+-- признают нормой («да, этот велосипед у нас в гараже без связи»).
+-- Ложная тревога и разобранная выглядели одинаково, и понять, чем
+-- занимался оператор, было нельзя.
+--
+-- Закрытой остаётся тревога с `handled_at`. Состояние - внутри открытой,
+-- поэтому частичный уникальный индекс по-прежнему держит одну открытую
+-- тревогу вида на трекер. Это и делает «норму» самоочищающейся: пока
+-- причина держится, тревога висит и второй раз не поднимается, а
+-- исчезнет причина - опрос закроет её сам.
+
+alter table crm.tracker_alerts add column if not exists level text not null
+  default 'yellow';                             -- urgent|yellow
+alter table crm.tracker_alerts add column if not exists state text not null
+  default 'new';                                -- new|working|snoozed|normal
+alter table crm.tracker_alerts add column if not exists taken_by text;
+alter table crm.tracker_alerts add column if not exists taken_at timestamptz;
+alter table crm.tracker_alerts add column if not exists snooze_until timestamptz;
+create index if not exists tracker_alerts_open_idx
+  on crm.tracker_alerts (state, created_at desc) where handled_at is null;
+
+-- Когда трекер последний раз ехал. Ради тревоги «не двигается при
+-- аренде»: `last_seen` - это выход на связь, а стоящий велосипед выходит
+-- на связь исправно. Считать по журналу позиций нельзя - он живёт месяц.
+alter table crm.trackers add column if not exists moved_at timestamptz;

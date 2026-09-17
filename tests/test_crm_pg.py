@@ -1491,6 +1491,74 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(log[0]["to_status"], "lost")
         self.assertEqual(log[0]["changed_by"], "staff:t")
 
+    async def test_alert_workflow_on_postgres(self):
+        """Тревога как задача: «это норма» не даёт ей подняться заново."""
+        await self.seed()
+        tracker_id = await self.crm.create_tracker(
+            device_id="1001", alias="Метка", bike_id=self.bike_id)
+        alert_id = await self.crm.raise_alert(
+            tracker_id=tracker_id, kind="moving", note="30 км/ч",
+            bike_id=self.bike_id, lat=55.8, lon=49.1, level="urgent")
+        self.assertIsNotNone(alert_id)
+
+        # Частичный уникальный индекс: одна открытая тревога вида на трекер.
+        self.assertIsNone(await self.crm.raise_alert(
+            tracker_id=tracker_id, kind="moving", note="ещё", bike_id=None,
+            lat=None, lon=None, level="urgent"))
+
+        self.assertTrue(await self.crm.set_alert_state(
+            alert_id, state="working", by="staff:t"))
+        row = await self.crm.tracker_alert(alert_id)
+        self.assertEqual(row["state"], "working")
+        self.assertEqual(row["taken_by"], "staff:t")
+
+        # «Это норма» оставляет её открытой - потому вторая и не встаёт.
+        await self.crm.set_alert_state(alert_id, state="normal", by="staff:t")
+        row = await self.crm.tracker_alert(alert_id)
+        self.assertEqual(row["state"], "normal")
+        self.assertIsNone(row["handled_at"])
+        self.assertIsNone(await self.crm.raise_alert(
+            tracker_id=tracker_id, kind="moving", note="и ещё", bike_id=None,
+            lat=None, lon=None, level="urgent"))
+
+        # Причина исчезла - опрос закрывает её сам, и место освобождается.
+        await self.crm.close_alerts(tracker_id, ["moving"], by="tracking")
+        self.assertIsNotNone((await self.crm.tracker_alert(alert_id))["handled_at"])
+        self.assertIsNotNone(await self.crm.raise_alert(
+            tracker_id=tracker_id, kind="moving", note="снова", bike_id=None,
+            lat=None, lon=None, level="urgent"))
+
+        # Закрытую в работу не возвращают.
+        self.assertFalse(await self.crm.set_alert_state(
+            alert_id, state="working", by="staff:t"))
+
+        # Фильтры по уровню и виду.
+        await self.crm.raise_alert(tracker_id=tracker_id, kind="offline",
+                                   note="молчит", bike_id=None, lat=None,
+                                   lon=None, level="yellow")
+        urgent = await self.crm.tracker_alerts(open_only=True, level="urgent")
+        self.assertEqual({a["kind"] for a in urgent}, {"moving"})
+        # Срочные сверху.
+        everything = await self.crm.tracker_alerts(open_only=True)
+        self.assertEqual(everything[0]["level"], "urgent")
+
+    async def test_moved_at_tracks_the_last_ride(self):
+        """`moved_at` не сбрасывается остановкой: по нему считают простой."""
+        await self.seed()
+        rode = datetime.now(UTC) - timedelta(days=4)
+        await self.crm.save_tracker_state({
+            "device_id": "1002", "alias": "Метка", "lat": 55.8, "lon": 49.1,
+            "speed": D("18"), "voltage": D("12.6"), "recorded_at": rode,
+            "course": None, "gsm_level": None, "alarm": False})
+        stopped = datetime.now(UTC)
+        await self.crm.save_tracker_state({
+            "device_id": "1002", "alias": "Метка", "lat": 55.8, "lon": 49.1,
+            "speed": D("0"), "voltage": D("12.6"), "recorded_at": stopped,
+            "course": None, "gsm_level": None, "alarm": False})
+        row = await self.crm.tracker_by_device("1002")
+        self.assertEqual(row["moved_at"], rode)
+        self.assertEqual(row["last_seen"], stopped)
+
 
 if __name__ == "__main__":
     unittest.main()

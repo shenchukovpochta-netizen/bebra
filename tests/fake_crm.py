@@ -2133,6 +2133,11 @@ class FakeCrm:
         tracker["gsm_level"] = device.get("gsm_level")
         tracker["alarm"] = bool(device.get("alarm"))
         tracker["voltage"] = _num(tracker.get("voltage"))
+        # Отметка «ехал» не сбрасывается, когда велосипед остановился:
+        # она и нужна, чтобы считать, сколько он уже стоит.
+        if (_num(device.get("speed") or 0) >= crm_logic.TRACKER_MOVING_SPEED
+                and device.get("recorded_at") is not None):
+            tracker["moved_at"] = device["recorded_at"]
         tracker["updated_at"] = self._now()
         if device.get("lat") is not None and device.get("recorded_at") is not None:
             known = any(p["tracker_id"] == tracker["id"]
@@ -2156,19 +2161,37 @@ class FakeCrm:
         self.positions_ = [p for p in self.positions_ if p["recorded_at"] >= edge]
         return before - len(self.positions_)
 
-    async def tracker_alerts(self, *, open_only=True, limit=200):
+    async def tracker_alerts(self, *, open_only=True, level=None, kind=None,
+                             limit=200):
         rows = []
         for alert in self.alerts_.values():
             if open_only and alert["handled_at"] is not None:
                 continue
+            if level and alert.get("level") != level:
+                continue
+            if kind and alert.get("kind") != kind:
+                continue
             tracker = self.trackers_.get(alert["tracker_id"]) or {}
             bike = self.bikes_.get(alert.get("bike_id")) or {}
+            rental = next((r for r in self.rentals_.values()
+                           if r["bike_id"] == alert.get("bike_id")
+                           and r["status"] == "active"), None)
+            client = self.clients_.get((rental or {}).get("client_id")) or {}
             rows.append({**alert, "device_id": tracker.get("device_id"),
                          "alias": tracker.get("alias"), "bike_code": bike.get("code"),
-                         "bike_model": bike.get("model")})
-        return sorted(rows, key=lambda a: a["id"], reverse=True)[:limit]
+                         "bike_model": bike.get("model"),
+                         "rental_id": (rental or {}).get("id"),
+                         "client_name": client.get("full_name")})
+        # Срочные сверху - как в базе.
+        return sorted(rows, key=lambda a: (a.get("level") != "urgent", -a["id"]))[:limit]
 
-    async def raise_alert(self, *, tracker_id, kind, note, bike_id, lat, lon):
+    async def tracker_alert(self, alert_id):
+        alert = self.alerts_.get(alert_id)
+        return dict(alert) if alert else None
+
+    async def raise_alert(self, *, tracker_id, kind, note, bike_id, lat, lon,
+                          level="yellow"):
+        # Частичный уникальный индекс: одна открытая тревога вида на трекер.
         if any(a["tracker_id"] == tracker_id and a["kind"] == kind
                and a["handled_at"] is None for a in self.alerts_.values()):
             return None
@@ -2176,8 +2199,18 @@ class FakeCrm:
         self.alerts_[alert_id] = {"id": alert_id, "tracker_id": tracker_id,
                                   "bike_id": bike_id, "kind": kind, "note": note,
                                   "lat": lat, "lon": lon, "created_at": self._now(),
+                                  "level": level, "state": "new", "taken_by": None,
+                                  "taken_at": None, "snooze_until": None,
                                   "handled_at": None, "handled_by": None}
         return alert_id
+
+    async def set_alert_state(self, alert_id, *, state, by, snooze_until=None):
+        alert = self.alerts_.get(alert_id)
+        if alert is None or alert["handled_at"] is not None:
+            return False
+        alert.update(state=state, taken_by=by, taken_at=self._now(),
+                     snooze_until=snooze_until)
+        return True
 
     async def close_alerts(self, tracker_id, kinds, *, by=None):
         count = 0

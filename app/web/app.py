@@ -144,6 +144,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
         DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
         BIKE_PASSPORT=logic.BIKE_PASSPORT, TAKE_WHAT=logic.TAKE_WHAT,
+        ALERT_LEVELS=logic.ALERT_LEVELS, ALERT_STATES=logic.ALERT_STATES,
+        ALERT_SNOOZE_HOURS=logic.ALERT_SNOOZE_HOURS,
         BATTERY_PASSPORT=logic.BATTERY_PASSPORT,
         STOCK_STALE_DAYS=logic.STOCK_STALE_DAYS,
         NOTICE_TARGETS=logic.NOTICE_TARGETS,
@@ -4175,6 +4177,60 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       map_cfg=logic.map_config(settings),
                       summary=logic.tracker_summary(rows),
                       alerts=await crm.tracker_alerts(open_only=True, limit=50))
+
+    @app.get("/alerts")
+    async def alerts_page(request: Request) -> Response:
+        """Реестр тревог: что случилось, кто взял и что с этим делают."""
+        if not may_view(request, "trackers"):
+            return denied(request, "trackers")
+        view = request.query_params.get("view") or "needs"
+        level = request.query_params.get("level") or ""
+        kind = request.query_params.get("kind") or ""
+        rows = logic.alert_rows(await crm.tracker_alerts(
+            open_only=view != "all", level=level or None, kind=kind or None,
+            limit=300))
+        shown = [r for r in rows if r["needs"]] if view == "needs" else rows
+        return render(request, "alerts.html", rows=shown, view=view,
+                      level=level, kind=kind,
+                      summary=logic.alert_summary(
+                          logic.alert_rows(await crm.tracker_alerts(open_only=True,
+                                                                    limit=300))))
+
+    @app.post("/alerts/{alert_id}")
+    async def alert_action(request: Request, alert_id: int) -> Response:
+        """Взять, отложить, признать нормой или закрыть.
+
+        «Это норма» - не закрытие: тревога остаётся открытой, поэтому
+        второй раз она не поднимется, пока причина держится, а исчезнет
+        причина - опрос закроет её сам.
+        """
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        if await crm.tracker_alert(alert_id) is None:
+            return render(request, "missing.html", status_code=404, what="Тревога")
+        data = await form(request)
+        action = str(data.get("action") or "")
+        nxt = data.get("next") or ""
+        back = nxt if nxt.startswith("/") and not nxt.startswith("//") else "/alerts"
+        by = who(request)
+        if action == "close":
+            await crm.handle_alert(alert_id, by=by)
+            flash(request, "Тревога закрыта.")
+        elif action == "take":
+            await crm.set_alert_state(alert_id, state="working", by=by)
+            flash(request, "Взяли в работу.")
+        elif action == "snooze":
+            until = logic.snooze_until(data.get("hours"))
+            await crm.set_alert_state(alert_id, state="snoozed", by=by,
+                                      snooze_until=until)
+            flash(request, f"Отложено до {_dmy(until)}.")
+        elif action == "normal":
+            await crm.set_alert_state(alert_id, state="normal", by=by)
+            flash(request, "Помечено нормой: пока причина держится, "
+                           "тревога больше не поднимется.")
+        else:
+            flash(request, "Непонятное действие.", "err")
+        return redirect(back)
 
     @app.get("/trackers")
     async def trackers_page(request: Request) -> Response:

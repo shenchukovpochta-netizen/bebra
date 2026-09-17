@@ -1,1 +1,1 @@
-<nav class="tabs"><a href="/map" {% if request.url.path.startswith('/map') %}class="on"{% endif %}>Карта</a><a href="/trackers" {% if request.url.path.startswith('/trackers') %}class="on"{% endif %}>Устройства</a></nav>
+<nav class="tabs"><a href="/map" {% if request.url.path.startswith('/map') %}class="on"{% endif %}>Карта</a><a href="/trackers" {% if request.url.path.startswith('/trackers') %}class="on"{% endif %}>Устройства</a><a href="/alerts" {% if request.url.path.startswith('/alerts') %}class="on"{% endif %}>Тревоги</a></nav>

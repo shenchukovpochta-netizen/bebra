@@ -63,7 +63,8 @@ async def poll_once(crm: Any, client: Any, *, now: datetime | None = None) -> di
         for alert in wanted:
             alert_id = await crm.raise_alert(
                 tracker_id=row["id"], kind=alert["kind"], note=alert.get("note"),
-                bike_id=row.get("bike_id"), lat=row.get("lat"), lon=row.get("lon"))
+                bike_id=row.get("bike_id"), lat=row.get("lat"), lon=row.get("lon"),
+                level=alert.get("level") or logic.alert_level(alert["kind"]))
             if alert_id is not None:
                 fresh.append({**alert, "id": alert_id,
                               "bike_code": row.get("bike_code"),
@@ -73,7 +74,11 @@ async def poll_once(crm: Any, client: Any, *, now: datetime | None = None) -> di
 
 
 async def report_alerts(bot: Any, cfg: Any, alerts: list[dict]) -> int:
-    """Новые тревоги - одной сводкой в служебный чат."""
+    """Новые тревоги - одной сводкой в служебный чат.
+
+    Срочные и жёлтые идут одним сообщением: два сообщения подряд читают
+    так же, как одно, а разделять их значит завести второй чат.
+    """
     digest = logic.tracker_digest(alerts)
     if not digest:
         return 0

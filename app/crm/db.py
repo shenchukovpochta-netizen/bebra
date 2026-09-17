@@ -2302,8 +2302,9 @@ class CrmDB:
             row = await conn.fetchrow(
                 """
                 insert into crm.trackers (device_id, alias, last_seen, lat, lon,
-                                          speed, course, voltage, gsm_level, alarm)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                          speed, course, voltage, gsm_level, alarm,
+                                          moved_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 on conflict (device_id) do update
                    set alias = coalesce(excluded.alias, crm.trackers.alias),
                        last_seen = coalesce(excluded.last_seen, crm.trackers.last_seen),
@@ -2312,6 +2313,10 @@ class CrmDB:
                        speed = excluded.speed, course = excluded.course,
                        voltage = coalesce(excluded.voltage, crm.trackers.voltage),
                        gsm_level = excluded.gsm_level, alarm = excluded.alarm,
+                       -- Отметка «ехал» не сбрасывается, когда велосипед
+                       -- остановился: она и нужна, чтобы считать, сколько
+                       -- он уже стоит.
+                       moved_at = coalesce(excluded.moved_at, crm.trackers.moved_at),
                        updated_at = now()
                 returning id, (xmax = 0) as created
                 """,
@@ -2319,7 +2324,10 @@ class CrmDB:
                 device.get("lat"), device.get("lon"),
                 _money(device.get("speed")), device.get("course"),
                 _money(device.get("voltage")), device.get("gsm_level"),
-                bool(device.get("alarm")))
+                bool(device.get("alarm")),
+                device.get("recorded_at")
+                if _money(device.get("speed") or 0) >= logic.TRACKER_MOVING_SPEED
+                else None)
             tracker_id = int(row["id"])
             if device.get("lat") is not None and device.get("recorded_at") is not None:
                 await conn.execute(
@@ -2360,29 +2368,70 @@ class CrmDB:
         return len(rows)
 
     async def tracker_alerts(self, *, open_only: bool = True,
+                             level: str | None = None, kind: str | None = None,
                              limit: int = 200) -> list[dict]:
-        where = "where a.handled_at is null" if open_only else ""
+        conds, args = [], []
+        if open_only:
+            conds.append("a.handled_at is null")
+        if level:
+            args.append(level)
+            conds.append(f"a.level = ${len(args)}")
+        if kind:
+            args.append(kind)
+            conds.append(f"a.kind = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
         return _rows(await self.pool.fetch(
             f"""
-            select a.*, t.device_id, t.alias, b.code as bike_code, b.model as bike_model
+            select a.*, t.device_id, t.alias, b.code as bike_code, b.model as bike_model,
+                   c.full_name as client_name, r.id as rental_id
               from crm.tracker_alerts a
               join crm.trackers t on t.id = a.tracker_id
               left join crm.bikes b on b.id = a.bike_id
+              left join crm.rentals r on r.bike_id = b.id and r.status = 'active'
+              left join crm.clients c on c.id = r.client_id
             {where}
-            order by a.created_at desc limit $1
-            """, limit))
+            -- Срочные сверху: их разбирают минутами, а не часами.
+            order by (a.level = 'urgent') desc, a.created_at desc limit ${len(args)}
+            """, *args))
+
+    async def tracker_alert(self, alert_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.tracker_alerts where id = $1", alert_id))
+
+    async def set_alert_state(self, alert_id: int, *, state: str, by: str,
+                              snooze_until: datetime | None = None) -> bool:
+        """Взять в работу, отложить или признать нормой.
+
+        Только открытую: возвращать закрытую тревогу в работу нечего -
+        причина исчезла, и опрос поднимет новую, если вернётся.
+        """
+        row = await self.pool.fetchrow(
+            """
+            update crm.tracker_alerts
+               set state = $2, taken_by = $3, taken_at = now(),
+                   snooze_until = $4
+             where id = $1 and handled_at is null
+            returning id
+            """, alert_id, state, by, snooze_until)
+        return row is not None
 
     async def raise_alert(self, *, tracker_id: int, kind: str, note: str | None,
                           bike_id: int | None, lat: float | None,
-                          lon: float | None) -> int | None:
-        """Поднять тревогу. None - такая уже висит открытой."""
+                          lon: float | None, level: str = "yellow") -> int | None:
+        """Поднять тревогу. None - такая уже висит открытой.
+
+        Признанная нормой висит открытой ровно для этого: второй раз она
+        не поднимется, пока причина держится.
+        """
         return await self.pool.fetchval(
             """
-            insert into crm.tracker_alerts (tracker_id, bike_id, kind, note, lat, lon)
-            values ($1, $2, $3, $4, $5, $6)
+            insert into crm.tracker_alerts (tracker_id, bike_id, kind, note, lat, lon,
+                                            level)
+            values ($1, $2, $3, $4, $5, $6, $7)
             on conflict do nothing
             returning id
-            """, tracker_id, bike_id, kind, note, lat, lon)
+            """, tracker_id, bike_id, kind, note, lat, lon, level)
 
     async def close_alerts(self, tracker_id: int, kinds: list[str], *,
                            by: str | None = None) -> int:

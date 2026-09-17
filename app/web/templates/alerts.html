@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Тревоги — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Тревоги</h1>
+  {% include "_trackers_tabs.html" %}
+</div>
+
+<div class="tiles">
+  <div class="tile {% if summary.urgent %}warn{% endif %}"><b>{{ summary.urgent }}</b><span>срочных<br><small class="muted">едет не туда или сработала метка</small></span></div>
+  <div class="tile"><b>{{ summary.needs }}</b><span>требуют внимания</span></div>
+  <div class="tile"><b>{{ summary.working }}</b><span>в работе</span></div>
+  <div class="tile"><b>{{ summary.snoozed }}</b><span>отложено</span></div>
+  <div class="tile"><b>{{ summary.normal }}</b><span>это норма<br><small class="muted">снимутся сами, когда причина исчезнет</small></span></div>
+</div>
+
+<div class="card">
+  <nav class="tabs">
+    <a href="/alerts?view=needs" {% if view == 'needs' %}class="on"{% endif %}>Требуют внимания · {{ summary.needs }}</a>
+    <a href="/alerts?view=open" {% if view == 'open' %}class="on"{% endif %}>Все открытые · {{ summary.open }}</a>
+    <a href="/alerts?view=all" {% if view == 'all' %}class="on"{% endif %}>Реестр</a>
+  </nav>
+  <form method="get" class="search">
+    <input type="hidden" name="view" value="{{ view }}">
+    <select name="level" onchange="this.form.submit()">
+      <option value="">любой уровень</option>
+      {% for code, label in ALERT_LEVELS.items() %}<option value="{{ code }}" {% if level == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+    <select name="kind" onchange="this.form.submit()">
+      <option value="">любой вид</option>
+      {% for code, label in TRACKER_ALERTS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+    <noscript><button type="submit">Показать</button></noscript>
+  </form>
+
+  <div class="table-wrap">
+  <table>
+    <tr><th>Уровень</th><th>Что случилось</th><th>Велосипед</th><th class="opt">Клиент</th><th>Когда</th><th>Состояние</th><th></th></tr>
+    {% for a in rows %}
+    <tr class="{% if a.needs and a.level == 'urgent' %}bad-row{% elif a.needs %}warn-row{% endif %}">
+      <td>{% if a.level == 'urgent' %}<span class="tag bad">● Срочно</span>{% else %}<span class="tag">Жёлтый</span>{% endif %}</td>
+      <td><b>{{ a.title }}</b>{% if a.note %}<br><small class="muted">{{ a.note }}</small>{% endif %}</td>
+      <td>{% if a.bike_code %}<a href="/bikes/{{ a.bike_id }}">№ {{ a.bike_code }}</a>{% else %}<a href="/trackers/{{ a.tracker_id }}">{{ a.alias or a.device_id }}</a>{% endif %}</td>
+      <td class="opt">{% if a.rental_id %}<a href="/rentals/{{ a.rental_id }}">{{ a.client_name }}</a>{% else %}<span class="muted">не выдан</span>{% endif %}</td>
+      <td class="muted nowrap">{{ a.created_at|dmy }}</td>
+      <td>
+        {% if not a.open %}<span class="tag">закрыта {{ a.handled_at|dmy }}</span>
+        {% else %}<span class="tag {% if a.state == 'new' %}bad{% endif %}">{{ ALERT_STATES[a.state] }}</span>
+          {% if a.state == 'snoozed' and a.snooze_until %}<br><small class="muted">до {{ a.snooze_until|dmy }}</small>{% endif %}
+          {% if a.taken_by %}<br><small class="muted">{{ a.taken_by }}</small>{% endif %}
+        {% endif %}
+      </td>
+      <td class="actions nowrap">
+        {% if a.open and can_edit(staff, 'trackers') %}
+        <form method="post" action="/alerts/{{ a.id }}" class="inline-form">
+          <input type="hidden" name="next" value="/alerts?view={{ view }}">
+          {% if a.state != 'working' %}<button type="submit" name="action" value="take" class="ghost">взять</button>{% endif %}
+          <button type="submit" name="action" value="snooze" class="ghost">отложить</button>
+          <input type="hidden" name="hours" value="{{ ALERT_SNOOZE_HOURS }}">
+          {% if a.state != 'normal' %}<button type="submit" name="action" value="normal" class="ghost">это норма</button>{% endif %}
+          <button type="submit" name="action" value="close" class="ghost danger">закрыть</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="7" class="muted">Ничего не требует внимания.</td></tr>{% endfor %}
+  </table>
+  </div>
+  <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
+</div>
+
+<div class="card">
+  <p class="muted"><b>Взять</b> — вы занимаетесь этим сейчас, остальные видят,
+    что тревога не брошена. <b>Отложить</b> — вернуть её в список через
+    {{ ALERT_SNOOZE_HOURS }} ч: до вечера с этим всё равно ничего не сделать.
+    <b>Это норма</b> — не закрытие: тревога остаётся открытой, поэтому второй
+    раз она не поднимется, пока причина держится, а исчезнет причина — опрос
+    закроет её сам. <b>Закрыть</b> — разобрались.</p>
+  <p class="muted">Тревога снимается и сама, когда причина исчезла: велосипед
+    вернулся на связь, уехал в аренду по-честному, питание восстановилось.
+    Открытая тревога одного вида на трекер всегда одна — иначе каждые пять
+    минут в списке было бы одно и то же.</p>
+</div>
+{% endblock %}

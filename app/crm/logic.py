@@ -1068,6 +1068,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/batteries", "batteries"),
     ("/map", "trackers"),
     ("/trackers", "trackers"),
+    ("/alerts", "trackers"),
     ("/stock-takes", "bikes"),
     ("/service", "service"),
     ("/orders", "service"),
@@ -2454,7 +2455,30 @@ TRACKER_ALERTS: dict[str, str] = {
     "offline": "Не выходит на связь",
     "alarm": "Тревога StarLine",
     "low_power": "Питание трекера",
+    # Оплаченный велосипед, который стоит: клиент уехал, бросил работу
+    # или собирается сдавать - и об этом лучше узнать до конца периода.
+    "idle_rented": "Не двигается при аренде",
 }
+# Срочные - те, где велосипед прямо сейчас уезжает не туда. Остальные
+# разбирают в свой черёд: у жёлтой тревоги нет минут, есть часы.
+ALERT_URGENT_KINDS = ("moving", "alarm")
+ALERT_LEVELS: dict[str, str] = {"urgent": "Срочно", "yellow": "Жёлтый"}
+# Состояние открытой тревоги. Закрытая - та, у которой есть handled_at.
+ALERT_STATES: dict[str, str] = {
+    "new": "Новая",
+    "working": "В работе",
+    "snoozed": "Отложена",
+    # «Это норма» - не закрытие: пока причина держится, тревога висит и
+    # второй раз не поднимается (частичный уникальный индекс), а исчезнет
+    # причина - опрос закроет её сам. Так норма сама себя убирает.
+    "normal": "Это норма",
+}
+# На сколько откладывают тревогу по умолчанию: до конца смены.
+ALERT_SNOOZE_HOURS = 4
+
+
+def alert_level(kind: str) -> str:
+    return "urgent" if kind in ALERT_URGENT_KINDS else "yellow"
 # Сколько часов молчания считать пропажей связи. Полсуток - потому что
 # велосипед ночует в подъезде, где связи нет, и час молчания ничего
 # не значит.
@@ -2464,6 +2488,10 @@ TRACKER_OFFLINE_HOURS = 12
 TRACKER_MOVING_SPEED = Decimal(5)
 # Питание трекера: ниже этого он скоро замолчит совсем.
 TRACKER_LOW_VOLTS = Decimal("11.5")
+# Сколько суток оплаченный велосипед может стоять, прежде чем это станет
+# вопросом. Трое суток - это уже не выходные: курьер либо бросил работу,
+# либо собрался сдавать, и узнать об этом лучше до конца периода.
+TRACKER_IDLE_DAYS = 3
 # Статусы велосипеда, при которых ехать он не должен.
 TRACKER_PARKED_STATUSES = ("available", "reserved", "repair", "maintenance")
 EARTH_KM = 6371.0088
@@ -2484,7 +2512,8 @@ def tracker_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any
     return {"offline_hours": int(number("tracker_offline_hours",
                                         TRACKER_OFFLINE_HOURS)),
             "moving_speed": number("tracker_moving_speed", TRACKER_MOVING_SPEED),
-            "low_volts": number("tracker_low_volts", TRACKER_LOW_VOLTS)}
+            "low_volts": number("tracker_low_volts", TRACKER_LOW_VOLTS),
+            "idle_days": int(number("tracker_idle_days", TRACKER_IDLE_DAYS))}
 
 
 def distance_km(lat1: float | None, lon1: float | None,
@@ -2524,10 +2553,21 @@ def tracker_rows(trackers: Iterable[dict], *, now: datetime | None = None,
             silent = max((now - seen).total_seconds() / 3600, 0)
         speed = to_money(tracker.get("speed") or 0)
         offline = silent is None or silent >= limits["offline_hours"]
+        moved = tracker.get("moved_at")
+        still = None
+        if moved is not None:
+            still = max((now - moved).total_seconds() / 86400, 0)
         rows.append({**tracker,
                      "silent_hours": round(silent, 1) if silent is not None else None,
                      "offline": offline,
                      "moving": speed >= limits["moving_speed"],
+                     "still_days": round(still, 1) if still is not None else None,
+                     # Стоит при аренде: велосипед у клиента, на связи,
+                     # но не двигался дольше порога. Молчащий трекер сюда
+                     # не считается - про него уже есть своя тревога.
+                     "idle_rented": bool(
+                         tracker.get("rental_id") and not offline
+                         and still is not None and still >= limits["idle_days"]),
                      "low_power": (tracker.get("voltage") is not None
                                    and to_money(tracker["voltage"]) <= limits["low_volts"]),
                      "map": map_url(tracker.get("lat"), tracker.get("lon"))})
@@ -2574,11 +2614,72 @@ def detect_alerts(row: Mapping[str, Any], *,
         out.append({"kind": "low_power",
                     "note": f"питание {to_money(row['voltage'])} В, "
                             f"порог {limits['low_volts']} В"})
+    if row.get("idle_rented"):
+        days = row.get("still_days")
+        out.append({"kind": "idle_rented",
+                    "note": (f"стоит {days:.0f} сут., аренда идёт"
+                             if days is not None else "не двигается, аренда идёт")})
     for alert in out:
         alert["tracker_id"] = row.get("id")
         alert["bike_id"] = row.get("bike_id")
+        alert["level"] = alert_level(alert["kind"])
         alert["lat"], alert["lon"] = row.get("lat"), row.get("lon")
     return out
+
+
+def alert_rows(alerts: Iterable[dict], *,
+               now: datetime | None = None) -> list[dict]:
+    """Тревоги с состоянием, понятным человеку.
+
+    `needs` - требует внимания прямо сейчас: новая, взятая в работу или
+    отложенная, у которой срок вышел. Признанная нормой и отложенная
+    «на потом» из этого списка выпадают - ради этого их и отмечали.
+    """
+    now = now or datetime.now(UTC)
+    rows = []
+    for alert in alerts:
+        state = str(alert.get("state") or "new")
+        open_ = alert.get("handled_at") is None
+        until = alert.get("snooze_until")
+        due = state != "snoozed" or until is None or until <= now
+        rows.append({
+            **alert,
+            "state": state,
+            "level": str(alert.get("level") or alert_level(str(alert.get("kind") or ""))),
+            "open": open_,
+            "title": TRACKER_ALERTS.get(str(alert.get("kind") or ""),
+                                        str(alert.get("kind") or "")),
+            "snooze_due": due,
+            "needs": open_ and state in ("new", "working", "snoozed") and due,
+        })
+    rows.sort(key=lambda a: (not a["needs"], a["level"] != "urgent",
+                             -(a.get("id") or 0)))
+    return rows
+
+
+def alert_summary(rows: Iterable[dict]) -> dict[str, int]:
+    rows = list(rows)
+    open_rows = [r for r in rows if r["open"]]
+    return {
+        "open": len(open_rows),
+        "needs": sum(1 for r in open_rows if r["needs"]),
+        "urgent": sum(1 for r in open_rows if r["needs"] and r["level"] == "urgent"),
+        "working": sum(1 for r in open_rows if r["state"] == "working"),
+        "snoozed": sum(1 for r in open_rows if r["state"] == "snoozed"),
+        "normal": sum(1 for r in open_rows if r["state"] == "normal"),
+    }
+
+
+def snooze_until(hours: Any = None, *, now: datetime | None = None) -> datetime:
+    """До какого времени откладываем. Пусто - до конца смены."""
+    now = now or datetime.now(UTC)
+    text = str("" if hours is None else hours).strip()
+    try:
+        # Ноль часов - это не «отложить», а опечатка: берём минимум.
+        value = int(text) if text else ALERT_SNOOZE_HOURS
+    except ValueError:
+        value = ALERT_SNOOZE_HOURS
+    return now + timedelta(hours=min(max(value, 1), 72))
 
 
 def map_points(rows: Iterable[dict]) -> list[dict]:
@@ -2708,16 +2809,26 @@ def tracker_digest(alerts: Iterable[dict], limit: int = 10) -> str:
     alerts = list(alerts)
     if not alerts:
         return ""
-    lines = [f"🛰 Трекеры: {len(alerts)}"]
-    for alert in alerts[:limit]:
+    urgent = sum(1 for a in alerts
+                 if (a.get("level") or alert_level(str(a.get("kind") or "")))
+                 == "urgent")
+    head = f"🛰 Трекеры: {len(alerts)}"
+    lines = [head + (f", срочных {urgent}" if urgent else "")]
+    # Срочные первыми: в чате читают первые три строки.
+    order = sorted(alerts, key=lambda a: (a.get("level")
+                                          or alert_level(str(a.get("kind") or "")))
+                   != "urgent")
+    for alert in order[:limit]:
         where = ""
         if alert.get("lat") is not None:
             where = f" — {map_url(alert['lat'], alert['lon'])}"
         code = alert.get("bike_code") or alert.get("alias") or alert.get("device_id")
-        lines.append(f"• {TRACKER_ALERTS.get(alert['kind'], alert['kind'])}: "
+        mark = "🔴 " if (alert.get("level")
+                        or alert_level(str(alert.get("kind") or ""))) == "urgent" else ""
+        lines.append(f"• {mark}{TRACKER_ALERTS.get(alert['kind'], alert['kind'])}: "
                      f"{code}{', ' + alert['note'] if alert.get('note') else ''}{where}")
-    if len(alerts) > limit:
-        lines.append(f"…и ещё {len(alerts) - limit}")
+    if len(order) > limit:
+        lines.append(f"…и ещё {len(order) - limit}")
     return "\n".join(lines)
 
 
