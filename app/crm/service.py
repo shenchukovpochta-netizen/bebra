@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -722,3 +723,102 @@ async def swap_battery(crm: Any, rental: dict, old: dict | None, new: dict, *,
                                  cycles=int(old.get("cycles") or 0) + 1, by=by)
     await crm.update_battery(new["id"], status="rented", rental_id=rental["id"],
                              bike_id=rental.get("bike_id"), by=by)
+
+
+# ─────────────────────────── касса ───────────────────────────
+
+
+async def open_cash_shift(crm: Any, *, location: str | None, opening: Decimal,
+                          note: str | None, by: str) -> int:
+    """Открыть смену на точке. Вторая открытая на той же точке невозможна:
+    два ящика с одним названием - это два ответа на вопрос «куда легли
+    деньги», и оба неверные."""
+    if await crm.open_shift_at(location) is not None:
+        raise ServiceError("На этой точке уже открыта смена. Сначала закройте её.")
+    if opening < 0:
+        raise ServiceError("Размен не может быть отрицательным.")
+    return await crm.create_shift(location=location, opening=opening, note=note,
+                                  by=by)
+
+
+async def cash_move(crm: Any, shift: dict, *, kind: str, amount: Decimal,
+                    reason: str | None, by: str) -> int:
+    """Внесение или изъятие из ящика."""
+    if shift.get("status") != "open":
+        raise ServiceError("Смена закрыта.")
+    if kind not in logic.CASH_MOVE_KINDS:
+        raise ServiceError("Неизвестный вид движения.")
+    if amount <= 0:
+        raise ServiceError("Сумма движения должна быть больше нуля.")
+    if kind == "out":
+        state = logic.shift_state(shift, await crm.shift_payments(shift["id"]),
+                                  await crm.cash_moves(shift["id"]))
+        if amount > state["expected"]:
+            raise ServiceError(
+                f"В кассе {logic.money(state['expected'])} — изъять больше нечего.")
+    return await crm.add_cash_move(shift["id"], kind=kind, amount=amount,
+                                   reason=reason, by=by)
+
+
+async def close_cash_shift(crm: Any, shift: dict, *, counted: Decimal,
+                           note: str | None, by: str) -> dict:
+    """Закрыть смену с пересчётом. Возвращает состояние с расхождением.
+
+    Расхождение не «исправляется» подгонкой ожидаемого: оно записывается
+    как есть. Смена, которая всегда сходится, ничего не проверяет.
+    """
+    if shift.get("status") != "open":
+        raise ServiceError("Смена уже закрыта.")
+    if counted < 0:
+        raise ServiceError("Посчитанная сумма не может быть отрицательной.")
+    state = logic.shift_state({**shift, "counted": counted},
+                              await crm.shift_payments(shift["id"]),
+                              await crm.cash_moves(shift["id"]))
+    await crm.close_shift(shift["id"], counted=counted, expected=state["expected"],
+                          note=note, by=by)
+    return state
+
+
+# ─────────────────────────── банк ───────────────────────────
+
+
+async def credit_bank_txn(crm: Any, txn: dict, client: dict, *, by: str,
+                          method: str = "transfer") -> int:
+    """Зачислить поступление клиенту: платёж в журнал, строка - разобрана.
+
+    Деньги попадают в журнал обычным платежом, а не особым видом записи:
+    средний чек считается по платежам, и «банковский» платёж, невидимый
+    отчётам, испортил бы его молча.
+    """
+    if txn.get("status") != "new":
+        raise ServiceError("Эта строка выписки уже разобрана.")
+    if txn.get("direction") != "credit":
+        raise ServiceError("Это списание со счёта, а не поступление.")
+    if client.get("status") != "active":
+        raise ServiceError("Клиент заблокирован или в чёрном списке.")
+    ledger_id = await add_entry(
+        crm, client, kind="payment", amount=logic.to_money(txn["amount"]),
+        method=method, note=f"Выписка банка: {txn.get('purpose') or txn['txn_id']}"[:500],
+        by=by)
+    await crm.mark_bank_txn(txn["id"], status="matched", client_id=client["id"],
+                            ledger_id=ledger_id, by=by)
+    return ledger_id
+
+
+async def ignore_bank_txn(crm: Any, txn: dict, *, by: str) -> None:
+    """Платёж не наш: ремонт чужой техники, возврат поставщика, личное."""
+    if txn.get("status") == "matched":
+        raise ServiceError("Поступление уже зачислено клиенту.")
+    await crm.mark_bank_txn(txn["id"], status="ignored", client_id=None,
+                            ledger_id=None, by=by)
+
+
+async def import_statement(crm: Any, rows: Iterable[dict]) -> dict:
+    """Сложить выписку в базу. Повторы - норма: выписку тянут за
+    перекрывающиеся периоды, и вторая встреча той же операции не ошибка."""
+    rows = list(rows)
+    saved = 0
+    for row in rows:
+        if await crm.save_bank_txn(row) is not None:
+            saved += 1
+    return {"seen": len(rows), "saved": saved}

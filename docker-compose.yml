@@ -21,6 +21,9 @@ secrets:
     file: ./secrets/starline_app_secret
   starline_password:
     file: ./secrets/starline_password
+  # Токен открытого API Точки: выписка по счёту и чек 54-ФЗ.
+  tochka_token:
+    file: ./secrets/tochka_token
   # Ключ подписи cookie веб-панели и пароль её первого администратора.
   # Оба генерирует bootstrap.sh; пароль нужен только до первого входа.
   crm_secret:
@@ -94,7 +97,7 @@ services:
       postgres:
         condition: service_healthy
     secrets: [db_password, bot_token, pdn_key, starline_app_secret,
-              starline_password]
+              starline_password, tochka_token]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
@@ -103,6 +106,7 @@ services:
       PDN_KEY_FILE: /run/secrets/pdn_key
       STARLINE_APP_SECRET_FILE: /run/secrets/starline_app_secret
       STARLINE_PASSWORD_FILE: /run/secrets/starline_password
+      TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
@@ -149,6 +153,12 @@ services:
       STARLINE_APP_ID: ${STARLINE_APP_ID}
       STARLINE_LOGIN: ${STARLINE_LOGIN}
       STARLINE_POLL_SECONDS: ${STARLINE_POLL_SECONDS:-300}
+
+      # Счёт в Точке: выписка и чек 54-ФЗ. Тянет тоже бот - панель
+      # в интернет не ходит.
+      TOCHKA_ACCOUNT_ID: ${TOCHKA_ACCOUNT_ID}
+      TOCHKA_CUSTOMER_CODE: ${TOCHKA_CUSTOMER_CODE}
+      TOCHKA_POLL_SECONDS: ${TOCHKA_POLL_SECONDS:-1800}
 
       STORAGE_DIR: /files/kyc
       TZ: ${TZ:-Europe/Moscow}

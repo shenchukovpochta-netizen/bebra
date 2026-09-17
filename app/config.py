@@ -163,6 +163,12 @@ class Config:
     starline_login: str = ""
     starline_password: str = ""
     starline_poll_seconds: int = 300
+    # Точка Банк: выписка по счёту и чек 54-ФЗ через эквайринг. Пусто -
+    # выписка не тянется, панель показывает то, что в базе.
+    tochka_token: str = ""
+    tochka_account_id: str = ""
+    tochka_customer_code: str = ""
+    tochka_poll_seconds: int = 1800
     extra: dict = field(default_factory=dict)
 
     @property
@@ -239,4 +245,8 @@ class Config:
             starline_login=_env("STARLINE_LOGIN"),
             starline_password=_secret("STARLINE_PASSWORD", required=False),
             starline_poll_seconds=_int("STARLINE_POLL_SECONDS", "300"),
+            tochka_token=_secret("TOCHKA_TOKEN", required=False),
+            tochka_account_id=_env("TOCHKA_ACCOUNT_ID"),
+            tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
+            tochka_poll_seconds=_int("TOCHKA_POLL_SECONDS", "1800"),
         )

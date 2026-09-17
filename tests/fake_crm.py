@@ -46,6 +46,9 @@ class FakeCrm:
         self.compat_: dict[tuple, bool] = {}
         self.batteries_: dict[int, dict] = {}
         self.battery_log_: list[dict] = []
+        self.shifts_: dict[int, dict] = {}
+        self.cash_moves_: list[dict] = []
+        self.bank_: dict[int, dict] = {}
         self.trackers_: dict[int, dict] = {}
         self.positions_: list[dict] = []
         self.alerts_: dict[int, dict] = {}
@@ -1603,6 +1606,112 @@ class FakeCrm:
                 count += 1
         return count
 
+
+    # ─── касса ───
+    async def cash_shifts(self, *, limit=100):
+        rows = [dict(x) for x in self.shifts_.values()]
+        return sorted(rows, key=lambda s: s["opened_at"], reverse=True)[:limit]
+
+    async def cash_shift(self, shift_id):
+        shift = self.shifts_.get(shift_id)
+        return dict(shift) if shift else None
+
+    async def open_shift(self):
+        rows = [dict(x) for x in self.shifts_.values() if x["status"] == "open"]
+        return sorted(rows, key=lambda s: s["opened_at"])[0] if rows else None
+
+    async def open_shift_at(self, location):
+        return next((dict(x) for x in self.shifts_.values()
+                     if x["status"] == "open"
+                     and (x.get("location") or "") == (location or "")), None)
+
+    async def create_shift(self, *, location, opening, note, by):
+        shift_id = self._id()
+        self.shifts_[shift_id] = {
+            "id": shift_id, "no": crm_logic.shift_no(len(self.shifts_) + 1),
+            "location": location, "status": "open", "opened_at": self._now(),
+            "opened_by": by, "opening": Decimal(opening), "closed_at": None,
+            "closed_by": None, "counted": None, "expected": None, "diff": None,
+            "note": note}
+        return shift_id
+
+    async def add_cash_move(self, shift_id, *, kind, amount, reason, by,
+                            ledger_id=None):
+        move_id = self._id()
+        self.cash_moves_.append({"id": move_id, "shift_id": shift_id, "kind": kind,
+                                 "amount": Decimal(amount), "reason": reason,
+                                 "ledger_id": ledger_id, "created_at": self._now(),
+                                 "created_by": by})
+        return move_id
+
+    async def cash_moves(self, shift_id):
+        return [dict(m) for m in self.cash_moves_ if m["shift_id"] == shift_id]
+
+    async def shift_payments(self, shift_id):
+        shift = self.shifts_.get(shift_id)
+        if shift is None:
+            return []
+        until = shift.get("closed_at") or self._now()
+        rows = []
+        for entry in self.ledger_:
+            if entry["kind"] not in ("payment", "refund") or entry.get("method") != "cash":
+                continue
+            if not shift["opened_at"] <= entry["created_at"] < until:
+                continue
+            client = self.clients_.get(entry["client_id"]) or {}
+            rows.append({**entry, "full_name": client.get("full_name")})
+        return sorted(rows, key=lambda x: x["id"])
+
+    async def close_shift(self, shift_id, *, counted, expected, note, by):
+        shift = self.shifts_.get(shift_id)
+        if shift is None or shift["status"] != "open":
+            return
+        shift.update(status="closed", closed_at=self._now(), closed_by=by,
+                     counted=Decimal(counted), expected=Decimal(expected),
+                     diff=Decimal(counted) - Decimal(expected),
+                     note=note or shift.get("note"))
+
+    # ─── банк ───
+    async def bank_txns(self, *, status=None, limit=200):
+        rows = []
+        for txn in self.bank_.values():
+            if status and txn["status"] != status:
+                continue
+            client = self.clients_.get(txn.get("client_id")) or {}
+            rows.append({**txn, "client_name": client.get("full_name")})
+        return sorted(rows, key=lambda t: t["booked_at"], reverse=True)[:limit]
+
+    async def bank_txn(self, txn_id):
+        txn = self.bank_.get(txn_id)
+        return dict(txn) if txn else None
+
+    async def save_bank_txn(self, txn):
+        if any(t["txn_id"] == txn["txn_id"] for t in self.bank_.values()):
+            return None
+        row_id = self._id()
+        self.bank_[row_id] = {"id": row_id, "txn_id": txn["txn_id"],
+                              "account": txn.get("account"),
+                              "booked_at": txn["booked_at"],
+                              "amount": Decimal(txn["amount"]),
+                              "direction": txn["direction"],
+                              "payer_name": txn.get("payer_name"),
+                              "payer_inn": txn.get("payer_inn"),
+                              "purpose": txn.get("purpose"), "status": "new",
+                              "client_id": None, "ledger_id": None,
+                              "handled_at": None, "handled_by": None,
+                              "created_at": self._now()}
+        return row_id
+
+    async def mark_bank_txn(self, txn_id, *, status, client_id=None,
+                            ledger_id=None, by):
+        txn = self.bank_.get(txn_id)
+        if txn is not None:
+            txn.update(status=status, client_id=client_id, ledger_id=ledger_id,
+                       handled_at=self._now(), handled_by=by)
+
+    async def last_bank_txn_at(self):
+        moments = [t["booked_at"] for t in self.bank_.values()]
+        return max(moments) if moments else None
 
     # ─── трекеры ───
     def _tracker_row(self, tracker):

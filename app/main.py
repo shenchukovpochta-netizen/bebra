@@ -21,7 +21,7 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
-from .crm import tracking
+from .crm import banking, tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, registration
@@ -30,6 +30,7 @@ from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
 from .services.starline import StarlineClient
+from .services.tochka import TochkaClient
 
 log = logging.getLogger("mybike")
 
@@ -105,6 +106,14 @@ async def run() -> None:
     tracking_task = asyncio.create_task(
         tracking.tracking_loop(bot, crm, cfg, starline,
                                interval=cfg.starline_poll_seconds))
+    # Выписка банка - своим кругом: клиент, оплативший утром, не должен
+    # ждать выдачи до вечернего прохода.
+    tochka = TochkaClient(token=cfg.tochka_token,
+                          account_id=cfg.tochka_account_id,
+                          customer_code=cfg.tochka_customer_code)
+    banking_task = asyncio.create_task(
+        banking.banking_loop(bot, crm, cfg, tochka,
+                             interval=cfg.tochka_poll_seconds))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([
@@ -134,7 +143,8 @@ async def run() -> None:
         retention.cancel()
         reminders.cancel()
         tracking_task.cancel()
-        await asyncio.gather(retention, reminders, tracking_task,
+        banking_task.cancel()
+        await asyncio.gather(retention, reminders, tracking_task, banking_task,
                              return_exceptions=True)
         await tasks.drain()
         await bot.session.close()

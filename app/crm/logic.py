@@ -878,6 +878,7 @@ SECTIONS: dict[str, str] = {
     "bikes": "Парк",
     "batteries": "Батареи",
     "trackers": "Трекеры и карта парка",
+    "cash": "Касса и банк",
     "service": "Сервис: наряды и виды работ",
     "inventory": "Склад: запчасти, приходы, заказы",
     "claims": "Заявки на зачисление",
@@ -922,6 +923,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/claims", "claims"),
     ("/finance", "finance"),
     ("/billing", "finance"),
+    ("/cash", "cash"),
+    ("/bank", "cash"),
     # После /finance: home_for берёт первый путь раздела, а /plan - это
     # форма на сводке, открывать её как страницу нечего.
     ("/plan", "finance"),
@@ -1012,7 +1015,7 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
                    "reports": "view", "inventory": "view", "batteries": "view",
-                   "trackers": "view"},
+                   "trackers": "view", "cash": "edit"},
       "actions": {}}, False),
     ("tech", "Механик",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
@@ -2444,3 +2447,163 @@ def tracker_digest(alerts: Iterable[dict], limit: int = 10) -> str:
     if len(alerts) > limit:
         lines.append(f"…и ещё {len(alerts) - limit}")
     return "\n".join(lines)
+
+
+# ─────────────────────────── касса ───────────────────────────
+#
+# Наличные на точке живут отдельно от журнала клиента. Журнал отвечает
+# «сколько должен клиент», смена - «сколько денег в ящике и сходится ли».
+# Платёж наличными попадает в оба места; размен, инкассация и недостача -
+# только в смену.
+
+CASH_MOVE_KINDS: dict[str, str] = {"in": "Внесение", "out": "Изъятие"}
+CASH_STATUSES: dict[str, str] = {"open": "Открыта", "closed": "Закрыта"}
+# Расхождение, на которое смотрят. Полтинник в конце дня - это сдача и
+# округление, а не пропажа; с трёхсот рублей уже разбираются.
+CASH_DIFF_NOISE = Decimal(300)
+
+
+def shift_no(number: int) -> str:
+    return f"КСМ-{int(number):06d}"
+
+
+def check_cash_move(raw: Any) -> Check:
+    return check_choice(raw, CASH_MOVE_KINDS, what="Вид движения")
+
+
+def shift_expected(shift: Mapping[str, Any], payments: Iterable[Mapping[str, Any]],
+                   moves: Iterable[Mapping[str, Any]]) -> Decimal:
+    """Сколько должно быть в ящике: размен + наличные платежи + внесения −
+    изъятия. Возврат наличными приходит платежом с минусом и вычитается
+    сам - отдельного правила для него не нужно."""
+    total = to_money(shift.get("opening") or 0)
+    for payment in payments:
+        total += to_money(payment.get("amount") or 0)
+    for move in moves:
+        amount = to_money(move.get("amount") or 0)
+        total += amount if move.get("kind") == "in" else -amount
+    return to_money(total)
+
+
+def shift_state(shift: Mapping[str, Any], payments: Iterable[Mapping[str, Any]],
+                moves: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Состояние смены для карточки: ожидаемое, посчитанное, расхождение."""
+    payments, moves = list(payments), list(moves)
+    expected = shift_expected(shift, payments, moves)
+    counted = (to_money(shift["counted"]) if shift.get("counted") is not None
+               else None)
+    diff = to_money(counted - expected) if counted is not None else None
+    return {"expected": expected, "counted": counted, "diff": diff,
+            "cash": to_money(sum(to_money(p.get("amount") or 0) for p in payments)),
+            "inflow": to_money(sum(to_money(m["amount"]) for m in moves
+                                   if m.get("kind") == "in")),
+            "outflow": to_money(sum(to_money(m["amount"]) for m in moves
+                                    if m.get("kind") == "out")),
+            "payments": len(payments), "moves": len(moves),
+            "open": shift.get("status") == "open",
+            "big_diff": diff is not None and abs(diff) >= CASH_DIFF_NOISE}
+
+
+def shift_rows(shifts: Iterable[dict]) -> list[dict]:
+    """Список смен: открытые первыми, дальше по дате закрытия."""
+    rows = [{**s, "big_diff": s.get("diff") is not None
+             and abs(to_money(s["diff"])) >= CASH_DIFF_NOISE} for s in shifts]
+    # Открытая смена - наверху, дальше свежие: сортировка в два прохода,
+    # потому что дату по убыванию и флаг по возрастанию одним ключом
+    # не выразить без выдумок про минус на datetime.
+    rows.sort(key=lambda s: s.get("opened_at"), reverse=True)
+    rows.sort(key=lambda s: s.get("status") != "open")
+    return rows
+
+
+# ─────────────────────────── банк ───────────────────────────
+#
+# На счёт падает не только аренда: выручка чужого ремонта, возвраты
+# поставщиков, личные переводы владельца. Поэтому строка выписки не
+# становится платежом сама - оператор подтверждает зачисление. Догадка
+# у системы есть, решение - у человека.
+
+BANK_STATUSES: dict[str, str] = {
+    "new": "Не разобран", "matched": "Зачислен", "ignored": "Не наш",
+}
+# Насколько уверенной должна быть догадка, чтобы её можно было зачислять
+# без человека (когда автозачисление вообще включено).
+MATCH_SURE = "contract"
+MATCH_REASONS: dict[str, str] = {
+    "contract": "номер договора в назначении",
+    "phone": "телефон в назначении",
+    "name": "ФИО плательщика",
+}
+
+
+def bank_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    settings = settings or {}
+    return {"auto_credit": str(settings.get("bank_auto_credit") or "") == "1"}
+
+
+def digits(raw: Any) -> str:
+    return re.sub(r"\D", "", str(raw or ""))
+
+
+def match_payment(txn: Mapping[str, Any],
+                  clients: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Кому из клиентов принадлежит поступление.
+
+    Три признака по убыванию надёжности: номер договора в назначении,
+    телефон там же, ФИО плательщика. Совпадение ФИО - именно догадка:
+    однофамильцы среди курьеров не редкость, и зачислять по ней без
+    человека нельзя.
+    """
+    if txn.get("direction") != "credit":
+        return None
+    purpose = str(txn.get("purpose") or "")
+    flat = purpose.upper().replace(" ", "")
+    phones = {digits(p) for p in re.findall(r"[\d\-()+ ]{10,}", purpose)}
+    payer = normalize_name(txn.get("payer_name"))
+    by_name = None
+    for client in clients:
+        contract = str(client.get("contract_no") or "").strip()
+        if contract and contract.upper().replace(" ", "") in flat:
+            return {"client": client, "reason": "contract"}
+        phone = digits(client.get("phone"))
+        if phone and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10):
+            return {"client": client, "reason": "phone"}
+        if payer and by_name is None and normalize_name(client.get("full_name")) == payer:
+            by_name = {"client": client, "reason": "name"}
+    return by_name
+
+
+def normalize_name(raw: Any) -> str:
+    """ФИО к сравнимому виду: «Иванов И. И.» и «ИВАНОВ ИВАН ИВАНОВИЧ»
+    так и останутся разными, а регистр и лишние пробелы - нет."""
+    return " ".join(str(raw or "").upper().replace("Ё", "Е").split())
+
+
+def bank_rows(txns: Iterable[dict], clients: Iterable[dict] | None = None,
+              *, settings: Mapping[str, Any] | None = None) -> list[dict]:
+    """Выписка с догадкой, кому зачислить. Неразобранные - первыми."""
+    clients = list(clients or [])
+    rows = []
+    for txn in txns:
+        guess = (match_payment(txn, clients) if txn.get("status") == "new"
+                 and clients else None)
+        rows.append({**txn, "guess": guess,
+                     "guess_reason": MATCH_REASONS.get((guess or {}).get("reason", ""), ""),
+                     "sure": bool(guess) and guess["reason"] == MATCH_SURE})
+    rows.sort(key=lambda t: t.get("booked_at"), reverse=True)
+    rows.sort(key=lambda t: t.get("status") != "new")
+    return rows
+
+
+def bank_summary(rows: Iterable[dict]) -> dict[str, Any]:
+    """Сводка по выписке. «Не разобрано» - только поступления: списание
+    разбирать нечего, оно никому не зачисляется и висело бы вечно."""
+    rows = list(rows)
+    new = [r for r in rows if r.get("status") == "new"
+           and r.get("direction") == "credit"]
+    return {"total": len(rows), "new": len(new),
+            "new_amount": to_money(sum(to_money(r["amount"]) for r in new
+                                       if r.get("direction") == "credit")),
+            "credited": to_money(sum(to_money(r["amount"]) for r in rows
+                                     if r.get("status") == "matched")),
+            "sure": sum(1 for r in rows if r.get("sure"))}

@@ -359,8 +359,8 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
   ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
@@ -1223,3 +1223,69 @@ create unique index if not exists tracker_alerts_one_open
   on crm.tracker_alerts (tracker_id, kind) where handled_at is null;
 create index if not exists tracker_alerts_idx
   on crm.tracker_alerts (created_at desc);
+
+-- ────────────────────── касса и банк ──────────────────────
+--
+-- Наличные на точке живут отдельно от журнала клиента. Журнал отвечает
+-- на вопрос «сколько должен клиент», смена - на вопрос «сколько денег
+-- в ящике и сходится ли». Это разные вопросы, и одной таблицей они не
+-- отвечаются: платёж наличными попадает и туда, и туда, а размен,
+-- инкассация и недостача - только в смену.
+
+create table if not exists crm.cash_shifts (
+  id         bigserial primary key,
+  no         text        not null unique,   -- КСМ-000001
+  location   text,
+  status     text        not null default 'open',   -- open|closed
+  opened_at  timestamptz not null default now(),
+  opened_by  text,
+  opening    numeric(12,2) not null default 0,      -- размен на начало
+  closed_at  timestamptz,
+  closed_by  text,
+  counted    numeric(12,2),                 -- сколько насчитали руками
+  expected   numeric(12,2),                 -- сколько должно быть
+  diff       numeric(12,2),                 -- counted - expected
+  note       text
+);
+-- Одна открытая смена на точку: две открытые - это два ответа на вопрос
+-- «в чей ящик легли деньги», и оба неверные.
+create unique index if not exists cash_shifts_one_open
+  on crm.cash_shifts (coalesce(location, '')) where status = 'open';
+
+create table if not exists crm.cash_moves (
+  id         bigserial primary key,
+  shift_id   bigint      not null references crm.cash_shifts (id) on delete cascade,
+  kind       text        not null,          -- in|out
+  amount     numeric(12,2) not null,        -- всегда положительная
+  reason     text,
+  ledger_id  bigint      references crm.ledger (id),
+  created_at timestamptz not null default now(),
+  created_by text
+);
+create index if not exists cash_moves_idx on crm.cash_moves (shift_id, id);
+
+-- Выписка банка. Строка приходит из Точки и живёт здесь своей жизнью:
+-- зачисление в журнал клиента - отдельное действие оператора, потому
+-- что на счёт падает и выручка ремонта, и возвраты поставщиков, и
+-- деньги, которые к прокату отношения не имеют.
+create table if not exists crm.bank_txns (
+  id         bigserial primary key,
+  txn_id     text        not null unique,   -- id операции в банке
+  account    text,
+  booked_at  timestamptz not null,
+  amount     numeric(12,2) not null,
+  direction  text        not null,          -- credit|debit
+  payer_name text,
+  payer_inn  text,
+  purpose    text,
+  -- new|matched|ignored. matched - деньги уже в журнале клиента,
+  -- ignored - платёж не наш (ремонт, возврат, личное).
+  status     text        not null default 'new',
+  client_id  bigint      references crm.clients (id),
+  ledger_id  bigint      references crm.ledger (id),
+  handled_at timestamptz,
+  handled_by text,
+  created_at timestamptz not null default now()
+);
+create index if not exists bank_txns_idx on crm.bank_txns (booked_at desc);
+create index if not exists bank_txns_new on crm.bank_txns (status) where status = 'new';

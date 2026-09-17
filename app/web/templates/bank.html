@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Выписка — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Выписка банка</h1>{% include "_cash_tabs.html" %}
+  <nav class="tabs">
+    <a href="/bank?status=new" {% if status == 'new' %}class="on"{% endif %}>Не разобрано</a>
+    <a href="/bank?status=matched" {% if status == 'matched' %}class="on"{% endif %}>Зачислено</a>
+    <a href="/bank?status=all" {% if status == 'all' %}class="on"{% endif %}>Все</a>
+  </nav>
+</div>
+
+<div class="tiles">
+  <div class="tile {% if summary.new %}warn{% endif %}"><b>{{ summary.new }}</b><span>не разобрано<br><small class="muted">на {{ money(summary.new_amount) }}</small></span></div>
+  <div class="tile"><b>{{ money(summary.credited) }}</b><span>зачислено клиентам</span></div>
+  <div class="tile"><b>{{ summary.total }}</b><span>строк в выписке</span></div>
+  <div class="tile"><b>{% if last_at %}{{ last_at|dmy }}{% else %}—{% endif %}</b><span>последняя операция</span></div>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>Когда</th><th>Плательщик</th><th class="num">Сумма</th><th>Назначение</th><th>Куда</th></tr>
+  {% for t in rows %}
+  <tr class="{% if t.status == 'new' and t.direction == 'credit' %}warn-row{% endif %}">
+    <td>{{ t.booked_at|dmy }}</td>
+    <td>{{ t.payer_name or '—' }}{% if t.payer_inn %} <span class="muted">ИНН {{ t.payer_inn }}</span>{% endif %}</td>
+    <td class="num {% if t.direction == 'debit' %}muted{% endif %}">{% if t.direction == 'debit' %}−{% endif %}{{ money(t.amount) }}</td>
+    <td class="muted">{{ t.purpose or '' }}</td>
+    <td>
+      {% if t.status == 'matched' %}
+        <span class="tag ok">зачислено</span>{% if t.client_id and can_view(staff, 'clients') %} <a href="/clients/{{ t.client_id }}">{{ t.client_name }}</a>{% endif %}
+      {% elif t.status == 'ignored' %}<span class="tag muted">не наш</span>
+      {% elif t.direction == 'debit' %}<span class="muted">списание</span>
+      {% elif can_edit(staff, 'cash') %}
+        <form method="post" action="/bank/{{ t.id }}" class="inline-form">
+          <select name="client_id">
+            {% if t.guess %}<option value="{{ t.guess.client.id }}" selected>{{ t.guess.client.full_name }} — {{ t.guess_reason }}</option>{% endif %}
+            <option value="">выберите клиента</option>
+            {% for c in clients_for_pick %}<option value="{{ c.id }}">{{ c.full_name }} · {{ c.phone }}</option>{% endfor %}
+          </select>
+          <button type="submit">Зачислить</button>
+          <button type="submit" name="action" value="ignore" class="ghost">Не наш</button>
+        </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted">Строк нет. Выписку тянет процесс бота раз в полчаса; без настроек Точки она не приходит.</td></tr>{% endfor %}
+</table>
+<p class="muted">На счёт падает не только аренда: выручка чужого ремонта,
+  возвраты поставщиков, личные переводы. Поэтому строка не становится
+  платежом сама — догадка у системы, решение у человека. Зачисление
+  пишется в журнал клиента обычным платежом.</p>
+</div>
+
+{% if can_edit(staff, 'cash') %}
+<div class="card narrow">
+  <h2>Автозачисление</h2>
+  <form method="post" action="/bank/settings">
+    <label class="check"><input type="checkbox" name="auto" value="1" {% if auto %}checked{% endif %}>
+      Зачислять само, если в назначении есть номер договора</label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">Срабатывает только на точное совпадение номера договора.
+    По сумме и по ФИО не зачисляется никогда: однофамильцы среди курьеров
+    не редкость, а это чужие деньги на чужом балансе.</p>
+</div>
+{% endif %}
+{% endblock %}

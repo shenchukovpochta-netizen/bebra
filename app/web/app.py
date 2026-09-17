@@ -120,6 +120,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
         TRACKER_ALERTS=logic.TRACKER_ALERTS,
+        CASH_MOVE_KINDS=logic.CASH_MOVE_KINDS, CASH_STATUSES=logic.CASH_STATUSES,
+        CASH_DIFF_NOISE=logic.CASH_DIFF_NOISE,
+        BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
         map_url=logic.map_url,
         BATTERY_STATUSES=logic.BATTERY_STATUSES,
         BATTERY_MANUAL_STATUSES=logic.BATTERY_MANUAL_STATUSES,
@@ -2443,6 +2446,189 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"Батарея заменена на {new['code']}." if old is not None
               else f"Батарея {new['code']} выдана клиенту.")
         return redirect(f"/rentals/{rental_id}")
+
+    # ─────────────────────── касса и банк ───────────────────────
+
+    @app.get("/cash")
+    async def cash_page(request: Request) -> Response:
+        if not may_view(request, "cash"):
+            return denied(request, "cash")
+        rows = logic.shift_rows(await crm.cash_shifts(limit=100))
+        current = await crm.open_shift()
+        state = None
+        if current is not None:
+            state = logic.shift_state(current,
+                                      await crm.shift_payments(current["id"]),
+                                      await crm.cash_moves(current["id"]))
+        return render(request, "cash.html", rows=rows, current=current, state=state,
+                      locations=await location_names())
+
+    @app.post("/cash")
+    async def cash_open(request: Request) -> Response:
+        if not may_edit(request, "cash"):
+            return denied(request, "cash")
+        data = await form(request)
+        opening = cost_field(data, "opening")
+        note = logic.check_note(data.get("note"))
+        location = logic.check_location(data.get("location"), await location_names())
+        for check in (opening, note, location):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/cash")
+        try:
+            shift_id = await service.open_cash_shift(
+                crm, location=location.value, opening=opening.value,
+                note=note.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/cash")
+        flash(request, "Смена открыта.")
+        return redirect(f"/cash/{shift_id}")
+
+    @app.get("/cash/{shift_id}")
+    async def cash_shift_card(request: Request, shift_id: int) -> Response:
+        if not may_view(request, "cash"):
+            return denied(request, "cash")
+        shift = await crm.cash_shift(shift_id)
+        if shift is None:
+            return render(request, "missing.html", status_code=404, what="Смена")
+        payments = await crm.shift_payments(shift_id)
+        moves = await crm.cash_moves(shift_id)
+        return render(request, "cash_shift.html", shift=shift, payments=payments,
+                      moves=moves,
+                      state=logic.shift_state(shift, payments, moves))
+
+    @app.post("/cash/{shift_id}/move")
+    async def cash_move(request: Request, shift_id: int) -> Response:
+        if not may_edit(request, "cash"):
+            return denied(request, "cash")
+        shift = await crm.cash_shift(shift_id)
+        if shift is None:
+            return render(request, "missing.html", status_code=404, what="Смена")
+        data = await form(request)
+        amount = logic.check_amount(data.get("amount"))
+        kind = logic.check_cash_move(data.get("kind"))
+        reason = logic.check_note(data.get("reason"))
+        for check in (amount, kind, reason):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/cash/{shift_id}")
+        try:
+            await service.cash_move(crm, shift, kind=kind.value, amount=amount.value,
+                                    reason=reason.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/cash/{shift_id}")
+        flash(request, f"{logic.CASH_MOVE_KINDS[kind.value]}: "
+                       f"{logic.money(amount.value)}.")
+        return redirect(f"/cash/{shift_id}")
+
+    @app.post("/cash/{shift_id}/close")
+    async def cash_close(request: Request, shift_id: int) -> Response:
+        if not may_edit(request, "cash"):
+            return denied(request, "cash")
+        shift = await crm.cash_shift(shift_id)
+        if shift is None:
+            return render(request, "missing.html", status_code=404, what="Смена")
+        data = await form(request)
+        counted = cost_field(data, "counted")
+        note = logic.check_note(data.get("note"))
+        for check in (counted, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/cash/{shift_id}")
+        try:
+            state = await service.close_cash_shift(
+                crm, shift, counted=counted.value, note=note.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/cash/{shift_id}")
+        if state["diff"]:
+            sign = "излишек" if state["diff"] > 0 else "недостача"
+            flash(request, f"Смена закрыта. Расхождение: {sign} "
+                           f"{logic.money(abs(state['diff']))}.",
+                  "err" if state["big_diff"] else "ok")
+        else:
+            flash(request, "Смена закрыта, касса сошлась.")
+        return redirect(f"/cash/{shift_id}")
+
+    @app.get("/bank")
+    async def bank_page(request: Request) -> Response:
+        if not may_view(request, "cash"):
+            return denied(request, "cash")
+        status = request.query_params.get("status") or "new"
+        settings = await crm.settings()
+        clients = await crm.clients(limit=10000)
+        rows = logic.bank_rows(
+            await crm.bank_txns(status=None if status == "all" else status, limit=200),
+            clients, settings=settings)
+        if status == "new":
+            # Списания в «не разобрано» не показываем: разбирать в них
+            # нечего, они никому не зачисляются и висели бы вечно.
+            rows = [r for r in rows if r["direction"] == "credit"]
+        # В выпадающем списке - те, кто платит: должники и те, у кого идёт
+        # аренда. Весь список клиентов в select не помещается и не нужен:
+        # платёж от закрывшегося год назад - повод открыть его карточку,
+        # а не искать в двух сотнях строк.
+        picks = {c["id"]: c for c in await crm.debtors(200)}
+        for rental in await crm.active_rentals():
+            picks.setdefault(rental["client_id"],
+                             {"id": rental["client_id"],
+                              "full_name": rental.get("full_name"),
+                              "phone": rental.get("phone")})
+        return render(request, "bank.html", rows=rows, status=status,
+                      summary=logic.bank_summary(
+                          logic.bank_rows(await crm.bank_txns(limit=500))),
+                      auto=logic.bank_settings(settings)["auto_credit"],
+                      clients_for_pick=sorted(
+                          picks.values(), key=lambda c: str(c.get("full_name") or "")),
+                      last_at=await crm.last_bank_txn_at())
+
+    @app.post("/bank/settings")
+    async def bank_settings(request: Request) -> Response:
+        if not may_edit(request, "cash"):
+            return denied(request, "cash")
+        data = await form(request)
+        await crm.set_setting("bank_auto_credit", "1" if data.get("auto") else "0",
+                              by=who(request))
+        flash(request, "Автозачисление включено: строки с номером договора "
+                       "в назначении будут зачисляться сами."
+              if data.get("auto") else "Автозачисление выключено.")
+        return redirect("/bank")
+
+    # Раньше /bank/{txn_id}: иначе «settings» уедет в числовой параметр.
+    @app.post("/bank/{txn_id}")
+    async def bank_handle(request: Request, txn_id: int) -> Response:
+        """Зачислить поступление клиенту или отметить «не наш»."""
+        if not may_edit(request, "cash"):
+            return denied(request, "cash")
+        txn = await crm.bank_txn(txn_id)
+        if txn is None:
+            return render(request, "missing.html", status_code=404,
+                          what="Строка выписки")
+        data = await form(request)
+        if (data.get("action") or "") == "ignore":
+            try:
+                await service.ignore_bank_txn(crm, txn, by=who(request))
+            except service.ServiceError as exc:
+                flash(request, str(exc), "err")
+                return redirect("/bank")
+            flash(request, "Отмечено: платёж не наш.")
+            return redirect("/bank")
+        client = (await crm.client(int(data["client_id"]))
+                  if (data.get("client_id") or "").isdigit() else None)
+        if client is None:
+            flash(request, "Выберите клиента, которому зачислить.", "err")
+            return redirect("/bank")
+        try:
+            await service.credit_bank_txn(crm, txn, client, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/bank")
+        await referral_bonus(client, logic.to_money(txn["amount"]), who(request))
+        flash(request, f"{logic.money(txn['amount'])} зачислено: "
+                       f"{client['full_name']}.")
+        return redirect("/bank")
 
     # ─────────────────────── трекеры и карта ───────────────────────
 

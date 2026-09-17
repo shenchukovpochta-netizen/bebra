@@ -33,6 +33,7 @@ from ..crm import notify, service
 from ..crm import sync as crm_sync
 from ..db import Database
 from ..filters import ServiceChatReply, StateIs, is_operator
+from ..services import tochka
 
 log = logging.getLogger(__name__)
 router = Router(name="cabinet")
@@ -226,6 +227,29 @@ async def cb_home(callback: CallbackQuery, bot: Bot, user: dict,
                            reply_markup=kb.cabinet(lang))
 
 
+async def pay_link(cfg: Config, client: dict, amount: Any) -> str:
+    """Ссылка на оплату: с чеком 54-ФЗ, если эквайринг Точки настроен.
+
+    Чек пробивает банк - это его эквайринг принимает деньги. Не настроен
+    или банк не ответил - остаётся обычная ссылка СБП из настроек: без
+    оплаты клиент не уедет, а чек можно выдать и потом.
+    """
+    if not (cfg.tochka_token and cfg.tochka_customer_code) or not amount or amount <= 0:
+        return cfg.pay_url
+    contract = str(client.get("contract_no") or "").strip()
+    purpose = f"Аренда велосипеда{', договор ' + contract if contract else ''}"
+    try:
+        got = await tochka.TochkaClient(
+            token=cfg.tochka_token, customer_code=cfg.tochka_customer_code,
+            account_id=cfg.tochka_account_id).payment_link(
+                amount=crm_logic.to_money(amount), purpose=purpose,
+                client_phone=client.get("phone"))
+    except Exception:                                   # noqa: BLE001
+        log.warning("ссылка с чеком не получена, отдаём обычную", exc_info=True)
+        return cfg.pay_url
+    return got.get("link") or cfg.pay_url
+
+
 @router.callback_query(F.data == "cab:pay")
 async def cb_pay(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
                  crm: Any = None) -> None:
@@ -237,12 +261,13 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
     balance = await crm.client_balance(client["id"])
     rental = await crm.active_rental_of(client["id"])
     summary = crm_logic.rental_summary(rental, balance, today=date.today())
+    amount = crm_logic.topup_hint(summary)
+    url = await pay_link(cfg, client, amount)
     await bot.send_message(
         user["tg_id"],
         i18n.t(lang, "CAB_PAY").format(
-            amount=crm_logic.money(crm_logic.topup_hint(summary)),
-            pay_url=logic.esc(cfg.pay_url)),
-        reply_markup=kb.cab_pay(cfg.pay_url, lang))
+            amount=crm_logic.money(amount), pay_url=logic.esc(url)),
+        reply_markup=kb.cab_pay(url, lang))
 
 
 def claim_card(claim: dict, balance: Any) -> str:

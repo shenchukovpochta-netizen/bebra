@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Касса — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Касса</h1>{% include "_cash_tabs.html" %}</div>
+
+{% if current %}
+<section class="card">
+  <h2>Открыта смена {{ current.no }}{% if current.location %} · {{ current.location }}{% endif %}</h2>
+  <div class="tiles">
+    <div class="tile"><b>{{ money(state.expected) }}</b><span>должно быть в ящике</span></div>
+    <div class="tile"><b>{{ money(state.cash) }}</b><span>принято наличными<br><small class="muted">{{ state.payments }} платежей</small></span></div>
+    <div class="tile"><b>{{ money(state.inflow) }}</b><span>внесено</span></div>
+    <div class="tile"><b>{{ money(state.outflow) }}</b><span>изъято</span></div>
+  </div>
+  <p><a class="btn" href="/cash/{{ current.id }}">Открыть смену</a>
+    <span class="muted">Открыл {{ current.opened_by or '' }} · {{ current.opened_at|dmy }} · размен {{ money(current.opening) }}</span></p>
+</section>
+{% elif can_edit(staff, 'cash') %}
+<section class="card narrow">
+  <h2>Открыть смену</h2>
+  <form method="post" action="/cash" class="grid2">
+    <label>Точка <select name="location"><option value="">не указана</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Размен в ящике, ₽ <input name="opening" inputmode="decimal" value="0"></label>
+    <label class="wide">Заметка <input name="note" placeholder="кто на точке, чем разменялись"></label>
+    <button type="submit">Открыть</button>
+  </form>
+  <p class="muted">Одна открытая смена на точку. Наличные платежи попадают
+    в смену сами — из журнала клиентов, по способу оплаты «наличные».</p>
+</section>
+{% endif %}
+
+<div class="card">
+<table>
+  <tr><th>Смена</th><th>Точка</th><th>Открыта</th><th>Закрыта</th><th class="num">Ожидалось</th><th class="num">Насчитали</th><th class="num">Расхождение</th></tr>
+  {% for s in rows %}
+  <tr class="{% if s.big_diff %}warn-row{% endif %}">
+    <td><a href="/cash/{{ s.id }}">{{ s.no }}</a>{% if s.status == 'open' %} <span class="tag rented">открыта</span>{% endif %}</td>
+    <td>{{ s.location or '—' }}</td>
+    <td>{{ s.opened_at|dmy }} <span class="muted">{{ s.opened_by or '' }}</span></td>
+    <td>{% if s.closed_at %}{{ s.closed_at|dmy }} <span class="muted">{{ s.closed_by or '' }}</span>{% else %}—{% endif %}</td>
+    <td class="num">{% if s.expected is not none %}{{ money(s.expected) }}{% else %}—{% endif %}</td>
+    <td class="num">{% if s.counted is not none %}{{ money(s.counted) }}{% else %}—{% endif %}</td>
+    <td class="num {% if s.big_diff %}bad{% endif %}">{% if s.diff is not none %}{{ money(s.diff) }}{% else %}—{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="muted">Смен не было.</td></tr>{% endfor %}
+</table>
+<p class="muted">Расхождение записывается как есть и не подгоняется:
+  смена, которая всегда сходится, ничего не проверяет. Полтинник в конце
+  дня — это сдача и округление, с {{ money(CASH_DIFF_NOISE) }} уже разбираются.</p>
+</div>
+{% endblock %}

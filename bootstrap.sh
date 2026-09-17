@@ -100,6 +100,8 @@ fi
 # поднялся. Заполните их - и опрос заведётся сам при следующем рестарте.
 [ -f secrets/starline_app_secret ] || : > secrets/starline_app_secret
 [ -f secrets/starline_password ] || : > secrets/starline_password
+# Счёт в Точке - тоже необязателен.
+[ -f secrets/tochka_token ] || : > secrets/tochka_token
 chmod 600 secrets/* .env
 # Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
 # Вне swarm docker compose не копирует файл секрета, а подключает хостовый как

@@ -859,6 +859,68 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             "set recorded_at = recorded_at - interval '60 days'")
         self.assertEqual(await self.crm.purge_tracker_positions(30), 2)
 
+    async def test_cash_and_bank_on_postgres(self):
+        """Касса на живой базе: одна открытая смена на точку, наличные
+        подтягиваются из журнала, выписка не двоится."""
+        await self.seed()
+        shift_id = await service.open_cash_shift(
+            self.crm, location="Павлюхина", opening=D("2000"), note=None,
+            by="staff:t")
+        shift = await self.crm.cash_shift(shift_id)
+        self.assertEqual(shift["no"], "КСМ-000001")
+        with self.assertRaises(service.ServiceError):
+            await service.open_cash_shift(self.crm, location="Павлюхина",
+                                          opening=D(0), note=None, by="staff:t")
+        # на другой точке своя смена открывается спокойно
+        other = await service.open_cash_shift(self.crm, location="Адоратского",
+                                              opening=D(0), note=None, by="staff:t")
+        self.assertIsNotNone(other)
+
+        client = await self.crm.client(self.client_id)
+        await service.add_entry(self.crm, client, kind="payment", amount=D("3000"),
+                                method="cash", note="аренда", by="staff:t")
+        await service.add_entry(self.crm, client, kind="payment", amount=D("5000"),
+                                method="sbp", note="перевод", by="staff:t")
+        payments = await self.crm.shift_payments(shift_id)
+        self.assertEqual([p["amount"] for p in payments], [D("3000.00")],
+                         "в кассу идут только наличные")
+
+        await service.cash_move(self.crm, shift, kind="out", amount=D("1000"),
+                                reason="инкассация", by="staff:t")
+        state = await service.close_cash_shift(
+            self.crm, shift, counted=D("3900"), note="сотни не хватает", by="staff:t")
+        self.assertEqual(state["expected"], D("4000.00"))
+        closed = await self.crm.cash_shift(shift_id)
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["diff"], D("-100.00"))
+        self.assertFalse(logic.shift_rows([closed])[0]["big_diff"])
+        # Платёж после закрытия в смену уже не попадает.
+        await service.add_entry(self.crm, client, kind="payment", amount=D("700"),
+                                method="cash", note="после смены", by="staff:t")
+        self.assertEqual(len(await self.crm.shift_payments(shift_id)), 1)
+
+        moment = datetime.now(UTC)
+        row = {"txn_id": "T-1", "account": "ACC", "booked_at": moment,
+               "amount": D("3000"), "direction": "credit",
+               "payer_name": "ИВАНОВ ИВАН", "payer_inn": None,
+               "purpose": "Оплата по договору АВ-2026-000042"}
+        txn_id = await self.crm.save_bank_txn(row)
+        self.assertIsNotNone(txn_id)
+        self.assertIsNone(await self.crm.save_bank_txn(row),
+                          "та же операция второй раз не ложится")
+        await self.crm.update_client(self.client_id, contract_no="АВ-2026-000042")
+        guessed = logic.bank_rows(await self.crm.bank_txns(status="new"),
+                                  await self.crm.clients(limit=100))
+        self.assertTrue(guessed[0]["sure"])
+        ledger_id = await service.credit_bank_txn(
+            self.crm, await self.crm.bank_txn(txn_id),
+            await self.crm.client(self.client_id), by="staff:t")
+        self.assertIsNotNone(ledger_id)
+        marked = await self.crm.bank_txn(txn_id)
+        self.assertEqual(marked["status"], "matched")
+        self.assertEqual(marked["ledger_id"], ledger_id)
+        self.assertEqual(await self.crm.last_bank_txn_at(), moment)
+
 
 if __name__ == "__main__":
     unittest.main()

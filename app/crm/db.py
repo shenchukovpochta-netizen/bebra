@@ -2225,3 +2225,134 @@ class CrmDB:
         await self.pool.execute(
             "update crm.tracker_alerts set handled_at = now(), handled_by = $2 "
             "where id = $1 and handled_at is null", alert_id, by)
+
+    # ─────────────────────────── касса ───────────────────────────
+
+    async def cash_shifts(self, *, limit: int = 100) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.cash_shifts order by opened_at desc limit $1", limit))
+
+    async def cash_shift(self, shift_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.cash_shifts where id = $1", shift_id))
+
+    async def open_shift(self) -> dict | None:
+        """Смена, открытая прямо сейчас. Их может быть по одной на точку -
+        берётся самая ранняя: оператор работает в своей, а сводка
+        показывает ту, что дольше всех висит незакрытой."""
+        return _row(await self.pool.fetchrow(
+            "select * from crm.cash_shifts where status = 'open' "
+            "order by opened_at limit 1"))
+
+    async def open_shift_at(self, location: str | None) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.cash_shifts "
+            "where status = 'open' and coalesce(location, '') = coalesce($1, '')",
+            location))
+
+    async def create_shift(self, *, location: str | None, opening: Decimal,
+                           note: str | None, by: str) -> int:
+        """Открыть смену. Номер выдаётся в той же транзакции: иначе две
+        кассы, открытые в одну секунду, получат один номер."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            number = int(await conn.fetchval(
+                "select count(*) + 1 from crm.cash_shifts"))
+            return int(await conn.fetchval(
+                """
+                insert into crm.cash_shifts (no, location, opening, note, opened_by)
+                values ($1, $2, $3, $4, $5) returning id
+                """, logic.shift_no(number), location, opening, note, by))
+
+    async def add_cash_move(self, shift_id: int, *, kind: str, amount: Decimal,
+                            reason: str | None, by: str,
+                            ledger_id: int | None = None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.cash_moves (shift_id, kind, amount, reason, ledger_id,
+                                        created_by)
+            values ($1, $2, $3, $4, $5, $6) returning id
+            """, shift_id, kind, amount, reason, ledger_id, by))
+
+    async def cash_moves(self, shift_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.cash_moves where shift_id = $1 order by id", shift_id))
+
+    async def shift_payments(self, shift_id: int) -> list[dict]:
+        """Наличные платежи за время смены - из журнала клиентов.
+
+        Смена не хранит копию этих строк: копия разошлась бы с журналом
+        при первой же правке платежа, а сходимость кассы держится именно
+        на том, что деньги в ящике и деньги в журнале - одно и то же.
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select l.*, c.full_name
+              from crm.ledger l
+              join crm.clients c on c.id = l.client_id
+              join crm.cash_shifts s on s.id = $1
+             where l.kind in ('payment', 'refund') and l.method = 'cash'
+               and l.created_at >= s.opened_at
+               and l.created_at < coalesce(s.closed_at, now())
+             order by l.id
+            """, shift_id))
+
+    async def close_shift(self, shift_id: int, *, counted: Decimal,
+                          expected: Decimal, note: str | None, by: str) -> None:
+        await self.pool.execute(
+            """
+            update crm.cash_shifts
+               set status = 'closed', closed_at = now(), closed_by = $2,
+                   counted = $3::numeric, expected = $4::numeric,
+                   -- Приведение обязательно: без него Postgres видит
+                   -- «неизвестное минус неизвестное» и не выбирает оператор.
+                   diff = $3::numeric - $4::numeric,
+                   note = coalesce($5, note)
+             where id = $1 and status = 'open'
+            """, shift_id, by, counted, expected, note)
+
+    # ─────────────────────────── банк ───────────────────────────
+
+    async def bank_txns(self, *, status: str | None = None,
+                        limit: int = 200) -> list[dict]:
+        where = "where t.status = $2" if status else ""
+        args = [limit] + ([status] if status else [])
+        return _rows(await self.pool.fetch(
+            f"""
+            select t.*, c.full_name as client_name
+              from crm.bank_txns t
+              left join crm.clients c on c.id = t.client_id
+            {where}
+            order by t.booked_at desc limit $1
+            """, *args))
+
+    async def bank_txn(self, txn_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.bank_txns where id = $1", txn_id))
+
+    async def save_bank_txn(self, txn: dict) -> int | None:
+        """Строка выписки. None - такая уже есть: выписку тянут за
+        перекрывающиеся периоды, и повторы - норма, а не сбой."""
+        return await self.pool.fetchval(
+            """
+            insert into crm.bank_txns (txn_id, account, booked_at, amount,
+                                       direction, payer_name, payer_inn, purpose)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            on conflict (txn_id) do nothing
+            returning id
+            """, txn["txn_id"], txn.get("account"), txn["booked_at"],
+            txn["amount"], txn["direction"], txn.get("payer_name"),
+            txn.get("payer_inn"), txn.get("purpose"))
+
+    async def mark_bank_txn(self, txn_id: int, *, status: str,
+                            client_id: int | None = None,
+                            ledger_id: int | None = None, by: str) -> None:
+        await self.pool.execute(
+            """
+            update crm.bank_txns
+               set status = $2, client_id = $3, ledger_id = $4,
+                   handled_at = now(), handled_by = $5
+             where id = $1
+            """, txn_id, status, client_id, ledger_id, by)
+
+    async def last_bank_txn_at(self) -> datetime | None:
+        return await self.pool.fetchval("select max(booked_at) from crm.bank_txns")
