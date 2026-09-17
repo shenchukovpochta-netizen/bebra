@@ -301,7 +301,9 @@ def cabinet(lang: str = "ru") -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_CONTRACT"),
                               callback_data="cab:contract")],
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_FRIENDS"),
-                              callback_data="cab:friends")],
+                              callback_data="cab:friends"),
+         InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REVIEW"),
+                              callback_data="cab:review")],
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REFRESH"), callback_data="cab:home")],
     ])
 
@@ -370,3 +372,15 @@ def estimate_answer(order_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Согласен", callback_data=f"est:ok:{order_id}"),
          InlineKeyboardButton(text="✖️ Не надо", callback_data=f"est:no:{order_id}")],
     ])
+
+
+def review_sites(links: list[dict] | None = None,
+                 lang: str = "ru") -> InlineKeyboardMarkup:
+    """Площадки для отзыва. Пустая ссылка - площадки нет: кнопка в
+    никуда хуже, чем её отсутствие."""
+    rows = [[InlineKeyboardButton(text=f"⭐ {site['title']}", url=site["url"])]
+            for site in (links or [])
+            if str(site.get("url", "")).startswith(("http://", "https://"))]
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REFRESH"),
+                                      callback_data="cab:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -56,6 +56,7 @@ class FakeCrm:
         self.bank_: dict[int, dict] = {}
         self.pay_orders_: dict[int, dict] = {}
         self.notices_: dict[str, dict] = {}
+        self.bonuses_: dict[int, dict] = {}
         self.notice_log_: list[dict] = []
         self.cards_: dict[int, dict] = {}
         self.trackers_: dict[int, dict] = {}
@@ -2253,6 +2254,77 @@ class FakeCrm:
         return sum(1 for x in self.bike_log_
                    if x["bike_id"] == bike_id and x["kind"] == "repair"
                    and x["created_at"].date() >= since)
+
+
+    # ─────────────────── баллы ───────────────────
+
+    def _bonus_unique(self, client_id, kind):
+        if kind in ("review", "friend") and any(
+                b["client_id"] == client_id and b["kind"] == kind
+                for b in self.bonuses_.values()):
+            raise UniqueError(f"bonuses_{kind}_once")
+
+    async def grant_bonus(self, *, client_id, kind, amount, note=None,
+                          ref_id=None, by=None):
+        amount = Decimal(amount)
+        if amount <= 0:
+            return None
+        self._bonus_unique(client_id, kind)
+        ledger_id = await self.add_ledger(client_id=client_id, kind="bonus",
+                                          amount=amount, note=note,
+                                          created_by=by)
+        return await self.record_bonus(client_id=client_id, kind=kind,
+                                       amount=amount, ledger_id=ledger_id,
+                                       ref_id=ref_id, note=note, by=by)
+
+    async def record_bonus(self, *, client_id, kind, amount, ledger_id=None,
+                           ref_id=None, note=None, by=None):
+        self._bonus_unique(client_id, kind)
+        bid = self._id()
+        self.bonuses_[bid] = {"id": bid, "client_id": client_id, "kind": kind,
+                              "amount": Decimal(amount), "ledger_id": ledger_id,
+                              "ref_id": ref_id, "note": note, "created_by": by,
+                              "created_at": self._now()}
+        return bid
+
+    async def bonuses(self, *, client_id=None, kind=None, since=None,
+                      until=None, limit=500):
+        rows = []
+        for b in sorted(self.bonuses_.values(), key=lambda x: -x["id"]):
+            if client_id is not None and b["client_id"] != client_id:
+                continue
+            if kind and b["kind"] != kind:
+                continue
+            day = b["created_at"].date()
+            if since and day < since:
+                continue
+            if until and day > until:
+                continue
+            client = self.clients_.get(b["client_id"], {})
+            rows.append({**b, "full_name": client.get("full_name"),
+                         "phone": client.get("phone")})
+        return rows[:limit]
+
+    async def bonus_of(self, client_id, kind):
+        for b in sorted(self.bonuses_.values(), key=lambda x: -x["id"]):
+            if b["client_id"] == client_id and b["kind"] == kind:
+                return dict(b)
+        return None
+
+    async def payments_total(self, *, since, until):
+        total = Decimal(0)
+        for x in self.ledger_:
+            if x["kind"] != "payment":
+                continue
+            day = x["created_at"].date()
+            if (since and day < since) or (until and day > until):
+                continue
+            total += Decimal(x["amount"])
+        return total
+
+    async def referrals_since(self, since):
+        return [dict(r) for r in self.referrals_.values()
+                if r["created_at"].date() >= since]
 
 
 def _num(value):

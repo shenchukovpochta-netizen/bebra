@@ -1215,6 +1215,45 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.work_order(order_id))["approved_by"],
                          "клиент")
 
+    async def test_bonuses_on_postgres(self):
+        """Баллы на живой базе: вид journal, повод рядом, один раз."""
+        await self.seed()
+        bonus_id = await self.crm.grant_bonus(
+            client_id=self.client_id, kind="review", amount=D("300"),
+            note="отзыв на Яндекс.Картах", by="staff:t")
+        self.assertIsNotNone(bonus_id)
+        self.assertEqual(await self.crm.client_balance(self.client_id),
+                         D("300.00"))
+        entry = (await self.crm.ledger_of(self.client_id))[0]
+        self.assertEqual(entry["kind"], "bonus")
+
+        # Платежей не прибавилось - средний чек цел.
+        self.assertEqual(await self.crm.payments_total(
+            since=date(2000, 1, 1), until=date(2100, 1, 1)), D(0))
+
+        # Бонус за отзыв - один раз: частичный уникальный индекс.
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.grant_bonus(client_id=self.client_id, kind="review",
+                                       amount=D("300"), by="staff:t")
+        # И баланс от неудачной попытки не поехал: обе вставки одной
+        # транзакцией, откатились обе.
+        self.assertEqual(await self.crm.client_balance(self.client_id),
+                         D("300.00"))
+
+        # А начислять руками можно сколько угодно раз.
+        await self.crm.grant_bonus(client_id=self.client_id, kind="manual",
+                                   amount=D("100"), by="staff:t")
+        await self.crm.grant_bonus(client_id=self.client_id, kind="manual",
+                                   amount=D("100"), by="staff:t")
+        self.assertEqual(await self.crm.client_balance(self.client_id),
+                         D("500.00"))
+        rows = await self.crm.bonuses(client_id=self.client_id)
+        self.assertEqual(len(rows), 3)
+        totals = logic.bonus_totals(rows, D("50000"))
+        self.assertEqual(totals["total"], D("500.00"))
+        self.assertEqual(totals["by_kind"]["manual"], D("200.00"))
+        self.assertIsNotNone(await self.crm.bonus_of(self.client_id, "review"))
+
 
 if __name__ == "__main__":
     unittest.main()

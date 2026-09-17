@@ -49,6 +49,21 @@
   </form>
   <p class="muted">Ссылку пробивает банк вместе с чеком по 54-ФЗ. В журнал
     счёт попадёт, когда клиент заплатит, — не раньше.</p>
+
+  {# Баллы - не платёж: в средний чек они не идут, поэтому отдельно. #}
+  <h3>Начислить баллы</h3>
+  <form method="post" action="/clients/{{ client.id }}/bonus" class="inline-form">
+    <button type="submit" name="action" value="review" class="ghost">За отзыв</button>
+  </form>
+  <form method="post" action="/clients/{{ client.id }}/bonus" class="inline-form">
+    <input name="amount" inputmode="decimal" placeholder="500" size="7" required>
+    <input name="note" placeholder="за что" size="16">
+    <button type="submit" name="action" value="manual" class="ghost">Начислить</button>
+  </form>
+  <p class="muted">Баллы меняют баланс, но платежом не считаются: средний
+    чек — одно из трёх чисел парка, и бонус завысил бы его. Бонус за отзыв
+    один раз на клиента и только по скриншоту: у площадок нет ни API, ни
+    обязанности нам отвечать.</p>
 </section>
 {% endif %}
 </div>
@@ -109,6 +124,17 @@
   <form method="post" action="/clients/{{ client.id }}/sign" class="inline-form">
     <button type="submit" class="ghost">✍ Собрать ссылку на подписание</button>
   </form>
+  {% endif %}
+  {% if bonuses %}
+  <h3>Баллы</h3>
+  <table>
+    <tr><th>Когда</th><th>За что</th><th class="num">Сумма</th></tr>
+    {% for b in bonuses %}
+    <tr><td class="nowrap muted">{{ b.created_at|dmy }}</td>
+      <td>{{ BONUS_KINDS.get(b.kind, b.kind) }}</td>
+      <td class="num">{{ money(b.amount) }}</td></tr>
+    {% endfor %}
+  </table>
   {% endif %}
   {% if pay_orders %}
   <h3>Счета</h3>

@@ -2863,3 +2863,87 @@ class CrmDB:
             "delete from crm.notice_log "
             "where created_at < now() - make_interval(days => $1)",
             days)).split()[-1] or 0)
+
+    # ─────────────────────── баллы ───────────────────────
+
+    async def grant_bonus(self, *, client_id: int, kind: str, amount: Decimal,
+                          note: str | None = None, ref_id: int | None = None,
+                          by: str | None = None) -> int | None:
+        """Начислить баллы: запись в журнал и повод рядом.
+
+        Обе вставки одной транзакцией. Повторный бонус за отзыв или другу
+        упирается в частичный уникальный индекс - тогда в журнале тоже
+        ничего не появляется, и баланс не поедет.
+        """
+        amount = _money(amount) or Decimal(0)
+        if amount <= 0:
+            return None
+        async with self.pool.acquire() as conn, conn.transaction():
+            ledger_id = int(await conn.fetchval(
+                """
+                insert into crm.ledger (client_id, kind, amount, note, created_by)
+                values ($1, 'bonus', $2, $3, $4) returning id
+                """, client_id, amount, note, by))
+            return int(await conn.fetchval(
+                """
+                insert into crm.bonuses (client_id, kind, amount, ledger_id,
+                                         ref_id, note, created_by)
+                values ($1, $2, $3, $4, $5, $6, $7) returning id
+                """, client_id, kind, amount, ledger_id, ref_id, note, by))
+
+    async def record_bonus(self, *, client_id: int, kind: str, amount: Decimal,
+                           ledger_id: int | None = None,
+                           ref_id: int | None = None, note: str | None = None,
+                           by: str | None = None) -> int:
+        """Повод для уже сделанной записи журнала. Нужен там, где деньги
+        пишет другой метод - например, бонус агенту в одной транзакции
+        с закрытием приглашения."""
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.bonuses (client_id, kind, amount, ledger_id,
+                                     ref_id, note, created_by)
+            values ($1, $2, $3, $4, $5, $6, $7) returning id
+            """, client_id, kind, _money(amount), ledger_id, ref_id, note, by))
+
+    async def bonuses(self, *, client_id: int | None = None,
+                      kind: str | None = None, since: date | None = None,
+                      until: date | None = None, limit: int = 500) -> list[dict]:
+        conds: list[str] = []
+        args: list[Any] = []
+        if client_id is not None:
+            args.append(client_id)
+            conds.append(f"b.client_id = ${len(args)}")
+        if kind:
+            args.append(kind)
+            conds.append(f"b.kind = ${len(args)}")
+        if since:
+            args.append(since)
+            conds.append(f"b.created_at >= ${len(args)}::date")
+        if until:
+            args.append(until)
+            conds.append(f"b.created_at < (${len(args)}::date + interval '1 day')")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"""
+            select b.*, c.full_name, c.phone
+              from crm.bonuses b join crm.clients c on c.id = b.client_id
+             {where} order by b.id desc limit ${len(args)}
+            """, *args))
+
+    async def bonus_of(self, client_id: int, kind: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.bonuses where client_id = $1 and kind = $2 "
+            "order by id desc limit 1", client_id, kind))
+
+    async def payments_total(self, *, since: date, until: date) -> Decimal:
+        """Сумма платежей за период - знаменатель доли баллов."""
+        return _money(await self.pool.fetchval(
+            "select coalesce(sum(amount), 0) from crm.ledger "
+            "where kind = 'payment' and created_at >= $1::date "
+            "and created_at < ($2::date + interval '1 day')",
+            since, until)) or Decimal(0)
+
+    async def referrals_since(self, since: date) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.referrals where created_at >= $1::date", since))

@@ -1623,3 +1623,35 @@ alter table crm.pay_orders add column if not exists work_order_id bigint
   references crm.work_orders (id);
 create index if not exists pay_orders_work_idx
   on crm.pay_orders (work_order_id) where work_order_id is not null;
+
+-- ────────────────────── баллы и отзывы ──────────────────────
+--
+-- Баллы - не деньги, а наша скидка. В журнале они живут записью вида
+-- `bonus`: отдельный вид нужен, чтобы их было видно и чтобы они никогда
+-- не попали в `payment`. Платежи формируют средний чек - бонус завысил
+-- бы его, и три числа парка стали бы врать.
+--
+-- Эта таблица - не копия журнала, а ответ на вопрос «за что начислили».
+-- Баланс по-прежнему считается по `ledger`, здесь только повод.
+create table if not exists crm.bonuses (
+  id         bigserial primary key,
+  client_id  bigint      not null references crm.clients (id),
+  -- referral: агенту за друга; friend: самому другу; review: за отзыв;
+  -- manual: руками, с заметкой оператора.
+  kind       text        not null,
+  amount     numeric(12,2) not null,
+  ledger_id  bigint      references crm.ledger (id),
+  ref_id     bigint      references crm.referrals (id),
+  note       text,
+  created_by text,
+  created_at timestamptz not null default now()
+);
+create index if not exists bonuses_client_idx on crm.bonuses (client_id, id desc);
+create index if not exists bonuses_kind_idx on crm.bonuses (kind, created_at desc);
+-- Бонус за отзыв - один раз на клиента: второй отзыв той же рукой на
+-- той же площадке площадка и сама не примет.
+create unique index if not exists bonuses_review_once
+  on crm.bonuses (client_id) where kind = 'review';
+-- Бонус другу - тоже один: приглашение отрабатывает однократно.
+create unique index if not exists bonuses_friend_once
+  on crm.bonuses (client_id) where kind = 'friend';

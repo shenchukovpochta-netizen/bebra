@@ -36,16 +36,21 @@ from .. import logic as bot_logic
 
 # ─────────────────────────── словари ───────────────────────────
 
+# Виды записей журнала. `bonus` - баллы: они меняют баланс, но платежом
+# не считаются. Средний чек считается по `payment`, и бонус, попавший
+# туда, завысил бы его - а это одно из трёх чисел парка.
 KINDS = {
     "payment": "Платёж",
     "charge": "Начисление",
     "fine": "Штраф / ремонт",
     "refund": "Возврат клиенту",
     "adjust": "Корректировка",
+    "bonus": "Баллы",
 }
 # Знак суммы по виду записи: оператор вводит число без знака, знак
 # ставит система. Корректировка - единственная со свободным знаком.
-KIND_SIGN = {"payment": 1, "charge": -1, "fine": -1, "refund": -1, "adjust": 0}
+KIND_SIGN = {"payment": 1, "charge": -1, "fine": -1, "refund": -1, "adjust": 0,
+             "bonus": 1}
 
 METHODS = {
     "sbp": "СБП", "cash": "Наличные", "card": "Карта",
@@ -3274,6 +3279,12 @@ NOTICES: dict[str, dict[str, Any]] = {
         "title": "Оплачен счёт",
         "hint": "Оператор ждёт этого сообщения, чтобы выдать велосипед.",
     },
+    "ref_spike": {
+        "group": "team", "target": "chat", "hour": 20,
+        "title": "Всплеск приглашений у одного агента",
+        "hint": "Столько друзей за сутки от одного человека стоит "
+                "посмотреть глазами. Система ничего не блокирует.",
+    },
     "part_arrived": {
         "group": "team", "target": "chat", "hour": None,
         "title": "Пришла запчасть, которую ждал наряд",
@@ -3496,3 +3507,123 @@ def orders_unpaid(orders: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             and not o.get("paid_at")]
     return {"count": len(rows),
             "sum": to_money(sum(to_money(o.get("total")) for o in rows))}
+
+
+# ────────────────────── баллы ──────────────────────
+#
+# Баллы - не деньги, а наша скидка. В журнале они живут видом `bonus`,
+# и в средний чек не попадают никогда: чек считается по `payment`.
+
+BONUS_KINDS: dict[str, str] = {
+    "referral": "Агенту за друга",
+    "friend": "Новому клиенту по приглашению",
+    "review": "За опубликованный отзыв",
+    "manual": "Начислено руками",
+}
+# Бонус другу и за отзыв по умолчанию нулевые: обещать клиенту то, чего
+# владелец не назначал, нельзя, а вот бонус агенту программа платила и
+# раньше - его умолчание остаётся.
+FRIEND_BONUS_DEFAULT = Decimal("0.00")
+REVIEW_BONUS_DEFAULT = Decimal("0.00")
+# Сколько друзей у одного агента за сутки - это уже не «рассказал
+# знакомым». Пятеро курьеров в один день от одного человека бывают, но
+# посмотреть на них стоит.
+REF_SPIKE_DEFAULT = 5
+
+
+def bonus_settings(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Настройки баллов поверх настроек реферальной программы."""
+    raw = raw or {}
+
+    def money_or(key: str, default: Decimal) -> Decimal:
+        try:
+            value = to_money(Decimal(str(raw[key])))
+        except (KeyError, ArithmeticError, ValueError, TypeError):
+            return default
+        return value if value >= 0 else default
+
+    def count_or(key: str, default: int) -> int:
+        try:
+            value = int(str(raw[key]))
+        except (KeyError, ValueError, TypeError):
+            return default
+        return value if 1 <= value <= 100 else default
+
+    return {**ref_settings(raw),
+            "friend_bonus": money_or("ref_friend_bonus", FRIEND_BONUS_DEFAULT),
+            "review_bonus": money_or("review_bonus", REVIEW_BONUS_DEFAULT),
+            # Платить только за того, кого в базе ещё не было: иначе
+            # «приведи друга» превращается в «перезаведи соседа».
+            "new_only": str(raw.get("ref_new_only", "1")) not in ("0", "", "false"),
+            "spike": count_or("ref_spike", REF_SPIKE_DEFAULT)}
+
+
+def bonus_promise(settings: Mapping[str, Any]) -> str:
+    """Что бот обещает другу. Суммы нет - и обещать нечего: «условия
+    уточняйте у менеджера» честнее выдуманного числа."""
+    agent = to_money(settings.get("bonus"))
+    friend = to_money(settings.get("friend_bonus"))
+    if agent <= 0 and friend <= 0:
+        return ""
+    parts = []
+    if friend > 0:
+        parts.append(f"вам {money(friend)}")
+    if agent > 0:
+        parts.append(f"другу {money(agent)}")
+    return " и ".join(parts)
+
+
+def is_new_friend(client: Mapping[str, Any] | None,
+                  referral: Mapping[str, Any] | None) -> bool:
+    """Правда ли друг - новый человек, а не давний клиент.
+
+    Карточка старого клиента заведена раньше перехода по ссылке: телефон
+    в базе уникален, поэтому вернувшийся получает ту же карточку, и
+    сравнение дат отвечает точно.
+    """
+    made = (client or {}).get("created_at")
+    clicked = (referral or {}).get("created_at")
+    if not isinstance(made, datetime) or not isinstance(clicked, datetime):
+        return True                      # дат нет - не наказываем клиента
+    return made >= clicked - timedelta(minutes=5)
+
+
+def ref_spikes(referrals: Iterable[Mapping[str, Any]], *,
+               limit: int, today: date | None = None) -> list[dict]:
+    """Агенты, у которых за сутки подозрительно много друзей.
+
+    Система ничего не блокирует: она показывает. Заблокировать честного
+    курьера, который привёл бригаду, дороже, чем разобрать пять строк
+    руками.
+    """
+    today = today or date.today()
+    by_agent: dict[int, int] = {}
+    for ref in referrals:
+        made = ref.get("created_at")
+        day = made.date() if isinstance(made, datetime) else made
+        if day == today and ref.get("agent_id") is not None:
+            by_agent[int(ref["agent_id"])] = by_agent.get(int(ref["agent_id"]), 0) + 1
+    rows = [{"agent_id": agent, "friends": n}
+            for agent, n in by_agent.items() if n >= limit]
+    rows.sort(key=lambda r: -r["friends"])
+    return rows
+
+
+def bonus_totals(entries: Iterable[Mapping[str, Any]],
+                 payments: Any = None) -> dict[str, Any]:
+    """Сколько роздано баллами и какая это доля от оплат.
+
+    Доля нужна, чтобы увидеть, не превратилась ли программа в раздачу:
+    «0,1 % от оплат месяца» - это скидка, «20 %» - это уже бизнес-модель.
+    """
+    rows = list(entries)                 # генератор пройти можно один раз
+    total = to_money(sum(to_money(e.get("amount")) for e in rows))
+    paid = to_money(payments or 0)
+    share = (total * 100 / paid) if paid > 0 else Decimal(0)
+    by_kind: dict[str, Decimal] = {}
+    for entry in rows:
+        code = str(entry.get("kind") or "manual")
+        by_kind[code] = to_money(by_kind.get(code, Decimal(0))
+                                 + to_money(entry.get("amount")))
+    return {"total": total, "share": share.quantize(Decimal("0.1")),
+            "by_kind": by_kind, "count": len(rows)}

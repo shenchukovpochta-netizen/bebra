@@ -156,6 +156,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
+        BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
         COMPANY_FIELDS=company.COMPANY_FIELDS,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
@@ -376,6 +377,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             since=datetime.combine(first, datetime.min.time()).astimezone(),
             until=datetime.now().astimezone())
         soon = logic.freeing_soon(rows, today=today)
+        month_totals = await crm.ledger_totals(since=today.replace(day=1))
         return render(request, "dashboard.html",
                       plan=plan,
                       progress=logic.plan_progress(
@@ -393,7 +395,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       expiring=expiring, before_days=cfg.remind_before_days,
                       forecast=logic.forecast_summary(bikes_by.get("available", 0), soon),
                       debtors=await crm.debtors(10),
-                      month=await crm.ledger_totals(since=today.replace(day=1)))
+                      month=month_totals,
+                      # Доля баллов от оплат: «0,1 %» - это скидка,
+                      # «20 %» - уже бизнес-модель, и это видно сразу.
+                      bonus_share=logic.bonus_totals(
+                          [{"kind": "all", "amount": month_totals.get("bonus", 0)}],
+                          month_totals.get("payment", 0))["share"])
 
     @app.post("/plan")
     async def plan_save(request: Request) -> Response:
@@ -606,7 +613,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       pay_hint=(str(-logic.to_money(balance))
                                 if logic.to_money(balance) < 0 else ""),
                       pay_orders=await crm.pay_orders(client_id=client_id,
-                                                      limit=10))
+                                                      limit=10),
+                      bonuses=await crm.bonuses(client_id=client_id, limit=20))
 
     @app.post("/clients/{client_id}/edit")
     async def client_edit(request: Request, client_id: int) -> Response:
@@ -1697,10 +1705,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         end = datetime.combine(until.value + timedelta(days=1),
                                datetime.min.time(), tzinfo=tz)
         rows = await crm.referrals(since=start, until=end, limit=5000)
+        raw = await crm.settings()
+        grants = await crm.bonuses(since=since.value, until=until.value, limit=2000)
         return render(request, "referrals.html", rows=rows,
                       funnel=logic.ref_funnel(rows), agents=logic.ref_agents(rows),
-                      settings=logic.ref_settings(await crm.settings()),
-                      free_bikes=str((await crm.settings()).get("free_bikes_post", "0"))
+                      settings=logic.bonus_settings(raw),
+                      links=logic.review_links(raw),
+                      bonuses=grants,
+                      totals=logic.bonus_totals(
+                          grants, await crm.payments_total(since=since.value,
+                                                           until=until.value)),
+                      free_bikes=str(raw.get("free_bikes_post", "0"))
                       not in ("0", "", "false"),
                       since=since.value, until=until.value)
 
@@ -1712,18 +1727,70 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         bonus = cost_field(data, "bonus")
         minimum = cost_field(data, "min_payment")
-        for check in (bonus, minimum):
+        friend = cost_field(data, "friend_bonus")
+        review = cost_field(data, "review_bonus")
+        spike = count_field(data, "spike", what="Порог всплеска",
+                            default=str(logic.REF_SPIKE_DEFAULT), limit=100)
+        for check in (bonus, minimum, friend, review, spike):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/reports/referrals")
-        await crm.set_setting("ref_enabled", "1" if data.get("enabled") else "0",
-                              by=who(request))
-        await crm.set_setting("ref_bonus", str(bonus.value), by=who(request))
-        await crm.set_setting("ref_min_payment", str(minimum.value), by=who(request))
+        by = who(request)
+        await crm.set_setting("ref_enabled", "1" if data.get("enabled") else "0", by=by)
+        await crm.set_setting("ref_bonus", str(bonus.value), by=by)
+        await crm.set_setting("ref_min_payment", str(minimum.value), by=by)
+        await crm.set_setting("ref_friend_bonus", str(friend.value), by=by)
+        await crm.set_setting("review_bonus", str(review.value), by=by)
+        await crm.set_setting("ref_new_only",
+                              "1" if data.get("new_only") else "0", by=by)
+        await crm.set_setting("ref_spike", str(spike.value), by=by)
+        for key in logic.REVIEW_SITES:
+            url = (data.get(key) or "").strip()
+            if url and not url.startswith(("http://", "https://")):
+                flash(request, f"{logic.REVIEW_SITES[key]}: ссылка должна "
+                               "начинаться с http:// или https://", "err")
+                return redirect("/reports/referrals")
+            await crm.set_setting(key, url, by=by)
         await crm.set_setting("free_bikes_post", "1" if data.get("free_bikes") else "0",
-                              by=who(request))
+                              by=by)
         flash(request, "Настройки программы сохранены.")
         return redirect("/reports/referrals")
+
+    @app.post("/clients/{client_id}/bonus")
+    async def client_bonus(request: Request, client_id: int) -> Response:
+        """Баллы клиенту: за отзыв или руками.
+
+        Отзыв проверяет человек по скриншоту: у площадок нет ни API, ни
+        обязанности нам отвечать, и правило в коде здесь было бы враньём.
+        """
+        if not logic.can_act(request.state.staff, "money_edit"):
+            return denied(request, "money_edit")
+        client = await crm.client(client_id)
+        if client is None:
+            return render(request, "missing.html", status_code=404, what="Клиент")
+        data = await form(request)
+        back = f"/clients/{client_id}"
+        try:
+            if (data.get("action") or "") == "review":
+                amount = await service.grant_review_bonus(
+                    crm, client, by=who(request))
+            else:
+                got = cost_field(data, "amount")
+                if not got.ok:
+                    flash(request, got.error, "err")
+                    return redirect(back)
+                note = logic.check_note(data.get("note"))
+                if not note.ok:
+                    flash(request, note.error, "err")
+                    return redirect(back)
+                amount = await service.grant_manual_bonus(
+                    crm, client, got.value, note=note.value or "", by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(back)
+        flash(request, f"Начислено баллами: {logic.money(amount)}. "
+                       "Это не платёж — в средний чек они не идут.")
+        return redirect(back)
 
     # ─────────────────────── сотрудники ───────────────────────
 

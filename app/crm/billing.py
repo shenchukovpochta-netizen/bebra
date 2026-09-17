@@ -254,6 +254,34 @@ async def report_silent_estimates(bot: Any, crm: Any, cfg: Any, *,
     return len(rows)
 
 
+async def report_ref_spikes(bot: Any, crm: Any, cfg: Any, *, today: date,
+                            chat_id: Any = None) -> int:
+    """Агенты, у которых за сутки подозрительно много друзей.
+
+    Система показывает, а не блокирует: заблокировать честного курьера,
+    который привёл бригаду, дороже, чем разобрать пять строк руками.
+    """
+    settings = logic.bonus_settings(await crm.settings())
+    rows = logic.ref_spikes(await crm.referrals_since(today),
+                            limit=settings["spike"], today=today)
+    if not rows:
+        return 0
+    lines = [f"👀 Всплеск приглашений: {len(rows)}"]
+    for row in rows[:10]:
+        agent = await crm.client(row["agent_id"])
+        lines.append(f"• {(agent or {}).get('full_name') or row['agent_id']} — "
+                     f"{row['friends']} друзей за сутки")
+    lines.append("Система ничего не заблокировала — посмотрите глазами.")
+    try:
+        await bot.send_message(chat_id or cfg.contract_chat_id, "\n".join(lines))
+        await notices.record(crm, "ref_spike", status="sent")
+    except TelegramAPIError as exc:
+        log.exception("сигнал о всплеске приглашений не доставлен")
+        await notices.record(crm, "ref_spike", status="failed", detail=str(exc))
+        return 0
+    return len(rows)
+
+
 # Сколько дней держать точки трекеров. Две недели назад - это «где он
 # ездил на прошлой неделе», дальше вопросов уже не задают.
 TRACK_KEEP_DAYS = 30
@@ -347,6 +375,16 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
                 log.info("CRM: нарядов молчит на согласовании %s", silent)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: сводка по согласованиям не собрана")
+
+    if due("ref_spike"):
+        notices.mark(done, "ref_spike", today)
+        try:
+            spikes = await report_ref_spikes(bot, crm, cfg, today=today,
+                                             chat_id=chat("ref_spike"))
+            if spikes:
+                log.info("CRM: агентов со всплеском приглашений %s", spikes)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: сигнал о всплеске приглашений не собран")
 
     if due("maintenance_invite"):
         notices.mark(done, "maintenance_invite", today)

@@ -74,6 +74,7 @@ BUTTONS_RU: dict[str, str] = {
     "BTN_CAB_HISTORY": "🧾 История",
     "BTN_CAB_CONTRACT": "📄 Договор",
     "BTN_CAB_FRIENDS": "👥 Мои друзья",
+    "BTN_CAB_REVIEW": "⭐ Оставить отзыв",
     "BTN_CAB_REFRESH": "🔄 Обновить",
     "BTN_CAB_BACK": "◀️ Назад",
 }

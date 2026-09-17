@@ -44,7 +44,8 @@ _DIALOG_STATES = (logic.WAIT_SUPPORT, logic.WAIT_CLOSE_REASON)
 
 KIND_KEY = {
     "payment": "CAB_KIND_PAYMENT", "charge": "CAB_KIND_CHARGE",
-    "fine": "CAB_KIND_FINE", "refund": "CAB_KIND_REFUND", "adjust": "CAB_KIND_ADJUST",
+    "fine": "CAB_KIND_FINE", "refund": "CAB_KIND_REFUND",
+    "adjust": "CAB_KIND_ADJUST", "bonus": "CAB_KIND_BONUS",
 }
 
 
@@ -618,3 +619,30 @@ async def _tell_estimate_answer(bot: Bot, crm: Any, cfg: Config, order: dict,
         return
     await notices.record(crm, "order_answer", status="sent",
                          client_id=client["id"])
+
+
+@router.callback_query(F.data == "cab:review")
+async def cb_review(callback: CallbackQuery, bot: Bot, user: dict,
+                    crm: Any = None) -> None:
+    """Экран отзыва: кнопки площадок из настроек.
+
+    Бонус называем только когда он задан: обещать клиенту сумму, которой
+    владелец не назначал, нельзя.
+    """
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    await callback.answer()
+    lang = i18n.user_lang(user)
+    settings = crm_logic.bonus_settings(await crm.settings())
+    links = crm_logic.review_links(await crm.settings())
+    if not links:
+        await bot.send_message(user["tg_id"], texts.CAB_REVIEW_NONE,
+                               reply_markup=kb.cabinet(lang))
+        return
+    bonus = crm_logic.to_money(settings["review_bonus"])
+    tail = (f"\n\nЗа опубликованный отзыв начислим "
+            f"<b>{crm_logic.money(bonus)}</b> баллами — "
+            f"покажите его менеджеру." if bonus > 0 else "")
+    await bot.send_message(user["tg_id"], texts.CAB_REVIEW.format(bonus=tail),
+                           reply_markup=kb.review_sites(links, lang))

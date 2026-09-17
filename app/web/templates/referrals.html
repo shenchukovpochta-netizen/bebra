@@ -65,16 +65,52 @@
   <h2>Настройки программы</h2>
   <form method="post" action="/reports/referrals" class="grid2">
     <label>Бонус агенту<input name="bonus" value="{{ settings.bonus }}"></label>
+    <label>Бонус новому клиенту<input name="friend_bonus" value="{{ settings.friend_bonus }}"></label>
     <label>Платёж друга не меньше<input name="min_payment" value="{{ settings.min_payment }}"></label>
+    <label>Бонус за отзыв<input name="review_bonus" value="{{ settings.review_bonus }}"></label>
+    <label>Сигнал: друзей у агента за сутки<input name="spike" value="{{ settings.spike }}" size="4"></label>
     <label class="check wide"><input type="checkbox" name="enabled" value="1" {% if settings.enabled %}checked{% endif %}> Программа включена</label>
+    <label class="check wide"><input type="checkbox" name="new_only" value="1" {% if settings.new_only %}checked{% endif %}>
+      Платить только за клиента, которого ещё нет в базе</label>
     <label class="check wide"><input type="checkbox" name="free_bikes" value="1" {% if free_bikes %}checked{% endif %}>
       Публиковать свободные велосипеды в канал раз в сутки</label>
+    <h3 class="wide">Площадки для отзывов</h3>
+    {% for key, title in REVIEW_SITES.items() %}
+    <label class="wide">{{ title }}<input name="{{ key }}" value="{{ (links | selectattr('key', 'equalto', key) | map(attribute='url') | first) or '' }}" placeholder="https://"></label>
+    {% endfor %}
     <button type="submit">Сохранить</button>
   </form>
   <p class="muted">Бонус платится один раз за друга и только с платежа не
     меньше порога: иначе хватило бы перевести сто рублей с собственной карты
-    на карту знакомого. Выключенная программа не показывает клиентам экран
-    «Мои друзья» и новых бонусов не начисляет.</p>
+    на карту знакомого. Галочка «только новый» отсекает второй заход того же
+    человека: карточка старого клиента заведена раньше перехода по ссылке.
+    Сигнал о всплеске ничего не блокирует — он показывает, кого посмотреть
+    глазами.</p>
+  <p class="muted">Пустая ссылка на площадку — площадка не показывается:
+    кнопка в никуда хуже, чем её отсутствие. Бонус за отзыв начисляет
+    оператор в карточке клиента по скриншоту: у площадок нет ни API, ни
+    обязанности нам отвечать.</p>
+</div>
+
+<div class="card">
+  <h2>Роздано баллами
+    <span class="muted">· {{ money(totals.total) }}</span>
+    {% if totals.share %}<span class="muted">· {{ totals.share }} % от оплат периода</span>{% endif %}
+  </h2>
+  <p class="muted">Баллы — не деньги, а наша скидка: в журнале они лежат
+    отдельным видом и в средний чек не идут. Доля нужна, чтобы увидеть,
+    не превратилась ли программа в раздачу.</p>
+  <table>
+    <tr><th>Когда</th><th>Клиент</th><th>За что</th><th class="num">Сумма</th></tr>
+    {% for b in bonuses %}
+    <tr>
+      <td class="nowrap muted">{{ b.created_at|dmy }}</td>
+      <td><a href="/clients/{{ b.client_id }}">{{ b.full_name or '—' }}</a></td>
+      <td>{{ BONUS_KINDS.get(b.kind, b.kind) }}{% if b.note %}<br><small class="muted">{{ b.note }}</small>{% endif %}</td>
+      <td class="num">{{ money(b.amount) }}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">За период баллов не начисляли.</td></tr>{% endfor %}
+  </table>
 </div>
 {% endif %}
 {% endblock %}

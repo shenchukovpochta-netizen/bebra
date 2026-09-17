@@ -40,6 +40,12 @@
   {% if money_ok %}
   <div class="tile"><b>{{ money(month.get('payment', 0)) }}</b><span>поступило за месяц</span></div>
   <div class="tile"><b>{{ money(-(month.get('charge', 0) + month.get('fine', 0))) }}</b><span>начислено за месяц</span></div>
+  {% if month.get('bonus', 0) %}
+  {# Баллы стоят рядом с деньгами, но деньгами не притворяются: подпись
+     говорит, что это скидка, и показывает её долю от оплат. #}
+  <div class="tile"><b>{{ money(month.get('bonus', 0)) }}</b><span>оплачено баллами<br>
+    <small class="muted">{{ bonus_share }} % от оплат месяца · не деньги, наша скидка</small></span></div>
+  {% endif %}
   {% endif %}
 </div>
 

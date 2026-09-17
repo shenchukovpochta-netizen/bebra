@@ -420,10 +420,16 @@ async def ref_paid(crm: Any, client: dict, amount: Decimal, *,
     ref = await crm.referral_of_client(client["id"])
     if ref is None or ref["status"] == "paid":
         return None
-    settings = logic.ref_settings(await crm.settings())
+    settings = logic.bonus_settings(await crm.settings())
     if not settings["enabled"] or settings["bonus"] <= 0:
         return None
     if logic.to_money(amount) < settings["min_payment"]:
+        return None
+    if settings["new_only"] and not logic.is_new_friend(client, ref):
+        # «Приведи друга» - про новых людей. Иначе это «перезаведи
+        # соседа»: карточка старого клиента заведена раньше перехода.
+        log.info("бонус за клиента %s не начислен: он был в базе раньше "
+                 "перехода по ссылке", client.get("id"))
         return None
     agent = await crm.client(ref["agent_id"])
     if agent is None or agent.get("status") != "active":
@@ -434,8 +440,64 @@ async def ref_paid(crm: Any, client: dict, amount: Decimal, *,
         created_by=by)
     if ledger_id is None:
         return None
+    # Повод рядом с записью: «за что начислили» журнал не хранит.
+    try:
+        await crm.record_bonus(client_id=agent["id"], kind="referral",
+                               amount=settings["bonus"], ledger_id=ledger_id,
+                               ref_id=ref["id"], note=note, by=by)
+    except Exception:                                    # noqa: BLE001
+        log.warning("повод бонуса агенту %s не записан", agent["id"],
+                    exc_info=True)
+    friend_bonus = settings["friend_bonus"]
+    if friend_bonus > 0:
+        # Другу - тоже, и один раз: частичный уникальный индекс не даст
+        # начислить второй, сколько бы раз ни звали.
+        try:
+            await crm.grant_bonus(
+                client_id=client["id"], kind="friend", amount=friend_bonus,
+                ref_id=ref["id"], by=by,
+                note=f"Бонус по приглашению от {agent.get('full_name') or agent['id']}")
+        except Exception:                                # noqa: BLE001
+            log.info("бонус другу %s уже начислялся", client.get("id"))
     return {**(await crm.referral_of_client(client["id"]) or {}),
-            "agent": agent, "bonus": settings["bonus"]}
+            "agent": agent, "bonus": settings["bonus"],
+            "friend_bonus": friend_bonus}
+
+
+async def grant_review_bonus(crm: Any, client: dict, *, by: str,
+                             note: str | None = None) -> Decimal | None:
+    """Бонус за опубликованный отзыв. Начисляет человек, посмотрев скриншот.
+
+    Автоматически проверить, что отзыв написан и опубликован, нечем:
+    у площадок нет ни API, ни обязанности нам отвечать. Поэтому кнопка
+    у оператора, а не правило в коде - и один раз на клиента.
+    """
+    settings = logic.bonus_settings(await crm.settings())
+    amount = settings["review_bonus"]
+    if amount <= 0:
+        raise ServiceError("Бонус за отзыв не задан: поставьте сумму "
+                           "в настройках отзывов.")
+    if await crm.bonus_of(client["id"], "review") is not None:
+        raise ServiceError("Бонус за отзыв этому клиенту уже начисляли.")
+    got = await crm.grant_bonus(client_id=client["id"], kind="review",
+                                amount=amount, by=by,
+                                note=note or "Бонус за опубликованный отзыв")
+    return amount if got is not None else None
+
+
+async def grant_manual_bonus(crm: Any, client: dict, amount: Decimal, *,
+                             note: str, by: str) -> Decimal:
+    """Баллы руками: акция, извинение, договорённость.
+
+    Это не платёж: баллы меняют баланс, но в средний чек не идут -
+    иначе одно из трёх чисел парка начало бы врать.
+    """
+    amount = logic.to_money(amount)
+    if amount <= 0:
+        raise ServiceError("Сумма баллов должна быть больше нуля.")
+    await crm.grant_bonus(client_id=client["id"], kind="manual", amount=amount,
+                          note=note or "Начислено руками", by=by)
+    return amount
 
 
 async def receive_parts(crm: Any, *, supplier_id: int | None, lines: list[dict],
