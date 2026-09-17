@@ -35,7 +35,8 @@ WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
 BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location",
                             "bike_id", "rental_id", "cycles", "purchase_price",
-                            "purchased_on", "service_months", "note"})
+                            "purchased_on", "service_months", "note",
+                            "volts", "amp_hours"})
 LOCATION_FIELDS = frozenset({"city", "name", "address", "note", "active", "sort",
                             "public_title", "phone", "hours", "lat", "lon"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
@@ -3106,6 +3107,42 @@ class CrmDB:
                 returning id
                 """, bike_id, by)
             return row is not None
+
+    async def mark_battery_checked(self, battery_id: int, field: str, *, by: str,
+                                   photo: str | None = None) -> None:
+        """Отметить поле паспорта батареи сверенным - слиянием в базе."""
+        mark: dict[str, Any] = {"at": datetime.now(UTC).isoformat(timespec="seconds"),
+                                "by": by}
+        if photo:
+            mark["photo"] = photo
+        await self.pool.execute(
+            "update crm.batteries set "
+            "checked = coalesce(checked, '{}'::jsonb) || $2::jsonb, "
+            "updated_at = now() where id = $1", battery_id, {field: mark})
+
+    async def clear_battery_check(self, battery_id: int, field: str) -> None:
+        await self.pool.execute(
+            "update crm.batteries set checked = coalesce(checked, '{}'::jsonb) - $2, "
+            "updated_at = now() where id = $1", battery_id, field)
+
+    async def commission_battery(self, battery_id: int, *, by: str) -> bool:
+        """Выпустить батарею в оборот. False - она уже не «на сборке»."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            row = await conn.fetchrow(
+                """
+                update crm.batteries set status = 'available',
+                       commissioned_at = now(), commissioned_by = $2,
+                       updated_at = now()
+                 where id = $1 and status = 'new'
+                returning id
+                """, battery_id, by)
+            return row is not None
+
+    async def batteries_on_assembly(self, limit: int = 200) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            f"{self._BATTERY_SELECT} where b.status = 'new' "
+            "order by b.id desc limit $1", limit))
 
     async def bikes_on_assembly(self, limit: int = 200) -> list[dict]:
         return _rows(await self.pool.fetch(

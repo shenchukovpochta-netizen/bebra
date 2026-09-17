@@ -7,6 +7,8 @@
   <label>Номер на корпусе <input name="code" required placeholder="9510001"></label>
   <label>Модель <select name="model_id"><option value="">не указана</option>{% for m in models %}<option value="{{ m.id }}">{{ m.title }}{% if m.capacity %} · {{ m.capacity }} А·ч{% endif %}</option>{% endfor %}</select></label>
   <label>Серийный номер <input name="serial_no"></label>
+  <label>Напряжение по табличке, В <input name="volts" inputmode="numeric" placeholder="60"></label>
+  <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal" placeholder="70"></label>
   <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
   <label>Цена покупки <input name="purchase_price"></label>
   <label>Куплена <input type="date" name="purchased_on"></label>

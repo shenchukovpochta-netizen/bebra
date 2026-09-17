@@ -144,6 +144,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
         DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
         BIKE_PASSPORT=logic.BIKE_PASSPORT,
+        BATTERY_PASSPORT=logic.BATTERY_PASSPORT,
         STOCK_STALE_DAYS=logic.STOCK_STALE_DAYS,
         NOTICE_TARGETS=logic.NOTICE_TARGETS,
         NOTICE_STATUSES=logic.NOTICE_STATUSES,
@@ -859,7 +860,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, f"{logic.BIKE_PASSPORT[field]}: сверка снята.")
             else:
                 field = str(data.get("field") or "")
-                photo = await save_bike_photo(bike, field, data.get("photo"))
+                photo = await save_check_photo("bike", bike, field,
+                                               data.get("photo"))
                 await service.check_bike_field(crm, bike, field,
                                                by=who(request), photo=photo)
                 flash(request, f"{logic.BIKE_PASSPORT.get(field, field)}: сверено.")
@@ -867,11 +869,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, str(exc), "err")
         return redirect(back)
 
-    async def save_bike_photo(bike: dict, field: str, upload: Any) -> str | None:
-        """Снимок сверки на диск. Возвращает путь или None, если не прислали.
+    async def save_check_photo(prefix: str, row: dict, field: str,
+                               upload: Any) -> str | None:
+        """Снимок сверки на диск. Возвращает имя или None, если не прислали.
 
-        Имя собираем сами из номера велосипеда и поля: имя из браузера -
-        это чужая строка, и «../../etc/passwd» в ней не шутка.
+        Имя собираем сами из вида техники, её номера и поля: имя из
+        браузера - это чужая строка, и «../../etc/passwd» в ней не шутка.
+        Префикс разводит велосипед и батарею: номера у них свои, и без
+        него батарея № 7 затёрла бы снимок велосипеда № 7.
         """
         filename = getattr(upload, "filename", "") or ""
         if not filename:
@@ -889,7 +894,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         folder = Path(cfg.bike_photo_dir)
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            name = f"{int(bike['id'])}-{field}{suffix}"
+            name = f"{prefix}-{int(row['id'])}-{field}{suffix}"
             (folder / name).write_bytes(raw)
         except OSError as err:
             log.warning("снимок сверки не сохранён: %s", err)
@@ -3083,7 +3088,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         location = logic.check_location(data.get("location"), await location_names())
         months = data.get("service_months") or "15"
         cycles = count_field(data, "cycles", what="Циклы", default="0", limit=99999)
-        for check in (code, note, price, bought, location, cycles):
+        volts = logic.check_volts(data.get("volts"))
+        amps = logic.check_amp_hours(data.get("amp_hours"))
+        for check in (code, note, price, bought, location, cycles, volts, amps):
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
@@ -3095,7 +3102,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "serial_no": (data.get("serial_no") or "").strip() or None,
                 "location": location.value, "purchase_price": price.value,
                 "purchased_on": bought.value, "service_months": int(months),
-                "cycles": cycles.value, "note": note.value}
+                "cycles": cycles.value, "note": note.value,
+                "volts": volts.value, "amp_hours": amps.value}
 
     @app.post("/batteries")
     async def battery_create(request: Request) -> Response:
@@ -3104,8 +3112,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         fields = await battery_fields(request, await form(request))
         if fields is None:
             return redirect("/batteries/new")
+        # Новая батарея заводится «на сборке», если владелец требует
+        # сверку: недособранную выдавать нечего. Требование снято -
+        # заводится сразу свободной, как было раньше.
+        checks = logic.bike_check_settings(await crm.settings())
         try:
-            battery_id = await crm.create_battery(by=who(request), **fields)
+            battery_id = await crm.create_battery(
+                by=who(request), status="new" if checks["required"] else "available",
+                **fields)
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "Батарея с таким номером уже есть.", "err")
@@ -3124,7 +3138,55 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       log=await crm.battery_status_log(battery_id),
                       models=await crm.battery_models(active_only=True),
                       locations=await location_names(),
+                      checks=logic.battery_check_state(battery,
+                                                       await crm.settings()),
                       amortization=logic.battery_amortization(battery))
+
+    @app.post("/batteries/{battery_id}/check")
+    async def battery_check(request: Request, battery_id: int) -> Response:
+        """Сверка поля паспорта батареи и ввод её в эксплуатацию."""
+        if not may_edit(request, "batteries"):
+            return denied(request, "batteries")
+        battery = await crm.battery(battery_id)
+        if battery is None:
+            return render(request, "missing.html", status_code=404, what="Батарея")
+        data = await request.form()
+        action = str(data.get("action") or "")
+        back = f"/batteries/{battery_id}"
+        try:
+            if action == "commission":
+                await service.commission_battery(crm, battery, by=who(request))
+                flash(request, f"Аккумулятор № {battery['code']} в обороте.")
+            elif action == "clear":
+                field = str(data.get("field") or "")
+                if field not in logic.BATTERY_PASSPORT:
+                    flash(request, "Неизвестное поле паспорта.", "err")
+                    return redirect(back)
+                await crm.clear_battery_check(battery_id, field)
+                flash(request, f"{logic.BATTERY_PASSPORT[field]}: сверка снята.")
+            else:
+                field = str(data.get("field") or "")
+                photo = await save_check_photo("akb", battery, field,
+                                               data.get("photo"))
+                await service.check_battery_field(crm, battery, field,
+                                                  by=who(request), photo=photo)
+                flash(request, f"{logic.BATTERY_PASSPORT.get(field, field)}: сверено.")
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+        return redirect(back)
+
+    @app.get("/batteries/{battery_id}/photo/{field}")
+    async def battery_photo(request: Request, battery_id: int, field: str) -> Response:
+        if not may_view(request, "batteries"):
+            return denied(request, "batteries")
+        battery = await crm.battery(battery_id)
+        marks = (battery or {}).get("checked") or {}
+        mark = marks.get(field) if isinstance(marks, dict) else None
+        name = (mark or {}).get("photo") if isinstance(mark, dict) else None
+        path = Path(cfg.bike_photo_dir) / str(name or "")
+        if not name or not path.is_file():
+            return render(request, "missing.html", status_code=404, what="Снимок")
+        return FileResponse(path)
 
     @app.post("/batteries/{battery_id}/edit")
     async def battery_edit(request: Request, battery_id: int) -> Response:
@@ -3155,6 +3217,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if battery["status"] == "rented":
             flash(request, "Батарея у клиента: её снимает возврат или замена, "
                            "а не смена статуса.", "err")
+            return redirect(f"/batteries/{battery_id}")
+        if battery["status"] == "new":
+            flash(request, "Батарея на сборке: из этого состояния её выводит "
+                           "только кнопка «Ввести в эксплуатацию».", "err")
             return redirect(f"/batteries/{battery_id}")
         await crm.update_battery(battery_id, status=status.value, by=who(request))
         flash(request, f"Статус: {logic.BATTERY_STATUSES[status.value]}.")
@@ -3851,11 +3917,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "settings")
         settings = await crm.settings()
         rows = await crm.bikes_on_assembly()
+        cells = await crm.batteries_on_assembly()
         return render(request, "intake.html",
                       checks=logic.bike_check_settings(settings),
                       search=logic.search_settings(settings),
                       rows=[{**b, "state": logic.bike_check_state(b, settings)}
-                            for b in rows])
+                            for b in rows],
+                      cells=[{**b, "state": logic.battery_check_state(b, settings)}
+                             for b in cells])
 
     @app.post("/intake")
     async def intake_save(request: Request) -> Response:

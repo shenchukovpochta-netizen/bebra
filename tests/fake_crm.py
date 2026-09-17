@@ -1616,6 +1616,8 @@ class FakeCrm:
             "status": "available", "location": None, "bike_id": None,
             "rental_id": None, "cycles": 0, "purchase_price": None,
             "purchased_on": None, "service_months": 15, "note": None,
+            "volts": None, "amp_hours": None, "checked": {},
+            "commissioned_at": None, "commissioned_by": None,
             "created_at": self._now(), "updated_at": self._now(), **fields}
         self._log_battery(battery_id, None, self.batteries_[battery_id]["status"], by)
         return battery_id
@@ -2426,6 +2428,40 @@ class FakeCrm:
         bike["commissioned_at"] = self._now()
         bike["commissioned_by"] = by
         return True
+
+    async def mark_battery_checked(self, battery_id, field, *, by, photo=None):
+        battery = self.batteries_.get(battery_id)
+        if battery is None:
+            return
+        mark = {"at": self._now().isoformat(timespec="seconds"), "by": by}
+        if photo:
+            mark["photo"] = photo
+        battery["checked"] = {**(battery.get("checked") or {}), field: mark}
+
+    async def clear_battery_check(self, battery_id, field):
+        battery = self.batteries_.get(battery_id)
+        if battery is not None:
+            battery["checked"] = {k: v for k, v
+                                  in (battery.get("checked") or {}).items()
+                                  if k != field}
+
+    async def commission_battery(self, battery_id, *, by):
+        battery = self.batteries_.get(battery_id)
+        if battery is None or battery.get("status") != "new":
+            return False
+        await self.update_battery(battery_id, status="available", by=by)
+        battery["commissioned_at"] = self._now()
+        battery["commissioned_by"] = by
+        return True
+
+    async def batteries_on_assembly(self, limit=200):
+        rows = [dict(b) for b in self.batteries_.values()
+                if b.get("status") == "new"]
+        for row in rows:
+            model = self.battery_models_.get(row.get("model_id")) or {}
+            row["model_title"] = model.get("title")
+        rows.sort(key=lambda b: -b["id"])
+        return rows[:limit]
 
     async def bikes_on_assembly(self, limit=200):
         rows = [dict(b) for b in self.bikes_.values() if b.get("status") == "new"]

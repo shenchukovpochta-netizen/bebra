@@ -1403,6 +1403,55 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                      kind="battery")
         self.assertEqual(len(await self.crm.tariffs(kind="battery")), 1)
 
+    async def test_battery_passport_on_postgres(self):
+        """Сверка батареи на живой базе: отметки сливаются, не затирая."""
+        await self.seed()
+        model_id = await self.crm.create_battery_model(
+            title="Аккумулятор 70 Ач", brand=None, voltage=60, capacity=D("70"),
+            price=D("12000"), service_months=15, note=None)
+        battery_id = await self.crm.create_battery(
+            code="9510001", model_id=model_id, serial_no="SN-1", volts=60,
+            amp_hours=D("70"), status="new", by="staff:t")
+        battery = await self.crm.battery(battery_id)
+        state = logic.battery_check_state(battery, {})
+        self.assertTrue(state["new"])
+        self.assertEqual(len(state["left"]), len(logic.BATTERY_PASSPORT))
+
+        # jsonb правится слиянием: соседние поля не затирают друг друга.
+        await self.crm.mark_battery_checked(battery_id, "code", by="staff:a")
+        await self.crm.mark_battery_checked(battery_id, "serial_no", by="staff:b",
+                                            photo="akb-1-serial_no.jpg")
+        marks = (await self.crm.battery(battery_id))["checked"]
+        self.assertEqual(set(marks), {"code", "serial_no"})
+        self.assertEqual(marks["serial_no"]["photo"], "akb-1-serial_no.jpg")
+
+        # Пока не сверено всё - в оборот не выходит.
+        with self.assertRaises(service.ServiceError):
+            await service.commission_battery(
+                self.crm, await self.crm.battery(battery_id), by="staff:t")
+        for field in ("model", "volts", "amp_hours"):
+            await self.crm.mark_battery_checked(battery_id, field, by="staff:t")
+        await service.commission_battery(
+            self.crm, await self.crm.battery(battery_id), by="staff:t")
+        row = await self.crm.battery(battery_id)
+        self.assertEqual(row["status"], "available")
+        self.assertIsNotNone(row["commissioned_at"])
+        # Смену статуса пишет триггер, автор - из set_config.
+        log = await self.crm.battery_status_log(battery_id)
+        self.assertEqual(log[0]["to_status"], "available")
+        self.assertEqual(log[0]["changed_by"], "staff:t")
+
+        await self.crm.clear_battery_check(battery_id, "code")
+        self.assertNotIn("code", (await self.crm.battery(battery_id))["checked"])
+
+    async def test_battery_columns_survive_reapply(self):
+        await self.seed()
+        battery_id = await self.crm.create_battery(code="9510002", status="new")
+        await Database(self.pool).apply_schema(SCHEMA)
+        row = await self.crm.battery(battery_id)
+        self.assertEqual(row["status"], "new")
+        self.assertEqual(row["checked"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

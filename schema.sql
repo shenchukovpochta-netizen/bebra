@@ -1767,3 +1767,23 @@ create index if not exists rental_extras_idx
 create unique index if not exists rental_extras_battery_once
   on crm.rental_extras (rental_id, battery_id)
   where removed_at is null and battery_id is not null;
+
+-- ────── паспорт аккумулятора и его сверка ──────
+--
+-- У велосипеда сверка появилась раньше: номер наклейки, серийный номер,
+-- госномер, трекер. У батареи ровно та же беда - её заводят с накладной,
+-- не глядя на корпус, а потом ищут «ту самую 70 Ач» по всему складу.
+--
+-- Напряжение и ёмкость ЗДЕСЬ, а не только в каталоге модели: в каталоге
+-- лежит паспорт модели, а на корпусе - табличка конкретной батареи, и
+-- они расходятся чаще, чем хотелось бы. Сверяют то, что на корпусе.
+
+alter table crm.batteries add column if not exists volts     integer;
+alter table crm.batteries add column if not exists amp_hours numeric(6,2);
+-- Отметки сверки: поле паспорта -> {at, by, photo}. jsonb, а не таблица:
+-- полей пять, они меняются вместе с формой, и отдельная таблица на пять
+-- строк - это join ради join.
+alter table crm.batteries add column if not exists checked jsonb not null
+  default '{}'::jsonb;
+alter table crm.batteries add column if not exists commissioned_at timestamptz;
+alter table crm.batteries add column if not exists commissioned_by text;

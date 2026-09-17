@@ -1,0 +1,61 @@
+{# Паспорт и сверка: один блок на велосипед и на аккумулятор.
+   Принимает: passport (состояние сверки), base (адрес карточки),
+   section (раздел прав), what (как называть технику в тексте),
+   commissioned_at / commissioned_by. Два одинаковых блока в двух
+   шаблонах разъезжаются на первой же правке, поэтому он один. #}
+<section class="card">
+  <h2>Паспорт и сверка
+    {% if passport.new %}<span class="tag">на сборке</span>
+    {% elif passport.done %}<span class="tag ok">сверен</span>
+    {% else %}<span class="tag bad">не сверен</span>{% endif %}
+  </h2>
+  <table>
+    <tr><th>Поле</th><th>Что в нём</th><th>Сверено</th><th></th></tr>
+    {% for r in passport.rows %}
+    <tr>
+      <td>{{ r.title }}</td>
+      <td>{% if r.filled %}{{ r.value }}{% else %}<span class="muted">не заполнено</span>{% endif %}</td>
+      <td>{% if r.ok %}<span class="tag ok">✓ {{ r.at[:10] }}</span>
+        {% if r.photo %}<br><a href="{{ base }}/photo/{{ r.field }}" target="_blank" rel="noopener">снимок</a>{% endif %}
+        {% elif r.at %}<span class="tag bad">нужен снимок</span>
+        {% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="actions nowrap">
+        {% if can_edit(staff, section) %}
+        {% if r.ok %}
+        <form method="post" action="{{ base }}/check" class="inline-form">
+          <input type="hidden" name="field" value="{{ r.field }}">
+          <button type="submit" name="action" value="clear" class="ghost">Снять</button>
+        </form>
+        {% else %}
+        <form method="post" action="{{ base }}/check" class="inline-form"
+              enctype="multipart/form-data">
+          <input type="hidden" name="field" value="{{ r.field }}">
+          {% if r.needs_photo %}<input type="file" name="photo" accept="image/*" capture="environment">{% endif %}
+          <button type="submit" name="action" value="check" class="ghost">Сверено</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if passport.new %}
+  {% if can_edit(staff, section) %}
+  <form method="post" action="{{ base }}/check" class="inline-form">
+    <button type="submit" name="action" value="commission"
+      {% if not passport.can_commission %}disabled{% endif %}>Ввести в эксплуатацию</button>
+  </form>
+  {% endif %}
+  {% if passport.left %}
+  <p class="flash {{ 'err' if passport.required else '' }}">Не сверено:
+    {{ passport.left|join(', ') }}.
+    {% if passport.required %}Пока не сверено, {{ what }} в оборот не выйдет.
+    {% else %}Сверка не требуется настройкой — список остаётся подсказкой.{% endif %}</p>
+  {% endif %}
+  <p class="muted">Из «нового на сборке» техника выходит только этой
+    кнопкой: она не попадает ни в выдачу, ни в операционный парк, и
+    простоем не считается — недособранное в убыток записывать незачем.</p>
+  {% elif commissioned_at %}
+  <p class="muted">В обороте с {{ commissioned_at|dmy }}{% if commissioned_by %} · {{ commissioned_by }}{% endif %}.</p>
+  {% endif %}
+</section>

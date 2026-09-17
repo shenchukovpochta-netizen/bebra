@@ -215,13 +215,26 @@ class TestBatteryPanel(tw.WebCase):
             title="48V 20Ah", brand="Sanyo", voltage=48, capacity=D(20),
             price=D(9000), service_months=15, note=None))
 
-    def create(self, **over):
+    def create(self, *, commission=True, **over):
+        """Завести батарею. Новая заводится «на сборке»: по умолчанию тут
+        же выпускаем её в оборот, потому что почти всем тестам ниже нужна
+        батарея, которую можно выдать."""
         data = {"code": "A-1", "model_id": str(self.model_id), "serial_no": "SN-1",
                 "location": "Павлюхина", "purchase_price": "9000",
                 "purchased_on": (date.today() - timedelta(days=200)).isoformat(),
-                "service_months": "15", "cycles": "0", "note": ""}
+                "service_months": "15", "cycles": "0", "note": "",
+                "volts": "60", "amp_hours": "70"}
         data.update(over)
-        return self.client.post("/batteries", data=data)
+        r = self.client.post("/batteries", data=data)
+        tail = r.headers.get("location", "").rsplit("/", 1)[-1]
+        if commission and r.status_code == 303 and tail.isdigit():
+            battery_id = int(tail)
+            for field in logic.BATTERY_PASSPORT:
+                self.client.post(f"/batteries/{battery_id}/check",
+                                 data={"field": field, "action": "check"})
+            self.client.post(f"/batteries/{battery_id}/check",
+                             data={"action": "commission"})
+        return r
 
     def test_battery_is_created_and_shown_in_the_list(self):
         r = self.create()

@@ -8,7 +8,9 @@
 <section class="card">
   <h2>Карточка</h2>
   <dl>
-    <dt>Модель</dt><dd>{{ battery.model_title or '—' }}{% if battery.voltage %} · {{ battery.voltage }} В{% endif %}{% if battery.capacity %} · {{ battery.capacity }} А·ч{% endif %}</dd>
+    <dt>Модель</dt><dd>{{ battery.model_title or '—' }}{% if battery.voltage %} · {{ battery.voltage }} В{% endif %}{% if battery.capacity %} · {{ battery.capacity }} А·ч{% endif %}
+      <br><small class="muted">по каталогу модели</small></dd>
+    <dt>По табличке</dt><dd>{% if battery.volts or battery.amp_hours %}{% if battery.volts %}{{ battery.volts }} В{% endif %}{% if battery.volts and battery.amp_hours %} · {% endif %}{% if battery.amp_hours %}{{ battery.amp_hours }} А·ч{% endif %}{% else %}<span class="muted">не переписана с корпуса</span>{% endif %}</dd>
     <dt>Серийный номер</dt><dd>{{ battery.serial_no or '—' }}</dd>
     <dt>Где</dt><dd>{% if battery.bike_code %}в велосипеде <a href="/bikes/{{ battery.bike_id }}">№ {{ battery.bike_code }}</a>{% else %}{{ battery.location or 'не на точке' }}{% endif %}</dd>
     <dt>У кого</dt><dd>{% if battery.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ battery.client_id }}">{{ battery.client_name }}</a>{% else %}{{ battery.client_name }}{% endif %}{% else %}—{% endif %}</dd>
@@ -22,12 +24,25 @@
   </dl>
 
   {% if can_edit(staff, 'batteries') %}
+  {% if battery.status == 'new' %}
+  <p class="muted">Аккумулятор на сборке: в оборот его выпускает кнопка
+    «Ввести в эксплуатацию» — она проверяет сверку, а список статусов нет.</p>
+  {% elif battery.status == 'rented' %}
+  <p class="muted">Батарея у клиента: её снимает возврат или замена.</p>
+  {% else %}
   <form method="post" action="/batteries/{{ battery.id }}/status" class="inline-form">
     <select name="status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if battery.status == code %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select>
     <button type="submit" class="ghost">Сменить статус</button>
   </form>
   {% endif %}
+  {% endif %}
 </section>
+
+{% with passport=checks, base="/batteries/" ~ battery.id, section="batteries",
+        what="аккумулятор", commissioned_at=battery.commissioned_at,
+        commissioned_by=battery.commissioned_by %}
+{% include "_passport.html" %}
+{% endwith %}
 
 <section class="card">
   <h2>Журнал статусов</h2>
@@ -50,6 +65,8 @@
     <label>Номер на корпусе <input name="code" value="{{ battery.code }}" required></label>
     <label>Модель <select name="model_id"><option value="">не указана</option>{% for m in models %}<option value="{{ m.id }}" {% if battery.model_id == m.id %}selected{% endif %}>{{ m.title }}</option>{% endfor %}</select></label>
     <label>Серийный номер <input name="serial_no" value="{{ battery.serial_no or '' }}"></label>
+    <label>Напряжение по табличке, В <input name="volts" inputmode="numeric" value="{{ battery.volts or '' }}" placeholder="60"></label>
+    <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal" value="{{ battery.amp_hours or '' }}" placeholder="70"></label>
     <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}" {% if battery.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <label>Цена покупки <input name="purchase_price" value="{{ battery.purchase_price if battery.purchase_price is not none else '' }}"></label>
     <label>Куплена <input type="date" name="purchased_on" value="{{ battery.purchased_on|iso if battery.purchased_on else '' }}"></label>

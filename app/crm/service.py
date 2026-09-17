@@ -1425,6 +1425,39 @@ async def commission_bike(crm: Any, bike: dict, *, by: str) -> None:
         raise ServiceError("Велосипед уже выпустил кто-то другой.")
 
 
+async def commission_battery(crm: Any, battery: dict, *, by: str) -> None:
+    """Выпустить батарею в оборот - по тем же правилам, что велосипед."""
+    if battery.get("status") != "new":
+        raise ServiceError("Аккумулятор уже в обороте.")
+    state = logic.battery_check_state(battery, await crm.settings())
+    if not state["can_commission"]:
+        raise ServiceError("Не сверено: " + ", ".join(state["left"])
+                           + ". Подтвердите поля паспорта или снимите "
+                             "требование сверки в настройках.")
+    if not await crm.commission_battery(battery["id"], by=by):
+        raise ServiceError("Аккумулятор уже выпустил кто-то другой.")
+
+
+async def check_battery_field(crm: Any, battery: dict, field: str, *, by: str,
+                              photo: str | None = None) -> None:
+    """Отметить поле паспорта батареи сверенным."""
+    if field not in logic.BATTERY_PASSPORT:
+        raise ServiceError("Неизвестное поле паспорта.")
+    if not logic.battery_field_value(battery, field):
+        raise ServiceError(f"{logic.BATTERY_PASSPORT[field]}: поле пустое — "
+                           "сверять нечего.")
+    settings = await crm.settings()
+    if (logic.bike_check_settings(settings)["photo"]
+            and field in logic.BATTERY_PHOTO_FIELDS and not photo):
+        marks = battery.get("checked") or {}
+        was = marks.get(field) if isinstance(marks, dict) else None
+        if not (isinstance(was, dict) and was.get("photo")):
+            raise ServiceError(f"{logic.BATTERY_PASSPORT[field]}: нужен снимок. "
+                               "Фотография доказывает, что человек смотрел "
+                               "на технику, а не переписал номер из накладной.")
+    await crm.mark_battery_checked(battery["id"], field, by=by, photo=photo)
+
+
 async def check_bike_field(crm: Any, bike: dict, field: str, *, by: str,
                            photo: str | None = None) -> None:
     """Отметить поле паспорта сверенным.

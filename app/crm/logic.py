@@ -2305,13 +2305,17 @@ def purchase_codes(raw: Any, *, limit: int = 100) -> tuple[list[str], str]:
 # ───────────────── справочники: точки, модели, батареи ─────────────────
 
 BATTERY_STATUSES: dict[str, str] = {
+    "new": "Новая на сборке",
     "available": "Свободна", "rented": "У клиента", "repair": "В ремонте",
     "maintenance": "На ТО", "lost": "Утеряна", "written_off": "Списана",
 }
 # Статусы, которые ставит оператор. rented - только через выдачу, как
-# и у велосипеда: батарея уходит вместе с ним.
+# и у велосипеда: батарея уходит вместе с ним. new снимает только ввод
+# в эксплуатацию: недособранную батарею выдавать нечего.
 BATTERY_MANUAL_STATUSES = ("available", "repair", "maintenance", "lost",
                            "written_off")
+# На сборке батарея в оборот не входит и в счёт парка не идёт: писать
+# недособранную технику в наличие значит обещать клиенту то, чего нет.
 BATTERY_OPERATIONAL = ("available", "rented", "repair", "maintenance")
 # Циклов, после которых батарею пора смотреть: ёмкость к этому моменту
 # заметно просела, и клиент начинает жаловаться на «не доезжает».
@@ -3881,6 +3885,96 @@ def bike_check_state(bike: Mapping[str, Any],
             # сверку не требует: список тогда остаётся подсказкой.
             "can_commission": (not left) or not required,
             "new": str(bike.get("status") or "") == "new"}
+
+
+# ────────────────── паспорт аккумулятора ──────────────────
+#
+# У велосипеда сверяют раму и наклейку, у батареи - корпус и табличку.
+# Правила те же и настройки те же: «ввод техники» один на всю технику,
+# заводить вторую страницу настроек ради второго вида железа незачем.
+
+BATTERY_PASSPORT: dict[str, str] = {
+    "model": "Модель и бренд",
+    "code": "Номер наклейки",
+    "serial_no": "Серийный номер (на корпусе)",
+    "volts": "Напряжение по табличке",
+    "amp_hours": "Ёмкость по табличке",
+}
+# Табличка и серийный номер - то, что переписывают из накладной чаще
+# всего. Модель и наклейку видно и так.
+BATTERY_PHOTO_FIELDS = ("serial_no", "amp_hours")
+
+
+def battery_field_value(battery: Mapping[str, Any], field: str) -> str:
+    """Что сверяем в этом поле. Модель приходит из каталога."""
+    if field == "model":
+        return str(battery.get("model_title") or "").strip()
+    value = battery.get(field)
+    if field in ("volts", "amp_hours"):
+        return "" if value in (None, "") else str(value)
+    return str(value or "").strip()
+
+
+def battery_checks(battery: Mapping[str, Any],
+                   settings: Mapping[str, Any] | None = None) -> list[dict]:
+    """Строки сверки паспорта батареи: поле, значение и отметка."""
+    checked = battery.get("checked")
+    checked = checked if isinstance(checked, Mapping) else {}
+    photo_needed = bike_check_settings(settings)["photo"]
+    rows = []
+    for field, title in BATTERY_PASSPORT.items():
+        mark = checked.get(field)
+        mark = mark if isinstance(mark, Mapping) else {}
+        value = battery_field_value(battery, field)
+        needs_photo = photo_needed and field in BATTERY_PHOTO_FIELDS
+        rows.append({
+            "field": field, "title": title, "value": value,
+            "filled": bool(value),
+            "at": mark.get("at"), "by": mark.get("by"), "photo": mark.get("photo"),
+            "needs_photo": needs_photo,
+            "ok": bool(mark.get("at")) and bool(value)
+            and (not needs_photo or bool(mark.get("photo"))),
+        })
+    return rows
+
+
+def battery_check_state(battery: Mapping[str, Any],
+                        settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    rows = battery_checks(battery, settings)
+    left = [r["title"] for r in rows if not r["ok"]]
+    required = bike_check_settings(settings)["required"]
+    return {"rows": rows, "left": left, "done": not left,
+            "required": required,
+            "can_commission": (not left) or not required,
+            "new": str(battery.get("status") or "") == "new"}
+
+
+def check_volts(raw: Any) -> Check:
+    """Напряжение по табличке: 24-96 В. Вне этого - опечатка."""
+    text = str(raw or "").strip().replace(",", ".")
+    if not text:
+        return Check(True, None)
+    try:
+        value = int(float(text))
+    except ValueError:
+        return Check(False, error="Напряжение: только число, вольты.")
+    if not 24 <= value <= 96:
+        return Check(False, error="Напряжение: от 24 до 96 В.")
+    return Check(True, value)
+
+
+def check_amp_hours(raw: Any) -> Check:
+    """Ёмкость по табличке, А·ч. Ноль - это не ёмкость."""
+    text = str(raw or "").strip().replace(",", ".")
+    if not text:
+        return Check(True, None)
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return Check(False, error="Ёмкость: только число, ампер-часы.")
+    if not Decimal(1) <= value <= Decimal(500):
+        return Check(False, error="Ёмкость: от 1 до 500 А·ч.")
+    return Check(True, value.quantize(Decimal("0.01")))
 
 
 def check_plate(raw: Any) -> Check:

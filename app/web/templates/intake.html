@@ -60,5 +60,25 @@
     операционный парк и простоем не считается: записывать недособранный
     велосипед в убыток незачем.</p>
 </section>
+
+<section class="card">
+  <h2>Аккумуляторы на сборке <span class="muted">· {{ cells|length }}</span></h2>
+  <table>
+    <tr><th>Номер</th><th>Модель</th><th>Сверка</th></tr>
+    {% for b in cells %}
+    <tr>
+      <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
+      <td>{{ b.model_title or '—' }}</td>
+      <td>{% if b.state.done %}<span class="tag ok">готов к выпуску</span>
+        {% else %}<span class="muted">{{ b.state.left|join(', ') }}</span>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="3" class="muted">Ничего не собирается —
+      все аккумуляторы в обороте.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">У батареи сверяют корпус и табличку: модель, номер
+    наклейки, серийный номер, напряжение и ёмкость. В каталоге лежит
+    паспорт модели, а на корпусе — табличка конкретной батареи, и они
+    расходятся чаще, чем хотелось бы.</p>
+</section>
 </div>
 {% endblock %}
