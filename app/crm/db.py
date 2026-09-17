@@ -21,6 +21,7 @@ BIKE_FIELDS = frozenset({
     "code", "model", "frame_no", "motor_no", "battery_count", "status",
     "purchase_price", "purchased_on", "note", "location", "service_months",
     "residual_price", "battery_price", "battery_service_months", "mileage_km",
+    "spare",
 })
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
@@ -1643,3 +1644,88 @@ class CrmDB:
             group by o.id, o.no, b.code, i.node, n.title, p.id, p.title
             order by o.no
             """))
+
+    # ─────────────────── замена велосипеда в аренде ───────────────────
+
+    async def rental_bikes(self, rental_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            """
+            select rb.*, b.code as bike_code, b.model as bike_model,
+                   b.status as bike_status, b.mileage_km as bike_mileage
+            from crm.rental_bikes rb join crm.bikes b on b.id = rb.bike_id
+            where rb.rental_id = $1 order by rb.id
+            """, rental_id))
+
+    async def open_rental_bike(self, rental_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.rental_bikes where rental_id = $1 "
+            "and returned_on is null order by id desc limit 1", rental_id))
+
+    async def add_rental_bike(self, rental_id: int, *, bike_id: int, issued_on: date,
+                              mileage_start: int | None, reason: str | None,
+                              created_by: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.rental_bikes (rental_id, bike_id, issued_on,
+                                          mileage_start, reason, created_by)
+            values ($1, $2, $3, $4, $5, $6) returning id
+            """, rental_id, bike_id, issued_on, mileage_start, reason, created_by))
+
+    async def swap_rental_bike(self, rental_id: int, *, old_bike_id: int | None,
+                               new_bike_id: int, old_status: str,
+                               mileage_old: int | None, mileage_new: int | None,
+                               reason: str, today: date, by: str) -> bool:
+        """Замена велосипеда внутри аренды - одной транзакцией.
+
+        Снять старый, выдать новый и переписать аренду по отдельности
+        нельзя: сбой между запросами оставил бы клиента без велосипеда
+        либо с двумя, а деньги аренды - на снятом.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            rental = await conn.fetchrow(
+                "select bike_id, started_on, mileage_start, status from crm.rentals "
+                "where id = $1 for update", rental_id)
+            if rental is None or rental["status"] != "active":
+                return False
+            if rental["bike_id"] != old_bike_id:
+                return False          # велосипед уже сменили в другом окне
+            if old_bike_id is not None:
+                # Журнал мог не застать выдачу (аренда старше замены) -
+                # тогда открываем строку задним числом по данным аренды.
+                open_row = await conn.fetchrow(
+                    "select id from crm.rental_bikes where rental_id = $1 "
+                    "and returned_on is null order by id desc limit 1", rental_id)
+                if open_row is None:
+                    await conn.execute(
+                        """
+                        insert into crm.rental_bikes (rental_id, bike_id, issued_on,
+                                                      mileage_start, reason, created_by)
+                        values ($1, $2, $3, $4, 'Выдача', $5)
+                        """, rental_id, old_bike_id, rental["started_on"],
+                        rental["mileage_start"], by)
+                await conn.execute(
+                    """
+                    update crm.rental_bikes set returned_on = $2, mileage_end = $3
+                     where rental_id = $1 and returned_on is null
+                    """, rental_id, today, mileage_old)
+                await conn.execute(
+                    "update crm.bikes set status = $2, "
+                    "mileage_km = greatest(mileage_km, coalesce($3, mileage_km)), "
+                    "updated_at = now() where id = $1",
+                    old_bike_id, old_status, mileage_old)
+            await conn.execute(
+                """
+                insert into crm.rental_bikes (rental_id, bike_id, issued_on,
+                                              mileage_start, reason, created_by)
+                values ($1, $2, $3, $4, $5, $6)
+                """, rental_id, new_bike_id, today, mileage_new, reason, by)
+            await conn.execute(
+                "update crm.bikes set status = 'rented', "
+                "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
+                "updated_at = now() where id = $1", new_bike_id, mileage_new)
+            await conn.execute(
+                "update crm.rentals set bike_id = $2, mileage_start = coalesce($3, 0), "
+                "mileage_end = null, updated_at = now() where id = $1",
+                rental_id, new_bike_id, mileage_new)
+            return True

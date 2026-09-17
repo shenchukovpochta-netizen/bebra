@@ -26,7 +26,7 @@
     <td class="muted">{{ b.frame_no or '' }}</td>
     <td>{{ b.battery_count }}</td>
     <td class="num muted">{{ '{:,}'.format(b.mileage_km or 0).replace(',', '\u00a0') }} км</td>
-    <td class="muted">{{ b.location or '' }}</td>
+    <td class="muted">{{ b.location or '' }}{% if b.spare %} · подменный{% endif %}</td>
     <td><span class="tag {{ b.status }}">{{ BIKE_STATUSES.get(b.status, b.status) }}</span></td>
     <td>{% if b.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}{% endif %}</td>
   </tr>

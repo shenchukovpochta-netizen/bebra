@@ -81,6 +81,11 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
         if "unique" in type(exc).__name__.lower():
             raise ServiceError("Аренда уже оформлена другим оператором.") from exc
         raise
+    # Журнал перемещений: с этой строки начинается история того, что
+    # у клиента на руках. Без неё замена не знала бы, что снимать.
+    if bike is not None:
+        await crm.add_rental_bike(rental_id, bike_id=bike["id"], issued_on=started_on,
+                                  mileage_start=mileage, reason="Выдача", created_by=by)
     if billing == "auto":
         await charge_due(crm, rental={"id": rental_id, "client_id": client["id"],
                                       "billed_until": started_on,
@@ -554,3 +559,39 @@ async def receive_part_order(crm: Any, order: dict, *, by: str) -> int:
                                 closed_at=datetime.now(UTC), doc_id=doc_id,
                                 total=logic.order_total(items))
     return doc_id
+
+
+async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
+                    mileage_old: int | None = None, mileage_new: int | None = None,
+                    old_status: str | None = None, by: str) -> dict:
+    """Заменить велосипед внутри аренды.
+
+    Деньги, даты и договор остаются те же - меняется только то, что у
+    клиента на руках. До замены приходилось закрывать аренду и открывать
+    новую, и тогда расходились и оплаченный период, и номер договора.
+    """
+    if rental.get("status") != "active":
+        raise ServiceError("Аренда закрыта - менять в ней нечего.")
+    if reason not in logic.SWAP_REASONS:
+        raise ServiceError("Укажите причину замены.")
+    old_id = rental.get("bike_id")
+    # Сначала «тот же велосипед»: он и правда «в аренде», но говорить об
+    # этом оператору, который просто не сменил выбор, бесполезно.
+    if old_id and int(old_id) == int(new_bike["id"]):
+        raise ServiceError("Это тот же велосипед.")
+    if new_bike.get("status") != "available":
+        raise ServiceError(
+            f"Велосипед {new_bike.get('code')} сейчас "
+            f"«{logic.BIKE_STATUSES.get(new_bike.get('status'), new_bike.get('status'))}».")
+    status = old_status or logic.SWAP_BIKE_STATUS.get(reason, "available")
+    if status not in logic.BIKE_MANUAL_STATUSES:
+        raise ServiceError("Недопустимый статус снятого велосипеда.")
+    ok = await crm.swap_rental_bike(
+        rental["id"], old_bike_id=old_id, new_bike_id=new_bike["id"],
+        old_status=status, mileage_old=mileage_old, mileage_new=mileage_new,
+        reason=logic.SWAP_REASONS[reason], today=date.today(), by=by)
+    if not ok:
+        raise ServiceError("Аренда изменилась, пока вы заполняли форму. "
+                           "Откройте её заново.")
+    return {"old_bike_id": old_id, "new_bike_id": new_bike["id"],
+            "old_status": status}

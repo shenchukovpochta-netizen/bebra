@@ -951,3 +951,36 @@ create table if not exists crm.part_order_items (
 );
 create unique index if not exists part_order_items_one on crm.part_order_items
   (order_id, part_id);
+
+-- ─────────────────── замена велосипеда внутри аренды ───────────────────
+--
+-- Велосипед сломался - раньше приходилось закрывать аренду и открывать
+-- новую: деньги, даты и договор при этом разъезжались. Замена оставляет
+-- аренду той же, а что у клиента на руках, помнит этот журнал.
+--
+-- Строка открыта, пока велосипед у клиента: returned_on пуст. Пробег
+-- пишется по каждой единице отдельно - иначе «накатал» после замены
+-- считался бы от одометра чужого велосипеда.
+
+create table if not exists crm.rental_bikes (
+  id           bigserial primary key,
+  rental_id    bigint      not null references crm.rentals (id) on delete cascade,
+  bike_id      bigint      not null references crm.bikes (id),
+  issued_on    date        not null default current_date,
+  returned_on  date,
+  mileage_start integer,
+  mileage_end  integer,
+  reason       text,
+  created_by   text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists rental_bikes_idx on crm.rental_bikes (rental_id, id);
+-- Один открытый велосипед на аренду: два «выданных» разом - это потерянный
+-- велосипед, который никто не ищет.
+create unique index if not exists rental_bikes_one_open on crm.rental_bikes (rental_id)
+  where returned_on is null;
+
+-- Подменный фонд: велосипеды, которые держат под замены, а не под выдачу.
+-- Отдельного статуса нет намеренно - подменный тоже свободен, просто
+-- предлагается первым при замене и последним при выдаче нового клиента.
+alter table crm.bikes add column if not exists spare boolean not null default false;

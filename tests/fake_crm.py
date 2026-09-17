@@ -38,6 +38,7 @@ class FakeCrm:
         self.part_docs_: dict[int, dict] = {}
         self.part_orders_: dict[int, dict] = {}
         self.part_order_items_: list[dict] = []
+        self.rental_bikes_: list[dict] = []
         self.settings_: dict[str, str] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
@@ -330,6 +331,7 @@ class FakeCrm:
         self.bikes_[bid] = {"id": bid, "code": None, "model": None, "frame_no": None,
                             "motor_no": None, "battery_count": 2, "status": "available",
                             "purchase_price": None, "purchased_on": None, "note": None,
+                            "spare": False,
                             "location": None, "service_months": 24,
                             "residual_price": Decimal(0), "battery_price": None,
                             "battery_service_months": 15, "mileage_km": 0,
@@ -1264,6 +1266,75 @@ class FakeCrm:
                              "part_id": (part or {}).get("id"), "title": title,
                              "qty": int(item.get("qty") or 1)})
         return rows
+
+    # ─────────────────── замена велосипеда в аренде ───────────────────
+
+    async def rental_bikes(self, rental_id):
+        rows = []
+        for row in self.rental_bikes_:
+            if row["rental_id"] != rental_id:
+                continue
+            bike = self.bikes_.get(row["bike_id"]) or {}
+            rows.append({**row, "bike_code": bike.get("code"),
+                         "bike_model": bike.get("model"),
+                         "bike_status": bike.get("status"),
+                         "bike_mileage": bike.get("mileage_km")})
+        return sorted(rows, key=lambda r: r["id"])
+
+    async def open_rental_bike(self, rental_id):
+        rows = [r for r in self.rental_bikes_
+                if r["rental_id"] == rental_id and r["returned_on"] is None]
+        return dict(rows[-1]) if rows else None
+
+    async def add_rental_bike(self, rental_id, *, bike_id, issued_on, mileage_start,
+                              reason, created_by):
+        row_id = self._id()
+        self.rental_bikes_.append({
+            "id": row_id, "rental_id": rental_id, "bike_id": bike_id,
+            "issued_on": issued_on, "returned_on": None,
+            "mileage_start": mileage_start, "mileage_end": None, "reason": reason,
+            "created_by": created_by, "created_at": self._now()})
+        return row_id
+
+    async def swap_rental_bike(self, rental_id, *, old_bike_id, new_bike_id,
+                               old_status, mileage_old, mileage_new, reason, today, by):
+        rental = self.rentals_.get(rental_id)
+        if rental is None or rental["status"] != "active":
+            return False
+        if rental.get("bike_id") != old_bike_id:
+            return False
+        if old_bike_id is not None:
+            open_row = await self.open_rental_bike(rental_id)
+            if open_row is None:
+                await self.add_rental_bike(
+                    rental_id, bike_id=old_bike_id, issued_on=rental["started_on"],
+                    mileage_start=rental.get("mileage_start"), reason="Выдача",
+                    created_by=by)
+            for row in self.rental_bikes_:
+                if row["rental_id"] == rental_id and row["returned_on"] is None:
+                    row["returned_on"] = today
+                    row["mileage_end"] = mileage_old
+            bike = self.bikes_[old_bike_id]
+            before = bike["status"]
+            bike["status"] = old_status
+            if mileage_old is not None:
+                bike["mileage_km"] = max(bike.get("mileage_km") or 0, int(mileage_old))
+            if before != old_status:
+                self._log_status(old_bike_id, before, old_status, by)
+        await self.add_rental_bike(rental_id, bike_id=new_bike_id, issued_on=today,
+                                   mileage_start=mileage_new, reason=reason,
+                                   created_by=by)
+        new_bike = self.bikes_[new_bike_id]
+        before = new_bike["status"]
+        new_bike["status"] = "rented"
+        if mileage_new is not None:
+            new_bike["mileage_km"] = max(new_bike.get("mileage_km") or 0,
+                                         int(mileage_new))
+        if before != "rented":
+            self._log_status(new_bike_id, before, "rented", by)
+        rental.update(bike_id=new_bike_id, mileage_start=mileage_new or 0,
+                      mileage_end=None)
+        return True
 
 
 class UniqueError(Exception):

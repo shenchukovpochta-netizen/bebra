@@ -129,6 +129,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
+        SWAP_REASONS=logic.SWAP_REASONS,
         PART_ORDER_STATUSES=logic.PART_ORDER_STATUSES,
         NEED_SOURCES=logic.NEED_SOURCES, PART_UNITS=logic.PART_UNITS,
         INTEGRITY_KINDS=logic.INTEGRITY_KINDS, DEBT_NOISE=logic.DEBT_NOISE,
@@ -617,6 +618,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "purchased_on": bought.value, "location": location or None,
                 "service_months": int(months), "residual_price": residual.value,
                 "battery_price": bat_price.value, "battery_service_months": int(bat_months),
+                # Подменный держат под замены, а не под выдачу: своего
+                # статуса у него нет, он такой же свободный.
+                "spare": bool(data.get("spare")),
                 **({"mileage_km": mileage.value} if mileage.value is not None else {})}
 
     @app.post("/bikes")
@@ -1024,9 +1028,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         summary = summarize(rental if rental["status"] == "active" else None,
                             rental.get("balance", 0))
         bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
+        moves = logic.rental_bike_rows(await crm.rental_bikes(rental_id))
         return render(request, "rental.html", rental=rental, summary=summary, bike=bike,
                       intent=logic.intent_state(rental, summary, today=date.today()),
-                      ledger=ledger, tariffs=await crm.tariffs(active_only=True))
+                      ledger=ledger, tariffs=await crm.tariffs(active_only=True),
+                      moves=moves,
+                      total_km=logic.rental_mileage(
+                          moves, current=(bike or {}).get("mileage_km")),
+                      swap_bikes=logic.swap_candidates(
+                          await crm.bikes(status="available", limit=10000),
+                          current_id=rental.get("bike_id")))
 
     @app.post("/rentals/{rental_id}/intent")
     async def rental_intent(request: Request, rental_id: int) -> Response:
@@ -1059,6 +1070,49 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         else:
             flash(request, "Неизвестное действие.", "err")
         return redirect(back)
+
+    @app.post("/rentals/{rental_id}/swap")
+    async def rental_swap(request: Request, rental_id: int) -> Response:
+        """Заменить велосипед, не трогая деньги и сроки аренды."""
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        rental = await crm.rental(rental_id)
+        if rental is None:
+            return render(request, "missing.html", status_code=404, what="Аренда")
+        data = await form(request)
+        reason = logic.check_swap_reason(data.get("reason") or "repair")
+        new_bike = await crm.bike(int(data["bike_id"])) \
+            if (data.get("bike_id") or "").isdigit() else None
+        old_bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
+        mileage_old = logic.check_mileage(
+            data.get("mileage_old"), current=(old_bike or {}).get("mileage_km"),
+            required=False)
+        # Тот же велосипед - случай отдельный: сверять его одометр «с самим
+        # собой» бессмысленно, и оператор получил бы разговор про пробег
+        # вместо понятного «это тот же велосипед».
+        same = bool(old_bike and new_bike and int(old_bike["id"]) == int(new_bike["id"]))
+        mileage_new = logic.check_mileage(
+            data.get("mileage_new"),
+            current=None if same else (new_bike or {}).get("mileage_km"),
+            required=False)
+        for check in (reason, mileage_old, mileage_new):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(f"/rentals/{rental_id}")
+        if new_bike is None:
+            flash(request, "Выберите велосипед на замену.", "err")
+            return redirect(f"/rentals/{rental_id}")
+        try:
+            await service.swap_bike(
+                crm, rental, new_bike, reason=reason.value,
+                mileage_old=mileage_old.value, mileage_new=mileage_new.value,
+                old_status=data.get("old_status") or None, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/rentals/{rental_id}")
+        flash(request, f"Велосипед заменён на № {new_bike['code']}. "
+                       "Деньги и сроки аренды не изменились.")
+        return redirect(f"/rentals/{rental_id}")
 
     @app.post("/rentals/{rental_id}/close")
     async def rental_close(request: Request, rental_id: int) -> Response:

@@ -1750,3 +1750,66 @@ def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = ()) -> list[dict]
 def order_total(items: Iterable[dict]) -> Decimal:
     return to_money(sum((to_money(i.get("price") or 0) * int(i.get("qty") or 1)
                          for i in items), Decimal(0)))
+
+
+# ─────────────────── замена велосипеда внутри аренды ───────────────────
+
+SWAP_REASONS: dict[str, str] = {
+    "repair": "Поломка",
+    "maintenance": "Плановое ТО",
+    "client": "По просьбе клиента",
+    "other": "Другое",
+}
+# Куда уходит снятый велосипед. По умолчанию в ремонт: заменяют обычно
+# сломанный, и «свободен» вернул бы его в выдачу неисправным.
+SWAP_BIKE_STATUS = {"repair": "repair", "maintenance": "maintenance",
+                    "client": "available", "other": "available"}
+
+
+def check_swap_reason(raw: Any) -> Check:
+    return check_choice(raw, SWAP_REASONS, what="Причина замены")
+
+
+def swap_candidates(bikes: Iterable[dict], *, current_id: Any = None) -> list[dict]:
+    """Кого предложить на замену: свободные, подменные - первыми.
+
+    Подменный фонд держат как раз под такие случаи, а свободный велосипед
+    лучше оставить новому клиенту: замена аренду не увеличивает, а выдача
+    увеличивает.
+    """
+    rows = [b for b in bikes
+            if b.get("status") == "available" and int(b["id"]) != int(current_id or 0)]
+    rows.sort(key=lambda b: (not b.get("spare"), str(b.get("code") or "")))
+    return rows
+
+
+def rental_bike_rows(rows: Iterable[dict], *, today: date | None = None) -> list[dict]:
+    """Журнал перемещений аренды: что и сколько было у клиента."""
+    today = today or date.today()
+    out = []
+    for row in rows:
+        issued = row.get("issued_on") or today
+        until = row.get("returned_on") or today
+        start, end = row.get("mileage_start"), row.get("mileage_end")
+        out.append({**row, "days": max((until - issued).days, 0),
+                    "open": row.get("returned_on") is None,
+                    "ridden": (int(end) - int(start))
+                    if start is not None and end is not None else None})
+    return out
+
+
+def rental_mileage(rows: Iterable[dict], *, current: int | None = None) -> int:
+    """Сколько накатали за аренду по всем велосипедам вместе.
+
+    После замены одометр нового велосипеда считается со своего начала:
+    иначе «накатал» получался бы разницей одометров разных машин.
+    """
+    total = 0
+    for row in rows:
+        start = row.get("mileage_start")
+        end = row.get("mileage_end")
+        if end is None and row.get("returned_on") is None and current is not None:
+            end = current
+        if start is not None and end is not None and int(end) >= int(start):
+            total += int(end) - int(start)
+    return total

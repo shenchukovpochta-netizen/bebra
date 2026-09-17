@@ -10,6 +10,7 @@
   <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="2"></label>
   <label>Пробег, км <input name="mileage_km" inputmode="numeric" placeholder="0"></label>
   <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+  <label class="check"><input type="checkbox" name="spare" value="1" > Подменный: держим под замены, а не под выдачу</label>
   <label>Цена покупки <input name="purchase_price" inputmode="decimal"></label>
   <label>Дата покупки <input name="purchased_on" type="date"></label>
   <label>Срок службы, мес. <input name="service_months" type="number" min="1" max="240" value="24"></label>

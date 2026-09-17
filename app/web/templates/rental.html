@@ -37,6 +37,21 @@
     <button type="submit">Применить со следующего периода</button>
   </form>
   {% endif %}
+  {% if swap_bikes %}
+  <h2>Заменить велосипед</h2>
+  {# Замена не трогает деньги, даты и договор: меняется только то, что
+     у клиента на руках. Подменные предлагаются первыми. #}
+  <form method="post" action="/rentals/{{ rental.id }}/swap" class="grid2">
+    <label class="wide">Новый велосипед <select name="bike_id">{% for b in swap_bikes %}<option value="{{ b.id }}">№ {{ b.code }} {{ b.model }}{% if b.spare %} · подменный{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Причина <select name="reason">{% for code, label in SWAP_REASONS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+    <label>Снятый после замены <select name="old_status"><option value="">по причине</option>{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}">{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>
+    <label>Пробег снятого, км <input name="mileage_old" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% endif %}"></label>
+    <label>Пробег нового, км <input name="mileage_new" inputmode="numeric" placeholder="с дисплея"></label>
+    <button type="submit">Заменить</button>
+  </form>
+  <p class="muted">Деньги, даты и договор остаются те же. Снятый велосипед по умолчанию уходит туда, куда указывает причина: поломка — в ремонт, ТО — на ТО.</p>
+  {% endif %}
+
   <h2>Закрыть аренду</h2>
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
@@ -49,6 +64,25 @@
 </section>
 {% endif %}
 </div>
+{% if moves|length > 1 or (moves and not moves[0].open) %}
+<section class="card">
+  <h2>Что было у клиента</h2>
+  <table>
+    <tr><th>Велосипед</th><th>Выдан</th><th>Снят</th><th>Суток</th><th>Накатал</th><th>Почему</th></tr>
+    {% for m in moves %}
+    <tr>
+      <td><a href="/bikes/{{ m.bike_id }}">№ {{ m.bike_code }}</a> {{ m.bike_model }}{% if m.open %} <span class="tag rented">сейчас у клиента</span>{% endif %}</td>
+      <td>{{ m.issued_on|dmy }}</td>
+      <td>{% if m.returned_on %}{{ m.returned_on|dmy }}{% else %}—{% endif %}</td>
+      <td class="num">{{ m.days }}</td>
+      <td class="num">{% if m.ridden is not none %}{{ m.ridden }} км{% else %}—{% endif %}</td>
+      <td>{{ m.reason or '' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">За всю аренду накатано <b>{{ total_km }} км</b> по всем велосипедам вместе: после замены одометр нового считается со своего начала.</p>
+</section>
+{% endif %}
 {% if money_ok %}
 <section class="card">
   <h2>Начисления по аренде</h2>

@@ -131,7 +131,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_referrals.py', 'tests/test_staff_link.py',
           'tests/test_shopwindow.py', 'tests/test_channels.py',
           'tests/test_integrity.py',
-          'tests/test_parts.py')
+          'tests/test_parts.py', 'tests/test_swap.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

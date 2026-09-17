@@ -624,6 +624,68 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             await service.receive_part_order(
                 self.crm, await self.crm.part_order(order["id"]), by="staff:t")
 
+    async def test_bike_swap_on_postgres(self):
+        """Замена на живой базе: одна транзакция, деньги и сроки на месте,
+        журнал перемещений держит обе единицы."""
+        await self.seed()
+        spare_id = await self.crm.create_bike(code="B-SPARE", model="Truck+")
+        await self.crm.update_bike(spare_id, spare=True, by="t")
+        rental_id = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() - timedelta(days=3), contract_no="АВ-1",
+            by="staff:t", mileage=1000)
+        before = await self.crm.rental(rental_id)
+        self.assertEqual(len(await self.crm.rental_bikes(rental_id)), 1)
+
+        await service.swap_bike(
+            self.crm, before, await self.crm.bike(spare_id), reason="repair",
+            mileage_old=1200, mileage_new=300, by="staff:t")
+        after = await self.crm.rental(rental_id)
+        self.assertEqual(after["bike_id"], spare_id)
+        self.assertEqual(after["billed_until"], before["billed_until"])
+        self.assertEqual(after["balance"], before["balance"])
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "repair")
+        self.assertEqual((await self.crm.bike(self.bike_id))["mileage_km"], 1200)
+        self.assertEqual((await self.crm.bike(spare_id))["status"], "rented")
+
+        rows = await self.crm.rental_bikes(rental_id)
+        self.assertEqual(len(rows), 2)
+        self.assertIsNotNone(rows[0]["returned_on"])
+        self.assertIsNone(rows[1]["returned_on"])
+        self.assertEqual(logic.rental_mileage(rows, current=350), 250)
+
+        # открытая строка одна: частичный уникальный индекс
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.add_rental_bike(rental_id, bike_id=self.bike_id,
+                                           issued_on=date.today(), mileage_start=0,
+                                           reason="дубль", created_by="t")
+
+        # замена по устаревшей карточке аренды не проходит
+        with self.assertRaises(service.ServiceError):
+            await service.swap_bike(self.crm, before, await self.crm.bike(self.bike_id),
+                                    reason="repair", by="staff:t")
+
+    async def test_swap_log_is_backfilled_for_old_rentals(self):
+        """Аренда старше журнала перемещений: строка выдачи создаётся задним
+        числом, иначе первая замена потеряла бы, что было до неё."""
+        await self.seed()
+        rental_id = await self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D("3000"), billing="auto",
+            started_on=date.today() - timedelta(days=5), contract_no=None,
+            created_by="import", mileage_start=500)
+        self.assertEqual(await self.crm.rental_bikes(rental_id), [])
+        spare_id = await self.crm.create_bike(code="B-SPARE", model="Truck+")
+        await service.swap_bike(
+            self.crm, await self.crm.rental(rental_id),
+            await self.crm.bike(spare_id), reason="client", by="staff:t")
+        rows = await self.crm.rental_bikes(rental_id)
+        self.assertEqual([r["bike_id"] for r in rows], [self.bike_id, spare_id])
+        self.assertEqual(rows[0]["reason"], "Выдача")
+        self.assertEqual(rows[0]["mileage_start"], 500)
+
 
 if __name__ == "__main__":
     unittest.main()
