@@ -723,6 +723,85 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.crm.bike_by_code("B-103"))
         self.assertEqual(len(await self.crm.purchases()), 1)
 
+    async def test_batteries_on_postgres(self):
+        """Батареи на живой базе: триггер журнала, выдача и возврат, каталог."""
+        await self.seed()
+        seeded = await self.crm.location_names()
+        self.assertEqual(seeded, ["Павлюхина", "Адоратского"],
+                         "точки приезжают со схемой - парк заведён с ними")
+
+        model_id = await self.crm.create_battery_model(
+            title="48V 20Ah", brand="Sanyo", voltage=48, capacity=D("20"),
+            price=D("9000"), service_months=15, note=None)
+        bike_model_id = await self.crm.create_bike_model(
+            title="Kugoo V3", brand=None, factory_title=None, battery_slots=2,
+            note=None)
+        await self.crm.set_compat(bike_model_id, model_id, fits=True, primary_fit=True)
+        fit = await self.crm.compat_for_bike_model("Kugoo V3")
+        self.assertEqual([m["title"] for m in fit], ["48V 20Ah"])
+
+        first = await self.crm.create_battery(code="A-1", model_id=model_id,
+                                              location="Павлюхина",
+                                              purchase_price=D("9000"),
+                                              by="staff:kolya")
+        second = await self.crm.create_battery(code="A-2", model_id=model_id,
+                                               by="staff:kolya")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_battery(code="A-1", by="staff:kolya")
+
+        # Журнал пишет триггер, автор - из set_config в той же транзакции.
+        log = await self.crm.battery_status_log(first)
+        self.assertEqual([(x["from_status"], x["to_status"]) for x in log],
+                         [(None, "available")])
+        self.assertEqual(log[0]["changed_by"], "staff:kolya")
+
+        client = await self.crm.client(self.client_id)
+        bike = await self.crm.bike(self.bike_id)
+        tariff = await self.crm.tariff(self.tariff_id)
+        rental_id = await service.open_rental(
+            self.crm, client=client, bike=bike, tariff=tariff,
+            started_on=date.today(), contract_no=None, by="staff:kolya")
+        await service.issue_with_batteries(self.crm, rental_id, bike=bike,
+                                           battery_ids=[first], by="staff:kolya")
+        row = await self.crm.battery(first)
+        self.assertEqual(row["status"], "rented")
+        self.assertEqual(row["bike_code"], "B-1")
+        self.assertEqual(row["client_name"], "Иванов Иван")
+        self.assertEqual(row["model_price"], D("9000.00"))
+
+        rental = await self.crm.rental(rental_id)
+        await service.swap_battery(self.crm, rental, row,
+                                   await self.crm.battery(second), by="staff:kolya")
+        old = await self.crm.battery(first)
+        self.assertEqual(old["status"], "repair")
+        self.assertIsNone(old["rental_id"])
+        self.assertEqual(old["cycles"], 1)
+        self.assertEqual((await self.crm.battery(second))["status"], "rented")
+
+        await service.close_rental(self.crm, await self.crm.rental(rental_id),
+                                   closed_on=date.today(), note=None, by="staff:kolya")
+        back = await self.crm.battery(second)
+        self.assertEqual(back["status"], "available")
+        self.assertIsNone(back["rental_id"])
+        self.assertEqual(back["cycles"], 1, "возврат - один цикл")
+        self.assertEqual([x["to_status"] for x in
+                          await self.crm.battery_status_log(first)],
+                         ["repair", "rented", "available"])
+        self.assertEqual(await self.crm.battery_counts(),
+                         {"repair": 1, "available": 1})
+
+        # Батарея заведена поштучно - у велосипеда остаётся только рама.
+        await self.crm.update_bike(self.bike_id, purchase_price=D("47000"),
+                                   residual_price=D("5000"), service_months=24,
+                                   battery_price=D("9000"), battery_count=2,
+                                   battery_service_months=15)
+        await self.crm.update_battery(first, bike_id=self.bike_id, by="staff:kolya")
+        bikes = await self.crm.bikes(limit=100)
+        batteries = await self.crm.batteries()
+        self.assertEqual(logic.amortization_total(bikes), D("2950.00"))
+        self.assertEqual(logic.amortization_total(bikes, batteries), D("2950.00"),
+                         "две карточки по 600 вместо счётчика на 1200")
+
 
 if __name__ == "__main__":
     unittest.main()

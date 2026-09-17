@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Новая батарея — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+<h1>Новая батарея</h1>
+<form method="post" action="/batteries" class="grid2">
+  <label>Номер на корпусе <input name="code" required placeholder="9510001"></label>
+  <label>Модель <select name="model_id"><option value="">не указана</option>{% for m in models %}<option value="{{ m.id }}">{{ m.title }}{% if m.capacity %} · {{ m.capacity }} А·ч{% endif %}</option>{% endfor %}</select></label>
+  <label>Серийный номер <input name="serial_no"></label>
+  <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+  <label>Цена покупки <input name="purchase_price"></label>
+  <label>Куплена <input type="date" name="purchased_on"></label>
+  <label>Срок службы, мес. <input name="service_months" value="15" size="4"></label>
+  <label>Циклов заряда <input name="cycles" value="0" size="5"></label>
+  <label class="wide">Заметка <textarea name="note" rows="2"></textarea></label>
+  <button type="submit">Завести</button>
+</form>
+<p class="muted">Номер — тот, что наклеен на корпусе: по нему батарею ищут
+  на точке и сверяют при выдаче. Цена и срок нужны для амортизации: если
+  они заданы, парк считает батарею по её карточке, а не по счётчику
+  у велосипеда.</p>
+</div>
+{% endblock %}

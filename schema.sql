@@ -359,9 +359,9 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
-  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
   -- их матрицу правит владелец, и перезапись затирала бы его настройку.
@@ -1025,3 +1025,130 @@ create index if not exists purchases_idx on crm.purchases (purchased_on desc);
 alter table crm.bikes add column if not exists purchase_id bigint
   references crm.purchases (id);
 create index if not exists bikes_purchase_idx on crm.bikes (purchase_id);
+
+-- ───────────────── справочники: точки, модели, совместимость ─────────────────
+--
+-- Точки были константой в коде: две штуки, и менять их приходилось
+-- разработчику. Теперь справочник, но старые значения остаются кодом
+-- точки - в bikes.location лежит текст, и переписывать парк ради
+-- красивого внешнего ключа дороже, чем пользы.
+
+create table if not exists crm.locations (
+  id         bigserial primary key,
+  city       text        not null default 'Казань',
+  name       text        not null unique,       -- совпадает с bikes.location
+  address    text,
+  note       text,
+  active     boolean     not null default true,
+  sort       integer     not null default 100,
+  created_at timestamptz not null default now()
+);
+
+insert into crm.locations (name, city, sort) values
+  ('Павлюхина', 'Казань', 10),
+  ('Адоратского', 'Казань', 20)
+on conflict (name) do nothing;
+
+-- Каталог моделей: у клиента одно название, на раме другое. Заводское
+-- держим отдельно, чтобы поиск по накладной находил, а клиент читал
+-- человеческое.
+create table if not exists crm.bike_models (
+  id            bigserial primary key,
+  title         text        not null unique,    -- как называем клиенту
+  brand         text,
+  factory_title text,
+  battery_slots integer     not null default 2,
+  active        boolean     not null default true,
+  note          text,
+  created_at    timestamptz not null default now()
+);
+
+create table if not exists crm.battery_models (
+  id         bigserial primary key,
+  title      text        not null unique,
+  brand      text,
+  voltage    integer,                           -- вольты
+  capacity   numeric(6,2),                      -- ампер-часы
+  price      numeric(12,2) not null default 0,
+  service_months integer   not null default 15,
+  active     boolean     not null default true,
+  note       text,
+  created_at timestamptz not null default now()
+);
+
+-- Совместимость: какая батарея подходит какой модели и какая основная.
+-- Пары, а не матрица в jsonb: по ней ищут в обе стороны - «что подходит
+-- этому велосипеду» и «куда встанет эта батарея».
+create table if not exists crm.compat (
+  bike_model_id    bigint not null references crm.bike_models (id) on delete cascade,
+  battery_model_id bigint not null references crm.battery_models (id) on delete cascade,
+  primary_fit      boolean not null default false,
+  primary key (bike_model_id, battery_model_id)
+);
+
+-- ───────────────────────────── батареи ─────────────────────────────
+--
+-- Раньше батарея была счётчиком у велосипеда: «две штуки, цена и срок».
+-- Этого хватало на амортизацию и не хватало ни на что другое - потерянную
+-- батарею нельзя было найти, а подменную выдать под запись. Теперь это
+-- отдельная единица со своей наклейкой, статусом и журналом.
+--
+-- Поля battery_* у велосипеда остаются: по ним считается амортизация
+-- парка, пока батареи не заведены поштучно. Как только у велосипеда
+-- появляются свои батареи, амортизацию берут с них.
+
+create table if not exists crm.batteries (
+  id             bigserial primary key,
+  code           text        not null unique,     -- наклейка на корпусе
+  model_id       bigint      references crm.battery_models (id),
+  serial_no      text,
+  -- available|rented|repair|maintenance|lost|written_off.
+  -- rented ставит и снимает выдача, как и у велосипеда.
+  status         text        not null default 'available',
+  location       text,
+  -- Где батарея физически: стоит в велосипеде или выдана с арендой.
+  bike_id        bigint      references crm.bikes (id),
+  rental_id      bigint      references crm.rentals (id),
+  cycles         integer     not null default 0,  -- циклов заряда
+  purchase_price numeric(12,2),
+  purchased_on   date,
+  service_months integer     not null default 15,
+  note           text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+create index if not exists batteries_status_idx on crm.batteries (status);
+create index if not exists batteries_bike_idx on crm.batteries (bike_id);
+create index if not exists batteries_rental_idx on crm.batteries (rental_id);
+
+-- Журнал статусов батареи - тот же принцип, что у велосипеда: без него
+-- «когда она пропала» выясняется по памяти оператора.
+create table if not exists crm.battery_status_log (
+  id          bigserial primary key,
+  battery_id  bigint      not null references crm.batteries (id),
+  from_status text,
+  to_status   text        not null,
+  changed_at  timestamptz not null default now(),
+  changed_by  text
+);
+create index if not exists battery_status_log_idx on crm.battery_status_log
+  (battery_id, changed_at);
+
+create or replace function crm.log_battery_status() returns trigger
+language plpgsql as $$
+begin
+  if tg_op = 'INSERT' or old.status is distinct from new.status then
+    insert into crm.battery_status_log (battery_id, from_status, to_status,
+                                        changed_at, changed_by)
+    values (new.id,
+            case when tg_op = 'INSERT' then null else old.status end,
+            new.status, now(),
+            nullif(current_setting('crm.actor', true), ''));
+  end if;
+  return new;
+end
+$$;
+drop trigger if exists batteries_status_log on crm.batteries;
+create trigger batteries_status_log
+  after insert or update of status on crm.batteries
+  for each row execute function crm.log_battery_status();

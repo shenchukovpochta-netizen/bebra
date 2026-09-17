@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Точки выдачи — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Точки выдачи</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/locations" class="on">Точки</a><a href="/models">Каталог</a></nav>
+</div>
+<div class="card">
+<table>
+  <tr><th>Город</th><th>Точка</th><th>Адрес</th><th>Работает</th><th class="opt">Заметка</th><th></th></tr>
+  {% for r in rows %}
+  <tr class="{% if not r.active %}muted{% endif %}">
+    <td>{{ r.city }}</td><td><b>{{ r.name }}</b></td><td>{{ r.address or '—' }}</td>
+    <td>{{ 'да' if r.active else 'нет' }}</td>
+    <td class="opt">{{ r.note or '' }}</td>
+    <td>{% if can_edit(staff, 'settings') %}<form method="post" action="/locations/{{ r.id }}/toggle"><button type="submit" class="ghost">{{ 'Закрыть' if r.active else 'Открыть' }}</button></form>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="muted">Название точки — это то, что лежит в карточке велосипеда.
+  Закрытая точка остаётся в карточках: велосипеды на ней никуда не делись,
+  и переписывать их ради красоты справочника значит потерять, где они стоят.</p>
+</div>
+{% if can_edit(staff, 'settings') %}
+<div class="card narrow">
+  <h2>Добавить точку</h2>
+  <form method="post" action="/locations" class="grid2">
+    <label>Название <input name="name" required placeholder="Восстания"></label>
+    <label>Город <input name="city" value="Казань"></label>
+    <label class="wide">Адрес <input name="address"></label>
+    <label class="wide">Заметка <input name="note"></label>
+    <button type="submit">Добавить</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

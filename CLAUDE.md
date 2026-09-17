@@ -59,7 +59,9 @@ Claude Code читает этот файл в начале каждой сесс
 `repair_nodes`, `repair_items`, `work_types`, `work_orders`, `work_order_items`,
 `stock_takes`, `stock_take_items`, `referrals`, `settings`, `suppliers`,
 `parts`, `part_docs`, `part_moves`, `part_orders`, `part_order_items`,
-`purchases`, `clients`, `rentals`, `rental_bikes`, `ledger`, `payment_claims`.
+`purchases`, `locations`, `bike_models`, `battery_models`, `compat`,
+`batteries`, `battery_status_log`, `clients`, `rentals`, `rental_bikes`,
+`ledger`, `payment_claims`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -101,9 +103,16 @@ Claude Code читает этот файл в начале каждой сесс
 - **Приглашения** (`referrals`): путь друга от перехода по ссылке до
   первого платежа. Бонус агенту — запись `ledger` вида `adjust`, а не
   `payment`: платежи формируют средний чек, и бонус завысил бы его.
-- **АКБ** пока не отдельная сущность: у велосипеда счётчик, цена и срок
-  службы АКБ для амортизации. Отдельная таблица — когда батареи начнут
-  маркировать на точках.
+- **АКБ — отдельная сущность** (`crm.batteries`, `crm.battery_status_log`,
+  триггер `crm.log_battery_status`): номер на корпусе, статус, циклы,
+  журнал. `rented` ставит и снимает только выдача. Счётчик АКБ в карточке
+  велосипеда остался для парка без карточек; как только батарея привязана
+  к велосипеду, от велосипеда берётся только рама (`frame_amortization`),
+  иначе амортизация посчиталась бы дважды.
+- **Справочники** (`crm.locations`, `crm.bike_models`, `crm.battery_models`,
+  `crm.compat`): точки выдачи, каталог моделей и матрица совместимости.
+  Модель в `crm.bikes` остаётся текстом — каталог связывается по названию,
+  переезд на ссылки переписал бы живую историю парка.
 
 Статусы велосипеда: `available`, `rented`, `repair`, `maintenance`,
 `reserved`, `lost`, `sold`, `written_off`. `rented` ставит и снимает только

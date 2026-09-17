@@ -118,6 +118,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BIKE_MANUAL_STATUSES=logic.BIKE_MANUAL_STATUSES,
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
+        BATTERY_STATUSES=logic.BATTERY_STATUSES,
+        BATTERY_MANUAL_STATUSES=logic.BATTERY_MANUAL_STATUSES,
+        BATTERY_CYCLES_WARN=logic.BATTERY_CYCLES_WARN,
         IDLE_TARGET_PERCENT=logic.IDLE_TARGET_PERCENT, CHECK_TARGET=logic.CHECK_TARGET,
         amortization_month=logic.amortization_month, fleet_losses=logic.fleet_losses,
         ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
@@ -232,6 +235,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await request.form()
         return {k: (v if isinstance(v, str) else "") for k, v in data.items()}
 
+    async def form_ids(request: Request, name: str) -> list[int]:
+        """Отмеченные галочками номера: form() оставляет только последний."""
+        data = await request.form()
+        return [int(v) for v in data.getlist(name) if str(v).isdigit()]
+
     def cost_field(data: dict, name: str) -> logic.Check:
         """Стоимость в форме: пусто и «0» - ноль (запчастей не было, работа
         своя), иначе обычная проверка суммы."""
@@ -332,6 +340,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         expiring = logic.expiring(rows, today=today, before_days=cfg.remind_before_days)
         bikes_by = await crm.bike_counts()
         fleet = await crm.bikes(limit=10000)
+        own_batteries = await crm.batteries(limit=10000)
         metrics = await period_metrics(days=30)
         settings = await crm.settings()
         operational = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
@@ -353,7 +362,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       operational=operational,
                       metrics=metrics, losses=logic.fleet_losses(metrics),
                       loss_today=logic.loss_per_day(bikes_by),
-                      amortization=logic.amortization_total(fleet),
+                      amortization=logic.amortization_total(fleet, own_batteries),
                       idle_by_location=idle_by_location(fleet),
                       claims=await crm.pending_claims(), rentals=rows,
                       expiring=expiring, before_days=cfg.remind_before_days,
@@ -905,6 +914,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "issue.html", **ctx)
         started = logic.check_date(p.get("started_on"), default=date.today())
         start = started.value if started.ok else date.today()
+        # Батареи предлагаются те, что подходят модели: на двух точках
+        # парк разношёрстный, и чужая батарея просто не встанет в раму.
+        free = await crm.batteries(status="available", limit=500)
+        fit = await crm.compat_for_bike_model(ctx["bike"]["model"])
+        fit_ids = {m["id"] for m in fit}
+        if fit_ids:
+            free = [b for b in free if b.get("model_id") in fit_ids]
+        ctx.update(batteries=free,
+                   battery_slots=int(ctx["bike"].get("battery_count") or 0))
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
@@ -979,6 +997,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(back)
+        battery_ids = await form_ids(request, "battery_ids")
+        if battery_ids:
+            try:
+                await service.issue_with_batteries(crm, rental_id, bike=bike,
+                                                   battery_ids=battery_ids,
+                                                   by=who(request))
+            except service.ServiceError as exc:
+                # Аренда уже открыта: батарею доедем отдельно, а операцию
+                # не откатываем - велосипед у клиента.
+                flash(request, f"{exc} Батареи не выданы, отметьте их в карточке.",
+                      "err")
         if pay.value > 0:
             # Платёж после начисления первого периода: баланс сразу честный,
             # и уведомление клиенту уходит с верной датой «оплачено до».
@@ -1139,7 +1168,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           moves, current=(bike or {}).get("mileage_km")),
                       swap_bikes=logic.swap_candidates(
                           await crm.bikes(status="available", limit=10000),
-                          current_id=rental.get("bike_id")))
+                          current_id=rental.get("bike_id")),
+                      batteries=logic.battery_rows(
+                          await crm.batteries(rental_id=rental_id)),
+                      free_batteries=await crm.batteries(status="available",
+                                                         limit=500))
 
     @app.post("/rentals/{rental_id}/intent")
     async def rental_intent(request: Request, rental_id: int) -> Response:
@@ -1412,7 +1445,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       bikes=bikes_by, fleet=fleet, rented=rented,
                       utilization=(round(100 * rented / fleet) if fleet else 0),
                       months_metrics=months_metrics,
-                      amortization=logic.amortization_total(fleet_rows),
+                      amortization=logic.amortization_total(
+                          fleet_rows, await crm.batteries(limit=10000)),
                       priced=sum(1 for b in fleet_rows
                                  if b.get("status") in logic.OPERATIONAL_STATUSES
                                  and b.get("purchase_price") is not None),
@@ -2127,6 +2161,285 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Реквизиты сохранены. Бот подхватит их в течение "
                        "нескольких минут.")
         return redirect("/company")
+
+    # ───────────────── справочники: точки, модели, совместимость ─────────────────
+
+    @app.get("/locations")
+    async def locations_page(request: Request) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        return render(request, "locations.html", rows=await crm.locations())
+
+    @app.post("/locations")
+    async def location_create(request: Request) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        name = logic.check_name(data.get("name"), what="Название точки")
+        city = logic.check_name(data.get("city") or "Казань", what="Город")
+        note = logic.check_note(data.get("note"))
+        for check in (name, city, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/locations")
+        try:
+            await crm.create_location(name=name.value, city=city.value,
+                                      address=(data.get("address") or "").strip() or None,
+                                      note=note.value)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Точка с таким названием уже есть.", "err")
+                return redirect("/locations")
+            raise
+        flash(request, "Точка добавлена.")
+        return redirect("/locations")
+
+    @app.post("/locations/{location_id}/toggle")
+    async def location_toggle(request: Request, location_id: int) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        rows = [x for x in await crm.locations() if x["id"] == location_id]
+        if not rows:
+            return render(request, "missing.html", status_code=404, what="Точка")
+        # Закрытая точка остаётся в карточках парка: велосипеды на ней
+        # никуда не делись, и переписывать их ради красоты справочника
+        # значит потерять, где они стоят.
+        await crm.update_location(location_id, active=not rows[0]["active"])
+        return redirect("/locations")
+
+    @app.get("/models")
+    async def models_page(request: Request) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        bikes = await crm.bike_models()
+        batteries = await crm.battery_models()
+        return render(request, "models.html", bike_models=bikes,
+                      battery_models=batteries,
+                      matrix=logic.compat_matrix(
+                          [m for m in bikes if m["active"]],
+                          [m for m in batteries if m["active"]],
+                          await crm.compat_pairs()))
+
+    @app.post("/models/bikes")
+    async def bike_model_create(request: Request) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        title = logic.check_name(data.get("title"), what="Название модели")
+        note = logic.check_note(data.get("note"))
+        slots = count_field(data, "battery_slots", what="Слотов АКБ", default="2",
+                            limit=10)
+        for check in (title, note, slots):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/models")
+        try:
+            await crm.create_bike_model(
+                title=title.value, brand=(data.get("brand") or "").strip() or None,
+                factory_title=(data.get("factory_title") or "").strip() or None,
+                battery_slots=slots.value, note=note.value)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Такая модель уже есть.", "err")
+                return redirect("/models")
+            raise
+        flash(request, "Модель добавлена.")
+        return redirect("/models")
+
+    @app.post("/models/batteries")
+    async def battery_model_create(request: Request) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        title = logic.check_name(data.get("title"), what="Название модели")
+        note = logic.check_note(data.get("note"))
+        price = cost_field(data, "price")
+        months = count_field(data, "service_months", what="Срок службы",
+                             default="15", limit=240)
+        volt = count_field(data, "voltage", what="Напряжение", default="0", limit=200)
+        for check in (title, note, price, months, volt):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/models")
+        capacity = cost_field(data, "capacity")
+        try:
+            await crm.create_battery_model(
+                title=title.value, brand=(data.get("brand") or "").strip() or None,
+                voltage=volt.value or None,
+                capacity=capacity.value if capacity.ok and capacity.value else None,
+                price=price.value, service_months=months.value or 15, note=note.value)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Такая модель АКБ уже есть.", "err")
+                return redirect("/models")
+            raise
+        flash(request, "Модель АКБ добавлена.")
+        return redirect("/models")
+
+    @app.post("/models/compat")
+    async def compat_set(request: Request) -> Response:
+        """Клетка матрицы совместимости: подходит, основная или пусто."""
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        if not (data.get("bike_model_id") or "").isdigit() \
+                or not (data.get("battery_model_id") or "").isdigit():
+            flash(request, "Выберите модели.", "err")
+            return redirect("/models")
+        mode = data.get("mode") or "none"
+        await crm.set_compat(int(data["bike_model_id"]), int(data["battery_model_id"]),
+                             fits=mode in ("fits", "primary"),
+                             primary_fit=mode == "primary")
+        return redirect("/models")
+
+    # ───────────────────────────── батареи ─────────────────────────────
+
+    async def location_names() -> list[str]:
+        """Точки из справочника; пустой справочник - константа из logic.
+
+        Константа остаётся сидом: парк заведён с этими названиями, и
+        пустая база не должна ломать формы.
+        """
+        try:
+            names = await crm.location_names()
+        except Exception:                                # noqa: BLE001
+            names = []
+        return names or list(logic.LOCATIONS)
+
+    @app.get("/batteries")
+    async def batteries_page(request: Request) -> Response:
+        status = request.query_params.get("status") or ""
+        q = request.query_params.get("q") or ""
+        location = request.query_params.get("location") or ""
+        rows = logic.battery_rows(await crm.batteries(
+            status=status or None, q=q or None, location=location or None))
+        return render(request, "batteries.html", rows=rows,
+                      summary=logic.battery_summary(
+                          logic.battery_rows(await crm.batteries())),
+                      status=status, q=q, location=location,
+                      locations=await location_names(),
+                      models=await crm.battery_models(active_only=True))
+
+    @app.get("/batteries/new")
+    async def battery_new(request: Request) -> Response:
+        if not may_edit(request, "batteries"):
+            return denied(request, "batteries")
+        return render(request, "battery_form.html", battery=None,
+                      models=await crm.battery_models(active_only=True),
+                      locations=await location_names())
+
+    async def battery_fields(request: Request, data: dict) -> dict | None:
+        code = logic.check_code(data.get("code"))
+        note = logic.check_note(data.get("note"))
+        price = (logic.check_amount(data.get("purchase_price"))
+                 if (data.get("purchase_price") or "").strip() else logic.Check(True, None))
+        bought = (logic.check_date(data.get("purchased_on"), default=None)
+                  if (data.get("purchased_on") or "").strip() else logic.Check(True, None))
+        location = logic.check_location(data.get("location"), await location_names())
+        months = data.get("service_months") or "15"
+        cycles = count_field(data, "cycles", what="Циклы", default="0", limit=99999)
+        for check in (code, note, price, bought, location, cycles):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return None
+        if not str(months).isdigit() or not 1 <= int(months) <= 240:
+            flash(request, "Срок службы: число месяцев от 1 до 240.", "err")
+            return None
+        model_id = int(data["model_id"]) if (data.get("model_id") or "").isdigit() else None
+        return {"code": code.value, "model_id": model_id,
+                "serial_no": (data.get("serial_no") or "").strip() or None,
+                "location": location.value, "purchase_price": price.value,
+                "purchased_on": bought.value, "service_months": int(months),
+                "cycles": cycles.value, "note": note.value}
+
+    @app.post("/batteries")
+    async def battery_create(request: Request) -> Response:
+        if not may_edit(request, "batteries"):
+            return denied(request, "batteries")
+        fields = await battery_fields(request, await form(request))
+        if fields is None:
+            return redirect("/batteries/new")
+        try:
+            battery_id = await crm.create_battery(by=who(request), **fields)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Батарея с таким номером уже есть.", "err")
+                return redirect("/batteries/new")
+            raise
+        flash(request, "Батарея заведена.")
+        return redirect(f"/batteries/{battery_id}")
+
+    @app.get("/batteries/{battery_id}")
+    async def battery_card(request: Request, battery_id: int) -> Response:
+        battery = await crm.battery(battery_id)
+        if battery is None:
+            return render(request, "missing.html", status_code=404, what="Батарея")
+        row = logic.battery_rows([battery])[0]
+        return render(request, "battery.html", battery=row,
+                      log=await crm.battery_status_log(battery_id),
+                      models=await crm.battery_models(active_only=True),
+                      locations=await location_names(),
+                      amortization=logic.battery_amortization(battery))
+
+    @app.post("/batteries/{battery_id}/edit")
+    async def battery_edit(request: Request, battery_id: int) -> Response:
+        if not may_edit(request, "batteries"):
+            return denied(request, "batteries")
+        if await crm.battery(battery_id) is None:
+            return render(request, "missing.html", status_code=404, what="Батарея")
+        fields = await battery_fields(request, await form(request))
+        if fields is None:
+            return redirect(f"/batteries/{battery_id}")
+        await crm.update_battery(battery_id, by=who(request), **fields)
+        flash(request, "Батарея сохранена.")
+        return redirect(f"/batteries/{battery_id}")
+
+    @app.post("/batteries/{battery_id}/status")
+    async def battery_status(request: Request, battery_id: int) -> Response:
+        if not may_edit(request, "batteries"):
+            return denied(request, "batteries")
+        battery = await crm.battery(battery_id)
+        if battery is None:
+            return render(request, "missing.html", status_code=404, what="Батарея")
+        data = await form(request)
+        status = logic.check_choice(data.get("status"), logic.BATTERY_MANUAL_STATUSES,
+                                    what="Статус батареи")
+        if not status.ok:
+            flash(request, status.error, "err")
+            return redirect(f"/batteries/{battery_id}")
+        if battery["status"] == "rented":
+            flash(request, "Батарея у клиента: её снимает возврат или замена, "
+                           "а не смена статуса.", "err")
+            return redirect(f"/batteries/{battery_id}")
+        await crm.update_battery(battery_id, status=status.value, by=who(request))
+        flash(request, f"Статус: {logic.BATTERY_STATUSES[status.value]}.")
+        return redirect(f"/batteries/{battery_id}")
+
+    @app.post("/rentals/{rental_id}/battery")
+    async def rental_battery_swap(request: Request, rental_id: int) -> Response:
+        """Замена батареи у клиента: аренду это не трогает."""
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        rental = await crm.rental(rental_id)
+        if rental is None:
+            return render(request, "missing.html", status_code=404, what="Аренда")
+        data = await form(request)
+        new = await crm.battery(int(data["battery_id"])) \
+            if (data.get("battery_id") or "").isdigit() else None
+        old = await crm.battery(int(data["old_id"])) \
+            if (data.get("old_id") or "").isdigit() else None
+        if new is None:
+            flash(request, "Выберите батарею на замену.", "err")
+            return redirect(f"/rentals/{rental_id}")
+        try:
+            await service.swap_battery(crm, rental, old, new, by=who(request),
+                                       old_status=data.get("old_status") or "repair")
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/rentals/{rental_id}")
+        flash(request, f"Батарея заменена на {new['code']}." if old is not None
+              else f"Батарея {new['code']} выдана клиенту.")
+        return redirect(f"/rentals/{rental_id}")
 
     # ─────────────────── закупки основных средств ───────────────────
 

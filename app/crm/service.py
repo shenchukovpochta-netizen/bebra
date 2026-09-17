@@ -132,13 +132,20 @@ async def charge_all(crm: Any, *, today: date) -> int:
 
 async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | None,
                        bike_status: str = "available", by: str | None = None,
-                       mileage: int | None = None) -> None:
+                       mileage: int | None = None,
+                       battery_status: str = "available") -> None:
     if bike_status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус велосипеда.")
     if not await crm.close_rental(rental["id"], closed_on=closed_on, note=note,
                                   bike_status=bike_status, closed_by=by,
                                   mileage_end=mileage):
         raise ServiceError("Аренда уже закрыта.")
+    # Батареи возвращаются вместе с велосипедом: оставить их «у клиента»
+    # значит потерять две штуки на каждой закрытой аренде.
+    try:
+        await crm.return_batteries(rental["id"], status=battery_status, by=by or "")
+    except Exception:                                    # noqa: BLE001
+        log.exception("батареи аренды %s не приняты обратно", rental["id"])
 
 
 async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -> None:
@@ -669,3 +676,49 @@ async def buy_bikes(crm: Any, *, supplier_id: int | None, purchased_on: date,
                                "Проверьте парк.") from exc
         raise
     return {"purchase_id": purchase_id, "bikes": len(bikes)}
+
+
+async def issue_with_batteries(crm: Any, rental_id: int, *, bike: dict | None,
+                               battery_ids: list[int], by: str) -> int:
+    """Выдать батареи вместе с велосипедом. Возвращает, сколько выдали.
+
+    Проверка занятости - до выдачи: батарея, уже уехавшая с другим
+    клиентом, не должна молча «выдаться» второй раз.
+    """
+    ready = []
+    for battery_id in battery_ids:
+        battery = await crm.battery(int(battery_id))
+        if battery is None:
+            raise ServiceError("Такой батареи нет.")
+        if battery["status"] != "available":
+            raise ServiceError(
+                f"Батарея {battery['code']} сейчас "
+                f"«{logic.BATTERY_STATUSES.get(battery['status'], battery['status'])}».")
+        ready.append(int(battery_id))
+    await crm.issue_batteries(rental_id, battery_ids=ready,
+                              bike_id=(bike or {}).get("id"), by=by)
+    return len(ready)
+
+
+async def swap_battery(crm: Any, rental: dict, old: dict | None, new: dict, *,
+                       by: str, old_status: str = "repair") -> None:
+    """Заменить батарею у клиента: старая возвращается, новая уходит.
+
+    Батарея ломается чаще велосипеда, и менять её - обычная операция
+    на точке. Аренду это не трогает вовсе.
+    """
+    if rental.get("status") != "active":
+        raise ServiceError("Аренда закрыта.")
+    if new.get("status") != "available":
+        raise ServiceError(
+            f"Батарея {new.get('code')} сейчас "
+            f"«{logic.BATTERY_STATUSES.get(new.get('status'), new.get('status'))}».")
+    if old is not None and int(old["id"]) == int(new["id"]):
+        raise ServiceError("Это та же батарея.")
+    if old is not None:
+        if old_status not in logic.BATTERY_MANUAL_STATUSES:
+            raise ServiceError("Недопустимый статус снятой батареи.")
+        await crm.update_battery(old["id"], status=old_status, rental_id=None,
+                                 cycles=int(old.get("cycles") or 0) + 1, by=by)
+    await crm.update_battery(new["id"], status="rented", rental_id=rental["id"],
+                             bike_id=rental.get("bike_id"), by=by)

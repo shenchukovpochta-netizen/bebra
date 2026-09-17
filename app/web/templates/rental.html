@@ -66,6 +66,21 @@
   <p class="muted">Деньги, даты и договор остаются те же. Снятый велосипед по умолчанию уходит туда, куда указывает причина: поломка — в ремонт, ТО — на ТО.</p>
   {% endif %}
 
+  {% if batteries or free_batteries %}
+  <h2>Батареи у клиента</h2>
+  {# Батарея ломается чаще велосипеда: замена на точке - обычное дело,
+     и аренду она не трогает вовсе. #}
+  <p class="wide">{% for b in batteries %}<a href="/batteries/{{ b.id }}">№ {{ b.code }}</a>{% if b.model_title %} · {{ b.model_title }}{% endif %} <span class="muted">{{ b.cycles }} циклов</span>{% if not loop.last %}, {% endif %}{% else %}<span class="muted">не отмечены — батареи можно выдать при следующей замене.</span>{% endfor %}</p>
+  {% if free_batteries %}
+  <form method="post" action="/rentals/{{ rental.id }}/battery" class="grid2">
+    <label>Снять <select name="old_id"><option value="">ничего не снимать</option>{% for b in batteries %}<option value="{{ b.id }}">№ {{ b.code }}</option>{% endfor %}</select></label>
+    <label>Выдать <select name="battery_id">{% for b in free_batteries %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Снятая уходит <select name="old_status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'repair' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select></label>
+    <button type="submit">{% if batteries %}Заменить батарею{% else %}Выдать батарею{% endif %}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+
   <h2>Закрыть аренду</h2>
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>

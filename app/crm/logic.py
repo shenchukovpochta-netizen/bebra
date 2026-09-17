@@ -556,13 +556,38 @@ def amortization_month(bike: dict) -> Decimal | None:
     return to_money(frame + battery)
 
 
-def amortization_total(bikes: Iterable[dict]) -> Decimal:
-    """Отложить на обновление парка в этом месяце: сумма по операционному парку."""
+def amortization_total(bikes: Iterable[dict],
+                       batteries: Iterable[dict] | None = None) -> Decimal:
+    """Отложить на обновление парка в этом месяце.
+
+    Батареи, заведённые поштучно, считаются по себе, а у велосипедов тогда
+    берётся только рама: иначе одна и та же батарея попала бы в сумму
+    дважды - счётчиком у велосипеда и своей карточкой.
+    """
+    batteries = list(batteries or [])
+    own = {int(b["bike_id"]) for b in batteries if b.get("bike_id")}
     total = Decimal(0)
     for b in bikes:
-        if b.get("status") in OPERATIONAL_STATUSES:
+        if b.get("status") not in OPERATIONAL_STATUSES:
+            continue
+        if b.get("id") is not None and int(b["id"]) in own:
+            total += frame_amortization(b) or Decimal(0)
+        else:
             total += amortization_month(b) or Decimal(0)
+    for battery in batteries:
+        if battery.get("status") in BATTERY_OPERATIONAL:
+            total += battery_amortization(battery) or Decimal(0)
     return to_money(total)
+
+
+def frame_amortization(bike: dict) -> Decimal | None:
+    """Амортизация только рамы, без АКБ: батареи посчитаны отдельно."""
+    price = bike.get("purchase_price")
+    if price is None:
+        return None
+    months = int(bike.get("service_months") or 24)
+    residual = to_money(bike.get("residual_price") or 0)
+    return to_money(max(to_money(price) - residual, Decimal(0)) / max(months, 1))
 
 
 def days_by_status(log: Iterable[dict], since: datetime, until: datetime) -> dict[str, Decimal]:
@@ -850,6 +875,7 @@ SECTIONS: dict[str, str] = {
     "clients": "Клиенты",
     "rentals": "Аренды",
     "bikes": "Парк",
+    "batteries": "Батареи",
     "service": "Сервис: наряды и виды работ",
     "inventory": "Склад: запчасти, приходы, заказы",
     "claims": "Заявки на зачисление",
@@ -881,6 +907,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/clients", "clients"),
     ("/rentals", "rentals"),
     ("/bikes", "bikes"),
+    ("/batteries", "batteries"),
     ("/stock-takes", "bikes"),
     ("/service", "service"),
     ("/orders", "service"),
@@ -901,6 +928,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/staff", "staff"),
     ("/profiles", "staff"),
     ("/company", "settings"),
+    ("/locations", "settings"),
+    ("/models", "settings"),
 )
 
 
@@ -978,11 +1007,12 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
      {"sections": {"dashboard": "view", "issue": "edit", "clients": "edit",
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
-                   "reports": "view", "inventory": "view"},
+                   "reports": "view", "inventory": "view", "batteries": "view"},
       "actions": {}}, False),
     ("tech", "Механик",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
-                   "rentals": "view", "reports": "view", "inventory": "edit"},
+                   "rentals": "view", "reports": "view", "inventory": "edit",
+                   "batteries": "edit"},
       "actions": {}}, False),
 )
 
@@ -2076,3 +2106,97 @@ def purchase_codes(raw: Any, *, limit: int = 100) -> tuple[list[str], str]:
     if len(codes) > limit:
         return [], f"За раз можно завести не больше {limit} велосипедов."
     return codes, ""
+
+
+# ───────────────── справочники: точки, модели, батареи ─────────────────
+
+BATTERY_STATUSES: dict[str, str] = {
+    "available": "Свободна", "rented": "У клиента", "repair": "В ремонте",
+    "maintenance": "На ТО", "lost": "Утеряна", "written_off": "Списана",
+}
+# Статусы, которые ставит оператор. rented - только через выдачу, как
+# и у велосипеда: батарея уходит вместе с ним.
+BATTERY_MANUAL_STATUSES = ("available", "repair", "maintenance", "lost",
+                           "written_off")
+BATTERY_OPERATIONAL = ("available", "rented", "repair", "maintenance")
+# Циклов, после которых батарею пора смотреть: ёмкость к этому моменту
+# заметно просела, и клиент начинает жаловаться на «не доезжает».
+BATTERY_CYCLES_WARN = 500
+
+
+def check_battery_status(raw: Any) -> Check:
+    return check_choice(raw, BATTERY_STATUSES, what="Статус батареи")
+
+
+def check_location(raw: Any, names: Iterable[str] | None = None) -> Check:
+    """Точка выдачи. Список берётся из справочника; пусто - «не на точке»."""
+    value = str(raw or "").strip()
+    if not value:
+        return Check(True, None)
+    allowed = set(names) if names is not None else set(LOCATIONS)
+    if value not in allowed:
+        return Check(False, error="Точка: недопустимое значение.")
+    return Check(True, value)
+
+
+def battery_rows(batteries: Iterable[dict], *, today: date | None = None) -> list[dict]:
+    """Список батарей с износом и признаком «пора смотреть»."""
+    today = today or date.today()
+    rows = []
+    for battery in batteries:
+        months = int(battery.get("service_months") or 15)
+        passed = months_between(battery.get("purchased_on"), today)
+        wear = (float(round(min(100 * passed / max(months, 1), 100), 1))
+                if battery.get("purchased_on") else None)
+        cycles = int(battery.get("cycles") or 0)
+        rows.append({**battery, "wear": wear, "cycles": cycles,
+                     "tired": cycles >= BATTERY_CYCLES_WARN
+                     or (wear is not None and wear >= 100)})
+    rows.sort(key=lambda b: (not b["tired"], str(b.get("code") or "")))
+    return rows
+
+
+def battery_summary(rows: Iterable[dict]) -> dict[str, int]:
+    rows = list(rows)
+    counts = {code: sum(1 for r in rows if r.get("status") == code)
+              for code in BATTERY_STATUSES}
+    counts["total"] = len(rows)
+    counts["tired"] = sum(1 for r in rows if r["tired"])
+    counts["operational"] = sum(1 for r in rows
+                                if r.get("status") in BATTERY_OPERATIONAL)
+    return counts
+
+
+def battery_amortization(battery: dict) -> Decimal | None:
+    """Сколько батарея съедает в месяц. None - цена не задана."""
+    price = battery.get("purchase_price")
+    if price is None:
+        model_price = battery.get("model_price")
+        if model_price is None:
+            return None
+        price = model_price
+    months = max(int(battery.get("service_months") or 15), 1)
+    return to_money(to_money(price) / months)
+
+
+def compat_matrix(bike_models: Iterable[dict], battery_models: Iterable[dict],
+                  pairs: Iterable[dict]) -> dict[str, Any]:
+    """Матрица совместимости для экрана: строки - велосипеды, колонки - АКБ.
+
+    Пустая клетка и есть «не подходит»: хранить отдельно «нет» значило бы
+    отличать «проверили и не подходит» от «ещё не проверяли», а на двух
+    точках это различие никому не нужно.
+    """
+    fits: dict[tuple[int, int], bool] = {}
+    for pair in pairs:
+        fits[(int(pair["bike_model_id"]), int(pair["battery_model_id"]))] = \
+            bool(pair.get("primary_fit"))
+    rows = []
+    for bike in bike_models:
+        cells = []
+        for battery in battery_models:
+            key = (int(bike["id"]), int(battery["id"]))
+            cells.append({"battery": battery, "fits": key in fits,
+                          "primary": fits.get(key, False)})
+        rows.append({"bike": bike, "cells": cells})
+    return {"rows": rows, "batteries": list(battery_models)}

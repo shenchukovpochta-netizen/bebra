@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Батареи — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Батареи</h1>
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="номер, серийник">
+    <select name="status"><option value="">все</option>
+      {% for code, label in BATTERY_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }} ({{ summary.get(code, 0) }})</option>{% endfor %}
+    </select>
+    <select name="location"><option value="">любая точка</option>
+      {% for loc in locations %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+      <option value="none" {% if location == 'none' %}selected{% endif %}>не на точке</option>
+    </select>
+    <button type="submit">Найти</button>
+  </form>
+  {% if can_edit(staff, 'batteries') %}<a class="btn" href="/batteries/new">+ Батарея</a>{% endif %}
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ summary.operational }}</b><span>в обороте<br><small class="muted">свободна, у клиента, ремонт, ТО</small></span></div>
+  <div class="tile"><b>{{ summary.available }}</b><span>свободных на точках</span></div>
+  <div class="tile {% if summary.tired %}warn{% endif %}"><b>{{ summary.tired }}</b><span>пора смотреть<br><small class="muted">от {{ BATTERY_CYCLES_WARN }} циклов или отслужила срок</small></span></div>
+  <div class="tile {% if summary.lost %}warn{% endif %}"><b>{{ summary.lost }}</b><span>утеряно</span></div>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>№</th><th>Модель</th><th class="opt">Ёмкость</th><th>Статус</th><th>Где</th><th class="opt">Циклов</th><th class="opt">Износ</th><th>У кого</th></tr>
+  {% for b in rows %}
+  <tr class="{% if b.tired %}warn-row{% endif %}">
+    <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
+    <td>{{ b.model_title or '—' }}</td>
+    <td class="opt muted">{% if b.voltage %}{{ b.voltage }} В{% endif %}{% if b.capacity %} · {{ b.capacity }} А·ч{% endif %}</td>
+    <td><span class="tag {{ b.status }}">{{ BATTERY_STATUSES[b.status] }}</span></td>
+    <td>{% if b.bike_code %}<a href="/bikes/{{ b.bike_id }}">№ {{ b.bike_code }}</a>{% else %}{{ b.location or '—' }}{% endif %}</td>
+    <td class="num opt {% if b.cycles >= BATTERY_CYCLES_WARN %}bad{% endif %}">{{ b.cycles }}</td>
+    <td class="num opt">{% if b.wear is none %}—{% else %}{{ b.wear }} %{% endif %}</td>
+    <td>{% if b.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.client_name }}</a>{% else %}{{ b.client_name or '' }}{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="muted">Батарей нет. Заведите их с наклейками — по ним батарею и ищут.</td></tr>{% endfor %}
+</table>
+<p class="muted">Первыми — те, что пора смотреть: от {{ BATTERY_CYCLES_WARN }} циклов
+  ёмкость заметно просела, и клиент начинает жаловаться на «не доезжает».
+  Статус «У клиента» ставит и снимает выдача, как и у велосипеда.</p>
+</div>
+{% endblock %}

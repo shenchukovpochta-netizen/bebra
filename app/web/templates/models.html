@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Каталог моделей — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Каталог моделей</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/locations">Точки</a><a href="/models" class="on">Каталог</a></nav>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Велосипеды</h2>
+  <table>
+    <tr><th>Название</th><th class="opt">Заводское</th><th>Слотов АКБ</th><th>В парке</th></tr>
+    {% for m in bike_models %}
+    <tr class="{% if not m.active %}muted{% endif %}">
+      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}</td>
+      <td class="opt muted">{{ m.factory_title or '—' }}</td>
+      <td class="num">{{ m.battery_slots }}</td>
+      <td class="num">{{ m.bikes }}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">Каталог пуст. Модели в карточках велосипедов от этого не ломаются — там текст.</td></tr>{% endfor %}
+  </table>
+  {% if can_edit(staff, 'settings') %}
+  <form method="post" action="/models/bikes" class="grid2">
+    <label>Название для клиента <input name="title" required></label>
+    <label>Бренд <input name="brand"></label>
+    <label>Заводское название <input name="factory_title"></label>
+    <label>Слотов АКБ <input name="battery_slots" value="2" size="3"></label>
+    <button type="submit">Добавить</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Батареи</h2>
+  <table>
+    <tr><th>Название</th><th>В</th><th>А·ч</th>{% if can_view(staff, 'finance') %}<th>Цена</th>{% endif %}<th>Заведено</th></tr>
+    {% for m in battery_models %}
+    <tr class="{% if not m.active %}muted{% endif %}">
+      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}</td>
+      <td class="num">{{ m.voltage or '—' }}</td>
+      <td class="num">{{ m.capacity or '—' }}</td>
+      {% if can_view(staff, 'finance') %}<td class="num">{{ money(m.price) }}</td>{% endif %}
+      <td class="num">{{ m.batteries }}</td>
+    </tr>
+    {% else %}<tr><td colspan="5" class="muted">Моделей АКБ нет.</td></tr>{% endfor %}
+  </table>
+  {% if can_edit(staff, 'settings') %}
+  <form method="post" action="/models/batteries" class="grid2">
+    <label>Название <input name="title" required></label>
+    <label>Бренд <input name="brand"></label>
+    <label>Напряжение, В <input name="voltage" size="4"></label>
+    <label>Ёмкость, А·ч <input name="capacity" size="5"></label>
+    <label>Цена <input name="price" value="0"></label>
+    <label>Срок службы, мес. <input name="service_months" value="15" size="4"></label>
+    <button type="submit">Добавить</button>
+  </form>
+  {% endif %}
+</section>
+</div>
+
+<div class="card">
+  <h2>Совместимость</h2>
+  {% if matrix.rows and matrix.batteries %}
+  <table>
+    <tr><th>Велосипед</th>{% for b in matrix.batteries %}<th>{{ b.title }}</th>{% endfor %}</tr>
+    {% for row in matrix.rows %}
+    <tr>
+      <td><b>{{ row.bike.title }}</b></td>
+      {% for cell in row.cells %}
+      <td>
+        {% if can_edit(staff, 'settings') %}
+        <form method="post" action="/models/compat" class="inline-form">
+          <input type="hidden" name="bike_model_id" value="{{ row.bike.id }}">
+          <input type="hidden" name="battery_model_id" value="{{ cell.battery.id }}">
+          <select name="mode" onchange="this.form.submit()">
+            <option value="none" {% if not cell.fits %}selected{% endif %}>—</option>
+            <option value="fits" {% if cell.fits and not cell.primary %}selected{% endif %}>подходит</option>
+            <option value="primary" {% if cell.primary %}selected{% endif %}>основная</option>
+          </select>
+          <noscript><button type="submit" class="ghost">ок</button></noscript>
+        </form>
+        {% else %}
+        {% if cell.primary %}основная{% elif cell.fits %}подходит{% else %}—{% endif %}
+        {% endif %}
+      </td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Пустая клетка и есть «не подходит»: хранить отдельно «нет»
+    значило бы отличать «проверили и не подходит» от «ещё не проверяли», а на
+    двух точках это различие никому не нужно. «Основная» — та, что ставят по
+    умолчанию при выдаче.</p>
+  {% else %}
+  <p class="muted">Матрица появится, когда в каталоге будут и велосипеды, и батареи.</p>
+  {% endif %}
+</div>
+{% endblock %}

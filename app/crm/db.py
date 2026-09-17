@@ -30,6 +30,14 @@ CLIENT_FIELDS = frozenset({
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
+BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location",
+                            "bike_id", "rental_id", "cycles", "purchase_price",
+                            "purchased_on", "service_months", "note"})
+LOCATION_FIELDS = frozenset({"city", "name", "address", "note", "active", "sort"})
+BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
+                               "battery_slots", "active", "note"})
+BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
+                                  "price", "service_months", "active", "note"})
 SUPPLIER_FIELDS = frozenset({"name", "phone", "note", "active"})
 PART_FIELDS = frozenset({"title", "node", "unit", "cost", "price", "min_stock",
                          "model", "active", "note"})
@@ -1798,3 +1806,253 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.bikes where purchase_id = $1 order by code",
             purchase_id))
+
+    # ───────────────── справочники: точки и модели ─────────────────
+
+    async def locations(self, *, active_only: bool = False) -> list[dict]:
+        where = "where active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"select * from crm.locations {where} order by sort, name"))
+
+    async def location_names(self) -> list[str]:
+        """Названия точек для форм и проверок. Пусто - справочник не завели,
+        и вызывающий откатывается на константу из logic."""
+        rows = await self.pool.fetch(
+            "select name from crm.locations where active order by sort, name")
+        return [r["name"] for r in rows]
+
+    async def create_location(self, *, name: str, city: str, address: str | None,
+                              note: str | None) -> int:
+        return int(await self.pool.fetchval(
+            "insert into crm.locations (name, city, address, note) "
+            "values ($1, $2, $3, $4) returning id", name, city, address, note))
+
+    async def update_location(self, location_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, LOCATION_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.locations set {sets} where id = $1", location_id, *values)
+
+    async def bike_models(self, *, active_only: bool = False) -> list[dict]:
+        where = "where m.active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"""
+            select m.*, count(b.id) as bikes
+            from crm.bike_models m
+            left join crm.bikes b on b.model = m.title
+            {where}
+            group by m.id
+            order by m.active desc, m.title
+            """))
+
+    async def bike_model(self, model_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.bike_models where id = $1", model_id))
+
+    async def create_bike_model(self, *, title: str, brand: str | None,
+                                factory_title: str | None, battery_slots: int,
+                                note: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.bike_models (title, brand, factory_title, battery_slots, note)
+            values ($1, $2, $3, $4, $5) returning id
+            """, title, brand, factory_title, battery_slots, note))
+
+    async def update_bike_model(self, model_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, BIKE_MODEL_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.bike_models set {sets} where id = $1", model_id, *values)
+
+    async def battery_models(self, *, active_only: bool = False) -> list[dict]:
+        where = "where m.active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"""
+            select m.*, count(b.id) as batteries
+            from crm.battery_models m
+            left join crm.batteries b on b.model_id = m.id
+            {where}
+            group by m.id
+            order by m.active desc, m.title
+            """))
+
+    async def battery_model(self, model_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.battery_models where id = $1", model_id))
+
+    async def create_battery_model(self, *, title: str, brand: str | None,
+                                   voltage: int | None, capacity: Decimal | None,
+                                   price: Decimal, service_months: int,
+                                   note: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.battery_models (title, brand, voltage, capacity, price,
+                                            service_months, note)
+            values ($1, $2, $3, $4, $5, $6, $7) returning id
+            """, title, brand, voltage, capacity, price, service_months, note))
+
+    async def update_battery_model(self, model_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        sets, values = _set_clause(fields, BATTERY_MODEL_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.battery_models set {sets} where id = $1", model_id, *values)
+
+    # ───────────────── совместимость ─────────────────
+
+    async def compat_pairs(self) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            """
+            select c.*, bm.title as bike_title, tm.title as battery_title
+            from crm.compat c
+            join crm.bike_models bm on bm.id = c.bike_model_id
+            join crm.battery_models tm on tm.id = c.battery_model_id
+            order by bm.title, tm.title
+            """))
+
+    async def set_compat(self, bike_model_id: int, battery_model_id: int, *,
+                         fits: bool, primary_fit: bool = False) -> None:
+        """Одна клетка матрицы. Снятая галочка удаляет пару, а не хранит
+        «не подходит»: пустая клетка и есть «не подходит»."""
+        if not fits:
+            await self.pool.execute(
+                "delete from crm.compat where bike_model_id = $1 "
+                "and battery_model_id = $2", bike_model_id, battery_model_id)
+            return
+        await self.pool.execute(
+            """
+            insert into crm.compat (bike_model_id, battery_model_id, primary_fit)
+            values ($1, $2, $3)
+            on conflict (bike_model_id, battery_model_id)
+            do update set primary_fit = excluded.primary_fit
+            """, bike_model_id, battery_model_id, primary_fit)
+
+    async def compat_for_bike_model(self, title: str) -> list[dict]:
+        """Какие батареи подходят этой модели велосипеда - по названию:
+        в crm.bikes лежит текст модели, а не ссылка на каталог."""
+        return _rows(await self.pool.fetch(
+            """
+            select tm.*, c.primary_fit
+            from crm.compat c
+            join crm.bike_models bm on bm.id = c.bike_model_id
+            join crm.battery_models tm on tm.id = c.battery_model_id
+            where bm.title = $1 and tm.active
+            order by c.primary_fit desc, tm.title
+            """, title))
+
+    # ───────────────────────────── батареи ─────────────────────────────
+
+    _BATTERY_SELECT = """
+        select b.*, m.title as model_title, m.voltage, m.capacity,
+               m.price as model_price, bk.code as bike_code, bk.model as bike_model,
+               c.full_name as client_name, r.client_id
+        from crm.batteries b
+        left join crm.battery_models m on m.id = b.model_id
+        left join crm.bikes bk on bk.id = b.bike_id
+        left join crm.rentals r on r.id = b.rental_id and r.status = 'active'
+        left join crm.clients c on c.id = r.client_id
+    """
+
+    async def batteries(self, *, status: str | None = None, q: str | None = None,
+                        location: str | None = None, bike_id: int | None = None,
+                        rental_id: int | None = None, limit: int = 1000) -> list[dict]:
+        conds, args = [], []
+        if status:
+            args.append(status)
+            conds.append(f"b.status = ${len(args)}")
+        if location == "none":
+            conds.append("b.location is null")
+        elif location:
+            args.append(location)
+            conds.append(f"b.location = ${len(args)}")
+        if bike_id:
+            args.append(bike_id)
+            conds.append(f"b.bike_id = ${len(args)}")
+        if rental_id:
+            args.append(rental_id)
+            conds.append(f"b.rental_id = ${len(args)}")
+        if q:
+            args.append(f"%{q.strip()}%")
+            conds.append(f"(b.code ilike ${len(args)} or b.serial_no ilike ${len(args)})")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._BATTERY_SELECT} {where} order by b.code limit ${len(args)}", *args))
+
+    async def battery(self, battery_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._BATTERY_SELECT} where b.id = $1", battery_id))
+
+    async def battery_by_code(self, code: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.batteries where code = $1", code))
+
+    async def create_battery(self, *, by: str | None = None, **fields: Any) -> int:
+        unknown = set(fields) - BATTERY_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        cols = list(fields)
+        places = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            return int(await conn.fetchval(
+                f"insert into crm.batteries ({', '.join(cols)}) values ({places}) "
+                "returning id", *[fields[c] for c in cols]))
+
+    async def update_battery(self, battery_id: int, *, by: str | None = None,
+                             **fields: Any) -> None:
+        """by - кто менял: триггер журнала статусов читает его из
+        set_config('crm.actor') в той же транзакции."""
+        sets, values = _set_clause(fields, BATTERY_FIELDS, 2)
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            await conn.execute(
+                f"update crm.batteries set {sets}, updated_at = now() where id = $1",
+                battery_id, *values)
+
+    async def battery_status_log(self, battery_id: int, limit: int = 30) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.battery_status_log where battery_id = $1 "
+            "order by changed_at desc, id desc limit $2", battery_id, limit))
+
+    async def battery_counts(self) -> dict[str, int]:
+        rows = await self.pool.fetch(
+            "select status, count(*) as n from crm.batteries group by status")
+        return {r["status"]: int(r["n"]) for r in rows}
+
+    async def issue_batteries(self, rental_id: int, *, battery_ids: list[int],
+                              bike_id: int | None, by: str) -> None:
+        """Выдать батареи вместе с арендой - одной транзакцией.
+
+        Батарея уходит к клиенту так же, как велосипед: статус, привязка
+        к аренде и журнал - вместе, иначе выданная батарея останется
+        «свободной» и уедет второму клиенту.
+        """
+        if not battery_ids:
+            return
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            await conn.execute(
+                """
+                update crm.batteries
+                   set status = 'rented', rental_id = $2, bike_id = coalesce($3, bike_id),
+                       updated_at = now()
+                 where id = any($1::bigint[]) and status = 'available'
+                """, battery_ids, rental_id, bike_id)
+
+    async def return_batteries(self, rental_id: int, *, status: str = "available",
+                               by: str) -> int:
+        """Принять батареи обратно при закрытии аренды или замене."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            rows = await conn.fetch(
+                """
+                update crm.batteries
+                   set status = $2, rental_id = null, cycles = cycles + 1,
+                       updated_at = now()
+                 where rental_id = $1 and status = 'rented'
+                returning id
+                """, rental_id, status)
+            return len(rows)

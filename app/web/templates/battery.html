@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Батарея {{ battery.code }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Батарея {{ battery.code }} <span class="tag {{ battery.status }}">{{ BATTERY_STATUSES[battery.status] }}</span></h1>
+  <a class="btn ghost" href="/batteries">Все батареи</a></div>
+
+<div class="cols">
+<section class="card">
+  <h2>Карточка</h2>
+  <dl>
+    <dt>Модель</dt><dd>{{ battery.model_title or '—' }}{% if battery.voltage %} · {{ battery.voltage }} В{% endif %}{% if battery.capacity %} · {{ battery.capacity }} А·ч{% endif %}</dd>
+    <dt>Серийный номер</dt><dd>{{ battery.serial_no or '—' }}</dd>
+    <dt>Где</dt><dd>{% if battery.bike_code %}в велосипеде <a href="/bikes/{{ battery.bike_id }}">№ {{ battery.bike_code }}</a>{% else %}{{ battery.location or 'не на точке' }}{% endif %}</dd>
+    <dt>У кого</dt><dd>{% if battery.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ battery.client_id }}">{{ battery.client_name }}</a>{% else %}{{ battery.client_name }}{% endif %}{% else %}—{% endif %}</dd>
+    <dt>Циклов</dt><dd class="{% if battery.cycles >= BATTERY_CYCLES_WARN %}bad{% endif %}">{{ battery.cycles }}{% if battery.tired %} · пора смотреть{% endif %}</dd>
+    <dt>Износ</dt><dd>{% if battery.wear is none %}не считается: нет даты покупки{% else %}{{ battery.wear }} % срока{% endif %}</dd>
+    {% if can_view(staff, 'finance') %}
+    <dt>Цена</dt><dd>{% if battery.purchase_price is not none %}{{ money(battery.purchase_price) }}{% else %}<span class="muted">не задана</span>{% endif %}</dd>
+    <dt>Амортизация</dt><dd>{% if amortization %}{{ money(amortization) }} в месяц{% else %}—{% endif %}</dd>
+    {% endif %}
+    <dt>Заметка</dt><dd>{{ battery.note or '—' }}</dd>
+  </dl>
+
+  {% if can_edit(staff, 'batteries') %}
+  <form method="post" action="/batteries/{{ battery.id }}/status" class="inline-form">
+    <select name="status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if battery.status == code %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select>
+    <button type="submit" class="ghost">Сменить статус</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Журнал статусов</h2>
+  <table>
+    <tr><th>Когда</th><th>Было</th><th>Стало</th><th>Кто</th></tr>
+    {% for x in log %}
+    <tr><td>{{ x.changed_at|dmy }}</td>
+      <td class="muted">{{ BATTERY_STATUSES.get(x.from_status, x.from_status or '—') }}</td>
+      <td>{{ BATTERY_STATUSES.get(x.to_status, x.to_status) }}</td>
+      <td class="muted">{{ x.changed_by or '' }}</td></tr>
+    {% else %}<tr><td colspan="4" class="muted">Записей нет.</td></tr>{% endfor %}
+  </table>
+</section>
+</div>
+
+{% if can_edit(staff, 'batteries') %}
+<section class="card">
+  <h2>Изменить</h2>
+  <form method="post" action="/batteries/{{ battery.id }}/edit" class="grid2">
+    <label>Номер на корпусе <input name="code" value="{{ battery.code }}" required></label>
+    <label>Модель <select name="model_id"><option value="">не указана</option>{% for m in models %}<option value="{{ m.id }}" {% if battery.model_id == m.id %}selected{% endif %}>{{ m.title }}</option>{% endfor %}</select></label>
+    <label>Серийный номер <input name="serial_no" value="{{ battery.serial_no or '' }}"></label>
+    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}" {% if battery.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Цена покупки <input name="purchase_price" value="{{ battery.purchase_price if battery.purchase_price is not none else '' }}"></label>
+    <label>Куплена <input type="date" name="purchased_on" value="{{ battery.purchased_on|iso if battery.purchased_on else '' }}"></label>
+    <label>Срок службы, мес. <input name="service_months" value="{{ battery.service_months }}" size="4"></label>
+    <label>Циклов заряда <input name="cycles" value="{{ battery.cycles }}" size="5"></label>
+    <label class="wide">Заметка <textarea name="note" rows="2">{{ battery.note or '' }}</textarea></label>
+    <button type="submit">Сохранить</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

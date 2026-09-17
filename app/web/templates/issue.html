@@ -183,6 +183,18 @@
     <label>Способ <select name="pay_method">{% for code, label in METHODS.items() %}<option value="{{ code }}" {% if code == 'sbp' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <p class="muted">0 — выдать без оплаты: клиент получит уведомление с долгом и ссылкой на оплату из кабинета (если Telegram привязан).</p>
   </section>
+  {% if batteries %}
+  <section class="card">
+    <h2>Батареи</h2>
+    <p class="muted">Отметьте, какие уезжают с велосипедом{% if battery_slots %} — слотов у модели: {{ battery_slots }}{% endif %}. Они перейдут в статус «У клиента» и вернутся при возврате.</p>
+    <div class="checks">
+      {% for b in batteries %}
+      <label class="check"><input type="checkbox" name="battery_ids" value="{{ b.id }}">
+        <span>№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</span></label>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
   </div>
   <div class="issue-bar">
     <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}&model={{ bike.model|urlencode }}">← Назад</a>

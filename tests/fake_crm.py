@@ -40,6 +40,12 @@ class FakeCrm:
         self.part_order_items_: list[dict] = []
         self.rental_bikes_: list[dict] = []
         self.purchases_: dict[int, dict] = {}
+        self.locations_: dict[int, dict] = {}
+        self.bike_models_: dict[int, dict] = {}
+        self.battery_models_: dict[int, dict] = {}
+        self.compat_: dict[tuple, bool] = {}
+        self.batteries_: dict[int, dict] = {}
+        self.battery_log_: list[dict] = []
         self.settings_: dict[str, str] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
@@ -1388,6 +1394,211 @@ class FakeCrm:
         rows = [dict(b) for b in self.bikes_.values()
                 if b.get("purchase_id") == purchase_id]
         return sorted(rows, key=lambda b: b["code"])
+
+    # ───────────────── справочники и батареи ─────────────────
+
+    async def locations(self, *, active_only=False):
+        rows = [dict(x) for x in self.locations_.values()
+                if not active_only or x["active"]]
+        return sorted(rows, key=lambda x: (x["sort"], x["name"]))
+
+    async def location_names(self):
+        return [x["name"] for x in await self.locations(active_only=True)]
+
+    async def create_location(self, *, name, city, address, note):
+        if any(x["name"] == name for x in self.locations_.values()):
+            raise UniqueError("location name")
+        loc_id = self._id()
+        self.locations_[loc_id] = {"id": loc_id, "name": name, "city": city,
+                                   "address": address, "note": note, "active": True,
+                                   "sort": 100, "created_at": self._now()}
+        return loc_id
+
+    async def update_location(self, location_id, **fields):
+        if location_id in self.locations_:
+            self.locations_[location_id].update(fields)
+
+    async def bike_models(self, *, active_only=False):
+        rows = []
+        for model in self.bike_models_.values():
+            if active_only and not model["active"]:
+                continue
+            rows.append({**model, "bikes": sum(1 for b in self.bikes_.values()
+                                               if b["model"] == model["title"])})
+        return sorted(rows, key=lambda m: (not m["active"], m["title"]))
+
+    async def bike_model(self, model_id):
+        model = self.bike_models_.get(model_id)
+        return dict(model) if model else None
+
+    async def create_bike_model(self, *, title, brand, factory_title, battery_slots,
+                                note):
+        if any(m["title"] == title for m in self.bike_models_.values()):
+            raise UniqueError("bike model")
+        model_id = self._id()
+        self.bike_models_[model_id] = {"id": model_id, "title": title, "brand": brand,
+                                       "factory_title": factory_title,
+                                       "battery_slots": int(battery_slots),
+                                       "active": True, "note": note,
+                                       "created_at": self._now()}
+        return model_id
+
+    async def update_bike_model(self, model_id, **fields):
+        if model_id in self.bike_models_:
+            self.bike_models_[model_id].update(fields)
+
+    async def battery_models(self, *, active_only=False):
+        rows = []
+        for model in self.battery_models_.values():
+            if active_only and not model["active"]:
+                continue
+            rows.append({**model, "batteries": sum(
+                1 for b in self.batteries_.values() if b.get("model_id") == model["id"])})
+        return sorted(rows, key=lambda m: (not m["active"], m["title"]))
+
+    async def battery_model(self, model_id):
+        model = self.battery_models_.get(model_id)
+        return dict(model) if model else None
+
+    async def create_battery_model(self, *, title, brand, voltage, capacity, price,
+                                   service_months, note):
+        if any(m["title"] == title for m in self.battery_models_.values()):
+            raise UniqueError("battery model")
+        model_id = self._id()
+        self.battery_models_[model_id] = {
+            "id": model_id, "title": title, "brand": brand, "voltage": voltage,
+            "capacity": capacity, "price": Decimal(str(price or 0)),
+            "service_months": int(service_months), "active": True, "note": note,
+            "created_at": self._now()}
+        return model_id
+
+    async def update_battery_model(self, model_id, **fields):
+        if model_id in self.battery_models_:
+            self.battery_models_[model_id].update(fields)
+
+    async def compat_pairs(self):
+        rows = []
+        for (bike_id, battery_id), primary in self.compat_.items():
+            bike = self.bike_models_.get(bike_id) or {}
+            battery = self.battery_models_.get(battery_id) or {}
+            rows.append({"bike_model_id": bike_id, "battery_model_id": battery_id,
+                         "primary_fit": primary, "bike_title": bike.get("title"),
+                         "battery_title": battery.get("title")})
+        return sorted(rows, key=lambda r: (r["bike_title"] or "", r["battery_title"] or ""))
+
+    async def set_compat(self, bike_model_id, battery_model_id, *, fits,
+                         primary_fit=False):
+        key = (bike_model_id, battery_model_id)
+        if not fits:
+            self.compat_.pop(key, None)
+            return
+        self.compat_[key] = bool(primary_fit)
+
+    async def compat_for_bike_model(self, title):
+        model = next((m for m in self.bike_models_.values() if m["title"] == title), None)
+        if model is None:
+            return []
+        rows = []
+        for (bike_id, battery_id), primary in self.compat_.items():
+            if bike_id != model["id"]:
+                continue
+            battery = self.battery_models_.get(battery_id)
+            if battery and battery["active"]:
+                rows.append({**battery, "primary_fit": primary})
+        return sorted(rows, key=lambda r: (not r["primary_fit"], r["title"]))
+
+    def _battery_row(self, battery):
+        model = self.battery_models_.get(battery.get("model_id")) or {}
+        bike = self.bikes_.get(battery.get("bike_id")) or {}
+        rental = self.rentals_.get(battery.get("rental_id")) or {}
+        client = self.clients_.get(rental.get("client_id")) or {}
+        return {**battery, "model_title": model.get("title"),
+                "voltage": model.get("voltage"), "capacity": model.get("capacity"),
+                "model_price": model.get("price"), "bike_code": bike.get("code"),
+                "bike_model": bike.get("model"),
+                "client_name": client.get("full_name") or None,
+                "client_id": rental.get("client_id")
+                if rental.get("status") == "active" else None}
+
+    async def batteries(self, *, status=None, q=None, location=None, bike_id=None,
+                        rental_id=None, limit=1000):
+        rows = []
+        for battery in self.batteries_.values():
+            if status and battery["status"] != status:
+                continue
+            if location == "none" and battery.get("location") is not None:
+                continue
+            if location and location != "none" and battery.get("location") != location:
+                continue
+            if bike_id and battery.get("bike_id") != bike_id:
+                continue
+            if rental_id and battery.get("rental_id") != rental_id:
+                continue
+            if q and q.lower() not in \
+                    f"{battery['code']} {battery.get('serial_no') or ''}".lower():
+                continue
+            rows.append(self._battery_row(battery))
+        return sorted(rows, key=lambda b: b["code"])[:limit]
+
+    async def battery(self, battery_id):
+        battery = self.batteries_.get(battery_id)
+        return self._battery_row(battery) if battery else None
+
+    async def battery_by_code(self, code):
+        return next((self._battery_row(b) for b in self.batteries_.values()
+                     if b["code"] == code), None)
+
+    def _log_battery(self, battery_id, from_status, to_status, by=None):
+        self.battery_log_.append({"id": self._id(), "battery_id": battery_id,
+                                  "from_status": from_status, "to_status": to_status,
+                                  "changed_at": self._now(), "changed_by": by})
+
+    async def create_battery(self, *, by=None, **fields):
+        if any(b["code"] == fields.get("code") for b in self.batteries_.values()):
+            raise UniqueError("battery code")
+        battery_id = self._id()
+        self.batteries_[battery_id] = {
+            "id": battery_id, "code": None, "model_id": None, "serial_no": None,
+            "status": "available", "location": None, "bike_id": None,
+            "rental_id": None, "cycles": 0, "purchase_price": None,
+            "purchased_on": None, "service_months": 15, "note": None,
+            "created_at": self._now(), "updated_at": self._now(), **fields}
+        self._log_battery(battery_id, None, self.batteries_[battery_id]["status"], by)
+        return battery_id
+
+    async def update_battery(self, battery_id, *, by=None, **fields):
+        before = self.batteries_[battery_id]["status"]
+        self.batteries_[battery_id].update(fields)
+        if "status" in fields and fields["status"] != before:
+            self._log_battery(battery_id, before, fields["status"], by)
+
+    async def battery_status_log(self, battery_id, limit=30):
+        rows = [dict(x) for x in self.battery_log_ if x["battery_id"] == battery_id]
+        return sorted(rows, key=lambda x: x["id"], reverse=True)[:limit]
+
+    async def battery_counts(self):
+        out: dict[str, int] = {}
+        for battery in self.batteries_.values():
+            out[battery["status"]] = out.get(battery["status"], 0) + 1
+        return out
+
+    async def issue_batteries(self, rental_id, *, battery_ids, bike_id, by):
+        for battery_id in battery_ids:
+            battery = self.batteries_.get(battery_id)
+            if battery is None or battery["status"] != "available":
+                continue
+            await self.update_battery(battery_id, status="rented", rental_id=rental_id,
+                                      bike_id=bike_id or battery.get("bike_id"), by=by)
+
+    async def return_batteries(self, rental_id, *, status="available", by):
+        count = 0
+        for battery in list(self.batteries_.values()):
+            if battery.get("rental_id") == rental_id and battery["status"] == "rented":
+                await self.update_battery(battery["id"], status=status, rental_id=None,
+                                          cycles=int(battery.get("cycles") or 0) + 1,
+                                          by=by)
+                count += 1
+        return count
 
 
 class UniqueError(Exception):
