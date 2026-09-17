@@ -36,6 +36,10 @@ header nav a:hover{color:#fff;text-decoration:none;background:rgba(255,255,255,.
 header nav a.on{color:#fff;background:var(--brand)}
 header nav a.me{margin-left:10px;color:var(--brand-soft)}
 header nav a.me.on{color:#fff}
+/* Разделов стало полтора десятка: на ноутбучной ширине меню поджимается,
+   чтобы не разъезжаться на две строки. */
+@media (max-width:1500px){header nav a{padding:6px 7px;font-size:13px}}
+@media (max-width:1200px){header nav a{padding:5px 6px;font-size:12.5px}header nav a.me{margin-left:4px}}
 
 main{max-width:1200px;margin:0 auto;padding:20px}
 h1{font:700 22px/1.2 var(--font-head);margin:0 0 14px;letter-spacing:-.01em}
