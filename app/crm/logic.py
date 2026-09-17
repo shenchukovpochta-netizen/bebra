@@ -1300,21 +1300,43 @@ def service_rows(bikes: Iterable[dict], orders_by_bike: dict[int, dict], *,
         rows.append({**bike, "order": order,
                      "stage": ORDER_STATUSES.get((order or {}).get("status"), "Без наряда"),
                      "days": days,
+                     # Что этот велосипед уже не заработал, пока стоит.
+                     "lost": idle_cost(days),
                      "stuck": (not order) or order_stuck(order, today=today)})
     # Без наряда - в начало: это и есть потерянные велосипеды сервиса.
     rows.sort(key=lambda r: (r["order"] is not None, -r["days"]))
     return rows
 
 
-def service_summary(rows: Iterable[dict]) -> dict[str, int]:
-    """Сводка рабочего стола: сколько стоит и сколько из них без наряда."""
+def service_summary(rows: Iterable[dict]) -> dict[str, Any]:
+    """Сводка рабочего стола: сколько стоит, сколько без наряда и почём.
+
+    Деньги здесь - оценка по цели среднего чека, а не факт: велосипед,
+    который стоит, не заработал ничего, и «сколько бы он принёс» -
+    единственный честный способ это назвать.
+    """
     rows = list(rows)
+    days = sum(r["days"] for r in rows)
     return {
         "total": len(rows),
         "no_order": sum(1 for r in rows if r["order"] is None),
         "stuck": sum(1 for r in rows if r["stuck"]),
-        "days": sum(r["days"] for r in rows),
+        "days": days,
+        "lost": idle_cost(days),
+        # Сколько они стоят нам каждый следующий день, пока стоят.
+        "per_day": idle_cost(len(rows)),
     }
+
+
+def idle_cost(days: Any, *, rate: Any = CHECK_TARGET) -> Decimal:
+    """Во сколько обходится простой: велосипеде-дни по цели чека.
+
+    Цель, а не фактический чек: потери должны показывать расстояние до
+    цели, а не подстраиваться под слабый месяц. Целые рубли - копейки
+    в оценке выглядят точностью, которой нет.
+    """
+    return (Decimal(str(days or 0)) * to_money(rate)).quantize(
+        Decimal(1), rounding=ROUND_HALF_UP)
 
 
 # ───────────────────────── пересчёт техники ─────────────────────────

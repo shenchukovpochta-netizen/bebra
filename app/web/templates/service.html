@@ -12,7 +12,8 @@
   <div class="tile"><b>{{ summary.total }}</b><span>всего в сервисе</span></div>
   <div class="tile {% if summary.stuck %}warn{% endif %}"><b>{{ summary.stuck }}</b><span>стоят дольше {{ ORDER_STUCK_DAYS }} дн.</span></div>
   {% if can_view(staff, 'finance') %}
-  <div class="tile"><b>{{ money(CHECK_TARGET * summary.days) }}</b><span>потеряно, пока стоят<br><small class="muted">{{ summary.days }} велосипеде-дней по цели</small></span></div>
+  <div class="tile"><b>{{ money(summary.lost) }}</b><span>потеряно, пока стоят<br><small class="muted">{{ summary.days }} велосипеде-дней по цели {{ money(CHECK_TARGET) }}</small></span></div>
+  <div class="tile {% if summary.per_day %}warn{% endif %}"><b>−{{ money(summary.per_day) }}</b><span>в день, пока стоят<br><small class="muted">каждые сутки сервиса стоят столько</small></span></div>
   {% endif %}
 </div>
 
@@ -63,13 +64,14 @@
   <h2>Велосипеды в сервисе</h2>
   {% if rows %}
   <table>
-    <tr><th>Велосипед</th><th>Модель</th><th>Этап</th><th>Суток</th><th>Наряд</th><th>Техник</th><th>Чей ремонт</th><th>Жалоба</th></tr>
+    <tr><th>Велосипед</th><th>Модель</th><th>Этап</th><th>Суток</th>{% if can_view(staff, 'finance') %}<th>Потеряно</th>{% endif %}<th>Наряд</th><th>Техник</th><th>Чей ремонт</th><th>Жалоба</th></tr>
     {% for r in rows %}
     <tr class="{% if r.stuck %}warn-row{% endif %}">
       <td><a href="/bikes/{{ r.id }}">№ {{ r.code }}</a></td>
       <td>{{ r.model }}</td>
       <td>{% if r.order %}<span class="tag order-{{ r.order.status }}">{{ r.stage }}</span>{% else %}<span class="tag bad">Без наряда</span>{% endif %}</td>
       <td class="num {% if r.stuck %}bad{% endif %}">{{ r.days }}</td>
+      {% if can_view(staff, 'finance') %}<td class="num {% if r.lost %}bad{% endif %}">{% if r.lost %}−{{ money(r.lost) }}{% else %}—{% endif %}</td>{% endif %}
       <td>{% if r.order %}<a href="/orders/{{ r.order.id }}">{{ r.order.no }}</a>{% elif can %}<a href="/orders/new?bike={{ r.id }}">открыть</a>{% else %}—{% endif %}</td>
       <td>{{ r.order.tech_name if r.order and r.order.tech_name else '—' }}</td>
       <td>{% if r.order %}{{ PAYERS[r.order.payer] }}{% else %}—{% endif %}</td>

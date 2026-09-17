@@ -406,6 +406,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                     and b.get("status") in logic.OPERATIONAL_STATUSES)),
                       metrics=metrics, losses=logic.fleet_losses(metrics),
                       loss_today=logic.loss_per_day(bikes_by),
+                      # Кто именно стоит и почём: список с деньгами -
+                      # это решение, а плитка «в ремонте 7» - только повод
+                      # сходить в сервис и посмотреть.
+                      standing=await standing_bikes(fleet),
                       amortization=logic.amortization_total(fleet, own_batteries),
                       idle_by_location=idle_by_location(fleet),
                       claims=await crm.pending_claims(), rentals=rows,
@@ -418,6 +422,19 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       bonus_share=logic.bonus_totals(
                           [{"kind": "all", "amount": month_totals.get("bonus", 0)}],
                           month_totals.get("payment", 0))["share"])
+
+    async def standing_bikes(fleet: list[dict], limit: int = 5) -> list[dict]:
+        """Велосипеды, которые стоят дольше всех, с ценой простоя."""
+        since = await crm.bike_status_since()
+        now = datetime.now(UTC)
+        rows = []
+        for bike in fleet:
+            if bike.get("status") not in logic.IDLE_STATUSES:
+                continue
+            days = logic.idle_days(since.get(bike["id"]), now=now) or 0
+            rows.append({**bike, "idle_days": days, "lost": logic.idle_cost(days)})
+        rows.sort(key=lambda b: (-b["idle_days"], str(b.get("code") or "")))
+        return rows[:limit]
 
     @app.post("/plan")
     async def plan_save(request: Request) -> Response:
@@ -836,12 +853,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if bike is None:
             return render(request, "missing.html", status_code=404, what="Велосипед")
         settings = await crm.settings()
+        # Сколько он уже не заработал, пока стоит. Простаивающий велосипед
+        # в списке - это строка, а в рублях - решение.
+        since = await crm.bike_status_since()
+        idle = (logic.idle_days(since.get(bike_id), now=datetime.now(UTC))
+                if bike.get("status") in logic.IDLE_STATUSES else 0)
         return render(request, "bike.html", bike=bike, log=await crm.bike_log(bike_id),
                       rentals=await crm.bike_rentals(bike_id),
                       status_log=await crm.bike_status_log(bike_id),
                       nodes=await crm.repair_nodes(),
                       order=await crm.open_order_of(bike_id),
                       passport=logic.bike_check_state(bike, settings),
+                      idle_days=idle, idle_lost=logic.idle_cost(idle),
                       amortization=logic.amortization_month(bike))
 
     @app.post("/bikes/{bike_id}/check")

@@ -149,6 +149,23 @@
   </ul>
   <p class="muted">Проценты — от операционного парка: потерянные, проданные
     и списанные в знаменатель не попадают никогда.</p>
+  {% if standing %}
+  <h3>Стоят дольше всех{% if money_ok %} <span class="muted">· −{{ money(loss_today.amount) }} в день</span>{% endif %}</h3>
+  <table>
+    <tr><th>Велосипед</th><th>Статус</th><th>Суток</th>{% if money_ok %}<th>Потеряно</th>{% endif %}</tr>
+    {% for b in standing %}
+    <tr>
+      <td><a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="muted">{{ b.model }}</span></td>
+      <td>{{ BIKE_STATUSES[b.status] }}</td>
+      <td class="num">{{ b.idle_days }}</td>
+      {% if money_ok %}<td class="num bad">−{{ money(b.lost) }}</td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Деньги здесь — оценка по цели {{ money(CHECK_TARGET) }} в день:
+    велосипед, который стоит, не заработал ничего, и «сколько бы он принёс» —
+    единственный честный способ это назвать.</p>
+  {% endif %}
   <p>{% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'clients') %}<a class="btn ghost" href="/clients/new">+ Клиент</a> {% endif %}{% if can_edit(staff, 'bikes') %}<a class="btn ghost" href="/bikes/new">+ Велосипед</a>{% endif %}</p>
 </section>
 {% if money_ok %}

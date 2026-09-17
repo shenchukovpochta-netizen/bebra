@@ -46,6 +46,11 @@
   </form>
   </fieldset>
   {% if not can_edit(staff, 'bikes') %}<p class="muted">Парк вам открыт только на просмотр: карточка, ремонт и смена статуса — за механиком.</p>{% endif %}
+  {% if idle_days and can_view(staff, 'finance') %}
+  <p class="flash {% if idle_lost %}err{% endif %}">Простаивает {{ idle_days }} сут. —
+    это <b>−{{ money(idle_lost) }}</b> по цели {{ money(CHECK_TARGET) }} в день.
+    Пока он стоит, каждые сутки стоят ещё {{ money(CHECK_TARGET) }}.</p>
+  {% endif %}
   <p class="muted">Пробег растёт сам: его вписывают при выдаче и при возврате аренды, назад не крутится. Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
 {% with passport=passport, base="/bikes/" ~ bike.id, section="bikes",
