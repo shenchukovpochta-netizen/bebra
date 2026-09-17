@@ -59,13 +59,24 @@ class TestOperatorLogic(unittest.TestCase):
                          "просроченные первыми, отложенные скрыты")
         self.assertEqual(out[0]["intent_label"], "")
 
-    def test_free_forecast_counts_returns_today_and_tomorrow(self):
-        rows = [row(1, -2, intent="return"), row(2, 0, intent="return"),
-                row(3, 1, intent="return"), row(4, 1, intent="renew"), row(5, 2, intent="return")]
-        out = logic.expiring(
-            [{**r, "intent_until": r["summary"]["covered_until"]} for r in rows],
-            today=TODAY, before_days=2)
-        self.assertEqual(logic.free_forecast(12, out), {"now": 12, "today": 2, "tomorrow": 1})
+    def test_forecast_counts_what_frees_up_in_the_next_days(self):
+        """Прогноз считается по «оплачено до», а «продлю» из него выпадает."""
+        rows = [{"status": "active", "bike_id": 1, "billed_until": TODAY,
+                 "balance": D(0), "price": D(3000), "period_days": 7, "intent": None},
+                {"status": "active", "bike_id": 2,
+                 "billed_until": TODAY + timedelta(days=1), "balance": D(0),
+                 "price": D(3000), "period_days": 7, "intent": "return"},
+                {"status": "active", "bike_id": 3,
+                 "billed_until": TODAY + timedelta(days=1), "balance": D(0),
+                 "price": D(3000), "period_days": 7, "intent": "renew"},
+                {"status": "active", "bike_id": 4,
+                 "billed_until": TODAY - timedelta(days=5), "balance": D(-3000),
+                 "price": D(3000), "period_days": 7, "intent": None}]
+        soon = logic.freeing_soon(rows, today=TODAY, horizon=3)
+        self.assertEqual({k: len(v) for k, v in soon.items()},
+                         {"0": 2, "1": 1, "2": 0, "3": 0})
+        self.assertEqual(logic.forecast_summary(12, soon),
+                         {"now": 12, "0": 14, "1": 15, "2": 15, "3": 15})
 
     def test_fleet_losses_from_metrics(self):
         metrics = logic.fleet_metrics(
@@ -124,13 +135,13 @@ class TestExpiringWidget(tw.WebCase):
         self.assertIn("теряем ≈", page)
         self.assertIn("потеряно на простое", page)
 
-    def test_intent_is_shown_and_feeds_the_forecast(self):
+    def test_intent_is_shown_and_takes_renewals_out_of_the_forecast(self):
         r = self.mark("return")
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/")
         page = self.get_ok("/")
         self.assertIn("сдаёт</span>", page)
-        self.assertIn("сдают сегодня <b>1</b>", page)
+        self.assertIn("к завтрашнему дню <b>1</b>", page)
         rental = tw.run(self.crm.rental(self.rental_id))
         self.assertEqual(rental["intent"], "return")
         self.assertEqual(rental["intent_by"], "staff:admin")
@@ -140,7 +151,8 @@ class TestExpiringWidget(tw.WebCase):
         card = self.get_ok(f"/rentals/{self.rental_id}")
         self.assertIn("Клиент сказал", card)
         self.assertIn("продлит</span>", card)
-        self.assertNotIn("сдают сегодня", self.get_ok("/"))
+        # Сказал «продлю» - велосипед не вернётся, и в прогнозе его нет.
+        self.assertIn("к завтрашнему дню <b>0</b>", self.get_ok("/"))
 
     def test_snooze_hides_until_tomorrow_and_clear_restores(self):
         self.mark("snooze")

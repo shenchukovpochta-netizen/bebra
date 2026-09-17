@@ -103,6 +103,12 @@
       {% endfor %}
     </div>
     {% else %}<p class="flash err">Свободных велосипедов нет — <a href="/bikes?status=repair">посмотрите ремонт</a> или <a href="/bikes/new">заведите новый</a>.</p>{% endif %}
+    {% set free_today = soon['0']|length %}{% set free_tomorrow = soon['1']|length %}
+    {% if free_today or free_tomorrow %}
+    {# Клиенту, который приедет завтра, можно назвать день: прогноз считается
+       по «оплачено до», а сказавшие «продлю» из него выпадают. #}
+    <p class="muted">Освобождается по срокам: сегодня <b>{{ free_today }}</b>, завтра <b>{{ free_tomorrow }}</b>{% if soon['2'] %}, через два дня <b>{{ soon['2']|length }}</b>{% endif %}. Прогноз, а не факт: велосипед освобождается актом возврата.</p>
+    {% endif %}
   </div>
   <div class="issue-bar">
     <span class="spacer"></span>

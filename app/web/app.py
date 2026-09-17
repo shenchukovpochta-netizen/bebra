@@ -331,18 +331,55 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         bikes_by = await crm.bike_counts()
         fleet = await crm.bikes(limit=10000)
         metrics = await period_metrics(days=30)
+        settings = await crm.settings()
+        operational = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
+        plan = logic.month_plan(settings, fleet=operational)
+        first = today.replace(day=1)
+        next_month = (first + timedelta(days=32)).replace(day=1)
+        month_metrics = await period_metrics(
+            since=datetime.combine(first, datetime.min.time()).astimezone(),
+            until=datetime.now().astimezone())
+        soon = logic.freeing_soon(rows, today=today)
         return render(request, "dashboard.html",
+                      plan=plan,
+                      progress=logic.plan_progress(
+                          plan, month_metrics,
+                          days_in_month=(next_month - first).days,
+                          days_passed=today.day),
+                      soon=soon,
                       counts=await crm.counts(), bikes=bikes_by,
-                      operational=sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES),
+                      operational=operational,
                       metrics=metrics, losses=logic.fleet_losses(metrics),
                       loss_today=logic.loss_per_day(bikes_by),
                       amortization=logic.amortization_total(fleet),
                       idle_by_location=idle_by_location(fleet),
                       claims=await crm.pending_claims(), rentals=rows,
                       expiring=expiring, before_days=cfg.remind_before_days,
-                      forecast=logic.free_forecast(bikes_by.get("available", 0), expiring),
+                      forecast=logic.forecast_summary(bikes_by.get("available", 0), soon),
                       debtors=await crm.debtors(10),
                       month=await crm.ledger_totals(since=today.replace(day=1)))
+
+    @app.post("/plan")
+    async def plan_save(request: Request) -> Response:
+        """План месяца: сколько велосипедов держать в аренде и по какому чеку.
+
+        Умолчания считаются от парка и целей, поэтому план правится, а не
+        придумывается с нуля.
+        """
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        data = await form(request)
+        rented = count_field(data, "plan_rented", what="Велосипедов в аренде",
+                             default="0", limit=9999)
+        check = cost_field(data, "plan_check")
+        for field in (rented, check):
+            if not field.ok:
+                flash(request, field.error, "err")
+                return redirect("/")
+        await crm.set_setting("plan_rented", str(rented.value), by=who(request))
+        await crm.set_setting("plan_check", str(check.value), by=who(request))
+        flash(request, "План на месяц сохранён.")
+        return redirect("/")
 
     async def referral_bonus(client: dict, amount: Decimal, by: str) -> None:
         """Друг заплатил - начислить бонус агенту и сказать ему об этом.
@@ -840,6 +877,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         available = await crm.bikes(status="available")
         ctx["tariffs"] = logic.tariff_tiles(await crm.tariffs(active_only=True))
         ctx["models"] = logic.model_availability(available)
+        # Клиенту, который приедет завтра, можно обещать конкретный день:
+        # прогноз считается по «оплачено до», а не по слову оператора.
+        ctx["soon"] = logic.freeing_soon(await crm.active_rentals())
         if (p.get("tariff") or "").isdigit():
             ctx["tariff"] = await crm.tariff(int(p["tariff"]))
         if ctx["bike"] is not None:

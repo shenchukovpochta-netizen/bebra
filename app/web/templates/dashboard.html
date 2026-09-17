@@ -43,11 +43,40 @@
   {% endif %}
 </div>
 
+{% if money_ok %}
+<section class="card three">
+  <div class="three-head"><h2>План на месяц</h2>
+    <span class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день</span></div>
+  <div class="tiles">
+    <div class="tile"><b>{{ money(progress.target) }}</b><span>план месяца</span></div>
+    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>пришло с начала месяца<br><small class="muted">ровным темпом было бы {{ money(progress.pace) }}</small></span></div>
+    <div class="tile"><b>{% if progress.percent is none %}—{% else %}{{ progress.percent }} %{% endif %}</b><span>плана выполнено</span></div>
+    <div class="tile"><b>{{ money(progress.left) }}</b><span>осталось собрать за {{ progress.days_left }} дн.{% if progress.need_rented %}<br><small class="muted">это {{ progress.need_rented }} велосипедов каждый день по цели</small>{% endif %}</span></div>
+  </div>
+  {% if progress.need_rented > operational %}
+  <p class="muted bad">Столько велосипедов в парке нет: план этого месяца уже
+    не вытянуть — либо поднимать чек, либо признать и поставить достижимый.</p>
+  {% endif %}
+  {% if can_edit(staff, 'finance') %}
+  <form method="post" action="/plan" class="grid2">
+    <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented }}" size="5"></label>
+    <label>Чек в день <input name="plan_check" value="{{ plan.check }}" size="8"></label>
+    <button type="submit">Сохранить план</button>
+  </form>
+  <p class="muted">Умолчания взяты из трёх чисел: парк {{ plan.fleet }} при простое
+    меньше {{ IDLE_TARGET_PERCENT }} % и чеке {{ money(CHECK_TARGET) }}. План —
+    то, что двигают, а не то, что придумывают с нуля.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 <div class="cols">
 {% if can_view(staff, 'rentals') %}
 <section class="card">
   <h2>Истекает аренда <small class="muted">· просрочка и ближайшие {{ before_days }} дн.</small></h2>
-  <p class="muted">Свободных сейчас <b>{{ forecast.now }}</b>{% if forecast.today or forecast.tomorrow %} · сдают сегодня <b>{{ forecast.today }}</b>, завтра <b>{{ forecast.tomorrow }}</b>{% endif %}{% if money_ok %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}{% endif %}</p>
+  {# Прогноз считается по «оплачено до» каждой идущей аренды, а сказавшие
+     «продлю» из него выпадают: их велосипед не вернётся. #}
+  <p class="muted">Свободных сейчас <b>{{ forecast.now }}</b> · к завтрашнему дню <b>{{ forecast['1'] }}</b>, через два дня <b>{{ forecast['2'] }}</b>{% if money_ok %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}{% endif %}</p>
   {% if expiring %}
   <table>
     <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}<th>Клиент сказал</th></tr>

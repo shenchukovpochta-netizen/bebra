@@ -752,22 +752,6 @@ def expiring(rows: Iterable[dict], *, today: date, before_days: int) -> list[dic
     return out
 
 
-def free_forecast(free_now: int, expiring_rows: Iterable[dict]) -> dict[str, int]:
-    """Свободных сейчас и сколько вернётся: «сдаёт» сегодня (включая
-    просроченных) и завтра. Прогноз, а не факт: велосипед освобождается
-    актом возврата, а не словом по телефону."""
-    today_n = tomorrow_n = 0
-    for r in expiring_rows:
-        if r.get("intent") != "return":
-            continue
-        left = r["summary"]["days_left"]
-        if left <= 0:
-            today_n += 1
-        elif left == 1:
-            tomorrow_n += 1
-    return {"now": int(free_now), "today": today_n, "tomorrow": tomorrow_n}
-
-
 def fleet_losses(metrics: dict, *, rate: Any = CHECK_TARGET) -> dict[str, Any]:
     """Потери в рублях за период по цели среднего чека.
 
@@ -906,6 +890,9 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/claims", "claims"),
     ("/finance", "finance"),
     ("/billing", "finance"),
+    # После /finance: home_for берёт первый путь раздела, а /plan - это
+    # форма на сводке, открывать её как страницу нечего.
+    ("/plan", "finance"),
     ("/tariffs", "tariffs"),
     ("/reports", "reports"),
     ("/import", "import"),
@@ -1891,3 +1878,94 @@ def search_digest(rows: dict[str, list[dict]]) -> str:
             lines.append(f"• {row.get('full_name') or '—'} · № {row.get('bike_code') or '—'}"
                          f" — в розыске {row['search_days']} дн., пора признавать потерю")
     return "\n".join(lines)
+
+
+# ─────────────────── план месяца и прогноз освобождения ───────────────────
+
+def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
+    """План на месяц из настроек. Не задан - считается от парка и целей.
+
+    Умолчания берутся из трёх чисел, а не из воздуха: столько парк даёт,
+    если держать простой в норме и чек на цели. План - это то, что можно
+    подвинуть, а не то, что надо придумать с нуля.
+    """
+    raw = raw or {}
+
+    def number(key: str, default: int) -> int:
+        try:
+            value = int(str(raw[key]))
+        except (KeyError, ValueError, TypeError):
+            return default
+        return value if value >= 0 else default
+
+    rented = number("plan_rented", int(round(fleet * (100 - IDLE_TARGET_PERCENT) / 100)))
+    check = to_money(raw.get("plan_check") or CHECK_TARGET)
+    if check <= 0:
+        check = CHECK_TARGET
+    return {"rented": rented, "check": check, "fleet": fleet}
+
+
+def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,
+                  days_in_month: int, days_passed: int) -> dict[str, Any]:
+    """Факт против плана: деньги за месяц и сколько ещё можно взять.
+
+    План месяца - велосипеде-дни аренды на чек. Сравнивается с тем же
+    средним чеком, что и в трёх числах, иначе цифры на соседних экранах
+    разошлись бы.
+    """
+    days_in_month = max(int(days_in_month), 1)
+    days_passed = min(max(int(days_passed), 0), days_in_month)
+    target = to_money(plan["check"] * plan["rented"] * days_in_month)
+    fact = to_money(metrics.get("revenue") or 0)
+    # Сколько должно было прийти к сегодняшнему дню: план ровным темпом.
+    pace = to_money(target * days_passed / days_in_month)
+    left = max(target - fact, Decimal(0))
+    days_left = days_in_month - days_passed
+    return {
+        "target": target, "fact": fact, "pace": pace, "left": left,
+        "ahead": fact >= pace,
+        "percent": (float(round(100 * fact / target, 1)) if target else None),
+        "days_left": days_left,
+        # Чтобы выйти на план, столько велосипедов должно кататься каждый
+        # оставшийся день по целевому чеку.
+        "need_rented": (int(-(-left / (plan["check"] * days_left) // 1))
+                        if days_left > 0 and plan["check"] > 0 and left > 0 else 0),
+    }
+
+
+def freeing_soon(rentals: Iterable[dict], *, today: date | None = None,
+                 horizon: int = 3) -> dict[str, list[dict]]:
+    """Что освободится в ближайшие дни - по «оплачено до» и намерению.
+
+    Мастеру выдачи важно не только «свободно сейчас», но и «завтра будет»:
+    клиенту, который приедет после обеда, можно обещать конкретный день.
+    Тот, кто сказал «продлю», в прогноз не идёт - его велосипед не вернётся.
+    """
+    today = today or date.today()
+    out: dict[str, list[dict]] = {str(i): [] for i in range(horizon + 1)}
+    for rental in rentals:
+        if rental.get("status") != "active" or not rental.get("bike_id"):
+            continue
+        if rental.get("intent") == "renew":
+            continue
+        until = covered_until(rental["billed_until"], rental.get("balance", 0),
+                              rental["price"], rental["period_days"])
+        left = days_left(until, today=today)
+        if left < 0:
+            left = 0                 # просрочка: велосипед ждут уже сегодня
+        if left <= horizon:
+            out[str(left)].append({**rental, "free_on": today + timedelta(days=left),
+                                   "returning": rental.get("intent") == "return"})
+    for rows in out.values():
+        rows.sort(key=lambda r: not r["returning"])
+    return out
+
+
+def forecast_summary(free_now: int, soon: dict[str, list[dict]]) -> dict[str, int]:
+    """Сколько свободно сейчас и сколько станет к каждому из ближайших дней."""
+    out = {"now": free_now}
+    total = free_now
+    for day in sorted(soon, key=int):
+        total += len(soon[day])
+        out[day] = total
+    return out
