@@ -39,6 +39,7 @@ class FakeCrm:
         self.part_orders_: dict[int, dict] = {}
         self.part_order_items_: list[dict] = []
         self.rental_bikes_: list[dict] = []
+        self.purchases_: dict[int, dict] = {}
         self.settings_: dict[str, str] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
@@ -331,7 +332,7 @@ class FakeCrm:
         self.bikes_[bid] = {"id": bid, "code": None, "model": None, "frame_no": None,
                             "motor_no": None, "battery_count": 2, "status": "available",
                             "purchase_price": None, "purchased_on": None, "note": None,
-                            "spare": False,
+                            "spare": False, "purchase_id": None,
                             "location": None, "service_months": 24,
                             "residual_price": Decimal(0), "battery_price": None,
                             "battery_service_months": 15, "mileage_km": 0,
@@ -1335,6 +1336,58 @@ class FakeCrm:
         rental.update(bike_id=new_bike_id, mileage_start=mileage_new or 0,
                       mileage_end=None)
         return True
+
+    # ─────────────────── закупки основных средств ───────────────────
+
+    async def purchases(self, *, limit=200):
+        rows = []
+        for purchase in self.purchases_.values():
+            sup = self.suppliers_.get(purchase.get("supplier_id")) or {}
+            bikes = [b for b in self.bikes_.values()
+                     if b.get("purchase_id") == purchase["id"]]
+            rows.append({**purchase, "supplier_name": sup.get("name"),
+                         "bikes": len(bikes),
+                         "written_off": sum(1 for b in bikes
+                                            if b["status"] == "written_off"),
+                         "spent": sum((b.get("purchase_price") or Decimal(0)
+                                       for b in bikes), Decimal(0))})
+        rows.sort(key=lambda p: p["id"], reverse=True)
+        return rows[:limit]
+
+    async def purchase(self, purchase_id):
+        purchase = self.purchases_.get(purchase_id)
+        if purchase is None:
+            return None
+        sup = self.suppliers_.get(purchase.get("supplier_id")) or {}
+        return {**purchase, "supplier_name": sup.get("name")}
+
+    async def create_purchase(self, *, supplier_id, purchased_on, note, bikes,
+                              created_by):
+        purchase_id = self._id()
+        self.purchases_[purchase_id] = {
+            "id": purchase_id,
+            "no": crm_logic.purchase_no(len(self.purchases_) + 1),
+            "supplier_id": supplier_id, "purchased_on": purchased_on,
+            "total": sum((Decimal(str(b.get("purchase_price") or 0)) for b in bikes),
+                         Decimal(0)),
+            "note": note, "created_by": created_by, "created_at": self._now()}
+        for bike in bikes:
+            bike_id = await self.create_bike(
+                by=created_by, code=bike["code"], model=bike["model"],
+                battery_count=bike["battery_count"],
+                purchase_price=bike["purchase_price"], purchased_on=purchased_on,
+                location=bike.get("location"), service_months=bike["service_months"],
+                residual_price=bike["residual_price"],
+                battery_price=bike.get("battery_price"),
+                battery_service_months=bike["battery_service_months"],
+                note=bike.get("note"))
+            self.bikes_[bike_id]["purchase_id"] = purchase_id
+        return purchase_id
+
+    async def purchase_bikes(self, purchase_id):
+        rows = [dict(b) for b in self.bikes_.values()
+                if b.get("purchase_id") == purchase_id]
+        return sorted(rows, key=lambda b: b["code"])
 
 
 class UniqueError(Exception):

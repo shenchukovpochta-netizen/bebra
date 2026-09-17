@@ -633,3 +633,39 @@ async def declare_theft(crm: Any, rental: dict, *, note: str | None, by: str) ->
     if not await crm.close_rental(rental["id"], closed_on=date.today(),
                                   note=reason, bike_status="lost", closed_by=by):
         raise ServiceError("Аренда уже закрыта.")
+
+
+async def buy_bikes(crm: Any, *, supplier_id: int | None, purchased_on: date,
+                    codes: list[str], model: str, price: Decimal,
+                    battery_count: int, service_months: int, residual: Decimal,
+                    battery_price: Decimal | None, battery_months: int,
+                    location: str | None, note: str | None, by: str) -> dict:
+    """Завести партию велосипедов одной закупкой.
+
+    Проверка занятых номеров - до вставки: заводить половину партии и
+    падать на седьмом номере значит оставить парк в состоянии, которого
+    оператор не ожидает.
+    """
+    if not codes:
+        raise ServiceError("Укажите инвентарные номера.")
+    taken = [code for code in codes if await crm.bike_by_code(code) is not None]
+    if taken:
+        raise ServiceError("Эти номера уже есть в парке: " + ", ".join(taken[:5])
+                           + ("…" if len(taken) > 5 else ""))
+    bikes = [{"code": code, "model": model, "battery_count": int(battery_count),
+              "purchase_price": logic.to_money(price),
+              "service_months": int(service_months),
+              "residual_price": logic.to_money(residual),
+              "battery_price": battery_price, "location": location,
+              "battery_service_months": int(battery_months), "note": note}
+             for code in codes]
+    try:
+        purchase_id = await crm.create_purchase(
+            supplier_id=supplier_id, purchased_on=purchased_on, note=note,
+            bikes=bikes, created_by=by)
+    except Exception as exc:                            # noqa: BLE001
+        if "unique" in type(exc).__name__.lower():
+            raise ServiceError("Пока вы заполняли форму, эти номера завели. "
+                               "Проверьте парк.") from exc
+        raise
+    return {"purchase_id": purchase_id, "bikes": len(bikes)}

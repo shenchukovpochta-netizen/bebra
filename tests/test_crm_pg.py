@@ -686,6 +686,43 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["reason"], "Выдача")
         self.assertEqual(rows[0]["mileage_start"], 500)
 
+    async def test_purchase_on_postgres(self):
+        """Закупка на живой базе: партия целиком, нумерация, износ."""
+        await self.seed()
+        supplier_id = await self.crm.create_supplier(name="ВелоОпт", phone=None,
+                                                     note=None)
+        result = await service.buy_bikes(
+            self.crm, supplier_id=supplier_id,
+            purchased_on=date.today() - timedelta(days=365),
+            codes=["B-101", "B-102"], model="Truck+", price=D("47000"),
+            battery_count=2, service_months=24, residual=D("5000"),
+            battery_price=D("9000"), battery_months=15, location="Павлюхина",
+            note="Весенняя партия", by="staff:t")
+        self.assertEqual(result["bikes"], 2)
+        purchase = await self.crm.purchase(result["purchase_id"])
+        self.assertEqual(purchase["no"], "ЗАК-000001")
+        self.assertEqual(purchase["total"], D("94000.00"))
+        bikes = await self.crm.purchase_bikes(purchase["id"])
+        self.assertEqual([b["code"] for b in bikes], ["B-101", "B-102"])
+
+        rows = logic.asset_rows(await self.crm.bikes(limit=100))
+        got = next(r for r in rows if r["code"] == "B-101")
+        self.assertEqual(got["wear"], 50.0, "год из двух лет срока")
+        self.assertEqual(got["book"], D("26000.00"))
+        summary = logic.asset_summary(rows)
+        self.assertEqual(summary["spent"], D("94000.00"))
+
+        # занятый номер отменяет всю партию
+        with self.assertRaises(service.ServiceError):
+            await service.buy_bikes(
+                self.crm, supplier_id=None, purchased_on=date.today(),
+                codes=["B-103", "B-101"], model="Truck+", price=D("1"),
+                battery_count=2, service_months=24, residual=D(0),
+                battery_price=None, battery_months=15, location=None, note=None,
+                by="staff:t")
+        self.assertIsNone(await self.crm.bike_by_code("B-103"))
+        self.assertEqual(len(await self.crm.purchases()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

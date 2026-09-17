@@ -2053,6 +2053,81 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Сохранено.")
         return redirect("/work-types")
 
+    # ─────────────────── закупки основных средств ───────────────────
+
+    @app.get("/assets")
+    async def assets_page(request: Request) -> Response:
+        """Парк как основные средства: сколько вложено, сколько осталось."""
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        tab = request.query_params.get("tab") or "all"
+        rows = logic.asset_rows(await crm.bikes(limit=10000))
+        summary = logic.asset_summary(rows)
+        if tab == "worn":
+            rows = [b for b in rows if b["worn_out"]
+                    and b.get("status") not in ("sold", "written_off")]
+        elif tab == "written_off":
+            rows = [b for b in rows if b.get("status") in ("sold", "written_off")]
+        elif tab == "live":
+            rows = [b for b in rows if b.get("status") not in ("sold", "written_off")]
+        return render(request, "assets.html", rows=rows, summary=summary, tab=tab,
+                      purchases=await crm.purchases(limit=100),
+                      suppliers=await crm.suppliers(active_only=True))
+
+    @app.post("/assets")
+    async def asset_purchase(request: Request) -> Response:
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        data = await form(request)
+        codes, error = logic.purchase_codes(data.get("codes"))
+        model = logic.check_name(data.get("model"), what="Модель")
+        price = logic.check_amount(data.get("purchase_price")) \
+            if (data.get("purchase_price") or "").strip() else logic.Check(True, None)
+        bought = logic.check_date(data.get("purchased_on"), default=date.today())
+        residual = cost_field(data, "residual_price")
+        note = logic.check_note(data.get("note"))
+        if error:
+            flash(request, error, "err")
+            return redirect("/assets")
+        for check in (model, price, bought, residual, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/assets")
+        months = data.get("service_months") or "24"
+        bat_months = data.get("battery_service_months") or "15"
+        batteries = data.get("battery_count") or "2"
+        for label, value in (("Срок службы", months), ("Срок службы АКБ", bat_months),
+                             ("АКБ", batteries)):
+            if not str(value).isdigit():
+                flash(request, f"{label}: нужно число.", "err")
+                return redirect("/assets")
+        bat_price = logic.check_amount(data.get("battery_price")) \
+            if (data.get("battery_price") or "").strip() else logic.Check(True, None)
+        if not bat_price.ok:
+            flash(request, bat_price.error, "err")
+            return redirect("/assets")
+        location = (data.get("location") or "").strip() or None
+        if location and location not in logic.LOCATIONS:
+            flash(request, "Точка: недопустимое значение.", "err")
+            return redirect("/assets")
+        supplier_id = int(data["supplier_id"]) \
+            if (data.get("supplier_id") or "").isdigit() else None
+        try:
+            result = await service.buy_bikes(
+                crm, supplier_id=supplier_id, purchased_on=bought.value, codes=codes,
+                model=model.value, price=price.value or Decimal(0),
+                battery_count=int(batteries), service_months=int(months),
+                residual=residual.value, battery_price=bat_price.value,
+                battery_months=int(bat_months), location=location, note=note.value,
+                by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/assets")
+        purchase = await crm.purchase(result["purchase_id"])
+        flash(request, f"Закупка {purchase['no']}: заведено велосипедов "
+                       f"{result['bikes']} на {logic.money(purchase['total'])}.")
+        return redirect("/assets")
+
     # ─────────────────────── склад запчастей ───────────────────────
 
     def doc_lines(data: dict, *, limit: int = 8) -> list[dict]:

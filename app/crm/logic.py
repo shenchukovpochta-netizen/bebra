@@ -893,6 +893,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     # После /finance: home_for берёт первый путь раздела, а /plan - это
     # форма на сводке, открывать её как страницу нечего.
     ("/plan", "finance"),
+    ("/assets", "finance"),
     ("/tariffs", "tariffs"),
     ("/reports", "reports"),
     ("/import", "import"),
@@ -1969,3 +1970,107 @@ def forecast_summary(free_now: int, soon: dict[str, list[dict]]) -> dict[str, in
         total += len(soon[day])
         out[day] = total
     return out
+
+
+# ─────────────────── закупки основных средств ───────────────────
+
+def purchase_no(number: int) -> str:
+    return f"ЗАК-{int(number):06d}"
+
+
+def months_between(since: Any, until: date) -> int:
+    """Полных месяцев между датами. Меньше месяца - ноль."""
+    if since is None:
+        return 0
+    start = since.date() if isinstance(since, datetime) else since
+    months = (until.year - start.year) * 12 + until.month - start.month
+    if until.day < start.day:
+        months -= 1
+    return max(months, 0)
+
+
+def wear_percent(bike: dict, *, today: date | None = None) -> float | None:
+    """Износ рамы в процентах срока службы. None - дата покупки не задана.
+
+    Считается по сроку, а не по пробегу: срок службы задан у каждого
+    велосипеда, а одометры половины парка переписывали не каждую выдачу.
+    """
+    bought = bike.get("purchased_on")
+    if bought is None:
+        return None
+    months = int(bike.get("service_months") or 24)
+    passed = months_between(bought, today or date.today())
+    return float(round(min(100 * passed / max(months, 1), 100), 1))
+
+
+def book_value(bike: dict, *, today: date | None = None) -> Decimal | None:
+    """Остаточная стоимость рамы: цена минус износ, но не ниже остаточной.
+
+    Ниже остаточной не падает намеренно: это цена, за которую велосипед
+    уходит после списания, и амортизация её не съедает.
+    """
+    price = bike.get("purchase_price")
+    if price is None:
+        return None
+    residual = to_money(bike.get("residual_price") or 0)
+    wear = wear_percent(bike, today=today)
+    if wear is None:
+        return to_money(price)
+    depreciable = max(to_money(price) - residual, Decimal(0))
+    return to_money(residual + depreciable * Decimal(str(100 - wear)) / 100)
+
+
+def asset_rows(bikes: Iterable[dict], *, today: date | None = None) -> list[dict]:
+    """Парк как основные средства: износ и остаточная стоимость каждой единицы."""
+    today = today or date.today()
+    rows = []
+    for bike in bikes:
+        wear = wear_percent(bike, today=today)
+        rows.append({**bike, "wear": wear, "book": book_value(bike, today=today),
+                     "month": amortization_month(bike),
+                     "worn_out": wear is not None and wear >= 100})
+    rows.sort(key=lambda b: (-(b["wear"] or 0), str(b.get("code") or "")))
+    return rows
+
+
+def asset_summary(rows: Iterable[dict], *, today: date | None = None) -> dict[str, Any]:
+    """Сводка по парку: вложено, осталось по балансу, сколько съедает в месяц."""
+    del today
+    rows = list(rows)
+    live = [b for b in rows if b.get("status") not in ("sold", "written_off")]
+    spent = sum((to_money(b.get("purchase_price") or 0) for b in rows), Decimal(0))
+    book = sum((b["book"] or Decimal(0) for b in live), Decimal(0))
+    month = sum((b["month"] or Decimal(0) for b in live), Decimal(0))
+    wears = [b["wear"] for b in live if b["wear"] is not None]
+    return {
+        "bikes": len(rows), "live": len(live),
+        "written_off": sum(1 for b in rows if b.get("status") == "written_off"),
+        "sold": sum(1 for b in rows if b.get("status") == "sold"),
+        "worn_out": sum(1 for b in live if b["worn_out"]),
+        "spent": to_money(spent), "book": to_money(book), "month": to_money(month),
+        "no_price": sum(1 for b in live if b.get("purchase_price") is None),
+        "wear": float(round(sum(wears) / len(wears), 1)) if wears else None,
+    }
+
+
+def purchase_codes(raw: Any, *, limit: int = 100) -> tuple[list[str], str]:
+    """Инвентарные номера партии из формы: список и ошибка.
+
+    Номера вводятся как есть - их уже наклеили на рамы, и придумывать за
+    оператора нумерацию значило бы разойтись с наклейками.
+    """
+    text = str(raw or "")
+    parts = [p for p in re.split(r"[\s,;]+", text) if p]
+    codes: list[str] = []
+    for part in parts:
+        check = check_code(part)
+        if not check.ok:
+            return [], check.error
+        if check.value in codes:
+            return [], f"Номер {check.value} в списке дважды."
+        codes.append(check.value)
+    if not codes:
+        return [], "Укажите инвентарные номера через пробел или запятую."
+    if len(codes) > limit:
+        return [], f"За раз можно завести не больше {limit} велосипедов."
+    return codes, ""

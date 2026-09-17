@@ -999,3 +999,29 @@ alter table crm.rentals add column if not exists search_by text;
 alter table crm.rentals add column if not exists search_note text;
 create index if not exists rentals_search_idx on crm.rentals (search_at)
   where search_at is not null;
+
+-- ─────────────────── закупки основных средств ───────────────────
+--
+-- Велосипеды приезжают партиями, а в парке живут поштучно. Закупка -
+-- документ ЗАК-000001, который помнит, что и почём взяли: без него
+-- «сколько мы вложили в парк» считалось по памяти владельца.
+--
+-- Амортизация по-прежнему живёт на велосипеде: партия может состоять
+-- из разных моделей с разным сроком службы, и складывать их в одну
+-- строку значило бы потерять единицу учёта.
+
+create table if not exists crm.purchases (
+  id           bigserial primary key,
+  no           text        not null unique,          -- ЗАК-000001
+  supplier_id  bigint      references crm.suppliers (id),
+  purchased_on date        not null default current_date,
+  total        numeric(12,2) not null default 0,
+  note         text,
+  created_by   text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists purchases_idx on crm.purchases (purchased_on desc);
+
+alter table crm.bikes add column if not exists purchase_id bigint
+  references crm.purchases (id);
+create index if not exists bikes_purchase_idx on crm.bikes (purchase_id);

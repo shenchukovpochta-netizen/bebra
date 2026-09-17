@@ -59,7 +59,7 @@ Claude Code читает этот файл в начале каждой сесс
 `repair_nodes`, `repair_items`, `work_types`, `work_orders`, `work_order_items`,
 `stock_takes`, `stock_take_items`, `referrals`, `settings`, `suppliers`,
 `parts`, `part_docs`, `part_moves`, `part_orders`, `part_order_items`,
-`clients`, `rentals`, `rental_bikes`, `ledger`, `payment_claims`.
+`purchases`, `clients`, `rentals`, `rental_bikes`, `ledger`, `payment_claims`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -74,6 +74,9 @@ Claude Code читает этот файл в начале каждой сесс
 - **Пересчёт** (`stock_takes`): ведомость ПРТ снимает ожидаемый парк при
   открытии и не пересчитывает его на лету. Найденный потерянный возвращается
   в парк при закрытии сам, недостача в `lost` — только по галочке оператора.
+- **Закупки** (`purchases`): партия велосипедов одним документом ЗАК;
+  единица учёта остаётся велосипедом, амортизация по-прежнему на нём.
+  Износ — по сроку службы, не по пробегу.
 - **План месяца** в `crm.settings` (`plan_rented`, `plan_check`): факт
   сравнивается с ровным темпом. Прогноз освобождения считается по
   «оплачено до», намерение «продлю» из него исключает аренду.

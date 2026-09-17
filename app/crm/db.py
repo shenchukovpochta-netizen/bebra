@@ -1730,3 +1730,71 @@ class CrmDB:
                 "mileage_end = null, updated_at = now() where id = $1",
                 rental_id, new_bike_id, mileage_new)
             return True
+
+    # ─────────────────── закупки основных средств ───────────────────
+
+    async def purchases(self, *, limit: int = 200) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            """
+            select p.*, s.name as supplier_name, count(b.id) as bikes,
+                   count(b.id) filter (where b.status = 'written_off') as written_off,
+                   coalesce(sum(b.purchase_price), 0) as spent
+            from crm.purchases p
+            left join crm.suppliers s on s.id = p.supplier_id
+            left join crm.bikes b on b.purchase_id = p.id
+            group by p.id, s.name
+            order by p.purchased_on desc, p.id desc
+            limit $1
+            """, limit))
+
+    async def purchase(self, purchase_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            """
+            select p.*, s.name as supplier_name
+            from crm.purchases p
+            left join crm.suppliers s on s.id = p.supplier_id
+            where p.id = $1
+            """, purchase_id))
+
+    async def create_purchase(self, *, supplier_id: int | None, purchased_on: date,
+                              note: str | None, bikes: list[dict],
+                              created_by: str) -> int:
+        """Закупка и её велосипеды - одной транзакцией.
+
+        Половина заведённой партии хуже, чем незаведённая: оператор считает,
+        что парк пополнен, а в выдаче половины номеров нет.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", created_by)
+            await conn.execute("lock table crm.purchases in share row exclusive mode")
+            next_no = int(await conn.fetchval(
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.purchases") or 1)
+            total = sum((Decimal(str(b.get("purchase_price") or 0)) for b in bikes),
+                        Decimal(0))
+            purchase_id = int(await conn.fetchval(
+                """
+                insert into crm.purchases (no, supplier_id, purchased_on, total, note,
+                                           created_by)
+                values ($1, $2, $3, $4, $5, $6) returning id
+                """, logic.purchase_no(next_no), supplier_id, purchased_on, total,
+                note, created_by))
+            for bike in bikes:
+                await conn.execute(
+                    """
+                    insert into crm.bikes (code, model, battery_count, purchase_price,
+                                           purchased_on, location, service_months,
+                                           residual_price, battery_price,
+                                           battery_service_months, purchase_id, note)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    """, bike["code"], bike["model"], bike["battery_count"],
+                    bike["purchase_price"], purchased_on, bike.get("location"),
+                    bike["service_months"], bike["residual_price"],
+                    bike.get("battery_price"), bike["battery_service_months"],
+                    purchase_id, bike.get("note"))
+            return purchase_id
+
+    async def purchase_bikes(self, purchase_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.bikes where purchase_id = $1 order by code",
+            purchase_id))

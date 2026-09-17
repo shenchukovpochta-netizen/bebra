@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Основные средства — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Основные средства</h1>
+  <nav class="tabs">
+    <a href="/assets" {% if tab == 'all' %}class="on"{% endif %}>Весь парк</a>
+    <a href="/assets?tab=live" {% if tab == 'live' %}class="on"{% endif %}>В строю</a>
+    <a href="/assets?tab=worn" {% if tab == 'worn' %}class="on"{% endif %}>Износ 100 %</a>
+    <a href="/assets?tab=written_off" {% if tab == 'written_off' %}class="on"{% endif %}>Выбыли</a>
+  </nav>
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ money(summary.spent) }}</b><span>вложено в парк<br><small class="muted">{{ summary.bikes }} велосипедов, цена задана у {{ summary.live - summary.no_price }} из {{ summary.live }}</small></span></div>
+  <div class="tile"><b>{{ money(summary.book) }}</b><span>остаточная стоимость<br><small class="muted">износ в среднем {% if summary.wear is none %}—{% else %}{{ summary.wear }} %{% endif %}</small></span></div>
+  <div class="tile"><b>{{ money(summary.month) }}</b><span>амортизация в месяц<br><small class="muted">столько откладывать на обновление</small></span></div>
+  <div class="tile {% if summary.worn_out %}warn{% endif %}"><b>{{ summary.worn_out }}</b><span>отслужили срок<br><small class="muted">выбыли: {{ summary.written_off }} списано, {{ summary.sold }} продано</small></span></div>
+</div>
+
+<div class="card">
+<table>
+  <tr><th>№</th><th>Модель</th><th class="opt">Куплен</th><th>Цена</th><th>Износ</th><th>Остаточная</th><th class="opt">Аморт./мес</th><th>Статус</th></tr>
+  {% for b in rows %}
+  <tr>
+    <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
+    <td>{{ b.model }}</td>
+    <td class="opt">{% if b.purchased_on %}{{ b.purchased_on|dmy }}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="num">{% if b.purchase_price is not none %}{{ money(b.purchase_price) }}{% else %}<span class="muted">не задана</span>{% endif %}</td>
+    <td class="num {% if b.worn_out %}bad{% endif %}">{% if b.wear is none %}—{% else %}{{ b.wear }} %{% endif %}</td>
+    <td class="num">{% if b.book is not none %}{{ money(b.book) }}{% else %}—{% endif %}</td>
+    <td class="num opt">{% if b.month %}{{ money(b.month) }}{% else %}—{% endif %}</td>
+    <td><span class="tag {{ b.status }}">{{ BIKE_STATUSES[b.status] }}</span></td>
+  </tr>
+  {% else %}<tr><td colspan="8" class="muted">Ничего нет.</td></tr>{% endfor %}
+</table>
+<p class="muted">Износ считается по сроку службы, а не по пробегу: срок задан
+  у каждого велосипеда, а одометры половины парка переписывали не каждую
+  выдачу. Остаточная стоимость ниже «остаточной» из карточки не падает —
+  это цена, за которую велосипед уходит после списания.</p>
+</div>
+
+<div class="card">
+  <h2>Закупки</h2>
+  <table>
+    <tr><th>№</th><th>Дата</th><th>Поставщик</th><th>Велосипедов</th><th>Сумма</th><th class="opt">Списано</th><th class="opt">Комментарий</th></tr>
+    {% for p in purchases %}
+    <tr>
+      <td>{{ p.no }}</td>
+      <td>{{ p.purchased_on|dmy }}</td>
+      <td>{{ p.supplier_name or '—' }}</td>
+      <td class="num">{{ p.bikes }}</td>
+      <td class="num">{{ money(p.total) }}</td>
+      <td class="num opt">{{ p.written_off }}</td>
+      <td class="opt">{{ p.note or '' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="7" class="muted">Закупок не заводили. Велосипеды, заведённые поштучно, в этот список не попадают.</td></tr>{% endfor %}
+  </table>
+</div>
+
+{% if can_edit(staff, 'bikes') %}
+<div class="card">
+  <h2>Новая закупка</h2>
+  {# Номера вводятся как есть: они уже наклеены на рамы, и придумывать
+     нумерацию за оператора значило бы разойтись с наклейками. #}
+  <form method="post" action="/assets" class="grid2">
+    <label class="wide">Инвентарные номера <textarea name="codes" rows="2" placeholder="B-101 B-102 B-103" required></textarea></label>
+    <label>Модель <input name="model" required></label>
+    <label>Дата закупки <input type="date" name="purchased_on" value="{{ today()|iso }}"></label>
+    <label>Поставщик <select name="supplier_id"><option value="">не указан</option>{% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></label>
+    <label>Цена за единицу <input name="purchase_price"></label>
+    <label>Остаточная стоимость <input name="residual_price" value="0"></label>
+    <label>Срок службы, мес. <input name="service_months" value="24" size="4"></label>
+    <label>АКБ в комплекте <input name="battery_count" value="2" size="4"></label>
+    <label>Цена АКБ <input name="battery_price"></label>
+    <label>Срок службы АКБ, мес. <input name="battery_service_months" value="15" size="4"></label>
+    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label class="wide">Комментарий <input name="note"></label>
+    <button type="submit">Завести партию</button>
+  </form>
+  <p class="muted">Партия заводится целиком или не заводится вовсе: занятые
+    номера проверяются до вставки. Каждый велосипед остаётся отдельной
+    единицей учёта — партия может состоять из разных моделей, и складывать
+    их в одну строку значило бы потерять велосипед.</p>
+</div>
+{% endif %}
+{% endblock %}
