@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import asyncpg
@@ -38,6 +38,9 @@ BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note"})
 BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
                                   "price", "service_months", "active", "note"})
+TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
+                            "lat", "lon", "speed", "course", "voltage", "gsm_level",
+                            "alarm", "note"})
 SUPPLIER_FIELDS = frozenset({"name", "phone", "note", "active"})
 PART_FIELDS = frozenset({"title", "node", "unit", "cost", "price", "min_stock",
                          "model", "active", "note"})
@@ -66,6 +69,17 @@ def _rows(records: list[asyncpg.Record]) -> list[dict]:
 
 def _row(record: asyncpg.Record | None) -> dict | None:
     return dict(record) if record is not None else None
+
+
+def _money(value: Any) -> Decimal | None:
+    """Число из внешнего API - в numeric. Float в колонку numeric asyncpg
+    не примет, а данные трекера приходят именно float."""
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _set_clause(fields: dict[str, Any], allowed: frozenset[str],
@@ -2056,3 +2070,158 @@ class CrmDB:
                 returning id
                 """, rental_id, status)
             return len(rows)
+
+    # ─────────────────────────── трекеры ───────────────────────────
+
+    _TRACKER_SELECT = """
+        select t.*, b.code as bike_code, b.model as bike_model, b.status as bike_status,
+               r.id as rental_id, c.full_name as client_name, c.phone as client_phone,
+               c.id as client_id
+          from crm.trackers t
+          left join crm.bikes b on b.id = t.bike_id
+          left join crm.rentals r on r.bike_id = b.id and r.status = 'active'
+          left join crm.clients c on c.id = r.client_id
+    """
+
+    async def trackers(self, *, active_only: bool = False,
+                       unbound: bool = False) -> list[dict]:
+        where = ["true"]
+        if active_only:
+            where.append("t.active")
+        if unbound:
+            where.append("t.bike_id is null")
+        return _rows(await self.pool.fetch(
+            f"{self._TRACKER_SELECT} where {' and '.join(where)} "
+            "order by b.code nulls last, t.device_id"))
+
+    async def tracker(self, tracker_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TRACKER_SELECT} where t.id = $1", tracker_id))
+
+    async def tracker_by_device(self, device_id: str) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TRACKER_SELECT} where t.device_id = $1", device_id))
+
+    async def tracker_of_bike(self, bike_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TRACKER_SELECT} where t.bike_id = $1", bike_id))
+
+    async def create_tracker(self, **fields: Any) -> int:
+        unknown = set(fields) - TRACKER_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        cols = list(fields)
+        places = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
+        return int(await self.pool.fetchval(
+            f"insert into crm.trackers ({', '.join(cols)}) values ({places}) "
+            "returning id", *[fields[c] for c in cols]))
+
+    async def update_tracker(self, tracker_id: int, **fields: Any) -> None:
+        unknown = set(fields) - TRACKER_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        if not fields:
+            return
+        sets = ", ".join(f"{c} = ${i}" for i, c in enumerate(fields, start=2))
+        await self.pool.execute(
+            f"update crm.trackers set {sets}, updated_at = now() where id = $1",
+            tracker_id, *fields.values())
+
+    async def save_tracker_state(self, device: dict) -> dict:
+        """Состояние устройства из StarLine: карточка и точка журнала.
+
+        Устройство, которого ещё нет, заводится само: связать его с
+        велосипедом оператор успеет, а терять координаты новой метки,
+        пока до неё не дошли руки, незачем. Позиция пишется в журнал
+        только с новой меткой времени - индекс не даст дублей, а
+        `on conflict do nothing` не даст падения на гонке опросов.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                insert into crm.trackers (device_id, alias, last_seen, lat, lon,
+                                          speed, course, voltage, gsm_level, alarm)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                on conflict (device_id) do update
+                   set alias = coalesce(excluded.alias, crm.trackers.alias),
+                       last_seen = coalesce(excluded.last_seen, crm.trackers.last_seen),
+                       lat = coalesce(excluded.lat, crm.trackers.lat),
+                       lon = coalesce(excluded.lon, crm.trackers.lon),
+                       speed = excluded.speed, course = excluded.course,
+                       voltage = coalesce(excluded.voltage, crm.trackers.voltage),
+                       gsm_level = excluded.gsm_level, alarm = excluded.alarm,
+                       updated_at = now()
+                returning id, (xmax = 0) as created
+                """,
+                device["device_id"], device.get("alias"), device.get("recorded_at"),
+                device.get("lat"), device.get("lon"),
+                _money(device.get("speed")), device.get("course"),
+                _money(device.get("voltage")), device.get("gsm_level"),
+                bool(device.get("alarm")))
+            tracker_id = int(row["id"])
+            if device.get("lat") is not None and device.get("recorded_at") is not None:
+                await conn.execute(
+                    """
+                    insert into crm.tracker_positions (tracker_id, lat, lon, speed,
+                                                       course, recorded_at)
+                    values ($1, $2, $3, $4, $5, $6)
+                    on conflict (tracker_id, recorded_at) do nothing
+                    """, tracker_id, device["lat"], device["lon"],
+                    _money(device.get("speed")), device.get("course"),
+                    device["recorded_at"])
+            return {"id": tracker_id, "created": bool(row["created"])}
+
+    async def tracker_positions(self, tracker_id: int, limit: int = 200) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.tracker_positions where tracker_id = $1 "
+            "order by recorded_at desc limit $2", tracker_id, limit))
+
+    async def purge_tracker_positions(self, days: int = 30) -> int:
+        """Журнал позиций - расходный материал: точка на опрос за месяц
+        даёт десятки тысяч строк, а нужен он на пару недель назад."""
+        rows = await self.pool.fetch(
+            "delete from crm.tracker_positions "
+            "where recorded_at < now() - make_interval(days => $1) returning id", days)
+        return len(rows)
+
+    async def tracker_alerts(self, *, open_only: bool = True,
+                             limit: int = 200) -> list[dict]:
+        where = "where a.handled_at is null" if open_only else ""
+        return _rows(await self.pool.fetch(
+            f"""
+            select a.*, t.device_id, t.alias, b.code as bike_code, b.model as bike_model
+              from crm.tracker_alerts a
+              join crm.trackers t on t.id = a.tracker_id
+              left join crm.bikes b on b.id = a.bike_id
+            {where}
+            order by a.created_at desc limit $1
+            """, limit))
+
+    async def raise_alert(self, *, tracker_id: int, kind: str, note: str | None,
+                          bike_id: int | None, lat: float | None,
+                          lon: float | None) -> int | None:
+        """Поднять тревогу. None - такая уже висит открытой."""
+        return await self.pool.fetchval(
+            """
+            insert into crm.tracker_alerts (tracker_id, bike_id, kind, note, lat, lon)
+            values ($1, $2, $3, $4, $5, $6)
+            on conflict do nothing
+            returning id
+            """, tracker_id, bike_id, kind, note, lat, lon)
+
+    async def close_alerts(self, tracker_id: int, kinds: list[str], *,
+                           by: str | None = None) -> int:
+        """Снять тревоги, которых больше нет: велосипед вернулся на связь
+        или уехал в аренду по-честному."""
+        if not kinds:
+            return 0
+        rows = await self.pool.fetch(
+            "update crm.tracker_alerts set handled_at = now(), handled_by = $3 "
+            "where tracker_id = $1 and kind = any($2::text[]) and handled_at is null "
+            "returning id", tracker_id, kinds, by)
+        return len(rows)
+
+    async def handle_alert(self, alert_id: int, *, by: str) -> None:
+        await self.pool.execute(
+            "update crm.tracker_alerts set handled_at = now(), handled_by = $2 "
+            "where id = $1 and handled_at is null", alert_id, by)

@@ -359,9 +359,9 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
-  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
   -- их матрицу правит владелец, и перезапись затирала бы его настройку.
@@ -1152,3 +1152,74 @@ drop trigger if exists batteries_status_log on crm.batteries;
 create trigger batteries_status_log
   after insert or update of status on crm.batteries
   for each row execute function crm.log_battery_status();
+
+-- ─────────────────────────── трекеры ───────────────────────────
+--
+-- Велосипед без трекера ищут звонками: «где вы сейчас», «подъеду
+-- завтра». Трекер отвечает на этот вопрос сам. Данные тянутся из
+-- StarLine (app/services/starline.py) и складываются здесь: панель
+-- в интернет не ходит, она читает базу.
+--
+-- Позиция дублируется в самой карточке трекера и в журнале позиций.
+-- Это не избыточность ради удобства: карточка нужна на каждый чих
+-- (карта, список, тревоги), а журнал растёт по точке на опрос, и
+-- искать «последнюю» по нему на каждый экран - лишний скан.
+
+create table if not exists crm.trackers (
+  id         bigserial primary key,
+  device_id  text        not null unique,   -- id устройства в кабинете StarLine
+  alias      text,                          -- имя, которое ему дали там же
+  bike_id    bigint      references crm.bikes (id),
+  active     boolean     not null default true,
+  last_seen  timestamptz,                   -- когда устройство выходило на связь
+  lat        double precision,
+  lon        double precision,
+  speed      numeric(6,2),                  -- км/ч по данным устройства
+  course     integer,                       -- направление, градусы
+  voltage    numeric(5,2),                  -- питание трекера, В
+  gsm_level  integer,
+  alarm      boolean     not null default false,
+  note       text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+-- Один трекер на велосипед: два «последних места» у одной рамы - это
+-- не резервирование, а спор, которому верить.
+create unique index if not exists trackers_bike_one on crm.trackers (bike_id)
+  where bike_id is not null;
+
+create table if not exists crm.tracker_positions (
+  id          bigserial primary key,
+  tracker_id  bigint      not null references crm.trackers (id) on delete cascade,
+  lat         double precision not null,
+  lon         double precision not null,
+  speed       numeric(6,2),
+  course      integer,
+  recorded_at timestamptz not null
+);
+-- Опрос повторяется чаще, чем устройство шлёт точки: без этого индекса
+-- один и тот же момент лёг бы в журнал десяток раз за час.
+create unique index if not exists tracker_positions_one
+  on crm.tracker_positions (tracker_id, recorded_at);
+create index if not exists tracker_positions_idx
+  on crm.tracker_positions (tracker_id, recorded_at desc);
+
+create table if not exists crm.tracker_alerts (
+  id         bigserial primary key,
+  tracker_id bigint      not null references crm.trackers (id) on delete cascade,
+  bike_id    bigint      references crm.bikes (id),
+  -- moving|offline|alarm|low_power
+  kind       text        not null,
+  note       text,
+  lat        double precision,
+  lon        double precision,
+  created_at timestamptz not null default now(),
+  handled_at timestamptz,
+  handled_by text
+);
+-- Одна открытая тревога каждого вида на трекер: иначе «едет без аренды»
+-- писалось бы каждые пять минут, и в списке утонуло бы всё остальное.
+create unique index if not exists tracker_alerts_one_open
+  on crm.tracker_alerts (tracker_id, kind) where handled_at is null;
+create index if not exists tracker_alerts_idx
+  on crm.tracker_alerts (created_at desc);

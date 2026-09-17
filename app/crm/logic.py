@@ -21,12 +21,13 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import random
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
@@ -876,6 +877,7 @@ SECTIONS: dict[str, str] = {
     "rentals": "Аренды",
     "bikes": "Парк",
     "batteries": "Батареи",
+    "trackers": "Трекеры и карта парка",
     "service": "Сервис: наряды и виды работ",
     "inventory": "Склад: запчасти, приходы, заказы",
     "claims": "Заявки на зачисление",
@@ -908,6 +910,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/rentals", "rentals"),
     ("/bikes", "bikes"),
     ("/batteries", "batteries"),
+    ("/map", "trackers"),
+    ("/trackers", "trackers"),
     ("/stock-takes", "bikes"),
     ("/service", "service"),
     ("/orders", "service"),
@@ -1007,12 +1011,13 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
      {"sections": {"dashboard": "view", "issue": "edit", "clients": "edit",
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
-                   "reports": "view", "inventory": "view", "batteries": "view"},
+                   "reports": "view", "inventory": "view", "batteries": "view",
+                   "trackers": "view"},
       "actions": {}}, False),
     ("tech", "Механик",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
                    "rentals": "view", "reports": "view", "inventory": "edit",
-                   "batteries": "edit"},
+                   "batteries": "edit", "trackers": "view"},
       "actions": {}}, False),
 )
 
@@ -2200,3 +2205,242 @@ def compat_matrix(bike_models: Iterable[dict], battery_models: Iterable[dict],
                           "primary": fits.get(key, False)})
         rows.append({"bike": bike, "cells": cells})
     return {"rows": rows, "batteries": list(battery_models)}
+
+
+# ─────────────────────────── трекеры ───────────────────────────
+#
+# Трекер отвечает на вопрос «где велосипед» без звонка клиенту. Данные
+# приходят из StarLine, здесь - только арифметика над ними: онлайн или
+# молчит, едет или стоит, и не пора ли поднять тревогу.
+#
+# Тревоги намеренно четыре. Каждая означает «садись и разбирайся», а не
+# «прими к сведению»: список, в котором половина строк - шум, оператор
+# перестаёт читать на второй неделе.
+
+TRACKER_ALERTS: dict[str, str] = {
+    "moving": "Едет без аренды",
+    "offline": "Не выходит на связь",
+    "alarm": "Тревога StarLine",
+    "low_power": "Питание трекера",
+}
+# Сколько часов молчания считать пропажей связи. Полсуток - потому что
+# велосипед ночует в подъезде, где связи нет, и час молчания ничего
+# не значит.
+TRACKER_OFFLINE_HOURS = 12
+# Скорость, с которой «стоит» превращается в «едет». 5 км/ч - это уже
+# не дрейф GPS у стены дома.
+TRACKER_MOVING_SPEED = Decimal(5)
+# Питание трекера: ниже этого он скоро замолчит совсем.
+TRACKER_LOW_VOLTS = Decimal("11.5")
+# Статусы велосипеда, при которых ехать он не должен.
+TRACKER_PARKED_STATUSES = ("available", "reserved", "repair", "maintenance")
+EARTH_KM = 6371.0088
+
+
+def tracker_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Пороги тревог: из настроек, иначе значения по умолчанию."""
+    settings = settings or {}
+
+    def number(key: str, default: Decimal | int) -> Decimal:
+        raw = str(settings.get(key) or "").strip().replace(",", ".")
+        try:
+            value = Decimal(raw)
+        except (InvalidOperation, ValueError):
+            return Decimal(default)
+        return value if value > 0 else Decimal(default)
+
+    return {"offline_hours": int(number("tracker_offline_hours",
+                                        TRACKER_OFFLINE_HOURS)),
+            "moving_speed": number("tracker_moving_speed", TRACKER_MOVING_SPEED),
+            "low_volts": number("tracker_low_volts", TRACKER_LOW_VOLTS)}
+
+
+def distance_km(lat1: float | None, lon1: float | None,
+                lat2: float | None, lon2: float | None) -> float | None:
+    """Расстояние по прямой между двумя точками, км.
+
+    Формула гаверсинуса: на городских расстояниях ошибка сотые доли
+    процента, а зависимостей не нужно никаких.
+    """
+    if None in (lat1, lon1, lat2, lon2):
+        return None
+    rlat1, rlat2 = math.radians(lat1), math.radians(lat2)
+    dlat = rlat2 - rlat1
+    dlon = math.radians(lon2) - math.radians(lon1)
+    h = (math.sin(dlat / 2) ** 2
+         + math.cos(rlat1) * math.cos(rlat2) * math.sin(dlon / 2) ** 2)
+    return round(2 * EARTH_KM * math.asin(min(1.0, math.sqrt(h))), 3)
+
+
+def map_url(lat: float | None, lon: float | None) -> str | None:
+    """Ссылка на карту с точкой. Яндекс: им пользуются на точках."""
+    if lat is None or lon is None:
+        return None
+    return f"https://yandex.ru/maps/?pt={lon:.6f},{lat:.6f}&z=17&l=map"
+
+
+def tracker_rows(trackers: Iterable[dict], *, now: datetime | None = None,
+                 settings: Mapping[str, Any] | None = None) -> list[dict]:
+    """Список трекеров с состоянием: молчит, едет, где на карте."""
+    now = now or datetime.now(UTC)
+    limits = tracker_settings(settings)
+    rows = []
+    for tracker in trackers:
+        seen = tracker.get("last_seen")
+        silent = None
+        if seen is not None:
+            silent = max((now - seen).total_seconds() / 3600, 0)
+        speed = to_money(tracker.get("speed") or 0)
+        offline = silent is None or silent >= limits["offline_hours"]
+        rows.append({**tracker,
+                     "silent_hours": round(silent, 1) if silent is not None else None,
+                     "offline": offline,
+                     "moving": speed >= limits["moving_speed"],
+                     "low_power": (tracker.get("voltage") is not None
+                                   and to_money(tracker["voltage"]) <= limits["low_volts"]),
+                     "map": map_url(tracker.get("lat"), tracker.get("lon"))})
+    # Сначала то, что требует внимания: тревога, движение, молчание.
+    rows.sort(key=lambda t: (not t.get("alarm"), not t["moving"], not t["offline"],
+                             str(t.get("bike_code") or "я" + str(t.get("device_id")))))
+    return rows
+
+
+def tracker_summary(rows: Iterable[dict]) -> dict[str, int]:
+    rows = list(rows)
+    return {"total": len(rows),
+            "online": sum(1 for r in rows if not r["offline"]),
+            "offline": sum(1 for r in rows if r["offline"]),
+            "moving": sum(1 for r in rows if r["moving"]),
+            "alarm": sum(1 for r in rows if r.get("alarm")),
+            "free": sum(1 for r in rows if not r.get("bike_id"))}
+
+
+def detect_alerts(row: Mapping[str, Any], *,
+                  settings: Mapping[str, Any] | None = None) -> list[dict]:
+    """Какие тревоги поднимает состояние трекера прямо сейчас.
+
+    Велосипед в аренде ездит - это норма, и «едет» для него не тревога.
+    Тревога - когда едет тот, что по учёту стоит на точке или в ремонте.
+    """
+    limits = tracker_settings(settings)
+    out: list[dict] = []
+    if row.get("alarm"):
+        out.append({"kind": "alarm", "note": "Устройство подняло тревогу"})
+    status = row.get("bike_status")
+    if row["moving"] and (status in TRACKER_PARKED_STATUSES
+                          or (row.get("bike_id") is None and row.get("lat") is not None)):
+        speed = to_money(row.get("speed") or 0)
+        where = BIKE_STATUSES.get(status, "не привязан к велосипеду")
+        out.append({"kind": "moving",
+                    "note": f"{speed:.0f} км/ч, по учёту — {where.lower()}"})
+    if row["offline"] and row.get("bike_status") not in ("sold", "written_off"):
+        hours = row["silent_hours"]
+        out.append({"kind": "offline",
+                    "note": (f"молчит {hours:.0f} ч" if hours is not None
+                             else "ни одного выхода на связь")})
+    if row["low_power"]:
+        out.append({"kind": "low_power",
+                    "note": f"питание {to_money(row['voltage'])} В, "
+                            f"порог {limits['low_volts']} В"})
+    for alert in out:
+        alert["tracker_id"] = row.get("id")
+        alert["bike_id"] = row.get("bike_id")
+        alert["lat"], alert["lon"] = row.get("lat"), row.get("lon")
+    return out
+
+
+def map_points(rows: Iterable[dict]) -> list[dict]:
+    """Точки для карты: только те, у кого есть координаты."""
+    points = []
+    for row in rows:
+        if row.get("lat") is None or row.get("lon") is None:
+            continue
+        if row.get("alarm"):
+            state = "alarm"
+        elif row.get("bike_status") == "rented":
+            state = "rented"
+        elif row["offline"]:
+            state = "offline"
+        else:
+            state = "parked"
+        points.append({"lat": row["lat"], "lon": row["lon"], "state": state,
+                       "code": row.get("bike_code") or row.get("alias")
+                       or row.get("device_id"),
+                       "title": tracker_title(row), "id": row.get("id")})
+    return points
+
+
+def tracker_title(row: Mapping[str, Any]) -> str:
+    """Подпись точки на карте: что это и в каком состоянии."""
+    parts = []
+    if row.get("bike_code"):
+        parts.append(f"№ {row['bike_code']}")
+    elif row.get("alias"):
+        parts.append(str(row["alias"]))
+    if row.get("client_name"):
+        parts.append(str(row["client_name"]))
+    elif row.get("bike_status"):
+        parts.append(BIKE_STATUSES.get(row["bike_status"], row["bike_status"]))
+    if row.get("moving"):
+        parts.append(f"{to_money(row.get('speed') or 0):.0f} км/ч")
+    if row.get("offline") and row.get("silent_hours") is not None:
+        parts.append(f"молчит {row['silent_hours']:.0f} ч")
+    return " · ".join(parts)
+
+
+# Карта: единственное место в панели, где нужен внешний скрипт. Адреса
+# вынесены в настройки, потому что сервер стоит в России: если OSM или
+# unpkg окажутся недоступны, владелец подменит их своей копией, не
+# пересобирая образ.
+MAP_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+MAP_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+MAP_TILES = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+MAP_ATTRIBUTION = "© OpenStreetMap"
+MAP_CENTER = (55.7887, 49.1221)                 # Казань, если точек нет
+
+
+def map_config(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    settings = settings or {}
+
+    def value(key: str, default: str) -> str:
+        return str(settings.get(key) or "").strip() or default
+
+    return {"js": value("map_js", MAP_JS), "css": value("map_css", MAP_CSS),
+            "tiles": value("map_tiles", MAP_TILES),
+            "attribution": value("map_attribution", MAP_ATTRIBUTION),
+            "lat": MAP_CENTER[0], "lon": MAP_CENTER[1]}
+
+
+def track_distance(positions: Iterable[Mapping[str, Any]]) -> float:
+    """Сколько накатано по журналу позиций, км.
+
+    Это не одометр: точки приходят раз в несколько минут, и срезанные
+    углы теряются. Для вопроса «он вообще ездит?» этого достаточно, а
+    накат за аренду по-прежнему считается по пробегу с дисплея.
+    """
+    points = sorted(positions, key=lambda p: p["recorded_at"])
+    total = 0.0
+    for before, after in zip(points, points[1:], strict=False):
+        step = distance_km(before["lat"], before["lon"], after["lat"], after["lon"])
+        # Скачок на десятки километров - это перескок GPS, а не поездка.
+        if step is not None and step < 5:
+            total += step
+    return round(total, 1)
+
+
+def tracker_digest(alerts: Iterable[dict], limit: int = 10) -> str:
+    """Тревоги трекеров одной сводкой в служебный чат."""
+    alerts = list(alerts)
+    if not alerts:
+        return ""
+    lines = [f"🛰 Трекеры: {len(alerts)}"]
+    for alert in alerts[:limit]:
+        where = ""
+        if alert.get("lat") is not None:
+            where = f" — {map_url(alert['lat'], alert['lon'])}"
+        code = alert.get("bike_code") or alert.get("alias") or alert.get("device_id")
+        lines.append(f"• {TRACKER_ALERTS.get(alert['kind'], alert['kind'])}: "
+                     f"{code}{', ' + alert['note'] if alert.get('note') else ''}{where}")
+    if len(alerts) > limit:
+        lines.append(f"…и ещё {len(alerts) - limit}")
+    return "\n".join(lines)

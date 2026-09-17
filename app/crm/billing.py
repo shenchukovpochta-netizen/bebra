@@ -129,6 +129,11 @@ async def report_integrity(bot: Any, crm: Any, cfg: Any) -> int:
     return len(issues)
 
 
+# Сколько дней держать точки трекеров. Две недели назад - это «где он
+# ездил на прошлой неделе», дальше вопросов уже не задают.
+TRACK_KEEP_DAYS = 30
+
+
 async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> None:
     """Начислить, напомнить, отчитаться. Каждый шаг отдельно в try:
     сбой одного не должен отменять остальные."""
@@ -162,6 +167,14 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> No
             log.info("CRM: пост о свободных велосипедах отправлен")
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: пост о свободных велосипедах не собран")
+    try:
+        # Журнал позиций трекеров - расходный материал: точка на каждый
+        # опрос за месяц даёт десятки тысяч строк на велосипед.
+        dropped = await crm.purge_tracker_positions(TRACK_KEEP_DAYS)
+        if dropped:
+            log.info("CRM: старых точек трекеров удалено %s", dropped)
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: чистка журнала трекеров не удалась")
     if digest:
         text = (texts.CAB_DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
                 + "\n\n" + digest)

@@ -802,6 +802,63 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logic.amortization_total(bikes, batteries), D("2950.00"),
                          "две карточки по 600 вместо счётчика на 1200")
 
+    async def test_trackers_on_postgres(self):
+        """Трекеры на живой базе: апсерт по устройству, журнал позиций
+        без дублей, одна открытая тревога на вид."""
+        await self.seed()
+        moment = datetime.now(UTC).replace(microsecond=0)
+        device = {"device_id": "1001", "alias": "Truck+ 101", "lat": 55.7692,
+                  "lon": 49.1440, "speed": 0.0, "course": 90,
+                  "recorded_at": moment, "voltage": 12.6, "gsm_level": 20,
+                  "alarm": False}
+        saved = await self.crm.save_tracker_state(device)
+        self.assertTrue(saved["created"], "неизвестное устройство заводится само")
+        again = await self.crm.save_tracker_state({**device, "speed": 24.0})
+        self.assertFalse(again["created"])
+        self.assertEqual(again["id"], saved["id"])
+
+        tracker = await self.crm.tracker(saved["id"])
+        self.assertEqual(tracker["device_id"], "1001")
+        self.assertEqual(tracker["speed"], D("24.00"))
+        self.assertEqual(tracker["voltage"], D("12.60"))
+        # Метка времени та же - вторая точка в журнал не легла.
+        self.assertEqual(len(await self.crm.tracker_positions(saved["id"])), 1)
+        await self.crm.save_tracker_state({**device,
+                                           "recorded_at": moment + timedelta(minutes=5)})
+        self.assertEqual(len(await self.crm.tracker_positions(saved["id"])), 2)
+
+        await self.crm.update_tracker(saved["id"], bike_id=self.bike_id)
+        self.assertEqual((await self.crm.tracker(saved["id"]))["bike_code"], "B-1")
+        other = await self.crm.create_tracker(device_id="1002")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.update_tracker(other, bike_id=self.bike_id)
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_tracker(device_id="1001")
+
+        alert_id = await self.crm.raise_alert(
+            tracker_id=saved["id"], kind="moving", note="24 км/ч",
+            bike_id=self.bike_id, lat=55.7692, lon=49.1440)
+        self.assertIsNotNone(alert_id)
+        self.assertIsNone(await self.crm.raise_alert(
+            tracker_id=saved["id"], kind="moving", note="ещё раз",
+            bike_id=self.bike_id, lat=None, lon=None),
+            "вторая такая же тревога не поднимается")
+        rows = await self.crm.tracker_alerts()
+        self.assertEqual([r["bike_code"] for r in rows], ["B-1"])
+        self.assertEqual(await self.crm.close_alerts(saved["id"], ["moving"],
+                                                     by="tracking"), 1)
+        self.assertEqual(await self.crm.tracker_alerts(), [])
+        # Закрытая не мешает поднять тревогу заново.
+        self.assertIsNotNone(await self.crm.raise_alert(
+            tracker_id=saved["id"], kind="moving", note="опять поехал",
+            bike_id=self.bike_id, lat=None, lon=None))
+
+        self.assertEqual(await self.crm.purge_tracker_positions(30), 0)
+        await self.pool.execute(
+            "update crm.tracker_positions "
+            "set recorded_at = recorded_at - interval '60 days'")
+        self.assertEqual(await self.crm.purge_tracker_positions(30), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

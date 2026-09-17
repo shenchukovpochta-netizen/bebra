@@ -59,7 +59,7 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
 # CRM: логика, база, биллинг, синхронизация с ботом; веб-панель со шаблонами.
 $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/billing.py', 'app/crm/service.py', 'app/crm/company.py', 'app/crm/notify.py',
-         'app/crm/sync.py', 'app/crm/import_xlsx.py')
+         'app/crm/sync.py', 'app/crm/import_xlsx.py', 'app/crm/tracking.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -100,7 +100,12 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/battery.html',
                   'app/web/templates/battery_form.html',
                   'app/web/templates/locations.html',
-                  'app/web/templates/models.html')
+                  'app/web/templates/models.html',
+                  'app/web/templates/_trackers_tabs.html',
+                  'app/web/templates/_map.html',
+                  'app/web/templates/map.html',
+                  'app/web/templates/trackers.html',
+                  'app/web/templates/tracker.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -123,7 +128,8 @@ $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
 $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py',
-              'app/services/mrz.py', 'app/services/ocr.py')
+              'app/services/mrz.py', 'app/services/ocr.py',
+              'app/services/starline.py')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
@@ -140,7 +146,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_shopwindow.py', 'tests/test_channels.py',
           'tests/test_integrity.py',
           'tests/test_parts.py', 'tests/test_swap.py',
-          'tests/test_search.py', 'tests/test_plan.py', 'tests/test_assets.py', 'tests/test_company.py', 'tests/test_batteries.py')
+          'tests/test_search.py', 'tests/test_plan.py', 'tests/test_assets.py', 'tests/test_company.py', 'tests/test_batteries.py',
+          'tests/test_trackers.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

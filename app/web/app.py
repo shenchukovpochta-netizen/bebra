@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import os
 import time
@@ -118,6 +119,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BIKE_MANUAL_STATUSES=logic.BIKE_MANUAL_STATUSES,
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
+        TRACKER_ALERTS=logic.TRACKER_ALERTS,
+        map_url=logic.map_url,
         BATTERY_STATUSES=logic.BATTERY_STATUSES,
         BATTERY_MANUAL_STATUSES=logic.BATTERY_MANUAL_STATUSES,
         BATTERY_CYCLES_WARN=logic.BATTERY_CYCLES_WARN,
@@ -2440,6 +2443,132 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"Батарея заменена на {new['code']}." if old is not None
               else f"Батарея {new['code']} выдана клиенту.")
         return redirect(f"/rentals/{rental_id}")
+
+    # ─────────────────────── трекеры и карта ───────────────────────
+
+    async def tracker_rows_now() -> list[dict]:
+        """Трекеры с состоянием: панель в StarLine не ходит, она читает базу.
+
+        Опрос живёт в процессе бота: у него уже есть расписание и бот
+        для тревог, а веб-процессов может быть несколько — и каждый
+        опрашивал бы StarLine по своему кругу.
+        """
+        return logic.tracker_rows(await crm.trackers(), settings=await crm.settings())
+
+    @app.get("/map")
+    async def fleet_map(request: Request) -> Response:
+        if not may_view(request, "trackers"):
+            return denied(request, "trackers")
+        settings = await crm.settings()
+        rows = logic.tracker_rows(await crm.trackers(), settings=settings)
+        points = logic.map_points(rows)
+        return render(request, "map.html", rows=rows, points=points,
+                      points_json=json.dumps(points, ensure_ascii=False),
+                      map_cfg=logic.map_config(settings),
+                      summary=logic.tracker_summary(rows),
+                      alerts=await crm.tracker_alerts(open_only=True, limit=50))
+
+    @app.get("/trackers")
+    async def trackers_page(request: Request) -> Response:
+        if not may_view(request, "trackers"):
+            return denied(request, "trackers")
+        rows = await tracker_rows_now()
+        return render(request, "trackers.html", rows=rows,
+                      summary=logic.tracker_summary(rows),
+                      alerts=await crm.tracker_alerts(open_only=True, limit=50),
+                      free_bikes=await crm.bikes(limit=10000))
+
+    @app.post("/trackers")
+    async def tracker_create(request: Request) -> Response:
+        """Метка заводится руками, если её ещё не видел опрос."""
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        data = await form(request)
+        device = logic.check_code(data.get("device_id"))
+        note = logic.check_note(data.get("note"))
+        for check in (device, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/trackers")
+        try:
+            await crm.create_tracker(
+                device_id=device.value,
+                alias=(data.get("alias") or "").strip() or None, note=note.value)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Трекер с таким номером устройства уже заведён.", "err")
+                return redirect("/trackers")
+            raise
+        flash(request, "Трекер заведён. Привяжите его к велосипеду.")
+        return redirect("/trackers")
+
+    @app.post("/trackers/{tracker_id}/bike")
+    async def tracker_bind(request: Request, tracker_id: int) -> Response:
+        """Привязка трекера к велосипеду - и есть весь смысл раздела:
+        без неё координаты принадлежат неизвестно чему."""
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        tracker = await crm.tracker(tracker_id)
+        if tracker is None:
+            return render(request, "missing.html", status_code=404, what="Трекер")
+        data = await form(request)
+        raw = (data.get("bike_id") or "").strip()
+        bike_id = int(raw) if raw.isdigit() else None
+        if bike_id is not None and await crm.bike(bike_id) is None:
+            flash(request, "Такого велосипеда нет.", "err")
+            return redirect("/trackers")
+        try:
+            await crm.update_tracker(tracker_id, bike_id=bike_id)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "На этом велосипеде уже стоит другой трекер.", "err")
+                return redirect("/trackers")
+            raise
+        flash(request, "Трекер привязан." if bike_id else "Трекер отвязан.")
+        return redirect(f"/trackers/{tracker_id}")
+
+    @app.post("/trackers/{tracker_id}/toggle")
+    async def tracker_toggle(request: Request, tracker_id: int) -> Response:
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        tracker = await crm.tracker(tracker_id)
+        if tracker is None:
+            return render(request, "missing.html", status_code=404, what="Трекер")
+        await crm.update_tracker(tracker_id, active=not tracker["active"])
+        flash(request, "Трекер снят с наблюдения." if tracker["active"]
+              else "Трекер снова под наблюдением.")
+        return redirect(f"/trackers/{tracker_id}")
+
+    @app.post("/trackers/alerts/{alert_id}")
+    async def tracker_alert_handle(request: Request, alert_id: int) -> Response:
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        data = await form(request)
+        nxt = data.get("next") or ""
+        back = nxt if nxt.startswith("/") and not nxt.startswith("//") else "/trackers"
+        await crm.handle_alert(alert_id, by=who(request))
+        flash(request, "Тревога снята.")
+        return redirect(back)
+
+    @app.get("/trackers/{tracker_id}")
+    async def tracker_card(request: Request, tracker_id: int) -> Response:
+        if not may_view(request, "trackers"):
+            return denied(request, "trackers")
+        tracker = await crm.tracker(tracker_id)
+        if tracker is None:
+            return render(request, "missing.html", status_code=404, what="Трекер")
+        settings = await crm.settings()
+        row = logic.tracker_rows([tracker], settings=settings)[0]
+        track = await crm.tracker_positions(tracker_id, 200)
+        return render(request, "tracker.html", tracker=row, track=track,
+                      run_km=logic.track_distance(track),
+                      map_cfg=logic.map_config(settings),
+                      points_json=json.dumps(logic.map_points([row]),
+                                             ensure_ascii=False),
+                      free_bikes=await crm.bikes(limit=10000),
+                      alerts=[a for a in await crm.tracker_alerts(open_only=False,
+                                                                  limit=50)
+                              if a["tracker_id"] == tracker_id])
 
     # ─────────────────── закупки основных средств ───────────────────
 

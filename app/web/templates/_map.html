@@ -1,0 +1,40 @@
+{# Карта на Leaflet с тайлами OSM. Единственное место в панели, где есть
+   скрипт: точки без подложки — это не карта, а созвездие. Без интернета
+   и без JS страница остаётся полезной: ниже тот же список со ссылками
+   на Яндекс.Карты, и он же виден в noscript. #}
+<div id="map" class="map"></div>
+<p id="map-offline" class="muted" hidden>Карта не загрузилась: сервер не достучался
+  до {{ map_cfg.js }}. Координаты каждого велосипеда есть в списке ниже — ссылка
+  открывает точку в Яндекс.Картах. Свой адрес карты задаётся настройками
+  <code>map_js</code>, <code>map_css</code> и <code>map_tiles</code>.</p>
+<link rel="stylesheet" href="{{ map_cfg.css }}">
+<script src="{{ map_cfg.js }}"></script>
+<script>
+(function () {
+  var points = {{ points_json|safe }};
+  var node = document.getElementById('map');
+  if (!node) { return; }
+  if (!window.L) {
+    /* Подложка недоступна - пустой белый прямоугольник хуже честной строки. */
+    node.hidden = true;
+    var note = document.getElementById('map-offline');
+    if (note) { note.hidden = false; }
+    return;
+  }
+  var colors = {alarm: '#d32f2f', rented: '#FF5907', parked: '#2e7d32', offline: '#777'};
+  var map = L.map(node);
+  L.tileLayer({{ map_cfg.tiles|tojson }},
+              {maxZoom: 19, attribution: {{ map_cfg.attribution|tojson }}}).addTo(map);
+  var bounds = [];
+  points.forEach(function (p) {
+    L.circleMarker([p.lat, p.lon], {radius: 7, weight: 2, color: colors[p.state] || '#555',
+                                    fillColor: colors[p.state] || '#555', fillOpacity: 0.8})
+      .addTo(map).bindPopup('<b>' + p.code + '</b><br>' + p.title);
+    bounds.push([p.lat, p.lon]);
+  });
+  if (bounds.length) { map.fitBounds(bounds, {padding: [30, 30], maxZoom: 15}); }
+  else { map.setView([{{ map_cfg.lat }}, {{ map_cfg.lon }}], 11); }
+})();
+</script>
+<noscript><p class="muted">Карта требует JavaScript. Координаты каждого
+  велосипеда есть в списке ниже — ссылка открывает точку в Яндекс.Картах.</p></noscript>

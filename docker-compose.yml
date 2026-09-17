@@ -14,6 +14,13 @@ secrets:
   # без него профиль просто не поднимается.
   max_bot_token:
     file: ./secrets/max_bot_token
+  # Доступ к кабинету StarLine: секрет приложения и пароль пользователя.
+  # Файлы создаёт bootstrap.sh пустыми - без них compose не поднимется,
+  # а пустые означают «трекеров нет», и опрос просто не запускается.
+  starline_app_secret:
+    file: ./secrets/starline_app_secret
+  starline_password:
+    file: ./secrets/starline_password
   # Ключ подписи cookie веб-панели и пароль её первого администратора.
   # Оба генерирует bootstrap.sh; пароль нужен только до первого входа.
   crm_secret:
@@ -86,13 +93,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    secrets: [db_password, bot_token, pdn_key]
+    secrets: [db_password, bot_token, pdn_key, starline_app_secret,
+              starline_password]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
       BOT_TOKEN_FILE: /run/secrets/bot_token
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       PDN_KEY_FILE: /run/secrets/pdn_key
+      STARLINE_APP_SECRET_FILE: /run/secrets/starline_app_secret
+      STARLINE_PASSWORD_FILE: /run/secrets/starline_password
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
@@ -132,6 +142,13 @@ services:
       UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
       REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}
       REMIND_HOUR_UTC: ${REMIND_HOUR_UTC:-7}
+
+      # Трекеры: опрос StarLine живёт в процессе бота - здесь уже есть
+      # и расписание, и бот, которым уходят тревоги. Панель в интернет
+      # не ходит и читает то, что опрос положил в базу.
+      STARLINE_APP_ID: ${STARLINE_APP_ID}
+      STARLINE_LOGIN: ${STARLINE_LOGIN}
+      STARLINE_POLL_SECONDS: ${STARLINE_POLL_SECONDS:-300}
 
       STORAGE_DIR: /files/kyc
       TZ: ${TZ:-Europe/Moscow}

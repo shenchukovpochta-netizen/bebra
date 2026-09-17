@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Карта парка — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Карта парка</h1>{% include "_trackers_tabs.html" %}</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ summary.online }}</b><span>на связи<br><small class="muted">из {{ summary.total }} трекеров</small></span></div>
+  <div class="tile {% if summary.moving %}warn{% endif %}"><b>{{ summary.moving }}</b><span>едут сейчас</span></div>
+  <div class="tile {% if summary.offline %}warn{% endif %}"><b>{{ summary.offline }}</b><span>молчат</span></div>
+  <div class="tile {% if summary.alarm %}warn{% endif %}"><b>{{ summary.alarm }}</b><span>с тревогой</span></div>
+</div>
+
+{% if alerts %}
+<section class="card">
+  <h2>Тревоги</h2>
+  <table>
+    <tr><th>Когда</th><th>Что</th><th>Велосипед</th><th>Подробности</th><th></th></tr>
+    {% for a in alerts %}
+    <tr>
+      <td>{{ a.created_at|dmy }}</td>
+      <td><span class="tag bad">{{ TRACKER_ALERTS.get(a.kind, a.kind) }}</span></td>
+      <td>{% if a.bike_id %}<a href="/bikes/{{ a.bike_id }}">№ {{ a.bike_code }}</a>{% else %}<span class="muted">{{ a.alias or a.device_id }}</span>{% endif %}</td>
+      <td>{{ a.note or '' }}{% if a.lat %} · <a href="{{ map_url(a.lat, a.lon) }}" target="_blank" rel="noopener">на карте</a>{% endif %}</td>
+      <td>{% if can_edit(staff, 'trackers') %}<form method="post" action="/trackers/alerts/{{ a.id }}"><input type="hidden" name="next" value="/map"><button type="submit" class="ghost">Снять</button></form>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  {% include "_map.html" %}
+  <p class="muted"><span class="dot rented"></span> в аренде ·
+    <span class="dot parked"></span> на точке ·
+    <span class="dot offline"></span> молчит ·
+    <span class="dot alarm"></span> тревога.
+    Данные обновляет опрос StarLine в процессе бота; панель в интернет не ходит.</p>
+</section>
+
+<section class="card">
+  <h2>Где что стоит</h2>
+  <table>
+    <tr><th>Велосипед</th><th>Состояние</th><th>Скорость</th><th class="opt">Связь</th><th>У кого</th><th></th></tr>
+    {% for t in rows %}
+    <tr class="{% if t.alarm or t.moving %}warn-row{% endif %}">
+      <td>{% if t.bike_id %}<a href="/bikes/{{ t.bike_id }}">№ {{ t.bike_code }}</a> {{ t.bike_model or '' }}{% else %}<span class="muted">{{ t.alias or t.device_id }} · без велосипеда</span>{% endif %}</td>
+      <td>{% if t.alarm %}<span class="tag bad">тревога</span>{% elif t.moving %}<span class="tag rented">едет</span>{% elif t.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}</td>
+      <td class="num">{% if t.speed %}{{ t.speed|int }} км/ч{% else %}—{% endif %}</td>
+      <td class="opt muted">{% if t.silent_hours is none %}не выходил{% else %}{{ t.silent_hours }} ч назад{% endif %}</td>
+      <td>{% if t.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ t.client_id }}">{{ t.client_name }}</a>{% else %}{{ t.client_name or '' }}{% endif %}</td>
+      <td>{% if t.map %}<a href="{{ t.map }}" target="_blank" rel="noopener">на карте</a>{% endif %} <a href="/trackers/{{ t.id }}">трек</a></td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">Трекеров нет. Заведите их на вкладке «Устройства» или дождитесь первого опроса StarLine.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

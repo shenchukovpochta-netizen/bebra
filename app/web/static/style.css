@@ -36,10 +36,12 @@ header nav a:hover{color:#fff;text-decoration:none;background:rgba(255,255,255,.
 header nav a.on{color:#fff;background:var(--brand)}
 header nav a.me{margin-left:10px;color:var(--brand-soft)}
 header nav a.me.on{color:#fff}
-/* Разделов стало полтора десятка: на ноутбучной ширине меню поджимается,
-   чтобы не разъезжаться на две строки. */
-@media (max-width:1500px){header nav a{padding:6px 7px;font-size:13px}}
-@media (max-width:1200px){header nav a{padding:5px 6px;font-size:12.5px}header nav a.me{margin-left:4px}}
+/* Разделов стало полтора десятка с лишним: на ноутбучной ширине меню
+   поджимается ступенями, чтобы не разъезжаться на две строки. Ниже 1000
+   оно всё равно переносится - и это нормально, там уже планшет. */
+@media (max-width:1600px){header nav a{padding:6px 7px;font-size:13px}}
+@media (max-width:1380px){header nav a{padding:5px 6px;font-size:12.5px}header nav a.me{margin-left:4px}}
+@media (max-width:1240px){header nav a{padding:4px 5px;font-size:12px}}
 
 main{max-width:1200px;margin:0 auto;padding:20px}
 h1{font:700 22px/1.2 var(--font-head);margin:0 0 14px;letter-spacing:-.01em}
@@ -194,3 +196,10 @@ tr.total td{border-top:2px solid var(--line);font-weight:600}
 .tag.ref-signed{background:#E8F4FF;color:#0B5A86}
 .tag.ref-rented{background:var(--brand);color:#fff}
 .tag.ref-paid{background:#E4F5E4;color:var(--ok)}
+
+/* Карта парка: единственный экран со скриптом, высота задаётся здесь -
+   у Leaflet без явной высоты контейнер схлопывается в ноль. */
+.map{height:min(60vh,520px);border-radius:12px;overflow:hidden;margin:4px 0 10px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 2px}
+.dot.rented{background:#FF5907}.dot.parked{background:#2e7d32}
+.dot.offline{background:#777}.dot.alarm{background:#d32f2f}

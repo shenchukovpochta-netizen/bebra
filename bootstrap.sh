@@ -96,6 +96,10 @@ fi
 # файла, и отсутствие файла ломало бы запуск даже тем, кто MAX не включал.
 # Реальный токен кладётся сюда только при включении профиля max.
 [ -f secrets/max_bot_token ] || : > secrets/max_bot_token
+# Трекеры StarLine необязательны: пустые файлы нужны только чтобы compose
+# поднялся. Заполните их - и опрос заведётся сам при следующем рестарте.
+[ -f secrets/starline_app_secret ] || : > secrets/starline_app_secret
+[ -f secrets/starline_password ] || : > secrets/starline_password
 chmod 600 secrets/* .env
 # Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
 # Вне swarm docker compose не копирует файл секрета, а подключает хостовый как

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Трекер {{ tracker.alias or tracker.device_id }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Трекер {{ tracker.alias or tracker.device_id }}
+  {% if tracker.alarm %}<span class="tag bad">тревога</span>{% elif tracker.moving %}<span class="tag rented">едет</span>{% elif tracker.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}</h1>
+  <a class="btn ghost" href="/trackers">Все трекеры</a></div>
+
+<div class="cols">
+<section class="card">
+  <h2>Карточка</h2>
+  <dl>
+    <dt>Устройство</dt><dd>{{ tracker.device_id }}</dd>
+    <dt>Велосипед</dt><dd>{% if tracker.bike_id %}<a href="/bikes/{{ tracker.bike_id }}">№ {{ tracker.bike_code }}</a> {{ tracker.bike_model or '' }}{% else %}<span class="muted">не привязан</span>{% endif %}</dd>
+    <dt>У кого</dt><dd>{% if tracker.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ tracker.client_id }}">{{ tracker.client_name }}</a> · {{ tracker.client_phone }}{% else %}{{ tracker.client_name or '—' }}{% endif %}</dd>
+    <dt>Связь</dt><dd>{% if tracker.last_seen %}{{ tracker.last_seen|dmy }}{% if tracker.silent_hours %} · {{ tracker.silent_hours }} ч назад{% endif %}{% else %}ни разу{% endif %}</dd>
+    <dt>Скорость</dt><dd>{% if tracker.speed %}{{ tracker.speed|int }} км/ч{% else %}стоит{% endif %}</dd>
+    <dt>Питание</dt><dd class="{% if tracker.low_power %}bad{% endif %}">{% if tracker.voltage %}{{ tracker.voltage }} В{% else %}—{% endif %}</dd>
+    <dt>Где</dt><dd>{% if tracker.map %}<a href="{{ tracker.map }}" target="_blank" rel="noopener">{{ '%.5f'|format(tracker.lat) }}, {{ '%.5f'|format(tracker.lon) }}</a>{% else %}координат нет{% endif %}</dd>
+    <dt>Накатано по треку</dt><dd>{{ run_km }} км <span class="muted">за {{ track|length }} точек журнала</span></dd>
+    <dt>Заметка</dt><dd>{{ tracker.note or '—' }}</dd>
+  </dl>
+  {% if can_edit(staff, 'trackers') %}
+  <form method="post" action="/trackers/{{ tracker.id }}/bike" class="inline-form">
+    <select name="bike_id"><option value="">не привязан</option>
+      {% for b in free_bikes %}<option value="{{ b.id }}" {% if tracker.bike_id == b.id %}selected{% endif %}>№ {{ b.code }} {{ b.model }}</option>{% endfor %}
+    </select>
+    <button type="submit">Привязать</button>
+  </form>
+  <form method="post" action="/trackers/{{ tracker.id }}/toggle" class="inline-form">
+    <button type="submit" class="ghost">{{ 'Снять с наблюдения' if tracker.active else 'Вернуть под наблюдение' }}</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  {% include "_map.html" %}
+</section>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Тревоги</h2>
+  <table>
+    <tr><th>Когда</th><th>Что</th><th>Подробности</th><th>Снял</th></tr>
+    {% for a in alerts %}
+    <tr>
+      <td>{{ a.created_at|dmy }}</td>
+      <td>{{ TRACKER_ALERTS.get(a.kind, a.kind) }}</td>
+      <td>{{ a.note or '' }}</td>
+      <td class="muted">{% if a.handled_at %}{{ a.handled_by or '' }} · {{ a.handled_at|dmy }}{% else %}<span class="tag bad">открыта</span>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">Тревог не было.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<section class="card">
+  <h2>Последние точки</h2>
+  <table>
+    <tr><th>Когда</th><th>Координаты</th><th>Скорость</th></tr>
+    {% for p in track[:30] %}
+    <tr>
+      <td>{{ p.recorded_at|dmy }}</td>
+      <td><a href="{{ map_url(p.lat, p.lon) }}" target="_blank" rel="noopener">{{ '%.5f'|format(p.lat) }}, {{ '%.5f'|format(p.lon) }}</a></td>
+      <td class="num">{% if p.speed %}{{ p.speed|int }} км/ч{% else %}—{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="3" class="muted">Точек нет: устройство ещё не выходило на связь.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Журнал хранится около месяца: точка на каждый опрос — это
+    десятки тысяч строк, а нужен он на пару недель назад.</p>
+</section>
+</div>
+{% endblock %}

@@ -21,6 +21,7 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
+from .crm import tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, registration
@@ -28,6 +29,7 @@ from .handlers import staff as staff_h
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
+from .services.starline import StarlineClient
 
 log = logging.getLogger("mybike")
 
@@ -93,6 +95,16 @@ async def run() -> None:
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
     reminders = asyncio.create_task(
         tasks.reminders_loop(bot, db, cfg, vault, crm))
+    # Опрос трекеров - отдельной задачей: у него свой период (минуты),
+    # а не суточный, как у напоминаний. Без настроек StarLine задача
+    # завершается сразу и ничего не делает.
+    starline = StarlineClient(app_id=cfg.starline_app_id,
+                              app_secret=cfg.starline_app_secret,
+                              login=cfg.starline_login,
+                              password=cfg.starline_password)
+    tracking_task = asyncio.create_task(
+        tracking.tracking_loop(bot, crm, cfg, starline,
+                               interval=cfg.starline_poll_seconds))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([
@@ -121,7 +133,9 @@ async def run() -> None:
         log.info("останавливаюсь")
         retention.cancel()
         reminders.cancel()
-        await asyncio.gather(retention, reminders, return_exceptions=True)
+        tracking_task.cancel()
+        await asyncio.gather(retention, reminders, tracking_task,
+                             return_exceptions=True)
         await tasks.drain()
         await bot.session.close()
         await db.close()

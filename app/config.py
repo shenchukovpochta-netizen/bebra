@@ -154,6 +154,15 @@ class Config:
     # текстом, без вложения.
     pdn_policy_file: Path = Path("/srv/app/pdn_policy.docx")
     auto_approve: bool = False
+    # StarLine: где сейчас велосипед. Пусто - опрос не запускается, и
+    # раздел трекеров показывает то, что в базе (то есть ничего).
+    # Пароль и секрет приложения - через _secret: у них тот же суффикс
+    # _FILE, что у остальных ключей, и в окружении им не место.
+    starline_app_id: str = ""
+    starline_app_secret: str = ""
+    starline_login: str = ""
+    starline_password: str = ""
+    starline_poll_seconds: int = 300
     extra: dict = field(default_factory=dict)
 
     @property
@@ -225,4 +234,9 @@ class Config:
             rate_soft=_int("RATE_SOFT", str(logic.RATE_SOFT_DEFAULT)),
             rate_hard=_int("RATE_HARD", str(logic.RATE_HARD_DEFAULT)),
             auto_approve=_env("AUTO_APPROVE", "0") == "1",
+            starline_app_id=_env("STARLINE_APP_ID"),
+            starline_app_secret=_secret("STARLINE_APP_SECRET", required=False),
+            starline_login=_env("STARLINE_LOGIN"),
+            starline_password=_secret("STARLINE_PASSWORD", required=False),
+            starline_poll_seconds=_int("STARLINE_POLL_SECONDS", "300"),
         )

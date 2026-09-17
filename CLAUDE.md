@@ -50,8 +50,9 @@ Claude Code читает этот файл в начале каждой сесс
   заявки, финансы, отчёты, импорт таблицы. Никакого NocoDB: экраны уже есть.
 - **Docker Compose** на VPS в РФ (152-ФЗ): postgres, bot, crm, backup,
   caddy (профиль https), bot-max (профиль max). Бэкап раз в сутки в `./backups`.
-- Интеграции (Авито, телефония, банк) — вне этой системы; для n8n при
-  необходимости дать одну точку входа, не тянуть их внутрь.
+- Интеграции: **StarLine** (трекеры) живёт внутри — без неё раздел «Карта»
+  пуст. Авито и телефония — вне системы; для n8n при необходимости дать
+  одну точку входа, не тянуть их внутрь.
 
 ## 4. Модель данных (схема `crm`)
 
@@ -60,8 +61,9 @@ Claude Code читает этот файл в начале каждой сесс
 `stock_takes`, `stock_take_items`, `referrals`, `settings`, `suppliers`,
 `parts`, `part_docs`, `part_moves`, `part_orders`, `part_order_items`,
 `purchases`, `locations`, `bike_models`, `battery_models`, `compat`,
-`batteries`, `battery_status_log`, `clients`, `rentals`, `rental_bikes`,
-`ledger`, `payment_claims`.
+`batteries`, `battery_status_log`, `trackers`, `tracker_positions`,
+`tracker_alerts`, `clients`, `rentals`, `rental_bikes`, `ledger`,
+`payment_claims`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -109,6 +111,11 @@ Claude Code читает этот файл в начале каждой сесс
   велосипеда остался для парка без карточек; как только батарея привязана
   к велосипеду, от велосипеда берётся только рама (`frame_amortization`),
   иначе амортизация посчиталась бы дважды.
+- **Трекеры** (`crm.trackers`, `crm.tracker_positions`, `crm.tracker_alerts`):
+  данные тянет опрос StarLine в процессе бота (`app/crm/tracking.py` +
+  `app/services/starline.py`), панель в интернет не ходит. Тревога одна
+  на вид на трекер (частичный уникальный индекс) и снимается сама, когда
+  причина исчезла. Журнал позиций живёт месяц, чистится дневным проходом.
 - **Справочники** (`crm.locations`, `crm.bike_models`, `crm.battery_models`,
   `crm.compat`): точки выдачи, каталог моделей и матрица совместимости.
   Модель в `crm.bikes` остаётся текстом — каталог связывается по названию,

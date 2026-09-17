@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from app.crm import logic as crm_logic
@@ -46,6 +46,9 @@ class FakeCrm:
         self.compat_: dict[tuple, bool] = {}
         self.batteries_: dict[int, dict] = {}
         self.battery_log_: list[dict] = []
+        self.trackers_: dict[int, dict] = {}
+        self.positions_: list[dict] = []
+        self.alerts_: dict[int, dict] = {}
         self.settings_: dict[str, str] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
@@ -1599,6 +1602,153 @@ class FakeCrm:
                                           by=by)
                 count += 1
         return count
+
+
+    # ─── трекеры ───
+    def _tracker_row(self, tracker):
+        bike = self.bikes_.get(tracker.get("bike_id")) or {}
+        rental = next((r for r in self.rentals_.values()
+                       if r.get("bike_id") == tracker.get("bike_id")
+                       and r["status"] == "active"), None) or {}
+        client = self.clients_.get(rental.get("client_id")) or {}
+        return {**tracker, "bike_code": bike.get("code"),
+                "bike_model": bike.get("model"), "bike_status": bike.get("status"),
+                "rental_id": rental.get("id"),
+                "client_id": rental.get("client_id"),
+                "client_name": client.get("full_name"),
+                "client_phone": client.get("phone")}
+
+    async def trackers(self, *, active_only=False, unbound=False):
+        rows = []
+        for tracker in self.trackers_.values():
+            if active_only and not tracker["active"]:
+                continue
+            if unbound and tracker.get("bike_id") is not None:
+                continue
+            rows.append(self._tracker_row(tracker))
+        return sorted(rows, key=lambda t: (t["bike_code"] is None,
+                                           t["bike_code"] or "", t["device_id"]))
+
+    async def tracker(self, tracker_id):
+        tracker = self.trackers_.get(tracker_id)
+        return self._tracker_row(tracker) if tracker else None
+
+    async def tracker_by_device(self, device_id):
+        return next((self._tracker_row(t) for t in self.trackers_.values()
+                     if t["device_id"] == device_id), None)
+
+    async def tracker_of_bike(self, bike_id):
+        return next((self._tracker_row(t) for t in self.trackers_.values()
+                     if t.get("bike_id") == bike_id), None)
+
+    async def create_tracker(self, **fields):
+        if any(t["device_id"] == fields.get("device_id")
+               for t in self.trackers_.values()):
+            raise UniqueError("tracker device_id")
+        tracker_id = self._id()
+        self.trackers_[tracker_id] = {
+            "id": tracker_id, "device_id": None, "alias": None, "bike_id": None,
+            "active": True, "last_seen": None, "lat": None, "lon": None,
+            "speed": None, "course": None, "voltage": None, "gsm_level": None,
+            "alarm": False, "note": None, "created_at": self._now(),
+            "updated_at": self._now(), **fields}
+        return tracker_id
+
+    async def update_tracker(self, tracker_id, **fields):
+        if fields.get("bike_id") is not None and any(
+                t["id"] != tracker_id and t.get("bike_id") == fields["bike_id"]
+                for t in self.trackers_.values()):
+            raise UniqueError("tracker bike_id")
+        if tracker_id in self.trackers_:
+            self.trackers_[tracker_id].update(fields)
+            self.trackers_[tracker_id]["updated_at"] = self._now()
+
+    async def save_tracker_state(self, device):
+        tracker = next((t for t in self.trackers_.values()
+                        if t["device_id"] == device["device_id"]), None)
+        created = tracker is None
+        if created:
+            tracker_id = await self.create_tracker(device_id=device["device_id"],
+                                                   alias=device.get("alias"))
+            tracker = self.trackers_[tracker_id]
+        for key in ("alias", "last_seen", "lat", "lon", "voltage"):
+            source = "recorded_at" if key == "last_seen" else key
+            if device.get(source) is not None:
+                tracker[key] = device[source]
+        tracker["speed"] = _num(device.get("speed"))
+        tracker["course"] = device.get("course")
+        tracker["gsm_level"] = device.get("gsm_level")
+        tracker["alarm"] = bool(device.get("alarm"))
+        tracker["voltage"] = _num(tracker.get("voltage"))
+        tracker["updated_at"] = self._now()
+        if device.get("lat") is not None and device.get("recorded_at") is not None:
+            known = any(p["tracker_id"] == tracker["id"]
+                        and p["recorded_at"] == device["recorded_at"]
+                        for p in self.positions_)
+            if not known:
+                self.positions_.append({
+                    "id": self._id(), "tracker_id": tracker["id"],
+                    "lat": device["lat"], "lon": device["lon"],
+                    "speed": _num(device.get("speed")), "course": device.get("course"),
+                    "recorded_at": device["recorded_at"]})
+        return {"id": tracker["id"], "created": created}
+
+    async def tracker_positions(self, tracker_id, limit=200):
+        rows = [dict(p) for p in self.positions_ if p["tracker_id"] == tracker_id]
+        return sorted(rows, key=lambda p: p["recorded_at"], reverse=True)[:limit]
+
+    async def purge_tracker_positions(self, days=30):
+        edge = self._now() - timedelta(days=days)
+        before = len(self.positions_)
+        self.positions_ = [p for p in self.positions_ if p["recorded_at"] >= edge]
+        return before - len(self.positions_)
+
+    async def tracker_alerts(self, *, open_only=True, limit=200):
+        rows = []
+        for alert in self.alerts_.values():
+            if open_only and alert["handled_at"] is not None:
+                continue
+            tracker = self.trackers_.get(alert["tracker_id"]) or {}
+            bike = self.bikes_.get(alert.get("bike_id")) or {}
+            rows.append({**alert, "device_id": tracker.get("device_id"),
+                         "alias": tracker.get("alias"), "bike_code": bike.get("code"),
+                         "bike_model": bike.get("model")})
+        return sorted(rows, key=lambda a: a["id"], reverse=True)[:limit]
+
+    async def raise_alert(self, *, tracker_id, kind, note, bike_id, lat, lon):
+        if any(a["tracker_id"] == tracker_id and a["kind"] == kind
+               and a["handled_at"] is None for a in self.alerts_.values()):
+            return None
+        alert_id = self._id()
+        self.alerts_[alert_id] = {"id": alert_id, "tracker_id": tracker_id,
+                                  "bike_id": bike_id, "kind": kind, "note": note,
+                                  "lat": lat, "lon": lon, "created_at": self._now(),
+                                  "handled_at": None, "handled_by": None}
+        return alert_id
+
+    async def close_alerts(self, tracker_id, kinds, *, by=None):
+        count = 0
+        for alert in self.alerts_.values():
+            if (alert["tracker_id"] == tracker_id and alert["kind"] in kinds
+                    and alert["handled_at"] is None):
+                alert["handled_at"], alert["handled_by"] = self._now(), by
+                count += 1
+        return count
+
+    async def handle_alert(self, alert_id, *, by):
+        alert = self.alerts_.get(alert_id)
+        if alert and alert["handled_at"] is None:
+            alert["handled_at"], alert["handled_by"] = self._now(), by
+
+
+def _num(value):
+    """Число из внешнего API - в Decimal, как numeric в базе."""
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except (ArithmeticError, ValueError):
+        return None
 
 
 class UniqueError(Exception):
