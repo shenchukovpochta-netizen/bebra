@@ -518,9 +518,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if other is not None and (current is None or other["id"] != current["id"]):
             flash(request, f"Этот телефон уже у клиента «{other['full_name']}».", "err")
             return None
-        return {"full_name": name.value, "phone": phone, "note": note.value,
-                "status": status.value, "contract_no": contract.value,
-                "channel": channel.value}
+        # MAX-аккаунт руками: мост из MAX-бота проставляет его сам, но
+        # мост поднят не у всех, а рассылке нужен адрес получателя.
+        raw_max = (data.get("max_id") or "").strip()
+        if raw_max and not raw_max.isdigit():
+            flash(request, "MAX id: только цифры, как в кабинете MAX.", "err")
+            return None
+        fields = {"full_name": name.value, "phone": phone, "note": note.value,
+                  "status": status.value, "contract_no": contract.value,
+                  "channel": channel.value}
+        if current is not None:
+            fields["max_id"] = int(raw_max) if raw_max else None
+        return fields
 
     @app.post("/clients")
     async def client_create(request: Request) -> Response:
@@ -565,7 +574,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         fields = await _client_fields(request, data, current=client)
         if fields is not None:
-            await crm.update_client(client_id, **fields)
+            try:
+                await crm.update_client(client_id, **fields)
+            except Exception as exc:                    # noqa: BLE001
+                if "unique" in type(exc).__name__.lower():
+                    flash(request, "Этот MAX-аккаунт уже привязан к другому "
+                                   "клиенту.", "err")
+                    return redirect(f"/clients/{client_id}")
+                raise
             flash(request, "Карточка сохранена.")
         return redirect(f"/clients/{client_id}")
 

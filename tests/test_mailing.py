@@ -297,6 +297,25 @@ class TestMailingPanel(tw.WebCase):
     def test_missing_campaign_is_a_404(self):
         self.assertEqual(self.client.get("/mailing/999").status_code, 404)
 
+    def test_max_id_is_editable_in_the_client_card(self):
+        card = self.get_ok(f"/clients/{self.client_id}")
+        self.assertIn('name="max_id"', card)
+        self.client.post(f"/clients/{self.client_id}/edit", data={
+            "full_name": "Иванов Иван", "phone": "+79990000000",
+            "status": "active", "max_id": "555"})
+        self.assertEqual(tw.run(self.crm.client(self.client_id))["max_id"], 555)
+        # чужой аккаунт второй карточке не достаётся
+        self.client.post(f"/clients/{self.max_client_id}/edit", data={
+            "full_name": "Петров Пётр", "phone": "+79990000002",
+            "status": "active", "max_id": "555"})
+        self.assertIn("уже привязан", self.get_ok(f"/clients/{self.max_client_id}"))
+        # не число - понятная ошибка
+        self.client.post(f"/clients/{self.client_id}/edit", data={
+            "full_name": "Иванов Иван", "phone": "+79990000000",
+            "status": "active", "max_id": "@ivanov"})
+        self.assertIn("только цифры", self.get_ok(f"/clients/{self.client_id}"))
+        self.assertEqual(tw.run(self.crm.client(self.client_id))["max_id"], 555)
+
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
 class TestMaxBridge(tw.WebCase):

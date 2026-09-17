@@ -451,6 +451,15 @@ class FakeCrm:
                 for c in self.clients_.values() if c["created_at"] >= since]
 
     async def update_client(self, client_id, **fields):
+        # Частичные уникальные индексы базы: тот же аккаунт не может
+        # принадлежать двум карточкам, и подмена его в панели должна
+        # упираться в ту же ошибку, что и в Postgres.
+        for column in ("tg_id", "max_id"):
+            value = fields.get(column)
+            if value is not None and any(
+                    c.get(column) == value and c["id"] != client_id
+                    for c in self.clients_.values()):
+                raise UniqueError(f"clients {column}")
         self.clients_[client_id].update(fields)
 
     async def link_client_tg(self, client_id, tg_id, username):

@@ -87,6 +87,9 @@
     <label>Статус <select name="status">{% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}" {% if client.status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     {# Откуда узнал: на это опирается отчёт «куда давать рекламу». #}
     <label>Откуда узнал <select name="channel"><option value="">не спросили</option>{% for code, label in CLIENT_CHANNELS.items() %}<option value="{{ code }}" {% if client.channel == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    {# MAX-аккаунт: мост из MAX-бота проставляет его сам, но мост поднят
+       не у всех, а рассылке нужен адрес получателя. #}
+    <label>MAX id <input name="max_id" inputmode="numeric" value="{{ client.max_id or '' }}" placeholder="если MAX-бот не привязал сам"></label>
     <label>Заметка <textarea name="note" rows="3">{{ client.note or '' }}</textarea></label>
     <button type="submit">Сохранить</button>
   </form>
