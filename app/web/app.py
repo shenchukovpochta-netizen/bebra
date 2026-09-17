@@ -127,7 +127,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BIKE_MANUAL_STATUSES=logic.BIKE_MANUAL_STATUSES,
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
-        TRACKER_ALERTS=logic.TRACKER_ALERTS,
+        TRACKER_ALERTS=logic.TRACKER_ALERTS, TRACK_RANGES=logic.TRACK_RANGES,
         SIGN_STATUSES=logic.SIGN_STATUSES, SIGN_EVENTS=logic.SIGN_EVENTS,
         SIGN_DOC_KINDS=logic.SIGN_DOC_KINDS,
         SIGN_CODE_MINUTES=logic.SIGN_CODE_MINUTES,
@@ -141,6 +141,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
         DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
         BIKE_PASSPORT=logic.BIKE_PASSPORT,
+        STOCK_STALE_DAYS=logic.STOCK_STALE_DAYS,
         NOTICE_TARGETS=logic.NOTICE_TARGETS,
         NOTICE_STATUSES=logic.NOTICE_STATUSES,
         NOTICE_LOG_DAYS=logic.NOTICE_LOG_DAYS,
@@ -702,6 +703,32 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                            location=location or None),
                       counts=await crm.bike_counts())
 
+    @app.get("/bikes.csv")
+    async def bikes_csv(request: Request) -> Response:
+        """Парк файлом. Фильтры те же, что на экране: выгружают то, что
+        видят, а не «всё вообще»."""
+        if not may_view(request, "bikes"):
+            return denied(request, "bikes")
+        rows = await crm.bikes(q=request.query_params.get("q") or None,
+                               status=request.query_params.get("status") or None,
+                               location=request.query_params.get("location") or None,
+                               limit=10000)
+        money_ok = may_view(request, "finance")
+        header = ["Номер", "Модель", "Статус", "Точка", "Госномер", "Пробег, км",
+                  "Номер рамы", "Клиент", "Заведён"]
+        if money_ok:
+            header.insert(6, "Цена покупки")
+        out = []
+        for b in rows:
+            line = [b["code"], b["model"],
+                    logic.BIKE_STATUSES.get(b["status"], b["status"]),
+                    b.get("location"), b.get("plate_no"), b.get("mileage_km"),
+                    b.get("frame_no"), b.get("full_name"), b.get("created_at")]
+            if money_ok:
+                line.insert(6, logic.to_money(b.get("purchase_price") or 0))
+            out.append(line)
+        return _csv("bikes.csv", header, out)
+
     @app.get("/bikes/new")
     async def bike_new(request: Request) -> Response:
         if not may_edit(request, "bikes"):
@@ -1244,14 +1271,62 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── аренды ───────────────────────
 
-    @app.get("/rentals")
-    async def rentals(request: Request) -> Response:
-        status = request.query_params.get("status") or "active"
-        rows = await crm.rentals(status=status if status != "all" else None)
+    def rental_rows(rows: list[dict], view: str) -> list[dict]:
+        """Аренды с посчитанной сводкой и фильтром вида.
+
+        «Без техники» - не статус, а состояние: аренда идёт, а велосипеда
+        на руках нет. Так бывает после замены, когда подменный уже забрали,
+        а новый ещё не выдали, - и такую аренду видно только отсюда.
+        """
         for r in rows:
             r["summary"] = summarize(r if r["status"] == "active" else None,
                                      r.get("balance", 0))
-        return render(request, "rentals.html", rows=rows, status=status)
+        if view == "nobike":
+            return [r for r in rows if r["status"] == "active" and not r.get("bike_id")]
+        if view == "debt":
+            return [r for r in rows if logic.to_money(r.get("balance")) < 0]
+        if view == "search":
+            return [r for r in rows if logic.in_search(r)]
+        return rows
+
+    @app.get("/rentals")
+    async def rentals(request: Request) -> Response:
+        status = request.query_params.get("status") or "active"
+        view = request.query_params.get("view") or ""
+        rows = await crm.rentals(status=status if status != "all" else None)
+        shown = rental_rows(rows, view)
+        return render(request, "rentals.html", rows=shown, status=status, view=view,
+                      counts={
+                          "nobike": sum(1 for r in rows if r["status"] == "active"
+                                        and not r.get("bike_id")),
+                          "debt": sum(1 for r in rows
+                                      if logic.to_money(r.get("balance")) < 0),
+                          "search": sum(1 for r in rows if logic.in_search(r))})
+
+    @app.get("/rentals.csv")
+    async def rentals_csv(request: Request) -> Response:
+        if not may_view(request, "rentals"):
+            return denied(request, "rentals")
+        status = request.query_params.get("status") or "active"
+        rows = rental_rows(
+            await crm.rentals(status=status if status != "all" else None),
+            request.query_params.get("view") or "")
+        money_ok = may_view(request, "finance")
+        header = ["Аренда", "Клиент", "Телефон", "Велосипед", "Тариф",
+                  "Начало", "Оплачено до", "Статус", "Договор"]
+        if money_ok:
+            header.insert(7, "Баланс")
+        out = []
+        for r in rows:
+            line = [r["id"], r.get("full_name"), r.get("phone"),
+                    r.get("bike_code"), r.get("tariff_name"), r.get("started_on"),
+                    (r["summary"] or {}).get("covered_until"),
+                    logic.RENTAL_STATUSES.get(r["status"], r["status"]),
+                    r.get("contract_no")]
+            if money_ok:
+                line.insert(7, logic.to_money(r.get("balance") or 0))
+            out.append(line)
+        return _csv("rentals.csv", header, out)
 
     @app.get("/rentals/new")
     async def rental_new(request: Request) -> Response:
@@ -2149,6 +2224,33 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "orders.html", rows=rows, status=status, payer=payer,
                       unpaid=logic.orders_unpaid(
                           await crm.work_orders(payer="client", limit=1000)))
+
+    @app.get("/orders.csv")
+    async def orders_csv(request: Request) -> Response:
+        if not may_view(request, "service"):
+            return denied(request, "service")
+        rows = await crm.work_orders(
+            status=request.query_params.get("status") or None,
+            payer=request.query_params.get("payer") or None, limit=5000)
+        money_ok = may_view(request, "finance")
+        header = ["Наряд", "Открыт", "Объект", "Статус", "Плательщик", "Клиент",
+                  "Техник", "Суток", "Закрыт", "Оплачен"]
+        if money_ok:
+            header.insert(8, "Сумма")
+        today = date.today()
+        out = []
+        for o in rows:
+            line = [o["no"], o.get("opened_at"),
+                    o.get("bike_code") or o.get("object_note"),
+                    logic.ORDER_STATUSES.get(o["status"], o["status"]),
+                    logic.PAYERS.get(o["payer"], o["payer"]), o.get("client_name"),
+                    o.get("tech_name"), logic.order_days(o, today=today),
+                    o.get("closed_at"), o.get("paid_at")]
+            if money_ok:
+                line.insert(8, logic.to_money(
+                    o.get("total") if o["status"] == "done" else o.get("estimate")))
+            out.append(line)
+        return _csv("orders.csv", header, out)
 
     @app.get("/orders/new")
     async def order_new(request: Request) -> Response:
@@ -3926,9 +4028,24 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Трекер")
         settings = await crm.settings()
         row = logic.tracker_rows([tracker], settings=settings)[0]
-        track = await crm.tracker_positions(tracker_id, 200)
+        # Трек за период: «где он был вчера» - главный вопрос к трекеру,
+        # и отвечать на него списком координат было бы издевательством.
+        kind = request.query_params.get("range") or "today"
+        since_q = logic.check_date(request.query_params.get("since"), default=None)
+        until_q = logic.check_date(request.query_params.get("until"), default=None)
+        first, last = logic.track_period(
+            kind, since=since_q.value if since_q.ok else None,
+            until=until_q.value if until_q.ok else None)
+        tz = datetime.now().astimezone().tzinfo
+        track = await crm.track_between(
+            tracker_id,
+            since=datetime.combine(first, datetime.min.time(), tzinfo=tz),
+            until=datetime.combine(last + timedelta(days=1), datetime.min.time(),
+                                   tzinfo=tz))
         return render(request, "tracker.html", tracker=row, track=track,
                       run_km=logic.track_distance(track),
+                      track_range=kind, track_since=first, track_until=last,
+                      line_json=json.dumps(logic.track_line(track)),
                       map_cfg=logic.map_config(settings),
                       points_json=json.dumps(logic.map_points([row]),
                                              ensure_ascii=False),
@@ -4033,10 +4150,35 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         node = request.query_params.get("node") or ""
         q = request.query_params.get("q") or ""
         rows = logic.part_rows(await crm.parts(node=node or None, q=q or None),
-                               await crm.stock_map())
+                               await crm.stock_map(), await crm.part_last_moved())
         return render(request, "parts.html", rows=rows,
                       summary=logic.stock_summary(rows), node=node, q=q,
                       nodes=await crm.repair_nodes())
+
+    @app.get("/parts.csv")
+    async def parts_csv(request: Request) -> Response:
+        if not may_view(request, "inventory"):
+            return denied(request, "inventory")
+        rows = logic.part_rows(
+            await crm.parts(node=request.query_params.get("node") or None,
+                            q=request.query_params.get("q") or None),
+            await crm.stock_map(), await crm.part_last_moved())
+        money_ok = may_view(request, "finance")
+        header = ["Позиция", "Узел", "Совместимость", "Остаток", "Ед.",
+                  "Неснижаемый", "Не хватает", "Дней на складе"]
+        if money_ok:
+            header += ["Себестоимость", "Σ себестоимость", "Цена клиенту",
+                       "Σ по клиенту"]
+        out = []
+        for r in rows:
+            line = [r["title"], logic.REPAIR_NODES.get(r.get("node"), ""),
+                    r.get("model") or "все", r["stock"], r.get("unit"),
+                    r.get("min_stock"), r["short"] or "", r.get("days_on_stock")]
+            if money_ok:
+                line += [logic.to_money(r.get("cost") or 0), r["cost_total"],
+                         logic.to_money(r.get("price") or 0), r["price_total"]]
+            out.append(line)
+        return _csv("parts.csv", header, out)
 
     @app.get("/parts/new")
     async def part_new(request: Request) -> Response:

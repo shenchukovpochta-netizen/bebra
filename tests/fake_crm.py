@@ -2364,6 +2364,22 @@ class FakeCrm:
         return rows[:limit]
 
 
+    async def track_between(self, tracker_id, *, since, until, limit=2000):
+        rows = [dict(x) for x in self.positions_
+                if x["tracker_id"] == tracker_id
+                and since <= x["recorded_at"] < until]
+        rows.sort(key=lambda x: x["recorded_at"])
+        return rows[:limit]
+
+    async def part_last_moved(self):
+        out = {}
+        for m in self.part_moves_:
+            pid = int(m["part_id"])
+            when = m["created_at"]
+            if pid not in out or when > out[pid]:
+                out[pid] = when
+        return out
+
     # ────────── свои шаблоны документов ──────────
 
     async def doc_templates(self, kind=None):

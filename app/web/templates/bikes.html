@@ -15,6 +15,7 @@
   </form>
   {% if can_edit(staff, 'bikes') %}<a class="btn" href="/bikes/new">+ Велосипед</a>{% endif %}
   <a class="btn ghost" href="/stock-takes">Пересчёт</a>
+  <a class="btn ghost" href="/bikes.csv?q={{ q|urlencode }}&status={{ status }}&location={{ location|urlencode }}">CSV</a>
 </div>
 <div class="card">
 <table>

@@ -1752,19 +1752,39 @@ def average_cost(stock: int, cost: Any, qty: int, price: Any) -> Decimal:
     return to_money((old_sum + new_sum) / total)
 
 
-def part_rows(parts: Iterable[dict], stocks: dict[int, int]) -> list[dict]:
+# Сколько дней позиция может лежать без движения, прежде чем это станет
+# заметно. Квартал: сезонную запчасть берут раз в сезон, а вот лежащая
+# полгода - это деньги на полке.
+STOCK_STALE_DAYS = 90
+
+
+def part_rows(parts: Iterable[dict], stocks: dict[int, int],
+              moved: Mapping[int, Any] | None = None,
+              *, today: date | None = None) -> list[dict]:
     """Остатки склада: позиция, сколько на полке и чего не хватает.
 
     Первыми - те, чей остаток ниже неснижаемого: это и есть список
     «что заказать», и он должен быть виден без прокрутки.
+
+    `moved` - когда позицию последний раз трогали. Отсюда «дней на
+    складе»: запчасть, которая лежит квартал, - это деньги на полке,
+    и увидеть их можно только так.
     """
+    moved = moved or {}
+    today = today or date.today()
     rows = []
     for part in parts:
         stock = int(stocks.get(int(part["id"]), 0))
         minimum = int(part.get("min_stock") or 0)
+        last = moved.get(int(part["id"]))
+        last_day = last.date() if isinstance(last, datetime) else last
+        days = (today - last_day).days if last_day else None
         rows.append({**part, "stock": stock,
                      "short": max(minimum - stock, 0),
                      "below": stock < minimum,
+                     "days_on_stock": days,
+                     "stale": bool(days is not None and stock > 0
+                                   and days >= STOCK_STALE_DAYS),
                      "cost_total": to_money(part.get("cost") or 0) * max(stock, 0),
                      "price_total": to_money(part.get("price") or 0) * max(stock, 0)})
     rows.sort(key=lambda r: (not r["below"], -r["short"], str(r.get("title") or "")))
@@ -1777,6 +1797,7 @@ def stock_summary(rows: Iterable[dict]) -> dict[str, Any]:
         "positions": len(rows),
         "below": sum(1 for r in rows if r["below"]),
         "empty": sum(1 for r in rows if r["stock"] <= 0),
+        "stale": sum(1 for r in rows if r.get("stale")),
         "cost": to_money(sum((r["cost_total"] for r in rows), Decimal(0))),
     }
 
@@ -2467,6 +2488,49 @@ def map_config(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
             "tiles": value("map_tiles", MAP_TILES),
             "attribution": value("map_attribution", MAP_ATTRIBUTION),
             "lat": MAP_CENTER[0], "lon": MAP_CENTER[1]}
+
+
+# Готовые периоды трека: столько спрашивают на практике. Произвольный
+# интервал тоже есть, но в девяти случаях из десяти нужен «сегодня».
+TRACK_RANGES: dict[str, str] = {
+    "today": "Сегодня", "yesterday": "Вчера", "week": "7 суток",
+}
+
+
+def track_period(kind: str, *, today: date | None = None,
+                 since: date | None = None,
+                 until: date | None = None) -> tuple[date, date]:
+    """Период трека: (с, по включительно). Непонятный вид - сегодня."""
+    today = today or date.today()
+    if kind == "yesterday":
+        day = today - timedelta(days=1)
+        return day, day
+    if kind == "week":
+        return today - timedelta(days=6), today
+    if kind == "custom" and since and until and since <= until:
+        # Месяц - столько живёт журнал позиций; просить больше нечего.
+        return max(since, today - timedelta(days=31)), min(until, today)
+    return today, today
+
+
+def track_line(positions: Iterable[Mapping[str, Any]]) -> list[list[float]]:
+    """Точки трека для линии на карте: [[широта, долгота], …].
+
+    Скачки GPS выкидываем той же меркой, что и в пробеге: линия через
+    полгорода и обратно - это не поездка, а перескок спутника.
+    """
+    points = sorted(positions, key=lambda p: p["recorded_at"])
+    line: list[list[float]] = []
+    for point in points:
+        lat, lon = point.get("lat"), point.get("lon")
+        if lat is None or lon is None:
+            continue
+        if line:
+            step = distance_km(line[-1][0], line[-1][1], lat, lon)
+            if step is not None and step >= 5:
+                continue
+        line.append([float(lat), float(lon)])
+    return line
 
 
 def track_distance(positions: Iterable[Mapping[str, Any]]) -> float:

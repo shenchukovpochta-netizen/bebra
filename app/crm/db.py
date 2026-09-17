@@ -2196,6 +2196,19 @@ class CrmDB:
                     device["recorded_at"])
             return {"id": tracker_id, "created": bool(row["created"])}
 
+    async def track_between(self, tracker_id: int, *, since: datetime,
+                            until: datetime, limit: int = 2000) -> list[dict]:
+        """Точки трекера за период - для линии на карте.
+
+        Сортировка по времени вперёд: линию рисуют от старой точки к
+        новой, и разворачивать её в шаблоне было бы странно.
+        """
+        return _rows(await self.pool.fetch(
+            "select * from crm.tracker_positions where tracker_id = $1 "
+            "and recorded_at >= $2 and recorded_at < $3 "
+            "order by recorded_at limit $4",
+            tracker_id, since, until, limit))
+
     async def tracker_positions(self, tracker_id: int, limit: int = 200) -> list[dict]:
         return _rows(await self.pool.fetch(
             "select * from crm.tracker_positions where tracker_id = $1 "
@@ -3070,3 +3083,14 @@ class CrmDB:
     async def drop_company_mark(self, kind: str) -> None:
         await self.pool.execute(
             "delete from crm.company_marks where kind = $1", kind)
+
+    async def part_last_moved(self) -> dict[int, datetime]:
+        """Когда позицию последний раз трогали - одним запросом на склад.
+
+        Нужен колонке «дней на складе»: запрос на позицию превратил бы
+        экран остатков в сотню запросов.
+        """
+        rows = await self.pool.fetch(
+            "select part_id, max(created_at) as moved from crm.part_moves "
+            "group by part_id")
+        return {int(r["part_id"]): r["moved"] for r in rows}

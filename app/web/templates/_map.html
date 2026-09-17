@@ -26,6 +26,15 @@
   L.tileLayer({{ map_cfg.tiles|tojson }},
               {maxZoom: 19, attribution: {{ map_cfg.attribution|tojson }}}).addTo(map);
   var bounds = [];
+  /* Линия трека: её рисуем только на карточке трекера, на общей карте
+     её нет - сто линий поверх друг друга читать нельзя. */
+  var line = {{ (line_json or '[]')|safe }};
+  if (line.length > 1) {
+    L.polyline(line, {color: '#FF5907', weight: 3, opacity: 0.8}).addTo(map);
+    line.forEach(function (p) { bounds.push(p); });
+    L.circleMarker(line[0], {radius: 5, color: '#2e7d32', fillColor: '#2e7d32',
+                             fillOpacity: 0.9}).addTo(map).bindPopup('начало');
+  }
   points.forEach(function (p) {
     L.circleMarker([p.lat, p.lon], {radius: 7, weight: 2, color: colors[p.state] || '#555',
                                     fillColor: colors[p.state] || '#555', fillOpacity: 0.8})

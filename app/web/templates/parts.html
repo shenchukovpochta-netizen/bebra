@@ -11,6 +11,7 @@
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'inventory') %}<a class="btn" href="/parts/new">+ Позиция</a>{% endif %}
+  <a class="btn ghost" href="/parts.csv?node={{ node }}&q={{ q|urlencode }}">CSV</a>
 </div>
 
 <div class="tiles">
@@ -18,18 +19,20 @@
   <div class="tile"><b>{{ summary.positions }}</b><span>позиций в номенклатуре</span></div>
   <div class="tile {% if summary.empty %}warn{% endif %}"><b>{{ summary.empty }}</b><span>нет на полке</span></div>
   {% if can_view(staff, 'finance') %}<div class="tile"><b>{{ money(summary.cost) }}</b><span>склад по себестоимости</span></div>{% endif %}
+  <div class="tile {% if summary.stale %}warn{% endif %}"><b>{{ summary.stale }}</b><span>лежит дольше {{ STOCK_STALE_DAYS }} дней<br><small class="muted">деньги на полке</small></span></div>
 </div>
 
 <div class="card">
 <table>
   {% set money_ok = can_view(staff, 'finance') %}
-  <tr><th>Позиция</th><th class="opt">Узел</th><th>На полке</th><th>Мин.</th>{% if money_ok %}<th>Себест.</th><th class="opt">Цена клиенту</th><th class="opt">Сумма</th>{% endif %}<th class="opt">Совместимость</th></tr>
+  <tr><th>Позиция</th><th class="opt">Узел</th><th>На полке</th><th>Мин.</th><th class="opt num">Дней на складе</th>{% if money_ok %}<th>Себест.</th><th class="opt">Цена клиенту</th><th class="opt">Сумма</th>{% endif %}<th class="opt">Совместимость</th></tr>
   {% for r in rows %}
   <tr class="{% if not r.active %}muted{% endif %}">
     <td><a href="/parts/{{ r.id }}">{{ r.title }}</a>{% if not r.active %} <small class="muted">архив</small>{% endif %}</td>
     <td class="opt">{{ r.node_title or '—' }}</td>
     <td class="num {% if r.below %}bad{% endif %}">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· не хватает {{ r.short }}</small>{% endif %}</td>
     <td class="num muted">{{ r.min_stock }}</td>
+    <td class="num opt {% if r.stale %}warn{% endif %}">{{ r.days_on_stock if r.days_on_stock is not none else '—' }}</td>
     {% if money_ok %}
     <td class="num">{{ money(r.cost) }}</td>
     <td class="num opt">{{ money(r.price) }}</td>
@@ -37,7 +40,7 @@
     {% endif %}
     <td class="opt">{{ r.model or 'все' }}</td>
   </tr>
-  {% else %}<tr><td colspan="8" class="muted">Склад пуст. Заведите позицию и проведите приход.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="muted">Склад пуст. Заведите позицию и проведите приход.</td></tr>{% endfor %}
 </table>
 <p class="muted">Первыми — те, чего не хватает до неснижаемого остатка.
   Себестоимость средняя: пересчитывается при каждом приходе, поэтому один

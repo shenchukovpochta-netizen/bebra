@@ -17,6 +17,7 @@
     <dt>Питание</dt><dd class="{% if tracker.low_power %}bad{% endif %}">{% if tracker.voltage %}{{ tracker.voltage }} В{% else %}—{% endif %}</dd>
     <dt>Где</dt><dd>{% if tracker.map %}<a href="{{ tracker.map }}" target="_blank" rel="noopener">{{ '%.5f'|format(tracker.lat) }}, {{ '%.5f'|format(tracker.lon) }}</a>{% else %}координат нет{% endif %}</dd>
     <dt>Накатано по треку</dt><dd>{{ run_km }} км <span class="muted">за {{ track|length }} точек журнала</span></dd>
+    <dt>Период</dt><dd>{{ track_since|dmy }} — {{ track_until|dmy }}</dd>
     <dt>Заметка</dt><dd>{{ tracker.note or '—' }}</dd>
   </dl>
   {% if can_edit(staff, 'trackers') %}
@@ -33,7 +34,21 @@
 </section>
 
 <section class="card">
-  {% include "_map.html" %}
+  {# Период трека: «где он был вчера» - главный вопрос к трекеру. Журнал
+   позиций живёт месяц, дальше спрашивать нечего. #}
+<nav class="tabs">
+  {% for code, title in TRACK_RANGES.items() %}
+  <a href="/trackers/{{ tracker.id }}?range={{ code }}"
+     class="{% if track_range == code %}on{% endif %}">{{ title }}</a>
+  {% endfor %}
+</nav>
+<form method="get" class="search">
+  <input type="hidden" name="range" value="custom">
+  <input name="since" type="date" value="{{ track_since|iso }}">
+  <input name="until" type="date" value="{{ track_until|iso }}">
+  <button type="submit">Показать</button>
+</form>
+{% include "_map.html" %}
 </section>
 </div>
 

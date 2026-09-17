@@ -169,7 +169,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_search.py', 'tests/test_plan.py', 'tests/test_assets.py', 'tests/test_company.py', 'tests/test_batteries.py',
           'tests/test_trackers.py', 'tests/test_cash.py',
           'tests/test_mailing.py', 'tests/test_esign.py', 'tests/test_paying.py', 'tests/test_notices.py', 'tests/test_estimate.py', 'tests/test_bonus.py',
-          'tests/test_intake.py', 'tests/test_documents.py',
+          'tests/test_intake.py', 'tests/test_documents.py', 'tests/test_lists.py',
           'tests/test_pricing.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
