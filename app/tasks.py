@@ -199,7 +199,10 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
     # помечается в базе и второй раз не уходит. У бота и CRM отметки свои:
     # сбой одного не должен ни отменять, ни повторять проход другого.
     bot_done_on: date | None = None
-    crm_done_on: date | None = None
+    # У CRM теперь не одна отметка на сутки, а по отметке на уведомление:
+    # у каждого свой час, и «сводка в 20:00» не должна ждать, пока
+    # напоминание в 09:00 отработает.
+    crm_done: dict[str, date] = {}
     while True:
         try:
             now = datetime.now(UTC)
@@ -221,12 +224,14 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                 except Exception:                       # noqa: BLE001
                     log.exception("прогон напоминаний не удался, повтор через "
                                   "%s с", REMIND_INTERVAL_SECONDS)
-            if crm is not None and due_today(now, crm_done_on, cfg.remind_hour_utc):
-                # Начисления, напоминания об оплате и сводка по долгам -
-                # тем же дневным проходом, что и напоминания о сроке.
+            if crm is not None:
+                # Проход CRM зовётся каждый круг, а что именно делать -
+                # решает он сам по расписанию уведомлений. Начисления и
+                # чистки внутри всё так же раз в сутки.
                 from .crm import billing
-                await billing.run_daily(bot, db, crm, cfg, today=today)
-                crm_done_on = today
+                local = datetime.now()
+                await billing.run_daily(bot, db, crm, cfg, today=local.date(),
+                                        now=local, done=crm_done)
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

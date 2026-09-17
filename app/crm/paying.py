@@ -23,7 +23,7 @@ from typing import Any
 
 from aiogram.exceptions import TelegramAPIError
 
-from . import logic, service
+from . import logic, notices, service
 
 log = logging.getLogger(__name__)
 
@@ -61,21 +61,27 @@ async def report_paid(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
     обновлять список счетов в панели, пока клиент держит телефон, ему
     некогда.
     """
+    if not await notices.allowed(crm, "pay_paid"):
+        return False
     text = (f"💳 Оплачен счёт {order.get('no')} — "
             f"{logic.money(order.get('amount'))}\n"
             f"{order.get('full_name') or 'клиент'} · {order.get('purpose') or ''}")
     try:
         await bot.send_message(cfg.contract_chat_id, text.strip())
-    except TelegramAPIError:
+    except TelegramAPIError as exc:
         log.exception("сообщение об оплате счёта не доставлено")
+        await notices.record(crm, "pay_paid", status="failed", detail=str(exc))
         return False
+    await notices.record(crm, "pay_paid", status="sent",
+                         client_id=order.get("client_id"))
     return True
 
 
-async def autocharge_daily(crm: Any, acquiring: Any, *,
+async def autocharge_daily(crm: Any, acquiring: Any, *, bot: Any = None,
                            today: date | None = None) -> dict:
     """Дневной проход автосписания. Час проверяет вызывающий."""
-    return await service.autocharge_once(crm, acquiring=acquiring, today=today)
+    return await service.autocharge_once(crm, acquiring=acquiring, bot=bot,
+                                         today=today)
 
 
 async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
@@ -94,7 +100,7 @@ async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
             hour = logic.pay_settings(await crm.settings())["autocharge_hour"]
             if charged_on != today and datetime.now().hour >= hour:
                 charged_on = today
-                charge = await autocharge_daily(crm, acquiring, today=today)
+                charge = await autocharge_daily(crm, acquiring, bot=bot, today=today)
                 if charge.get("charged") or charge.get("failed"):
                     log.info("автосписание: списано %s, отказов %s",
                              charge["charged"], charge["failed"])

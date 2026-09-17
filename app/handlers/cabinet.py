@@ -29,7 +29,7 @@ from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
 from ..crm import logic as crm_logic
-from ..crm import notify, service
+from ..crm import notices, notify, service
 from ..crm import sync as crm_sync
 from ..db import Database
 from ..filters import ServiceChatReply, StateIs, is_operator
@@ -472,8 +472,10 @@ async def credit(bot: Bot, db: Database, crm: Any, claim: dict, amount: Any, *,
                      texts.CAB_CLAIM_DONE_MARK.format(amount=crm_logic.money(amount),
                                                       who=who))
     client = await crm.client(claim["client_id"]) or claim
-    await notify.payment_credited(bot, db, crm, {**client, "id": claim["client_id"]},
-                                  amount)
+    paid = {**client, "id": claim["client_id"]}
+    await notices.send_client(
+        crm, "pay_credited", claim["client_id"],
+        lambda: notify.payment_credited(bot, db, crm, paid, amount))
     # Бонус агенту, если этого клиента привёл друг. Сбой программы не
     # должен откатывать зачисление - оно уже состоялось.
     try:

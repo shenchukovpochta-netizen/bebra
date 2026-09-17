@@ -974,6 +974,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/staff", "staff"),
     ("/profiles", "staff"),
     ("/company", "settings"),
+    ("/notices", "settings"),
     ("/locations", "settings"),
     ("/models", "settings"),
 )
@@ -3150,3 +3151,239 @@ def autocharge_due(rentals: Iterable[Mapping[str, Any]],
                     "amount": to_money(-debt)})
     due.sort(key=lambda r: -r["amount"])
     return due
+
+
+# ────────────────────── уведомления ──────────────────────
+#
+# Каталог - здесь, в коде: уведомление не появляется «по настройке», у
+# него всегда есть отправитель и повод в коде. В базе (`crm.notices`)
+# лежит только то, что владелец поменял, поэтому новое уведомление
+# показывается в панели само, а строки, которой нет, читаются как
+# умолчания отсюда.
+#
+# `hour is None` - «сразу по событию»: такое уходит в момент события, и
+# часа у него нет. Остальные проверяет суточный проход.
+
+NOTICE_GROUPS: dict[str, str] = {
+    "client": "Клиентам",
+    "team": "Команде",
+    "channel": "Канал для клиентов",
+}
+# Кому уходит: клиенту в личку, в служебный чат, в клиентский канал.
+NOTICE_TARGETS: dict[str, str] = {
+    "client": "Клиенту", "chat": "Служебный чат", "channel": "Канал",
+}
+NOTICE_STATUSES: dict[str, str] = {
+    "sent": "Отправлено", "failed": "Не доставлено", "skipped": "Пропущено",
+}
+# Сколько держим историю отправок. Месяц отвечает на «почему клиент
+# говорит, что ему не написали»; дальше вопрос уже не задают.
+NOTICE_LOG_DAYS = 30
+
+NOTICES: dict[str, dict[str, Any]] = {
+    # ─ клиентам ─
+    "rent_soon": {
+        "group": "client", "target": "client", "hour": 14,
+        "title": "Аренда истекает через N дней",
+        "hint": "За сколько дней предупреждать - в настройках бота "
+                "(REMIND_BEFORE_DAYS).",
+    },
+    "rent_due": {
+        "group": "client", "target": "client", "hour": 9,
+        "title": "Аренда истекает сегодня",
+        "hint": "Последний день оплаченного периода.",
+    },
+    "rent_overdue": {
+        "group": "client", "target": "client", "hour": 8,
+        "title": "Просрочка — напомнить клиенту",
+        "hint": "Оплаченный период кончился, деньги не пришли.",
+    },
+    "pay_credited": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Платёж зачислен",
+        "hint": "Уходит сразу после зачисления, с новой датой «оплачено до».",
+    },
+    "autocharge_ok": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Списание с карты прошло",
+        "hint": "Только при включённом автосписании.",
+    },
+    "autocharge_fail": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Списание с карты не прошло",
+        "hint": "Банк отказал: на карте нет денег или она недействительна.",
+    },
+    "repair_ready": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Техника готова после ремонта",
+        "hint": "Только по нарядам за счёт клиента: свой парк чинится молча.",
+    },
+    "maintenance_invite": {
+        "group": "client", "target": "client", "hour": 10,
+        "title": "Приглашение на ТО",
+        "hint": "Аренда идёт дольше срока, а велосипед за это время "
+                "в сервис не заезжал.",
+        "params": {"after_days": 30},
+    },
+    "review_ask": {
+        "group": "client", "target": "client", "hour": 10,
+        "title": "Просьба оставить отзыв",
+        "hint": "Клиент с нами дольше срока и не должен денег. "
+                "Площадки - в настройках отзывов.",
+        "params": {"after_days": 21},
+    },
+    # ─ команде ─
+    "daily_digest": {
+        "group": "team", "target": "chat", "hour": 20,
+        "title": "Ежедневный отчёт по оплатам",
+        "hint": "Кто платит, кто должен, у кого кончается аренда.",
+    },
+    "search_digest": {
+        "group": "team", "target": "chat", "hour": 20,
+        "title": "Кого пора искать",
+        "hint": "Молчит, когда искать некого.",
+    },
+    "integrity": {
+        "group": "team", "target": "chat", "hour": 20,
+        "title": "Расхождения в данных",
+        "hint": "Парк, аренды и наряды не сходятся между собой. "
+                "Молчит, когда всё сходится.",
+    },
+    "bank_unmatched": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Не разобранные поступления",
+        "hint": "Деньги на счёте есть, а кому - неизвестно.",
+    },
+    "pay_paid": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Оплачен счёт",
+        "hint": "Оператор ждёт этого сообщения, чтобы выдать велосипед.",
+    },
+    "part_arrived": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Пришла запчасть, которую ждал наряд",
+        "hint": "Наряд стоял в «ждёт запчасть» и теперь может ехать дальше.",
+    },
+    "order_waiting": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Наряд ждёт согласования сметы",
+        "hint": "Клиенту отправили смету, ответа нет.",
+    },
+    # ─ в канал ─
+    "free_bikes": {
+        "group": "channel", "target": "channel", "hour": 10,
+        "title": "Свободные велосипеды в канал",
+        "hint": "Свободный велосипед - прямой простой, а канал читают "
+                "те самые курьеры.",
+    },
+}
+
+
+def notice_defaults(code: str) -> dict[str, Any]:
+    """Умолчания уведомления из каталога. Неизвестный код - пусто."""
+    item = NOTICES.get(code)
+    if item is None:
+        return {}
+    return {"code": code, "title": item["title"], "group": item["group"],
+            "target": item["target"], "hint": item.get("hint", ""),
+            "enabled": True, "at_hour": item["hour"], "at_minute": 0,
+            "chat_id": None, "extra": dict(item.get("params") or {})}
+
+
+def notice_settings(rows: Iterable[Mapping[str, Any]] | None = None
+                    ) -> dict[str, dict[str, Any]]:
+    """Каталог, поверх которого легли правки владельца.
+
+    Строки, которой нет в базе, достаточно: она читается как умолчание.
+    Строка с кодом не из каталога игнорируется - уведомление без кода в
+    коде отправлять нечем.
+    """
+    stored = {str(r.get("code")): r for r in (rows or [])}
+    out = {}
+    for code in NOTICES:
+        item = notice_defaults(code)
+        row = stored.get(code)
+        if row is not None:
+            item["enabled"] = bool(row.get("enabled", True))
+            if row.get("at_hour") is not None:
+                item["at_hour"] = int(row["at_hour"])
+            item["at_minute"] = int(row.get("at_minute") or 0)
+            item["chat_id"] = str(row.get("chat_id") or "") or None
+            extra = row.get("extra")
+            if isinstance(extra, Mapping):
+                # Белый список: параметры уведомления заданы каталогом,
+                # чужие ключи из базы в работу не идут.
+                item["extra"].update({k: v for k, v in extra.items()
+                                      if k in item["extra"]})
+            item["updated_by"] = row.get("updated_by")
+            item["updated_at"] = row.get("updated_at")
+        out[code] = item
+    return out
+
+
+def notice_param(setting: Mapping[str, Any] | None, key: str,
+                 default: int = 0) -> int:
+    """Целый параметр уведомления. Мусор в базе - к умолчанию каталога."""
+    extra = (setting or {}).get("extra") or {}
+    try:
+        return int(extra[key])
+    except (KeyError, ValueError, TypeError):
+        return default
+
+
+def notice_time(setting: Mapping[str, Any] | None) -> str:
+    if not setting or setting.get("at_hour") is None:
+        return "сразу"
+    return f"{int(setting['at_hour']):02d}:{int(setting.get('at_minute') or 0):02d}"
+
+
+def notice_due(setting: Mapping[str, Any] | None, now: datetime,
+               done_on: date | None = None) -> bool:
+    """Пора ли отправлять уведомление по расписанию.
+
+    Не «ровно в этот час», а «в этот час или позже, если сегодня ещё не
+    отправляли»: бота перезапускают среди дня, и привязка к минуте молча
+    съедала бы уведомления за целые сутки.
+    """
+    if not setting or not setting.get("enabled"):
+        return False
+    hour = setting.get("at_hour")
+    if hour is None:
+        return False                       # «сразу» расписанием не ловится
+    if done_on == now.date():
+        return False
+    minutes_now = now.hour * 60 + now.minute
+    return minutes_now >= int(hour) * 60 + int(setting.get("at_minute") or 0)
+
+
+def notice_rows(settings: Mapping[str, Mapping[str, Any]],
+                counts: Mapping[str, int] | None = None) -> dict[str, list[dict]]:
+    """Уведомления по группам - в том порядке, в каком они в каталоге."""
+    counts = counts or {}
+    out: dict[str, list[dict]] = {group: [] for group in NOTICE_GROUPS}
+    for code, item in settings.items():
+        row = dict(item)
+        row["time"] = notice_time(item)
+        row["target_title"] = NOTICE_TARGETS.get(item["target"], "—")
+        row["sent"] = int(counts.get(code, 0))
+        out.setdefault(item["group"], []).append(row)
+    return out
+
+
+# Площадки для отзывов: кнопки в сообщении клиенту и в кабинете. Пустая
+# ссылка - площадка не показывается: пустая кнопка хуже, чем её отсутствие.
+REVIEW_SITES: dict[str, str] = {
+    "review_yandex": "Яндекс.Карты",
+    "review_2gis": "2ГИС",
+    "review_avito": "Авито",
+}
+
+
+def review_links(settings: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
+    settings = settings or {}
+    out = []
+    for key, title in REVIEW_SITES.items():
+        url = str(settings.get(key) or "").strip()
+        if url.startswith(("http://", "https://")):
+            out.append({"key": key, "title": title, "url": url})
+    return out

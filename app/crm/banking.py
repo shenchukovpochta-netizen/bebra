@@ -21,7 +21,7 @@ from typing import Any
 
 from aiogram.exceptions import TelegramAPIError
 
-from . import logic, service
+from . import logic, notices, service
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,8 @@ async def auto_credit(crm: Any, *, by: str = "bank") -> int:
 
 async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10) -> int:
     """Напомнить оператору о неразобранных поступлениях."""
+    if not await notices.allowed(crm, "bank_unmatched"):
+        return 0
     rows = [r for r in await crm.bank_txns(status="new", limit=100)
             if r["direction"] == "credit"]
     if not rows:
@@ -87,9 +89,12 @@ async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10) -> int
         lines.append(f"…и ещё {len(rows) - limit}")
     try:
         await bot.send_message(cfg.contract_chat_id, "\n".join(lines))
-    except TelegramAPIError:
+    except TelegramAPIError as exc:
         log.exception("сводка по выписке не доставлена")
+        await notices.record(crm, "bank_unmatched", status="failed",
+                             detail=str(exc))
         return 0
+    await notices.record(crm, "bank_unmatched", status="sent")
     return len(rows)
 
 

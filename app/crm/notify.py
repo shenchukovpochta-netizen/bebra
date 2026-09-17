@@ -165,3 +165,62 @@ async def pay_link(bot: Any, db: Any, order: dict) -> bool:
         no=order.get("no") or "", amount=logic.money(order.get("amount")),
         purpose=bot_logic.esc(order.get("purpose")), link=bot_logic.esc(link))
     return await _send(bot, order["tg_id"], text)
+
+
+async def maintenance_invite(bot: Any, rental: dict) -> bool:
+    """Клиенту: пора на бесплатное ТО."""
+    if not rental.get("tg_id") or bot is None:
+        return False
+    started = rental.get("started_on")
+    days = (date.today() - started).days if started else 0
+    bike = rental.get("bike_code")
+    text = texts.SERVICE_INVITE.format(
+        bike=f"Велосипед № {bot_logic.esc(bike)}" if bike else "Велосипед",
+        days=days)
+    return await _send(bot, rental["tg_id"], text)
+
+
+async def review_ask(bot: Any, rental: dict,
+                     links: list[dict] | None = None) -> bool:
+    """Клиенту: просьба оставить отзыв.
+
+    Площадок нет - просим написать менеджеру: кнопка в никуда хуже, чем
+    её отсутствие, а повод сказать спасибо остаётся.
+    """
+    if not rental.get("tg_id") or bot is None:
+        return False
+    started = rental.get("started_on")
+    days = (date.today() - started).days if started else 0
+    sites = links or []
+    tail = ("\n\n" + "\n".join(f"• {bot_logic.esc(s['title'])}: {bot_logic.esc(s['url'])}"
+                                 for s in sites)
+            if sites else texts.REVIEW_ASK_PLAIN)
+    return await _send(bot, rental["tg_id"],
+                       texts.REVIEW_ASK.format(days=days, links=tail))
+
+
+async def autocharge_ok(bot: Any, client: dict, amount: Any,
+                        card: dict | None, until: Any = None) -> bool:
+    """Клиенту: с карты списали. Молча списывать нельзя - это выглядит
+    как мошенничество, даже когда клиент сам согласился."""
+    if not client.get("tg_id") or bot is None:
+        return False
+    text = texts.AUTOCHARGE_OK.format(
+        mask=logic.card_mask((card or {}).get("mask")) or "----",
+        amount=logic.money(amount),
+        until=until.strftime("%d.%m.%Y") if until else "—")
+    return await _send(bot, client["tg_id"], text)
+
+
+async def autocharge_fail(bot: Any, client: dict, amount: Any,
+                          card: dict | None, reason: str = "") -> bool:
+    """Клиенту: списать не вышло. Причину даём словами банка, но без
+    кодов: «insufficient_funds» курьеру ничего не объясняет."""
+    if not client.get("tg_id") or bot is None:
+        return False
+    human = ("Скорее всего, на карте не хватило денег."
+             if not reason else bot_logic.esc(reason)[:200])
+    text = texts.AUTOCHARGE_FAIL.format(
+        mask=logic.card_mask((card or {}).get("mask")) or "----",
+        amount=logic.money(amount), reason=human)
+    return await _send(bot, client["tg_id"], text)

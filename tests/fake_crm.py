@@ -55,6 +55,8 @@ class FakeCrm:
         self.cash_moves_: list[dict] = []
         self.bank_: dict[int, dict] = {}
         self.pay_orders_: dict[int, dict] = {}
+        self.notices_: dict[str, dict] = {}
+        self.notice_log_: list[dict] = []
         self.cards_: dict[int, dict] = {}
         self.trackers_: dict[int, dict] = {}
         self.positions_: list[dict] = []
@@ -2190,6 +2192,52 @@ class FakeCrm:
         card = self.cards_.get(card_id)
         if card is not None:
             card["used_at"] = self._now()
+
+
+    # ─────────────────── уведомления ───────────────────
+
+    async def notices(self):
+        return [dict(n) for n in sorted(self.notices_.values(),
+                                        key=lambda n: n["code"])]
+
+    async def set_notice(self, code, *, enabled, at_hour, at_minute=0,
+                         chat_id=None, extra=None, by=None):
+        self.notices_[code] = {"code": code, "enabled": bool(enabled),
+                               "at_hour": at_hour, "at_minute": at_minute,
+                               "chat_id": chat_id, "extra": dict(extra or {}),
+                               "updated_by": by, "updated_at": self._now()}
+
+    async def log_notice(self, code, *, target, status, client_id=None,
+                         detail=None):
+        self.notice_log_.append({
+            "id": self._id(), "code": code, "client_id": client_id,
+            "target": target, "status": status,
+            "detail": (detail or "")[:500] or None, "created_at": self._now()})
+
+    async def notice_log(self, *, code=None, limit=200):
+        rows = [dict(n, full_name=(self.clients_.get(n["client_id"]) or {}).get("full_name"))
+                for n in reversed(self.notice_log_)
+                if code is None or n["code"] == code]
+        return rows[:limit]
+
+    async def notice_counts(self, days=30):
+        edge = self._now() - timedelta(days=days)
+        out = {}
+        for row in self.notice_log_:
+            if row["status"] == "sent" and row["created_at"] >= edge:
+                out[row["code"]] = out.get(row["code"], 0) + 1
+        return out
+
+    async def purge_notice_log(self, days):
+        edge = self._now() - timedelta(days=days)
+        before = len(self.notice_log_)
+        self.notice_log_ = [n for n in self.notice_log_ if n["created_at"] >= edge]
+        return before - len(self.notice_log_)
+
+    async def repairs_since(self, bike_id, since):
+        return sum(1 for x in self.bike_log_
+                   if x["bike_id"] == bike_id and x["kind"] == "repair"
+                   and x["created_at"].date() >= since)
 
 
 def _num(value):

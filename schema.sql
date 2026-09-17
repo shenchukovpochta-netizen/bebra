@@ -1560,3 +1560,43 @@ create table if not exists crm.card_tokens (
 -- Одна действующая карта на клиента: привязали новую - старая уходит.
 create unique index if not exists card_tokens_one
   on crm.card_tokens (client_id, provider) where active;
+
+-- ────────────────────── уведомления ──────────────────────
+--
+-- Каталог уведомлений живёт в коде (`logic.NOTICES`), а здесь - только
+-- то, что владелец в нём поменял. Так новое уведомление появляется в
+-- панели само, без вставки в схему, а строки, которых нет, читаются
+-- как «по умолчанию».
+--
+-- `at_hour is null` - «сразу по событию»: такие уходят в момент, когда
+-- событие случилось, и часа у них нет.
+create table if not exists crm.notices (
+  code       text        primary key,
+  enabled    boolean     not null default true,
+  at_hour    smallint,
+  at_minute  smallint    not null default 0,
+  -- Переопределение получателя для командных: по умолчанию служебный чат
+  -- из настроек бота.
+  chat_id    text,
+  -- Параметры конкретного уведомления: за сколько дней предупреждать,
+  -- через сколько звать на ТО. Белый список - в logic.NOTICES.
+  extra      jsonb       not null default '{}'::jsonb,
+  updated_by text,
+  updated_at timestamptz not null default now()
+);
+
+-- История отправок: кому и чем кончилось. Текст сообщения здесь не
+-- хранится - он собирается из шаблона и данных клиента, а копия текста
+-- через месяц уже не отвечает ни на один вопрос, зато весит.
+create table if not exists crm.notice_log (
+  id         bigserial primary key,
+  code       text        not null,
+  client_id  bigint      references crm.clients (id),
+  target     text        not null,          -- client|chat|channel
+  status     text        not null,          -- sent|failed|skipped
+  detail     text,
+  created_at timestamptz not null default now()
+);
+create index if not exists notice_log_idx on crm.notice_log (created_at desc);
+create index if not exists notice_log_code_idx
+  on crm.notice_log (code, created_at desc);

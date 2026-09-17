@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Уведомления — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Уведомления</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/locations">Точки</a>
+    <a href="/models">Каталог</a><a href="/notices" class="on">Уведомления</a></nav>
+</div>
+
+{% if not bot_ready %}
+<p class="flash err">Токен бота панели не задан: клиентские уведомления
+  отсюда не уходят. Их по-прежнему шлёт процесс бота — тумблеры действуют
+  и на него.</p>
+{% endif %}
+{% if not chat_ready %}
+<p class="flash">Служебный чат панели не задан (CONTRACT_CHAT_ID): командные
+  сообщения из панели не уходят. У бота свой адрес, его это не касается.</p>
+{% endif %}
+
+{% set can = can_edit(staff, 'settings') %}
+{% for group, title in NOTICE_GROUPS.items() %}
+{% if groups.get(group) %}
+<section class="card">
+  <h2>{{ title }} <span class="muted">· {{ groups[group]|length }}</span></h2>
+  <div class="table-wrap">
+  <table class="editable">
+    <tr><th>Вкл</th><th>Сообщение</th><th>Кому</th><th>Когда</th>
+      <th class="opt num">За 30 дней</th><th></th></tr>
+    {% for n in groups[group] %}
+    <tr class="{% if not n.enabled %}muted{% endif %}">
+      <td><input type="checkbox" name="enabled" form="nt{{ n.code }}"
+        {% if n.enabled %}checked{% endif %} {% if not can %}disabled{% endif %}></td>
+      <td><b>{{ n.title }}</b>{% if n.hint %}<br><small class="muted">{{ n.hint }}</small>{% endif %}
+        {% for key, value in n.extra.items() %}
+        <br><label class="inline-label">через
+          <input name="{{ key }}" value="{{ value }}" size="3" class="mini"
+                 form="nt{{ n.code }}" {% if not can %}disabled{% endif %}> дн.</label>
+        {% endfor %}</td>
+      <td class="muted">{{ n.target_title }}</td>
+      <td class="nowrap">
+        {% if n.at_hour is none %}<span class="tag">сразу</span>
+        {% else %}
+        <input name="at_hour" value="{{ n.at_hour }}" size="2" class="mini"
+               form="nt{{ n.code }}" {% if not can %}disabled{% endif %}>:<input
+               name="at_minute" value="{{ '%02d' % n.at_minute }}" size="2" class="mini"
+               form="nt{{ n.code }}" {% if not can %}disabled{% endif %}>
+        {% endif %}
+      </td>
+      <td class="opt num muted">{{ n.sent or '—' }}</td>
+      <td class="actions nowrap">
+        {% if can %}<button type="submit" class="ghost" form="nt{{ n.code }}">Сохранить</button>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {# Формы - за таблицей: <form> внутри <tr> браузер выносит наружу. #}
+  {% for n in groups[group] %}<form id="nt{{ n.code }}" method="post" action="/notices/{{ n.code }}"></form>{% endfor %}
+</section>
+{% endif %}
+{% endfor %}
+
+<section class="card">
+  <h2>История отправок</h2>
+  <table>
+    <tr><th>Когда</th><th>Уведомление</th><th>Кому</th><th>Чем кончилось</th></tr>
+    {% for r in log %}
+    <tr>
+      <td class="nowrap muted">{{ r.created_at|dmy }}</td>
+      <td>{{ NOTICES.get(r.code, {}).get('title', r.code) }}</td>
+      <td>{% if r.client_id %}<a href="/clients/{{ r.client_id }}">{{ r.full_name or '—' }}</a>
+        {% else %}<span class="muted">{{ NOTICE_TARGETS.get(r.target, '—') }}</span>{% endif %}</td>
+      <td>
+        {% if r.status == 'sent' %}<span class="tag ok">отправлено</span>
+        {% elif r.status == 'failed' %}<span class="tag bad">не доставлено</span>
+        {% else %}<span class="tag">пропущено</span>{% endif %}
+        {% if r.detail %}<br><small class="muted">{{ r.detail }}</small>{% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">Пока ничего не отправлялось.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">История живёт {{ NOTICE_LOG_DAYS }} дней и чистится дневным
+    проходом. Текст сообщения здесь не хранится: через месяц копия текста
+    уже не отвечает ни на один вопрос, зато весит.</p>
+</section>
+{% endblock %}

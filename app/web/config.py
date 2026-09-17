@@ -37,6 +37,10 @@ class WebConfig:
     # Панель стоит за Caddy (задан CRM_DOMAIN): адрес клиента брать из
     # X-Forwarded-For, иначе все входы выглядят как один адрес прокси.
     trust_proxy: bool = False
+    # Служебный чат: панель пишет туда то же, что бот, - приход запчасти
+    # под стоящий наряд. Пусто - командные сообщения из панели не уходят,
+    # и это не ошибка: у панели может не быть своего бота.
+    contract_chat_id: str = ""
     # Эквайринг Точки. Панель ходит в банк ровно за одним - за ссылкой
     # на оплату, которую оператор просит при клиенте. Опрос статусов
     # остаётся в процессе бота: круг по счетам из трёх веб-процессов
@@ -64,6 +68,7 @@ class WebConfig:
             title=_env("CRM_TITLE", "МАЙБАЙК"),
             pay_url=_env("PAY_URL"),
             trust_proxy=bool(_env("CRM_DOMAIN", "")),
+            contract_chat_id=_env("CONTRACT_CHAT_ID"),
             tochka_token=_secret("TOCHKA_TOKEN", required=False),
             tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
         )

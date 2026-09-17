@@ -14,7 +14,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from . import esign, logic
+from . import esign, logic, notices, notify
 
 log = logging.getLogger(__name__)
 
@@ -569,6 +569,26 @@ async def receive_part_order(crm: Any, order: dict, *, by: str) -> int:
     return doc_id
 
 
+async def orders_waiting_for(crm: Any, items: Iterable[dict]) -> list[dict]:
+    """Наряды, которые стояли в «ждёт запчасть» ради этой поставки.
+
+    Строка заказа помнит наряд, из-за которого её заказали
+    (`part_order_items.work_order_id`), поэтому по приёмке сразу видно,
+    кому идти. Без этого техник узнаёт о приходе, только когда сам
+    заглянет на склад.
+    """
+    seen, out = set(), []
+    for item in items:
+        order_id = item.get("work_order_id")
+        if not order_id or order_id in seen:
+            continue
+        seen.add(order_id)
+        order = await crm.work_order(int(order_id))
+        if order is not None and order.get("status") == "waiting":
+            out.append(order)
+    return out
+
+
 async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
                     mileage_old: int | None = None, mileage_new: int | None = None,
                     old_status: str | None = None, by: str) -> dict:
@@ -1079,8 +1099,8 @@ async def credit_pay_order(crm: Any, order: dict, *, by: str,
     return await crm.mark_pay_paid(order["id"], method=method, by=by)
 
 
-async def autocharge_once(crm: Any, *, acquiring: Any, today: date | None = None,
-                          limit: int = 50) -> dict:
+async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
+                          today: date | None = None, limit: int = 50) -> dict:
     """Суточный проход автосписания.
 
     Списываем только уже начисленный долг: аренда платится вперёд, и
@@ -1118,15 +1138,38 @@ async def autocharge_once(crm: Any, *, acquiring: Any, today: date | None = None
             log.warning("автосписание клиенту %s не прошло", item["client_id"],
                         exc_info=True)
             await crm.mark_pay_failed(order_id, error=str(err))
+            await _tell_autocharge(crm, bot, client, card, item["amount"],
+                                   ok=False, reason=str(err))
             failed += 1
             continue
         if state.get("state") == "paid":
             await crm.mark_pay_paid(order_id, method="card", by="автосписание")
             await crm.touch_card(card["id"])
+            fresh = await crm.active_rental_of(client["id"])
+            balance = await crm.client_balance(client["id"])
+            summary = logic.rental_summary(fresh, balance, today=today)
+            await _tell_autocharge(crm, bot, client, card, item["amount"],
+                                   ok=True, until=summary.get("covered_until"))
             charged += 1
         else:
-            await crm.mark_pay_failed(
-                order_id,
-                error=f"банк: {state.get('status') or 'списание не прошло'}")
+            reason = f"банк: {state.get('status') or 'списание не прошло'}"
+            await crm.mark_pay_failed(order_id, error=reason)
+            await _tell_autocharge(crm, bot, client, card, item["amount"],
+                                   ok=False, reason=reason)
             failed += 1
     return {"charged": charged, "failed": failed, "skipped": ""}
+
+
+async def _tell_autocharge(crm: Any, bot: Any, client: dict, card: dict,
+                           amount: Decimal, *, ok: bool, reason: str = "",
+                           until: Any = None) -> None:
+    """Сказать клиенту о списании. Молчать нельзя ни при удаче, ни при
+    отказе: в первом случае это выглядит как списание без спроса, во
+    втором клиент узнаёт о долге только из просрочки."""
+    if bot is None:
+        return
+    code = "autocharge_ok" if ok else "autocharge_fail"
+    await notices.send_client(
+        crm, code, client["id"],
+        (lambda: notify.autocharge_ok(bot, client, amount, card, until)) if ok
+        else (lambda: notify.autocharge_fail(bot, client, amount, card, reason)))

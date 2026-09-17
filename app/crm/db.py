@@ -2775,3 +2775,72 @@ class CrmDB:
     async def touch_card(self, card_id: int) -> None:
         await self.pool.execute(
             "update crm.card_tokens set used_at = now() where id = $1", card_id)
+
+    async def repairs_since(self, bike_id: int, since: date) -> int:
+        """Сколько раз велосипед был в сервисе с даты. Нужен приглашению
+        на ТО: тот, кто заезжал, зовётся зря."""
+        return int(await self.pool.fetchval(
+            "select count(*) from crm.bike_log where bike_id = $1 "
+            "and kind = 'repair' and created_at >= $2",
+            bike_id, since) or 0)
+
+    # ─────────────────────── уведомления ───────────────────────
+
+    async def notices(self) -> list[dict]:
+        """Только то, что владелец менял. Каталог - в logic.NOTICES."""
+        return _rows(await self.pool.fetch(
+            "select * from crm.notices order by code"))
+
+    async def set_notice(self, code: str, *, enabled: bool,
+                         at_hour: int | None, at_minute: int = 0,
+                         chat_id: str | None = None,
+                         extra: dict | None = None, by: str | None = None) -> None:
+        await self.pool.execute(
+            """
+            insert into crm.notices (code, enabled, at_hour, at_minute, chat_id,
+                                     extra, updated_by, updated_at)
+            values ($1, $2, $3, $4, $5, coalesce($6, '{}'::jsonb), $7, now())
+            on conflict (code) do update
+               set enabled = excluded.enabled, at_hour = excluded.at_hour,
+                   at_minute = excluded.at_minute, chat_id = excluded.chat_id,
+                   extra = excluded.extra, updated_by = excluded.updated_by,
+                   updated_at = now()
+            """, code, enabled, at_hour, at_minute, chat_id, extra or {}, by)
+
+    async def log_notice(self, code: str, *, target: str, status: str,
+                         client_id: int | None = None,
+                         detail: str | None = None) -> None:
+        await self.pool.execute(
+            "insert into crm.notice_log (code, client_id, target, status, detail) "
+            "values ($1, $2, $3, $4, $5)",
+            code, client_id, target, status, (detail or "")[:500] or None)
+
+    async def notice_log(self, *, code: str | None = None,
+                         limit: int = 200) -> list[dict]:
+        conds, args = [], []
+        if code:
+            args.append(code)
+            conds.append(f"n.code = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"""
+            select n.*, c.full_name
+              from crm.notice_log n
+              left join crm.clients c on c.id = n.client_id
+             {where} order by n.id desc limit ${len(args)}
+            """, *args))
+
+    async def notice_counts(self, days: int = 30) -> dict[str, int]:
+        """Сколько раз уведомление уходило за период - для экрана."""
+        rows = await self.pool.fetch(
+            "select code, count(*) as n from crm.notice_log "
+            "where status = 'sent' and created_at >= now() - make_interval(days => $1) "
+            "group by code", days)
+        return {r["code"]: int(r["n"]) for r in rows}
+
+    async def purge_notice_log(self, days: int) -> int:
+        return int((await self.pool.execute(
+            "delete from crm.notice_log "
+            "where created_at < now() - make_interval(days => $1)",
+            days)).split()[-1] or 0)

@@ -28,7 +28,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
-from ..crm import company, import_xlsx, logic, notify, service
+from ..crm import company, import_xlsx, logic, notices, notify, service
 from ..services import contract as contract_service
 from ..services import tochka
 from .config import WebConfig
@@ -134,6 +134,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         CASH_DIFF_NOISE=logic.CASH_DIFF_NOISE,
         BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
         PAY_STATUSES=logic.PAY_STATUSES, PAY_KINDS=logic.PAY_KINDS,
+        NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
+        NOTICE_TARGETS=logic.NOTICE_TARGETS,
+        NOTICE_STATUSES=logic.NOTICE_STATUSES,
+        NOTICE_LOG_DAYS=logic.NOTICE_LOG_DAYS,
         PAY_METHODS=logic.PAY_METHODS, card_title=logic.card_title,
         AUTOCHARGE_HOUR=logic.AUTOCHARGE_HOUR,
         map_url=logic.map_url,
@@ -411,6 +415,24 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "План на месяц сохранён.")
         return redirect("/")
 
+    async def tell_parts_arrived(orders: list[dict]) -> None:
+        """В служебный чат: пришла запчасть, которую ждал наряд."""
+        if not orders or bot is None or not cfg.contract_chat_id:
+            return
+        if not await notices.allowed(crm, "part_arrived"):
+            return
+        lines = ["📦 Пришла запчасть — наряды могут ехать дальше:"]
+        lines += [f"• {o.get('no')} — {o.get('bike_code') or o.get('object_note') or '—'}"
+                  for o in orders[:10]]
+        try:
+            await bot.send_message(cfg.contract_chat_id, "\n".join(lines))
+        except Exception as err:                         # noqa: BLE001
+            log.warning("сообщение о приходе запчасти не ушло: %s", err)
+            await notices.record(crm, "part_arrived", status="failed",
+                                 detail=str(err))
+            return
+        await notices.record(crm, "part_arrived", status="sent")
+
     async def referral_bonus(client: dict, amount: Decimal, by: str) -> None:
         """Друг заплатил - начислить бонус агенту и сказать ему об этом.
 
@@ -628,7 +650,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                 method=method, note=note.value, by=who(request),
                                 rental_id=rental["id"] if rental else None)
         if kind.value == "payment":
-            await notify.payment_credited(bot, db, crm, client, amount.value)
+            await notices.send_client(
+                crm, "pay_credited", client["id"],
+                lambda: notify.payment_credited(bot, db, crm, client,
+                                                amount.value))
             await referral_bonus(client, amount.value, who(request))
         flash(request, "Запись добавлена.")
         return redirect(f"/clients/{client_id}")
@@ -1502,7 +1527,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Заявку уже обработали.", "err")
             return redirect("/claims")
         client = await crm.client(claim["client_id"])
-        await notify.payment_credited(bot, db, crm, client, amount.value)
+        await notices.send_client(
+                crm, "pay_credited", client["id"],
+                lambda: notify.payment_credited(bot, db, crm, client,
+                                                amount.value))
         await referral_bonus(client, amount.value, who(request))
         flash(request, f"Зачислено {logic.money(amount.value)} клиенту {client['full_name']}.")
         return redirect("/claims")
@@ -2111,7 +2139,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if order.get("payer") == "client" and order.get("client_id"):
             client = await crm.client(order["client_id"])
             if client:
-                await notify.repair_ready(bot, client, order, totals["total"])
+                await notices.send_client(
+                    crm, "repair_ready", client["id"],
+                    lambda: notify.repair_ready(bot, client, order,
+                                                totals["total"]))
         flash(request, f"Наряд закрыт: клиенту {logic.money(totals['total'])}, "
                        f"себестоимость {logic.money(totals['cost'])}.")
         return redirect(f"/orders/{order_id}")
@@ -3118,6 +3149,60 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                        f"{client['full_name']}.")
         return redirect("/bank")
 
+    # ─────────────────────── уведомления ───────────────────────
+
+    @app.get("/notices")
+    async def notices_page(request: Request) -> Response:
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        state = logic.notice_settings(await crm.notices())
+        counts = await crm.notice_counts(logic.NOTICE_LOG_DAYS)
+        return render(request, "notices.html",
+                      groups=logic.notice_rows(state, counts),
+                      log=await crm.notice_log(limit=50),
+                      bot_ready=bot is not None,
+                      chat_ready=bool(cfg.contract_chat_id))
+
+    @app.post("/notices/{code}")
+    async def notice_save(request: Request, code: str) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if code not in logic.NOTICES:
+            return render(request, "missing.html", status_code=404,
+                          what="Уведомление")
+        data = await form(request)
+        default = logic.notice_defaults(code)
+        at_hour: int | None = None
+        if default["at_hour"] is not None:
+            # «Сразу» остаётся «сразу»: перенести событийное уведомление на
+            # час нельзя - события не ждут расписания.
+            hour = count_field(data, "at_hour", what="Час",
+                               default=str(default["at_hour"]), limit=23)
+            minute = count_field(data, "at_minute", what="Минуты",
+                                 default="0", limit=59)
+            for check in (hour, minute):
+                if not check.ok:
+                    flash(request, check.error, "err")
+                    return redirect("/notices")
+            at_hour, at_minute = hour.value, minute.value
+        else:
+            at_minute = 0
+        extra = {}
+        for key, fallback in (default["extra"] or {}).items():
+            got = count_field(data, key, what="Срок", default=str(fallback),
+                              limit=365)
+            if not got.ok:
+                flash(request, got.error, "err")
+                return redirect("/notices")
+            extra[key] = got.value
+        await crm.set_notice(code, enabled=bool(data.get("enabled")),
+                             at_hour=at_hour, at_minute=at_minute,
+                             chat_id=(data.get("chat_id") or "").strip() or None,
+                             extra=extra, by=who(request))
+        flash(request, f"«{default['title']}»: "
+              + ("включено." if data.get("enabled") else "выключено."))
+        return redirect("/notices")
+
     # ─────────────────────── счета на оплату ───────────────────────
 
     def acquiring() -> Any:
@@ -3783,12 +3868,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         order = await crm.part_order(order_id)
         if order is None:
             return render(request, "missing.html", status_code=404, what="Заказ")
+        items = await crm.part_order_items(order_id)
         try:
             doc_id = await service.receive_part_order(crm, order, by=who(request))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect("/part-orders")
         doc = await crm.part_doc(doc_id)
+        # Наряд, который стоял из-за этой запчасти, может ехать дальше -
+        # и техник должен узнать об этом сейчас, а не заглянув на склад.
+        await tell_parts_arrived(await service.orders_waiting_for(crm, items))
         flash(request, f"Заказ принят: приход {doc['no']} на {logic.money(doc['total'])}.")
         return redirect("/part-orders")
 

@@ -1103,6 +1103,49 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.drop_card(self.client_id)
         self.assertIsNone(await self.crm.card_of(self.client_id))
 
+    async def test_notices_on_postgres(self):
+        """Уведомления на живой базе: правка поверх каталога и история."""
+        await self.seed()
+        # Пустая таблица - всё включено по умолчанию из каталога.
+        state = logic.notice_settings(await self.crm.notices())
+        self.assertEqual(set(state), set(logic.NOTICES))
+        self.assertTrue(state["daily_digest"]["enabled"])
+
+        await self.crm.set_notice("daily_digest", enabled=False, at_hour=21,
+                                  at_minute=15, chat_id="-100500",
+                                  extra={}, by="staff:t")
+        # Повторная правка того же кода - обновление, а не вторая строка.
+        await self.crm.set_notice("daily_digest", enabled=False, at_hour=22,
+                                  at_minute=0, chat_id=None, extra={},
+                                  by="staff:t")
+        rows = await self.crm.notices()
+        self.assertEqual(len(rows), 1)
+        state = logic.notice_settings(rows)
+        self.assertFalse(state["daily_digest"]["enabled"])
+        self.assertEqual(logic.notice_time(state["daily_digest"]), "22:00")
+        self.assertIsNone(state["daily_digest"]["chat_id"])
+
+        # jsonb возвращается словарём, а не строкой.
+        await self.crm.set_notice("review_ask", enabled=True, at_hour=10,
+                                  extra={"after_days": 45}, by="staff:t")
+        state = logic.notice_settings(await self.crm.notices())
+        self.assertEqual(logic.notice_param(state["review_ask"], "after_days"), 45)
+
+        await self.crm.log_notice("rent_due", target="client", status="sent",
+                                  client_id=self.client_id)
+        await self.crm.log_notice("rent_due", target="client", status="failed",
+                                  client_id=self.client_id, detail="бот заблокирован")
+        self.assertEqual(await self.crm.notice_counts(30), {"rent_due": 1},
+                         "в счётчик идут только отправленные")
+        log = await self.crm.notice_log(code="rent_due")
+        self.assertEqual([r["status"] for r in log], ["failed", "sent"])
+        self.assertIsNotNone(log[0]["full_name"])
+
+        await self.pool.execute(
+            "update crm.notice_log set created_at = created_at - interval '40 days'")
+        self.assertEqual(await self.crm.purge_notice_log(30), 2)
+        self.assertEqual(await self.crm.notice_log(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

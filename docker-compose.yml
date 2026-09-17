@@ -209,6 +209,8 @@ services:
       # рассылки, чтобы оператор видел то же, что увидит клиент.
       PAY_URL: ${PAY_URL}
       TOCHKA_CUSTOMER_CODE: ${TOCHKA_CUSTOMER_CODE}
+      # Служебный чат: панель пишет туда то же, что бот.
+      CONTRACT_CHAT_ID: ${CONTRACT_CHAT_ID}
       CRM_TITLE: ${CRM_TITLE:-МАЙБАЙК}
       # Непустой домен = панель за Caddy: адрес клиента из X-Forwarded-For.
       CRM_DOMAIN: ${CRM_DOMAIN:-}
