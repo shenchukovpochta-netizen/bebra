@@ -215,11 +215,14 @@ fieldset[disabled] input,fieldset[disabled] select,fieldset[disabled] textarea{o
 .tag.order-done{background:#E4F5E4;color:var(--ok)}
 .tag.order-cancelled{background:var(--ink);color:#fff}
 tr.warn-row td{background:#FFF7EC}
+/* Строка в розыске краснее жёлтой: её ищут, а не листают. */
+tr.bad-row td{background:#FFECEC}
 @media (prefers-color-scheme:dark){
   .tag.order-new{background:#4A3A18;color:#FFD9A0}
   .tag.order-waiting{background:#123048;color:#BEE2FF}
   .tag.order-done{background:#1F3A21}
   tr.warn-row td{background:#3A2E1C}
+  tr.bad-row td{background:#40201F}
   .tag.take-found{background:#1F3A21}
   .tag.take-extra{background:#4A3A18;color:#FFD9A0}
 }

@@ -2348,9 +2348,14 @@ def battery_rows(batteries: Iterable[dict], *, today: date | None = None) -> lis
                 if battery.get("purchased_on") else None)
         cycles = int(battery.get("cycles") or 0)
         rows.append({**battery, "wear": wear, "cycles": cycles,
+                     # Розыск - состояние аренды, а не батареи: пока
+                     # клиент не нашёлся, батарея числится у него.
+                     "in_search": bool(battery.get("search_at")),
                      "tired": cycles >= BATTERY_CYCLES_WARN
                      or (wear is not None and wear >= 100)})
-    rows.sort(key=lambda b: (not b["tired"], str(b.get("code") or "")))
+    # В розыске - первыми: их ищут, а не листают.
+    rows.sort(key=lambda b: (not b["in_search"], not b["tired"],
+                             str(b.get("code") or "")))
     return rows
 
 
@@ -2360,6 +2365,7 @@ def battery_summary(rows: Iterable[dict]) -> dict[str, int]:
               for code in BATTERY_STATUSES}
     counts["total"] = len(rows)
     counts["tired"] = sum(1 for r in rows if r["tired"])
+    counts["search"] = sum(1 for r in rows if r.get("in_search"))
     counts["operational"] = sum(1 for r in rows
                                 if r.get("status") in BATTERY_OPERATIONAL)
     return counts

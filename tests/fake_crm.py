@@ -1571,11 +1571,15 @@ class FakeCrm:
                 "model_price": model.get("price"), "bike_code": bike.get("code"),
                 "bike_model": bike.get("model"),
                 "client_name": client.get("full_name") or None,
+                # Розыск - состояние аренды: как и в базе, он приезжает
+                # джойном, а не колонкой у батареи.
+                "search_at": rental.get("search_at")
+                if rental.get("status") == "active" else None,
                 "client_id": rental.get("client_id")
                 if rental.get("status") == "active" else None}
 
     async def batteries(self, *, status=None, q=None, location=None, bike_id=None,
-                        rental_id=None, limit=1000):
+                        rental_id=None, in_search=False, limit=1000):
         rows = []
         for battery in self.batteries_.values():
             if status and battery["status"] != status:
@@ -1591,7 +1595,10 @@ class FakeCrm:
             if q and q.lower() not in \
                     f"{battery['code']} {battery.get('serial_no') or ''}".lower():
                 continue
-            rows.append(self._battery_row(battery))
+            row = self._battery_row(battery)
+            if in_search and not row.get("search_at"):
+                continue
+            rows.append(row)
         return sorted(rows, key=lambda b: b["code"])[:limit]
 
     async def battery(self, battery_id):

@@ -725,7 +725,12 @@ async def stop_search(crm: Any, rental: dict, *, by: str) -> None:
 
 
 async def declare_theft(crm: Any, rental: dict, *, note: str | None, by: str) -> None:
-    """Признать велосипед потерянным: аренда закрывается, велосипед - lost.
+    """Признать технику потерянной: аренда закрывается, велосипед - lost.
+
+    Батареи уходят туда же. Раньше эта кнопка звала базу напрямую, минуя
+    возврат батарей, и выданные аккумуляторы оставались «у клиента»
+    навсегда: велосипед числился потерянным, а две батареи при нём -
+    живыми и свободными к выдаче.
 
     Долг клиента остаётся в журнале: списывать его - отдельное решение
     владельца, и делается оно корректировкой, а не этой кнопкой.
@@ -733,9 +738,8 @@ async def declare_theft(crm: Any, rental: dict, *, note: str | None, by: str) ->
     if rental.get("status") != "active":
         raise ServiceError("Аренда уже закрыта.")
     reason = (note or "").strip() or "Признан потерянным: клиент не вернул велосипед"
-    if not await crm.close_rental(rental["id"], closed_on=date.today(),
-                                  note=reason, bike_status="lost", closed_by=by):
-        raise ServiceError("Аренда уже закрыта.")
+    await close_rental(crm, rental, closed_on=date.today(), note=reason,
+                       bike_status="lost", by=by, battery_status="lost")
 
 
 async def buy_bikes(crm: Any, *, supplier_id: int | None, purchased_on: date,

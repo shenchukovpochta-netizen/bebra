@@ -3061,12 +3061,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         status = request.query_params.get("status") or ""
         q = request.query_params.get("q") or ""
         location = request.query_params.get("location") or ""
+        view = request.query_params.get("view") or ""
         rows = logic.battery_rows(await crm.batteries(
-            status=status or None, q=q or None, location=location or None))
+            status=status or None, q=q or None, location=location or None,
+            in_search=view == "search"))
         return render(request, "batteries.html", rows=rows,
                       summary=logic.battery_summary(
                           logic.battery_rows(await crm.batteries())),
-                      status=status, q=q, location=location,
+                      status=status, q=q, location=location, view=view,
                       locations=await location_names(),
                       models=await crm.battery_models(active_only=True))
 

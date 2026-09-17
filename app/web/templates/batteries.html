@@ -16,10 +16,16 @@
   {% if can_edit(staff, 'batteries') %}<a class="btn" href="/batteries/new">+ Батарея</a>{% endif %}
 </div>
 
+<nav class="tabs">
+  <a href="/batteries" {% if not view %}class="on"{% endif %}>Все</a>
+  <a href="/batteries?view=search" {% if view == 'search' %}class="on"{% endif %}>🔎 В розыске · {{ summary.search }}</a>
+</nav>
+
 <div class="tiles">
   <div class="tile"><b>{{ summary.operational }}</b><span>в обороте<br><small class="muted">свободна, у клиента, ремонт, ТО</small></span></div>
   <div class="tile"><b>{{ summary.available }}</b><span>свободных на точках</span></div>
   <div class="tile {% if summary.tired %}warn{% endif %}"><b>{{ summary.tired }}</b><span>пора смотреть<br><small class="muted">от {{ BATTERY_CYCLES_WARN }} циклов или отслужила срок</small></span></div>
+  <div class="tile {% if summary.search %}warn{% endif %}"><b>{{ summary.search }}</b><span>в розыске<br><small class="muted">уехали с арендой, которую ищут</small></span></div>
   <div class="tile {% if summary.lost %}warn{% endif %}"><b>{{ summary.lost }}</b><span>утеряно</span></div>
 </div>
 
@@ -27,8 +33,8 @@
 <table>
   <tr><th>№</th><th>Модель</th><th class="opt">Ёмкость</th><th>Статус</th><th>Где</th><th class="opt">Циклов</th><th class="opt">Износ</th><th>У кого</th></tr>
   {% for b in rows %}
-  <tr class="{% if b.tired %}warn-row{% endif %}">
-    <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
+  <tr class="{% if b.in_search %}bad-row{% elif b.tired %}warn-row{% endif %}">
+    <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a>{% if b.in_search %} <span class="tag bad">розыск</span>{% endif %}</td>
     <td>{{ b.model_title or '—' }}</td>
     <td class="opt muted">{% if b.voltage %}{{ b.voltage }} В{% endif %}{% if b.capacity %} · {{ b.capacity }} А·ч{% endif %}</td>
     <td><span class="tag {{ b.status }}">{{ BATTERY_STATUSES[b.status] }}</span></td>
@@ -39,8 +45,11 @@
   </tr>
   {% else %}<tr><td colspan="8" class="muted">Батарей нет. Заведите их с наклейками — по ним батарею и ищут.</td></tr>{% endfor %}
 </table>
-<p class="muted">Первыми — те, что пора смотреть: от {{ BATTERY_CYCLES_WARN }} циклов
+<p class="muted">Первыми — те, что в розыске, затем те, что пора смотреть: от {{ BATTERY_CYCLES_WARN }} циклов
   ёмкость заметно просела, и клиент начинает жаловаться на «не доезжает».
-  Статус «У клиента» ставит и снимает выдача, как и у велосипеда.</p>
+  Статус «У клиента» ставит и снимает выдача, как и у велосипеда.
+  Розыск — состояние аренды, а не батареи: пока клиент не нашёлся,
+  батарея у него и числится «у клиента». Признание кражи уводит в
+  «утеряна» и велосипед, и его батареи.</p>
 </div>
 {% endblock %}

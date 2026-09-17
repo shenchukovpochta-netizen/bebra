@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Батарея {{ battery.code }} — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="bar"><h1>Батарея {{ battery.code }} <span class="tag {{ battery.status }}">{{ BATTERY_STATUSES[battery.status] }}</span></h1>
+<div class="bar"><h1>Батарея {{ battery.code }} <span class="tag {{ battery.status }}">{{ BATTERY_STATUSES[battery.status] }}</span>{% if battery.in_search %} <span class="tag bad">в розыске</span>{% endif %}</h1>
   <a class="btn ghost" href="/batteries">Все батареи</a></div>
 
 <div class="cols">

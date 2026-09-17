@@ -2077,7 +2077,10 @@ class CrmDB:
     _BATTERY_SELECT = """
         select b.*, m.title as model_title, m.voltage, m.capacity,
                m.price as model_price, bk.code as bike_code, bk.model as bike_model,
-               c.full_name as client_name, r.client_id
+               c.full_name as client_name, r.client_id,
+               -- Розыск - состояние аренды, а не батареи: пока клиент
+               -- не нашёлся, батарея у него, и статус у неё «у клиента».
+               r.search_at as search_at
         from crm.batteries b
         left join crm.battery_models m on m.id = b.model_id
         left join crm.bikes bk on bk.id = b.bike_id
@@ -2087,7 +2090,8 @@ class CrmDB:
 
     async def batteries(self, *, status: str | None = None, q: str | None = None,
                         location: str | None = None, bike_id: int | None = None,
-                        rental_id: int | None = None, limit: int = 1000) -> list[dict]:
+                        rental_id: int | None = None, in_search: bool = False,
+                        limit: int = 1000) -> list[dict]:
         conds, args = [], []
         if status:
             args.append(status)
@@ -2106,6 +2110,8 @@ class CrmDB:
         if q:
             args.append(f"%{q.strip()}%")
             conds.append(f"(b.code ilike ${len(args)} or b.serial_no ilike ${len(args)})")
+        if in_search:
+            conds.append("r.search_at is not null")
         where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)
         return _rows(await self.pool.fetch(
