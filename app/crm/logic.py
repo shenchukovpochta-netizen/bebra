@@ -1319,6 +1319,11 @@ def service_summary(rows: Iterable[dict]) -> dict[str, int]:
 # ───────────────────────── пересчёт техники ─────────────────────────
 
 TAKE_SCOPES: dict[str, str] = {"all": "Весь парк", "location": "Одна точка"}
+# Что считаем. Отдельной ведомости на батареи нет намеренно: человек с
+# телефоном обходит точку один раз и вводит номера подряд, а какой из
+# них чей - разбирается система.
+TAKE_WHAT: dict[str, str] = {"all": "Всё", "bikes": "Велосипеды",
+                             "batteries": "Аккумуляторы"}
 TAKE_STATES: dict[str, str] = {
     "expected": "Не отмечен", "found": "На месте",
     "missing": "Не нашли", "extra": "Лишний",
@@ -1328,6 +1333,9 @@ TAKE_STATES: dict[str, str] = {
 # он уже потерян, а если найдётся - попадёт в неё лишним, ради этого
 # пересчёт и затевается.
 TAKE_EXPECTED_STATUSES = ("available", "repair", "maintenance", "reserved")
+# То же для батарей. Резерва у них нет, «на сборке» тоже не ждём: она
+# ещё не в обороте, и её отсутствие на точке ничего не значит.
+TAKE_EXPECTED_BATTERY_STATUSES = ("available", "repair", "maintenance")
 
 
 def take_no(number: int) -> str:
@@ -1357,6 +1365,30 @@ def expected_bikes(bikes: Iterable[dict], *, scope: str,
     return sorted(rows, key=lambda b: str(b.get("code") or ""))
 
 
+def expected_batteries(batteries: Iterable[dict], *, scope: str,
+                       location: str | None = None) -> list[dict]:
+    """Какие батареи ждём на точке. Снимок, как и у велосипедов."""
+    rows = [b for b in batteries
+            if b.get("status") in TAKE_EXPECTED_BATTERY_STATUSES]
+    if scope == "location":
+        rows = [b for b in rows if (b.get("location") or "") == (location or "")]
+    return sorted(rows, key=lambda b: str(b.get("code") or ""))
+
+
+def take_counts_by_kind(items: Iterable[dict]) -> dict[str, dict[str, int]]:
+    """Счётчики отдельно по велосипедам и батареям.
+
+    Сводное число ничего не говорит о том, где именно недостача, а
+    искать пропавшую батарею и пропавший велосипед - разные разговоры.
+    """
+    rows = list(items)
+    out = {}
+    for kind, key in (("bikes", "bike_id"), ("batteries", "battery_id")):
+        part = [i for i in rows if i.get(key)]
+        out[kind] = {**take_counts(part), "any": bool(part)}
+    return out
+
+
 def take_counts(items: Iterable[dict]) -> dict[str, int]:
     """Счётчики ведомости по её строкам."""
     rows = list(items)
@@ -1382,9 +1414,10 @@ def take_progress(counts: dict[str, int]) -> int:
 
 def take_title(take: dict) -> str:
     """Подпись ведомости: что считали и где."""
-    if str(take.get("scope") or "") == "location":
-        return f"Точка {take.get('location') or '—'}"
-    return TAKE_SCOPES["all"]
+    what = TAKE_WHAT.get(str(take.get("what") or "bikes"), "")
+    where = (f"Точка {take.get('location') or '—'}"
+             if str(take.get("scope") or "") == "location" else TAKE_SCOPES["all"])
+    return f"{what} · {where}" if what else where
 
 
 # ─────────────────────── окупаемость по моделям ───────────────────────

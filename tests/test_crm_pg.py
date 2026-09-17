@@ -1452,6 +1452,45 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "new")
         self.assertEqual(row["checked"], {})
 
+    async def test_stock_take_with_batteries_on_postgres(self):
+        """Ведомость на живой базе считает и батареи."""
+        await self.seed()
+        battery_id = await self.crm.create_battery(
+            code="9510001", status="available", location="Павлюхина")
+        gone_id = await self.crm.create_battery(
+            code="9510002", status="available", location="Павлюхина")
+        take_id = await service.start_stock_take(
+            self.crm, scope="all", location=None, note=None, what="all",
+            by="staff:t")
+        items = await self.crm.take_items(take_id)
+        self.assertEqual(len(items), 3, "велосипед и две батареи")
+
+        # Номер может оказаться и велосипедным, и батарейным.
+        got = await service.take_add_found(
+            self.crm, await self.crm.stock_take(take_id), "9510001")
+        self.assertEqual(got["state"], "found")
+        self.assertEqual(got["kind"], "battery")
+        got = await service.take_add_found(
+            self.crm, await self.crm.stock_take(take_id), "B-1")
+        self.assertEqual(got["kind"], "bike")
+
+        # Та же батарея второй раз - уникальный индекс не даст задвоить.
+        with self.assertRaises(asyncpg.exceptions.UniqueViolationError):
+            await self.crm.add_take_item(take_id, bike_id=None,
+                                         battery_id=battery_id, code="9510001")
+
+        result = await service.finish_stock_take(
+            self.crm, await self.crm.stock_take(take_id), by="staff:t",
+            lose_missing=True)
+        self.assertEqual(result["missing"], 1)
+        self.assertEqual((await self.crm.battery(gone_id))["status"], "lost")
+        self.assertEqual((await self.crm.battery(battery_id))["status"],
+                         "available")
+        # Смену статуса батареи пишет триггер, автор - из set_config.
+        log = await self.crm.battery_status_log(gone_id)
+        self.assertEqual(log[0]["to_status"], "lost")
+        self.assertEqual(log[0]["changed_by"], "staff:t")
+
 
 if __name__ == "__main__":
     unittest.main()

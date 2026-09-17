@@ -62,10 +62,16 @@ class TestTakeLogic(unittest.TestCase):
         self.assertEqual(logic.take_progress(logic.take_counts([])), 0)
 
     def test_title_and_open_state(self):
-        self.assertEqual(logic.take_title({"scope": "all"}), "Весь парк")
+        # В подписи теперь и «что», и «где»: ведомость на батареи от
+        # ведомости на велосипеды иначе не отличить.
+        self.assertEqual(logic.take_title({"scope": "all"}),
+                         "Велосипеды · Весь парк")
+        self.assertEqual(logic.take_title({"scope": "all", "what": "all"}),
+                         "Всё · Весь парк")
         self.assertEqual(
-            logic.take_title({"scope": "location", "location": "Адоратского"}),
-            "Точка Адоратского")
+            logic.take_title({"scope": "location", "location": "Адоратского",
+                              "what": "batteries"}),
+            "Аккумуляторы · Точка Адоратского")
         self.assertTrue(logic.take_is_open({"status": "open"}))
         self.assertFalse(logic.take_is_open({"status": "done"}))
         self.assertFalse(logic.take_is_open(None))
@@ -300,3 +306,138 @@ class TestStockTakeInPanel(tw.WebCase):
 
 if __name__ == "__main__":                             # pragma: no cover
     unittest.main()
+
+
+class TestExpectedBatteries(unittest.TestCase):
+    """Кого ждём на точке из батарей."""
+
+    def rows(self):
+        return [{"id": 1, "code": "9510001", "status": "available",
+                 "location": "Павлюхина"},
+                {"id": 2, "code": "9510002", "status": "rented",
+                 "location": "Павлюхина"},
+                {"id": 3, "code": "9510003", "status": "repair",
+                 "location": "Адоратского"},
+                {"id": 4, "code": "9510004", "status": "new",
+                 "location": "Павлюхина"},
+                {"id": 5, "code": "9510005", "status": "lost",
+                 "location": "Павлюхина"}]
+
+    def test_rented_and_lost_are_not_expected(self):
+        got = logic.expected_batteries(self.rows(), scope="all")
+        self.assertEqual([b["code"] for b in got], ["9510001", "9510003"])
+
+    def test_new_is_not_expected(self):
+        got = logic.expected_batteries(self.rows(), scope="all")
+        self.assertNotIn("9510004", [b["code"] for b in got],
+                         "на сборке - ещё не в обороте, её отсутствие "
+                         "на точке ничего не значит")
+
+    def test_location_narrows(self):
+        got = logic.expected_batteries(self.rows(), scope="location",
+                                       location="Адоратского")
+        self.assertEqual([b["code"] for b in got], ["9510003"])
+
+
+class TestCountsByKind(unittest.TestCase):
+    def test_counts_are_split(self):
+        items = [{"bike_id": 1, "state": "found"},
+                 {"bike_id": 2, "state": "missing"},
+                 {"battery_id": 7, "state": "found"},
+                 {"battery_id": 8, "state": "found"},
+                 {"code": "чужое", "state": "extra"}]
+        got = logic.take_counts_by_kind(items)
+        self.assertEqual(got["bikes"]["found"], 1)
+        self.assertEqual(got["bikes"]["missing"], 1)
+        self.assertEqual(got["batteries"]["found"], 2)
+        self.assertEqual(got["batteries"]["missing"], 0)
+
+    def test_empty_kind_is_marked(self):
+        got = logic.take_counts_by_kind([{"bike_id": 1, "state": "found"}])
+        self.assertTrue(got["bikes"]["any"])
+        self.assertFalse(got["batteries"]["any"])
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestTakeWithBatteries(tw.WebCase):
+    def setUp(self):
+        super().setUp()
+        self.login()
+        self.bike_id = tw.run(self.crm.create_bike(code="B-1", model="Kugoo V3",
+                                                location="Павлюхина"))
+        self.battery_id = tw.run(self.crm.create_battery(
+            code="9510001", status="available", location="Павлюхина"))
+        self.gone_id = tw.run(self.crm.create_battery(
+            code="9510002", status="available", location="Павлюхина"))
+
+    def start(self, what="all"):
+        self.client.post("/stock-takes", data={"scope": "all", "what": what,
+                                               "note": ""})
+        return tw.run(self.crm.open_stock_take())["id"]
+
+    def test_all_counts_both(self):
+        take_id = self.start("all")
+        items = tw.run(self.crm.take_items(take_id))
+        self.assertEqual(len(items), 3, "велосипед и две батареи")
+        self.assertEqual(tw.run(self.crm.stock_take(take_id))["expected"], 3)
+
+    def test_batteries_only_leaves_the_bike_out(self):
+        take_id = self.start("batteries")
+        items = tw.run(self.crm.take_items(take_id))
+        self.assertEqual({i["battery_code"] for i in items},
+                         {"9510001", "9510002"})
+        self.assertTrue(all(i["bike_id"] is None for i in items))
+
+    def test_a_battery_number_is_recognised(self):
+        take_id = self.start("all")
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "9510001"})
+        item = tw.run(self.crm.take_item_of_battery(take_id, self.battery_id))
+        self.assertEqual(item["state"], "found")
+
+    def test_a_bike_number_still_works(self):
+        take_id = self.start("all")
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "B-1"})
+        item = tw.run(self.crm.take_item_of_bike(take_id, self.bike_id))
+        self.assertEqual(item["state"], "found")
+
+    def test_battery_number_in_a_bikes_only_take_is_extra(self):
+        take_id = self.start("bikes")
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "9510001"})
+        items = tw.run(self.crm.take_items(take_id))
+        extra = [i for i in items if i["state"] == "extra"]
+        self.assertEqual(len(extra), 1)
+        self.assertIsNone(extra[0]["battery_id"],
+                          "в ведомости на велосипеды батарею не ждали вовсе")
+
+    def test_missing_battery_becomes_lost_only_by_the_checkbox(self):
+        take_id = self.start("all")
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "B-1"})
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "9510001"})
+        self.client.post(f"/stock-takes/{take_id}/close", data={})
+        self.assertEqual(tw.run(self.crm.battery(self.gone_id))["status"],
+                         "available", "без галочки ничего не списывается")
+
+    def test_with_the_checkbox_it_is_lost(self):
+        take_id = self.start("all")
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "B-1"})
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "9510001"})
+        self.client.post(f"/stock-takes/{take_id}/close", data={"lose_missing": "1"})
+        self.assertEqual(tw.run(self.crm.battery(self.gone_id))["status"], "lost")
+        self.assertEqual(tw.run(self.crm.battery(self.battery_id))["status"],
+                         "available")
+
+    def test_found_lost_battery_comes_back(self):
+        tw.run(self.crm.update_battery(self.gone_id, status="lost", by="тест"))
+        take_id = self.start("all")
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "9510002"})
+        self.client.post(f"/stock-takes/{take_id}/close",
+                         data={"return_found": "1"})
+        self.assertEqual(tw.run(self.crm.battery(self.gone_id))["status"], "available",
+                         "нашлась - значит физически стоит на точке")
+
+    def test_card_shows_both_kinds(self):
+        take_id = self.start("all")
+        text = self.get_ok(f"/stock-takes/{take_id}")
+        self.assertIn("АКБ", text)
+        self.assertIn("велосипед", text)
+        self.assertIn("Аккумуляторы:", text, "счётчики по видам")

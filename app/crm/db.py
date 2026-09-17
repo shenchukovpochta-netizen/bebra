@@ -1048,7 +1048,8 @@ class CrmDB:
 
     async def create_stock_take(self, *, scope: str, location: str | None,
                                 note: str | None, bike_ids: list[int],
-                                created_by: str) -> int:
+                                created_by: str, what: str = "bikes",
+                                battery_ids: list[int] | None = None) -> int:
         """Открыть ведомость и сразу записать в неё снимок ожидаемого парка.
 
         Номер и строки - одной транзакцией: ведомость без строк оператор
@@ -1059,17 +1060,24 @@ class CrmDB:
             next_no = int(await conn.fetchval(
                 "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
                 "from crm.stock_takes") or 1)
+            battery_ids = list(battery_ids or [])
             take_id = int(await conn.fetchval(
                 """
-                insert into crm.stock_takes (no, scope, location, note, expected, created_by)
-                values ($1, $2, $3, $4, $5, $6) returning id
+                insert into crm.stock_takes (no, scope, location, note, expected,
+                                             created_by, what)
+                values ($1, $2, $3, $4, $5, $6, $7) returning id
                 """, logic.take_no(next_no), scope, location, note,
-                len(bike_ids), created_by))
+                len(bike_ids) + len(battery_ids), created_by, what))
             if bike_ids:
                 await conn.executemany(
                     "insert into crm.stock_take_items (take_id, bike_id, state) "
                     "values ($1, $2, 'expected')",
                     [(take_id, bike_id) for bike_id in bike_ids])
+            if battery_ids:
+                await conn.executemany(
+                    "insert into crm.stock_take_items (take_id, battery_id, state) "
+                    "values ($1, $2, 'expected')",
+                    [(take_id, battery_id) for battery_id in battery_ids])
             return take_id
 
     async def update_stock_take(self, take_id: int, **fields: Any) -> None:
@@ -1081,15 +1089,25 @@ class CrmDB:
 
     _TAKE_ITEM_SELECT = """
         select i.*, b.code as bike_code, b.model as bike_model,
-               b.status as bike_status, b.location as bike_location
+               b.status as bike_status, b.location as bike_location,
+               a.code as battery_code, m.title as battery_model,
+               a.status as battery_status, a.location as battery_location
         from crm.stock_take_items i
         left join crm.bikes b on b.id = i.bike_id
+        left join crm.batteries a on a.id = i.battery_id
+        left join crm.battery_models m on m.id = a.model_id
     """
 
     async def take_items(self, take_id: int) -> list[dict]:
         return _rows(await self.pool.fetch(
             f"{self._TAKE_ITEM_SELECT} where i.take_id = $1 "
-            "order by coalesce(b.code, i.code), i.id", take_id))
+            "order by coalesce(b.code, a.code, i.code), i.id", take_id))
+
+    async def take_item_of_battery(self, take_id: int,
+                                   battery_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TAKE_ITEM_SELECT} where i.take_id = $1 and i.battery_id = $2",
+            take_id, battery_id))
 
     async def take_item(self, take_id: int, item_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
@@ -1118,11 +1136,12 @@ class CrmDB:
             "select count(*) from upd", take_id, state, source) or 0)
 
     async def add_take_item(self, take_id: int, *, bike_id: int | None, code: str | None,
-                            state: str = "extra", note: str | None = None) -> int:
+                            state: str = "extra", note: str | None = None,
+                            battery_id: int | None = None) -> int:
         return int(await self.pool.fetchval(
-            "insert into crm.stock_take_items (take_id, bike_id, code, state, note) "
-            "values ($1, $2, $3, $4, $5) returning id",
-            take_id, bike_id, code, state, note))
+            "insert into crm.stock_take_items (take_id, bike_id, battery_id, code, "
+            "state, note) values ($1, $2, $6, $3, $4, $5) returning id",
+            take_id, bike_id, code, state, note, battery_id))
 
     async def delete_take_item(self, take_id: int, item_id: int) -> bool:
         row = await self.pool.fetchrow(
@@ -1131,16 +1150,17 @@ class CrmDB:
         return row is not None
 
     async def close_stock_take(self, take_id: int, *, counts: dict[str, int],
-                               closed_at: datetime) -> list[int]:
+                               closed_at: datetime) -> dict[str, list[int]]:
         """Закрыть ведомость: неотмеченное становится недостачей.
 
-        Возвращает id велосипедов, которых не нашли: что с ними делать -
-        решает не база.
+        Возвращает id ненайденных - велосипедов и батарей отдельно:
+        что с ними делать, решает не база.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(
                 "update crm.stock_take_items set state = 'missing' "
-                "where take_id = $1 and state = 'expected' returning bike_id", take_id)
+                "where take_id = $1 and state = 'expected' "
+                "returning bike_id, battery_id", take_id)
             await conn.execute(
                 """
                 update crm.stock_takes
@@ -1150,7 +1170,12 @@ class CrmDB:
                 """, take_id, closed_at, int(counts.get("total") or 0),
                 int(counts.get("found") or 0), int(counts.get("missing") or 0),
                 int(counts.get("extra") or 0))
-            return [int(r["bike_id"]) for r in rows if r["bike_id"] is not None]
+            return {
+                "bikes": [int(r["bike_id"]) for r in rows
+                          if r["bike_id"] is not None],
+                "batteries": [int(r["battery_id"]) for r in rows
+                              if r["battery_id"] is not None],
+            }
 
     # ─────────────────────── окупаемость по моделям ───────────────────────
 

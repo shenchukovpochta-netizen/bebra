@@ -143,7 +143,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         PAY_STATUSES=logic.PAY_STATUSES, PAY_KINDS=logic.PAY_KINDS,
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
         DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
-        BIKE_PASSPORT=logic.BIKE_PASSPORT,
+        BIKE_PASSPORT=logic.BIKE_PASSPORT, TAKE_WHAT=logic.TAKE_WHAT,
         BATTERY_PASSPORT=logic.BATTERY_PASSPORT,
         STOCK_STALE_DAYS=logic.STOCK_STALE_DAYS,
         NOTICE_TARGETS=logic.NOTICE_TARGETS,
@@ -4741,10 +4741,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, check.error, "err")
                 return redirect("/stock-takes")
         location = (data.get("location") or "").strip() or None
+        what = logic.check_choice(data.get("what") or "all", logic.TAKE_WHAT,
+                                  what="Что считаем")
+        if not what.ok:
+            flash(request, what.error, "err")
+            return redirect("/stock-takes")
         try:
             take_id = await service.start_stock_take(
                 crm, scope=scope.value, location=location, note=note.value,
-                by=who(request))
+                what=what.value, by=who(request))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect("/stock-takes")
@@ -4759,7 +4764,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         items = await crm.take_items(take_id)
         counts = logic.take_counts(items)
         return render(request, "stock_take.html", take=take, items=items,
-                      counts=counts, progress=logic.take_progress(counts))
+                      counts=counts, progress=logic.take_progress(counts),
+                      by_kind=logic.take_counts_by_kind(items))
 
     @app.post("/stock-takes/{take_id}/scan")
     async def stock_take_scan(request: Request, take_id: int) -> Response:

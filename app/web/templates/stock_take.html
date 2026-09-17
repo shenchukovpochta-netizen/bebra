@@ -13,6 +13,15 @@
   {% if take.status == 'open' %}<div class="tile"><b>{{ progress }} %</b><span>пройдено</span></div>{% endif %}
 </div>
 
+{% if by_kind.bikes.any and by_kind.batteries.any %}
+{# Сводное число не говорит, где именно недостача, а искать пропавшую
+   батарею и пропавший велосипед - разные разговоры. #}
+<p class="muted">Велосипеды: {{ by_kind.bikes.found }} из {{ by_kind.bikes.total }},
+  не нашли {{ by_kind.bikes.missing }}. Аккумуляторы:
+  {{ by_kind.batteries.found }} из {{ by_kind.batteries.total }},
+  не нашли {{ by_kind.batteries.missing }}.</p>
+{% endif %}
+
 {% set editable = take.status == 'open' and can_edit(staff, 'bikes') %}
 {% if editable %}
 <div class="card">
@@ -20,7 +29,7 @@
   {# Считают с телефоном в руках: прочитал номер на раме - ввёл. Экран
      сразу говорит, ждали эту единицу здесь или нет. #}
   <form method="post" action="/stock-takes/{{ take.id }}/scan" class="grid2">
-    <label class="wide">Номер на раме<input type="text" name="code" autofocus autocomplete="off" placeholder="510001"></label>
+    <label class="wide">Номер {% if take.what == 'batteries' %}на корпусе{% elif take.what == 'all' %}на раме или на корпусе{% else %}на раме{% endif %}<input type="text" name="code" autofocus autocomplete="off" placeholder="510001"></label>
     <button type="submit">Отметить</button>
   </form>
   <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
@@ -34,13 +43,18 @@
 
 <div class="card">
 <table>
-  <tr><th>№</th><th class="opt">Модель</th><th>Числится</th><th class="opt">Точка</th><th>Отметка</th><th class="opt">Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
+  <tr><th>№</th><th class="opt">Что</th><th class="opt">Модель</th><th>Числится</th><th class="opt">Точка</th><th>Отметка</th><th class="opt">Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
   {% for i in items %}
   <tr>
-    <td>{% if i.bike_id %}<a href="/bikes/{{ i.bike_id }}">{{ i.bike_code or i.code }}</a>{% else %}{{ i.code or '—' }}{% endif %}</td>
-    <td class="opt">{{ i.bike_model or '—' }}</td>
-    <td>{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}{% else %}нет в парке{% endif %}</td>
-    <td class="opt">{{ i.bike_location or '—' }}</td>
+    <td>{% if i.bike_id %}<a href="/bikes/{{ i.bike_id }}">{{ i.bike_code or i.code }}</a>
+      {% elif i.battery_id %}<a href="/batteries/{{ i.battery_id }}">{{ i.battery_code or i.code }}</a>
+      {% else %}{{ i.code or '—' }}{% endif %}</td>
+    <td class="opt muted">{% if i.battery_id %}АКБ{% elif i.bike_id %}велосипед{% else %}—{% endif %}</td>
+    <td class="opt">{{ i.bike_model or i.battery_model or '—' }}</td>
+    <td>{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}
+      {% elif i.battery_status %}{{ BATTERY_STATUSES[i.battery_status] }}
+      {% else %}нет в парке{% endif %}</td>
+    <td class="opt">{{ i.bike_location or i.battery_location or '—' }}</td>
     <td><span class="tag take-{{ i.state }}">{{ TAKE_STATES[i.state] }}</span></td>
     <td class="opt">{{ i.note or '' }}</td>
     {% if editable %}
@@ -61,7 +75,7 @@
     </td>
     {% endif %}
   </tr>
-  {% else %}<tr><td colspan="7" class="muted">Ведомость пуста.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="muted">Ведомость пуста.</td></tr>{% endfor %}
 </table>
 </div>
 

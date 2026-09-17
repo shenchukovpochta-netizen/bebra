@@ -18,6 +18,9 @@
      лежать на точке. Велосипеды в аренде в неё не попадают - они у курьеров. #}
   <form method="post" action="/stock-takes" class="grid2">
     <label>Что считаем
+      <select name="what">{% for code, label in TAKE_WHAT.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
+    </label>
+    <label>Где считаем
       <select name="scope">{% for code, label in TAKE_SCOPES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
     </label>
     <label>Точка
@@ -27,8 +30,12 @@
     <button type="submit">Начать пересчёт</button>
   </form>
   <p class="muted">Считается техника, которую ждут на точке: свободная,
-    в ремонте, на ТО и забронированная. Велосипеды в аренде не считаются —
-    они у курьеров.</p>
+    в ремонте, на ТО и забронированная. Велосипеды и батареи в аренде не
+    считаются — они у курьеров. Батарея «на сборке» тоже не ждётся: она
+    ещё не в обороте.</p>
+  <p class="muted">Отдельной ведомости на батареи нет намеренно: человек
+    с телефоном обходит точку один раз и вводит номера подряд, а какой
+    из них чей — разбирается система.</p>
 </div>
 {% endif %}
 

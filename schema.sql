@@ -1787,3 +1787,19 @@ alter table crm.batteries add column if not exists checked jsonb not null
   default '{}'::jsonb;
 alter table crm.batteries add column if not exists commissioned_at timestamptz;
 alter table crm.batteries add column if not exists commissioned_by text;
+
+-- ────── пересчёт считает и батареи ──────
+--
+-- Ведомость считала только велосипеды, а на складе лежат ещё 120 батарей,
+-- и теряются они не реже. `what` - что считали: всё, велосипеды или
+-- аккумуляторы. Отдельной ведомости на батареи нет намеренно: человек с
+-- телефоном обходит точку один раз и вводит номера подряд, а какой из
+-- них чей - разбирается система.
+
+alter table crm.stock_takes add column if not exists what text not null
+  default 'bikes';
+alter table crm.stock_take_items add column if not exists battery_id bigint
+  references crm.batteries (id);
+-- Одна батарея в ведомости один раз - по той же причине, что и велосипед.
+create unique index if not exists stock_take_items_one_battery
+  on crm.stock_take_items (take_id, battery_id) where battery_id is not null;
