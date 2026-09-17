@@ -234,7 +234,8 @@ class TestIssueWizard(tw.WebCase):
         self.assertEqual(r.status_code, 303)
         rental = self.run_(self.crm.active_rental_of(self.client_id))
         self.assertIsNotNone(rental)
-        self.assertEqual(r.headers["location"], f"/rentals/{rental['id']}")
+        # Мастер не бросает оператора в карточку: пятый шаг - документы.
+        self.assertEqual(r.headers["location"], f"/issue/docs?rental={rental['id']}")
         self.assertEqual(rental["contract_no"], "АВ-2026-000001", "номер договора из бота")
         self.assertEqual(rental["mileage_start"], 1200)
         self.assertEqual(self.run_(self.crm.bike(self.bike_id))["status"], "rented")
@@ -245,8 +246,10 @@ class TestIssueWizard(tw.WebCase):
         self.assertEqual(payment["rental_id"], rental["id"])
         self.assertIn("B-1", payment["note"])
         self.assertIn("Аренда оформлена", self.bot.sent[-1][1])
-        page = self.get_ok(r.headers["location"])
-        self.assertIn("Выдача оформлена", page)
+        docs = self.get_ok(r.headers["location"])
+        self.assertIn("Документы", docs)
+        self.assertIn("Выдача оформлена", docs, "флеш доезжает до шага документов")
+        page = self.get_ok(f"/rentals/{rental['id']}")
         self.assertIn("3 000", page)
 
     def test_issue_without_payment_leaves_debt(self):

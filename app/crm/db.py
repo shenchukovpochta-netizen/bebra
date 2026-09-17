@@ -30,7 +30,7 @@ CLIENT_FIELDS = frozenset({
     "max_id",
 })
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active",
-                          "sort", "model"})
+                          "sort", "model", "kind"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
                               "active", "sort"})
 BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location",
@@ -67,7 +67,7 @@ ORDER_FIELDS = frozenset({
 })
 RENTAL_FIELDS = frozenset({
     "search_at", "search_by", "search_note",
-    "tariff_id", "tariff_name", "period_days", "price", "billing",
+    "tariff_id", "tariff_name", "period_days", "price", "base_price", "billing",
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
     "intent", "intent_until", "intent_by", "intent_at", "snooze_until",
     "mileage_start", "mileage_end",
@@ -198,21 +198,30 @@ class CrmDB:
 
     # ─────────────────────── тарифы ───────────────────────
 
-    async def tariffs(self, *, active_only: bool = False) -> list[dict]:
-        where = "where active" if active_only else ""
+    async def tariffs(self, *, active_only: bool = False,
+                      kind: str | None = None) -> list[dict]:
+        conds, args = [], []
+        if active_only:
+            conds.append("active")
+        if kind:
+            args.append(kind)
+            conds.append(f"kind = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
         return _rows(await self.pool.fetch(
-            f"select * from crm.tariffs {where} order by sort, period_days, id"))
+            f"select * from crm.tariffs {where} "
+            "order by kind, sort, period_days, id", *args))
 
     async def tariff(self, tariff_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
             "select * from crm.tariffs where id = $1", tariff_id))
 
     async def create_tariff(self, name: str, period_days: int, price: Decimal,
-                            note: str | None, model: str | None = None) -> int:
+                            note: str | None, model: str | None = None,
+                            kind: str = "bike") -> int:
         return int(await self.pool.fetchval(
-            "insert into crm.tariffs (name, period_days, price, note, model) "
-            "values ($1, $2, $3, $4, $5) returning id",
-            name, period_days, price, note, model))
+            "insert into crm.tariffs (name, period_days, price, note, model, kind) "
+            "values ($1, $2, $3, $4, $5, $6) returning id",
+            name, period_days, price, note, model, kind))
 
     async def update_tariff(self, tariff_id: int, **fields: Any) -> None:
         sets, values = _set_clause(fields, TARIFF_FIELDS, 2)
@@ -569,8 +578,13 @@ class CrmDB:
                             period_days: int, price: Decimal, billing: str,
                             started_on: date, contract_no: str | None,
                             created_by: str | None,
-                            mileage_start: int | None = None) -> int:
+                            mileage_start: int | None = None,
+                            base_price: Decimal | None = None) -> int:
         """Аренда и статус велосипеда - одной транзакцией.
+
+        `price` - цена периода целиком, вместе с позициями; `base_price` -
+        цена одного велосипеда. По первой идёт начисление, по второй
+        пересчёт, когда позицию снимают.
 
         Уникальные индексы на активную аренду клиента и велосипеда бросают
         UniqueViolationError; вызывающий переводит его в понятное сообщение.
@@ -581,12 +595,13 @@ class CrmDB:
                 """
                 insert into crm.rentals
                   (client_id, bike_id, tariff_id, tariff_name, period_days, price,
-                   billing, started_on, billed_until, contract_no, created_by,
-                   mileage_start)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11)
+                   base_price, billing, started_on, billed_until, contract_no,
+                   created_by, mileage_start)
+                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11)
                 returning id
                 """, client_id, bike_id, tariff_id, tariff_name, period_days,
-                price, billing, started_on, contract_no, created_by, mileage_start))
+                price, billing, started_on, contract_no, created_by, mileage_start,
+                base_price if base_price is not None else price))
             if bike_id is not None:
                 # greatest: пробег велосипеда не уменьшается никогда, даже
                 # если аренду задним числом оформили с меньшим числом.
@@ -630,6 +645,12 @@ class CrmDB:
                     "mileage_km = greatest(mileage_km, coalesce($3, mileage_km)), "
                     "updated_at = now() where id = $1 and status = 'rented'",
                     row["bike_id"], bike_status, mileage_end)
+            # Позиции закрываются вместе с арендой: доп. аккумулятор
+            # вернулся на склад, и висеть действующим ему незачем.
+            await conn.execute(
+                "update crm.rental_extras set removed_at = now(), removed_by = $2 "
+                "where rental_id = $1 and removed_at is null",
+                rental_id, closed_by)
             return True
 
     async def charge_period(self, rental_id: int, client_id: int, *,
@@ -1679,6 +1700,75 @@ class CrmDB:
             order by o.no
             """))
 
+    # ─────────────────── позиции аренды сверх велосипеда ───────────────────
+
+    async def rental_extras(self, rental_id: int, *,
+                            live_only: bool = False) -> list[dict]:
+        where = "and e.removed_at is null" if live_only else ""
+        return _rows(await self.pool.fetch(
+            f"""
+            select e.*, b.code as battery_code, m.title as battery_model
+            from crm.rental_extras e
+            left join crm.batteries b on b.id = e.battery_id
+            left join crm.battery_models m on m.id = b.model_id
+            where e.rental_id = $1 {where} order by e.id
+            """, rental_id))
+
+    async def rental_extra(self, extra_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.rental_extras where id = $1", extra_id))
+
+    async def add_rental_extra(self, rental_id: int, *, kind: str, title: str,
+                               price: Decimal, battery_id: int | None,
+                               by: str | None) -> int:
+        """Позиция и новая цена периода - одной транзакцией.
+
+        Цена аренды складывается из велосипеда и позиций. Записать позицию
+        и забыть переписать цену значит выдать батарею бесплатно, а
+        переписать цену без позиции - взять деньги неизвестно за что.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            extra_id = int(await conn.fetchval(
+                """
+                insert into crm.rental_extras (rental_id, kind, battery_id,
+                                               title, price, added_by)
+                values ($1, $2, $3, $4, $5, $6) returning id
+                """, rental_id, kind, battery_id, title, price, by))
+            await conn.execute(
+                "update crm.rentals set price = $2, updated_at = now() "
+                "where id = $1", rental_id,
+                await self._period_price(conn, rental_id))
+            return extra_id
+
+    async def drop_rental_extra(self, extra_id: int, *, by: str | None) -> bool:
+        async with self.pool.acquire() as conn, conn.transaction():
+            rental_id = await conn.fetchval(
+                "update crm.rental_extras set removed_at = now(), removed_by = $2 "
+                "where id = $1 and removed_at is null returning rental_id",
+                extra_id, by)
+            if rental_id is None:
+                return False
+            await conn.execute(
+                "update crm.rentals set price = $2, updated_at = now() "
+                "where id = $1", int(rental_id),
+                await self._period_price(conn, int(rental_id)))
+            return True
+
+    @staticmethod
+    async def _period_price(conn: Any, rental_id: int) -> Decimal:
+        """Цена периода: цена велосипеда на выдаче плюс действующие позиции.
+
+        `rentals.price` уже включает позиции, складывать её с ними второй
+        раз нельзя - потому база и хранится отдельной колонкой.
+        """
+        base = await conn.fetchval(
+            "select coalesce(base_price, price) from crm.rentals where id = $1",
+            rental_id)
+        extras = await conn.fetchval(
+            "select coalesce(sum(price), 0) from crm.rental_extras "
+            "where rental_id = $1 and removed_at is null", rental_id)
+        return Decimal(str(base or 0)) + Decimal(str(extras or 0))
+
     # ─────────────────── замена велосипеда в аренде ───────────────────
 
     async def rental_bikes(self, rental_id: int) -> list[dict]:
@@ -2095,6 +2185,21 @@ class CrmDB:
                 returning id
                 """, rental_id, status)
             return len(rows)
+
+    async def return_battery(self, battery_id: int, *, status: str = "available",
+                             by: str) -> bool:
+        """Принять одну батарею: снятие доп. аккумулятора среди аренды."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            row = await conn.fetchrow(
+                """
+                update crm.batteries
+                   set status = $2, rental_id = null, cycles = cycles + 1,
+                       updated_at = now()
+                 where id = $1 and status = 'rented'
+                returning id
+                """, battery_id, status)
+            return row is not None
 
     # ─────────────────────────── трекеры ───────────────────────────
 

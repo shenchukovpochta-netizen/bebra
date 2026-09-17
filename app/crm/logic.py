@@ -663,21 +663,64 @@ def per_day(price: Any, period_days: Any) -> Decimal:
     return (to_money(price) / days).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
-def tariffs_for_model(tariffs: Iterable[dict], model: Any) -> list[dict]:
+# Вид тарифа. Велосипед и аккумулятор сдаются отдельно и стоят разного:
+# курьер берёт вторую батарею, чтобы не заряжаться в середине смены.
+TARIFF_KINDS: dict[str, str] = {"bike": "Велосипеды", "battery": "Аккумуляторы"}
+
+
+def check_tariff_kind(raw: Any) -> Check:
+    """Вид тарифа; пусто читается как «велосипед» - так было до батарей."""
+    return check_choice(str(raw or "bike"), TARIFF_KINDS, what="Вид тарифа")
+
+
+def model_aliases(models: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """Как модель зовут в парке -> как она называется в каталоге.
+
+    В парке модель записана так, как её назвал поставщик в накладной
+    («Maikaolin Maikaolin H10»), а в каталоге и в тарифах - так, как её
+    называют клиенту («Городской H10»). Совпадения букв в букву не будет
+    никогда, и переименовывать парк нельзя: это живая история, на неё
+    ссылаются закрытые аренды и наряды. Поэтому каталог хранит оба имени
+    и связывает их здесь.
+    """
+    out: dict[str, str] = {}
+    for row in models:
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        for name in (title, row.get("factory_title")):
+            key = str(name or "").strip().casefold()
+            if key:
+                out.setdefault(key, title)
+    return out
+
+
+def catalogue_model(model: Any, aliases: Mapping[str, str] | None = None) -> str:
+    """Название модели в терминах каталога: по нему ищется цена."""
+    name = str(model or "").strip()
+    if not aliases:
+        return name
+    return aliases.get(name.casefold(), name)
+
+
+def tariffs_for_model(tariffs: Iterable[dict], model: Any, *, kind: str = "bike",
+                      aliases: Mapping[str, str] | None = None) -> list[dict]:
     """Тарифы для модели: её собственные, а если их нет - общие.
 
     Цена зависит от модели: Monster Truck+ и Kugoo V3 Pro стоят
     по-разному. Тариф без модели остаётся запасным - он работает, пока
-    у модели нет своей цены.
+    у модели нет своей цены. Имя модели сначала переводится в название
+    каталога: в парке оно заводское, а цена стоит на клиентском.
     """
-    rows = [dict(t) for t in tariffs]
-    name = str(model or "").strip()
+    rows = [dict(t) for t in tariffs
+            if str(t.get("kind") or "bike") == kind]
+    name = catalogue_model(model, aliases)
     own = [t for t in rows if str(t.get("model") or "").strip() == name and name]
     return own or [t for t in rows if not str(t.get("model") or "").strip()]
 
 
 def match_tariff(tariffs: Iterable[dict], tariff: Mapping[str, Any] | None,
-                 model: Any) -> dict | None:
+                 model: Any, *, aliases: Mapping[str, str] | None = None) -> dict | None:
     """Тот же срок, но по цене выбранной модели.
 
     Оператор выбирает тариф и модель на одном экране, и модель он может
@@ -686,7 +729,8 @@ def match_tariff(tariffs: Iterable[dict], tariff: Mapping[str, Any] | None,
     """
     if tariff is None:
         return None
-    rows = tariffs_for_model(tariffs, model)
+    rows = tariffs_for_model(tariffs, model, kind=str(tariff.get("kind") or "bike"),
+                             aliases=aliases)
     same = [t for t in rows if int(t.get("id") or 0) == int(tariff.get("id") or 0)]
     if same:
         return same[0]
@@ -717,6 +761,72 @@ def tariff_tiles(tariffs: Iterable[dict]) -> list[dict]:
                   - to_money(t["price"])).quantize(CENT, rounding=ROUND_HALF_UP)
         out.append({**t, "per_day": day, "saving": saving if saving > 0 else Decimal(0),
                     "hits_target": day >= CHECK_TARGET})
+    return out
+
+
+# ─────────────────── позиции аренды сверх велосипеда ───────────────────
+#
+# Второй аккумулятор курьер берёт, чтобы не заряжаться в середине смены,
+# и это отдельные деньги. Цена периода у аренды остаётся одна: она и
+# начисляется, и попадает в средний чек. Позиции - расшифровка этой цены.
+
+EXTRA_KINDS: dict[str, str] = {"battery": "Доп. аккумулятор"}
+# Сколько батарей можно взять сверх той, что стоит в раме. Две - это уже
+# полный рюкзак, а больше просят только чтобы перепродать.
+MAX_EXTRA_BATTERIES = 2
+
+
+def extra_title(kind: str, what: Any) -> str:
+    """Название позиции так, как оно встанет в договор и в акт."""
+    name = str(what or "").strip()
+    head = EXTRA_KINDS.get(kind, kind)
+    return f"{head} {name}".strip() if name else head
+
+
+def live_extras(extras: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Действующие позиции: снятая с аренды батарея денег больше не стоит."""
+    return [dict(e) for e in extras if not e.get("removed_at")]
+
+
+def extras_total(extras: Iterable[Mapping[str, Any]]) -> Decimal:
+    """Сколько позиции прибавляют к цене периода."""
+    return to_money(sum((to_money(e.get("price")) for e in live_extras(extras)),
+                        Decimal(0)))
+
+
+def period_price(base: Any, extras: Iterable[Mapping[str, Any]] = ()) -> Decimal:
+    """Цена периода целиком: велосипед плюс всё, что к нему взяли.
+
+    Ровно это число ложится в `rentals.price` и начисляется. Складывать
+    цену в двух местах нельзя: однажды сложат по-разному.
+    """
+    return to_money(to_money(base) + extras_total(extras))
+
+
+def battery_extra_price(tariffs: Iterable[dict], battery: Mapping[str, Any] | None,
+                        period_days: Any) -> Decimal | None:
+    """Цена доп. аккумулятора за тот же срок, что и у аренды.
+
+    Нет тарифа на этот срок - None, а не ноль: бесплатная батарея и
+    батарея без цены выглядят одинаково, а стоят по-разному, и решать
+    это должен человек в тарифах.
+    """
+    days = int(period_days or 0)
+    if days <= 0:
+        return None
+    model = (battery or {}).get("model_title") or (battery or {}).get("model")
+    rows = tariffs_for_model(tariffs, model, kind="battery")
+    hit = next((t for t in rows if int(t.get("period_days") or 0) == days), None)
+    return to_money(hit["price"]) if hit else None
+
+
+def battery_options(batteries: Iterable[dict], tariffs: Iterable[dict],
+                    period_days: Any) -> list[dict]:
+    """Свободные батареи с ценой за период - то, из чего выбирает оператор."""
+    out = []
+    for row in batteries:
+        price = battery_extra_price(tariffs, row, period_days)
+        out.append({**row, "extra_price": price, "priced": price is not None})
     return out
 
 

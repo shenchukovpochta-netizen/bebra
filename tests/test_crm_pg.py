@@ -1341,6 +1341,68 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.drop_company_mark("stamp")
         self.assertEqual(await self.crm.company_marks(), [])
 
+    async def test_rental_extras_on_postgres(self):
+        """Доп. аккумулятор на живой базе: цена периода сходится всегда."""
+        await self.seed()
+        model_id = await self.crm.create_battery_model(
+            title="Аккумулятор 70 Ач", brand=None, voltage=60, capacity=D("70"),
+            price=D("12000"), service_months=15, note=None)
+        battery_id = await self.crm.create_battery(
+            code="9510001", model_id=model_id, status="available")
+        # Вид тарифа разводит одинаковые сроки: раньше на «7 дн.» стоял
+        # один уникальный индекс, и цена батареи в него не помещалась.
+        await self.crm.create_tariff("АКБ · неделя", 7, D("1170"), None,
+                                     model="Аккумулятор 70 Ач", kind="battery")
+        rental_id = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no="АВ-1", by="test")
+        rental = await self.crm.rental(rental_id)
+        self.assertEqual(rental["price"], D("3000.00"))
+        self.assertEqual(rental["base_price"], D("3000.00"))
+
+        price = await service.add_battery_extra(
+            self.crm, rental, await self.crm.battery(battery_id),
+            tariffs=await self.crm.tariffs(active_only=True), by="test")
+        self.assertEqual(price, D("1170.00"))
+        rental = await self.crm.rental(rental_id)
+        self.assertEqual(rental["price"], D("4170.00"))
+        self.assertEqual(rental["base_price"], D("3000.00"),
+                         "база не двигается: она цена велосипеда на выдаче")
+        self.assertEqual((await self.crm.battery(battery_id))["status"], "rented")
+
+        # Та же батарея второй строкой - это двойная цена за одну вещь.
+        with self.assertRaises(asyncpg.exceptions.UniqueViolationError):
+            await self.crm.add_rental_extra(
+                rental_id, kind="battery", title="Доп. аккумулятор",
+                price=D("1170"), battery_id=battery_id, by="test")
+
+        extra = (await self.crm.rental_extras(rental_id, live_only=True))[0]
+        await service.drop_battery_extra(self.crm, rental, extra, by="test")
+        self.assertEqual((await self.crm.rental(rental_id))["price"], D("3000.00"))
+        self.assertEqual((await self.crm.battery(battery_id))["status"], "available")
+
+        # Закрытие аренды закрывает и позиции.
+        await service.add_battery_extra(
+            self.crm, await self.crm.rental(rental_id),
+            await self.crm.battery(battery_id),
+            tariffs=await self.crm.tariffs(active_only=True), by="test")
+        await self.crm.close_rental(rental_id, closed_on=date.today(), note=None,
+                                    closed_by="test")
+        self.assertEqual(await self.crm.rental_extras(rental_id, live_only=True), [])
+
+    async def test_tariff_kind_survives_reapply(self):
+        """Схема идемпотентна: вид тарифа и позиции переживают повтор."""
+        await self.seed()
+        await Database(self.pool).apply_schema(SCHEMA)
+        rows = await self.crm.tariffs()
+        self.assertTrue(all((r.get("kind") or "") == "bike" for r in rows),
+                        "старый тариф без вида читается как велосипед")
+        await self.crm.create_tariff("АКБ · неделя", 7, D("1170"), None,
+                                     kind="battery")
+        self.assertEqual(len(await self.crm.tariffs(kind="battery")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

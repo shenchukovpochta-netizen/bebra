@@ -1429,10 +1429,9 @@ create index if not exists sign_events_idx on crm.sign_events (request_id, id);
 -- тарифы остаются запасными.
 
 alter table crm.tariffs add column if not exists model text;
--- Одна цена на связку «модель + срок» среди действующих: два тарифа
--- на одно и то же - это спор о цене прямо на выдаче.
-create unique index if not exists tariffs_model_period_idx
-  on crm.tariffs (coalesce(model, ''), period_days) where active;
+-- Одна цена на связку «вид + модель + срок» среди действующих: два тарифа
+-- на одно и то же - это спор о цене прямо на выдаче. Индекс заводится
+-- ниже, вместе с видом тарифа: до него колонки `kind` ещё нет.
 
 -- Характеристики модели: их спрашивает каждый второй курьер, и раньше
 -- ответ жил в голове оператора.
@@ -1718,3 +1717,53 @@ create table if not exists crm.company_marks (
   uploaded_by text,
   uploaded_at timestamptz not null default now()
 );
+
+-- ────── позиции аренды: доп. аккумулятор за деньги ──────
+--
+-- Курьер берёт второй аккумулятор, чтобы не заряжаться в середине смены,
+-- и это отдельные деньги. Раньше у аренды была одна цена за период - цена
+-- велосипеда, и вторая батарея уезжала бесплатно.
+--
+-- `rentals.price` остаётся ценой периода ЦЕЛИКОМ: по ней идёт начисление
+-- и по ней считается средний чек. Здесь лежит расшифровка - из чего эта
+-- цена сложилась. Иначе пришлось бы складывать цену в двух местах и
+-- однажды сложить по-разному.
+
+-- Тариф бывает не только на велосипед: у аккумулятора своя цена и свой
+-- срок. kind разделяет их, чтобы «неделя» велосипеда и «неделя» батареи
+-- не спорили за один и тот же уникальный индекс.
+alter table crm.tariffs add column if not exists kind text not null default 'bike';
+
+-- Прошлый индекс не знал про вид и запрещал батарее иметь свою «неделю».
+drop index if exists crm.tariffs_model_period_idx;
+create unique index if not exists tariffs_kind_model_period_idx
+  on crm.tariffs (kind, coalesce(model, ''), period_days) where active;
+
+-- Цена велосипеда на момент выдачи. `rentals.price` - цена периода
+-- целиком, вместе с позициями; вычитать их обратно каждый раз, когда
+-- позицию снимают, нельзя: тариф к тому времени могли поднять, и аренда
+-- молча переоценилась бы задним числом.
+alter table crm.rentals add column if not exists base_price numeric(12,2);
+update crm.rentals set base_price = price where base_price is null;
+
+create table if not exists crm.rental_extras (
+  id         bigserial primary key,
+  rental_id  bigint      not null references crm.rentals (id) on delete cascade,
+  kind       text        not null default 'battery',
+  battery_id bigint      references crm.batteries (id),
+  title      text        not null,
+  -- Цена за тот же период, что и у аренды: смешивать сутки с неделей
+  -- в одной строке значит потерять смысл суммы.
+  price      numeric(12,2) not null default 0,
+  added_at   timestamptz not null default now(),
+  added_by   text,
+  removed_at timestamptz,
+  removed_by text
+);
+create index if not exists rental_extras_idx
+  on crm.rental_extras (rental_id, removed_at);
+-- Одна батарея на аренде одной строкой: две строки на ту же батарею -
+-- это двойная цена за одну вещь.
+create unique index if not exists rental_extras_battery_once
+  on crm.rental_extras (rental_id, battery_id)
+  where removed_at is null and battery_id is not null;

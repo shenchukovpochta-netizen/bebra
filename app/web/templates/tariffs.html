@@ -4,7 +4,9 @@
 <div class="bar"><h1>Тарифы</h1></div>
 {% set can = can_edit(staff, 'tariffs') %}
 
+{% for g in groups %}
 <section class="card">
+  <h2>{{ g.title }} <span class="muted">· {{ g.rows|length }}</span></h2>
   <fieldset {% if not can %}disabled{% endif %} class="plain">
   {# Формы стоят отдельно от таблицы, а поля ссылаются на них атрибутом
      form: <form> внутри <tr> браузер выносит наружу, и строки таблицы
@@ -12,13 +14,13 @@
   <div class="table-wrap">
   <table class="editable">
     <tr><th>Модель</th><th>Название</th><th>Период</th><th>Цена</th><th class="num">В день</th><th class="opt">Заметка</th><th></th></tr>
-    {% for t in rows %}
+    {% for t in g.rows %}
     <tr class="{% if not t.active %}muted{% endif %}">
       <td>
         <select name="model" form="tariff{{ t.id }}" title="{{ t.model or 'любая модель' }}">
           <option value="">любая модель</option>
-          {% for m in models %}<option value="{{ m.title }}" {% if t.model == m.title %}selected{% endif %}>{{ m.title }}</option>{% endfor %}
-          {% if t.model and t.model not in models|map(attribute='title')|list %}<option value="{{ t.model }}" selected>{{ t.model }} · нет в каталоге</option>{% endif %}
+          {% for m in g.models %}<option value="{{ m.title }}" {% if t.model == m.title %}selected{% endif %}>{{ m.title }}</option>{% endfor %}
+          {% if t.model and t.model not in g.models|map(attribute='title')|list %}<option value="{{ t.model }}" selected>{{ t.model }} · нет в каталоге</option>{% endif %}
         </select>
       </td>
       <td class="grow"><input name="name" value="{{ t.name }}" form="tariff{{ t.id }}"></td>
@@ -35,35 +37,40 @@
   </table>
   </div>
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
-  {% for t in rows %}<form id="tariff{{ t.id }}" method="post" action="/tariffs/{{ t.id }}"></form>{% endfor %}
+  {% for t in g.rows %}
+  <form id="tariff{{ t.id }}" method="post" action="/tariffs/{{ t.id }}">
+    <input type="hidden" name="kind" value="{{ g.kind }}">
+  </form>
+  {% endfor %}
   </fieldset>
 
-  {% if not can %}<p class="muted">Тарифы вам открыты только на просмотр.</p>{% endif %}
-  <p class="muted">Цена зависит от модели: у Monster Truck+ и Kugoo V3 Pro
-    она разная. Тариф «любая модель» остаётся запасным — он работает,
-    пока у модели нет своей цены. Идущие аренды хранят свою копию цены
-    и периода: правка тарифа их не меняет.</p>
-  {% if unpriced %}
-  <p class="flash {{ 'err' if not has_common else '' }}">Без своей цены:
-    {{ unpriced|join(', ') }}.
-    {% if has_common %}Пока уедут по запасному тарифу.{% else %}Выдать их не получится — заведите тариф.{% endif %}</p>
+  <p class="muted">{{ g.hint }}</p>
+  {% if g.unpriced %}
+  <p class="flash {{ 'err' if not g.has_common else '' }}">Без своей цены:
+    {{ g.unpriced|join(', ') }}.
+    {% if g.has_common %}Пока уедут по запасному тарифу.{% else %}Выдать их не получится — заведите тариф.{% endif %}</p>
+  {% endif %}
+
+  {% if can %}
+  <details>
+    <summary>Новый тариф · {{ g.title|lower }}</summary>
+    <form method="post" action="/tariffs" class="grid2">
+      <input type="hidden" name="kind" value="{{ g.kind }}">
+      <label>Название <input name="name" placeholder="{{ 'Неделя' if g.kind == 'bike' else 'Аккумулятор · неделя' }}" required></label>
+      <label>Модель <select name="model"><option value="">любая модель (запасной)</option>{% for m in g.models %}<option value="{{ m.title }}">{{ m.title }}</option>{% endfor %}</select></label>
+      <label>Период, дней <input name="period_days" type="number" min="1" max="366" value="7" required></label>
+      <label>Цена за период <input name="price" inputmode="decimal" placeholder="{{ '3000' if g.kind == 'bike' else '1170' }}" required></label>
+      <label class="wide">Заметка <input name="note"></label>
+      <button type="submit">Добавить</button>
+    </form>
+  </details>
   {% endif %}
 </section>
+{% endfor %}
 
-{% if can %}
-<section class="card narrow">
-  <h2>Новый тариф</h2>
-  <form method="post" action="/tariffs" class="grid2">
-    <label>Название <input name="name" placeholder="Неделя" required></label>
-    <label>Модель <select name="model"><option value="">любая модель (запасной)</option>{% for m in models %}<option value="{{ m.title }}">{{ m.title }}</option>{% endfor %}</select></label>
-    <label>Период, дней <input name="period_days" type="number" min="1" max="366" value="7" required></label>
-    <label>Цена за период <input name="price" inputmode="decimal" placeholder="3000" required></label>
-    <label class="wide">Заметка <input name="note"></label>
-    <button type="submit">Добавить</button>
-  </form>
-  <p class="muted">Одна цена на связку «модель + срок»: второй такой же
-    тариф система не примет. Выключенный тариф не предлагается при
-    оформлении, но остаётся в истории.</p>
-</section>
-{% endif %}
+{% if not can %}<p class="muted">Тарифы вам открыты только на просмотр.</p>{% endif %}
+<p class="muted">Одна цена на связку «вид + модель + срок»: второй такой же
+  тариф система не примет. Выключенный тариф не предлагается при
+  оформлении, но остаётся в истории. Идущие аренды хранят свою копию цены
+  и периода: правка тарифа их не меняет.</p>
 {% endblock %}

@@ -81,6 +81,49 @@
   {% endif %}
   {% endif %}
 
+  <h2>Позиции аренды <span class="muted">· доп. аккумуляторы</span></h2>
+  {# Цена периода у аренды одна; позиции - её расшифровка. Складывать
+     цену в двух местах нельзя: однажды сложат по-разному. #}
+  <table>
+    <tr><th>Что</th><th class="num">За период</th><th>Взята</th><th></th></tr>
+    <tr><td>{{ rental.tariff_name }} <span class="muted">· велосипед</span></td>
+      <td class="num">{{ money(rental.base_price or rental.price) }}</td>
+      <td class="muted">{{ rental.started_on|dmy }}</td><td></td></tr>
+    {% for e in extras %}
+    <tr class="{% if e.removed_at %}muted{% endif %}">
+      <td>{{ e.title }}{% if e.battery_code %} · <a href="/batteries/{{ e.battery_id }}">№ {{ e.battery_code }}</a>{% endif %}</td>
+      <td class="num">{% if e.removed_at %}<s>{{ money(e.price) }}</s>{% else %}{{ money(e.price) }}{% endif %}</td>
+      <td class="muted">{{ e.added_at|dmy }}{% if e.removed_at %} — снята {{ e.removed_at|dmy }}{% endif %}</td>
+      <td class="actions">
+        {% if not e.removed_at and rental.status == 'active' and can_edit(staff, 'rentals') %}
+        <form method="post" action="/rentals/{{ rental.id }}/extras/{{ e.id }}" class="inline-form">
+          <select name="status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'available' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select>
+          <button type="submit" class="ghost danger">Снять</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    <tr><td><b>Итого за период</b></td><td class="num"><b>{{ money(rental.price) }}</b></td><td colspan="2" class="muted">{% if extras_total %}велосипед + {{ money(extras_total) }} позициями{% endif %}</td></tr>
+  </table>
+  {% if rental.status == 'active' and can_edit(staff, 'rentals') %}
+  {% set can_add = free_batteries|selectattr('priced')|list %}
+  {% if can_add %}
+  <form method="post" action="/rentals/{{ rental.id }}/extras" class="grid2">
+    <label>Доп. аккумулятор <select name="battery_id">
+      {% for b in can_add %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %} · +{{ money(b.extra_price) }}</option>{% endfor %}
+    </select></label>
+    <button type="submit">Выдать за деньги</button>
+  </form>
+  <p class="muted">Не больше {{ max_extra }} доп. аккумуляторов на аренду.
+    Новая цена действует со следующего начисления: текущий период уже
+    начислен, и менять клиенту сумму задним числом нельзя.</p>
+  {% else %}
+  <p class="muted">Свободных аккумуляторов с ценой на {{ rental.period_days }} дн.
+    нет — заведите её в <a href="/tariffs">тарифах</a>.</p>
+  {% endif %}
+  {% endif %}
+
   <h2>Закрыть аренду</h2>
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>

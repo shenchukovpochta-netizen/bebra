@@ -131,6 +131,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         SIGN_STATUSES=logic.SIGN_STATUSES, SIGN_EVENTS=logic.SIGN_EVENTS,
         SIGN_DOC_KINDS=logic.SIGN_DOC_KINDS,
         SIGN_CODE_MINUTES=logic.SIGN_CODE_MINUTES,
+        SIGN_LINK_DAYS=logic.SIGN_LINK_DAYS,
+        TARIFF_KINDS=logic.TARIFF_KINDS, EXTRA_KINDS=logic.EXTRA_KINDS,
+        MAX_EXTRA_BATTERIES=logic.MAX_EXTRA_BATTERIES,
         AUDIENCES=logic.AUDIENCES, CAMPAIGN_STATUSES=logic.CAMPAIGN_STATUSES,
         SEND_STATUSES=logic.SEND_STATUSES, SEND_CHANNELS=logic.SEND_CHANNELS,
         TEMPLATE_FIELDS=logic.TEMPLATE_FIELDS,
@@ -1102,6 +1105,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "issue.html", **ctx)
         available = await crm.bikes(status="available")
         all_tariffs = await crm.tariffs(active_only=True)
+        aliases = logic.model_aliases(await crm.bike_models())
         ctx["models"] = logic.model_availability(available)
         # Цена зависит от модели, поэтому плитки тарифов собираются под
         # выбранную: пока модели нет, показываем цены первой свободной -
@@ -1110,7 +1114,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                         or (ctx["models"][0]["model"] if ctx["models"] else ""))
         ctx["tariff_model"] = picked_model
         ctx["tariffs"] = logic.tariff_tiles(
-            logic.tariffs_for_model(all_tariffs, picked_model))
+            logic.tariffs_for_model(all_tariffs, picked_model, aliases=aliases))
         # Клиенту, который приедет завтра, можно обещать конкретный день:
         # прогноз считается по «оплачено до», а не по слову оператора.
         ctx["soon"] = logic.freeing_soon(await crm.active_rentals())
@@ -1122,7 +1126,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # по цене выбранной модели. Иначе клиент платил бы за Kugoo
         # цену Monster Truck.
         if ctx["tariff"] is not None and ctx["model"]:
-            fixed = logic.match_tariff(all_tariffs, ctx["tariff"], ctx["model"])
+            fixed = logic.match_tariff(all_tariffs, ctx["tariff"], ctx["model"],
+                                       aliases=aliases)
             if fixed is None:
                 flash(request, f"Для модели «{ctx['model']}» нет тарифа на "
                                f"{ctx['tariff']['period_days']} дн. — "
@@ -1152,12 +1157,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Батареи предлагаются те, что подходят модели: на двух точках
         # парк разношёрстный, и чужая батарея просто не встанет в раму.
         free = await crm.batteries(status="available", limit=500)
-        fit = await crm.compat_for_bike_model(ctx["bike"]["model"])
+        fit = await crm.compat_for_bike_model(
+            logic.catalogue_model(ctx["bike"]["model"], aliases))
         fit_ids = {m["id"] for m in fit}
         if fit_ids:
             free = [b for b in free if b.get("model_id") in fit_ids]
-        ctx.update(batteries=free,
-                   battery_slots=int(ctx["bike"].get("battery_count") or 0))
+        # Основная батарея входит в цену велосипеда, каждая следующая -
+        # платная позиция: курьер берёт её, чтобы не заряжаться в смену.
+        ctx.update(batteries=logic.battery_options(free, all_tariffs,
+                                                   tariff["period_days"]),
+                   battery_slots=int(ctx["bike"].get("battery_count") or 0),
+                   max_extra=logic.MAX_EXTRA_BATTERIES)
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
@@ -1206,8 +1216,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect(back)
         # Последняя проверка перед деньгами: цена должна быть ценой этой
         # модели, а не той, с которой оператор начинал.
-        fixed = logic.match_tariff(await crm.tariffs(active_only=True), tariff,
-                                   bike.get("model"))
+        all_tariffs = await crm.tariffs(active_only=True)
+        aliases = logic.model_aliases(await crm.bike_models())
+        fixed = logic.match_tariff(all_tariffs, tariff, bike.get("model"),
+                                   aliases=aliases)
         if fixed is None:
             flash(request, f"Для модели «{bike.get('model')}» нет тарифа "
                            f"на {tariff['period_days']} дн.", "err")
@@ -1234,14 +1246,43 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         contract_no = contract.value or client.get("contract_no")
         if not contract_no:
             contract_no = ((await bot_user_for(client)) or {}).get("contract_no")
+        # Доп. аккумуляторы - платные позиции: цена считается до открытия
+        # аренды, потому что начисляется цена периода целиком. Нет цены на
+        # этот срок - отказ до денег, а не бесплатная батарея после.
+        extra_ids = await form_ids(request, "extra_battery_ids")
+        if len(extra_ids) > logic.MAX_EXTRA_BATTERIES:
+            flash(request, f"Доп. аккумуляторов не больше "
+                           f"{logic.MAX_EXTRA_BATTERIES} на аренду.", "err")
+            return redirect(back)
+        extras: list[dict] = []
+        for battery_id in extra_ids:
+            battery = await crm.battery(battery_id)
+            if battery is None or battery.get("status") != "available":
+                flash(request, "Доп. аккумулятор уже занят — обновите страницу.",
+                      "err")
+                return redirect(back)
+            price = logic.battery_extra_price(all_tariffs, battery,
+                                              tariff["period_days"])
+            if price is None:
+                flash(request, f"Нет тарифа на аккумулятор "
+                               f"«{battery.get('model_title') or '—'}» на "
+                               f"{tariff['period_days']} дн. — заведите цену "
+                               "в тарифах.", "err")
+                return redirect(back)
+            extras.append({"kind": "battery", "battery_id": battery["id"],
+                           "title": logic.extra_title("battery",
+                                                      battery.get("model_title")),
+                           "price": price})
         try:
             rental_id = await service.open_rental(
                 crm, client=client, bike=bike, tariff=tariff, started_on=started.value,
-                contract_no=contract_no, by=who(request), mileage=mileage.value)
+                contract_no=contract_no, by=who(request), mileage=mileage.value,
+                extras=extras)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(back)
-        battery_ids = await form_ids(request, "battery_ids")
+        battery_ids = [*(await form_ids(request, "battery_ids")),
+                       *(e["battery_id"] for e in extras)]
         if battery_ids:
             try:
                 await service.issue_with_batteries(crm, rental_id, bike=bike,
@@ -1267,7 +1308,48 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         else:
             flash(request, f"Выдача оформлена без оплаты: № {bike['code']} у клиента, "
                            "первый период остался долгом на балансе.")
-        return redirect(f"/rentals/{rental_id}")
+        # Пятый шаг мастера: документы и подпись. У них они собираются до
+        # аренды, у нас - после: в договор и акт идёт номер велосипеда и
+        # дата выдачи, а до открытия аренды их ещё нет. Оператору это
+        # всё равно одна лента, а не поход в другой раздел.
+        return redirect(f"/issue/docs?rental={rental_id}")
+
+    @app.get("/issue/docs")
+    async def issue_docs(request: Request) -> Response:
+        """Шаг «документы»: пакет на подпись по только что открытой аренде."""
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        raw = request.query_params.get("rental") or ""
+        rental = await crm.rental(int(raw)) if raw.isdigit() else None
+        if rental is None:
+            return render(request, "missing.html", status_code=404, what="Аренда")
+        client = await crm.client(rental["client_id"])
+        if client is None:
+            return render(request, "missing.html", status_code=404, what="Клиент")
+        # Заявка на эту аренду уже может быть: оператор вернулся на шаг
+        # назад или обновил страницу. Второй пакет на те же документы -
+        # это два протокола на одну выдачу.
+        rows = [r for r in await crm.sign_requests(client_id=client["id"], limit=20)
+                if int(r.get("rental_id") or 0) == int(rental["id"])]
+        row = next((r for r in rows if r["status"] != "cancelled"), None)
+        problem = None
+        if row is None:
+            try:
+                row = await service.start_signing(
+                    crm, client=client, rental=rental, company=await sign_company(),
+                    bot_user=await bot_user_for(client), by=who(request))
+            except service.ServiceError as exc:
+                problem = str(exc)
+        code = request.session.pop("sign_code", None) if row else None
+        return render(request, "issue.html", step=5, client=client, rental=rental,
+                      req=row, problem=problem,
+                      state=logic.sign_state(row) if row else None,
+                      link=sign_link(request, row["token"]) if row else "",
+                      code=(code or {}).get("code")
+                      if row and (code or {}).get("id") == row["id"] else None,
+                      bot_state=logic.bot_client_state(await bot_user_for(client)),
+                      extras=logic.live_extras(
+                          await crm.rental_extras(rental["id"])))
 
     # ─────────────────────── аренды ───────────────────────
 
@@ -1463,8 +1545,67 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           current_id=rental.get("bike_id")),
                       batteries=logic.battery_rows(
                           await crm.batteries(rental_id=rental_id)),
-                      free_batteries=await crm.batteries(status="available",
-                                                         limit=500))
+                      free_batteries=logic.battery_options(
+                          await crm.batteries(status="available", limit=500),
+                          await crm.tariffs(active_only=True),
+                          rental.get("period_days")),
+                      extras=await crm.rental_extras(rental_id),
+                      extras_total=logic.extras_total(
+                          await crm.rental_extras(rental_id, live_only=True)),
+                      max_extra=logic.MAX_EXTRA_BATTERIES)
+
+    @app.post("/rentals/{rental_id}/extras")
+    async def rental_extra_add(request: Request, rental_id: int) -> Response:
+        """Доп. аккумулятор в идущую аренду - платной позицией.
+
+        Новая цена действует со следующего начисления: текущий период уже
+        начислен, и менять клиенту сумму после того, как он её увидел,
+        нельзя.
+        """
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        rental = await crm.rental(rental_id)
+        if rental is None:
+            return render(request, "missing.html", status_code=404, what="Аренда")
+        data = await form(request)
+        raw = data.get("battery_id") or ""
+        battery = await crm.battery(int(raw)) if raw.isdigit() else None
+        if battery is None:
+            flash(request, "Выберите аккумулятор.", "err")
+            return redirect(f"/rentals/{rental_id}")
+        try:
+            price = await service.add_battery_extra(
+                crm, rental, battery, tariffs=await crm.tariffs(active_only=True),
+                by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/rentals/{rental_id}")
+        flash(request, f"Доп. аккумулятор № {battery['code']} выдан: "
+                       f"+{logic.money(price)} к периоду со следующего начисления.")
+        return redirect(f"/rentals/{rental_id}")
+
+    @app.post("/rentals/{rental_id}/extras/{extra_id}")
+    async def rental_extra_drop(request: Request, rental_id: int,
+                                extra_id: int) -> Response:
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        rental = await crm.rental(rental_id)
+        extra = await crm.rental_extra(extra_id)
+        if rental is None or extra is None:
+            return render(request, "missing.html", status_code=404, what="Позиция")
+        data = await form(request)
+        status = data.get("status") or "available"
+        if status not in logic.BATTERY_STATUSES:
+            status = "available"
+        try:
+            await service.drop_battery_extra(crm, rental, extra, by=who(request),
+                                             status=status)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/rentals/{rental_id}")
+        flash(request, "Позиция снята, аккумулятор принят. "
+                       "Цена периода уменьшится со следующего начисления.")
+        return redirect(f"/rentals/{rental_id}")
 
     @app.post("/rentals/{rental_id}/intent")
     async def rental_intent(request: Request, rental_id: int) -> Response:
@@ -1603,14 +1744,37 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows.sort(key=lambda t: (str(t.get("model") or "").lower(),
                                  int(t.get("period_days") or 0)))
         models = await crm.bike_models(active_only=True)
+        batteries = await crm.battery_models(active_only=True)
         # Модели, у которых нет ни одной своей цены: на выдаче они уедут
         # на запасной тариф, и это стоит видеть до выдачи, а не после.
-        priced = {str(t.get("model") or "") for t in rows if t.get("active")}
-        return render(request, "tariffs.html", rows=rows, models=models,
-                      unpriced=[m["title"] for m in models
-                                if m["title"] not in priced],
-                      has_common=any(not t.get("model") for t in rows
-                                     if t.get("active")))
+        def unpriced(catalogue: list[dict], kind: str) -> list[str]:
+            priced = {str(t.get("model") or "") for t in rows
+                      if t.get("active") and (t.get("kind") or "bike") == kind}
+            return [m["title"] for m in catalogue if m["title"] not in priced]
+
+        def has_common(kind: str) -> bool:
+            return any(not t.get("model") for t in rows
+                       if t.get("active") and (t.get("kind") or "bike") == kind)
+
+        return render(request, "tariffs.html",
+                      groups=[
+                          {"kind": "bike", "title": logic.TARIFF_KINDS["bike"],
+                           "rows": [t for t in rows
+                                    if (t.get("kind") or "bike") == "bike"],
+                           "models": models, "unpriced": unpriced(models, "bike"),
+                           "has_common": has_common("bike"),
+                           "hint": "Цена велосипеда за период. Тариф без модели — "
+                                   "запасной: он работает, пока у модели нет своей."},
+                          {"kind": "battery", "title": logic.TARIFF_KINDS["battery"],
+                           "rows": [t for t in rows
+                                    if (t.get("kind") or "bike") == "battery"],
+                           "models": batteries,
+                           "unpriced": unpriced(batteries, "battery"),
+                           "has_common": has_common("battery"),
+                           "hint": "Цена доп. аккумулятора за тот же период, что "
+                                   "и аренда. Нет цены на срок — доп. аккумулятор "
+                                   "на этот срок не выдать."},
+                      ])
 
     def _tariff_fields(request: Request, data: dict) -> dict | None:
         name = logic.check_name(data.get("name"), what="Название")
@@ -1621,8 +1785,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
+        kind = logic.check_tariff_kind(data.get("kind"))
+        if not kind.ok:
+            flash(request, kind.error, "err")
+            return None
         return {"name": name.value, "period_days": period.value, "price": price.value,
-                "note": note.value,
+                "note": note.value, "kind": kind.value,
                 "model": (data.get("model") or "").strip() or None}
 
     @app.post("/tariffs")

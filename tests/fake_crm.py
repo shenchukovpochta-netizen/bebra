@@ -39,6 +39,7 @@ class FakeCrm:
         self.part_orders_: dict[int, dict] = {}
         self.part_order_items_: list[dict] = []
         self.rental_bikes_: list[dict] = []
+        self.rental_extras_: dict[int, dict] = {}
         self.purchases_: dict[int, dict] = {}
         self.locations_: dict[int, dict] = {}
         self.bike_models_: dict[int, dict] = {}
@@ -224,23 +225,29 @@ class FakeCrm:
         return True
 
     # ─── тарифы ───
-    async def tariffs(self, *, active_only=False):
-        rows = [dict(t) for t in self.tariffs_.values() if not active_only or t["active"]]
-        return sorted(rows, key=lambda t: (t["sort"], t["period_days"], t["id"]))
+    async def tariffs(self, *, active_only=False, kind=None):
+        rows = [dict(t) for t in self.tariffs_.values()
+                if (not active_only or t["active"])
+                and (kind is None or (t.get("kind") or "bike") == kind)]
+        return sorted(rows, key=lambda t: (t.get("kind") or "bike", t["sort"],
+                                           t["period_days"], t["id"]))
 
     async def tariff(self, tariff_id):
         t = self.tariffs_.get(tariff_id)
         return dict(t) if t else None
 
-    async def create_tariff(self, name, period_days, price, note, model=None):
+    async def create_tariff(self, name, period_days, price, note, model=None,
+                            kind="bike"):
         tid = self._id()
+        # Частичный уникальный индекс tariffs_kind_model_period_idx.
         if any(t["active"] and t["period_days"] == period_days
                and (t.get("model") or "") == (model or "")
+               and (t.get("kind") or "bike") == kind
                for t in self.tariffs_.values()):
-            raise UniqueError("tariff model period")
+            raise UniqueError("tariff kind model period")
         self.tariffs_[tid] = {"id": tid, "name": name, "period_days": period_days,
                               "price": Decimal(price), "note": note, "active": True,
-                              "sort": 100, "model": model,
+                              "sort": 100, "model": model, "kind": kind,
                               "created_at": self._now()}
         return tid
 
@@ -526,7 +533,7 @@ class FakeCrm:
 
     async def create_rental(self, *, client_id, bike_id, tariff_id, tariff_name,
                             period_days, price, billing, started_on, contract_no,
-                            created_by, mileage_start=None):
+                            created_by, mileage_start=None, base_price=None):
         if self._active(client_id) is not None:
             raise UniqueError("rentals_active_client_idx")
         if bike_id is not None and any(r["bike_id"] == bike_id and r["status"] == "active"
@@ -536,6 +543,8 @@ class FakeCrm:
         self.rentals_[rid] = {"id": rid, "client_id": client_id, "bike_id": bike_id,
                               "tariff_id": tariff_id, "tariff_name": tariff_name,
                               "period_days": period_days, "price": Decimal(price),
+                              "base_price": Decimal(base_price if base_price is not None
+                                                    else price),
                               "billing": billing, "contract_no": contract_no,
                               "started_on": started_on, "billed_until": started_on,
                               "status": "active", "closed_on": None, "close_note": None,
@@ -570,6 +579,9 @@ class FakeCrm:
             if mileage_end is not None:
                 self.bikes_[r["bike_id"]]["mileage_km"] = max(
                     self.bikes_[r["bike_id"]].get("mileage_km") or 0, int(mileage_end))
+        for extra in self.rental_extras_.values():
+            if extra["rental_id"] == rental_id and extra["removed_at"] is None:
+                extra.update(removed_at=self._now(), removed_by=closed_by)
         return True
 
     async def charge_period(self, rental_id, client_id, *, period_from, period_to,
@@ -1631,6 +1643,63 @@ class FakeCrm:
                 continue
             await self.update_battery(battery_id, status="rented", rental_id=rental_id,
                                       bike_id=bike_id or battery.get("bike_id"), by=by)
+
+    # ─── позиции аренды ───
+    async def rental_extras(self, rental_id, *, live_only=False):
+        rows = [dict(e) for e in self.rental_extras_.values()
+                if e["rental_id"] == rental_id
+                and (not live_only or e["removed_at"] is None)]
+        for row in rows:
+            battery = self.batteries_.get(row.get("battery_id"))
+            row["battery_code"] = (battery or {}).get("code")
+            row["battery_model"] = (battery or {}).get("model_title")
+        return sorted(rows, key=lambda e: e["id"])
+
+    async def rental_extra(self, extra_id):
+        row = self.rental_extras_.get(extra_id)
+        return dict(row) if row else None
+
+    async def add_rental_extra(self, rental_id, *, kind, title, price, battery_id, by):
+        # Частичный уникальный индекс rental_extras_battery_once.
+        if battery_id is not None and any(
+                e["rental_id"] == rental_id and e["battery_id"] == battery_id
+                and e["removed_at"] is None for e in self.rental_extras_.values()):
+            raise UniqueError("rental_extras_battery_once")
+        eid = self._id()
+        self.rental_extras_[eid] = {
+            "id": eid, "rental_id": rental_id, "kind": kind, "battery_id": battery_id,
+            "title": title, "price": Decimal(price), "added_at": self._now(),
+            "added_by": by, "removed_at": None, "removed_by": None}
+        self._reprice(rental_id)
+        return eid
+
+    async def drop_rental_extra(self, extra_id, *, by):
+        row = self.rental_extras_.get(extra_id)
+        if row is None or row["removed_at"] is not None:
+            return False
+        row.update(removed_at=self._now(), removed_by=by)
+        self._reprice(row["rental_id"])
+        return True
+
+    def _reprice(self, rental_id):
+        """Цена периода = база плюс действующие позиции - как в базе."""
+        rental = self.rentals_.get(rental_id)
+        if rental is None:
+            return
+        base = rental.get("base_price")
+        base = Decimal(base if base is not None else rental["price"])
+        extras = sum((Decimal(e["price"]) for e in self.rental_extras_.values()
+                      if e["rental_id"] == rental_id and e["removed_at"] is None),
+                     Decimal(0))
+        rental["price"] = base + extras
+
+    async def return_battery(self, battery_id, *, status="available", by):
+        battery = self.batteries_.get(battery_id)
+        if battery is None or battery["status"] != "rented":
+            return False
+        await self.update_battery(battery_id, status=status, rental_id=None,
+                                  cycles=int(battery.get("cycles") or 0) + 1, by=by)
+        return True
 
     async def return_batteries(self, rental_id, *, status="available", by):
         count = 0

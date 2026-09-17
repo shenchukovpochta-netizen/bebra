@@ -10,7 +10,8 @@
   <span class="{% if client %}done{% elif step == 1 %}now{% else %}todo{% endif %}">1 · {% if client %}{{ client.full_name }}{% else %}Клиент{% endif %}</span>
   <span class="{% if tariff and (model or bike) %}done{% elif step == 2 %}now{% else %}todo{% endif %}">2 · {% if tariff and (model or bike) %}{{ tariff.name }} · {{ model or bike.model }}{% else %}Модель и тариф{% endif %}</span>
   <span class="{% if bike %}done{% elif step == 3 %}now{% else %}todo{% endif %}">3 · {% if bike %}№ {{ bike.code }}{% else %}Велосипед{% endif %}</span>
-  <span class="{% if step == 4 %}now{% else %}todo{% endif %}">4 · Оплата и аренда</span>
+  <span class="{% if step == 4 %}now{% elif step == 5 %}done{% else %}todo{% endif %}">4 · Оплата и аренда</span>
+  <span class="{% if step == 5 %}now{% else %}todo{% endif %}">5 · Документы</span>
 </div>
 
 {# ─── шаг 1: клиент по телефону ─── #}
@@ -43,7 +44,7 @@
 {% endif %}
 
 {# ─── карточка клиента над шагами 2–4 ─── #}
-{% if client %}
+{% if client and step != 5 %}
 <div class="card">
   <div class="who">
     <b>{{ client.full_name }}</b>
@@ -168,6 +169,8 @@
       <dt>Клиент</dt><dd>{{ client.full_name }} · {{ client.phone }}</dd>
       <dt>Велосипед</dt><dd><b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}</dd>
       <dt>Тариф</dt><dd>{{ tariff.name }} — {{ money(tariff.price) }} / {{ tariff.period_days }} дн. <span class="muted">({{ money(per_day) }} в день)</span></dd>
+      <dt>Итого за период</dt><dd><b id="period-total" data-base="{{ tariff.price }}">{{ money(tariff.price) }}</b>
+        <span class="muted">велосипед плюс отмеченные доп. аккумуляторы</span></dd>
       <dt>Начало</dt><dd><input name="started_on" type="date" value="{{ started_on|iso }}" style="max-width:200px"></dd>
       <dt>Пробег при выдаче</dt><dd><input name="mileage" inputmode="numeric" value="{{ mileage }}" required style="max-width:200px"> <span class="muted">км с дисплея; по нему посчитается накат за аренду</span></dd>
       <dt>Оплачено будет до</dt><dd>{{ ends_on|dmy }} <span class="muted">при оплате первого периода</span></dd>
@@ -185,14 +188,31 @@
   </section>
   {% if batteries %}
   <section class="card">
-    <h2>Батареи</h2>
-    <p class="muted">Отметьте, какие уезжают с велосипедом{% if battery_slots %} — слотов у модели: {{ battery_slots }}{% endif %}. Они перейдут в статус «У клиента» и вернутся при возврате.</p>
+    <h2>Основной аккумулятор <small class="muted">· входит в цену</small></h2>
+    <p class="muted">Тот, что стоит в раме{% if battery_slots %} — слотов у модели: {{ battery_slots }}{% endif %}. Он перейдёт в статус «У клиента» и вернётся при возврате.</p>
     <div class="checks">
       {% for b in batteries %}
       <label class="check"><input type="checkbox" name="battery_ids" value="{{ b.id }}">
         <span>№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</span></label>
       {% endfor %}
     </div>
+
+    <h2>Доп. аккумулятор <small class="muted">· необязательно, не больше {{ max_extra }}</small></h2>
+    <p class="muted">Курьер берёт второй, чтобы не заряжаться в середине
+      смены, и это отдельные деньги: цена прибавляется к цене периода.</p>
+    <div class="checks">
+      {% for b in batteries %}
+      <label class="check {% if not b.priced %}muted{% endif %}">
+        <input type="checkbox" name="extra_battery_ids" value="{{ b.id }}"
+               class="extra-battery" data-price="{{ b.extra_price or 0 }}"
+               {% if not b.priced %}disabled{% endif %}>
+        <span>№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}
+          {% if b.priced %}<b>+{{ money(b.extra_price) }}</b>{% else %}<span class="muted">нет цены на {{ tariff.period_days }} дн.</span>{% endif %}</span></label>
+      {% endfor %}
+    </div>
+    <p class="muted">Аккумулятор без цены на этот срок выдать нельзя:
+      бесплатная батарея и батарея без цены выглядят одинаково, а стоят
+      по-разному. Заведите цену в <a href="/tariffs">тарифах</a>.</p>
   </section>
   {% endif %}
   </div>
@@ -202,5 +222,69 @@
     <button type="submit">✓ Оформить выдачу</button>
   </div>
 </form>
+{# Итог за период считается на месте: оператор при живом клиенте должен
+   видеть сумму до нажатия, а не после. Без скрипта строка показывает
+   цену велосипеда, а цены позиций подписаны у каждой галочки. #}
+<script>
+(function () {
+  var total = document.getElementById('period-total');
+  if (!total) return;
+  var boxes = document.querySelectorAll('.extra-battery');
+  function ruble(value) {
+    return value.toLocaleString('ru-RU', {minimumFractionDigits: 0}) + ' \u20BD';
+  }
+  function recount() {
+    var sum = parseFloat(total.dataset.base || '0') || 0;
+    boxes.forEach(function (box) {
+      if (box.checked) sum += parseFloat(box.dataset.price || '0') || 0;
+    });
+    total.textContent = ruble(sum);
+  }
+  boxes.forEach(function (box) { box.addEventListener('change', recount); });
+  recount();
+})();
+</script>
+{% endif %}
+
+{# ─── шаг 5: документы и подпись ─── #}
+{% if step == 5 %}
+<div class="card">
+  <h2>Документы</h2>
+  {% if problem %}
+  <p class="flash err">{{ problem }}</p>
+  <p><a class="btn" href="/rentals/{{ rental.id }}">К аренде →</a></p>
+  {% else %}
+  <p class="muted">Аренда <b>№ {{ rental.contract_no or rental.id }}</b> оформлена.
+    Пакет на подпись собран: {{ req.docs|length }} документ(а).</p>
+  <ol class="docs">
+    {% for d in req.docs %}
+    <li>{{ d.title }}
+      {% if d.path %}<a href="/signings/{{ req.id }}/doc/{{ loop.index0 }}">открыть</a>
+      {% else %}<span class="muted">текстом в заявке</span>{% endif %}</li>
+    {% endfor %}
+  </ol>
+  {% if extras %}
+  <p class="muted">В акте: {% for e in extras %}{{ e.title }} — {{ money(e.price) }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+
+  <div class="issue-bar">
+    {% if bot_state and bot_state.linked %}
+    <form method="post" action="/signings/{{ req.id }}/code" class="inline-form">
+      <button type="submit">Отправить код клиенту в Telegram</button>
+    </form>
+    {% else %}
+    <span class="muted">Клиент не в боте — продиктуйте ссылку или откройте её на его телефоне.</span>
+    {% endif %}
+    <span class="spacer"></span>
+    <a class="btn ghost" href="/signings/{{ req.id }}">Карточка подписания</a>
+    <a class="btn" href="/rentals/{{ rental.id }}">Готово → аренда</a>
+  </div>
+  <p class="muted">Ссылка для клиента: <code>{{ link }}</code></p>
+  {% if code %}<p class="flash">Код отправлен клиенту: <b>{{ code }}</b> — действует {{ SIGN_CODE_MINUTES }} мин.</p>{% endif %}
+  <p class="muted">Подписывать необязательно прямо сейчас: ссылка живёт
+    {{ SIGN_LINK_DAYS }} дн., и заявка ждёт в разделе «Подписания».
+    Выдача уже оформлена, велосипед у клиента.</p>
+  {% endif %}
+</div>
 {% endif %}
 {% endblock %}

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -55,12 +55,18 @@ async def add_entry(crm: Any, client: dict, *, kind: str, amount: Decimal,
 
 async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict,
                       started_on: date, contract_no: str | None, by: str,
-                      billing: str = "auto", mileage: int | None = None) -> int:
+                      billing: str = "auto", mileage: int | None = None,
+                      extras: Sequence[Mapping[str, Any]] = ()) -> int:
     """Оформить аренду и начислить первый период.
 
     Аренда с датой начала в будущем не начисляется заранее: первый период
     спишет дневной проход в свой день - иначе клиент видел бы долг за
     велосипед, которого ещё не получил.
+
+    `extras` - платные позиции сверх велосипеда (доп. аккумулятор). Они
+    заводятся до первого начисления, потому что начисляется цена периода
+    целиком: завести их после значило бы подарить клиенту первый период
+    второй батареи.
     """
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
@@ -70,11 +76,13 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             f"«{logic.BIKE_STATUSES.get(bike.get('status'), bike.get('status'))}».")
     if await crm.active_rental_of(client["id"]) is not None:
         raise ServiceError("У клиента уже идёт аренда - сначала закройте её.")
+    base = logic.to_money(tariff["price"])
+    price = logic.period_price(base, extras)
     try:
         rental_id = await crm.create_rental(
             client_id=client["id"], bike_id=bike["id"] if bike else None,
             tariff_id=tariff.get("id"), tariff_name=tariff["name"],
-            period_days=int(tariff["period_days"]), price=logic.to_money(tariff["price"]),
+            period_days=int(tariff["period_days"]), price=price, base_price=base,
             billing=billing, started_on=started_on, contract_no=contract_no,
             created_by=by, mileage_start=mileage)
     except Exception as exc:                            # noqa: BLE001
@@ -87,11 +95,16 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
     if bike is not None:
         await crm.add_rental_bike(rental_id, bike_id=bike["id"], issued_on=started_on,
                                   mileage_start=mileage, reason="Выдача", created_by=by)
+    for extra in extras:
+        await crm.add_rental_extra(
+            rental_id, kind=str(extra.get("kind") or "battery"),
+            title=str(extra["title"]), price=logic.to_money(extra.get("price")),
+            battery_id=extra.get("battery_id"), by=by)
     if billing == "auto":
         await charge_due(crm, rental={"id": rental_id, "client_id": client["id"],
                                       "billed_until": started_on,
                                       "period_days": int(tariff["period_days"]),
-                                      "price": logic.to_money(tariff["price"]),
+                                      "price": price,
                                       "tariff_name": tariff["name"],
                                       "billing": "auto", "status": "active"},
                          today=date.today())
@@ -781,6 +794,60 @@ async def issue_with_batteries(crm: Any, rental_id: int, *, bike: dict | None,
     await crm.issue_batteries(rental_id, battery_ids=ready,
                               bike_id=(bike or {}).get("id"), by=by)
     return len(ready)
+
+
+async def add_battery_extra(crm: Any, rental: dict, battery: dict, *,
+                            tariffs: Iterable[dict], by: str) -> Decimal:
+    """Добавить доп. аккумулятор в аренду как платную позицию.
+
+    Цена берётся из тарифов на тот же срок, что у аренды. Нет такого
+    тарифа - отказ: бесплатная батарея и батарея без цены выглядят
+    одинаково, и разбираться с этим должен человек в тарифах, а не
+    выдача молча.
+
+    Новая цена действует со следующего начисления: текущий период уже
+    начислен по старой, и переписывать начисленное задним числом
+    значит менять клиенту сумму после того, как он её увидел.
+    """
+    if rental.get("status") != "active":
+        raise ServiceError("Аренда закрыта.")
+    if battery.get("status") != "available":
+        raise ServiceError(
+            f"Батарея {battery.get('code')} сейчас "
+            f"«{logic.BATTERY_STATUSES.get(battery.get('status'), battery.get('status'))}».")
+    live = logic.live_extras(await crm.rental_extras(rental["id"]))
+    if sum(1 for e in live if e.get("kind") == "battery") >= logic.MAX_EXTRA_BATTERIES:
+        raise ServiceError(
+            f"Больше {logic.MAX_EXTRA_BATTERIES} доп. аккумуляторов на аренду "
+            "не выдаём.")
+    price = logic.battery_extra_price(tariffs, battery, rental.get("period_days"))
+    if price is None:
+        raise ServiceError(
+            f"Нет тарифа на аккумулятор «{battery.get('model_title') or '—'}» "
+            f"на {int(rental.get('period_days') or 0)} дн. — заведите цену "
+            "в тарифах.")
+    await crm.add_rental_extra(
+        rental["id"], kind="battery",
+        title=logic.extra_title("battery", battery.get("model_title")),
+        price=price, battery_id=int(battery["id"]), by=by)
+    await crm.issue_batteries(rental["id"], battery_ids=[int(battery["id"])],
+                              bike_id=rental.get("bike_id"), by=by)
+    return price
+
+
+async def drop_battery_extra(crm: Any, rental: dict, extra: dict, *, by: str,
+                             status: str = "available") -> None:
+    """Снять позицию и вернуть батарею в парк.
+
+    Снять одно без другого нельзя: батарея у клиента без позиции едет
+    бесплатно, позиция без батареи - это деньги ни за что.
+    """
+    if int(extra.get("rental_id") or 0) != int(rental["id"]):
+        raise ServiceError("Позиция не от этой аренды.")
+    if not await crm.drop_rental_extra(int(extra["id"]), by=by):
+        raise ServiceError("Позиция уже снята.")
+    if extra.get("battery_id"):
+        await crm.return_battery(int(extra["battery_id"]), status=status, by=by)
 
 
 async def swap_battery(crm: Any, rental: dict, old: dict | None, new: dict, *,

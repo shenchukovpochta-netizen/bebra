@@ -261,8 +261,11 @@ class TestBatteryPanel(tw.WebCase):
         battery_id = int(self.create().headers["location"].rsplit("/", 1)[1])
         page = self.get_ok(f"/issue?client={self.client_id}&tariff={self.tariff_id}"
                            f"&bike={self.bike_id}")
-        self.assertIn("Батареи", page)
+        self.assertIn("Основной аккумулятор", page)
         self.assertIn(f'name="battery_ids" value="{battery_id}"', page)
+        # Без тарифа на аккумулятор доп. позиция предлагается запертой:
+        # бесплатная батарея и батарея без цены выглядят одинаково.
+        self.assertIn("нет цены на", page)
         r = self.client.post("/issue", data={
             "client_id": str(self.client_id), "tariff_id": str(self.tariff_id),
             "bike_id": str(self.bike_id), "started_on": date.today().isoformat(),
@@ -272,7 +275,7 @@ class TestBatteryPanel(tw.WebCase):
         row = tw.run(self.crm.battery(battery_id))
         self.assertEqual(row["status"], "rented")
         self.assertEqual(row["bike_id"], self.bike_id)
-        rental_id = int(r.headers["location"].rsplit("/", 1)[1])
+        rental_id = int(r.headers["location"].rsplit("=", 1)[1])
         card = self.get_ok(f"/rentals/{rental_id}")
         self.assertIn("Батареи у клиента", card)
         self.assertIn("A-1", card)
