@@ -30,6 +30,10 @@ class WebConfig:
     remind_before_days: int
     # Имя проката в шапке панели.
     title: str = "МАЙБАЙК"
+    # Ссылка на оплату - та же, что у бота. Панель подставляет её
+    # в предпросмотр рассылки: {pay_url} в шаблоне должен показывать
+    # оператору то же, что увидит клиент.
+    pay_url: str = ""
     # Панель стоит за Caddy (задан CRM_DOMAIN): адрес клиента брать из
     # X-Forwarded-For, иначе все входы выглядят как один адрес прокси.
     trust_proxy: bool = False
@@ -52,5 +56,6 @@ class WebConfig:
             port=_int("CRM_PORT", "8080"),
             remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
             title=_env("CRM_TITLE", "МАЙБАЙК"),
+            pay_url=_env("PAY_URL"),
             trust_proxy=bool(_env("CRM_DOMAIN", "")),
         )

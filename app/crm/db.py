@@ -26,6 +26,7 @@ BIKE_FIELDS = frozenset({
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
     "note", "source", "channel", "ref_code", "invited_by", "invited_at",
+    "max_id",
 })
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active", "sort"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
@@ -38,6 +39,8 @@ BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note"})
 BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
                                   "price", "service_months", "active", "note"})
+TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
+                                "note"})
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
                             "alarm", "note"})
@@ -2356,3 +2359,154 @@ class CrmDB:
 
     async def last_bank_txn_at(self) -> datetime | None:
         return await self.pool.fetchval("select max(booked_at) from crm.bank_txns")
+
+    # ─────────────────────────── рассылки ───────────────────────────
+
+    async def templates(self, *, active_only: bool = False) -> list[dict]:
+        where = "where active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"select * from crm.message_templates {where} order by title"))
+
+    async def template(self, template_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.message_templates where id = $1", template_id))
+
+    async def create_template(self, *, code: str, title: str, body: str,
+                              body_max: str | None, note: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.message_templates (code, title, body, body_max, note)
+            values ($1, $2, $3, $4, $5) returning id
+            """, code, title, body, body_max, note))
+
+    async def update_template(self, template_id: int, **fields: Any) -> None:
+        unknown = set(fields) - TEMPLATE_FIELDS_DB
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        if not fields:
+            return
+        sets = ", ".join(f"{c} = ${i}" for i, c in enumerate(fields, start=2))
+        await self.pool.execute(
+            f"update crm.message_templates set {sets}, updated_at = now() "
+            "where id = $1", template_id, *fields.values())
+
+    async def clients_for_mailing(self, limit: int = 10000) -> list[dict]:
+        """Клиенты с балансом и датой последней аренды - для аудиторий.
+
+        Баланс и «когда в последний раз брал» считаются здесь, а отбор -
+        в logic.pick_audience: правила аудиторий меняются чаще, чем схема,
+        и проверять их удобнее без базы.
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select c.*, coalesce(l.balance, 0) as balance,
+                   r.last_rental_on
+              from crm.clients c
+              left join (select client_id, sum(amount) as balance
+                           from crm.ledger group by client_id) l
+                     on l.client_id = c.id
+              left join (select client_id, max(coalesce(closed_on, started_on))
+                                as last_rental_on
+                           from crm.rentals group by client_id) r
+                     on r.client_id = c.id
+             order by c.full_name limit $1
+            """, limit))
+
+    async def campaigns(self, *, limit: int = 100) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            """
+            select c.*, t.title as template_title,
+                   count(s.id) as total,
+                   count(s.id) filter (where s.status = 'sent') as sent,
+                   count(s.id) filter (where s.status = 'failed') as failed
+              from crm.campaigns c
+              left join crm.message_templates t on t.id = c.template_id
+              left join crm.campaign_sends s on s.campaign_id = c.id
+             group by c.id, t.title
+             order by c.created_at desc limit $1
+            """, limit))
+
+    async def campaign(self, campaign_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            """
+            select c.*, t.title as template_title, t.body, t.body_max
+              from crm.campaigns c
+              left join crm.message_templates t on t.id = c.template_id
+             where c.id = $1
+            """, campaign_id))
+
+    async def create_campaign(self, *, title: str, template_id: int,
+                              audience: str, note: str | None, by: str) -> int:
+        async with self.pool.acquire() as conn, conn.transaction():
+            number = int(await conn.fetchval(
+                "select count(*) + 1 from crm.campaigns"))
+            return int(await conn.fetchval(
+                """
+                insert into crm.campaigns (no, title, template_id, audience,
+                                           note, created_by)
+                values ($1, $2, $3, $4, $5, $6) returning id
+                """, logic.campaign_no(number), title, template_id, audience,
+                note, by))
+
+    async def queue_sends(self, campaign_id: int,
+                          rows: list[tuple[int, str]]) -> int:
+        """Поставить получателей в очередь. Повтор ничего не добавляет:
+        уникальный индекс не даст отправить одному человеку дважды."""
+        if not rows:
+            return 0
+        done = await self.pool.fetch(
+            """
+            insert into crm.campaign_sends (campaign_id, client_id, channel)
+            select $1, x.client_id, x.channel
+              from unnest($2::bigint[], $3::text[]) as x(client_id, channel)
+            on conflict (campaign_id, client_id) do nothing
+            returning id
+            """, campaign_id, [r[0] for r in rows], [r[1] for r in rows])
+        return len(done)
+
+    async def campaign_sends(self, campaign_id: int, *, status: str | None = None,
+                             limit: int = 1000) -> list[dict]:
+        where = "and s.status = $3" if status else ""
+        args = [campaign_id, limit] + ([status] if status else [])
+        return _rows(await self.pool.fetch(
+            f"""
+            select s.*, c.full_name, c.phone, c.tg_id, c.max_id, c.contract_no
+              from crm.campaign_sends s
+              join crm.clients c on c.id = s.client_id
+             where s.campaign_id = $1 {where}
+             order by s.id limit $2
+            """, *args))
+
+    async def mark_send(self, send_id: int, *, status: str,
+                        error: str | None = None) -> None:
+        await self.pool.execute(
+            "update crm.campaign_sends set status = $2, error = $3, "
+            "sent_at = now() where id = $1", send_id, status, error)
+
+    async def set_campaign_status(self, campaign_id: int, status: str) -> None:
+        await self.pool.execute(
+            """
+            update crm.campaigns
+               set status = $2,
+                   started_at = case when $2 = 'sending' then now() else started_at end,
+                   finished_at = case when $2 in ('done', 'cancelled') then now()
+                                      else finished_at end
+             where id = $1
+            """, campaign_id, status)
+
+    async def sending_campaigns(self) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.campaigns where status = 'sending' order by id"))
+
+    async def link_client_max(self, phone: str, max_id: int) -> int | None:
+        """Связать карточку с аккаунтом MAX по телефону. None - такого
+        клиента нет или аккаунт уже занят другой карточкой."""
+        return await self.pool.fetchval(
+            """
+            update crm.clients set max_id = $2, updated_at = now()
+             where phone = $1
+               and (max_id is null or max_id = $2)
+               and not exists (select 1 from crm.clients other
+                                where other.max_id = $2 and other.phone <> $1)
+            returning id
+            """, phone, max_id)

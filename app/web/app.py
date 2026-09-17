@@ -120,6 +120,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         OPERATIONAL_STATUSES=logic.OPERATIONAL_STATUSES, IDLE_STATUSES=logic.IDLE_STATUSES,
         LOCATIONS=logic.LOCATIONS, REPAIR_NODES=logic.REPAIR_NODES,
         TRACKER_ALERTS=logic.TRACKER_ALERTS,
+        AUDIENCES=logic.AUDIENCES, CAMPAIGN_STATUSES=logic.CAMPAIGN_STATUSES,
+        SEND_STATUSES=logic.SEND_STATUSES, SEND_CHANNELS=logic.SEND_CHANNELS,
+        TEMPLATE_FIELDS=logic.TEMPLATE_FIELDS,
         CASH_MOVE_KINDS=logic.CASH_MOVE_KINDS, CASH_STATUSES=logic.CASH_STATUSES,
         CASH_DIFF_NOISE=logic.CASH_DIFF_NOISE,
         BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
@@ -2446,6 +2449,143 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"Батарея заменена на {new['code']}." if old is not None
               else f"Батарея {new['code']} выдана клиенту.")
         return redirect(f"/rentals/{rental_id}")
+
+    # ─────────────────────── рассылки ───────────────────────
+
+    async def audience_people(code: str) -> list[dict]:
+        return logic.pick_audience(code, await crm.clients_for_mailing(),
+                                   await crm.active_rentals(),
+                                   before_days=cfg.remind_before_days)
+
+    @app.get("/mailing")
+    async def mailing_page(request: Request) -> Response:
+        if not may_view(request, "mailing"):
+            return denied(request, "mailing")
+        sizes = {code: len(await audience_people(code)) for code in logic.AUDIENCES}
+        return render(request, "mailing.html",
+                      rows=logic.campaign_rows(await crm.campaigns(limit=100)),
+                      templates=await crm.templates(),
+                      sizes=sizes)
+
+    @app.post("/mailing/templates")
+    async def template_save(request: Request) -> Response:
+        """Новый шаблон или правка существующего."""
+        if not may_edit(request, "mailing"):
+            return denied(request, "mailing")
+        data = await form(request)
+        title = logic.check_name(data.get("title"), what="Название шаблона")
+        body = logic.check_template_body(data.get("body"), what="Текст")
+        raw_max = (data.get("body_max") or "").strip()
+        body_max = (logic.check_template_body(raw_max, what="Текст для MAX")
+                    if raw_max else logic.Check(True, None))
+        note = logic.check_note(data.get("note"))
+        for check in (title, body, body_max, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/mailing")
+        template_id = int(data["id"]) if (data.get("id") or "").isdigit() else None
+        if template_id:
+            await crm.update_template(template_id, title=title.value,
+                                      body=body.value, body_max=body_max.value,
+                                      note=note.value)
+            flash(request, "Шаблон сохранён.")
+            return redirect("/mailing")
+        code = logic.check_slug(data.get("code"), what="Код шаблона")
+        if not code.ok:
+            flash(request, code.error, "err")
+            return redirect("/mailing")
+        try:
+            await crm.create_template(code=code.value, title=title.value,
+                                      body=body.value, body_max=body_max.value,
+                                      note=note.value)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Шаблон с таким кодом уже есть.", "err")
+                return redirect("/mailing")
+            raise
+        flash(request, "Шаблон добавлен.")
+        return redirect("/mailing")
+
+    @app.post("/mailing")
+    async def campaign_create(request: Request) -> Response:
+        if not may_edit(request, "mailing"):
+            return denied(request, "mailing")
+        data = await form(request)
+        title = logic.check_name(data.get("title"), what="Название рассылки")
+        audience = logic.check_audience(data.get("audience"))
+        note = logic.check_note(data.get("note"))
+        for check in (title, audience, note):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/mailing")
+        template = (await crm.template(int(data["template_id"]))
+                    if (data.get("template_id") or "").isdigit() else None)
+        if template is None:
+            flash(request, "Выберите шаблон.", "err")
+            return redirect("/mailing")
+        try:
+            created = await service.create_campaign(
+                crm, title=title.value, template=template,
+                audience=audience.value, note=note.value, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/mailing")
+        flash(request, f"Черновик собран: {created['queued']} получателей. "
+                       "Посмотрите список и запустите отправку.")
+        return redirect(f"/mailing/{created['id']}")
+
+    @app.get("/mailing/{campaign_id}")
+    async def campaign_card(request: Request, campaign_id: int) -> Response:
+        if not may_view(request, "mailing"):
+            return denied(request, "mailing")
+        campaign = await crm.campaign(campaign_id)
+        if campaign is None:
+            return render(request, "missing.html", status_code=404, what="Рассылка")
+        sends = await crm.campaign_sends(campaign_id, limit=1000)
+        preview = ""
+        if sends:
+            client = await crm.client(sends[0]["client_id"])
+            if client is not None:
+                values = logic.template_context(
+                    client, await crm.active_rental_of(client["id"]),
+                    await crm.client_balance(client["id"]),
+                    pay_url=cfg.pay_url)
+                preview = logic.render_template(campaign.get("body") or "", values)
+        return render(request, "campaign.html", campaign=campaign, sends=sends,
+                      progress=logic.campaign_progress(sends), preview=preview)
+
+    @app.post("/mailing/{campaign_id}/start")
+    async def campaign_start(request: Request, campaign_id: int) -> Response:
+        if not may_edit(request, "mailing"):
+            return denied(request, "mailing")
+        campaign = await crm.campaign(campaign_id)
+        if campaign is None:
+            return render(request, "missing.html", status_code=404, what="Рассылка")
+        try:
+            await service.start_campaign(crm, campaign)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/mailing/{campaign_id}")
+        flash(request, "Отправка началась. Сообщения уходят из процесса бота, "
+                       "по несколько в секунду.")
+        return redirect(f"/mailing/{campaign_id}")
+
+    @app.post("/mailing/{campaign_id}/cancel")
+    async def campaign_cancel(request: Request, campaign_id: int) -> Response:
+        if not may_edit(request, "mailing"):
+            return denied(request, "mailing")
+        campaign = await crm.campaign(campaign_id)
+        if campaign is None:
+            return render(request, "missing.html", status_code=404, what="Рассылка")
+        try:
+            left = await service.cancel_campaign(crm, campaign)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/mailing/{campaign_id}")
+        flash(request, f"Рассылка остановлена, снято из очереди: {left}. "
+                       "Отправленное не отзывается — ни Telegram, ни MAX этого "
+                       "не умеют.")
+        return redirect(f"/mailing/{campaign_id}")
 
     # ─────────────────────── касса и банк ───────────────────────
 

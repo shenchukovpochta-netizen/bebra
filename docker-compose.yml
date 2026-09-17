@@ -97,7 +97,7 @@ services:
       postgres:
         condition: service_healthy
     secrets: [db_password, bot_token, pdn_key, starline_app_secret,
-              starline_password, tochka_token]
+              starline_password, tochka_token, max_bot_token]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
@@ -107,6 +107,9 @@ services:
       STARLINE_APP_SECRET_FILE: /run/secrets/starline_app_secret
       STARLINE_PASSWORD_FILE: /run/secrets/starline_password
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
+      # Нужен ровно для рассылок: тем клиентам, у кого привязан MAX.
+      # Пустой файл - такие получатели помечаются пропущенными.
+      MAX_BOT_TOKEN_FILE: /run/secrets/max_bot_token
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
@@ -199,6 +202,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mybike}
 
       CRM_ADMIN_LOGIN: ${CRM_ADMIN_LOGIN:-admin}
+      # Та же ссылка, что у бота: панель показывает её в предпросмотре
+      # рассылки, чтобы оператор видел то же, что увидит клиент.
+      PAY_URL: ${PAY_URL}
       CRM_TITLE: ${CRM_TITLE:-МАЙБАЙК}
       # Непустой домен = панель за Caddy: адрес клиента из X-Forwarded-For.
       CRM_DOMAIN: ${CRM_DOMAIN:-}
@@ -259,6 +265,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
       POSTGRES_DB: ${POSTGRES_DB:-mybike}
       MAX_POSTGRES_DB: mybike_max
+      # Мост в основную базу: MAX-бот проставляет max_id в карточке
+      # клиента по телефону, иначе рассылке некуда писать.
+      CRM_POSTGRES_DB: ${POSTGRES_DB:-mybike}
 
       # Адрес Bot API MAX. Меняется только если dev.max.ru объявит другой.
       MAX_API_BASE: ${MAX_API_BASE:-https://botapi.max.ru}

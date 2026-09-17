@@ -921,6 +921,54 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marked["ledger_id"], ledger_id)
         self.assertEqual(await self.crm.last_bank_txn_at(), moment)
 
+    async def test_mailing_on_postgres(self):
+        """Рассылка на живой базе: встроенные шаблоны, очередь без дублей,
+        связь MAX-аккаунта с карточкой."""
+        await self.seed()
+        seeded = {t["code"] for t in await self.crm.templates()}
+        self.assertEqual(seeded, {"debt", "comeback", "expiring"},
+                         "шаблоны приезжают со схемой")
+        debt = next(t for t in await self.crm.templates() if t["code"] == "debt")
+        self.assertIn("\n", debt["body"], "перенос строки, а не два символа")
+
+        # должник с Telegram и должник с MAX
+        await self.crm.add_ledger(client_id=self.client_id, kind="charge",
+                                  amount=D("-3000"))
+        other = await self.crm.create_client(full_name="Петров Пётр",
+                                             phone="+79990000002")
+        self.assertEqual(await self.crm.link_client_max("+79990000002", 777), other)
+        self.assertIsNone(await self.crm.link_client_max("+79990000000", 777),
+                          "чужой MAX-аккаунт не перевешивается")
+        await self.crm.add_ledger(client_id=other, kind="charge", amount=D("-1500"))
+
+        people = logic.pick_audience("debtors", await self.crm.clients_for_mailing(),
+                                     await self.crm.active_rentals())
+        self.assertEqual({p["channel"] for p in people}, {"tg", "max"})
+
+        created = await service.create_campaign(
+            self.crm, title="Долги", template=debt, audience="debtors",
+            note=None, by="staff:t")
+        self.assertEqual(created["queued"], 2)
+        campaign = await self.crm.campaign(created["id"])
+        self.assertEqual(campaign["no"], "РСЛ-000001")
+        self.assertEqual(campaign["status"], "draft")
+        # Повторная постановка в очередь ничего не добавляет.
+        self.assertEqual(
+            await self.crm.queue_sends(created["id"],
+                                       [(int(p["id"]), p["channel"]) for p in people]),
+            0)
+
+        sends = await self.crm.campaign_sends(created["id"])
+        await self.crm.mark_send(sends[0]["id"], status="sent")
+        await self.crm.mark_send(sends[1]["id"], status="failed", error="заблокировал")
+        progress = logic.campaign_progress(await self.crm.campaign_sends(created["id"]))
+        self.assertEqual((progress["sent"], progress["failed"]), (1, 1))
+        rows = await self.crm.campaigns()
+        self.assertEqual((rows[0]["sent"], rows[0]["failed"], rows[0]["total"]),
+                         (1, 1, 2))
+        await self.crm.set_campaign_status(created["id"], "done")
+        self.assertEqual(await self.crm.sending_campaigns(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

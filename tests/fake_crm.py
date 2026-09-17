@@ -46,6 +46,9 @@ class FakeCrm:
         self.compat_: dict[tuple, bool] = {}
         self.batteries_: dict[int, dict] = {}
         self.battery_log_: list[dict] = []
+        self.templates_: dict[int, dict] = {}
+        self.campaigns_: dict[int, dict] = {}
+        self.sends_: dict[int, dict] = {}
         self.shifts_: dict[int, dict] = {}
         self.cash_moves_: list[dict] = []
         self.bank_: dict[int, dict] = {}
@@ -436,7 +439,7 @@ class FakeCrm:
         self.clients_[cid] = {"id": cid, "full_name": full_name, "phone": phone,
                               "tg_id": tg_id, "username": username, "status": "active",
                               "contract_no": contract_no, "note": note, "source": source,
-                              "channel": None, "ref_code": None,
+                              "channel": None, "ref_code": None, "max_id": None,
                               "invited_by": None, "invited_at": None,
                               "created_at": self._now(), "updated_at": self._now()}
         return cid
@@ -1606,6 +1609,134 @@ class FakeCrm:
                 count += 1
         return count
 
+
+    # ─── рассылки ───
+    async def templates(self, *, active_only=False):
+        rows = [dict(t) for t in self.templates_.values()
+                if not active_only or t["active"]]
+        return sorted(rows, key=lambda t: t["title"])
+
+    async def template(self, template_id):
+        template = self.templates_.get(template_id)
+        return dict(template) if template else None
+
+    async def create_template(self, *, code, title, body, body_max, note):
+        if any(t["code"] == code for t in self.templates_.values()):
+            raise UniqueError("template code")
+        template_id = self._id()
+        self.templates_[template_id] = {
+            "id": template_id, "code": code, "title": title, "body": body,
+            "body_max": body_max, "active": True, "note": note,
+            "created_at": self._now(), "updated_at": self._now()}
+        return template_id
+
+    async def update_template(self, template_id, **fields):
+        if template_id in self.templates_:
+            self.templates_[template_id].update(fields)
+            self.templates_[template_id]["updated_at"] = self._now()
+
+    async def clients_for_mailing(self, limit=10000):
+        rows = []
+        for client in self.clients_.values():
+            rentals = [r for r in self.rentals_.values()
+                       if r["client_id"] == client["id"]]
+            last = None
+            for rental in rentals:
+                moment = rental.get("closed_on") or rental["started_on"]
+                last = moment if last is None or moment > last else last
+            rows.append({**client,
+                         "balance": sum((x["amount"] for x in self.ledger_
+                                         if x["client_id"] == client["id"]),
+                                        Decimal(0)),
+                         "last_rental_on": last})
+        return sorted(rows, key=lambda c: c["full_name"])[:limit]
+
+    async def campaigns(self, *, limit=100):
+        rows = []
+        for campaign in self.campaigns_.values():
+            sends = [s for s in self.sends_.values()
+                     if s["campaign_id"] == campaign["id"]]
+            template = self.templates_.get(campaign.get("template_id")) or {}
+            rows.append({**campaign, "template_title": template.get("title"),
+                         "total": len(sends),
+                         "sent": sum(1 for s in sends if s["status"] == "sent"),
+                         "failed": sum(1 for s in sends if s["status"] == "failed")})
+        return sorted(rows, key=lambda c: c["created_at"], reverse=True)[:limit]
+
+    async def campaign(self, campaign_id):
+        campaign = self.campaigns_.get(campaign_id)
+        if campaign is None:
+            return None
+        template = self.templates_.get(campaign.get("template_id")) or {}
+        return {**campaign, "template_title": template.get("title"),
+                "body": template.get("body"), "body_max": template.get("body_max")}
+
+    async def create_campaign(self, *, title, template_id, audience, note, by):
+        campaign_id = self._id()
+        self.campaigns_[campaign_id] = {
+            "id": campaign_id, "no": crm_logic.campaign_no(len(self.campaigns_) + 1),
+            "title": title, "template_id": template_id, "audience": audience,
+            "status": "draft", "created_by": by, "created_at": self._now(),
+            "started_at": None, "finished_at": None, "note": note}
+        return campaign_id
+
+    async def queue_sends(self, campaign_id, rows):
+        added = 0
+        for client_id, channel in rows:
+            if any(s["campaign_id"] == campaign_id and s["client_id"] == client_id
+                   for s in self.sends_.values()):
+                continue
+            send_id = self._id()
+            self.sends_[send_id] = {"id": send_id, "campaign_id": campaign_id,
+                                    "client_id": client_id, "channel": channel,
+                                    "status": "queued", "error": None,
+                                    "sent_at": None}
+            added += 1
+        return added
+
+    async def campaign_sends(self, campaign_id, *, status=None, limit=1000):
+        rows = []
+        for send in self.sends_.values():
+            if send["campaign_id"] != campaign_id:
+                continue
+            if status and send["status"] != status:
+                continue
+            client = self.clients_.get(send["client_id"]) or {}
+            rows.append({**send, "full_name": client.get("full_name"),
+                         "phone": client.get("phone"), "tg_id": client.get("tg_id"),
+                         "max_id": client.get("max_id"),
+                         "contract_no": client.get("contract_no")})
+        return sorted(rows, key=lambda s: s["id"])[:limit]
+
+    async def mark_send(self, send_id, *, status, error=None):
+        send = self.sends_.get(send_id)
+        if send is not None:
+            send.update(status=status, error=error, sent_at=self._now())
+
+    async def set_campaign_status(self, campaign_id, status):
+        campaign = self.campaigns_.get(campaign_id)
+        if campaign is None:
+            return
+        campaign["status"] = status
+        if status == "sending":
+            campaign["started_at"] = self._now()
+        if status in ("done", "cancelled"):
+            campaign["finished_at"] = self._now()
+
+    async def sending_campaigns(self):
+        return [dict(c) for c in self.campaigns_.values()
+                if c["status"] == "sending"]
+
+    async def link_client_max(self, phone, max_id):
+        taken = next((c for c in self.clients_.values()
+                      if c.get("max_id") == max_id and c["phone"] != phone), None)
+        if taken is not None:
+            return None
+        client = next((c for c in self.clients_.values() if c["phone"] == phone), None)
+        if client is None:
+            return None
+        client["max_id"] = max_id
+        return client["id"]
 
     # ─── касса ───
     async def cash_shifts(self, *, limit=100):

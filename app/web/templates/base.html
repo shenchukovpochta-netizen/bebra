@@ -27,6 +27,7 @@
       {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
       {% if can_view(staff, 'finance') %}<a href="/finance" {% if request.url.path.startswith('/finance') %}class="on"{% endif %}>Финансы</a>{% endif %}
       {% if can_view(staff, 'cash') %}<a href="/cash" {% if request.url.path.startswith(('/cash', '/bank')) %}class="on"{% endif %}>Касса</a>{% endif %}
+      {% if can_view(staff, 'mailing') %}<a href="/mailing" {% if request.url.path.startswith('/mailing') %}class="on"{% endif %}>Рассылки</a>{% endif %}
       {% if can_view(staff, 'tariffs') %}<a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>{% endif %}
       {% if can_view(staff, 'reports') %}<a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>{% endif %}
       {% if can_view(staff, 'import') %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}

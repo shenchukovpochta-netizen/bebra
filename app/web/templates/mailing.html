@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Рассылки — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Рассылки</h1></div>
+
+<div class="tiles">
+  {% for code, label in AUDIENCES.items() %}
+  <div class="tile"><b>{{ sizes.get(code, 0) }}</b><span>{{ label }}</span></div>
+  {% endfor %}
+</div>
+
+{% if can_edit(staff, 'mailing') %}
+<section class="card">
+  <h2>Новая рассылка</h2>
+  <form method="post" action="/mailing" class="grid2">
+    <label>Название <input name="title" required placeholder="Напоминание должникам, сентябрь"></label>
+    <label>Шаблон <select name="template_id">{% for t in templates %}{% if t.active %}<option value="{{ t.id }}">{{ t.title }}</option>{% endif %}{% endfor %}</select></label>
+    <label>Аудитория <select name="audience">{% for code, label in AUDIENCES.items() %}<option value="{{ code }}">{{ label }} — {{ sizes.get(code, 0) }}</option>{% endfor %}</select></label>
+    <label>Заметка <input name="note" placeholder="зачем и почему именно сейчас"></label>
+    <button type="submit">Собрать черновик</button>
+  </form>
+  <p class="muted">Черновик не отправляется сам: сначала список получателей
+    и предпросмотр, потом кнопка «Отправить». Заблокированные и чёрный
+    список не получают ничего никогда, клиенты без Telegram и MAX — тоже
+    (писать некуда).</p>
+</section>
+{% endif %}
+
+<div class="card">
+<table>
+  <tr><th>Рассылка</th><th>Шаблон</th><th>Аудитория</th><th>Статус</th><th class="num">Ушло</th><th class="num">Не дошло</th><th>Когда</th></tr>
+  {% for c in rows %}
+  <tr>
+    <td><a href="/mailing/{{ c.id }}">{{ c.no }}</a> {{ c.title }}</td>
+    <td class="muted">{{ c.template_title or '—' }}</td>
+    <td>{{ AUDIENCES.get(c.audience, c.audience) }}</td>
+    <td><span class="tag {% if c.status == 'sending' %}rented{% elif c.status == 'done' %}ok{% elif c.status == 'cancelled' %}muted{% endif %}">{{ CAMPAIGN_STATUSES[c.status] }}</span></td>
+    <td class="num">{{ c.sent }} / {{ c.total }}</td>
+    <td class="num {% if c.failed %}bad{% endif %}">{{ c.failed }}</td>
+    <td class="muted">{{ c.created_at|dmy }} · {{ c.created_by or '' }}</td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="muted">Рассылок не было.</td></tr>{% endfor %}
+</table>
+</div>
+
+<section class="card">
+  <h2>Шаблоны</h2>
+  <table>
+    <tr><th>Код</th><th>Название</th><th>Текст</th><th class="opt">Для MAX</th></tr>
+    {% for t in templates %}
+    <tr class="{% if not t.active %}muted{% endif %}">
+      <td>{{ t.code }}</td>
+      <td>{{ t.title }}</td>
+      <td class="muted">{{ (t.body or '')[:120] }}{% if (t.body or '')|length > 120 %}…{% endif %}</td>
+      <td class="opt">{{ 'свой текст' if t.body_max else 'из основного, без разметки' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% if can_edit(staff, 'mailing') %}
+  <h3>Добавить или заменить</h3>
+  <form method="post" action="/mailing/templates" class="grid2">
+    <label>Изменить существующий <select name="id"><option value="">новый шаблон</option>{% for t in templates %}<option value="{{ t.id }}">{{ t.title }}</option>{% endfor %}</select></label>
+    <label>Код (для нового) <input name="code" placeholder="promo_sept"></label>
+    <label class="wide">Название <input name="title" required placeholder="Скидка на неделю"></label>
+    <label class="wide">Текст для Telegram <textarea name="body" rows="5" required placeholder="Здравствуйте, {name}! ..."></textarea></label>
+    <label class="wide">Текст для MAX <textarea name="body_max" rows="4" placeholder="можно оставить пустым — возьмём основной, сняв разметку"></textarea></label>
+    <label class="wide">Заметка <input name="note"></label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">Подстановки: {% for code, label in TEMPLATE_FIELDS.items() %}<code>{{ '{' }}{{ code }}{{ '}' }}</code> — {{ label }}{% if not loop.last %}, {% endif %}{% endfor %}.
+    Неизвестную подстановку форма не примет: опечатка в имени поля уехала бы
+    клиенту как есть. MAX разметку не понимает — для него текст либо свой,
+    либо основной со снятыми тегами.</p>
+  {% endif %}
+</section>
+{% endblock %}

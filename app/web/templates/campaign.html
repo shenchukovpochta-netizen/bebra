@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ campaign.no }} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ campaign.no }} · {{ campaign.title }}
+  <span class="tag {% if campaign.status == 'sending' %}rented{% elif campaign.status == 'done' %}ok{% elif campaign.status == 'cancelled' %}muted{% endif %}">{{ CAMPAIGN_STATUSES[campaign.status] }}</span></h1>
+  <a class="btn ghost" href="/mailing">Все рассылки</a></div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ progress.total }}</b><span>получателей<br><small class="muted">Telegram {{ progress.tg }} · MAX {{ progress['max'] }}</small></span></div>
+  <div class="tile"><b>{{ progress.sent }}</b><span>доставлено</span></div>
+  <div class="tile {% if progress.failed %}warn{% endif %}"><b>{{ progress.failed }}</b><span>не дошло</span></div>
+  <div class="tile"><b>{{ progress.percent }} %</b><span>пройдено</span></div>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Предпросмотр</h2>
+  <p class="muted">Так сообщение увидит первый в списке — с его именем,
+    велосипедом и суммой.</p>
+  <pre class="preview">{{ preview }}</pre>
+  <dl>
+    <dt>Шаблон</dt><dd>{{ campaign.template_title or '—' }}</dd>
+    <dt>Аудитория</dt><dd>{{ AUDIENCES.get(campaign.audience, campaign.audience) }}</dd>
+    <dt>Собрал</dt><dd>{{ campaign.created_by or '' }} · {{ campaign.created_at|dmy }}</dd>
+    <dt>Заметка</dt><dd>{{ campaign.note or '—' }}</dd>
+  </dl>
+  {% if can_edit(staff, 'mailing') %}
+  {% if campaign.status == 'draft' %}
+  <form method="post" action="/mailing/{{ campaign.id }}/start" class="inline-form">
+    <button type="submit">Отправить {{ progress.total }} сообщений</button>
+  </form>
+  {% elif campaign.status == 'sending' %}
+  <form method="post" action="/mailing/{{ campaign.id }}/cancel" class="inline-form">
+    <button type="submit" class="danger">Остановить</button>
+  </form>
+  <p class="muted">Отправленное не отзывается: ни Telegram, ни MAX этого
+    не умеют. Остановка снимает только то, что ещё в очереди.</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Получатели</h2>
+  <table>
+    <tr><th>Клиент</th><th>Куда</th><th>Статус</th><th class="opt">Ошибка</th></tr>
+    {% for s in sends %}
+    <tr class="{% if s.status == 'failed' %}warn-row{% endif %}">
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ s.client_id }}">{{ s.full_name }}</a>{% else %}{{ s.full_name }}{% endif %}</td>
+      <td>{{ SEND_CHANNELS.get(s.channel, s.channel) }}</td>
+      <td>{{ SEND_STATUSES.get(s.status, s.status) }}{% if s.sent_at %} <span class="muted">{{ s.sent_at|dmy }}</span>{% endif %}</td>
+      <td class="opt muted">{{ s.error or '' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">Получателей нет.</td></tr>{% endfor %}
+  </table>
+</section>
+</div>
+{% endblock %}

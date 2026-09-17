@@ -21,11 +21,12 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
-from .crm import banking, tracking
+from .crm import banking, mailing, tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, registration
 from .handlers import staff as staff_h
+from .max.client import MaxClient
 from .middlewares import PipelineMiddleware
 from .services.contract import load_template
 from .services.crypto import Vault
@@ -114,6 +115,12 @@ async def run() -> None:
     banking_task = asyncio.create_task(
         banking.banking_loop(bot, crm, cfg, tochka,
                              interval=cfg.tochka_poll_seconds))
+    # Рассылки: тот же текст уходит в Telegram и, если подключён бот MAX,
+    # в MAX. Токен MAX здесь необязателен - без него MAX-клиентам
+    # сообщения помечаются пропущенными, а не теряются молча.
+    max_client = MaxClient(cfg.max_bot_token) if cfg.max_bot_token else None
+    mailing_task = asyncio.create_task(
+        mailing.mailing_loop(bot, crm, cfg, max_client=max_client))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([
@@ -144,8 +151,11 @@ async def run() -> None:
         reminders.cancel()
         tracking_task.cancel()
         banking_task.cancel()
+        mailing_task.cancel()
         await asyncio.gather(retention, reminders, tracking_task, banking_task,
-                             return_exceptions=True)
+                             mailing_task, return_exceptions=True)
+        if max_client is not None:
+            await max_client.close()
         await tasks.drain()
         await bot.session.close()
         await db.close()

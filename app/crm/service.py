@@ -822,3 +822,51 @@ async def import_statement(crm: Any, rows: Iterable[dict]) -> dict:
         if await crm.save_bank_txn(row) is not None:
             saved += 1
     return {"seen": len(rows), "saved": saved}
+
+
+# ─────────────────────────── рассылки ───────────────────────────
+
+
+async def create_campaign(crm: Any, *, title: str, template: dict, audience: str,
+                          note: str | None, by: str,
+                          today: date | None = None) -> dict:
+    """Собрать кампанию и очередь получателей.
+
+    Очередь считается сразу, а не в момент отправки: черновик существует
+    именно затем, чтобы посмотреть на список до того, как двести человек
+    получат сообщение.
+    """
+    if audience not in logic.AUDIENCES:
+        raise ServiceError("Неизвестная аудитория.")
+    if not template or not template.get("active", True):
+        raise ServiceError("Шаблон не выбран или снят с публикации.")
+    people = logic.pick_audience(audience, await crm.clients_for_mailing(),
+                                 await crm.active_rentals(), today=today)
+    if not people:
+        raise ServiceError("В этой аудитории сейчас никого: "
+                           "рассылать нечего.")
+    campaign_id = await crm.create_campaign(
+        title=title, template_id=template["id"], audience=audience, note=note,
+        by=by)
+    queued = await crm.queue_sends(
+        campaign_id, [(int(p["id"]), p["channel"]) for p in people])
+    return {"id": campaign_id, "queued": queued}
+
+
+async def start_campaign(crm: Any, campaign: dict) -> None:
+    if campaign.get("status") != "draft":
+        raise ServiceError("Отправлять можно только черновик.")
+    await crm.set_campaign_status(campaign["id"], "sending")
+
+
+async def cancel_campaign(crm: Any, campaign: dict) -> int:
+    """Остановить рассылку. Отправленное не отзывается - Telegram и MAX
+    этого не умеют; снимается только то, что ещё в очереди."""
+    if campaign.get("status") in ("done", "cancelled"):
+        raise ServiceError("Кампания уже завершена.")
+    left = 0
+    for send in await crm.campaign_sends(campaign["id"], status="queued"):
+        await crm.mark_send(send["id"], status="skipped", error="отменено")
+        left += 1
+    await crm.set_campaign_status(campaign["id"], "cancelled")
+    return left

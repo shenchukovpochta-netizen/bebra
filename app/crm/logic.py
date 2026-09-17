@@ -879,6 +879,7 @@ SECTIONS: dict[str, str] = {
     "batteries": "Батареи",
     "trackers": "Трекеры и карта парка",
     "cash": "Касса и банк",
+    "mailing": "Рассылки и шаблоны",
     "service": "Сервис: наряды и виды работ",
     "inventory": "Склад: запчасти, приходы, заказы",
     "claims": "Заявки на зачисление",
@@ -925,6 +926,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/billing", "finance"),
     ("/cash", "cash"),
     ("/bank", "cash"),
+    ("/mailing", "mailing"),
     # После /finance: home_for берёт первый путь раздела, а /plan - это
     # форма на сводке, открывать её как страницу нечего.
     ("/plan", "finance"),
@@ -1015,7 +1017,7 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
                    "reports": "view", "inventory": "view", "batteries": "view",
-                   "trackers": "view", "cash": "edit"},
+                   "trackers": "view", "cash": "edit", "mailing": "view"},
       "actions": {}}, False),
     ("tech", "Механик",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
@@ -2607,3 +2609,214 @@ def bank_summary(rows: Iterable[dict]) -> dict[str, Any]:
             "credited": to_money(sum(to_money(r["amount"]) for r in rows
                                      if r.get("status") == "matched")),
             "sure": sum(1 for r in rows if r.get("sure"))}
+
+
+# ─────────────────────────── рассылки ───────────────────────────
+#
+# Рассылка - это не «написать всем». Курьеру с велосипедом на руках
+# предложение «возвращайтесь» выглядит издевательством, а должнику
+# скидка - поощрением. Поэтому у кампании есть аудитория, а у шаблона -
+# подстановки: имя, велосипед, долг, «оплачено до».
+#
+# Подстановки - белым списком. Шаблон пишет человек, и опечатка в имени
+# поля не должна ни падать на отправке, ни уезжать клиенту как есть.
+
+TEMPLATE_FIELDS: dict[str, str] = {
+    "name": "имя клиента",
+    "phone": "телефон",
+    "bike": "номер велосипеда в аренде",
+    "tariff": "название тарифа",
+    "price": "цена периода",
+    "until": "оплачено до",
+    "debt": "долг (без минуса)",
+    "balance": "баланс",
+    "contract": "номер договора",
+    "pay_url": "ссылка на оплату",
+}
+CAMPAIGN_STATUSES: dict[str, str] = {
+    "draft": "Черновик", "sending": "Отправляется",
+    "done": "Отправлена", "cancelled": "Отменена",
+}
+SEND_STATUSES: dict[str, str] = {
+    "queued": "В очереди", "sent": "Доставлено",
+    "failed": "Не доставлено", "skipped": "Пропущен",
+}
+SEND_CHANNELS: dict[str, str] = {"tg": "Telegram", "max": "MAX"}
+AUDIENCES: dict[str, str] = {
+    "renting": "Сейчас в аренде",
+    "debtors": "Должники",
+    "expiring": "Истекает срок",
+    "comeback": "Уехали и не вернулись",
+    "all": "Все клиенты",
+}
+# Сколько дней «не вернулся» считать поводом написать. Меньше двух недель -
+# человек просто в отпуске, больше трёх месяцев - он уже не курьер.
+COMEBACK_FROM_DAYS = 14
+COMEBACK_TO_DAYS = 90
+# Пауза между сообщениями. Telegram разрешает больше, но рассылка - не
+# гонка: при 5 в секунду двести человек получат сообщение за минуту,
+# а бот не поймает ограничение на массовую отправку.
+SEND_PAUSE = 0.2
+
+
+def campaign_no(number: int) -> str:
+    return f"РСЛ-{int(number):06d}"
+
+
+def check_slug(raw: Any, *, what: str = "Код") -> Check:
+    """Код шаблона: латиница, цифры, подчёркивание. Не инвентарный номер -
+    проверка кода велосипеда подняла бы его в верхний регистр."""
+    value = str(raw or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{2,32}", value):
+        return Check(False, error=f"{what}: латиница, цифры и подчёркивание, "
+                                  "от 2 до 32 символов.")
+    return Check(True, value)
+
+
+def check_audience(raw: Any) -> Check:
+    return check_choice(raw, AUDIENCES, what="Аудитория")
+
+
+def check_template_body(raw: Any, *, what: str = "Текст") -> Check:
+    """Текст шаблона: непустой, в пределах лимита Telegram и без
+    неизвестных подстановок."""
+    text = str(raw or "").strip()
+    if not text:
+        return Check(False, error=f"{what}: пусто.")
+    if len(text) > 3000:
+        return Check(False, error=f"{what}: длиннее 3000 символов не уйдёт.")
+    unknown = [f for f in re.findall(r"{([a-zA-Z_]+)}", text)
+               if f not in TEMPLATE_FIELDS]
+    if unknown:
+        return Check(False, error=f"{what}: неизвестная подстановка "
+                                  f"{{{unknown[0]}}}.")
+    return Check(True, text)
+
+
+def plain_text(html_text: str) -> str:
+    """Разметку - долой: MAX её не понимает и покажет теги как текст."""
+    text = re.sub(r"<br\s*/?>", "\n", str(html_text or ""))
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text)
+
+
+def first_name(full_name: Any) -> str:
+    """Имя из ФИО: «Ахмедов Бехруз Шухратович» - «Бехруз».
+
+    Обращение по фамилии в рассылке звучит как повестка, а по полному
+    ФИО - как робот. Одного слова в карточке не бывает почти никогда,
+    но если так - оно и пойдёт в текст.
+    """
+    parts = str(full_name or "").split()
+    return parts[1] if len(parts) > 1 else (parts[0] if parts else "")
+
+
+def template_context(client: Mapping[str, Any], rental: Mapping[str, Any] | None,
+                     balance: Any, *, pay_url: str = "",
+                     today: date | None = None) -> dict[str, str]:
+    """Значения подстановок для одного клиента."""
+    balance = to_money(balance or 0)
+    summary = rental_summary(rental, balance, today=today or date.today()) \
+        if rental else {}
+    until = summary.get("covered_until")
+    return {
+        "name": first_name(client.get("full_name")),
+        "phone": str(client.get("phone") or ""),
+        "bike": f"№ {rental['bike_code']}" if rental and rental.get("bike_code")
+        else "—",
+        "tariff": str((rental or {}).get("tariff_name") or "—"),
+        "price": money((rental or {}).get("price") or 0),
+        "until": until.strftime("%d.%m.%Y") if until else "—",
+        "debt": money(-balance) if balance < 0 else money(0),
+        "balance": money(balance),
+        "contract": str(client.get("contract_no")
+                        or (rental or {}).get("contract_no") or "—"),
+        "pay_url": pay_url,
+    }
+
+
+def render_template(body: str, values: Mapping[str, str]) -> str:
+    """Подставить значения. Неизвестное поле остаётся как есть: шаблон
+    проверяется при сохранении, и падать на отправке ему незачем."""
+    def one(match: re.Match) -> str:
+        return str(values.get(match.group(1), match.group(0)))
+
+    return re.sub(r"{([a-zA-Z_]+)}", one, str(body or ""))
+
+
+def send_channel(client: Mapping[str, Any]) -> str | None:
+    """Куда писать клиенту. Telegram первым: там кабинет и уведомления."""
+    if client.get("tg_id"):
+        return "tg"
+    if client.get("max_id"):
+        return "max"
+    return None
+
+
+def pick_audience(code: str, clients: Iterable[dict],
+                  rentals: Iterable[dict] | None = None, *,
+                  today: date | None = None,
+                  before_days: int = 2) -> list[dict]:
+    """Кому уйдёт кампания. Возвращает клиентов с их арендой, если она есть.
+
+    Заблокированные и чёрный список не получают ничего никогда: рассылка
+    не повод напомнить о себе тому, кому отказали.
+    """
+    today = today or date.today()
+    by_client: dict[int, dict] = {}
+    for rental in rentals or []:
+        if rental.get("status") == "active":
+            by_client[int(rental["client_id"])] = rental
+    out = []
+    for client in clients:
+        if client.get("status") != "active":
+            continue
+        if send_channel(client) is None:
+            continue
+        rental = by_client.get(int(client["id"]))
+        balance = to_money(client.get("balance") or 0)
+        if code == "renting" and rental is None:
+            continue
+        if code == "debtors" and balance >= 0:
+            continue
+        if code == "expiring":
+            if rental is None:
+                continue
+            summary = rental_summary(rental, to_money(rental.get("balance") or 0),
+                                     today=today)
+            left = summary.get("days_left")
+            if left is None or left > before_days:
+                continue
+        if code == "comeback":
+            if rental is not None:
+                continue
+            last = client.get("last_rental_on")
+            if last is None:
+                continue
+            days = (today - (last.date() if isinstance(last, datetime) else last)).days
+            if not COMEBACK_FROM_DAYS <= days <= COMEBACK_TO_DAYS:
+                continue
+        out.append({**client, "rental": rental,
+                    "channel": send_channel(client)})
+    out.sort(key=lambda c: str(c.get("full_name") or ""))
+    return out
+
+
+def campaign_progress(sends: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    sends = list(sends)
+    counts = {code: sum(1 for s in sends if s.get("status") == code)
+              for code in SEND_STATUSES}
+    counts["total"] = len(sends)
+    counts["tg"] = sum(1 for s in sends if s.get("channel") == "tg")
+    counts["max"] = sum(1 for s in sends if s.get("channel") == "max")
+    counts["percent"] = (round(100 * (counts["sent"] + counts["failed"]
+                                      + counts["skipped"]) / len(sends))
+                         if sends else 0)
+    return counts
+
+
+def campaign_rows(campaigns: Iterable[dict]) -> list[dict]:
+    rows = list(campaigns)
+    rows.sort(key=lambda c: c.get("created_at"), reverse=True)
+    rows.sort(key=lambda c: c.get("status") != "sending")
+    return rows

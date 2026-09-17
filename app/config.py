@@ -169,6 +169,10 @@ class Config:
     tochka_account_id: str = ""
     tochka_customer_code: str = ""
     tochka_poll_seconds: int = 1800
+    # Токен бота MAX. Телеграм-боту он нужен ровно для одного: отправить
+    # рассылку тем клиентам, у кого привязан MAX. Пусто - такие получатели
+    # помечаются пропущенными.
+    max_bot_token: str = ""
     extra: dict = field(default_factory=dict)
 
     @property
@@ -249,4 +253,5 @@ class Config:
             tochka_account_id=_env("TOCHKA_ACCOUNT_ID"),
             tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
             tochka_poll_seconds=_int("TOCHKA_POLL_SECONDS", "1800"),
+            max_bot_token=_secret("MAX_BOT_TOKEN", required=False),
         )

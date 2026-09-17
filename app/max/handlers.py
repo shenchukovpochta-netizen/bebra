@@ -73,11 +73,15 @@ class Ctx:
     """Всё, что нужно обработчику: клиент, база, конфиг, шифрование."""
 
     def __init__(self, cl: MaxClient, db: Database, cfg: Config,
-                 vault: Vault) -> None:
+                 vault: Vault, crm: Any = None) -> None:
         self.cl = cl
         self.db = db
         self.cfg = cfg
         self.vault = vault
+        # Мост в основную базу CRM: MAX-бот живёт в своей, но карточка
+        # клиента одна на оба мессенджера. Может быть None - тогда моста
+        # просто нет, и бот работает как раньше.
+        self.crm = crm
 
 
 async def _say(ctx: Ctx, user_id: int, text: str,
@@ -143,6 +147,24 @@ async def cb_oferta(ctx: Ctx, user: dict, callback_id: str) -> None:
     await _say(ctx, user["tg_id"], texts.ASK_CONTACT, kb.share_contact())
 
 
+async def link_crm_account(ctx: Ctx, phone: str, max_id: int) -> None:
+    """Привязать MAX-аккаунт к карточке клиента в основной базе.
+
+    Best effort, как и вся синхронизация с CRM: без этой связи рассылке
+    некуда писать MAX-клиенту, но сам бот работает и без неё.
+    """
+    if ctx.crm is None:
+        return
+    try:
+        linked = await ctx.crm.link_client_max(phone, max_id)
+    except Exception:                                   # noqa: BLE001
+        log.warning("MAX-аккаунт %s не связан с карточкой", max_id, exc_info=True)
+        return
+    if linked is None:
+        log.info("карточки с телефоном %s в CRM нет - MAX-аккаунт не связан",
+                 phone)
+
+
 async def st_contact(ctx: Ctx, user: dict, attachments: list) -> None:
     phone, owner_id = parse.contact_from(attachments)
     if phone is None:
@@ -158,6 +180,7 @@ async def st_contact(ctx: Ctx, user: dict, attachments: list) -> None:
                               phone=normalized, state=following):
         return
     await ctx.db.log_event(user["tg_id"], "contact_set")
+    await link_crm_account(ctx, normalized, user["tg_id"])
     await _say(ctx, user["tg_id"], texts.ANKETA_INTRO)
     await _ask(ctx, user["tg_id"], following)
 

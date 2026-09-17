@@ -359,8 +359,8 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
   ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
@@ -1289,3 +1289,82 @@ create table if not exists crm.bank_txns (
 );
 create index if not exists bank_txns_idx on crm.bank_txns (booked_at desc);
 create index if not exists bank_txns_new on crm.bank_txns (status) where status = 'new';
+
+-- ────────────────────── рассылки ──────────────────────
+--
+-- Рассылка - это не «написать всем». Курьеру, у которого велосипед на
+-- руках, предложение «вернуться» выглядит издевательством, а должнику
+-- скидка - поощрением. Поэтому у кампании есть аудитория, а у шаблона -
+-- подстановки: имя, баланс, дата «оплачено до».
+--
+-- Текст хранится дважды: для Telegram с разметкой и для MAX простым
+-- текстом. MAX разметку не понимает, а автоматически снятые теги
+-- превращают «<b>3 000 ₽</b>» в «3 000 ₽» - но только там, где текст
+-- писали с оглядкой на это. Отдельное поле честнее.
+
+create table if not exists crm.message_templates (
+  id         bigserial primary key,
+  code       text        not null unique,
+  title      text        not null,
+  body       text        not null,      -- Telegram, с разметкой
+  body_max   text,                      -- MAX, простым текстом
+  active     boolean     not null default true,
+  note       text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into crm.message_templates (code, title, body, body_max, note) values
+  ('debt', 'Напоминание о долге',
+   E'Здравствуйте, {name}!\n\nПо велосипеду {bike} накопился долг {debt}.\nОплатить можно по ссылке: {pay_url}\n\nЕсли уже оплатили — напишите нам.',
+   E'Здравствуйте, {name}!\n\nПо велосипеду {bike} накопился долг {debt}.\nОплатить можно по ссылке: {pay_url}\n\nЕсли уже оплатили — напишите нам.',
+   'Аудитория «должники»'),
+  ('comeback', 'Возвращайтесь',
+   E'Здравствуйте, {name}!\n\nУ нас есть свободные велосипеды — можно забрать сегодня на Павлюхина или Адоратского.\nНапишите, и придержим за вами.',
+   E'Здравствуйте, {name}!\n\nУ нас есть свободные велосипеды — можно забрать сегодня на Павлюхина или Адоратского.\nНапишите, и придержим за вами.',
+   'Аудитория «уехали и не вернулись»'),
+  ('expiring', 'Срок подходит',
+   E'Здравствуйте, {name}!\n\nАренда велосипеда {bike} оплачена до {until}.\nПродлить — {pay_url}, сумма за период {price}.',
+   E'Здравствуйте, {name}!\n\nАренда велосипеда {bike} оплачена до {until}.\nПродлить — {pay_url}, сумма за период {price}.',
+   'Аудитория «истекает срок»')
+on conflict (code) do nothing;
+
+create table if not exists crm.campaigns (
+  id          bigserial primary key,
+  no          text        not null unique,   -- РСЛ-000001
+  title       text        not null,
+  template_id bigint      references crm.message_templates (id),
+  audience    text        not null,
+  -- draft|sending|done|cancelled. Рассылка не стартует сама: черновик
+  -- существует именно затем, чтобы посмотреть на список получателей
+  -- до того, как двести человек получат сообщение.
+  status      text        not null default 'draft',
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  started_at  timestamptz,
+  finished_at timestamptz,
+  note        text
+);
+
+create table if not exists crm.campaign_sends (
+  id          bigserial primary key,
+  campaign_id bigint      not null references crm.campaigns (id) on delete cascade,
+  client_id   bigint      not null references crm.clients (id),
+  channel     text        not null,          -- tg|max
+  status      text        not null default 'queued',  -- queued|sent|failed|skipped
+  error       text,
+  sent_at     timestamptz
+);
+-- Один получатель - одно сообщение в кампании: повторный запуск и гонка
+-- отправителей иначе шлют клиенту второй раз то же самое.
+create unique index if not exists campaign_sends_one
+  on crm.campaign_sends (campaign_id, client_id);
+create index if not exists campaign_sends_queue
+  on crm.campaign_sends (campaign_id, status);
+
+-- MAX-аккаунт клиента. Телеграм-аккаунт лежит в tg_id с самого начала;
+-- MAX появился позже и живёт в своей базе, поэтому связь заводится
+-- по телефону: мостом из MAX-бота или руками в карточке.
+alter table crm.clients add column if not exists max_id bigint;
+create unique index if not exists clients_max_idx on crm.clients (max_id)
+  where max_id is not null;

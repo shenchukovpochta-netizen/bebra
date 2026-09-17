@@ -20,6 +20,7 @@ import asyncpg
 
 from . import tasks
 from .config import Config, _env, _int, _secret
+from .crm.db import CrmDB
 from .db import Database
 from .max.client import MaxClient
 from .max.handlers import Ctx
@@ -133,7 +134,21 @@ async def run() -> None:
     me = await cl.me()
     log.info("бот MAX @%s готов", me.get("username") or me.get("name"))
 
-    ctx = Ctx(cl, db, cfg, vault)
+    # Мост в основную базу CRM: карточка клиента одна на оба мессенджера,
+    # и рассылке нужен его max_id. Не поднялся - бот работает как раньше.
+    crm, crm_db = None, None
+    main_db = _env("CRM_POSTGRES_DB", "")
+    if main_db and main_db != cfg.pg["database"]:
+        try:
+            crm_db = await Database.connect(dict(cfg.pg, database=main_db))
+            crm = CrmDB(crm_db.pool)
+            log.info("мост в CRM поднят (база %s)", main_db)
+        except Exception:                               # noqa: BLE001
+            log.warning("мост в CRM не поднялся: MAX-аккаунты не будут "
+                        "привязываться к карточкам", exc_info=True)
+            crm, crm_db = None, None
+
+    ctx = Ctx(cl, db, cfg, vault, crm)
     retention = asyncio.create_task(tasks.retention_loop(db, cfg))
     stop = asyncio.Event()
 
@@ -159,6 +174,8 @@ async def run() -> None:
         await tasks.drain()
         await cl.close()
         await db.close()
+        if crm_db is not None:
+            await crm_db.close()
         log.info("остановлен")
 
 
