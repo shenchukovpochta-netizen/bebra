@@ -786,6 +786,32 @@ class CrmDB:
             *args)
         return {r["kind"]: Decimal(r["total"] or 0) for r in rows}
 
+    async def money_by_day(self, since: date, until: date) -> list[dict]:
+        """Платежи и начисления по дням: сколько пришло и сколько начислили.
+
+        Дни без движения остаются в ряду нулями: провал на графике - это
+        тоже факт, а дыра в нём выглядит поломкой.
+        """
+        rows = await self.pool.fetch(
+            """
+            with days as (
+              select generate_series($1::date, $2::date, interval '1 day')::date as day
+            )
+            select d.day,
+                   coalesce(sum(l.amount) filter (where l.kind = 'payment'), 0)
+                     as paid,
+                   coalesce(-sum(l.amount) filter (where l.kind = 'charge'), 0)
+                     as charged
+              from days d
+              left join crm.ledger l
+                     on l.created_at >= d.day::timestamptz
+                    and l.created_at < (d.day + 1)::timestamptz
+             group by d.day
+             order by d.day
+            """, since, until)
+        return [{"day": r["day"], "paid": Decimal(r["paid"] or 0),
+                 "charged": Decimal(r["charged"] or 0)} for r in rows]
+
     async def revenue_by_month(self, months: int = 12) -> list[dict]:
         """Платежи и начисления по месяцам: сколько пришло и сколько
         заработано. Расходы на ремонт - из журнала велосипедов."""

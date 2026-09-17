@@ -2362,6 +2362,71 @@ def repair_chart(by_day: Mapping[date, Any], norm: int = 0) -> dict[str, Any]:
             "peak": max((d["value"] for d in days), default=0)}
 
 
+def money_chart(rows: Iterable[Mapping[str, Any]], *, plan_per_day: Any = 0,
+                today: date | None = None) -> dict[str, Any]:
+    """График денег по дням месяца: пришло, накопленный долг, план в день.
+
+    Долг показан накопительным: разовый провал ничего не значит, а линия,
+    которая ползёт вверх весь месяц, - это и есть «копим долги».
+
+    Дни после сегодняшнего остаются в ряду пустыми: месяц ещё идёт, и
+    обрезать его значит делать вид, что он кончился.
+    """
+    today = today or date.today()
+    per_day = to_money(plan_per_day)
+    days, paid_sum, debt_sum = [], Decimal(0), Decimal(0)
+    for row in rows:
+        day = row["day"]
+        future = day > today
+        paid = to_money(row.get("paid"))
+        charged = to_money(row.get("charged"))
+        if not future:
+            paid_sum += paid
+            debt_sum += charged - paid
+        days.append({"day": day, "paid": paid, "charged": charged,
+                     "future": future,
+                     # Долг копится нарастающим итогом и ниже нуля не
+                     # опускается: переплата - это не отрицательный долг,
+                     # а деньги вперёд, и рисовать её провалом нечестно.
+                     "debt": max(debt_sum, Decimal(0)),
+                     "over": bool(per_day) and paid >= per_day})
+    past = [d for d in days if not d["future"]]
+    top = max([d["paid"] for d in days] + [per_day, Decimal(1)])
+    debt_top = max([d["debt"] for d in days] + [Decimal(1)])
+    for row in days:
+        row["height"] = int(round(100 * row["paid"] / top))
+        row["debt_height"] = int(round(100 * row["debt"] / debt_top))
+    best = max(past, key=lambda d: d["paid"], default=None)
+    worked = [d for d in past if d["paid"] > 0]
+    return {
+        "days": days, "top": top, "debt_top": debt_top,
+        "plan_per_day": per_day,
+        "plan_height": int(round(100 * per_day / top)) if top else 0,
+        "paid": to_money(paid_sum),
+        "debt": max(debt_sum, Decimal(0)),
+        "days_passed": len(past),
+        "avg": to_money(paid_sum / len(past)) if past else Decimal(0),
+        # Средний по рабочим дням: месяц, в котором половина дней пустая,
+        # средним по всем дням выглядит вдвое хуже, чем он есть.
+        "avg_worked": to_money(paid_sum / len(worked)) if worked else Decimal(0),
+        "best": best,
+        "over_days": sum(1 for d in past if d["over"]),
+    }
+
+
+def cumulative(days: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Тот же ряд накопительно: «сколько всего пришло к этому дню»."""
+    out, total = [], Decimal(0)
+    for row in days:
+        if not row.get("future"):
+            total += to_money(row.get("paid"))
+        out.append({**row, "total": total})
+    top = max([r["total"] for r in out] + [Decimal(1)])
+    for row in out:
+        row["height"] = int(round(100 * row["total"] / top))
+    return out
+
+
 def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,
                   days_in_month: int, days_passed: int) -> dict[str, Any]:
     """Факт против плана: деньги за месяц и сколько ещё можно взять.

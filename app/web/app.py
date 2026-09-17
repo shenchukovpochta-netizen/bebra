@@ -391,6 +391,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             until=datetime.now().astimezone())
         soon = logic.freeing_soon(rows, today=today)
         month_totals = await crm.ledger_totals(since=today.replace(day=1))
+        # Деньги по дням месяца: столбики «пришло», линия накопленного
+        # долга и пунктир плана в день. Помесячных чисел мало - по ним
+        # не видно, в какой день всё пошло не так.
+        chart = logic.money_chart(
+            await crm.money_by_day(first, (next_month - timedelta(days=1))),
+            plan_per_day=logic.to_money(plan["check"] * plan["rented"]),
+            today=today)
         return render(request, "dashboard.html",
                       plan=plan,
                       progress=logic.plan_progress(
@@ -416,7 +423,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       expiring=expiring, before_days=cfg.remind_before_days,
                       forecast=logic.forecast_summary(bikes_by.get("available", 0), soon),
                       debtors=await crm.debtors(10),
-                      month=month_totals,
+                      month=month_totals, chart=chart,
+                      chart_total=logic.cumulative(chart["days"]),
+                      chart_view=request.query_params.get("chart") or "days",
                       # Доля баллов от оплат: «0,1 %» - это скидка,
                       # «20 %» - уже бизнес-модель, и это видно сразу.
                       bonus_share=logic.bonus_totals(

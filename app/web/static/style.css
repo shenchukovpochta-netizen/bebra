@@ -288,3 +288,12 @@ p.small{font-size:13px}
   .bars{height:140px}
   .bar-num{display:none}
 }
+
+/* Деньги по дням: столбик «пришло» и точка накопленного долга.
+   Будущие дни месяца остаются пустыми - месяц ещё идёт, и обрезать
+   его значит делать вид, что он кончился. */
+.bar-val.over-ok{background:var(--ok)}
+.bar-val.future{background:var(--line)}
+.bar-col{position:relative}
+.bar-dot{position:absolute;left:50%;width:6px;height:6px;margin-left:-3px;
+         border-radius:50%;background:var(--bad)}

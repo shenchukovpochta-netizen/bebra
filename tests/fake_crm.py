@@ -657,6 +657,23 @@ class FakeCrm:
             rows.append({**x, "full_name": self.clients_[x["client_id"]]["full_name"]})
         return rows[:limit]
 
+    async def money_by_day(self, since, until):
+        """Дни без движения остаются в ряду нулями - как в базе: дыра
+        на графике выглядит поломкой, а ноль это факт."""
+        from datetime import timedelta as _td
+        out = []
+        day = since
+        while day <= until:
+            paid = sum((Decimal(x["amount"]) for x in self.ledger_
+                        if x["kind"] == "payment"
+                        and x["created_at"].date() == day), Decimal(0))
+            charged = -sum((Decimal(x["amount"]) for x in self.ledger_
+                            if x["kind"] == "charge"
+                            and x["created_at"].date() == day), Decimal(0))
+            out.append({"day": day, "paid": paid, "charged": charged})
+            day += _td(days=1)
+        return out
+
     async def ledger_totals(self, *, since=None, until=None):
         out: dict[str, Decimal] = {}
         for x in await self.ledger(since=since, until=until, limit=10**9):

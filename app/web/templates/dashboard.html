@@ -63,6 +63,37 @@
   <p class="muted bad">Столько велосипедов в парке нет: план этого месяца уже
     не вытянуть — либо поднимать чек, либо признать и поставить достижимый.</p>
   {% endif %}
+  <h3>Деньги по дням
+    <span class="muted">· <a href="/?chart=days" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a> ·
+      <a href="/?chart=cumulative" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></span></h3>
+  {% set shown = chart_total if chart_view == 'cumulative' else chart.days %}
+  <div class="bars" role="img"
+       aria-label="Деньги по дням месяца, план {{ money(chart.plan_per_day) }} в день">
+    {% for d in shown %}
+    <div class="bar-col" title="{{ d.day|dmy }}: пришло {{ money(d.paid) }}{% if d.debt %}, долг {{ money(d.debt) }}{% endif %}">
+      <div class="bar-val {% if d.future %}future{% elif d.over %}over-ok{% endif %}"
+           style="height:{{ d.height }}%"></div>
+      {% if chart_view != 'cumulative' and d.debt %}
+      <div class="bar-dot" style="bottom:{{ d.debt_height }}%" aria-hidden="true"></div>
+      {% endif %}
+      <div class="bar-day muted">{{ d.day.day }}</div>
+    </div>
+    {% endfor %}
+    {% if chart_view != 'cumulative' and chart.plan_per_day %}
+    <div class="bar-norm" style="bottom:{{ chart.plan_height }}%" aria-hidden="true">
+      <span>план {{ money(chart.plan_per_day) }}/день</span></div>
+    {% endif %}
+  </div>
+  <p class="muted">Итого пришло <b>{{ money(chart.paid) }}</b> за {{ chart.days_passed }} дн. ·
+    в среднем {{ money(chart.avg) }}/день{% if chart.avg_worked != chart.avg %} (по дням с оплатами — {{ money(chart.avg_worked) }}){% endif %}{% if chart.best and chart.best.paid %} ·
+    лучший день {{ chart.best.day|dmy }} — {{ money(chart.best.paid) }}{% endif %} ·
+    дней по плану {{ chart.over_days }}.</p>
+  {% if chart.debt %}
+  <p class="muted">Точки под столбиками — накопленный долг: сейчас
+    <b class="bad">{{ money(chart.debt) }}</b>. Разовый провал ничего не значит,
+    а линия, которая ползёт вверх весь месяц, — это и есть «копим долги».</p>
+  {% endif %}
+
   {% if can_edit(staff, 'finance') %}
   <form method="post" action="/plan" class="grid2">
     <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented }}" size="5"></label>

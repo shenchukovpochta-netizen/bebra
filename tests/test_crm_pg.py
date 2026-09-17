@@ -1647,6 +1647,28 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(week[today - timedelta(days=3)], D("0"))
         self.assertEqual(week[today - timedelta(days=1)], D("0"))
 
+    async def test_money_by_day_on_postgres(self):
+        """Деньги по дням: пустой день - ноль, а не пропуск."""
+        await self.seed()
+        today = date.today()
+        await self.crm.add_ledger(client_id=self.client_id, rental_id=None,
+                                  kind="payment", amount=D("4200"))
+        await self.crm.add_ledger(client_id=self.client_id, rental_id=None,
+                                  kind="charge", amount=D("-3000"))
+        rows = await self.crm.money_by_day(today - timedelta(days=2), today)
+        self.assertEqual(len(rows), 3, "дни без движения остаются в ряду")
+        by_day = {r["day"]: r for r in rows}
+        self.assertEqual(by_day[today]["paid"], D("4200.00"))
+        self.assertEqual(by_day[today]["charged"], D("3000.00"),
+                         "начисление показываем положительным числом")
+        self.assertEqual(by_day[today - timedelta(days=2)]["paid"], D("0"))
+
+        chart = logic.money_chart(rows, plan_per_day=D("2000"), today=today)
+        self.assertEqual(chart["paid"], D("4200.00"))
+        self.assertEqual(chart["debt"], D("0"),
+                         "заплатили больше, чем начислили - это не долг")
+        self.assertEqual(chart["over_days"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
