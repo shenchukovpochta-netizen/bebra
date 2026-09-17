@@ -1813,3 +1813,81 @@ def rental_mileage(rows: Iterable[dict], *, current: int | None = None) -> int:
         if start is not None and end is not None and int(end) >= int(start):
             total += int(end) - int(start)
     return total
+
+
+# ───────────────────────────── розыск ─────────────────────────────
+
+# Через сколько суток просрочки аренда попадает в розыск и через сколько
+# суток розыска пора признавать велосипед потерянным. Значения по
+# умолчанию - для Казани с недельным тарифом: неделя молчания это уже не
+# «забыл оплатить».
+SEARCH_AFTER_DAYS = 7
+THEFT_AFTER_DAYS = 21
+
+
+def search_settings(raw: dict[str, str] | None) -> dict[str, int]:
+    raw = raw or {}
+
+    def days(key: str, default: int) -> int:
+        try:
+            value = int(str(raw[key]))
+        except (KeyError, ValueError, TypeError):
+            return default
+        return value if 1 <= value <= 365 else default
+
+    return {"search_after": days("search_after_days", SEARCH_AFTER_DAYS),
+            "theft_after": days("theft_after_days", THEFT_AFTER_DAYS)}
+
+
+def in_search(rental: dict) -> bool:
+    return bool(rental.get("search_at"))
+
+
+def search_days(rental: dict, *, today: date | None = None) -> int:
+    """Сколько суток аренда в розыске."""
+    started = rental.get("search_at")
+    if started is None:
+        return 0
+    start = started.date() if isinstance(started, datetime) else started
+    return max(((today or date.today()) - start).days, 0)
+
+
+def search_rows(rentals: Iterable[dict], *, settings: dict[str, int],
+                today: date | None = None) -> dict[str, list[dict]]:
+    """Кого искать: просрочившие дольше нормы и уже объявленные в розыск.
+
+    Просрочка считается по тому же «оплачено до», что и напоминания:
+    иначе в розыск попадал бы клиент, у которого на балансе есть деньги
+    на следующий период.
+    """
+    today = today or date.today()
+    candidates, searching = [], []
+    for rental in rentals:
+        if rental.get("status") != "active":
+            continue
+        until = covered_until(rental["billed_until"], rental.get("balance", 0),
+                              rental["price"], rental["period_days"])
+        overdue = max(-days_left(until, today=today), 0)
+        row = {**rental, "overdue_days": overdue, "covered_until": until,
+               "search_days": search_days(rental, today=today)}
+        if in_search(rental):
+            row["theft"] = row["search_days"] >= settings["theft_after"]
+            searching.append(row)
+        elif overdue >= settings["search_after"]:
+            candidates.append(row)
+    candidates.sort(key=lambda r: -r["overdue_days"])
+    searching.sort(key=lambda r: -r["search_days"])
+    return {"candidates": candidates, "searching": searching}
+
+
+def search_digest(rows: dict[str, list[dict]]) -> str:
+    """Строки для служебного чата. Пусто - искать некого, молчим."""
+    lines = []
+    for row in rows["candidates"]:
+        lines.append(f"• {row.get('full_name') or '—'} · № {row.get('bike_code') or '—'}"
+                     f" — просрочка {row['overdue_days']} дн., пора в розыск")
+    for row in rows["searching"]:
+        if row.get("theft"):
+            lines.append(f"• {row.get('full_name') or '—'} · № {row.get('bike_code') or '—'}"
+                         f" — в розыске {row['search_days']} дн., пора признавать потерю")
+    return "\n".join(lines)

@@ -89,6 +89,26 @@ async def post_free_bikes(bot: Any, crm: Any, cfg: Any) -> bool:
     return True
 
 
+async def report_search(bot: Any, crm: Any, cfg: Any, *, today: date) -> int:
+    """Кого пора искать - в служебный чат. Возвращает число строк.
+
+    Молчим, когда искать некого: ежедневное «все платят» перестают читать,
+    а вместе с ним и то, ради чего сообщение есть.
+    """
+    settings = logic.search_settings(await crm.settings())
+    rows = logic.search_rows(await crm.active_rentals(), settings=settings,
+                             today=today)
+    lines = logic.search_digest(rows)
+    if not lines:
+        return 0
+    try:
+        await bot.send_message(cfg.contract_chat_id,
+                               texts.SEARCH_DIGEST.format(lines=lines))
+    except TelegramAPIError:
+        log.exception("сводка по розыску не доставлена")
+    return len(rows["candidates"]) + sum(1 for r in rows["searching"] if r.get("theft"))
+
+
 async def report_integrity(bot: Any, crm: Any, cfg: Any) -> int:
     """Расхождения - в служебный чат. Возвращает число расхождений.
 
@@ -125,6 +145,12 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date) -> No
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: проход напоминаний не удался")
         return
+    try:
+        hunted = await report_search(bot, crm, cfg, today=today)
+        if hunted:
+            log.info("CRM: строк розыска отправлено %s", hunted)
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: сводка по розыску не собрана")
     try:
         found = await report_integrity(bot, crm, cfg)
         if found:

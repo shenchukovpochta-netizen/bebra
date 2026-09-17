@@ -44,6 +44,7 @@ ORDER_FIELDS = frozenset({
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
 })
 RENTAL_FIELDS = frozenset({
+    "search_at", "search_by", "search_note",
     "tariff_id", "tariff_name", "period_days", "price", "billing",
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
     "intent", "intent_until", "intent_by", "intent_at", "snooze_until",

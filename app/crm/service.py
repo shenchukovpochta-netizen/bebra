@@ -595,3 +595,41 @@ async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
                            "Откройте её заново.")
     return {"old_bike_id": old_id, "new_bike_id": new_bike["id"],
             "old_status": status}
+
+
+async def start_search(crm: Any, rental: dict, *, note: str | None, by: str) -> None:
+    """Объявить велосипед в розыск: клиент не платит и не отвечает.
+
+    Аренда остаётся идущей, а начисления - начисляться: розыск не прощает
+    долг, он поднимает флаг, чтобы велосипед не растворился в списке
+    должников.
+    """
+    if rental.get("status") != "active":
+        raise ServiceError("Аренда закрыта.")
+    if logic.in_search(rental):
+        raise ServiceError("Эта аренда уже в розыске.")
+    await crm.update_rental(rental["id"], search_at=datetime.now(UTC),
+                            search_by=by, search_note=note)
+
+
+async def stop_search(crm: Any, rental: dict, *, by: str) -> None:
+    """Снять розыск: клиент нашёлся, велосипед вернули."""
+    del by
+    if not logic.in_search(rental):
+        raise ServiceError("Эта аренда не в розыске.")
+    await crm.update_rental(rental["id"], search_at=None, search_by=None,
+                            search_note=None)
+
+
+async def declare_theft(crm: Any, rental: dict, *, note: str | None, by: str) -> None:
+    """Признать велосипед потерянным: аренда закрывается, велосипед - lost.
+
+    Долг клиента остаётся в журнале: списывать его - отдельное решение
+    владельца, и делается оно корректировкой, а не этой кнопкой.
+    """
+    if rental.get("status") != "active":
+        raise ServiceError("Аренда уже закрыта.")
+    reason = (note or "").strip() or "Признан потерянным: клиент не вернул велосипед"
+    if not await crm.close_rental(rental["id"], closed_on=date.today(),
+                                  note=reason, bike_status="lost", closed_by=by):
+        raise ServiceError("Аренда уже закрыта.")

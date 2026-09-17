@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Розыск — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Розыск</h1>
+  <nav class="tabs"><a href="/rentals">Аренды</a><a href="/rentals/search" class="on">Розыск</a></nav>
+</div>
+
+<div class="tiles">
+  <div class="tile {% if candidates %}hot{% endif %}"><b>{{ candidates|length }}</b><span>пора в розыск<br><small class="muted">просрочка от {{ settings.search_after }} дн.</small></span></div>
+  <div class="tile {% if searching %}warn{% endif %}"><b>{{ searching|length }}</b><span>в розыске сейчас</span></div>
+  <div class="tile"><b>{{ searching|selectattr('theft')|list|length }}</b><span>пора признавать потерю<br><small class="muted">в розыске от {{ settings.theft_after }} дн.</small></span></div>
+</div>
+
+<div class="card">
+  <h2>Пора в розыск</h2>
+  <table>
+    <tr><th>Клиент</th><th>Телефон</th><th>Велосипед</th><th>Просрочка</th><th>Долг</th><th></th></tr>
+    {% for r in candidates %}
+    <tr>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
+      <td>{{ r.phone or '—' }}</td>
+      <td>{% if r.bike_id %}<a href="/bikes/{{ r.bike_id }}">№ {{ r.bike_code }}</a>{% else %}—{% endif %}</td>
+      <td class="num bad">{{ r.overdue_days }} дн.</td>
+      <td class="num {% if r.balance < 0 %}bad{% endif %}">{% if can_view(staff, 'finance') %}{{ money(r.balance) }}{% endif %}</td>
+      <td><a class="btn ghost" href="/rentals/{{ r.id }}">Открыть аренду</a></td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">Никого: все платят или в розыске уже стоят.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Просрочка считается по «оплачено до», как и напоминания:
+    клиент с деньгами на балансе сюда не попадает, даже если период уже
+    начислен.</p>
+</div>
+
+<div class="card">
+  <h2>В розыске</h2>
+  <table>
+    <tr><th>Клиент</th><th>Телефон</th><th>Велосипед</th><th>В розыске</th><th>Почему</th><th></th></tr>
+    {% for r in searching %}
+    <tr class="{% if r.theft %}warn-row{% endif %}">
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
+      <td>{{ r.phone or '—' }}</td>
+      <td>{% if r.bike_id %}<a href="/bikes/{{ r.bike_id }}">№ {{ r.bike_code }}</a>{% else %}—{% endif %}</td>
+      <td class="num">{{ r.search_days }} дн.{% if r.theft %} <small class="bad">пора признавать потерю</small>{% endif %}</td>
+      <td>{{ r.search_note or '' }} <small class="muted">{{ r.search_by or '' }}</small></td>
+      <td><a class="btn ghost" href="/rentals/{{ r.id }}">Открыть аренду</a></td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">В розыске никого.</td></tr>{% endfor %}
+  </table>
+</div>
+
+{% if can_edit(staff, 'rentals') %}
+<div class="card narrow">
+  <h2>Правило</h2>
+  <form method="post" action="/rentals/search" class="grid2">
+    <label>В розыск через, суток просрочки <input name="search_after_days" value="{{ settings.search_after }}" size="4"></label>
+    <label>Признавать потерю через, суток розыска <input name="theft_after_days" value="{{ settings.theft_after }}" size="4"></label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">Система не объявляет розыск сама: она показывает, кого
+    пора искать, а решение и звонок остаются за человеком. Признание потери
+    закрывает аренду и переводит велосипед в «Утерян»; долг клиента
+    остаётся в журнале — списывать его отдельное решение.</p>
+</div>
+{% endif %}
+{% endblock %}

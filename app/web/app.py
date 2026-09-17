@@ -129,7 +129,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
-        SWAP_REASONS=logic.SWAP_REASONS,
+        SWAP_REASONS=logic.SWAP_REASONS, in_search=logic.in_search,
+        search_days=logic.search_days,
         PART_ORDER_STATUSES=logic.PART_ORDER_STATUSES,
         NEED_SOURCES=logic.NEED_SOURCES, PART_UNITS=logic.PART_UNITS,
         INTEGRITY_KINDS=logic.INTEGRITY_KINDS, DEBT_NOISE=logic.DEBT_NOISE,
@@ -1016,6 +1017,65 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                            f"{started.value:%d.%m.%Y}.")
         else:
             flash(request, "Аренда оформлена, первый период начислен.")
+        return redirect(f"/rentals/{rental_id}")
+
+    @app.get("/rentals/search")
+    async def rentals_search(request: Request) -> Response:
+        """Розыск: кто перестал платить и пропал.
+
+        Потеря велосипеда начинается одинаково - клиент замолчал, а
+        велосипед остался «в аренде», и никто его не ищет.
+        """
+        settings = logic.search_settings(await crm.settings())
+        rows = logic.search_rows(await crm.active_rentals(), settings=settings)
+        return render(request, "search.html", settings=settings, **rows)
+
+    @app.post("/rentals/search")
+    async def rentals_search_settings(request: Request) -> Response:
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        data = await form(request)
+        after = count_field(data, "search_after_days", what="Срок до розыска",
+                            default=str(logic.SEARCH_AFTER_DAYS), limit=365)
+        theft = count_field(data, "theft_after_days", what="Срок до признания потери",
+                            default=str(logic.THEFT_AFTER_DAYS), limit=365)
+        for check in (after, theft):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/rentals/search")
+        await crm.set_setting("search_after_days", str(after.value), by=who(request))
+        await crm.set_setting("theft_after_days", str(theft.value), by=who(request))
+        flash(request, "Правило розыска сохранено.")
+        return redirect("/rentals/search")
+
+    @app.post("/rentals/{rental_id}/search")
+    async def rental_search(request: Request, rental_id: int) -> Response:
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        rental = await crm.rental(rental_id)
+        if rental is None:
+            return render(request, "missing.html", status_code=404, what="Аренда")
+        data = await form(request)
+        note = logic.check_note(data.get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+            return redirect(f"/rentals/{rental_id}")
+        action = data.get("action") or "start"
+        try:
+            if action == "stop":
+                await service.stop_search(crm, rental, by=who(request))
+                flash(request, "Розыск снят.")
+            elif action == "theft":
+                await service.declare_theft(crm, rental, note=note.value,
+                                            by=who(request))
+                flash(request, "Велосипед признан потерянным, аренда закрыта. "
+                               "Долг клиента остался в журнале.")
+            else:
+                await service.start_search(crm, rental, note=note.value,
+                                           by=who(request))
+                flash(request, "Аренда в розыске.")
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
         return redirect(f"/rentals/{rental_id}")
 
     @app.get("/rentals/{rental_id}")

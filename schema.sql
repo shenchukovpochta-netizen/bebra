@@ -984,3 +984,18 @@ create unique index if not exists rental_bikes_one_open on crm.rental_bikes (ren
 -- Отдельного статуса нет намеренно - подменный тоже свободен, просто
 -- предлагается первым при замене и последним при выдаче нового клиента.
 alter table crm.bikes add column if not exists spare boolean not null default false;
+
+-- ───────────────────────────── розыск ─────────────────────────────
+--
+-- Из ~190 велосипедов ~25 числятся потерянными. Потеря начинается
+-- одинаково: клиент перестал платить и пропал, а велосипед остался
+-- «в аренде» и никто его не ищет. Розыск - это отметка с датой и автором,
+-- после которой велосипед перестаёт быть просто должником.
+--
+-- Отдельной таблицы нет: розыск - состояние аренды, а не сущность.
+
+alter table crm.rentals add column if not exists search_at timestamptz;
+alter table crm.rentals add column if not exists search_by text;
+alter table crm.rentals add column if not exists search_note text;
+create index if not exists rentals_search_idx on crm.rentals (search_at)
+  where search_at is not null;

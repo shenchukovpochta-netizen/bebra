@@ -38,6 +38,20 @@
   </form>
   {% endif %}
   {% if swap_bikes %}
+  <h2>Розыск</h2>
+  {# Розыск не прощает долг и не останавливает начисления: он поднимает
+     флаг, чтобы велосипед не растворился в списке должников. #}
+  <form method="post" action="/rentals/{{ rental.id }}/search" class="grid2">
+    {% if in_search(rental) %}
+    <p class="wide">В розыске {{ search_days(rental) }} дн.{% if rental.search_note %} — {{ rental.search_note }}{% endif %} <small class="muted">{{ rental.search_by or '' }}</small></p>
+    <button type="submit" name="action" value="stop">Снять розыск</button>
+    <button type="submit" name="action" value="theft" class="danger">Признать потерянным</button>
+    {% else %}
+    <label class="wide">Комментарий <input name="note" placeholder="не отвечает с 10.09, адрес не подтверждён"></label>
+    <button type="submit" name="action" value="start">Объявить в розыск</button>
+    {% endif %}
+  </form>
+
   <h2>Заменить велосипед</h2>
   {# Замена не трогает деньги, даты и договор: меняется только то, что
      у клиента на руках. Подменные предлагаются первыми. #}

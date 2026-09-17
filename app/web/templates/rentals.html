@@ -6,6 +6,7 @@
     <a href="/rentals?status=active" {% if status == 'active' %}class="on"{% endif %}>Идут</a>
     <a href="/rentals?status=closed" {% if status == 'closed' %}class="on"{% endif %}>Закрытые</a>
     <a href="/rentals?status=all" {% if status == 'all' %}class="on"{% endif %}>Все</a>
+    <a href="/rentals/search">Розыск</a>
   </nav>
   {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Форма</a>{% endif %}
 </div>
