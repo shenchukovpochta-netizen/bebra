@@ -2,7 +2,7 @@
 {% block title %}{{ bike.code }} — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar">
-  <h1>{{ bike.code }} · {{ bike.model }} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
+  <h1>{{ bike.code }} · {{ bike.model }}{% if catalogue and (catalogue.brand or catalogue.title != bike.model) %} <small class="muted">{{ catalogue.brand or '' }}{% if catalogue.title != bike.model %} {{ catalogue.title }}{% endif %}</small>{% endif %} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
   {% if bike.status == 'available' and can_edit(staff, 'issue') %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
   {% if can_edit(staff, 'service') %}
     {% if order %}<a class="btn ghost" href="/orders/{{ order.id }}">Наряд {{ order.no }}</a>
@@ -53,6 +53,27 @@
   {% endif %}
   <p class="muted">Пробег растёт сам: его вписывают при выдаче и при возврате аренды, назад не крутится. Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
+{% if can_view(staff, 'trackers') %}
+<section class="card">
+  <h2>Трекер
+    {% if tracker %}{% if tracker.alarm %}<span class="tag bad">тревога</span>{% elif tracker.moving %}<span class="tag rented">едет</span>{% elif tracker.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}
+    {% else %}<span class="tag bad">нет</span>{% endif %}</h2>
+  {% if tracker %}
+  <dl>
+    <dt>Устройство</dt><dd><a href="/trackers/{{ tracker.id }}">{{ tracker.alias or tracker.device_id }}</a></dd>
+    <dt>Связь</dt><dd class="{% if tracker.offline %}bad{% endif %}">{% if tracker.last_seen %}{{ tracker.last_seen|dmy }}{% if tracker.silent_hours %} · {{ tracker.silent_hours }} ч назад{% endif %}{% else %}ни разу{% endif %}</dd>
+    <dt>Скорость</dt><dd>{% if tracker.speed %}{{ tracker.speed|int }} км/ч{% else %}стоит{% endif %}</dd>
+    <dt>Питание</dt><dd class="{% if tracker.low_power %}bad{% endif %}">{% if tracker.voltage %}{{ tracker.voltage }} В{% else %}—{% endif %}</dd>
+    <dt>Последний раз ехал</dt><dd>{{ tracker.moved_at|dmy if tracker.moved_at else '—' }}</dd>
+    <dt>Где</dt><dd>{% if tracker.map %}<a href="{{ tracker.map }}" target="_blank" rel="noopener">на карте</a> · {% endif %}<a href="/trackers/{{ tracker.id }}">трек за период</a></dd>
+  </dl>
+  {% if not bike.tracker_ok %}<p class="muted">Галочка «трекер установлен» в карточке не стоит, а привязка есть — поправьте карточку.</p>{% endif %}
+  {% else %}
+  <p class="muted">Привязанного трекера нет{% if bike.tracker_ok %}, хотя галочка «трекер установлен» стоит{% endif %}.
+    Привязка делается на карточке устройства: <a href="/trackers">Устройства</a>.</p>
+  {% endif %}
+</section>
+{% endif %}
 {% with passport=passport, base="/bikes/" ~ bike.id, section="bikes",
         what="велосипед", commissioned_at=bike.commissioned_at,
         commissioned_by=bike.commissioned_by %}
@@ -107,6 +128,21 @@
     {% else %}<tr><td colspan="5" class="muted">Записей нет.</td></tr>{% endfor %}
   </table>
 </section>
+{% if can_view(staff, 'service') %}
+<section class="card">
+  <h2>Наряды <a class="muted" href="/orders?bike={{ bike.id }}">все →</a></h2>
+  <table>
+    <tr><th>№</th><th>Открыт</th><th>Статус</th><th>Плательщик</th><th>Суток</th>{% if can_view(staff, 'finance') %}<th class="num">Сумма</th>{% endif %}</tr>
+    {% for o in orders %}
+    <tr><td><a href="/orders/{{ o.id }}">{{ o.no }}</a></td><td>{{ o.opened_at|dmy }}</td>
+      <td><span class="tag order-{{ o.status }}">{{ ORDER_STATUSES[o.status] }}</span></td>
+      <td>{{ PAYERS[o.payer] }}</td><td class="num">{{ o.days }}</td>
+      {% if can_view(staff, 'finance') %}<td class="num">{{ money(o.total if o.status == 'done' else o.estimate) }}</td>{% endif %}</tr>
+    {% else %}<tr><td colspan="6" class="muted">Нарядов по велосипеду не было.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Открытые и закрытые вместе: по ним видно, что у велосипеда ломается раз за разом. Записи «ремонт» в журнале ниже — итог закрытых нарядов и ремонты без наряда.</p>
+</section>
+{% endif %}
 <section class="card">
   <h2>История статусов</h2>
   <table>

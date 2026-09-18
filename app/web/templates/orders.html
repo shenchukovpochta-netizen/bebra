@@ -20,6 +20,10 @@
   <a href="/orders?status=waiting" class="{% if status == 'waiting' %}on{% endif %}">Ждут запчасть</a>
   <a href="/orders?status=done&payer=client" class="{% if status == 'done' %}on{% endif %}">Закрытые клиентские</a>
 </nav>
+{% if bike_filter %}
+<p class="flash">Наряды велосипеда <a href="/bikes/{{ bike_filter.id }}">№ {{ bike_filter.code }}</a> {{ bike_filter.model }} —
+  вся история ремонтов, открытые и закрытые. <a href="/orders">Все наряды</a></p>
+{% endif %}
 <div class="card">
 {{ list.views(views, '/orders', tools, staff) }}
 <div class="table-wrap">

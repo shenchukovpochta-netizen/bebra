@@ -712,6 +712,19 @@ def model_aliases(models: Iterable[Mapping[str, Any]]) -> dict[str, str]:
     return out
 
 
+def catalogue_entry(models: Iterable[Mapping[str, Any]], model: Any) -> dict | None:
+    """Строка каталога для модели парка: по клиентскому или заводскому
+    имени, без учёта регистра. None - в каталоге такой нет."""
+    name = str(model or "").strip().casefold()
+    if not name:
+        return None
+    for row in models:
+        for candidate in (row.get("title"), row.get("factory_title")):
+            if str(candidate or "").strip().casefold() == name:
+                return dict(row)
+    return None
+
+
 def catalogue_model(model: Any, aliases: Mapping[str, str] | None = None) -> str:
     """Название модели в терминах каталога: по нему ищется цена."""
     name = str(model or "").strip()

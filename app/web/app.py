@@ -1040,11 +1040,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         since = await crm.bike_status_since()
         idle = (logic.idle_days(since.get(bike_id), now=datetime.now(UTC))
                 if bike.get("status") in logic.IDLE_STATUSES else 0)
+        # Трекер - по привязке crm.trackers, а не по ручной галочке: галочка
+        # говорит «поставили», привязка - «работает и где».
+        tracker = await crm.tracker_of_bike(bike_id)
+        orders = await crm.work_orders(bike_id=bike_id, limit=20)
+        for o in orders:
+            o["days"] = logic.order_days(o, today=date.today())
         return render(request, "bike.html", bike=bike, log=await crm.bike_log(bike_id),
                       rentals=await crm.bike_rentals(bike_id),
                       status_log=await crm.bike_status_log(bike_id),
                       nodes=await crm.repair_nodes(),
                       order=await crm.open_order_of(bike_id),
+                      orders=orders,
+                      tracker=(logic.tracker_rows([tracker], settings=settings)[0]
+                               if tracker else None),
+                      catalogue=logic.catalogue_entry(await crm.bike_models(),
+                                                      bike.get("model")),
                       passport=logic.bike_check_state(bike, settings),
                       idle_days=idle, idle_lost=logic.idle_cost(idle),
                       amortization=logic.amortization_month(bike))
@@ -2830,7 +2841,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def orders_page(request: Request) -> Response:
         status = request.query_params.get("status") or ""
         payer = request.query_params.get("payer") or ""
+        bike_q = request.query_params.get("bike") or ""
+        # Наряды одного велосипеда - его история ремонтов целиком: с карточки
+        # велосипеда сюда ведёт «все наряды».
+        bike_filter = (await crm.bike(int(bike_q))
+                       if bike_q.isdigit() else None)
         rows = await crm.work_orders(status=status or None, payer=payer or None,
+                                     bike_id=bike_filter["id"] if bike_filter else None,
                                      limit=300)
         for order in rows:
             order["days"] = logic.order_days(order, today=date.today())
@@ -2839,6 +2856,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # он менялся бы от фильтра и ничего не значил.
         tools = list_tools(request, rows, allowed=ORDER_SORTS)
         return render(request, "orders.html", rows=tools["rows"], tools=tools,
+                      bike_filter=bike_filter,
                       status=status, payer=payer,
                       views=await views_of(request, "/orders"),
                       total=logic.sum_of(tools["all_rows"], "total"),
