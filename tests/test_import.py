@@ -202,6 +202,23 @@ class TestRead(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].phone, "+79001112233")
 
+    def test_name_column_is_read_under_both_titles(self):
+        """«Имя» и «ФИО» - одна колонка в разных редакциях таблицы.
+
+        Редакция с «Имя» разбиралась без арендатора: парк заводился,
+        клиентов и аренд не появлялось ни одного, и отчёт об этом молчал -
+        строка без ФИО считается строкой без человека.
+        """
+        for title in ("ФИО", "Имя", "ФИО арендатора"):
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["№", title, "Основной номер телефона", "статус"])
+            ws.append([1, "Иванов Иван", 89001112233, "В аренде (долгов нет)"])
+            buf = io.BytesIO()
+            wb.save(buf)
+            rows = ix.read_rows(buf.getvalue())
+            self.assertEqual(rows[0].fio, "Иванов Иван", title)
+
     def test_bad_file(self):
         with self.assertRaises(ix.ImportError_):
             ix.read_rows(b"not a workbook")
