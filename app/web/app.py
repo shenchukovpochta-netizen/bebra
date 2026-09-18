@@ -2419,7 +2419,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Расхождения между парком, арендами и нарядами."""
         return logic.integrity_issues(
             await crm.bikes(limit=10000), await crm.active_rentals(),
-            await crm.open_orders_by_bike(), await crm.debtors(200))
+            await crm.open_orders_by_bike(), await crm.debtors(200),
+            batteries=await crm.batteries(limit=10000))
 
     @app.get("/reports/integrity")
     async def integrity_report(request: Request) -> Response:
@@ -3654,7 +3655,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         view = request.query_params.get("view") or ""
         rows = logic.battery_rows(await crm.batteries(
             status=status or None, q=q or None, location=location or None,
-            in_search=view == "search"))
+            in_search=view == "search"), since=await crm.battery_status_since())
         return render(request, "batteries.html", rows=rows,
                       summary=logic.battery_summary(
                           logic.battery_rows(await crm.batteries())),
@@ -3725,7 +3726,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         battery = await crm.battery(battery_id)
         if battery is None:
             return render(request, "missing.html", status_code=404, what="Батарея")
-        row = logic.battery_rows([battery])[0]
+        row = logic.battery_rows([battery], since=await crm.battery_status_since())[0]
         return render(request, "battery.html", battery=row,
                       log=await crm.battery_status_log(battery_id),
                       models=await crm.battery_models(active_only=True),

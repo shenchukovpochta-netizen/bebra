@@ -2037,6 +2037,8 @@ INTEGRITY_KINDS: dict[str, str] = {
     "repair_no_order": "В ремонте, а наряда нет",
     "lost_with_rental": "Числится утерянным, а аренда идёт",
     "debt_without_rental": "Долг есть, а аренды нет",
+    "battery_rented_no_rental": "Батарея «у клиента», а аренды нет",
+    "battery_rental_no_status": "Батарея числится за арендой, а статус не «у клиента»",
 }
 # Долг, ниже которого разбираться не с чем: копейки округления и
 # недоплаты в пару рублей висят у половины базы.
@@ -2045,23 +2047,39 @@ DEBT_NOISE = Decimal(500)
 
 def integrity_issues(bikes: Iterable[dict], rentals: Iterable[dict],
                      orders_by_bike: dict[int, dict],
-                     debtors: Iterable[dict] = ()) -> list[dict]:
-    """Расхождения между парком, арендами и нарядами.
+                     debtors: Iterable[dict] = (),
+                     batteries: Iterable[dict] = ()) -> list[dict]:
+    """Расхождения между парком, арендами, нарядами и батареями.
 
     Расхождение - это не «некрасиво в базе», а невидимый простой: велосипед,
     числящийся в аренде без аренды, не попадает ни в выдачу, ни в ремонт,
-    и никто про него не вспомнит, пока не придёт пересчёт.
+    и никто про него не вспомнит, пока не придёт пересчёт. У батареи
+    то же: «у клиента» без аренды - это батарея, которой нет ни на полке,
+    ни в выдаче.
     """
     bikes = list(bikes)
     rentals = [r for r in rentals if r.get("status") == "active"]
     rented_bikes = {int(r["bike_id"]): r for r in rentals if r.get("bike_id")}
+    active_ids = {int(r["id"]) for r in rentals}
     by_id = {int(b["id"]): b for b in bikes}
     issues: list[dict] = []
 
     def add(kind: str, *, bike: dict | None = None, rental: dict | None = None,
-            what: str = "") -> None:
+            what: str = "", battery: dict | None = None) -> None:
         issues.append({"kind": kind, "title": INTEGRITY_KINDS[kind], "bike": bike,
-                       "rental": rental, "what": what})
+                       "rental": rental, "battery": battery, "what": what})
+
+    for battery in batteries:
+        rental_id = battery.get("rental_id")
+        linked = rental_id is not None and int(rental_id) in active_ids
+        if battery.get("status") == "rented" and not linked:
+            add("battery_rented_no_rental", battery=battery,
+                what="Ни на полке, ни в выдаче: пропадёт до пересчёта.")
+        elif linked and battery.get("status") != "rented":
+            add("battery_rental_no_status", battery=battery,
+                rental=next((r for r in rentals if int(r["id"]) == int(rental_id)), None),
+                what=f"Числится «{BATTERY_STATUSES.get(battery.get('status'), '—')}» "
+                     "и может уйти второму клиенту.")
 
     for bike in bikes:
         bike_id = int(bike["id"])
@@ -2772,12 +2790,15 @@ BATTERY_STATUSES: dict[str, str] = {
     "new": "Новая на сборке",
     "available": "Свободна", "rented": "У клиента", "repair": "В ремонте",
     "maintenance": "На ТО", "lost": "Утеряна", "written_off": "Списана",
+    # Проданная - как проданный велосипед: остаётся в базе со своей
+    # историей, в операционный парк и в пересчёт не входит.
+    "sold": "Продана",
 }
 # Статусы, которые ставит оператор. rented - только через выдачу, как
 # и у велосипеда: батарея уходит вместе с ним. new снимает только ввод
 # в эксплуатацию: недособранную батарею выдавать нечего.
 BATTERY_MANUAL_STATUSES = ("available", "repair", "maintenance", "lost",
-                           "written_off")
+                           "written_off", "sold")
 # На сборке батарея в оборот не входит и в счёт парка не идёт: писать
 # недособранную технику в наличие значит обещать клиенту то, чего нет.
 BATTERY_OPERATIONAL = ("available", "rented", "repair", "maintenance")
@@ -2801,9 +2822,18 @@ def check_location(raw: Any, names: Iterable[str] | None = None) -> Check:
     return Check(True, value)
 
 
-def battery_rows(batteries: Iterable[dict], *, today: date | None = None) -> list[dict]:
-    """Список батарей с износом и признаком «пора смотреть»."""
+def battery_rows(batteries: Iterable[dict], *, today: date | None = None,
+                 since: Mapping[int, datetime] | None = None,
+                 now: datetime | None = None) -> list[dict]:
+    """Список батарей с износом, признаком «пора смотреть» и днями.
+
+    `since` - когда батарея вошла в текущий статус (по журналу): отсюда
+    «в ремонте 12 дней». Дни у клиента - от начала аренды, за которой
+    батарея числится: у клиента она с выдачи, а не с последней замены.
+    """
     today = today or date.today()
+    now = now or datetime.now(UTC)
+    since = since or {}
     rows = []
     for battery in batteries:
         months = int(battery.get("service_months") or 15)
@@ -2811,12 +2841,21 @@ def battery_rows(batteries: Iterable[dict], *, today: date | None = None) -> lis
         wear = (float(round(min(100 * passed / max(months, 1), 100), 1))
                 if battery.get("purchased_on") else None)
         cycles = int(battery.get("cycles") or 0)
+        started = battery.get("rental_started")
+        if isinstance(started, datetime):
+            started = started.date()
         rows.append({**battery, "wear": wear, "cycles": cycles,
                      # Розыск - состояние аренды, а не батареи: пока
                      # клиент не нашёлся, батарея числится у него.
                      "in_search": bool(battery.get("search_at")),
                      "tired": cycles >= BATTERY_CYCLES_WARN
-                     or (wear is not None and wear >= 100)})
+                     or (wear is not None and wear >= 100),
+                     "rental_days": (max((today - started).days, 0)
+                                     if started and battery.get("client_id") else None),
+                     # Без записи в журнале (импорт до триггера) - ноль,
+                     # а не «None» в колонке.
+                     "status_days": (idle_days(since.get(int(battery["id"])), now=now)
+                                     if battery.get("id") is not None else None) or 0})
     # В розыске - первыми: их ищут, а не листают.
     rows.sort(key=lambda b: (not b["in_search"], not b["tired"],
                              str(b.get("code") or "")))

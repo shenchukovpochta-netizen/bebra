@@ -31,19 +31,21 @@
 
 <div class="card">
 <table>
-  <tr><th>№</th><th>Модель</th><th class="opt">Ёмкость</th><th>Статус</th><th>Где</th><th class="opt">Циклов</th><th class="opt">Износ</th><th>У кого</th></tr>
+  <tr><th>№</th><th>Модель</th><th class="opt">Ёмкость</th><th>Статус</th><th class="num">Дней</th><th>Где</th><th class="opt">Циклов</th><th class="opt">Износ</th><th>У кого</th></tr>
   {% for b in rows %}
   <tr class="{% if b.in_search %}bad-row{% elif b.tired %}warn-row{% endif %}">
     <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a>{% if b.in_search %} <span class="tag bad">розыск</span>{% endif %}</td>
     <td>{{ b.model_title or '—' }}</td>
     <td class="opt muted">{% if b.voltage %}{{ b.voltage }} В{% endif %}{% if b.capacity %} · {{ b.capacity }} А·ч{% endif %}</td>
     <td><span class="tag {{ b.status }}">{{ BATTERY_STATUSES[b.status] }}</span></td>
+    {# У клиента - дни с выдачи; в остальных статусах - дни в статусе по журналу. #}
+    <td class="num" title="{% if b.rental_days is not none %}дней у клиента с выдачи{% else %}дней в этом статусе{% endif %}">{{ b.rental_days if b.rental_days is not none else b.status_days }}</td>
     <td>{% if b.bike_code %}<a href="/bikes/{{ b.bike_id }}">№ {{ b.bike_code }}</a>{% else %}{{ b.location or '—' }}{% endif %}</td>
     <td class="num opt {% if b.cycles >= BATTERY_CYCLES_WARN %}bad{% endif %}">{{ b.cycles }}</td>
     <td class="num opt">{% if b.wear is none %}—{% else %}{{ b.wear }} %{% endif %}</td>
-    <td>{% if b.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.client_name }}</a>{% else %}{{ b.client_name or '' }}{% endif %}</td>
+    <td>{% if b.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.client_name }}</a>{% else %}{{ b.client_name or '' }}{% endif %}{% if b.client_id and b.rental_id and can_view(staff, 'rentals') %} <small><a href="/rentals/{{ b.rental_id }}">аренда #{{ b.rental_id }}</a></small>{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="8" class="muted">Батарей нет. Заведите их с наклейками — по ним батарею и ищут.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="muted">Батарей нет. Заведите их с наклейками — по ним батарею и ищут.</td></tr>{% endfor %}
 </table>
 <p class="muted">Первыми — те, что в розыске, затем те, что пора смотреть: от {{ BATTERY_CYCLES_WARN }} циклов
   ёмкость заметно просела, и клиент начинает жаловаться на «не доезжает».

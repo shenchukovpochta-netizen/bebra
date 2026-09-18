@@ -6,7 +6,7 @@
 </div>
 
 {% if not issues %}
-<div class="card"><p>Расхождений нет: парк, аренды и наряды сходятся.</p></div>
+<div class="card"><p>Расхождений нет: парк, батареи, аренды и наряды сходятся.</p></div>
 {% else %}
 <div class="tiles">
   {% for kind, label in INTEGRITY_KINDS.items() %}{% if summary.get(kind) %}
@@ -19,7 +19,7 @@
   {% for i in issues %}
   <tr>
     <td>{{ i.title }}</td>
-    <td>{% if i.bike %}<a href="/bikes/{{ i.bike.id }}">№ {{ i.bike.code }}</a> {{ i.bike.model }}{% else %}—{% endif %}</td>
+    <td>{% if i.bike %}<a href="/bikes/{{ i.bike.id }}">№ {{ i.bike.code }}</a> {{ i.bike.model }}{% elif i.battery %}батарея <a href="/batteries/{{ i.battery.id }}">№ {{ i.battery.code }}</a>{% else %}—{% endif %}</td>
     <td>
       {% set person = i.client or i.rental %}
       {% if person and person.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ person.client_id }}">{{ person.full_name }}</a>

@@ -2299,6 +2299,7 @@ class CrmDB:
         select b.*, m.title as model_title, m.voltage, m.capacity,
                m.price as model_price, bk.code as bike_code, bk.model as bike_model,
                c.full_name as client_name, r.client_id,
+               r.started_on as rental_started,
                -- Розыск - состояние аренды, а не батареи: пока клиент
                -- не нашёлся, батарея у него, и статус у неё «у клиента».
                r.search_at as search_at
@@ -2368,6 +2369,14 @@ class CrmDB:
             await conn.execute(
                 f"update crm.batteries set {sets}, updated_at = now() where id = $1",
                 battery_id, *values)
+
+    async def battery_status_since(self) -> dict[int, datetime]:
+        """С какого момента каждая батарея в текущем статусе - по журналу,
+        одним запросом: списку нужны дни у каждой строки."""
+        rows = await self.pool.fetch(
+            "select battery_id, max(changed_at) as since "
+            "from crm.battery_status_log group by battery_id")
+        return {int(r["battery_id"]): r["since"] for r in rows}
 
     async def battery_status_log(self, battery_id: int, limit: int = 30) -> list[dict]:
         return _rows(await self.pool.fetch(

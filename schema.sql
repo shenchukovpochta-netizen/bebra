@@ -1102,7 +1102,7 @@ create table if not exists crm.batteries (
   code           text        not null unique,     -- наклейка на корпусе
   model_id       bigint      references crm.battery_models (id),
   serial_no      text,
-  -- available|rented|repair|maintenance|lost|written_off.
+  -- new|available|rented|repair|maintenance|lost|written_off|sold.
   -- rented ставит и снимает выдача, как и у велосипеда.
   status         text        not null default 'available',
   location       text,

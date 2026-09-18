@@ -166,7 +166,8 @@ async def report_integrity(bot: Any, crm: Any, cfg: Any, *,
     """
     issues = logic.integrity_issues(
         await crm.bikes(limit=10000), await crm.active_rentals(),
-        await crm.open_orders_by_bike(), await crm.debtors(200))
+        await crm.open_orders_by_bike(), await crm.debtors(200),
+        batteries=await crm.batteries(limit=10000))
     if not issues:
         return 0
     text = texts.INTEGRITY_DIGEST.format(total=len(issues),

@@ -13,7 +13,8 @@
     <dt>По табличке</dt><dd>{% if battery.volts or battery.amp_hours %}{% if battery.volts %}{{ battery.volts }} В{% endif %}{% if battery.volts and battery.amp_hours %} · {% endif %}{% if battery.amp_hours %}{{ battery.amp_hours }} А·ч{% endif %}{% else %}<span class="muted">не переписана с корпуса</span>{% endif %}</dd>
     <dt>Серийный номер</dt><dd>{{ battery.serial_no or '—' }}</dd>
     <dt>Где</dt><dd>{% if battery.bike_code %}в велосипеде <a href="/bikes/{{ battery.bike_id }}">№ {{ battery.bike_code }}</a>{% else %}{{ battery.location or 'не на точке' }}{% endif %}</dd>
-    <dt>У кого</dt><dd>{% if battery.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ battery.client_id }}">{{ battery.client_name }}</a>{% else %}{{ battery.client_name }}{% endif %}{% else %}—{% endif %}</dd>
+    <dt>У кого</dt><dd>{% if battery.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ battery.client_id }}">{{ battery.client_name }}</a>{% else %}{{ battery.client_name }}{% endif %}{% if battery.rental_id and can_view(staff, 'rentals') %} · <a href="/rentals/{{ battery.rental_id }}">аренда #{{ battery.rental_id }}</a>{% endif %}{% if battery.rental_days is not none %} · {{ battery.rental_days }} дн. с выдачи{% endif %}{% else %}—{% endif %}</dd>
+    <dt>В статусе</dt><dd>{{ battery.status_days }} дн.</dd>
     <dt>Циклов</dt><dd class="{% if battery.cycles >= BATTERY_CYCLES_WARN %}bad{% endif %}">{{ battery.cycles }}{% if battery.tired %} · пора смотреть{% endif %}</dd>
     <dt>Износ</dt><dd>{% if battery.wear is none %}не считается: нет даты покупки{% else %}{{ battery.wear }} % срока{% endif %}</dd>
     {% if can_view(staff, 'finance') %}

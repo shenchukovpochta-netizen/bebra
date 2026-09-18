@@ -1732,6 +1732,8 @@ class FakeCrm:
                 "model_price": model.get("price"), "bike_code": bike.get("code"),
                 "bike_model": bike.get("model"),
                 "client_name": client.get("full_name") or None,
+                "rental_started": rental.get("started_on")
+                if rental.get("status") == "active" else None,
                 # Розыск - состояние аренды: как и в базе, он приезжает
                 # джойном, а не колонкой у батареи.
                 "search_at": rental.get("search_at")
@@ -1795,6 +1797,13 @@ class FakeCrm:
         self.batteries_[battery_id].update(fields)
         if "status" in fields and fields["status"] != before:
             self._log_battery(battery_id, before, fields["status"], by)
+
+    async def battery_status_since(self):
+        out = {}
+        for x in self.battery_log_:
+            if x["battery_id"] not in out or x["changed_at"] > out[x["battery_id"]]:
+                out[x["battery_id"]] = x["changed_at"]
+        return out
 
     async def battery_status_log(self, battery_id, limit=30):
         rows = [dict(x) for x in self.battery_log_ if x["battery_id"] == battery_id]

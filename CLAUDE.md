@@ -259,7 +259,7 @@ Claude Code читает этот файл в начале каждой сесс
 `maintenance`, `reserved`, `lost`, `sold`, `written_off`. `rented` ставит
 и снимает только аренда, `new` снимает только ввод в эксплуатацию.
 У батареи те же правила: `new`, `available`, `rented`, `repair`,
-`maintenance`, `lost`, `written_off`.
+`maintenance`, `lost`, `written_off`, `sold`.
 
 ## 5. Правила работы над кодом
 

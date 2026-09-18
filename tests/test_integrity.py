@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -109,6 +110,26 @@ class TestIntegrityInPanel(tw.WebCase):
     def test_clean_park_says_so(self):
         page = self.get_ok("/reports/integrity")
         self.assertIn("Расхождений нет", page)
+
+    def test_battery_at_client_without_a_rental_is_reported(self):
+        bid = tw.run(self.crm.create_battery(code="9510001", status="available"))
+        tw.run(self.crm.update_battery(bid, status="rented", by="t"))
+        page = self.get_ok("/reports/integrity")
+        self.assertIn("Батарея «у клиента», а аренды нет", page)
+        self.assertIn("9510001", page)
+
+    def test_battery_linked_to_a_rental_but_not_rented_is_reported(self):
+        rental_id = tw.run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="weekly",
+            started_on=date.today(), contract_no="АВ-1", created_by="т"))
+        bid = tw.run(self.crm.create_battery(code="9510002", status="available"))
+        tw.run(self.crm.update_battery(bid, rental_id=rental_id, status="repair", by="t"))
+        page = self.get_ok("/reports/integrity")
+        self.assertIn("числится за арендой, а статус не «у клиента»", page)
+        # Привели в порядок - расхождение исчезло.
+        tw.run(self.crm.update_battery(bid, status="rented", by="t"))
+        self.assertNotIn("числится за арендой", self.get_ok("/reports/integrity"))
 
     def test_broken_bike_status_is_shown(self):
         tw.run(self.crm.update_bike(self.bike_id, status="rented"))

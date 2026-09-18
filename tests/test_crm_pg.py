@@ -1770,6 +1770,29 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await Database(self.pool).apply_schema(SCHEMA)
         self.assertEqual((await self.crm.client(self.client_id))["phone2"], "+79171112233")
 
+    async def test_battery_status_since_on_postgres(self):
+        """Дни в статусе у батареи - по журналу, который пишет триггер."""
+        await self.seed()
+        battery_id = await self.crm.create_battery(code="9510009", status="available")
+        since = await self.crm.battery_status_since()
+        self.assertIn(battery_id, since)
+        await self.crm.update_battery(battery_id, status="sold", by="staff:t")
+        rows = await self.crm.battery_status_log(battery_id)
+        self.assertEqual(rows[0]["to_status"], "sold")
+        self.assertGreaterEqual((await self.crm.battery_status_since())[battery_id],
+                                since[battery_id])
+        # Аренда у батареи - в выборке вместе с датой выдачи.
+        rental_id = await self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D("3000"), billing="weekly",
+            started_on=date.today() - timedelta(days=3), contract_no="АВ-9",
+            created_by="t")
+        await self.crm.update_battery(battery_id, status="rented", rental_id=rental_id,
+                                      by="staff:t")
+        row = (await self.crm.batteries(rental_id=rental_id))[0]
+        self.assertEqual(row["rental_started"], date.today() - timedelta(days=3))
+        self.assertEqual(logic.battery_rows([row])[0]["rental_days"], 3)
+
     async def test_mileage_column_survives_reapply(self):
         """schema.sql идемпотентен: повторный старт не теряет колонку."""
         await Database(self.pool).apply_schema(SCHEMA)

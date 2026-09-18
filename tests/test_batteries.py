@@ -373,6 +373,37 @@ class TestBatteryPanel(tw.WebCase):
         self.assertEqual(r.status_code, 303)
         self.assertEqual(tw.run(self.crm.locations())[0]["city"], "Казань")
 
+    def test_days_at_client_and_in_status_and_the_rental_link(self):
+        battery_id = int(self.create().headers["location"].rsplit("/", 1)[1])
+        page = self.get_ok("/batteries")
+        self.assertIn("<th class=\"num\">Дней</th>", page)
+        rental_id = tw.run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="weekly",
+            started_on=date.today() - timedelta(days=5), contract_no="АВ-1",
+            created_by="т"))
+        tw.run(self.crm.update_battery(battery_id, rental_id=rental_id, status="rented",
+                                       by="t"))
+        row = logic.battery_rows(tw.run(self.crm.batteries()),
+                                 since=tw.run(self.crm.battery_status_since()))[0]
+        self.assertEqual(row["rental_days"], 5, "дни у клиента - с выдачи")
+        self.assertEqual(row["status_days"], 0, "статус сменили только что")
+        page = self.get_ok("/batteries")
+        self.assertIn(f"/rentals/{rental_id}", page, "из строки видно, за какой арендой")
+        card = self.get_ok(f"/batteries/{battery_id}")
+        self.assertIn("5 дн. с выдачи", card)
+        self.assertIn(f"аренда #{rental_id}", card)
+
+    def test_sold_battery_leaves_the_operational_park(self):
+        battery_id = int(self.create().headers["location"].rsplit("/", 1)[1])
+        r = self.client.post(f"/batteries/{battery_id}/status",
+                             data={"status": "sold", "note": "продана с велосипедом"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(tw.run(self.crm.battery(battery_id))["status"], "sold")
+        summary = logic.battery_summary(logic.battery_rows(tw.run(self.crm.batteries())))
+        self.assertEqual(summary["operational"], 0)
+        self.assertEqual(summary["sold"], 1)
+
     def test_battery_model_is_editable_and_archivable(self):
         r = self.client.post(f"/models/batteries/{self.model_id}", data={
             "title": "48V 20Ah", "brand": "LG", "voltage": "48", "capacity": "20",
