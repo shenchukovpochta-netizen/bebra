@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from app.crm import logic  # noqa: E402
+from app.crm import logic, notices  # noqa: E402
 
 try:
     import test_web as tw
@@ -154,6 +154,69 @@ async def _ok():
 
 async def _boom():
     raise RuntimeError("телеграм лёг")
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestTeamNotice(tw.WebCase):
+    """Командное уведомление: адресат из панели, живость бота."""
+
+    def setUp(self):
+        super().setUp()
+        self.login()
+
+    def test_goes_to_the_service_chat_by_default(self):
+        sent = tw.run(notices.send_team(self.crm, self.bot, "estimate_waiting",
+                                        "ждём", "-1001"))
+        self.assertTrue(sent)
+        self.assertEqual(self.bot.sent[-1], ("-1001", "ждём"))
+        self.assertEqual(tw.run(self.crm.notice_log(limit=1))[0]["status"], "sent")
+
+    def test_owner_can_point_it_at_a_person(self):
+        tw.run(self.crm.set_notice("estimate_waiting", enabled=True, at_hour=None,
+                                   chat_id="777", by="t"))
+        tw.run(notices.send_team(self.crm, self.bot, "estimate_waiting", "ждём", "-1001"))
+        self.assertEqual(self.bot.sent[-1][0], "777", "адресат - сотрудник, не чат")
+
+    def test_disabled_or_unaddressed_is_skipped_and_recorded(self):
+        tw.run(self.crm.set_notice("estimate_waiting", enabled=False, at_hour=None,
+                                   by="t"))
+        self.assertFalse(tw.run(notices.send_team(self.crm, self.bot, "estimate_waiting",
+                                                  "ждём", "-1001")))
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(tw.run(self.crm.notice_log(limit=1))[0]["status"], "skipped")
+        tw.run(self.crm.set_notice("estimate_waiting", enabled=True, at_hour=None,
+                                   by="t"))
+        self.assertFalse(tw.run(notices.send_team(self.crm, self.bot, "estimate_waiting",
+                                                  "ждём", "")), "чат не задан")
+
+    def test_page_offers_staff_with_telegram_as_recipients(self):
+        staff_id = tw.run(self.crm.create_staff(
+            "tech", logic.hash_password("tech-pass-1"), "Хомяков И.", "tech", None))
+        page = self.get_ok("/notices")
+        self.assertIn('name="chat_id"', page)
+        self.assertNotIn("Хомяков И.", page, "без Telegram сотруднику слать некуда")
+        tw.run(self.crm.link_staff_tg(staff_id, 777, "homyakov"))
+        page = self.get_ok("/notices")
+        self.assertIn("Хомяков И.", page)
+        r = self.client.post("/notices/estimate_waiting", data={"enabled": "1",
+                                                                  "chat_id": "777"})
+        self.assertEqual(r.status_code, 303)
+        state = logic.notice_settings(tw.run(self.crm.notices()))
+        self.assertEqual(state["estimate_waiting"]["chat_id"], "777")
+        self.assertIn("Наряд ждёт согласования", self.get_ok("/notices"))
+
+    def test_bot_health_is_shown(self):
+        self.assertIn("отвечает", self.get_ok("/notices"))
+        self.assertNotIn("Бот не отвечает", self.get_ok("/"))
+
+    def test_dead_bot_is_flagged_on_the_dashboard(self):
+        async def dead():
+            raise RuntimeError("телеграм лёг")
+        self.bot.get_me = dead
+        page = self.get_ok("/")
+        self.assertIn("Бот не отвечает", page)
+        self.assertIn("телеграм лёг", page)
+        self.assertIn("Бот не отвечает", self.get_ok("/notices"))
 
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")

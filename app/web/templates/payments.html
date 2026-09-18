@@ -12,10 +12,36 @@
 </div>
 
 {% if not online %}
-<p class="flash err">Эквайринг Точки не настроен: ссылку выдать нечем.
+<p class="flash err">{% if acq.configured and not acq.enabled %}Эквайринг выключен
+  владельцем: ссылки на оплату не выставляются.{% else %}Эквайринг Точки не настроен:
+  ссылку выдать нечем.{% endif %}
   Счёт заведётся, но платить по нему клиенту будет нечем — примите
   наличные или перевод и закройте счёт руками.</p>
 {% endif %}
+
+<section class="card narrow">
+  <h2>Эквайринг Точки
+    {% if not acq.configured %}<span class="tag bad">не настроен</span>
+    {% elif acq.enabled %}<span class="tag ok">подключён · {{ acq.code }}</span>
+    {% else %}<span class="tag">выключен · {{ acq.code }}</span>{% endif %}</h2>
+  {# Токен и код клиента живут в окружении панели, а выключатель - здесь:
+     отключить на день эквайринг должен мочь владелец, а не тот, кто
+     правит .env на сервере. Проверка ходит в банк один раз, по кнопке. #}
+  {% if can_edit(staff, 'finance') %}
+  <form method="post" action="/payments/acquiring" class="inline-form">
+    {% if acq.configured %}
+    <button type="submit" name="action" value="check" class="ghost">Проверить подключение</button>
+    {% if acq.enabled %}<button type="submit" name="action" value="off" class="ghost danger">Отключить</button>
+    {% else %}<button type="submit" name="action" value="on">Включить</button>{% endif %}
+    {% endif %}
+  </form>
+  {% endif %}
+  <p class="muted">{% if acq.configured %}Токен и код клиента заданы в окружении
+    панели (TOCHKA_TOKEN, TOCHKA_CUSTOMER_CODE). Проверка - один запрос в банк
+    по кнопке: панель в интернет сама не ходит.{% else %}Задайте TOCHKA_TOKEN и
+    TOCHKA_CUSTOMER_CODE в окружении панели (INSTALL.md) - тогда ссылки на оплату
+    с чеком 54-ФЗ будут выставляться отсюда.{% endif %}</p>
+</section>
 
 <section class="card">
   <div class="bar"><h2>Список</h2>

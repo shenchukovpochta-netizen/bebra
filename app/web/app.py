@@ -8,6 +8,7 @@ app.crm.logic и app.crm.service, уведомления клиентам - app.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -498,7 +499,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             plan_per_day=logic.to_money(plan["check"] * plan["rented"]),
             today=span["today"])
         return render(request, "dashboard.html",
-                      plan=plan, span=span,
+                      plan=plan, span=span, bot_state=await bot_health(),
                       progress=logic.plan_progress(
                           plan, month_metrics,
                           days_in_month=span["days"],
@@ -3000,6 +3001,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       if got["sent"] else
                       "Смета собрана, но клиента нет в боте — "
                       "согласуйте вживую.", "ok" if got["sent"] else "err")
+                if got["sent"]:
+                    # Команде - сразу, а не сводкой через сутки: наряд
+                    # встал, и кто-то должен знать, что ждём клиента.
+                    await notices.send_team(
+                        crm, bot, "estimate_waiting",
+                        f"⏳ Наряд {order.get('no')} ждёт согласования: смета "
+                        f"на {logic.money(got['total'])} ушла клиенту "
+                        f"{order.get('client_name') or ''}.".replace("  ", " "),
+                        cfg.contract_chat_id)
             elif action in ("agree", "decline"):
                 # «Согласовать вживую»: клиент стоит рядом и сказал «да».
                 # Пишем, кто именно согласовал - на спор «я такого не
@@ -3024,7 +3034,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Наряд")
         try:
             invoice = await service.invoice_order(crm, order, by=who(request),
-                                                  acquiring=acquiring())
+                                                  acquiring=await acquiring_live())
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/orders/{order_id}")
@@ -4591,7 +4601,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "notices.html",
                       groups=logic.notice_rows(state, counts),
                       log=await crm.notice_log(limit=50),
-                      bot_ready=bot is not None,
+                      bot_ready=bot is not None, bot_state=await bot_health(),
+                      # Адресат командного уведомления - сотрудник с Telegram
+                      # вместо служебного чата: техник получает «ждёт
+                      # запчасть» лично, а не в общем потоке.
+                      recipients=[x for x in await crm.staff_all()
+                                  if x.get("tg_id") and x.get("active")],
                       chat_ready=bool(cfg.contract_chat_id))
 
     @app.post("/notices/{code}")
@@ -4636,6 +4651,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── счета на оплату ───────────────────────
 
+    # Живость бота: get_me раз в пять минут, не на каждый экран. Если бот
+    # молчит, слать об этом в Telegram тем же ботом бессмысленно - поэтому
+    # предупреждение живёт в панели, а не в уведомлениях.
+    _bot_health: dict[str, Any] = {"at": 0.0, "ok": None, "name": "", "error": ""}
+
+    async def bot_health() -> dict[str, Any]:
+        if bot is None:
+            return {"ok": None, "name": "", "error": "бот к панели не подключён"}
+        now = time.monotonic()
+        if now - _bot_health["at"] < 300 and _bot_health["ok"] is not None:
+            return dict(_bot_health)
+        try:
+            me = await asyncio.wait_for(bot.get_me(), timeout=5)
+            _bot_health.update(at=now, ok=True, name=getattr(me, "username", "") or "",
+                               error="")
+        except Exception as exc:                         # noqa: BLE001
+            _bot_health.update(at=now, ok=False, error=str(exc) or type(exc).__name__)
+        return dict(_bot_health)
+
     def acquiring() -> Any:
         """Эквайринг Точки для одного запроса.
 
@@ -4647,6 +4681,50 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return None
         return tochka.TochkaClient(token=cfg.tochka_token,
                                    customer_code=cfg.tochka_customer_code)
+
+    async def acquiring_live() -> Any:
+        """Эквайринг, если он настроен И не выключен владельцем в панели.
+
+        Выключатель - настройка, а не удаление токена из окружения:
+        отключить на день эквайринг, который спорит с кассой, должен
+        мочь владелец, а не тот, кто правит .env на сервере.
+        """
+        if not logic.acquiring_enabled(await crm.settings()):
+            return None
+        return acquiring()
+
+    def acquiring_state(settings: dict[str, Any]) -> dict[str, Any]:
+        code = str(cfg.tochka_customer_code or "")
+        return {"configured": acquiring() is not None,
+                "enabled": logic.acquiring_enabled(settings),
+                "code": ("•••" + code[-4:]) if code else ""}
+
+    @app.post("/payments/acquiring")
+    async def acquiring_toggle(request: Request) -> Response:
+        """Включить, выключить или проверить эквайринг из панели."""
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        action = (await form(request)).get("action") or ""
+        if action in ("on", "off"):
+            await crm.set_setting("acquiring_enabled", "1" if action == "on" else "0",
+                                  by=who(request))
+            flash(request, "Эквайринг включён." if action == "on"
+                  else "Эквайринг выключен: ссылки на оплату не выставляются.")
+        elif action == "check":
+            client = acquiring()
+            if client is None:
+                flash(request, "Эквайринг не настроен: нет токена или кода клиента "
+                               "в окружении панели.", "err")
+            else:
+                try:
+                    got = await client.ping()
+                    flash(request, f"Банк принял токен: торговых точек "
+                                   f"эквайринга - {got['retailers']}.")
+                except Exception as exc:                 # noqa: BLE001
+                    flash(request, f"Банк не принял: {exc}", "err")
+        else:
+            flash(request, "Непонятное действие.", "err")
+        return redirect("/payments")
 
     @app.get("/payments")
     async def payments_page(request: Request) -> Response:
@@ -4663,12 +4741,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                              {"id": rental["client_id"],
                               "full_name": rental.get("full_name"),
                               "phone": rental.get("phone")})
+        raw_settings = await crm.settings()
         return render(request, "payments.html",
                       rows=logic.pay_rows(orders), status=status,
-                      settings=settings,
+                      settings=settings, acq=acquiring_state(raw_settings),
                       summary=logic.pay_summary(
                           await crm.pay_orders(limit=500)),
-                      online=acquiring() is not None,
+                      online=await acquiring_live() is not None,
                       clients_for_pick=sorted(
                           picks.values(), key=lambda c: str(c.get("full_name") or "")))
 
@@ -4690,7 +4769,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rental = await crm.active_rental_of(client["id"])
         order = await service.create_pay_order(
             crm, client=client, rental=rental, amount=amount.value,
-            by=who(request), acquiring=acquiring())
+            by=who(request), acquiring=await acquiring_live())
         if order.get("status") == "failed":
             flash(request, f"Счёт {order['no']} заведён, но ссылки нет: "
                            f"{order.get('error') or 'банк не ответил'}", "err")

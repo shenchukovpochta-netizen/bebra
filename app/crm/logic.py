@@ -3935,6 +3935,12 @@ def pay_methods(settings: Mapping[str, Any] | None = None) -> list[str]:
     return chosen or list(PAY_METHODS)
 
 
+def acquiring_enabled(settings: Mapping[str, Any] | None = None) -> bool:
+    """Выключатель эквайринга в панели. Не задан - включён: токен в
+    окружении и есть согласие им пользоваться."""
+    return str((settings or {}).get("acquiring_enabled", "1")) not in ("0", "false")
+
+
 def pay_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
     settings = settings or {}
 
@@ -4141,6 +4147,12 @@ NOTICES: dict[str, dict[str, Any]] = {
         "params": {"after_days": 21},
     },
     # ─ команде ─
+    "estimate_waiting": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Наряд ждёт согласования",
+        "hint": "В момент отправки сметы: что ушло клиенту и на сколько. "
+                "Молчание дольше суток - отдельной сводкой ниже.",
+    },
     "daily_digest": {
         "group": "team", "target": "chat", "hour": 20,
         "title": "Ежедневный отчёт по оплатам",

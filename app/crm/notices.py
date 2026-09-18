@@ -80,6 +80,28 @@ async def send_client(crm: Any, code: str, client_id: int | None,
     return sent
 
 
+async def send_team(crm: Any, bot: Any, code: str, text: str, default_chat: Any,
+                    *, reply_markup: Any = None) -> bool:
+    """Командное уведомление: адресат - переопределение владельца
+    (конкретный сотрудник) или служебный чат. True - доставлено."""
+    state = await settings(crm)
+    if not state.get(code, {}).get("enabled", True):
+        await record(crm, code, status="skipped", detail="выключено в настройках")
+        return False
+    chat = chat_for(state, code, default_chat)
+    if bot is None or not chat:
+        await record(crm, code, status="skipped", detail="служебный чат не задан")
+        return False
+    try:
+        await bot.send_message(chat, text, reply_markup=reply_markup)
+    except Exception as err:                             # noqa: BLE001
+        log.warning("уведомление %s команде не ушло", code, exc_info=True)
+        await record(crm, code, status="failed", detail=str(err))
+        return False
+    await record(crm, code, status="sent")
+    return True
+
+
 def due(state: dict[str, dict[str, Any]], code: str, now: datetime,
         done: dict[str, date] | None = None) -> bool:
     """Пора ли по расписанию. `done` - память прохода: код → дата."""

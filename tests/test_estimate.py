@@ -164,6 +164,24 @@ class TestEstimateFlow(tw.WebCase):
         self.assertEqual(_run(self.crm.bike(self.bike_id))["status"], "available",
                          "от чего отказались, то не держит место в сервисе")
 
+    def test_sending_the_estimate_tells_the_team_at_once(self):
+        self.add_line()
+        # Служебный чат задаётся конфигом при сборке панели: собираем её
+        # заново с чатом, обвязка теста чата не задаёт.
+        import dataclasses
+        cfg = dataclasses.replace(self.cfg, contract_chat_id="-1001")
+        self.app = tw.create_app(crm=self.crm, db=self.db, cfg=cfg, bot=self.bot)
+        self.client = tw.TestClient(self.app, follow_redirects=False)
+        self.login()
+        r = self.client.post(f"/orders/{self.order_id}/estimate", data={"action": "send"})
+        self.assertEqual(r.status_code, 303)
+        team = [t for chat, t in self.bot.sent if chat == "-1001"]
+        self.assertTrue(team, "команде ушло сообщение о смете")
+        self.assertIn("ждёт согласования", team[-1])
+        self.assertIn("1 500 ₽", team[-1])
+        codes = [n["code"] for n in _run(self.crm.notice_log(limit=10))]
+        self.assertIn("estimate_waiting", codes)
+
     def test_live_agreement_works_without_sending_the_estimate(self):
         """Клиент стоит у стойки: гнать его в бота ради кнопки незачем."""
         self.add_line()

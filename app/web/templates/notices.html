@@ -10,6 +10,11 @@
 <p class="flash err">Токен бота панели не задан: клиентские уведомления
   отсюда не уходят. Их по-прежнему шлёт процесс бота — тумблеры действуют
   и на него.</p>
+{% elif bot_state.ok %}
+<p class="muted">Бот <b>@{{ bot_state.name }}</b> отвечает.</p>
+{% elif bot_state.ok is not none %}
+<p class="flash err">Бот не отвечает: {{ bot_state.error }}. Уведомления не уйдут,
+  клиенты не получат кабинет. Проверьте контейнер bot и токен.</p>
 {% endif %}
 {% if not chat_ready %}
 <p class="flash">Служебный чат панели не задан (CONTRACT_CHAT_ID): командные
@@ -35,7 +40,14 @@
           <input name="{{ key }}" value="{{ value }}" size="3" class="mini"
                  form="nt{{ n.code }}" {% if not can %}disabled{% endif %}> дн.</label>
         {% endfor %}</td>
-      <td class="muted">{{ n.target_title }}</td>
+      <td class="muted">{% if group == 'team' and n.target == 'chat' %}
+        {# Адресат - сотрудник с Telegram вместо служебного чата: техник
+           получает своё лично, а не в общем потоке. #}
+        <select name="chat_id" form="nt{{ n.code }}" class="mini" {% if not can %}disabled{% endif %}>
+          <option value="">служебный чат</option>
+          {% for r in recipients %}<option value="{{ r.tg_id }}" {% if n.chat_id and n.chat_id|string == r.tg_id|string %}selected{% endif %}>{{ r.name or r.login }}</option>{% endfor %}
+        </select>
+        {% else %}{{ n.target_title }}{% endif %}</td>
       <td class="nowrap">
         {% if n.at_hour is none %}<span class="tag">сразу</span>
         {% else %}

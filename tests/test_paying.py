@@ -150,6 +150,51 @@ class TestPayLogic(unittest.TestCase):
                          "без карты списывать нечем")
 
 
+class TestTochkaPing(unittest.TestCase):
+    """Проверка подключения: один лёгкий запрос, ответ банка как есть."""
+
+    @staticmethod
+    def client(status, payload):
+        class Response:
+            def __init__(self):
+                self.status = status
+
+            async def json(self, content_type=None):
+                return payload
+
+        class Session:
+            calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def request(self, method, url, headers=None, **kwargs):
+                Session.calls.append((method, url, kwargs.get("params")))
+                return Response()
+
+        Session.calls.clear()
+        return tochka.TochkaClient(token="t", customer_code="300000",
+                                   session_factory=Session), Session
+
+    def test_ping_counts_retailers(self):
+        client, session = self.client(200, {"Data": {"Retailer": [{}, {}]}})
+        got = tw.run(client.ping())
+        self.assertEqual(got, {"retailers": 2})
+        method, url, params = session.calls[0]
+        self.assertEqual(method, "GET")
+        self.assertIn("acquiring/v1.0/retailers", url)
+        self.assertEqual(params, {"customerCode": "300000"})
+
+    def test_ping_reports_the_bank_error(self):
+        client, _ = self.client(401, {"errors": [{"message": "bad token"}]})
+        with self.assertRaises(tochka.TochkaError) as ctx:
+            tw.run(client.ping())
+        self.assertIn("401", str(ctx.exception))
+
+
 class TestTochkaParsing(unittest.TestCase):
     def test_states_map_to_three_words(self):
         paid = tochka.payment_state(
@@ -175,6 +220,37 @@ class TestTochkaParsing(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestAcquiringSwitch(tw.WebCase):
+    def setUp(self):
+        super().setUp()
+        self.login()
+
+    def test_switch_lives_in_settings_and_shows_on_the_page(self):
+        page = self.get_ok("/payments")
+        self.assertIn("Эквайринг Точки", page)
+        self.assertIn("не настроен", page, "в тестах токена нет")
+        r = self.client.post("/payments/acquiring", data={"action": "off"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(tw.run(self.crm.settings())["acquiring_enabled"], "0")
+        self.assertFalse(logic.acquiring_enabled(tw.run(self.crm.settings())))
+        self.client.post("/payments/acquiring", data={"action": "on"})
+        self.assertTrue(logic.acquiring_enabled(tw.run(self.crm.settings())))
+        self.assertTrue(logic.acquiring_enabled({}), "не задано - включён")
+
+    def test_check_without_a_token_says_so(self):
+        self.client.post("/payments/acquiring", data={"action": "check"})
+        self.assertIn("не настроен", self.get_ok("/payments"))
+
+    def test_switch_is_money_only(self):
+        profile = tw.run(self.crm.access_profile_by_code("tech"))
+        tw.run(self.crm.create_staff("petr", logic.hash_password("password-1"),
+                                     "Пётр", "manager", profile["id"]))
+        self.client.post("/logout")
+        self.login("petr", "password-1")
+        self.assertEqual(self.client.post("/payments/acquiring",
+                                          data={"action": "off"}).status_code, 403)
+
+
 class TestPayFlow(tw.WebCase):
     def setUp(self):
         super().setUp()

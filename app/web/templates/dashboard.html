@@ -3,6 +3,10 @@
 {# Сводка режется профилем: без доступа к финансам рубли не показываются
    вовсе, иначе право «смотреть сводку» обходило бы право на деньги. #}
 {% set money_ok = can_view(staff, 'finance') %}
+{% if bot_state and bot_state.ok is sameas false %}
+<p class="flash err">Бот не отвечает: {{ bot_state.error }}. Клиенты не получают
+  кабинет и напоминания, коды подписания не уходят. Проверьте контейнер bot.</p>
+{% endif %}
 <section class="card three">
   <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }}/день{% endif %}</span></div>
   <div class="tiles">

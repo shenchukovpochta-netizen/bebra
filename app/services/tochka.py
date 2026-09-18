@@ -218,6 +218,16 @@ class TochkaClient:
             if close is not None:
                 await close()
 
+    async def ping(self) -> dict:
+        """Проверить, что токен и код клиента приняты банком: список
+        торговых точек эквайринга - самый лёгкий запрос, который требует
+        и того, и другого. Ошибка - TochkaError с ответом банка."""
+        async with self._session() as session:
+            data = await self._json(session, "GET", "acquiring/v1.0/retailers",
+                                    params={"customerCode": self.customer_code})
+        retailers = (data.get("Data") or {}).get("Retailer") or []
+        return {"retailers": len(retailers)}
+
     async def payment_status(self, operation_id: str) -> dict:
         """Что стало со ссылкой: оплатили, протухла или ещё ждём."""
         if not self.token:
