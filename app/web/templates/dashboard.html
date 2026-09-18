@@ -51,21 +51,26 @@
 
 {% if money_ok %}
 <section class="card three">
-  <div class="three-head"><h2>План на месяц</h2>
+  <div class="three-head"><h2>План на месяц
+      {# Стрелки листают месяц: прошлый - целиком, вперёд - некуда. #}
+      <span class="muted"><a href="/?month={{ span.prev_key }}" title="прошлый месяц">‹</a> {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a href="/?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}</span></h2>
     <span class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день</span></div>
   <div class="tiles">
     <div class="tile"><b>{{ money(progress.target) }}</b><span>план месяца</span></div>
-    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>пришло с начала месяца<br><small class="muted">ровным темпом было бы {{ money(progress.pace) }}</small></span></div>
+    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>{% if span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}<br><small class="muted">ровным темпом было бы {{ money(progress.pace) }}</small></span></div>
     <div class="tile"><b>{% if progress.percent is none %}—{% else %}{{ progress.percent }} %{% endif %}</b><span>плана выполнено</span></div>
+    {% if span.is_current %}
+    <div class="tile {% if progress.forecast_ok %}good{% else %}warn{% endif %}"><b>{{ money(progress.forecast) }}</b><span>прогноз по темпу<br><small class="muted">столько придёт к концу месяца, если ничего не менять</small></span></div>
     <div class="tile"><b>{{ money(progress.left) }}</b><span>осталось собрать за {{ progress.days_left }} дн.{% if progress.need_rented %}<br><small class="muted">это {{ progress.need_rented }} велосипедов каждый день по цели</small>{% endif %}</span></div>
+    {% endif %}
   </div>
   {% if progress.need_rented > operational %}
   <p class="muted bad">Столько велосипедов в парке нет: план этого месяца уже
     не вытянуть — либо поднимать чек, либо признать и поставить достижимый.</p>
   {% endif %}
   <h3>Деньги по дням
-    <span class="muted">· <a href="/?chart=days" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a> ·
-      <a href="/?chart=cumulative" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></span></h3>
+    <span class="muted">· <a href="/?chart=days&month={{ span.key }}" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a> ·
+      <a href="/?chart=cumulative&month={{ span.key }}" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></span></h3>
   {% set shown = chart_total if chart_view == 'cumulative' else chart.days %}
   <div class="bars" role="img"
        aria-label="Деньги по дням месяца, план {{ money(chart.plan_per_day) }} в день">
@@ -100,6 +105,7 @@
     <label>Чек в день <input name="plan_check" value="{{ plan.check }}" size="8"></label>
     <label>Норма в ремонте <input name="plan_repair" value="{{ plan.repair }}" size="5"></label>
     <label>Норма подменных <input name="plan_spare" value="{{ plan.spare }}" size="5"></label>
+    <label>Норма свободных <input name="plan_free" value="{{ plan.free }}" size="5"></label>
     <button type="submit">Сохранить план</button>
   </form>
   <p class="muted">Умолчания взяты из трёх чисел: парк {{ plan.fleet }} при простое

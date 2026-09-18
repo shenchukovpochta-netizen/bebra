@@ -62,6 +62,41 @@ class TestPlanLogic(unittest.TestCase):
         self.assertEqual(progress["days_left"], 15)
         self.assertEqual(progress["need_rented"], 100)
 
+    def test_forecast_keeps_the_current_pace(self):
+        plan = {"rented": 10, "check": D(500)}
+        got = logic.plan_progress(plan, {"revenue": D(30000)},
+                                  days_in_month=30, days_passed=10)
+        self.assertEqual(got["forecast"], D(90000), "3 000 в день × 30")
+        self.assertFalse(got["forecast_ok"], "план 150 000 - не успеваем")
+        got = logic.plan_progress(plan, {"revenue": D(60000)},
+                                  days_in_month=30, days_passed=10)
+        self.assertTrue(got["forecast_ok"])
+        self.assertEqual(logic.plan_progress(plan, {"revenue": D(0)}, days_in_month=30,
+                                             days_passed=0)["forecast"], D(0),
+                         "в первый день делить не на что")
+
+    def test_month_from_the_address_never_goes_into_the_future(self):
+        today = date(2026, 9, 18)
+        self.assertEqual(logic.month_from("2026-08", today=today), date(2026, 8, 1))
+        self.assertEqual(logic.month_from("2026-09", today=today), date(2026, 9, 1))
+        self.assertEqual(logic.month_from("2026-12", today=today), date(2026, 9, 1),
+                         "вперёд листать некуда")
+        self.assertEqual(logic.month_from("мусор", today=today), date(2026, 9, 1))
+        self.assertEqual(logic.month_from("2026-13", today=today), date(2026, 9, 1))
+        self.assertEqual(logic.month_from(None, today=today), date(2026, 9, 1))
+
+    def test_month_bounds_for_past_and_current(self):
+        today = date(2026, 9, 18)
+        past = logic.month_bounds(date(2026, 8, 1), today=today)
+        self.assertEqual((past["last"], past["today"], past["days"], past["passed"]),
+                         (date(2026, 8, 31), date(2026, 8, 31), 31, 31))
+        self.assertEqual((past["prev_key"], past["next_key"]), ("2026-07", "2026-09"))
+        self.assertFalse(past["is_current"])
+        now = logic.month_bounds(date(2026, 9, 1), today=today)
+        self.assertEqual((now["today"], now["passed"]), (today, 18))
+        self.assertIsNone(now["next_key"], "у текущего месяца стрелки вперёд нет")
+        self.assertTrue(now["is_current"])
+
     def test_progress_at_the_end_of_the_month_asks_for_nothing(self):
         plan = {"rented": 10, "check": D(500), "fleet": 10}
         progress = logic.plan_progress(plan, {"revenue": D(0)},
@@ -125,6 +160,29 @@ class TestPlanInPanel(tw.WebCase):
         plan = logic.month_plan(settings, fleet=10)
         self.assertEqual((plan["rented"], plan["check"]), (120, D("600.00")))
         self.assertIn("120 велосипедов в аренде по 600", self.get_ok("/"))
+
+    def test_dashboard_pages_through_months(self):
+        page = self.get_ok("/")
+        self.assertIn("прогноз по темпу", page)
+        self.assertIn("?month=", page)
+        past = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        page = self.get_ok(f"/?month={past}")
+        self.assertIn("пришло за месяц", page)
+        self.assertNotIn("прогноз по темпу", page, "у прошлого месяца прогноза нет")
+        self.assertEqual(self.client.get("/?month=2999-01").status_code, 200)
+        self.assertEqual(self.client.get("/?month=мусор").status_code, 200)
+
+    def test_free_norm_is_saved_and_shown_on_the_tiles(self):
+        r = self.client.post("/plan", data={"plan_rented": "120", "plan_check": "600",
+                                            "plan_repair": "5", "plan_spare": "2",
+                                            "plan_free": "3"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(tw.run(self.crm.settings())["plan_free"], "3")
+        tiles = {t["code"]: t for t in logic.fleet_tiles(
+            {"available": 7, "rented": 100, "repair": 2}, {"free": 3, "rented": 120,
+                                                            "repair": 5, "spare": 2})}
+        self.assertEqual(tiles["available"]["norm"], 3)
+        self.assertTrue(tiles["available"]["over"], "семь свободных при норме три - простой")
 
     def test_bad_plan_is_refused(self):
         r = self.client.post("/plan", data={"plan_rented": "сто", "plan_check": "600"})

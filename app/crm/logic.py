@@ -1452,6 +1452,12 @@ def service_summary(rows: Iterable[dict]) -> dict[str, Any]:
         "total": len(rows),
         "no_order": sum(1 for r in rows if r["order"] is None),
         "stuck": sum(1 for r in rows if r["stuck"]),
+        # Два состояния, где техника стоит не из-за нас: ждём клиента
+        # и ждём поставщика. Их видно плитками, а не только фильтром.
+        "approving": sum(1 for r in rows
+                         if (r["order"] or {}).get("status") == "approve"),
+        "waiting": sum(1 for r in rows
+                       if (r["order"] or {}).get("status") == "waiting"),
         "days": days,
         "lost": idle_cost(days),
         # Сколько они стоят нам каждый следующий день, пока стоят.
@@ -2478,8 +2484,11 @@ def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
     repair = number("plan_repair",
                     max(int(round(fleet * IDLE_TARGET_PERCENT / 200)), 1))
     spare = number("plan_spare", max(int(round(fleet * Decimal("0.02"))), 2))
+    # Свободных - вторая половина допустимого простоя: столько стоит на
+    # точке «на выдачу», больше - уже некому выдавать.
+    free = number("plan_free", max(int(round(fleet * IDLE_TARGET_PERCENT / 200)), 1))
     return {"rented": rented, "check": check, "fleet": fleet,
-            "repair": repair, "spare": spare}
+            "repair": repair, "spare": spare, "free": free}
 
 
 # Плитки парка на сводке: статус, подпись и откуда берётся норма.
@@ -2488,7 +2497,8 @@ def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
 FLEET_TILES: tuple[tuple[str, str, str | None, str], ...] = (
     ("rented", "У клиента", "rented", "min"),
     ("repair", "В ремонте", "repair", "max"),
-    ("available", "Свободны", None, ""),
+    # Свободных сверх нормы - это не запас, а простой: выдавать некому.
+    ("available", "Свободны", "free", "max"),
     ("maintenance", "На ТО", None, ""),
     ("new", "На сборке", None, ""),
 )
@@ -2547,6 +2557,38 @@ def repair_chart(by_day: Mapping[date, Any], norm: int = 0) -> dict[str, Any]:
             "ok_days": sum(1 for d in days if not d["over"]),
             "over_days": sum(1 for d in days if d["over"]),
             "peak": max((d["value"] for d in days), default=0)}
+
+
+def month_from(raw: Any, *, today: date | None = None) -> date:
+    """Первое число месяца из «ГГГГ-ММ» в адресе. Мусор или будущее -
+    текущий месяц: листать вперёд некуда, там ещё ничего не произошло."""
+    today = today or date.today()
+    current = today.replace(day=1)
+    text = str(raw or "").strip()
+    try:
+        first = date(int(text[:4]), int(text[5:7]), 1) if len(text) == 7 else current
+    except ValueError:
+        return current
+    return first if first <= current else current
+
+
+def month_bounds(first: date, *, today: date | None = None) -> dict[str, Any]:
+    """Границы месяца для графиков: последний день, «сегодня» внутри
+    месяца (для прошлого - его последний день), соседние месяцы."""
+    today = today or date.today()
+    next_first = (first + timedelta(days=32)).replace(day=1)
+    last = next_first - timedelta(days=1)
+    prev_first = (first - timedelta(days=1)).replace(day=1)
+    current = today.replace(day=1)
+    return {"first": first, "last": last, "next": next_first,
+            "prev": prev_first,
+            "today": min(today, last),
+            "days": (next_first - first).days,
+            "passed": (min(today, last) - first).days + 1,
+            "is_current": first == current,
+            "prev_key": prev_first.strftime("%Y-%m"),
+            "next_key": next_first.strftime("%Y-%m") if first < current else None,
+            "key": first.strftime("%Y-%m")}
 
 
 def money_chart(rows: Iterable[Mapping[str, Any]], *, plan_per_day: Any = 0,
@@ -2630,8 +2672,14 @@ def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,
     pace = to_money(target * days_passed / days_in_month)
     left = max(target - fact, Decimal(0))
     days_left = days_in_month - days_passed
+    # Прогноз - тем же темпом до конца месяца: «придёт столько, если
+    # ничего не менять». Не обещание, а ответ на «успеваем или нет».
+    forecast = (to_money(fact * days_in_month / days_passed)
+                if days_passed > 0 else Decimal(0))
     return {
         "target": target, "fact": fact, "pace": pace, "left": left,
+        "forecast": forecast,
+        "forecast_ok": forecast >= target,
         "ahead": fact >= pace,
         "percent": (float(round(100 * fact / target, 1)) if target else None),
         "days_left": days_left,

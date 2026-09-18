@@ -123,6 +123,25 @@ class TestServiceInPanel(tw.WebCase):
         self.assertEqual(tw.run(self.crm.bike(self.bike_id))["status"], "repair",
                          "наряд открыт - велосипед не должен числиться свободным")
 
+    def test_desk_counts_approval_and_parts_and_lists_spares(self):
+        self.open_order()
+        order = self.current()
+        tw.run(self.crm.update_work_order(order["id"], status="waiting"))
+        spare = tw.run(self.crm.create_bike(code="B-9", model="Truck+", spare=True))
+        page = self.get_ok("/service")
+        self.assertIn("ждём запчасть", page)
+        self.assertIn('href="/orders?status=waiting"><b>1</b>', page)
+        self.assertIn('href="/orders?status=approve"><b>0</b>', page)
+        self.assertIn("Подменный фонд", page)
+        self.assertIn(f"/bikes/{spare}", page)
+        past = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        self.assertEqual(self.client.get(f"/service?month={past}").status_code, 200)
+        self.assertIn(f"/service?month={past}", self.get_ok("/service"),
+                      "стрелка на прошлый месяц")
+        summary = logic.service_summary(logic.service_rows(
+            tw.run(self.crm.bikes(limit=100)), tw.run(self.crm.open_orders_by_bike())))
+        self.assertEqual((summary["waiting"], summary["approving"]), (1, 0))
+
     def test_payer_changes_while_nothing_was_promised(self):
         """«Наш» ремонт оказался клиентским после разборки: плательщик
         меняется на месте, а не закрытием и новым нарядом."""

@@ -478,26 +478,31 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         settings = await crm.settings()
         operational = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
         plan = logic.month_plan(settings, fleet=operational)
-        first = today.replace(day=1)
-        next_month = (first + timedelta(days=32)).replace(day=1)
+        # Месяц листается стрелками: прошлый - целиком, текущий - по
+        # сегодняшний день, вперёд листать некуда.
+        span = logic.month_bounds(
+            logic.month_from(request.query_params.get("month"), today=today),
+            today=today)
+        first, next_month = span["first"], span["next"]
         month_metrics = await period_metrics(
             since=datetime.combine(first, datetime.min.time()).astimezone(),
-            until=datetime.now().astimezone())
+            until=(datetime.now().astimezone() if span["is_current"] else
+                   datetime.combine(next_month, datetime.min.time()).astimezone()))
         soon = logic.freeing_soon(rows, today=today)
         month_totals = await crm.ledger_totals(since=today.replace(day=1))
         # Деньги по дням месяца: столбики «пришло», линия накопленного
         # долга и пунктир плана в день. Помесячных чисел мало - по ним
         # не видно, в какой день всё пошло не так.
         chart = logic.money_chart(
-            await crm.money_by_day(first, (next_month - timedelta(days=1))),
+            await crm.money_by_day(first, span["last"]),
             plan_per_day=logic.to_money(plan["check"] * plan["rented"]),
-            today=today)
+            today=span["today"])
         return render(request, "dashboard.html",
-                      plan=plan,
+                      plan=plan, span=span,
                       progress=logic.plan_progress(
                           plan, month_metrics,
-                          days_in_month=(next_month - first).days,
-                          days_passed=today.day),
+                          days_in_month=span["days"],
+                          days_passed=span["passed"]),
                       soon=soon,
                       counts=await crm.counts(), bikes=bikes_by,
                       operational=operational,
@@ -617,7 +622,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                              default="0", limit=9999)
         spare = count_field(data, "plan_spare", what="Норма подменных",
                             default="0", limit=9999)
-        for field in (rented, check, repair, spare):
+        free = count_field(data, "plan_free", what="Норма свободных",
+                           default="0", limit=9999)
+        for field in (rented, check, repair, spare, free):
             if not field.ok:
                 flash(request, field.error, "err")
                 return redirect("/")
@@ -625,6 +632,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         await crm.set_setting("plan_check", str(check.value), by=who(request))
         await crm.set_setting("plan_repair", str(repair.value), by=who(request))
         await crm.set_setting("plan_spare", str(spare.value), by=who(request))
+        await crm.set_setting("plan_free", str(free.value), by=who(request))
         flash(request, "План на месяц сохранён.")
         return redirect("/")
 
@@ -2808,14 +2816,19 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         plan = logic.month_plan(settings, fleet=sum(
             counts.get(code, 0) for code in logic.OPERATIONAL_STATUSES))
         # График за месяц: по нему видно, ремонт у нас ровный или
-        # скачет - и когда именно скакнул.
-        first = today.replace(day=1)
+        # скачет - и когда именно скакнул. Месяц листается стрелками.
+        span = logic.month_bounds(
+            logic.month_from(request.query_params.get("month"), today=today),
+            today=today)
         chart = logic.repair_chart(
-            await crm.bikes_in_status_by_day("repair", first, today),
+            await crm.bikes_in_status_by_day("repair", span["first"], span["today"]),
             norm=int(plan["repair"]))
+        # Подменный фонд - на столе сервиса: это его резерв на замены.
+        spares = [b for b in bikes if b.get("spare")
+                  and b.get("status") in logic.OPERATIONAL_STATUSES]
         return render(request, "service.html", rows=tools["rows"], tools=tools, q=q,
-                      summary=logic.service_summary(rows),
-                      chart=chart, plan=plan, month=first,
+                      summary=logic.service_summary(rows), spares=spares,
+                      chart=chart, plan=plan, month=span["first"], span=span,
                       tiles=logic.fleet_tiles(
                           counts, plan,
                           spare=sum(1 for b in bikes if b.get("spare")

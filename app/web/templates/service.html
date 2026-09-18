@@ -18,6 +18,8 @@
   <div class="tile {% if summary.no_order %}hot{% endif %}"><b>{{ summary.no_order }}</b><span>в ремонте без наряда<br><small class="muted">никто ими не занят</small></span></div>
   <div class="tile"><b>{{ summary.total }}</b><span>всего в сервисе</span></div>
   <div class="tile {% if summary.stuck %}warn{% endif %}"><b>{{ summary.stuck }}</b><span>стоят дольше {{ ORDER_STUCK_DAYS }} дн.</span></div>
+  <a class="tile {% if summary.approving %}warn{% endif %}" href="/orders?status=approve"><b>{{ summary.approving }}</b><span>ждут согласования<br><small class="muted">клиент молчит на смету</small></span></a>
+  <a class="tile {% if summary.waiting %}warn{% endif %}" href="/orders?status=waiting"><b>{{ summary.waiting }}</b><span>ждём запчасть</span></a>
   {% if can_view(staff, 'finance') %}
   <div class="tile"><b>{{ money(summary.lost) }}</b><span>потеряно, пока стоят<br><small class="muted">{{ summary.days }} велосипеде-дней по цели {{ money(CHECK_TARGET) }}</small></span></div>
   <div class="tile {% if summary.per_day %}warn{% endif %}"><b>−{{ money(summary.per_day) }}</b><span>в день, пока стоят<br><small class="muted">каждые сутки сервиса стоят столько</small></span></div>
@@ -25,7 +27,7 @@
 </div>
 
 <section class="card">
-  <h2>В ремонте по дням <span class="muted">· {{ month|dmy }} · норма {{ chart.norm }}</span></h2>
+  <h2>В ремонте по дням <span class="muted">· <a href="/service?month={{ span.prev_key }}" title="прошлый месяц">‹</a> {{ month.strftime('%m.%Y') }} {% if span.next_key %}<a href="/service?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %} · норма {{ chart.norm }}</span></h2>
   {# Столбики чистым CSS: высота в процентах от пика. Библиотека графиков
      ради двадцати столбиков - это триста килобайт на страницу, которую
      открывают с телефона на точке. #}
@@ -106,6 +108,12 @@
   </table>
   </div>
   <p class="muted">«Без наряда» — велосипед в ремонте, но работой никто не занят: он копит простой, а в отчётах выглядит как обычный ремонт. Такие стоят первыми.</p>
+  {% if spares %}
+  <h3>Подменный фонд <span class="muted">· {{ spares|length }} из нормы {{ plan.spare }}</span></h3>
+  {# Резерв сервиса на замены: подменный у клиента - это замена, которая
+     уже сработала, свободный подменный - та, что ещё может. #}
+  <p>{% for b in spares %}<a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="tag {{ b.status }}">{{ BIKE_STATUSES[b.status] }}</span>{% if b.location %} <small class="muted">{{ b.location }}</small>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+  {% endif %}
   {% else %}<p class="muted">В сервисе пусто — весь операционный парк свободен или в аренде.</p>{% endif %}
 </section>
 {% endblock %}
