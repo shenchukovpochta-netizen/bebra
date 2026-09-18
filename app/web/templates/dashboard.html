@@ -129,7 +129,7 @@
       {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
       <td class="intent">
         {% if r.intent %}<span class="tag intent-{{ r.intent }}">{{ r.intent_label }}</span>{% endif %}
-        {% if can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/intent"><input type="hidden" name="next" value="/"><button name="intent" value="renew" class="ghost" title="Клиент продлевает">✓ продлит</button><button name="intent" value="return" class="ghost" title="Клиент сдаёт велосипед">↩ сдаёт</button><button name="intent" value="snooze" class="ghost" title="Скрыть до завтра">⏰ завтра</button></form>{% endif %}
+        {% if can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/intent"><input type="hidden" name="next" value="/"><button name="intent" value="renew" class="ghost" title="Клиент продлевает">✓ продлит</button><button name="intent" value="return" class="ghost" title="Клиент сдаёт велосипед">↩ сдаёт</button><button name="intent" value="snooze" class="ghost" title="Скрыть до завтра">⏰ завтра</button></form>{% if r.tg_id %}<form method="post" action="/rentals/{{ r.id }}/remind" class="inline-form"><input type="hidden" name="next" value="/"><button type="submit" class="ghost" title="Напомнить клиенту в боте сейчас">🔔</button></form>{% endif %}{% endif %}
       </td>
     </tr>
     {% endfor %}

@@ -263,6 +263,23 @@ def reminder_kind(left: int | None, *, before_days: int) -> str | None:
     return None
 
 
+def manual_reminder_kind(summary: Mapping[str, Any] | None) -> str | None:
+    """Какое напоминание слать по кнопке оператора - без расписания.
+
+    Расписание шлёт в свои дни, а оператор жмёт, когда решил сам:
+    просрочка - «просрочка», сегодня - «сегодня», иначе «истекает через
+    N дней», сколько бы их ни было. None - аренда не идёт.
+    """
+    if not summary or not summary.get("active"):
+        return None
+    left = summary.get("days_left")
+    if left is None:
+        return None
+    if left < 0:
+        return REMIND_OVERDUE
+    return REMIND_DUE if left == 0 else REMIND_SOON
+
+
 def reminder_due(rental: dict, *, before_days: int, today: date) -> str | None:
     """Напоминание по аренде на сегодня с учётом уже отправленного.
 

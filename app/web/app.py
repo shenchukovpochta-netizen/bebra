@@ -29,7 +29,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
 from .. import texts
-from ..crm import company, doctemplates, import_xlsx, logic, notices, notify, service
+from ..crm import billing, company, doctemplates, import_xlsx, logic, notices, notify, service
 from ..services import contract as contract_service
 from ..services import tochka
 from .config import WebConfig
@@ -869,6 +869,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                                 amount.value))
             await referral_bonus(client, amount.value, who(request))
         flash(request, "Запись добавлена.")
+        # С карточки аренды платёж принимают, не уходя с неё.
+        nxt = data.get("next") or ""
+        if nxt.startswith("/") and not nxt.startswith("//"):
+            return redirect(nxt)
         return redirect(f"/clients/{client_id}")
 
     @app.get("/clients/{client_id}/contract")
@@ -1817,6 +1821,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
         moves = logic.rental_bike_rows(await crm.rental_bikes(rental_id))
         return render(request, "rental.html", rental=rental, summary=summary, bike=bike,
+                      order=(await crm.open_order_of(rental["bike_id"])
+                             if rental.get("bike_id") else None),
+                      days_running=logic.rental_days(rental, today=date.today()),
+                      remind_kind=logic.manual_reminder_kind(summary),
                       intent=logic.intent_state(rental, summary, today=date.today()),
                       ledger=ledger, tariffs=await crm.tariffs(active_only=True),
                       moves=moves,
@@ -1888,6 +1896,32 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Позиция снята, аккумулятор принят. "
                        "Цена периода уменьшится со следующего начисления.")
         return redirect(f"/rentals/{rental_id}")
+
+    @app.post("/rentals/{rental_id}/remind")
+    async def rental_remind(request: Request, rental_id: int) -> Response:
+        """Напоминание клиенту по кнопке: тот же текст, что шлёт расписание,
+        но сейчас и мимо тумблера - оператор нажал сам."""
+        data = await form(request)
+        nxt = data.get("next") or ""
+        back = nxt if nxt.startswith("/") and not nxt.startswith("//") else f"/rentals/{rental_id}"
+        rental = await crm.rental(rental_id)
+        if rental is None or rental["status"] != "active":
+            flash(request, "Аренда не идёт - напоминать не о чем.", "err")
+            return redirect(back)
+        if not rental.get("tg_id"):
+            flash(request, f"{rental['full_name']}: клиента нет в боте, "
+                           "напоминание отправить некуда - позвоните.", "err")
+            return redirect(back)
+        if bot is None:
+            flash(request, "Бот не подключён к панели.", "err")
+            return redirect(back)
+        kind = logic.manual_reminder_kind(summarize(rental, rental.get("balance", 0)))
+        sent = await billing.send_reminder(bot, db, crm, rental, kind=kind,
+                                           today=date.today(), manual=True)
+        flash(request, f"{rental['full_name']}: напоминание отправлено." if sent
+              else f"{rental['full_name']}: не доставлено - клиент заблокировал бота?",
+              "ok" if sent else "err")
+        return redirect(back)
 
     @app.post("/rentals/{rental_id}/intent")
     async def rental_intent(request: Request, rental_id: int) -> Response:

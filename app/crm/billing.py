@@ -62,35 +62,51 @@ async def remind_once(bot: Any, db: Any, crm: Any, cfg: Any, *,
                                  detail="выключено в настройках")
             continue
         await crm.mark_notified(r["id"], today, kind)
-        if not r.get("tg_id"):
-            await notices.record(crm, code, status="skipped",
-                                 client_id=r.get("client_id"),
-                                 detail="клиента нет в боте")
-            continue                # клиент без Telegram: только в сводку
-        summary = logic.rental_summary(r, r.get("balance", 0), today=today)
-        lang = "ru"
-        try:
-            row = await db.get_user(r["tg_id"])
-            lang = i18n.user_lang(dict(row) if row else None)
-        except Exception:                                # noqa: BLE001
-            pass
-        text = i18n.t(lang, REMIND_KEY[kind]).format(
-            bike=bot_logic.esc(summary.get("bike") or "—"),
-            until=summary["covered_until"].strftime("%d.%m.%Y"),
-            days=max(summary["days_left"], 0),
-            amount=logic.money(logic.topup_hint(summary)),
-            debt=logic.money(summary["due"]))
-        try:
-            await bot.send_message(r["tg_id"], text, reply_markup=kb.cab_topup(lang))
+        if await send_reminder(bot, db, crm, r, kind=kind, today=today):
             sent += 1
-            await notices.record(crm, code, status="sent",
-                                 client_id=r.get("client_id"))
-        except TelegramAPIError as exc:
-            log.warning("напоминание CRM (%s) клиенту %s не доставлено: %s",
-                        kind, r["tg_id"], exc)
-            await notices.record(crm, code, status="failed",
-                                 client_id=r.get("client_id"), detail=str(exc))
     return sent, logic.digest(rentals, today=today, before_days=cfg.remind_before_days)
+
+
+async def send_reminder(bot: Any, db: Any, crm: Any, rental: dict, *, kind: str,
+                        today: date, manual: bool = False) -> bool:
+    """Одно напоминание одной аренде: текст по виду, язык клиента,
+    кнопка пополнения. True - доставлено.
+
+    Общая для расписания и кнопки «Напомнить»: два текста одного
+    напоминания разъехались бы на первой же правке. Ручная отправка
+    в журнале помечена - по нему видно, что это нажал человек.
+    """
+    code = REMIND_CODE[kind]
+    detail = "вручную" if manual else None
+    if not rental.get("tg_id"):
+        await notices.record(crm, code, status="skipped",
+                             client_id=rental.get("client_id"),
+                             detail="клиента нет в боте")
+        return False                # клиент без Telegram: только в сводку
+    summary = logic.rental_summary(rental, rental.get("balance", 0), today=today)
+    lang = "ru"
+    try:
+        row = await db.get_user(rental["tg_id"])
+        lang = i18n.user_lang(dict(row) if row else None)
+    except Exception:                                # noqa: BLE001
+        pass
+    text = i18n.t(lang, REMIND_KEY[kind]).format(
+        bike=bot_logic.esc(summary.get("bike") or "—"),
+        until=summary["covered_until"].strftime("%d.%m.%Y"),
+        days=max(summary["days_left"], 0),
+        amount=logic.money(logic.topup_hint(summary)),
+        debt=logic.money(summary["due"]))
+    try:
+        await bot.send_message(rental["tg_id"], text, reply_markup=kb.cab_topup(lang))
+    except TelegramAPIError as exc:
+        log.warning("напоминание CRM (%s) клиенту %s не доставлено: %s",
+                    kind, rental["tg_id"], exc)
+        await notices.record(crm, code, status="failed",
+                             client_id=rental.get("client_id"), detail=str(exc))
+        return False
+    await notices.record(crm, code, status="sent",
+                         client_id=rental.get("client_id"), detail=detail)
+    return True
 
 
 async def post_free_bikes(bot: Any, crm: Any, cfg: Any) -> bool:

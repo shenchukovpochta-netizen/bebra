@@ -45,6 +45,7 @@
     {{ list.th('Оплачено', 'paid', tools) }}
     {{ list.th('Просрочка', 'overdue', tools, 'num') }}
     {% if money_ok %}{{ list.th('Баланс', 'debt', tools, 'num') }}{% endif %}
+    <th></th>
   </tr>
   {% for r in rows %}
   <tr>
@@ -57,9 +58,10 @@
     <td>{% if r.status == 'active' %}{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">закрыта</span>{% endif %}</td>
     <td class="num">{% if r.overdue_days %}<span class="bad">{{ r.overdue_days }} дн.</span>{% else %}<span class="muted">—</span>{% endif %}</td>
     {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
+    <td class="actions nowrap">{% if r.status == 'active' and r.tg_id and can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/remind" class="inline-form"><input type="hidden" name="next" value="/rentals?status={{ status }}&view={{ view }}{{ qs }}"><button type="submit" class="ghost" title="напомнить клиенту сейчас">🔔</button></form>{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="9" class="muted">Пусто.</td></tr>{% endfor %}
-  {{ list.footer(tools, '/rentals', 9,
+  {% else %}<tr><td colspan="10" class="muted">Пусто.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/rentals', 10,
                  ((('долг ' ~ money(-debt_total)) if money_ok and debt_total else '')
                   ~ (' · ' if money_ok and debt_total and overdue_total else '')
                   ~ (('просрочено ' ~ overdue_total) if overdue_total else ''))) }}

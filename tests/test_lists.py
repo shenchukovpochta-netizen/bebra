@@ -184,6 +184,16 @@ class TestRentalListLogic(unittest.TestCase):
                                            today=date(2026, 9, 18)), 4)
         self.assertEqual(logic.rental_days({}), 0)
 
+    def test_manual_reminder_kind_follows_the_days_left(self):
+        self.assertEqual(logic.manual_reminder_kind({"active": True, "days_left": -2}),
+                         logic.REMIND_OVERDUE)
+        self.assertEqual(logic.manual_reminder_kind({"active": True, "days_left": 0}),
+                         logic.REMIND_DUE)
+        self.assertEqual(logic.manual_reminder_kind({"active": True, "days_left": 9}),
+                         logic.REMIND_SOON, "оператор жмёт, когда решил, - шлём «через 9 дней»")
+        self.assertIsNone(logic.manual_reminder_kind({"active": False, "days_left": -2}))
+        self.assertIsNone(logic.manual_reminder_kind(None))
+
     def test_overdue_days_come_from_the_summary(self):
         self.assertEqual(logic.overdue_days({"active": True, "days_left": -3}), 3)
         self.assertEqual(logic.overdue_days({"active": True, "days_left": 2}), 0)
@@ -259,6 +269,67 @@ class TestRentalViews(tw.WebCase):
         self.assertIn("Просрочка, дн.", text)
         self.assertIn("Иванов", self.client.get("/rentals.csv?q=иванов").text)
         self.assertNotIn("Иванов", self.client.get("/rentals.csv?q=петров").text)
+
+    # ─── карточка аренды: оплата, наряд, суток, напоминание ───
+
+    def test_card_shows_days_and_offers_an_order(self):
+        page = self.get_ok(f"/rentals/{self.rental_id}")
+        self.assertIn("сут.", page)
+        self.assertIn(f"/orders/new?bike={self.bike_id}", page, "наряд открывается с аренды")
+        self.assertIn("Принять оплату", page)
+        _run(self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None, complaint="стук",
+            object_note=None, tech_id=None, estimate=D(0), created_by="т"))
+        page = self.get_ok(f"/rentals/{self.rental_id}")
+        self.assertIn("наряд РЕМ-", page, "открытый наряд виден тегом")
+        self.assertNotIn(f"/orders/new?bike={self.bike_id}", page)
+
+    def test_payment_from_the_card_lands_in_the_ledger_and_returns_there(self):
+        r = self.client.post(f"/clients/{self.client_id}/ledger", data={
+            "kind": "payment", "amount": "3000", "method": "cash",
+            "note": "с карточки аренды", "next": f"/rentals/{self.rental_id}"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], f"/rentals/{self.rental_id}")
+        rows = [x for x in _run(self.crm.ledger_of(self.client_id, 50))
+                if x.get("kind") == "payment"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["rental_id"], self.rental_id)
+        # Чужой адрес в next не уводит с панели.
+        r = self.client.post(f"/clients/{self.client_id}/ledger", data={
+            "kind": "payment", "amount": "100", "method": "cash", "note": "",
+            "next": "//evil.example/x"})
+        self.assertEqual(r.headers["location"], f"/clients/{self.client_id}")
+
+    def test_remind_button_sends_the_reminder_now(self):
+        self.db.users[5001] = {"tg_id": 5001, "lang": None}
+        r = self.client.post(f"/rentals/{self.rental_id}/remind",
+                             data={"next": "/rentals"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/rentals")
+        self.assertTrue(self.bot.sent, "клиенту ушло сообщение")
+        chat_id, text = self.bot.sent[-1][0], self.bot.sent[-1][1]
+        self.assertEqual(chat_id, 5001)
+        self.assertIn("B-1", text)
+        log = _run(self.crm.notice_log(limit=10))
+        self.assertEqual(log[0]["code"], "rent_overdue", "аренда с 1 сентября просрочена")
+        self.assertEqual(log[0]["detail"], "вручную")
+        self.assertIn("напоминание отправлено", self.get_ok("/rentals"))
+
+    def test_remind_needs_telegram_and_an_active_rental(self):
+        _run(self.crm.update_client(self.client_id, tg_id=None))
+        self.client.post(f"/rentals/{self.rental_id}/remind", data={})
+        self.assertIn("нет в боте", self.get_ok(f"/rentals/{self.rental_id}"))
+        self.assertEqual(self.bot.sent, [])
+        _run(self.crm.update_client(self.client_id, tg_id=5001))
+        _run(self.crm.update_rental(self.rental_id, status="closed"))
+        self.client.post(f"/rentals/{self.rental_id}/remind", data={})
+        self.assertIn("не идёт", self.get_ok(f"/rentals/{self.rental_id}"))
+        self.assertEqual(self.bot.sent, [])
+
+    def test_list_has_the_bell_only_for_clients_in_the_bot(self):
+        self.assertIn(f"/rentals/{self.rental_id}/remind", self.get_ok("/rentals"))
+        _run(self.crm.update_client(self.client_id, tg_id=None))
+        self.assertNotIn(f"/rentals/{self.rental_id}/remind", self.get_ok("/rentals"))
 
     def test_tabs_are_on_the_page(self):
         text = self.get_ok("/rentals")
