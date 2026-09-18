@@ -251,6 +251,7 @@ class TestPlanApply(unittest.TestCase):
         self.assertEqual(c["source"], "import")
         self.assertEqual(c["username"], "Diennt")
         self.assertIn("Доп. телефоны: +79172372469", c["note"])
+        self.assertEqual(c["phone2"], "+79172372469", "первый запасной - в своё поле")
         self.assertIn("Адрес регистрации: Казань", c["note"])
         r = run(crm.active_rental_of(c["id"]))
         self.assertEqual((r["billing"], r["period_days"], r["price"]),

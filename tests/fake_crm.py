@@ -459,7 +459,9 @@ class FakeCrm:
             digits = "".join(ch for ch in (q or "") if ch.isdigit())
             if len(digits) == 11 and digits[0] in "78":
                 digits = digits[1:]
-            phone_digits = "".join(ch for ch in c["phone"] if ch.isdigit())
+            phone_digits = " ".join(
+                "".join(ch for ch in str(c.get(k) or "") if ch.isdigit())
+                for k in ("phone", "phone2", "phone3"))
             if q and q.lower() not in hay.lower() \
                     and not (len(digits) >= 3 and digits in phone_digits):
                 continue
@@ -497,6 +499,8 @@ class FakeCrm:
                               "contract_no": contract_no, "note": note, "source": source,
                               "channel": None, "ref_code": None, "max_id": None,
                               "invited_by": None, "invited_at": None,
+                              "phone2": None, "phone3": None,
+                              "employer": None, "experience": None,
                               "created_at": self._now(), "updated_at": self._now()}
         return cid
 

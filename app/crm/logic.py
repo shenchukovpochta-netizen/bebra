@@ -1924,6 +1924,41 @@ def free_bikes_post(bikes: Iterable[dict], tariffs: Iterable[dict], *,
 
 # Каналы привлечения. Порядок - по тому, как часто приходят курьеры;
 # «сарафан» проставляется сам, когда клиента привёл друг по приглашению.
+# Где работает курьер. Для отчёта «кто наш клиент», а не для документов:
+# у «Самоката» и «Яндекс Еды» разные графики и разные простои.
+EMPLOYERS: dict[str, str] = {
+    "yandex": "Яндекс Еда / Доставка",
+    "samokat": "Самокат",
+    "sbermarket": "Купер (СберМаркет)",
+    "delivery": "Другая доставка",
+    "other": "Не курьер / другое",
+}
+
+# Стаж курьера: новичок чаще ломает и чаще пропадает - это входит
+# в решение о залоге и о сроке.
+EXPERIENCE: dict[str, str] = {
+    "none": "Впервые",
+    "under_year": "До года",
+    "years_1_3": "1–3 года",
+    "over_3": "Больше 3 лет",
+}
+
+
+def check_employer(raw: Any) -> Check:
+    """Работодатель из формы: пусто - не спросили, чужой код - ошибка."""
+    text = str(raw or "").strip()
+    if not text:
+        return Check(True, None)
+    return check_choice(text, EMPLOYERS, what="Компания")
+
+
+def check_experience(raw: Any) -> Check:
+    text = str(raw or "").strip()
+    if not text:
+        return Check(True, None)
+    return check_choice(text, EXPERIENCE, what="Стаж")
+
+
 CLIENT_CHANNELS: dict[str, str] = {
     "avito": "Авито",
     "2gis": "2ГИС",

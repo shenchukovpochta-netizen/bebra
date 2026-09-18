@@ -265,6 +265,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         COMPANY_FIELDS=company.COMPANY_FIELDS,
         CONTACT_FIELDS=company.CONTACT_FIELDS,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
+        EMPLOYERS=logic.EMPLOYERS, EXPERIENCE=logic.EXPERIENCE,
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
         SWAP_REASONS=logic.SWAP_REASONS, in_search=logic.in_search,
         search_days=logic.search_days,
@@ -751,13 +752,27 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         contract = logic.check_name(data.get("contract_no"), what="Договор") \
             if (data.get("contract_no") or "").strip() else logic.Check(True, None)
         channel = logic.check_channel(data.get("channel"))
-        for check in (name, note, status, contract, channel):
+        employer = logic.check_employer(data.get("employer"))
+        experience = logic.check_experience(data.get("experience"))
+        for check in (name, note, status, contract, channel, employer, experience):
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
         if phone is None:
             flash(request, "Телефон: не похоже на номер. Пример: +7 900 123-45-67.", "err")
             return None
+        # Запасные телефоны: необязательны, но если вписаны - это номера.
+        spare: dict[str, str | None] = {}
+        for key in ("phone2", "phone3"):
+            raw = (data.get(key) or "").strip()
+            if not raw:
+                spare[key] = None
+                continue
+            normal = bot_logic.normalize_phone(raw)
+            if normal is None:
+                flash(request, f"Запасной телефон «{raw}»: не похоже на номер.", "err")
+                return None
+            spare[key] = normal
         other = await crm.client_by_phone(phone)
         if other is not None and (current is None or other["id"] != current["id"]):
             flash(request, f"Этот телефон уже у клиента «{other['full_name']}».", "err")
@@ -770,7 +785,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return None
         fields = {"full_name": name.value, "phone": phone, "note": note.value,
                   "status": status.value, "contract_no": contract.value,
-                  "channel": channel.value}
+                  "channel": channel.value, **spare,
+                  "employer": employer.value, "experience": experience.value}
         if current is not None:
             fields["max_id"] = int(raw_max) if raw_max else None
         return fields

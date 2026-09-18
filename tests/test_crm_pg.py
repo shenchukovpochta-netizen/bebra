@@ -1757,6 +1757,19 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.update_work_order(order_id, status="cancelled")
         self.assertNotIn(self.bike_id, await self.crm.open_orders_by_bike())
 
+    async def test_client_search_by_spare_phone_on_postgres(self):
+        """Запасной номер ищется цифрами так же, как основной."""
+        await self.seed()
+        await self.crm.update_client(self.client_id, phone2="+79171112233",
+                                     employer="samokat", experience="over_3")
+        found = await self.crm.clients(q="917 111")
+        self.assertEqual([c["id"] for c in found], [self.client_id])
+        self.assertEqual(found[0]["employer"], "samokat")
+        self.assertEqual(await self.crm.clients(q="905 555"), [])
+        # Повторное применение схемы колонки не теряет.
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual((await self.crm.client(self.client_id))["phone2"], "+79171112233")
+
     async def test_mileage_column_survives_reapply(self):
         """schema.sql идемпотентен: повторный старт не теряет колонку."""
         await Database(self.pool).apply_schema(SCHEMA)

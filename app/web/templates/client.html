@@ -15,7 +15,8 @@
     {% if money_ok %}<dt>Баланс</dt><dd class="{% if balance < 0 %}bad{% endif %}"><b>{{ money(balance) }}</b></dd>{% endif %}
     <dt>Аренда</dt><dd>{% if rental %}{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ rental.id }}">{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}</a>{% else %}{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}{% endif %} · {{ rental.tariff_name }}{% if money_ok %} — {{ money(rental.price) }}{% endif %} / {{ rental.period_days }} дн. ({{ BILLING[rental.billing] }}){% else %}<span class="muted">нет</span>{% endif %}</dd>
     {% if money_ok %}<dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>{% endif %}
-    <dt>Телефон</dt><dd>{{ client.phone }}</dd>
+    <dt>Телефон</dt><dd>{{ client.phone }}{% if client.phone2 or client.phone3 %} <span class="muted">· запасные {{ [client.phone2, client.phone3]|select|join(', ') }}</span>{% endif %}</dd>
+    {% if client.employer or client.experience %}<dt>Работа</dt><dd>{{ EMPLOYERS.get(client.employer, '') }}{% if client.employer and client.experience %} · {% endif %}{% if client.experience %}стаж: {{ EXPERIENCE.get(client.experience, '') }}{% endif %}</dd>{% endif %}
     <dt>Telegram</dt><dd>{% if client.tg_id %}✅ ID {{ client.tg_id }}{% if client.username %} · @{{ client.username }}{% endif %}{% else %}<span class="muted">не привязан — клиент отправляет боту /cabinet и делится контактом</span>{% endif %}</dd>
     <dt>Договор</dt><dd>{{ client.contract_no or '—' }}{% if has_contract and can_act(staff, 'client_docs') %} · <a href="/clients/{{ client.id }}/contract">скачать подписанный</a>{% endif %}</dd>
     {% if bot_user %}<dt>В боте</dt><dd>статус {{ bot_user.status }}, шаг {{ bot_user.state }}{% if bot_user.rent_until %}, срок по форме выдачи до {{ bot_user.rent_until|dmy }}{% endif %}</dd>{% endif %}
@@ -107,6 +108,10 @@
   <form method="post" action="/clients/{{ client.id }}/edit">
     <label>ФИО <input name="full_name" value="{{ client.full_name }}" required></label>
     <label>Телефон <input name="phone" value="{{ client.phone }}" required></label>
+    <label>Запасной телефон <input name="phone2" value="{{ client.phone2 or '' }}" inputmode="tel" placeholder="родственник, второй номер"></label>
+    <label>Ещё один <input name="phone3" value="{{ client.phone3 or '' }}" inputmode="tel"></label>
+    <label>Компания <select name="employer"><option value="">не спросили</option>{% for code, label in EMPLOYERS.items() %}<option value="{{ code }}" {% if client.employer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Стаж курьера <select name="experience"><option value="">не спросили</option>{% for code, label in EXPERIENCE.items() %}<option value="{{ code }}" {% if client.experience == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <label>Номер договора <input name="contract_no" value="{{ client.contract_no or '' }}"></label>
     <label>Статус <select name="status">{% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}" {% if client.status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     {# Откуда узнал: на это опирается отчёт «куда давать рекламу». #}

@@ -491,6 +491,10 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
                     "full_name": row.fio, "phone": row.phone,
                     "username": row.tg.lstrip("@") if row.tg.startswith("@") else None,
                     "status": client_status, "note": _client_note(row), "line": row.line,
+                    # Первые два запасных - в свои поля: по ним ищут и
+                    # звонят; остальные остаются в заметке.
+                    "phone2": row.extra_phones[0] if row.extra_phones else None,
+                    "phone3": row.extra_phones[1] if len(row.extra_phones) > 1 else None,
                 }
                 plan.clients.append(client_ref)
                 # Долг клиента, у которого аренды уже нет (полиция, невозврат):
@@ -571,6 +575,8 @@ async def apply_plan(crm: Any, plan: Plan, *, by: str = "import") -> dict[str, i
                                       source="import")
         if c["status"] != "active":
             await crm.update_client(cid, status=c["status"])
+        if c.get("phone2") or c.get("phone3"):
+            await crm.update_client(cid, phone2=c.get("phone2"), phone3=c.get("phone3"))
         ids[c["phone"]] = cid
         done["clients"] += 1
     for r in plan.rentals:

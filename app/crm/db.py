@@ -27,7 +27,7 @@ BIKE_FIELDS = frozenset({
 CLIENT_FIELDS = frozenset({
     "full_name", "phone", "tg_id", "username", "status", "contract_no",
     "note", "source", "channel", "ref_code", "invited_by", "invited_at",
-    "max_id",
+    "max_id", "phone2", "phone3", "employer", "experience",
 })
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active",
                           "sort", "model", "kind"})
@@ -495,12 +495,17 @@ class CrmDB:
                          f"or c.username ilike ${len(args)}")
             # Телефон ищут как набрали: «900 111», «8 (900) 111-22-33».
             # Сравниваются только цифры, у восьмёрки отбрасывается код страны.
+            # Запасные номера ищутся так же: звонит с них тот же клиент.
             digits = re.sub(r"\D", "", q)
             if len(digits) >= 3:
                 if len(digits) == 11 and digits[0] in "78":
                     digits = digits[1:]
                 args.append(f"%{digits}%")
-                text_cond += f" or regexp_replace(c.phone, '\\D', '', 'g') like ${len(args)}"
+                text_cond += (f" or regexp_replace(c.phone, '\\D', '', 'g') like ${len(args)}"
+                              f" or regexp_replace(coalesce(c.phone2, ''), '\\D', '', 'g')"
+                              f" like ${len(args)}"
+                              f" or regexp_replace(coalesce(c.phone3, ''), '\\D', '', 'g')"
+                              f" like ${len(args)}")
             conds.append(f"({text_cond})")
         where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)

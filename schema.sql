@@ -1880,3 +1880,13 @@ begin
   return new;
 end
 $$;
+
+-- Клиент: запасные телефоны и место работы. Второй и третий номер бот
+-- собирает в анкете, но она зашифрована и остаётся единственным местом
+-- для собранного ботом; здесь - то, что оператор записал руками или
+-- привёз импорт. Работодатель и стаж - для отчёта «кто наш клиент»,
+-- не для документов.
+alter table crm.clients add column if not exists phone2 text;
+alter table crm.clients add column if not exists phone3 text;
+alter table crm.clients add column if not exists employer text;
+alter table crm.clients add column if not exists experience text;
