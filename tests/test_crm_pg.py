@@ -1616,23 +1616,27 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.seed()
         today = date.today()
         tz = datetime.now().astimezone().tzinfo
-        noon = datetime.combine(today, datetime.min.time(), tzinfo=tz) \
-            + timedelta(hours=12)
+        now = datetime.now(tz)
+        # Ремонт начался три часа назад, но не раньше сегодняшней полуночи:
+        # «с полудня» зависело от времени суток и до полудня давало
+        # отрицательную долю - тест падал по утрам.
+        midnight = datetime.combine(today, datetime.min.time(), tzinfo=tz)
+        start = max(midnight + timedelta(minutes=1), now - timedelta(hours=3))
         # Журнал пишет триггер; подменяем время записей, чтобы получить
-        # ровно полсуток ремонта - на живой базе это и проверяем.
+        # известную долю суток ремонта - на живой базе это и проверяем.
         await self.crm.update_bike(self.bike_id, status="repair", by="staff:t")
         await self.pool.execute(
             "update crm.bike_status_log set changed_at = $2 "
             "where bike_id = $1 and to_status = 'available'",
-            self.bike_id, noon - timedelta(days=10))
+            self.bike_id, start - timedelta(days=10))
         await self.pool.execute(
             "update crm.bike_status_log set changed_at = $2 "
-            "where bike_id = $1 and to_status = 'repair'", self.bike_id, noon)
+            "where bike_id = $1 and to_status = 'repair'", self.bike_id, start)
         by_day = await self.crm.bikes_in_status_by_day("repair", today, today)
         self.assertEqual(set(by_day), {today})
-        # Ремонт идёт с полудня по «сейчас»: доля суток, а не 0 и не 1.
+        # Ремонт идёт с start по «сейчас»: доля суток, а не 0 и не 1.
         # Ждём ровно столько, сколько прошло, с запасом на время запроса.
-        want = D(str((datetime.now(tz) - noon).total_seconds() / 86400))
+        want = D(str((datetime.now(tz) - start).total_seconds() / 86400))
         self.assertAlmostEqual(by_day[today], want, delta=D("0.001"))
         self.assertGreater(by_day[today], D("0"))
         self.assertLess(by_day[today], D("1"))
