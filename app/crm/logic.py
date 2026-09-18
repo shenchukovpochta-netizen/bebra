@@ -1389,12 +1389,21 @@ def service_rows(bikes: Iterable[dict], orders_by_bike: dict[int, dict], *,
             continue
         order = orders_by_bike.get(bike["id"])
         days = order_days(order, today=today) if order else (bike.get("idle_days") or 0)
-        rows.append({**bike, "order": order,
-                     "stage": ORDER_STATUSES.get((order or {}).get("status"), "Без наряда"),
+        order = order or {}
+        rows.append({**bike, "order": order or None,
+                     "stage": ORDER_STATUSES.get(order.get("status"), "Без наряда"),
                      "days": days,
                      # Что этот велосипед уже не заработал, пока стоит.
                      "lost": idle_cost(days),
-                     "stuck": (not order) or order_stuck(order, today=today)})
+                     "stuck": (not order) or order_stuck(order, today=today),
+                     # Плоские поля наряда - по ним сортируют, ищут и
+                     # выгружают: вложенный словарь для этого не годится.
+                     "order_no": order.get("no") or "",
+                     "tech": order.get("tech_name") or "",
+                     "payer_title": PAYERS.get(str(order.get("payer") or ""), ""),
+                     "client": order.get("client_name") or "",
+                     "estimate": to_money(order.get("estimate") or 0),
+                     "complaint": order.get("complaint") or bike.get("note") or ""})
     # Без наряда - в начало: это и есть потерянные велосипеды сервиса.
     rows.sort(key=lambda r: (r["order"] is not None, -r["days"]))
     return rows
@@ -3013,11 +3022,32 @@ def alert_rows(alerts: Iterable[dict], *,
     return rows
 
 
-def alert_summary(rows: Iterable[dict]) -> dict[str, int]:
+def tracker_state_title(row: Mapping[str, Any]) -> str:
+    """Состояние трекера одним словом - то же, что цветной тег на карте."""
+    if row.get("alarm"):
+        return "тревога"
+    if row.get("moving"):
+        return "едет"
+    if row.get("offline"):
+        return "молчит"
+    return "стоит"
+
+
+def alert_summary(rows: Iterable[dict], *, now: datetime | None = None) -> dict[str, int]:
     rows = list(rows)
     open_rows = [r for r in rows if r["open"]]
+    now = now or datetime.now(UTC)
+    since = now - timedelta(days=1)
+
+    def fresh(r: dict) -> bool:
+        at = r.get("created_at")
+        return isinstance(at, datetime) and at >= since
+
     return {
         "open": len(open_rows),
+        # За сутки - и закрытые тоже: «сколько за ночь настреляло» отвечает
+        # на другой вопрос, чем «сколько сейчас висит».
+        "day": sum(1 for r in rows if fresh(r)),
         "needs": sum(1 for r in open_rows if r["needs"]),
         "urgent": sum(1 for r in open_rows if r["needs"] and r["level"] == "urgent"),
         "working": sum(1 for r in open_rows if r["state"] == "working"),
@@ -4679,6 +4709,22 @@ def rental_search(rows: Iterable[Mapping[str, Any]], q: str | None) -> list[dict
         phone = re.sub(r"\D", "", str(r.get("phone") or ""))
         if (text in hay or str(r.get("id")) == text
                 or (digits and (digits in phone or digits == str(r.get("id"))))):
+            out.append(dict(r))
+    return out
+
+
+def rows_search(rows: Iterable[Mapping[str, Any]], q: str | None,
+                keys: tuple[str, ...]) -> list[dict]:
+    """Строка поиска по нескольким полям строки: подстрока без учёта
+    регистра. Пусто - все строки. Возвращает копии: списки правятся
+    дальше (сортировка, страницы), исходные строки трогать нельзя."""
+    text = " ".join(str(q or "").lower().split())
+    if not text:
+        return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        hay = " ".join(str(r.get(k) or "") for k in keys).lower()
+        if text in hay:
             out.append(dict(r))
     return out
 

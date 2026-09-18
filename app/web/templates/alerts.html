@@ -1,8 +1,11 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Тревоги — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Тревоги</h1>
   {% include "_trackers_tabs.html" %}
+  <a class="btn ghost" href="/alerts.xlsx?view={{ view }}&level={{ level }}&kind={{ kind }}&q={{ q|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/alerts.csv?view={{ view }}&level={{ level }}&kind={{ kind }}&q={{ q|urlencode }}">CSV</a>
 </div>
 
 <div class="tiles">
@@ -11,6 +14,7 @@
   <div class="tile"><b>{{ summary.working }}</b><span>в работе</span></div>
   <div class="tile"><b>{{ summary.snoozed }}</b><span>отложено</span></div>
   <div class="tile"><b>{{ summary.normal }}</b><span>это норма<br><small class="muted">снимутся сами, когда причина исчезнет</small></span></div>
+  <div class="tile"><b>{{ summary.day }}</b><span>за сутки<br><small class="muted">сколько настреляло, с закрытыми</small></span></div>
 </div>
 
 <div class="card">
@@ -29,12 +33,21 @@
       <option value="">любой вид</option>
       {% for code, label in TRACKER_ALERTS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
-    <noscript><button type="submit">Показать</button></noscript>
+    <input name="q" value="{{ q }}" placeholder="велосипед, клиент, трекер">
+    <button type="submit">Найти</button>
   </form>
 
   <div class="table-wrap">
   <table>
-    <tr><th>Уровень</th><th>Что случилось</th><th>Велосипед</th><th class="opt">Клиент</th><th>Когда</th><th>Состояние</th><th></th></tr>
+    <tr>
+      {{ list.th('Уровень', 'level', tools) }}
+      {{ list.th('Что случилось', 'title', tools) }}
+      {{ list.th('Велосипед', 'bike', tools) }}
+      {{ list.th('Клиент', 'client', tools, 'opt') }}
+      {{ list.th('Когда', 'created', tools) }}
+      {{ list.th('Состояние', 'state', tools) }}
+      <th></th>
+    </tr>
     {% for a in rows %}
     <tr class="{% if a.needs and a.level == 'urgent' %}bad-row{% elif a.needs %}warn-row{% endif %}">
       <td>{% if a.level == 'urgent' %}<span class="tag bad">● Срочно</span>{% else %}<span class="tag">Жёлтый</span>{% endif %}</td>
@@ -63,6 +76,7 @@
       </td>
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Ничего не требует внимания.</td></tr>{% endfor %}
+    {{ list.footer(tools, '/alerts', 7) }}
   </table>
   </div>
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>

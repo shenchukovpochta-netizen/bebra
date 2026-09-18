@@ -1,10 +1,17 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Сервис — {{ app_title }}{% endblock %}
 {% block content %}
 {% set can = can_edit(staff, 'service') %}
 <div class="bar"><h1>Рабочий стол сервиса</h1>
   <nav class="tabs"><a href="/service" class="on">Рабочий стол</a><a href="/orders">Наряды</a><a href="/work-types">Виды работ</a></nav>
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="№ велосипеда, наряд, техник, клиент">
+    <button type="submit">Найти</button>
+  </form>
   {% if can %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
+  <a class="btn ghost" href="/service.xlsx?q={{ q|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/service.csv?q={{ q|urlencode }}">CSV</a>
 </div>
 
 <div class="tiles">
@@ -62,9 +69,23 @@
 
 <section class="card">
   <h2>Велосипеды в сервисе</h2>
-  {% if rows %}
+  {% if rows or q %}
+  {% set money_ok = can_view(staff, 'finance') %}
+  <div class="table-wrap">
   <table>
-    <tr><th>Велосипед</th><th>Модель</th><th>Этап</th><th>Суток</th>{% if can_view(staff, 'finance') %}<th>Потеряно</th>{% endif %}<th>Наряд</th><th>Техник</th><th>Чей ремонт</th><th>Жалоба</th></tr>
+    <tr>
+      {{ list.th('Велосипед', 'bike', tools) }}
+      {{ list.th('Модель', 'model', tools) }}
+      {{ list.th('Этап', 'stage', tools) }}
+      {{ list.th('Суток', 'days', tools, 'num') }}
+      {% if money_ok %}{{ list.th('Потеряно', 'lost', tools, 'num') }}{% endif %}
+      {{ list.th('Наряд', 'order', tools) }}
+      {{ list.th('Техник', 'tech', tools) }}
+      {{ list.th('Чей ремонт', 'payer', tools) }}
+      {{ list.th('Клиент', 'client', tools, 'opt') }}
+      {% if money_ok %}{{ list.th('Смета', 'estimate', tools, 'opt num') }}{% endif %}
+      <th>Жалоба</th>
+    </tr>
     {% for r in rows %}
     <tr class="{% if r.stuck %}warn-row{% endif %}">
       <td><a href="/bikes/{{ r.id }}">№ {{ r.code }}</a></td>
@@ -74,11 +95,16 @@
       {% if can_view(staff, 'finance') %}<td class="num {% if r.lost %}bad{% endif %}">{% if r.lost %}−{{ money(r.lost) }}{% else %}—{% endif %}</td>{% endif %}
       <td>{% if r.order %}<a href="/orders/{{ r.order.id }}">{{ r.order.no }}</a>{% elif can %}<a href="/orders/new?bike={{ r.id }}">открыть</a>{% else %}—{% endif %}</td>
       <td>{{ r.order.tech_name if r.order and r.order.tech_name else '—' }}</td>
-      <td>{% if r.order %}{{ PAYERS[r.order.payer] }}{% else %}—{% endif %}</td>
-      <td class="muted">{{ (r.order.complaint if r.order else r.note) or '' }}</td>
+      <td>{{ r.payer_title or '—' }}</td>
+      <td class="opt">{% if r.order and r.order.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.order.client_id }}">{{ r.client }}</a>{% else %}{{ r.client or '—' }}{% endif %}</td>
+      {% if money_ok %}<td class="num opt">{% if r.estimate %}{{ money(r.estimate) }}{% else %}—{% endif %}</td>{% endif %}
+      <td class="muted">{{ r.complaint }}</td>
     </tr>
-    {% endfor %}
+    {% else %}<tr><td colspan="11" class="muted">По запросу ничего нет.</td></tr>{% endfor %}
+    {{ list.footer(tools, '/service', 11,
+                   (summary.days ~ ' велосипеде-дней' ~ ((' · потеряно ' ~ money(summary.lost)) if money_ok else ''))) }}
   </table>
+  </div>
   <p class="muted">«Без наряда» — велосипед в ремонте, но работой никто не занят: он копит простой, а в отчётах выглядит как обычный ремонт. Такие стоят первыми.</p>
   {% else %}<p class="muted">В сервисе пусто — весь операционный парк свободен или в аренде.</p>{% endif %}
 </section>

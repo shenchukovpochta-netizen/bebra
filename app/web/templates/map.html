@@ -1,7 +1,15 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Карта парка — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="bar"><h1>Карта парка</h1>{% include "_trackers_tabs.html" %}</div>
+<div class="bar"><h1>Карта парка</h1>{% include "_trackers_tabs.html" %}
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="№ велосипеда, клиент, трекер">
+    <button type="submit">Найти</button>
+  </form>
+  <a class="btn ghost" href="/map.xlsx?q={{ q|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/map.csv?q={{ q|urlencode }}">CSV</a>
+</div>
 
 <div class="tiles">
   <div class="tile"><b>{{ summary.online }}</b><span>на связи<br><small class="muted">из {{ summary.total }} трекеров</small></span></div>
@@ -39,8 +47,17 @@
 
 <section class="card">
   <h2>Где что стоит</h2>
+  {# Поиск - это и «выделить найденное»: на карте остаются только найденные точки. #}
+  <div class="table-wrap">
   <table>
-    <tr><th>Велосипед</th><th>Состояние</th><th>Скорость</th><th class="opt">Связь</th><th>У кого</th><th></th></tr>
+    <tr>
+      {{ list.th('Велосипед', 'bike', tools) }}
+      <th>Состояние</th>
+      {{ list.th('Скорость', 'speed', tools) }}
+      {{ list.th('Связь', 'silent', tools, 'opt') }}
+      {{ list.th('У кого', 'client', tools) }}
+      <th></th>
+    </tr>
     {% for t in rows %}
     <tr class="{% if t.alarm or t.moving %}warn-row{% endif %}">
       <td>{% if t.bike_id %}<a href="/bikes/{{ t.bike_id }}">№ {{ t.bike_code }}</a> {{ t.bike_model or '' }}{% else %}<span class="muted">{{ t.alias or t.device_id }} · без велосипеда</span>{% endif %}</td>
@@ -50,7 +67,9 @@
       <td>{% if t.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ t.client_id }}">{{ t.client_name }}</a>{% else %}{{ t.client_name or '' }}{% endif %}</td>
       <td>{% if t.map %}<a href="{{ t.map }}" target="_blank" rel="noopener">на карте</a>{% endif %} <a href="/trackers/{{ t.id }}">трек</a></td>
     </tr>
-    {% else %}<tr><td colspan="6" class="muted">Трекеров нет. Заведите их на вкладке «Устройства» или дождитесь первого опроса StarLine.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="6" class="muted">{% if q %}По запросу ничего нет.{% else %}Трекеров нет. Заведите их на вкладке «Устройства» или дождитесь первого опроса StarLine.{% endif %}</td></tr>{% endfor %}
+    {{ list.footer(tools, '/map', 6) }}
   </table>
+  </div>
 </section>
 {% endblock %}

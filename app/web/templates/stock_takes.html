@@ -1,8 +1,15 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Пересчёт техники — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Пересчёт техники</h1>
   <nav class="tabs"><a href="/bikes">Парк</a><a href="/stock-takes" class="on">Пересчёт</a></nav>
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="номер, точка, кто провёл, комментарий">
+    <button type="submit">Найти</button>
+  </form>
+  <a class="btn ghost" href="/stock-takes.xlsx?q={{ q|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/stock-takes.csv?q={{ q|urlencode }}">CSV</a>
 </div>
 
 {% if current %}
@@ -40,8 +47,19 @@
 {% endif %}
 
 <div class="card">
+<div class="table-wrap">
 <table>
-  <tr><th>№</th><th>Дата</th><th>Что считали</th><th>Ожидалось</th><th>Нашли</th><th>Не нашли</th><th>Лишние</th><th>Кто провёл</th><th>Комментарий</th></tr>
+  <tr>
+    {{ list.th('№', 'no', tools) }}
+    {{ list.th('Дата', 'started', tools) }}
+    {{ list.th('Что считали', 'what', tools) }}
+    {{ list.th('Ожидалось', 'expected', tools, 'num') }}
+    {{ list.th('Нашли', 'found', tools, 'num') }}
+    {{ list.th('Не нашли', 'missing', tools, 'num') }}
+    {{ list.th('Лишние', 'extra', tools, 'num') }}
+    {{ list.th('Кто провёл', 'who', tools) }}
+    <th>Комментарий</th>
+  </tr>
   {% for r in rows %}
   <tr>
     <td><a href="/stock-takes/{{ r.id }}">{{ r.no }}</a></td>
@@ -55,6 +73,8 @@
     <td>{{ r.note or '' }}</td>
   </tr>
   {% else %}<tr><td colspan="9" class="muted">Пересчётов ещё не было.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/stock-takes', 9) }}
 </table>
+</div>
 </div>
 {% endblock %}

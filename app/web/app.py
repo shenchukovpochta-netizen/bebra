@@ -2736,7 +2736,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         today, now = date.today(), datetime.now(UTC)
         for bike in bikes:
             bike["idle_days"] = logic.idle_days(since.get(bike["id"]), now=now)
-        rows = logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today)
+        q = request.query_params.get("q") or ""
+        rows = logic.rows_search(
+            logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today),
+            q, ("code", "model", "order_no", "tech", "client", "complaint"))
+        tools = list_tools(request, rows, allowed=SERVICE_SORTS)
         settings = await crm.settings()
         counts = await crm.bike_counts()
         plan = logic.month_plan(settings, fleet=sum(
@@ -2747,7 +2751,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         chart = logic.repair_chart(
             await crm.bikes_in_status_by_day("repair", first, today),
             norm=int(plan["repair"]))
-        return render(request, "service.html", rows=rows,
+        return render(request, "service.html", rows=tools["rows"], tools=tools, q=q,
                       summary=logic.service_summary(rows),
                       chart=chart, plan=plan, month=first,
                       tiles=logic.fleet_tiles(
@@ -2755,6 +2759,38 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           spare=sum(1 for b in bikes if b.get("spare")
                                     and b.get("status") in logic.OPERATIONAL_STATUSES)),
                       orders=await crm.work_orders(open_only=True, limit=200))
+
+    SERVICE_SORTS = {"bike": "code", "model": "model", "stage": "stage",
+                     "days": "days", "lost": "lost", "order": "order_no",
+                     "tech": "tech", "payer": "payer_title", "client": "client",
+                     "estimate": "estimate"}
+
+    @app.get("/service.{ext}")
+    async def service_csv(request: Request, ext: str) -> Response:
+        bikes = await crm.bikes(limit=10000)
+        since = await crm.bike_status_since()
+        today, now = date.today(), datetime.now(UTC)
+        for bike in bikes:
+            bike["idle_days"] = logic.idle_days(since.get(bike["id"]), now=now)
+        rows = logic.rows_search(
+            logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today),
+            request.query_params.get("q") or "",
+            ("code", "model", "order_no", "tech", "client", "complaint"))
+        money_ok = may_view(request, "finance")
+        header = ["Велосипед", "Модель", "Этап", "Суток", "Наряд", "Техник",
+                  "Чей ремонт", "Клиент", "Жалоба"]
+        if money_ok:
+            header[4:4] = ["Потеряно"]
+            header.append("Смета")
+        out = []
+        for r in rows:
+            line = [r["code"], r.get("model"), r["stage"], r["days"], r["order_no"],
+                    r["tech"], r["payer_title"], r["client"], r["complaint"]]
+            if money_ok:
+                line[4:4] = [r["lost"]]
+                line.append(r["estimate"])
+            out.append(line)
+        return _table(ext, "service", header, out)
 
     @app.get("/orders")
     async def orders_page(request: Request) -> Response:
@@ -3072,10 +3108,30 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── сервис: виды работ ───────────────────────
 
+    WORK_SORTS = {"title": "title", "category": "category", "minutes": "minutes",
+                  "price": "price", "used": "used"}
+
     @app.get("/work-types")
     async def work_types_page(request: Request) -> Response:
-        return render(request, "work_types.html", rows=await crm.work_types(),
-                      can_manage=may_edit(request, "service"))
+        q = request.query_params.get("q") or ""
+        rows = logic.rows_search(await crm.work_types(), q, ("title", "category"))
+        tools = list_tools(request, rows, allowed=WORK_SORTS)
+        return render(request, "work_types.html", rows=tools["rows"], tools=tools,
+                      q=q, can_manage=may_edit(request, "service"))
+
+    @app.get("/work-types.{ext}")
+    async def work_types_csv(request: Request, ext: str) -> Response:
+        rows = logic.rows_search(await crm.work_types(),
+                                 request.query_params.get("q") or "",
+                                 ("title", "category"))
+        return _table(ext, "work-types",
+                      ["Наименование", "Категория", "Узел", "Время, мин",
+                       "Цена клиенту", "Использований", "Статус"],
+                      [[r["title"], r.get("category"),
+                        logic.REPAIR_NODES.get(str(r.get("node") or ""), ""),
+                        r.get("minutes"), logic.to_money(r.get("price") or 0),
+                        r.get("used"), "активна" if r.get("active") else "выключена"]
+                       for r in rows])
 
     @app.post("/work-types")
     async def work_type_create(request: Request) -> Response:
@@ -4575,30 +4631,84 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "trackers")
         settings = await crm.settings()
         rows = logic.tracker_rows(await crm.trackers(), settings=settings)
-        points = logic.map_points(rows)
-        return render(request, "map.html", rows=rows, points=points,
+        q = request.query_params.get("q") or ""
+        found = logic.rows_search(rows, q, TRACKER_SEARCH)
+        tools = list_tools(request, found, allowed=TRACKER_SORTS)
+        # Точки на карте - по найденному: поиск и есть «выделить найденное».
+        points = logic.map_points(tools["all_rows"])
+        return render(request, "map.html", rows=tools["rows"], tools=tools, q=q,
+                      points=points,
                       points_json=json.dumps(points, ensure_ascii=False),
                       map_cfg=logic.map_config(settings),
                       summary=logic.tracker_summary(rows),
                       alerts=await crm.tracker_alerts(open_only=True, limit=50))
+
+    TRACKER_SORTS = {"bike": "bike_code", "speed": "speed", "silent": "silent_hours",
+                     "client": "client_name"}
+    TRACKER_SEARCH = ("bike_code", "bike_model", "client_name", "alias", "device_id")
+
+    @app.get("/map.{ext}")
+    async def map_csv(request: Request, ext: str) -> Response:
+        if not may_view(request, "trackers"):
+            return denied(request, "trackers")
+        rows = logic.rows_search(
+            logic.tracker_rows(await crm.trackers(), settings=await crm.settings()),
+            request.query_params.get("q") or "", TRACKER_SEARCH)
+        return _table(ext, "map",
+                      ["Велосипед", "Модель", "Трекер", "Состояние", "Скорость",
+                       "Связь, ч назад", "У кого", "Широта", "Долгота"],
+                      [[r.get("bike_code"), r.get("bike_model"),
+                        r.get("alias") or r.get("device_id"),
+                        logic.tracker_state_title(r), r.get("speed"),
+                        r.get("silent_hours"), r.get("client_name"),
+                        r.get("lat"), r.get("lon")] for r in rows])
 
     @app.get("/alerts")
     async def alerts_page(request: Request) -> Response:
         """Реестр тревог: что случилось, кто взял и что с этим делают."""
         if not may_view(request, "trackers"):
             return denied(request, "trackers")
+        rows, view, level, kind, q = await alert_list(request)
+        tools = list_tools(request, rows, allowed=ALERT_SORTS)
+        return render(request, "alerts.html", rows=tools["rows"], tools=tools,
+                      view=view, level=level, kind=kind, q=q,
+                      summary=logic.alert_summary(
+                          logic.alert_rows(await crm.tracker_alerts(open_only=False,
+                                                                    limit=2000))))
+
+    ALERT_SORTS = {"level": "level", "title": "title", "bike": "bike_code",
+                   "client": "client_name", "created": "created_at",
+                   "state": "state"}
+
+    async def alert_list(request: Request) -> tuple[list[dict], str, str, str, str]:
         view = request.query_params.get("view") or "needs"
         level = request.query_params.get("level") or ""
         kind = request.query_params.get("kind") or ""
+        q = request.query_params.get("q") or ""
         rows = logic.alert_rows(await crm.tracker_alerts(
             open_only=view != "all", level=level or None, kind=kind or None,
-            limit=300))
+            limit=2000))
         shown = [r for r in rows if r["needs"]] if view == "needs" else rows
-        return render(request, "alerts.html", rows=shown, view=view,
-                      level=level, kind=kind,
-                      summary=logic.alert_summary(
-                          logic.alert_rows(await crm.tracker_alerts(open_only=True,
-                                                                    limit=300))))
+        return (logic.rows_search(shown, q, ("title", "note", "bike_code",
+                                             "client_name", "alias", "device_id")),
+                view, level, kind, q)
+
+    @app.get("/alerts.{ext}")
+    async def alerts_csv(request: Request, ext: str) -> Response:
+        if not may_view(request, "trackers"):
+            return denied(request, "trackers")
+        rows, *_ = await alert_list(request)
+        return _table(ext, "alerts",
+                      ["Уровень", "Что случилось", "Подробности", "Велосипед",
+                       "Клиент", "Когда", "Состояние", "Кто взял", "Закрыта"],
+                      [[logic.ALERT_LEVELS.get(r["level"], r["level"]), r["title"],
+                        r.get("note"), r.get("bike_code") or r.get("alias")
+                        or r.get("device_id"), r.get("client_name"),
+                        r.get("created_at"),
+                        logic.ALERT_STATES.get(r["state"], r["state"]) if r["open"]
+                        else "закрыта",
+                        r.get("taken_by"), r.get("handled_at")]
+                       for r in rows])
 
     @app.post("/alerts/{alert_id}")
     async def alert_action(request: Request, alert_id: int) -> Response:
@@ -5190,11 +5300,36 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── пересчёт техники ───────────────────────
 
+    TAKE_SORTS = {"no": "no", "started": "started_at", "what": "title",
+                  "expected": "expected", "found": "found", "missing": "missing",
+                  "extra": "extra", "who": "created_by"}
+
+    async def take_rows(request: Request) -> tuple[list[dict], str]:
+        q = request.query_params.get("q") or ""
+        rows = await crm.stock_takes(limit=2000)
+        for r in rows:
+            r["title"] = logic.take_title(r)
+        return logic.rows_search(rows, q, ("no", "title", "note", "created_by",
+                                           "location")), q
+
     @app.get("/stock-takes")
     async def stock_takes_page(request: Request) -> Response:
-        return render(request, "stock_takes.html",
-                      rows=await crm.stock_takes(limit=100),
-                      current=await crm.open_stock_take())
+        rows, q = await take_rows(request)
+        tools = list_tools(request, rows, allowed=TAKE_SORTS)
+        return render(request, "stock_takes.html", rows=tools["rows"], tools=tools,
+                      q=q, current=await crm.open_stock_take())
+
+    @app.get("/stock-takes.{ext}")
+    async def stock_takes_csv(request: Request, ext: str) -> Response:
+        rows, _ = await take_rows(request)
+        return _table(ext, "stock-takes",
+                      ["№", "Дата", "Что считали", "Состояние", "Ожидалось",
+                       "Найдено", "Не нашли", "Лишние", "Кто провёл", "Комментарий"],
+                      [[r["no"], r.get("started_at"), r["title"],
+                        logic.TAKE_STATES.get(r.get("status"), r.get("status")),
+                        r.get("expected"), r.get("found"), r.get("missing"),
+                        r.get("extra"), r.get("created_by"), r.get("note")]
+                       for r in rows])
 
     @app.post("/stock-takes")
     async def stock_take_start(request: Request) -> Response:

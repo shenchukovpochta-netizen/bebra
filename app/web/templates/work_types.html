@@ -1,14 +1,28 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Виды работ — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Виды работ</h1>
   <nav class="tabs"><a href="/service">Рабочий стол</a><a href="/orders">Наряды</a><a href="/work-types" class="on">Виды работ</a></nav>
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="название, категория">
+    <button type="submit">Найти</button>
+  </form>
+  <a class="btn ghost" href="/work-types.xlsx?q={{ q|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/work-types.csv?q={{ q|urlencode }}">CSV</a>
 </div>
 <section class="card">
   <fieldset {% if not can_manage %}disabled{% endif %} class="plain">
   <div class="table-wrap">
   <table class="editable">
-    <tr><th>Наименование</th><th class="opt">Категория</th><th>Время</th><th>Цена клиенту</th><th class="num opt">Использований</th><th></th></tr>
+    <tr>
+      {{ list.th('Наименование', 'title', tools) }}
+      {{ list.th('Категория', 'category', tools, 'opt') }}
+      {{ list.th('Время', 'minutes', tools) }}
+      {{ list.th('Цена клиенту', 'price', tools) }}
+      {{ list.th('Использований', 'used', tools, 'num opt') }}
+      <th></th>
+    </tr>
     {% for t in rows %}
     <tr class="{% if not t.active %}muted{% endif %}">
       <td class="grow"><input name="title" value="{{ t.title }}" form="work{{ t.id }}"></td>
@@ -20,6 +34,7 @@
         <button type="submit" name="action" value="toggle" class="ghost" form="work{{ t.id }}">{{ 'Выключить' if t.active else 'Включить' }}</button></td>
     </tr>
     {% else %}<tr><td colspan="6" class="muted">Каталог пуст.</td></tr>{% endfor %}
+    {{ list.footer(tools, '/work-types', 6) }}
   </table>
   </div>
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
