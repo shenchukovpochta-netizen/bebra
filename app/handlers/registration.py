@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from .. import i18n, logic, tasks, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import logic as crm_logic
 from ..crm import service as crm_service
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
@@ -106,19 +107,28 @@ def pending_text(user: dict) -> str:
     return i18n.t(lang, "PENDING_WAIT")
 
 
-async def _catch_invite(crm: Any, command: CommandObject | None, tg_id: int) -> None:
+async def _catch_invite(crm: Any, command: CommandObject | None, tg_id: int) -> str | None:
     """Код приглашения из ссылки t.me/бот?start=<код>.
 
     Переход записывается до анкеты: человек может уйти на полпути, и агент
     всё равно должен увидеть, что по его ссылке приходили. Ошибка CRM
     регистрацию не рушит - это учёт, а не цикл бота.
+
+    Возвращает текст приветствия для нового друга или None: обещание
+    собирается из настроек панели, потому что суммы меняет владелец.
     """
     if crm is None or command is None or not (command.args or "").strip():
-        return
+        return None
     try:
-        await crm_service.ref_click(crm, command.args, tg_id)
+        if await crm_service.ref_click(crm, command.args, tg_id) is None:
+            return None
+        promise = crm_logic.bonus_promise(crm_logic.bonus_settings(await crm.settings()))
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: переход по приглашению %s не записан", command.args)
+        return None
+    if not promise:
+        return texts.REF_FRIEND_HELLO_NO_SUM
+    return texts.REF_FRIEND_HELLO.format(promise=promise)
 
 
 @router.message(CommandStart())
@@ -126,7 +136,9 @@ async def cmd_start(message: Message, db: Database, cfg: Config, vault: Vault,
                     user: dict, command: CommandObject | None = None,
                     crm: Any = None) -> None:
     lang = i18n.user_lang(user)
-    await _catch_invite(crm, command, user["tg_id"])
+    hello = await _catch_invite(crm, command, user["tg_id"])
+    if hello:
+        await message.answer(hello)
     if user["state"] == logic.PENDING:
         # Заявка на проверке или уже одобрена и ждёт данных выдачи: /start
         # здесь - «что там с моей заявкой», а не «заполнить заново». Иначе

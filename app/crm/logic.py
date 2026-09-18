@@ -2157,6 +2157,9 @@ def stock_summary(rows: Iterable[dict]) -> dict[str, Any]:
         "empty": sum(1 for r in rows if r["stock"] <= 0),
         "stale": sum(1 for r in rows if r.get("stale")),
         "cost": to_money(sum((r["cost_total"] for r in rows), Decimal(0))),
+        # По клиентским ценам - что склад принесёт, если разойдётся весь;
+        # рядом с себестоимостью это и есть наценка склада одним числом.
+        "price": to_money(sum((r["price_total"] for r in rows), Decimal(0))),
     }
 
 
@@ -4244,18 +4247,22 @@ def bonus_settings(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
             "spike": count_or("ref_spike", REF_SPIKE_DEFAULT)}
 
 
-def bonus_promise(settings: Mapping[str, Any]) -> str:
-    """Что бот обещает другу. Суммы нет - и обещать нечего: «условия
-    уточняйте у менеджера» честнее выдуманного числа."""
+def bonus_promise(settings: Mapping[str, Any], *, for_agent: bool = False) -> str:
+    """Что бот обещает: другу по умолчанию, агенту - с for_agent.
+
+    Суммы нет - и обещать нечего: пустая строка, и текст скажет «условия
+    уточняйте у менеджера». Это честнее «0 ₽ на баланс».
+    """
     agent = to_money(settings.get("bonus"))
     friend = to_money(settings.get("friend_bonus"))
     if agent <= 0 and friend <= 0:
         return ""
+    mine, theirs = (agent, friend) if for_agent else (friend, agent)
     parts = []
-    if friend > 0:
-        parts.append(f"вам {money(friend)}")
-    if agent > 0:
-        parts.append(f"другу {money(agent)}")
+    if mine > 0:
+        parts.append(f"вам {money(mine)}")
+    if theirs > 0:
+        parts.append(f"другу {money(theirs)}")
     return " и ".join(parts)
 
 

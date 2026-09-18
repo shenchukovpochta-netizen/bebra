@@ -422,7 +422,7 @@ async def cb_friends(callback: CallbackQuery, bot: Bot, user: dict,
         return
     await callback.answer()
     lang = i18n.user_lang(user)
-    settings = crm_logic.ref_settings(await crm.settings())
+    settings = crm_logic.bonus_settings(await crm.settings())
     if not settings["enabled"]:
         await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_FRIENDS_OFF"),
                                reply_markup=kb.cab_back(lang))
@@ -438,7 +438,10 @@ async def cb_friends(callback: CallbackQuery, bot: Bot, user: dict,
         click=funnel["click"], signed=funnel["signed"], rented=funnel["rented"],
         paid=funnel["paid"], bonus=crm_logic.money(funnel["bonus"])) \
         if rows else i18n.t(lang, "CAB_FRIENDS_EMPTY")
-    text = i18n.t(lang, "CAB_FRIENDS").format(
+    # Сумма агента не задана - «0 ₽ на баланс» обещать нельзя: другой
+    # текст отправляет к менеджеру, а не выдумывает число.
+    key = "CAB_FRIENDS" if settings["bonus"] > 0 else "CAB_FRIENDS_NO_SUM"
+    text = i18n.t(lang, key).format(
         code=code, link=crm_logic.ref_link(await _bot_username(bot), code),
         bonus=crm_logic.money(settings["bonus"]), stats=stats)
     await bot.send_message(user["tg_id"], text, reply_markup=kb.cab_back(lang))

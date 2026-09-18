@@ -168,6 +168,13 @@ class TestReferralsInPanel(tw.WebCase):
         self.assertEqual(tw.run(self.crm.ledger_of(self.agent_id, limit=10)), [],
                          "платёж ниже нового порога бонуса не даёт")
 
+    def test_report_warns_when_the_programme_has_no_sums(self):
+        tw.run(self.crm.set_setting("ref_bonus", "0", by="t"))
+        tw.run(self.crm.set_setting("ref_friend_bonus", "0", by="t"))
+        self.assertIn("суммы бонусов не заданы", self.get_ok("/reports/referrals"))
+        tw.run(self.crm.set_setting("ref_bonus", "500", by="t"))
+        self.assertNotIn("суммы бонусов не заданы", self.get_ok("/reports/referrals"))
+
     def test_report_is_money_only(self):
         profile = tw.run(self.crm.access_profile_by_code("tech"))
         tw.run(self.crm.create_staff("petr", logic.hash_password("password-1"),
@@ -230,6 +237,41 @@ class TestReferralsInBot(tc.CabinetCase):
         self.assertIn("AB3D9K", text)
         self.assertIn("https://t.me/testbot?start=AB3D9K", text)
         self.assertIn("Пока по вашей ссылке никто не приходил", text)
+
+    async def test_friend_hears_the_promise_on_start(self):
+        """Друг пришёл по ссылке - бот сразу говорит, что ему за это будет,
+        и суммы берёт из настроек панели, а не из кода."""
+        await self.agent()
+        await self.crm.set_setting("ref_bonus", "500", by="t")
+        await self.crm.set_setting("ref_friend_bonus", "300", by="t")
+        await self.feed(tc.msg("/start AB3D9K", user_id=FRIEND_ID, chat_id=FRIEND_ID))
+        texts = "\n".join(self.texts_to(FRIEND_ID))
+        self.assertIn("вам 300 ₽ и другу 500 ₽", texts)
+
+    async def test_friend_without_sums_is_sent_to_the_manager(self):
+        await self.agent()
+        await self.crm.set_setting("ref_bonus", "0", by="t")
+        await self.crm.set_setting("ref_friend_bonus", "0", by="t")
+        await self.feed(tc.msg("/start AB3D9K", user_id=FRIEND_ID, chat_id=FRIEND_ID))
+        texts = "\n".join(self.texts_to(FRIEND_ID))
+        self.assertIn("уточняйте у менеджера", texts)
+        self.assertNotIn("0 ₽", texts, "ноль рублей не обещаем")
+
+    async def test_own_start_has_no_promise(self):
+        await self.agent()
+        await self.feed(tc.msg("/start AB3D9K"))
+        self.assertNotIn("по приглашению", "\n".join(self.texts_to(tc.USER_ID)))
+
+    async def test_friends_screen_without_agent_sum_points_to_the_manager(self):
+        await self.agent()
+        await self.crm.set_setting("ref_bonus", "0", by="t")
+        self.approved_user()
+        await self.feed(tc.msg("/cabinet"))
+        await self.feed(tc.cb("cab:friends"))
+        text = self.last_text()
+        self.assertIn("AB3D9K", text)
+        self.assertIn("уточняйте у менеджера", text)
+        self.assertNotIn("0 ₽", text)
 
     async def test_friends_screen_issues_a_code_when_there_is_none(self):
         client = await self.crm_client(tg_id=tc.USER_ID)

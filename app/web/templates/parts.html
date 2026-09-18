@@ -53,7 +53,20 @@
 <div class="table-wrap">
 <table>
   {% set money_ok = can_view(staff, 'finance') %}
-  <tr><th>Позиция</th><th class="opt">Узел</th><th>На полке</th><th>Мин.</th><th class="opt num">Дней на складе</th>{% if money_ok %}<th>Себест.</th><th class="opt">Цена клиенту</th><th class="opt">Сумма</th>{% endif %}<th class="opt">Совместимость</th></tr>
+  <tr>
+    {{ list.th('Позиция', 'title', tools) }}
+    {{ list.th('Узел', 'node', tools, 'opt') }}
+    {{ list.th('На полке', 'stock', tools) }}
+    {{ list.th('Мин.', 'min', tools) }}
+    {{ list.th('Дней на складе', 'days', tools, 'opt num') }}
+    {% if money_ok %}
+    {{ list.th('Себест.', 'cost', tools) }}
+    {{ list.th('Σ себест.', 'cost_total', tools, 'opt num') }}
+    {{ list.th('Цена клиенту', 'price', tools, 'opt') }}
+    {{ list.th('Σ по клиенту', 'price_total', tools, 'opt num') }}
+    {% endif %}
+    {{ list.th('Совместимость', 'model', tools, 'opt') }}
+  </tr>
   {% for r in rows %}
   <tr class="{% if not r.active %}muted{% endif %}">
     <td><a href="/parts/{{ r.id }}">{{ r.title }}</a>{% if not r.active %} <small class="muted">архив</small>{% endif %}</td>
@@ -63,14 +76,16 @@
     <td class="num opt {% if r.stale %}warn{% endif %}">{{ r.days_on_stock if r.days_on_stock is not none else '—' }}</td>
     {% if money_ok %}
     <td class="num">{{ money(r.cost) }}</td>
-    <td class="num opt">{{ money(r.price) }}</td>
     <td class="num opt">{{ money(r.cost_total) }}</td>
+    <td class="num opt">{{ money(r.price) }}</td>
+    <td class="num opt">{{ money(r.price_total) }}</td>
     {% endif %}
     <td class="opt">{{ r.model or 'все' }}</td>
   </tr>
-  {% else %}<tr><td colspan="9" class="muted">Склад пуст. Заведите позицию и проведите приход.</td></tr>{% endfor %}
-  {{ list.footer(tools, '/parts', 9,
-                 ('на складе ' ~ money(summary.cost)) if money_ok and summary.cost else '') }}
+  {% else %}<tr><td colspan="10" class="muted">Склад пуст. Заведите позицию и проведите приход.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/parts', 10,
+                 ('по себестоимости ' ~ money(summary.cost) ~ ' · по клиентским ценам ' ~ money(summary.price))
+                 if money_ok and summary.cost else '') }}
 </table>
 <p class="muted">Первыми — те, чего не хватает до неснижаемого остатка.
   Себестоимость средняя: пересчитывается при каждом приходе, поэтому один

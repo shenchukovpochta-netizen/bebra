@@ -169,6 +169,17 @@ class TestStockInPanel(tw.WebCase):
 
     # ─── приход ───
 
+    def test_headers_sort_by_click_and_footer_sums_both_prices(self):
+        self.receive(qty="10", price="300")
+        page = self.get_ok("/parts")
+        self.assertIn("sort=cost_total", page, "Σ себест. сортируется заголовком")
+        self.assertIn("sort=price_total", page)
+        self.assertIn("по клиентским ценам 6 000 ₽", page, "10 × 600")
+        self.assertIn("по себестоимости 3 000 ₽", page)
+        r = self.client.get("/parts?sort=price_total&dir=desc")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('class="opt num sorted"', r.text)
+
     def test_chart_shows_the_money_on_the_shelf(self):
         self.receive(qty="10", price="300")
         page = self.get_ok("/parts")

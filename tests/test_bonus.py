@@ -65,6 +65,15 @@ class TestBonusLogic(unittest.TestCase):
         self.assertIn("другу", logic.bonus_promise({"bonus": D(500),
                                                     "friend_bonus": D(0)}))
 
+    def test_promise_is_addressed_to_the_right_side(self):
+        settings = {"bonus": D(500), "friend_bonus": D(300)}
+        self.assertEqual(logic.bonus_promise(settings), "вам 300 ₽ и другу 500 ₽",
+                         "другу - его сумма первой")
+        self.assertEqual(logic.bonus_promise(settings, for_agent=True),
+                         "вам 500 ₽ и другу 300 ₽", "агенту - наоборот")
+        self.assertEqual(logic.bonus_promise({"bonus": D(500), "friend_bonus": D(0)},
+                                             for_agent=True), "вам 500 ₽")
+
     def test_old_client_is_not_a_new_friend(self):
         now = datetime.now(UTC)
         self.assertTrue(logic.is_new_friend({"created_at": now},

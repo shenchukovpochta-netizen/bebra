@@ -176,6 +176,29 @@ class TestSigningFlow(tw.WebCase):
         self.assertIn("Договор аренды", card)
         self.assertIn("Заявка создана", card)
 
+    def test_operator_opens_a_document_from_the_card(self):
+        """Ссылка «открыть» на карточке и на пятом шаге мастера ведёт
+        на файл пакета - раньше маршрута не было, и ссылка была битой."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF-1.4 contract")
+        self.db.users[5001]["contract_path"] = f.name
+        request_id, row = self.start()
+        card = self.get_ok(f"/signings/{request_id}")
+        self.assertIn(f"/signings/{request_id}/doc/1", card)
+        r = self.client.get(f"/signings/{request_id}/doc/1")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, b"%PDF-1.4 contract")
+        # Соглашение об ЭП живёт текстом в заявке - файла у него нет.
+        self.assertEqual(self.client.get(f"/signings/{request_id}/doc/0").status_code, 404)
+        self.assertEqual(self.client.get(f"/signings/{request_id}/doc/9").status_code, 404)
+        self.assertEqual(self.client.get("/signings/999/doc/1").status_code, 404)
+
+    def test_missing_file_is_a_404_not_a_crash(self):
+        self.db.users[5001]["contract_path"] = "/tmp/no-such-contract.pdf"
+        request_id, _ = self.start()
+        self.assertEqual(self.client.get(f"/signings/{request_id}/doc/1").status_code, 404)
+
     def test_client_page_signs_with_the_code(self):
         request_id, row = self.start()
         page = self.client.get(f"/sign/{row['token']}").text

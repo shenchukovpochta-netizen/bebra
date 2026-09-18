@@ -1590,7 +1590,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                    "payer": "payer", "client": "client_name",
                    "tech": "tech_name", "total": "total", "opened": "opened_at"}
     PART_SORTS = {"title": "title", "node": "node_title", "stock": "stock",
-                  "cost": "cost", "price": "price", "days": "days_on_stock"}
+                  "cost": "cost", "price": "price", "days": "days_on_stock",
+                  "cost_total": "cost_total", "price_total": "price_total",
+                  "min": "min_stock", "model": "model"}
 
     def rental_rows(rows: list[dict], view: str) -> list[dict]:
         """Аренды с посчитанной сводкой и фильтром вида.
@@ -3655,6 +3657,26 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       link=sign_link(request, row["token"]),
                       digest=logic.sign_docs_digest(row.get("docs") or []),
                       events=await crm.sign_events(request_id))
+
+    @app.get("/signings/{request_id}/doc/{index}")
+    async def sign_card_doc(request: Request, request_id: int, index: int) -> Response:
+        """Файл пакета для оператора - тот же, что видит клиент по ссылке.
+
+        Путь берётся из списка документов заявки, а не из запроса: по
+        индексу нельзя дотянуться до чужого файла.
+        """
+        if not may_view(request, "clients"):
+            return denied(request, "clients")
+        row = await crm.sign_request(request_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Заявка")
+        docs = list(row.get("docs") or [])
+        if not 0 <= index < len(docs) or not docs[index].get("path"):
+            return render(request, "missing.html", status_code=404, what="Документ")
+        path = Path(str(docs[index]["path"]))
+        if not path.is_file():
+            return render(request, "missing.html", status_code=404, what="Файл документа")
+        return FileResponse(path, filename=f"{docs[index]['title']}{path.suffix}")
 
     @app.post("/signings/{request_id}/code")
     async def sign_code_send(request: Request, request_id: int) -> Response:
