@@ -2,7 +2,8 @@
 {% block title %}Трекер {{ tracker.alias or tracker.device_id }} — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Трекер {{ tracker.alias or tracker.device_id }}
-  {% if tracker.alarm %}<span class="tag bad">тревога</span>{% elif tracker.moving %}<span class="tag rented">едет</span>{% elif tracker.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}</h1>
+  {% if tracker.alarm %}<span class="tag bad">тревога</span>{% elif tracker.moving %}<span class="tag rented">едет</span>{% elif tracker.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}
+  {% if block.blocked %}<span class="tag bad">мотор заблокирован</span>{% endif %}</h1>
   <a class="btn ghost" href="/trackers">Все трекеры</a></div>
 
 <div class="cols">
@@ -31,6 +32,20 @@
     <button type="submit" class="ghost">{{ 'Снять с наблюдения' if tracker.active else 'Вернуть под наблюдение' }}</button>
   </form>
   {% endif %}
+  {# Мотор: команда ложится в очередь, опрос относит её в StarLine.
+     Блокировка срабатывает после остановки - не на ходу. #}
+  <h3>Мотор</h3>
+  <p>{% if block.blocked %}<b>Заблокирован</b>{% if tracker.blocked_at %} с {{ tracker.blocked_at|dmy }}{% endif %}{% if tracker.blocked_by %} · {{ tracker.blocked_by }}{% endif %}{% else %}Не заблокирован{% endif %}
+    {% if block.pending %}<br><span class="tag rented">в очереди: {{ TRACKER_COMMANDS[block.pending.command] }}</span> <small class="muted">с {{ block.pending.requested_at|dmy }}{% if block.pending.requested_by %} · {{ block.pending.requested_by }}{% endif %}</small>{% endif %}</p>
+  {% if can_edit(staff, 'trackers') and tracker.active and block.next %}
+  <form method="post" action="/trackers/{{ tracker.id }}/command" class="inline-form" onsubmit="return confirm('{{ TRACKER_COMMANDS[block.next] }}? Сработает после остановки велосипеда.')">
+    <input type="hidden" name="command" value="{{ block.next }}">
+    <button type="submit" class="{% if block.next == 'block' %}danger{% else %}ghost{% endif %}">{{ TRACKER_COMMANDS[block.next] }}</button>
+  </form>
+  {% endif %}
+  <p class="muted">Блокировка срабатывает после остановки: мотор перестаёт тянуть,
+    когда велосипед уже стоит, а не на ходу. Команду относит опрос StarLine на
+    ближайшем круге (минуты), ответ ляжет сюда и в служебный чат.</p>
 </section>
 
 <section class="card">
@@ -65,6 +80,23 @@
       <td class="muted">{% if a.handled_at %}{{ a.handled_by or '' }} · {{ a.handled_at|dmy }}{% else %}<span class="tag bad">открыта</span>{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">Тревог не было.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<section class="card">
+  <h2>Команды StarLine</h2>
+  <table>
+    <tr><th>Когда</th><th>Команда</th><th>Кто</th><th>Ответ</th></tr>
+    {% for c in commands %}
+    <tr>
+      <td>{{ c.requested_at|dmy }}</td>
+      <td>{{ c.title }}</td>
+      <td class="muted">{{ c.requested_by or '—' }}</td>
+      <td>{% if c.state == 'pending' %}<span class="tag rented">в очереди</span>{% if c.stale %} <small class="bad">опрос не забирает — работает ли бот и настроен ли StarLine?</small>{% endif %}
+        {% elif c.state == 'done' %}<span class="tag available">выполнена</span> <small class="muted">{{ c.sent_at|dmy }}</small>
+        {% else %}<span class="tag bad">отказ</span> <small class="muted">{{ c.result or '' }}</small>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">Команд не было.</td></tr>{% endfor %}
   </table>
 </section>
 

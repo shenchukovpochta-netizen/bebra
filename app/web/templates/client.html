@@ -35,9 +35,14 @@
       <option value="refund">Возврат клиенту (списание)</option>
       <option value="adjust">Корректировка (со знаком)</option>
     </select></label>
-    <label>Сумма <input name="amount" inputmode="decimal" placeholder="3000" required></label>
+    <label>Сумма <input name="amount" inputmode="decimal" placeholder="3000"></label>
     <label>Способ <select name="method"><option value="">—</option>{% for code, label in METHODS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
     <label>Заметка <input name="note" placeholder="за что"></label>
+    {% if presets %}
+    {# Штраф из прайса арендатора: сумма и заметка подставятся сами, если
+       их оставить пустыми. Только для вида «Штраф / ремонт». #}
+    <label class="wide">Штраф из прайса <select name="preset"><option value="">— не из прайса —</option>{% for p in presets %}<option value="{{ p.id }}">{{ p.category }} · {{ p.title }} · {{ money(p.total) }}</option>{% endfor %}</select></label>
+    {% endif %}
     <button type="submit">Записать</button>
   </form>
   <p class="muted">Платёж клиенту с привязанным Telegram уходит уведомлением с новой датой «оплачено до». Начисления за периоды делает биллинг сам.</p>

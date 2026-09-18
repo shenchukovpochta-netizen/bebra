@@ -1338,9 +1338,70 @@ ORDER_MANUAL_STATUSES = ("new", "in_work", "waiting", "cancelled")
 
 PAYERS: dict[str, str] = {"own": "Наш", "client": "Клиент"}
 
+# Группы прайса сервиса (регламент № 11) - как в печатном листе, чтобы
+# владелец узнавал свой прайс. Хвост - категории первого сида: строки с
+# ними остались на старых установках, и выпадающий список обязан их
+# показывать, иначе первое же сохранение молча сменит категорию.
 WORK_CATEGORIES: tuple[str, ...] = (
-    "Электрика", "Тормоза", "Ходовая", "Свет", "ТО", "Прочее",
+    "Передняя часть", "Задняя часть", "Мотор-колесо и шиномонтаж",
+    "Аккумуляторы", "Гидроизоляция", "Рама и резьба", "Minako",
+    "Штрафы и порча имущества", "ТО",
+    "Электрика", "Тормоза", "Ходовая", "Свет", "Прочее",
 )
+FINES_CATEGORY = "Штрафы и порча имущества"
+
+# Два листа прайса. Лист выбирается по объекту наряда: свой велосипед -
+# арендатору, чужая техника - стороннему. Плательщик здесь ни при чём:
+# он решает, выставят ли цену, а не какую.
+PRICE_SHEETS: dict[str, str] = {"own": "Арендатору", "ext": "Стороннему"}
+_SHEET_COLUMNS = {"own": ("price", "parts_price"),
+                  "ext": ("price_ext", "parts_price_ext")}
+
+
+def price_sheet(order: Mapping[str, Any] | None) -> str:
+    """Какой лист прайса у наряда: без своего велосипеда - сторонний."""
+    return "own" if (order or {}).get("bike_id") else "ext"
+
+
+def sheet_price(work_type: Mapping[str, Any], sheet: str = "own") -> Decimal | None:
+    """Цена работы клиенту по листу: работа плюс запчасть. None - в этом
+    листе такой работы нет, и подставлять нечего."""
+    work_col, parts_col = _SHEET_COLUMNS.get(sheet, _SHEET_COLUMNS["own"])
+    work = work_type.get(work_col)
+    if work is None:
+        return None
+    return to_money(work) + to_money(work_type.get(parts_col) or 0)
+
+
+def work_type_rows(types: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Каталог с итогами по обоим листам - для списка и выгрузки."""
+    rows = []
+    for t in types:
+        rows.append({**t, "own_total": sheet_price(t, "own"),
+                     "ext_total": sheet_price(t, "ext")})
+    return rows
+
+
+def priced_types(types: Iterable[Mapping[str, Any]], sheet: str) -> list[dict]:
+    """Каталог для формы строки наряда: цена того листа, что у наряда."""
+    return [{**t, "sheet_total": sheet_price(t, sheet)} for t in types]
+
+
+def fine_presets(types: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Позиции прайса арендатора для журнала клиента: штрафы первыми.
+
+    Штраф за потерянную сумку - не ремонт, наряда под него нет, и
+    оператор пишет его в журнал руками. Прайс подсказывает сумму и
+    название, чтобы в заметке не оказалось «сумка 2000» пятью почерками.
+    """
+    rows = [{"id": t["id"], "title": t["title"], "category": t.get("category") or "",
+             "total": sheet_price(t, "own")}
+            for t in types if t.get("active", True)]
+    rows = [r for r in rows if r["total"] is not None and r["total"] > 0]
+    rows.sort(key=lambda r: (r["category"] != FINES_CATEGORY,
+                             WORK_CATEGORIES.index(r["category"])
+                             if r["category"] in WORK_CATEGORIES else 99))
+    return rows
 
 # Сколько суток наряд может стоять, прежде чем это станет заметно.
 # Велосипед в ремонте - это велосипед вне аренды, то есть прямой простой.
@@ -2979,6 +3040,57 @@ TRACKER_ALERTS: dict[str, str] = {
 # Срочные - те, где велосипед прямо сейчас уезжает не туда. Остальные
 # разбирают в свой черёд: у жёлтой тревоги нет минут, есть часы.
 ALERT_URGENT_KINDS = ("moving", "alarm")
+
+# Команды устройству. Блокировка у StarLine срабатывает после остановки
+# велосипеда: мотор перестаёт тянуть, когда тот уже стоит, а не на ходу.
+# Поэтому команда из панели безопасна, а задержка до ближайшего круга
+# опроса ничего не меняет.
+TRACKER_COMMANDS: dict[str, str] = {"block": "Заблокировать мотор",
+                                    "unblock": "Снять блокировку"}
+# Тревоги, при которых кнопка блокировки уместна прямо в списке.
+BLOCKABLE_ALERTS = ("moving", "alarm")
+# Команда в очереди дольше двух кругов опроса - опрос, похоже, не работает.
+COMMAND_STALE_MINUTES = 10
+
+
+def check_command(raw: Any) -> Check:
+    return check_choice(raw, TRACKER_COMMANDS, what="Команда")
+
+
+def command_rows(commands: Iterable[Mapping[str, Any]], *,
+                 now: datetime | None = None) -> list[dict]:
+    """Команды с состоянием для человека: в очереди, выполнена, отказ."""
+    now = now or datetime.now(UTC)
+    rows = []
+    for c in commands:
+        sent = c.get("sent_at")
+        if sent is None:
+            waited = (now - c["requested_at"]).total_seconds() / 60 \
+                if c.get("requested_at") else 0
+            state, title = "pending", "в очереди"
+            stale = waited >= COMMAND_STALE_MINUTES
+        elif c.get("ok"):
+            state, title, stale = "done", "выполнена", False
+        else:
+            state, title, stale = "failed", "StarLine отказал", False
+        rows.append({**c, "state": state, "state_title": title, "stale": stale,
+                     "title": TRACKER_COMMANDS.get(str(c.get("command")),
+                                                   str(c.get("command")))})
+    return rows
+
+
+def block_state(tracker: Mapping[str, Any],
+                pending: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Что показать про мотор: заблокирован ли и какая команда ждёт.
+
+    Следующая команда - обратная текущему состоянию, пока в очереди
+    ничего нет: вторую туда не поставить (уникальный индекс), и кнопка
+    в это время не нужна.
+    """
+    blocked = bool(tracker.get("blocked"))
+    return {"blocked": blocked, "pending": pending,
+            "next": None if pending else ("unblock" if blocked else "block"),
+            "title": "мотор заблокирован" if blocked else "мотор не заблокирован"}
 ALERT_LEVELS: dict[str, str] = {"urgent": "Срочно", "yellow": "Жёлтый"}
 # Состояние открытой тревоги. Закрытая - та, у которой есть handled_at.
 ALERT_STATES: dict[str, str] = {

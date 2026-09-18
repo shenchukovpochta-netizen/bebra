@@ -72,16 +72,17 @@
   </form>
   {% endif %}
   <form method="post" action="/orders/{{ order.id }}/items" class="grid2">
-    <label class="wide">Из каталога <select name="work_type_id"><option value="">— вписать руками —</option>{% for t in types %}<option value="{{ t.id }}">{{ t.title }} · {{ money(t.price) }}</option>{% endfor %}</select></label>
+    <label class="wide">Из прайса «{{ PRICE_SHEETS[sheet] }}» <select name="work_type_id"><option value="">— вписать руками —</option>{% for t in types %}<option value="{{ t.id }}">{{ t.title }} · {% if t.sheet_total is not none %}{{ money(t.sheet_total) }}{% else %}нет в прайсе{% endif %}</option>{% endfor %}</select></label>
     <label>Или название <input name="title" placeholder="если не из каталога"></label>
     <label>Узел <select name="node"><option value="">— из каталога —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}">{{ title }}</option>{% endfor %}</select></label>
     <label>Количество <input name="qty" inputmode="numeric" value="1"></label>
-    <label>Цена клиенту, ₽ <input name="price" inputmode="decimal" placeholder="0"></label>
+    <label>Цена клиенту, ₽ <input name="price" inputmode="decimal" placeholder="{% if order.payer == 'client' %}из прайса{% else %}0{% endif %}"></label>
     <label>Запчасти, ₽ <input name="parts_cost" inputmode="decimal" placeholder="0"></label>
     <label>Работа, ₽ <input name="labor_cost" inputmode="decimal" placeholder="0"></label>
     <button type="submit">Добавить</button>
   </form>
-  <p class="muted">Цена клиенту — то, что он платит; запчасти и работа — наша себестоимость. У своего ремонта цену клиенту можно оставить нулём: в журнал велосипеда уйдёт себестоимость.</p>
+  <p class="muted">Цена клиенту — то, что он платит; запчасти и работа — наша себестоимость.
+    {% if order.payer == 'client' %}Пустая цена у работы из прайса подставится сама — лист «{{ PRICE_SHEETS[sheet] }}»: {% if sheet == 'own' %}наш велосипед, платит арендатор{% else %}чужая техника{% endif %}. Работы, которой в этом листе нет, цену вписывают руками.{% else %}У своего ремонта цену клиенту можно оставить нулём: в журнал велосипеда уйдёт себестоимость.{% endif %}</p>
   {% endif %}
 </section>
 </div>

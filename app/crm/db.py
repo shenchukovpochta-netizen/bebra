@@ -32,7 +32,8 @@ CLIENT_FIELDS = frozenset({
 TARIFF_FIELDS = frozenset({"name", "period_days", "price", "note", "active",
                           "sort", "model", "kind"})
 WORK_TYPE_FIELDS = frozenset({"title", "category", "minutes", "price", "node",
-                              "active", "sort"})
+                              "active", "sort", "parts_price", "price_ext",
+                              "parts_price_ext"})
 BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location",
                             "bike_id", "rental_id", "cycles", "purchase_price",
                             "purchased_on", "service_months", "note",
@@ -51,7 +52,7 @@ TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
                                 "note"})
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
-                            "alarm", "note"})
+                            "alarm", "note", "blocked", "blocked_at", "blocked_by"})
 SUPPLIER_FIELDS = frozenset({"name", "phone", "note", "active"})
 PART_FIELDS = frozenset({"title", "node", "unit", "cost", "price", "min_stock",
                          "model", "active", "note"})
@@ -965,12 +966,17 @@ class CrmDB:
             "select * from crm.work_types where id = $1", type_id))
 
     async def create_work_type(self, *, title: str, category: str, minutes: int,
-                               price: Decimal, node: str | None) -> int:
+                               price: Decimal | None, node: str | None,
+                               parts_price: Decimal = Decimal(0),
+                               price_ext: Decimal | None = None,
+                               parts_price_ext: Decimal = Decimal(0)) -> int:
         return int(await self.pool.fetchval(
             """
-            insert into crm.work_types (title, category, minutes, price, node)
-            values ($1, $2, $3, $4, $5) returning id
-            """, title, category, minutes, price, node))
+            insert into crm.work_types (title, category, minutes, price, node,
+                                        parts_price, price_ext, parts_price_ext)
+            values ($1, $2, $3, $4, $5, $6, $7, $8) returning id
+            """, title, category, minutes, price, node, parts_price, price_ext,
+            parts_price_ext))
 
     async def update_work_type(self, type_id: int, **fields: Any) -> None:
         if not fields:
@@ -2588,7 +2594,8 @@ class CrmDB:
         args.append(limit)
         return _rows(await self.pool.fetch(
             f"""
-            select a.*, t.device_id, t.alias, b.code as bike_code, b.model as bike_model,
+            select a.*, t.device_id, t.alias, t.blocked as tracker_blocked,
+                   b.code as bike_code, b.model as bike_model,
                    c.full_name as client_name, r.id as rental_id
               from crm.tracker_alerts a
               join crm.trackers t on t.id = a.tracker_id
@@ -2654,6 +2661,48 @@ class CrmDB:
         await self.pool.execute(
             "update crm.tracker_alerts set handled_at = now(), handled_by = $2 "
             "where id = $1 and handled_at is null", alert_id, by)
+
+    # ─────────────── команды устройству (блокировка мотора) ───────────────
+
+    async def queue_tracker_command(self, *, tracker_id: int, command: str, by: str,
+                                    alert_id: int | None = None,
+                                    note: str | None = None) -> int:
+        """Поставить команду в очередь. Вторая на тот же трекер до отправки
+        первой упрётся в уникальный индекс - это и есть ответ оператору."""
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.tracker_commands (tracker_id, command, alert_id, note,
+                                              requested_by)
+            values ($1, $2, $3, $4, $5) returning id
+            """, tracker_id, command, alert_id, note, by))
+
+    async def pending_tracker_commands(self) -> list[dict]:
+        """Что опрос понесёт в StarLine на этом круге, в порядке постановки."""
+        return _rows(await self.pool.fetch(
+            """
+            select c.*, t.device_id, t.bike_id, b.code as bike_code
+              from crm.tracker_commands c
+              join crm.trackers t on t.id = c.tracker_id
+              left join crm.bikes b on b.id = t.bike_id
+             where c.sent_at is null
+             order by c.requested_at, c.id
+            """))
+
+    async def pending_command_of(self, tracker_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.tracker_commands where tracker_id = $1 "
+            "and sent_at is null", tracker_id))
+
+    async def finish_tracker_command(self, command_id: int, *, ok: bool,
+                                     result: str | None) -> None:
+        await self.pool.execute(
+            "update crm.tracker_commands set sent_at = now(), ok = $2, result = $3 "
+            "where id = $1 and sent_at is null", command_id, ok, result)
+
+    async def tracker_commands(self, tracker_id: int, limit: int = 20) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.tracker_commands where tracker_id = $1 "
+            "order by requested_at desc, id desc limit $2", tracker_id, limit))
 
     # ─────────────────────────── касса ───────────────────────────
 

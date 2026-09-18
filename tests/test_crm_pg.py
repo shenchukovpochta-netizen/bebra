@@ -1801,6 +1801,62 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             "where table_schema = 'crm' and table_name = 'bike_status_log'")
         self.assertIn("mileage_km", {r["column_name"] for r in rows})
 
+    async def test_work_price_seed_on_postgres(self):
+        """Прайс владельца ложится один раз на версию и правок в панели
+        не трогает; заглушки первого сида, которых не касались, гаснут."""
+        types = {t["title"]: t for t in await self.crm.work_types()}
+        self.assertGreaterEqual(len(types), 100)
+        row = types["Замена контроллера"]
+        self.assertEqual((row["price"], row["parts_price"]), (D("1000"), D("3500")))
+        self.assertEqual((row["price_ext"], row["parts_price_ext"]), (D("2500"), D("4500")))
+        self.assertEqual(logic.sheet_price(row, "own"), D("4500"))
+        self.assertEqual(logic.sheet_price(row, "ext"), D("7000"))
+        self.assertIsNone(types["Заварить раму"]["price"], "арендатору не предлагается")
+        self.assertIsNone(types["Потеря аккумулятора"]["price_ext"])
+        self.assertEqual(types["Замена зеркал, шт"]["price"], D(0), "работа прочерком - ноль")
+        self.assertEqual(types["Замена зеркал, шт"]["parts_price"], D(500))
+        self.assertEqual((await self.crm.settings()).get("work_price_version"), "2026-08-17")
+        # Правка в панели переживает повторный старт.
+        await self.crm.update_work_type(row["id"], price=D("1100"))
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual((await self.crm.work_type(row["id"]))["price"], D("1100"))
+        # Новая редакция (отметки нет): нетронутая заглушка выключается,
+        # цена регламента возвращается, строки не плодятся.
+        old = await self.crm.create_work_type(title="Замена камеры", category="Ходовая",
+                                              minutes=15, price=D(200), node="tube_tire")
+        await self.pool.execute("delete from crm.settings where key = 'work_price_version'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertFalse((await self.crm.work_type(old))["active"])
+        self.assertEqual((await self.crm.work_type(row["id"]))["price"], D("1000"))
+        self.assertEqual(len(await self.crm.work_types()), len(types) + 1)
+
+    async def test_tracker_commands_on_postgres(self):
+        """Очередь команд: одна в ожидании на трекер, ответ ложится на команду."""
+        await self.seed()
+        tracker_id = await self.crm.create_tracker(device_id="1001", alias="T",
+                                                   bike_id=self.bike_id)
+        cid = await self.crm.queue_tracker_command(tracker_id=tracker_id,
+                                                   command="block", by="admin")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.queue_tracker_command(tracker_id=tracker_id,
+                                                 command="unblock", by="admin")
+        pending = await self.crm.pending_tracker_commands()
+        self.assertEqual([(p["id"], p["device_id"], p["bike_id"]) for p in pending],
+                         [(cid, "1001", self.bike_id)])
+        await self.crm.finish_tracker_command(cid, ok=True, result="ok")
+        self.assertIsNone(await self.crm.pending_command_of(tracker_id))
+        await self.crm.update_tracker(tracker_id, blocked=True,
+                                      blocked_at=datetime.now(UTC), blocked_by="admin")
+        self.assertTrue((await self.crm.tracker(tracker_id))["blocked"])
+        await self.crm.queue_tracker_command(tracker_id=tracker_id, command="unblock",
+                                             by="admin")
+        rows = await self.crm.tracker_commands(tracker_id)
+        self.assertEqual([r["command"] for r in rows], ["unblock", "block"])
+        await self.crm.raise_alert(tracker_id=tracker_id, kind="moving", note=None,
+                                   bike_id=self.bike_id, lat=None, lon=None,
+                                   level="urgent")
+        self.assertTrue((await self.crm.tracker_alerts())[0]["tracker_blocked"])
+
 
 if __name__ == "__main__":
     unittest.main()

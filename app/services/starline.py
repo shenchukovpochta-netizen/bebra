@@ -36,6 +36,9 @@ API_URL = "https://developer.starline.ru/json"
 APP_TOKEN_TTL = 3 * 3600
 USER_TOKEN_TTL = 20 * 3600
 TIMEOUT = 20
+# Параметр set_param, которым StarLine блокирует мотор: режим
+# «антиограбление». Блокировка вступает после остановки, не на ходу.
+BLOCK_PARAM = "hijack"
 
 
 class StarlineError(Exception):
@@ -204,36 +207,82 @@ class StarlineClient:
         self._slnet = cookie
         return cookie
 
-    async def devices(self, *, now: float | None = None) -> list[dict]:
-        """Все устройства кабинета в виде плоских словарей.
+    async def _call(self, session, method: str, path: str, *, now: float,
+                    **kwargs) -> Any:
+        """Запрос к API с cookie slnet и одним повтором при отказе авторизации.
 
-        Один повтор при отказе авторизации: cookie slnet протухает молча,
-        и первый же запрос после этого возвращает 403. Повторять дальше
-        нечего - это уже неверный пароль или блокировка.
+        Cookie протухает молча, и первый же запрос после этого возвращает
+        403. Повторять дальше нечего - это уже неверный пароль или
+        блокировка кабинета.
         """
+        for attempt in (1, 2):
+            if not self._slnet:
+                await self.connect(session, now=now)
+            data, response = await self._json(
+                session, method, f"{self.api_url}{path}",
+                headers={"Cookie": f"slnet={self._slnet}"}, **kwargs)
+            if getattr(response, "status", 200) in (401, 403) and attempt == 1:
+                self._slnet = ""
+                continue
+            return data
+        return None
+
+    async def devices(self, *, now: float | None = None) -> list[dict]:
+        """Все устройства кабинета в виде плоских словарей."""
         if not self.ready:
             return []
         now = now if now is not None else datetime.now(UTC).timestamp()
         session = self._session()
         try:
-            for attempt in (1, 2):
-                if not self._slnet:
-                    await self.connect(session, now=now)
-                data, response = await self._json(
-                    session, "GET", f"{self.api_url}/v2/user/{self._user_id}/user_info",
-                    headers={"Cookie": f"slnet={self._slnet}"})
-                if getattr(response, "status", 200) in (401, 403) and attempt == 1:
-                    self._slnet = ""
-                    continue
-                devices = (data or {}).get("devices") if isinstance(data, dict) else None
-                if devices is None:
-                    raise StarlineError("user_info: StarLine не вернул устройства")
-                return [d for d in (parse_device(x) for x in devices) if d["device_id"]]
-            return []
+            data = await self._call(session, "GET",
+                                    f"/v2/user/{self._user_id}/user_info", now=now)
+            devices = (data or {}).get("devices") if isinstance(data, dict) else None
+            if devices is None:
+                raise StarlineError("user_info: StarLine не вернул устройства")
+            return [d for d in (parse_device(x) for x in devices) if d["device_id"]]
         finally:
             close = getattr(session, "close", None)
             if close is not None:
                 await close()
+
+    async def set_param(self, device_id: str, name: str, value: int, *,
+                        now: float | None = None) -> dict:
+        """Команда устройству: `set_param` с телом {"type": имя, имя: 0|1}.
+
+        Ответ v1 - не конверт state/desc, а {"code": 200, "codestring":
+        "OK"}: всё, кроме 200, - отказ, и его текст уходит оператору как
+        есть - StarLine пишет причину словами.
+        """
+        if not self.ready:
+            raise StarlineError("StarLine не настроен: команду отправить нечем")
+        now = now if now is not None else datetime.now(UTC).timestamp()
+        session = self._session()
+        try:
+            data = await self._call(session, "POST",
+                                    f"/v1/device/{device_id}/set_param", now=now,
+                                    json={"type": name, name: int(value)})
+            if not isinstance(data, dict):
+                raise StarlineError("set_param: ответ StarLine не разобрать")
+            code = data.get("code")
+            if str(code) != "200":
+                raise StarlineError(
+                    f"set_param: StarLine отказал ({data.get('codestring') or code})")
+            return data
+        finally:
+            close = getattr(session, "close", None)
+            if close is not None:
+                await close()
+
+    async def block_motor(self, device_id: str, on: bool, *,
+                          now: float | None = None) -> dict:
+        """Заблокировать или разблокировать мотор.
+
+        У StarLine это режим «антиограбление» (`hijack`): блокировка
+        включается не на ходу, а после того, как велосипед остановился, -
+        мотор перестаёт тянуть, когда тот уже стоит. Поэтому команда
+        из панели безопасна для курьера на дороге.
+        """
+        return await self.set_param(device_id, BLOCK_PARAM, 1 if on else 0, now=now)
 
 
 def _slnet_from(response: Any) -> str:

@@ -12,14 +12,18 @@
   <a class="btn ghost" href="/work-types.csv?q={{ q|urlencode }}">CSV</a>
 </div>
 <section class="card">
+  {# Два листа прайса в одной строке: арендатору и стороннему заказчику.
+     Пустая пара «работа + запчасть» значит «в этом прайсе такой работы
+     нет» - наряд тогда не подставит ноль, а попросит цену руками. #}
   <fieldset {% if not can_manage %}disabled{% endif %} class="plain">
   <div class="table-wrap">
   <table class="editable">
     <tr>
       {{ list.th('Наименование', 'title', tools) }}
       {{ list.th('Категория', 'category', tools, 'opt') }}
-      {{ list.th('Время', 'minutes', tools) }}
-      {{ list.th('Цена клиенту', 'price', tools) }}
+      {{ list.th('Время', 'minutes', tools, 'opt') }}
+      {{ list.th('Арендатору: работа + запчасть', 'price', tools) }}
+      {{ list.th('Стороннему: работа + запчасть', 'price_ext', tools) }}
       {{ list.th('Использований', 'used', tools, 'num opt') }}
       <th></th>
     </tr>
@@ -28,14 +32,17 @@
       <td class="grow"><input name="title" value="{{ t.title }}" form="work{{ t.id }}"></td>
       <td class="opt"><select name="category" form="work{{ t.id }}" class="mini">{% for c in WORK_CATEGORIES %}<option value="{{ c }}" {% if t.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
         <select name="node" form="work{{ t.id }}" class="mini" title="узел для отчёта «что ломается»"><option value="">— узел —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}" {% if t.node == code %}selected{% endif %}>{{ title }}</option>{% endfor %}</select></td>
-      <td class="nowrap"><input name="minutes" value="{{ t.minutes }}" size="3" class="mini" form="work{{ t.id }}"> мин</td>
-      <td class="nowrap"><input name="price" value="{{ t.price }}" size="7" class="mini" form="work{{ t.id }}"> ₽</td>
+      <td class="nowrap opt"><input name="minutes" value="{{ t.minutes }}" size="3" class="mini" form="work{{ t.id }}"> мин</td>
+      <td class="nowrap"><input name="price" value="{{ '' if t.price is none else t.price }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—"> + <input name="parts_price" value="{{ '' if t.price is none else t.parts_price }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—">
+        {% if t.own_total is not none %}= <b>{{ money(t.own_total) }}</b>{% else %}<span class="muted">нет в прайсе</span>{% endif %}</td>
+      <td class="nowrap"><input name="price_ext" value="{{ '' if t.price_ext is none else t.price_ext }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—"> + <input name="parts_price_ext" value="{{ '' if t.price_ext is none else t.parts_price_ext }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—">
+        {% if t.ext_total is not none %}= <b>{{ money(t.ext_total) }}</b>{% else %}<span class="muted">нет в прайсе</span>{% endif %}</td>
       <td class="num opt">{{ t.used }}</td>
       <td class="actions nowrap"><button type="submit" class="ghost" form="work{{ t.id }}">Сохранить</button>
         <button type="submit" name="action" value="toggle" class="ghost" form="work{{ t.id }}">{{ 'Выключить' if t.active else 'Включить' }}</button></td>
     </tr>
-    {% else %}<tr><td colspan="6" class="muted">Каталог пуст.</td></tr>{% endfor %}
-    {{ list.footer(tools, '/work-types', 6) }}
+    {% else %}<tr><td colspan="7" class="muted">Каталог пуст.</td></tr>{% endfor %}
+    {{ list.footer(tools, '/work-types', 7) }}
   </table>
   </div>
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
@@ -44,15 +51,24 @@
   {% for t in rows %}<form id="work{{ t.id }}" method="post" action="/work-types/{{ t.id }}"></form>{% endfor %}
   </fieldset>
   {% if not can_manage %}<p class="muted">Виды работ вам открыты только на просмотр.</p>{% endif %}
+  <p class="muted">Два прайса: <b>арендатору</b> — за поломку по его вине на нашем
+    велосипеде, <b>стороннему</b> — за ремонт чужой техники. Цена клиенту
+    это работа плюс запчасть; в наряд подставляется лист по объекту: свой
+    велосипед — арендатору, чужая техника — стороннему. Оба поля листа
+    пустые — работы в этом прайсе нет, и наряд попросит цену руками.
+    Ноль — честный ноль: колодки в рамках ТО.</p>
 </section>
 {% if can_manage %}
 <section class="card narrow">
   <h2>Новый вид работ</h2>
   <form method="post" action="/work-types">
-    <label>Наименование <input name="title" placeholder="Замена камеры" required></label>
+    <label>Наименование <input name="title" placeholder="Замена спицы" required></label>
     <label>Категория <select name="category">{% for c in WORK_CATEGORIES %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select></label>
-    <label>Время, мин <input name="minutes" inputmode="numeric" value="15"></label>
-    <label>Цена клиенту, ₽ <input name="price" inputmode="decimal" placeholder="200"></label>
+    <label>Время, мин <input name="minutes" inputmode="numeric" value="0"></label>
+    <label>Арендатору: работа, ₽ <input name="price" inputmode="decimal" placeholder="200"></label>
+    <label>Арендатору: запчасть, ₽ <input name="parts_price" inputmode="decimal" placeholder="0"></label>
+    <label>Стороннему: работа, ₽ <input name="price_ext" inputmode="decimal" placeholder="пусто — нет в прайсе"></label>
+    <label>Стороннему: запчасть, ₽ <input name="parts_price_ext" inputmode="decimal" placeholder="0"></label>
     <label>Узел <select name="node"><option value="">— не привязан —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}">{{ title }}</option>{% endfor %}</select></label>
     <button type="submit">Добавить</button>
   </form>

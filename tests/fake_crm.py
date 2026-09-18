@@ -64,6 +64,7 @@ class FakeCrm:
         self.notice_log_: list[dict] = []
         self.cards_: dict[int, dict] = {}
         self.trackers_: dict[int, dict] = {}
+        self.commands_: list[dict] = []
         self.positions_: list[dict] = []
         self.alerts_: dict[int, dict] = {}
         self.settings_: dict[str, str] = {}
@@ -89,15 +90,18 @@ class FakeCrm:
     def _seed_work_types(self) -> None:
         """Пара видов работ, как их кладёт schema.sql: тестам нужен
         непустой каталог, полный список там ни к чему."""
-        for title, category, minutes, price, node in (
-                ("Замена камеры", "Ходовая", 15, Decimal(200), "tube_tire"),
-                ("Диагностика электрики", "Электрика", 45, Decimal(600), "wiring")):
+        for title, category, minutes, price, parts, ext, parts_ext, node in (
+                ("Замена камеры", "Ходовая", 15, Decimal(200), Decimal(0),
+                 Decimal(400), Decimal(0), "tube_tire"),
+                ("Диагностика электрики", "Электрика", 45, Decimal(600), Decimal(0),
+                 None, Decimal(0), "wiring")):
             self._work_type_seq += 1
             tid = self._work_type_seq
             self.work_types_[tid] = {
                 "id": tid, "title": title, "category": category, "minutes": minutes,
-                "price": price, "node": node, "active": True, "sort": 100,
-                "created_at": self._now()}
+                "price": price, "parts_price": parts, "price_ext": ext,
+                "parts_price_ext": parts_ext, "node": node, "active": True,
+                "sort": 100, "created_at": self._now()}
 
     def _seed_profiles(self) -> None:
         """Те же встроенные профили, что кладёт schema.sql."""
@@ -790,13 +794,17 @@ class FakeCrm:
         t = self.work_types_.get(type_id)
         return dict(t) if t else None
 
-    async def create_work_type(self, *, title, category, minutes, price, node):
+    async def create_work_type(self, *, title, category, minutes, price, node,
+                               parts_price=Decimal(0), price_ext=None,
+                               parts_price_ext=Decimal(0)):
         if any(t["title"] == title for t in self.work_types_.values()):
             raise UniqueError("title")
         self._work_type_seq += 1
         tid = self._work_type_seq
         self.work_types_[tid] = {"id": tid, "title": title, "category": category,
                                  "minutes": minutes, "price": price, "node": node,
+                                 "parts_price": parts_price, "price_ext": price_ext,
+                                 "parts_price_ext": parts_price_ext,
                                  "active": True, "sort": 100,
                                  "created_at": self._now()}
         return tid
@@ -2288,7 +2296,8 @@ class FakeCrm:
             "id": tracker_id, "device_id": None, "alias": None, "bike_id": None,
             "active": True, "last_seen": None, "lat": None, "lon": None,
             "speed": None, "course": None, "voltage": None, "gsm_level": None,
-            "alarm": False, "note": None, "created_at": self._now(),
+            "alarm": False, "note": None, "blocked": False, "blocked_at": None,
+            "blocked_by": None, "created_at": self._now(),
             "updated_at": self._now(), **fields}
         return tracker_id
 
@@ -2365,6 +2374,7 @@ class FakeCrm:
             rows.append({**alert, "device_id": tracker.get("device_id"),
                          "alias": tracker.get("alias"), "bike_code": bike.get("code"),
                          "bike_model": bike.get("model"),
+                         "tracker_blocked": bool(tracker.get("blocked")),
                          "rental_id": (rental or {}).get("id"),
                          "client_name": client.get("full_name")})
         # Срочные сверху - как в базе.
@@ -2410,6 +2420,45 @@ class FakeCrm:
         alert = self.alerts_.get(alert_id)
         if alert and alert["handled_at"] is None:
             alert["handled_at"], alert["handled_by"] = self._now(), by
+
+    # ─── команды устройству ───
+    async def queue_tracker_command(self, *, tracker_id, command, by, alert_id=None,
+                                    note=None):
+        # Частичный уникальный индекс: одна команда в очереди на трекер.
+        if any(c["tracker_id"] == tracker_id and c["sent_at"] is None
+               for c in self.commands_):
+            raise UniqueError("tracker_commands_one_pending")
+        cid = self._id()
+        self.commands_.append({"id": cid, "tracker_id": tracker_id, "command": command,
+                               "alert_id": alert_id, "note": note, "requested_by": by,
+                               "requested_at": self._now(), "sent_at": None,
+                               "ok": None, "result": None})
+        return cid
+
+    async def pending_tracker_commands(self):
+        rows = []
+        for c in sorted(self.commands_, key=lambda c: (c["requested_at"], c["id"])):
+            if c["sent_at"] is not None:
+                continue
+            tracker = self.trackers_.get(c["tracker_id"]) or {}
+            bike = self.bikes_.get(tracker.get("bike_id")) or {}
+            rows.append({**c, "device_id": tracker.get("device_id"),
+                         "bike_id": tracker.get("bike_id"), "bike_code": bike.get("code")})
+        return rows
+
+    async def pending_command_of(self, tracker_id):
+        return next((dict(c) for c in self.commands_
+                     if c["tracker_id"] == tracker_id and c["sent_at"] is None), None)
+
+    async def finish_tracker_command(self, command_id, *, ok, result):
+        for c in self.commands_:
+            if c["id"] == command_id and c["sent_at"] is None:
+                c.update(sent_at=self._now(), ok=ok, result=result)
+
+    async def tracker_commands(self, tracker_id, limit=20):
+        rows = [dict(c) for c in self.commands_ if c["tracker_id"] == tracker_id]
+        return sorted(rows, key=lambda c: (c["requested_at"], c["id"]),
+                      reverse=True)[:limit]
 
 
     # ─────────────────── приём оплаты ───────────────────

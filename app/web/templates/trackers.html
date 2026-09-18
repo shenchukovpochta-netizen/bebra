@@ -26,7 +26,7 @@
       </form>
       {% elif t.bike_id %}№ {{ t.bike_code }}{% else %}—{% endif %}
     </td>
-    <td>{% if t.alarm %}<span class="tag bad">тревога</span>{% elif t.moving %}<span class="tag rented">едет</span>{% elif t.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}</td>
+    <td>{% if t.alarm %}<span class="tag bad">тревога</span>{% elif t.moving %}<span class="tag rented">едет</span>{% elif t.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}{% if t.blocked %} <span class="tag bad">🔒</span>{% endif %}</td>
     <td class="num opt {% if t.low_power %}bad{% endif %}">{% if t.voltage %}{{ t.voltage }} В{% else %}—{% endif %}</td>
     <td class="opt muted">{% if t.silent_hours is none %}не выходил{% else %}{{ t.silent_hours }} ч назад{% endif %}</td>
     <td>{% if t.map %}<a href="{{ t.map }}" target="_blank" rel="noopener">на карте</a>{% endif %}</td>

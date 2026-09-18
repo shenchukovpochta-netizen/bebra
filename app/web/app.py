@@ -260,6 +260,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ORDER_MANUAL_STATUSES=logic.ORDER_MANUAL_STATUSES,
         ORDER_OPEN=logic.ORDER_OPEN,
         WORK_CATEGORIES=logic.WORK_CATEGORIES, ORDER_STUCK_DAYS=logic.ORDER_STUCK_DAYS,
+        PRICE_SHEETS=logic.PRICE_SHEETS, TRACKER_COMMANDS=logic.TRACKER_COMMANDS,
+        BLOCKABLE_ALERTS=logic.BLOCKABLE_ALERTS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
@@ -829,6 +831,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         has_contract = bool(bot_user and bot_user.get("contract_status") == "signed"
                             and bot_user.get("contract_path"))
         return render(request, "client.html", client=client, balance=balance,
+                      presets=logic.fine_presets(await crm.work_types(active_only=True)),
                       rental=rental, summary=summarize(rental, balance),
                       ledger=await crm.ledger_of(client_id, 100),
                       rentals=await crm.client_rentals(client_id),
@@ -873,6 +876,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         kind = logic.check_choice(data.get("kind"), ("payment", "fine", "refund", "adjust"),
                                   what="Вид записи")
+        # Позиция прайса арендатора: подсказывает сумму и заметку. Только
+        # для штрафа - «Потеря аккумулятора» платежом это описка, а не
+        # запись, которую стоит принять.
+        preset = None
+        if (data.get("preset") or "").isdigit():
+            preset = await crm.work_type(int(data["preset"]))
+            if preset is None or logic.sheet_price(preset, "own") is None:
+                flash(request, "Такой позиции в прайсе нет.", "err")
+                return redirect(f"/clients/{client_id}")
+            if data.get("kind") != "fine":
+                flash(request, "Позиция прайса - это штраф или ремонт: "
+                               "выберите вид «Штраф / ремонт».", "err")
+                return redirect(f"/clients/{client_id}")
+            if not (data.get("amount") or "").strip():
+                data["amount"] = str(logic.sheet_price(preset, "own"))
+            if not (data.get("note") or "").strip():
+                data["note"] = preset["title"]
         amount = logic.check_amount(data.get("amount"),
                                     allow_negative=data.get("kind") == "adjust")
         note = logic.check_note(data.get("note"))
@@ -2978,7 +2998,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       invoice=logic.invoice_state(order, invoices),
                       invoices=invoices,
                       days=logic.order_days(order, today=date.today()),
-                      types=await crm.work_types(active_only=True),
+                      sheet=logic.price_sheet(order),
+                      types=logic.priced_types(await crm.work_types(active_only=True),
+                                               logic.price_sheet(order)),
                       techs=await crm.staff_all(),
                       parts=logic.part_rows(await crm.parts(active_only=True), stocks),
                       may_stock=may_view(request, "inventory"))
@@ -3066,6 +3088,19 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                  what="Работа")
         qty = count_field(data, "qty", what="Количество", limit=99)
         price = cost_field(data, "price")
+        # Цена из прайса: лист по объекту наряда, только когда платит
+        # клиент и поле оставили пустым. «0» руками - это ноль, а не
+        # просьба подставить; своему ремонту цена клиенту ни к чему.
+        if (work_type and order.get("payer") == "client"
+                and not (data.get("price") or "").strip()):
+            sheet = logic.price_sheet(order)
+            from_sheet = logic.sheet_price(work_type, sheet)
+            if from_sheet is None:
+                flash(request, f"«{work_type['title']}» в прайсе "
+                               f"«{logic.PRICE_SHEETS[sheet]}» нет - укажите цену "
+                               "клиенту руками.", "err")
+                return redirect(f"/orders/{order_id}")
+            price = logic.Check(True, from_sheet)
         parts = cost_field(data, "parts_cost")
         labor = cost_field(data, "labor_cost")
         for check in (title, qty, price, parts, labor):
@@ -3229,27 +3264,57 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # ─────────────────────── сервис: виды работ ───────────────────────
 
     WORK_SORTS = {"title": "title", "category": "category", "minutes": "minutes",
-                  "price": "price", "used": "used"}
+                  "price": "own_total", "price_ext": "ext_total", "used": "used"}
+
+    def sheet_pair(data: dict, work: str, parts: str) -> logic.Check:
+        """Лист прайса из формы: работа и запчасть.
+
+        Оба поля пустые - работы в этом листе нет (None), и наряд не
+        станет подставлять ноль за «нет цены». Заполнено хоть одно -
+        пустое читается нулём: «Пайка фары» без запчасти это честный ноль.
+        """
+        raw_work = (data.get(work) or "").strip()
+        raw_parts = (data.get(parts) or "").strip()
+        if not raw_work and not raw_parts:
+            return logic.Check(True, (None, Decimal(0)))
+        checks = cost_field(data, work), cost_field(data, parts)
+        for check in checks:
+            if not check.ok:
+                return check
+        return logic.Check(True, (checks[0].value, checks[1].value))
 
     @app.get("/work-types")
     async def work_types_page(request: Request) -> Response:
         q = request.query_params.get("q") or ""
-        rows = logic.rows_search(await crm.work_types(), q, ("title", "category"))
+        rows = logic.rows_search(logic.work_type_rows(await crm.work_types()), q,
+                                 ("title", "category"))
         tools = list_tools(request, rows, allowed=WORK_SORTS)
         return render(request, "work_types.html", rows=tools["rows"], tools=tools,
                       q=q, can_manage=may_edit(request, "service"))
 
     @app.get("/work-types.{ext}")
     async def work_types_csv(request: Request, ext: str) -> Response:
-        rows = logic.rows_search(await crm.work_types(),
+        rows = logic.rows_search(logic.work_type_rows(await crm.work_types()),
                                  request.query_params.get("q") or "",
                                  ("title", "category"))
+
+        def cell(value: Any) -> Any:
+            return "" if value is None else logic.to_money(value)
+
         return _table(ext, "work-types",
                       ["Наименование", "Категория", "Узел", "Время, мин",
-                       "Цена клиенту", "Использований", "Статус"],
+                       "Арендатору: работа", "Арендатору: запчасть", "Арендатору: итого",
+                       "Стороннему: работа", "Стороннему: запчасть", "Стороннему: итого",
+                       "Использований", "Статус"],
                       [[r["title"], r.get("category"),
                         logic.REPAIR_NODES.get(str(r.get("node") or ""), ""),
-                        r.get("minutes"), logic.to_money(r.get("price") or 0),
+                        r.get("minutes"),
+                        cell(r.get("price")),
+                        cell(r.get("parts_price")) if r.get("price") is not None else "",
+                        cell(r.get("own_total")),
+                        cell(r.get("price_ext")),
+                        cell(r.get("parts_price_ext")) if r.get("price_ext") is not None else "",
+                        cell(r.get("ext_total")),
                         r.get("used"), "активна" if r.get("active") else "выключена"]
                        for r in rows])
 
@@ -3258,8 +3323,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         title = logic.check_name(data.get("title"), what="Наименование")
         minutes = count_field(data, "minutes", what="Время", default="0", limit=999)
-        price = cost_field(data, "price")
-        for check in (title, minutes, price):
+        own = sheet_pair(data, "price", "parts_price")
+        ext = sheet_pair(data, "price_ext", "parts_price_ext")
+        for check in (title, minutes, own, ext):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/work-types")
@@ -3271,8 +3337,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             node = None
         try:
             await crm.create_work_type(title=title.value, category=category,
-                                       minutes=minutes.value, price=price.value,
-                                       node=node)
+                                       minutes=minutes.value, price=own.value[0],
+                                       parts_price=own.value[1],
+                                       price_ext=ext.value[0],
+                                       parts_price_ext=ext.value[1], node=node)
         except Exception as exc:                        # noqa: BLE001
             if not name_taken(exc):
                 raise
@@ -3292,7 +3360,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/work-types")
         title = logic.check_name(data.get("title"), what="Наименование")
         minutes = count_field(data, "minutes", what="Время", default="0", limit=999)
-        price = cost_field(data, "price")
+        own = sheet_pair(data, "price", "parts_price")
+        ext = sheet_pair(data, "price_ext", "parts_price_ext")
         current = await crm.work_type(type_id)
         # Категорию и узел завели при создании и потом не трогали - а
         # «Замена мотор-колеса» в «Электрике» вместо «Ходовой» портила
@@ -3303,11 +3372,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if node and node not in logic.REPAIR_NODES:
             flash(request, "Узел: только из справочника.", "err")
             return redirect("/work-types")
-        for check in (title, minutes, price, category):
+        for check in (title, minutes, own, ext, category):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/work-types")
-        await crm.update_work_type(type_id, title=title.value, price=price.value,
+        await crm.update_work_type(type_id, title=title.value, price=own.value[0],
+                                   parts_price=own.value[1], price_ext=ext.value[0],
+                                   parts_price_ext=ext.value[1],
                                    minutes=minutes.value, category=category.value,
                                    node=node or None)
         flash(request, "Сохранено.")
@@ -5065,6 +5136,48 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
               else "Трекер снова под наблюдением.")
         return redirect(f"/trackers/{tracker_id}")
 
+    @app.post("/trackers/{tracker_id}/command")
+    async def tracker_command(request: Request, tracker_id: int) -> Response:
+        """Заблокировать мотор или снять блокировку.
+
+        Панель в StarLine не ходит: команда ложится в очередь, опрос в
+        процессе бота относит её на ближайшем круге и пишет ответ на
+        карточку. Блокировка у StarLine срабатывает после остановки
+        велосипеда, поэтому кнопка безопасна для курьера на дороге.
+        """
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        tracker = await crm.tracker(tracker_id)
+        if tracker is None:
+            return render(request, "missing.html", status_code=404, what="Трекер")
+        data = await form(request)
+        nxt = data.get("next") or ""
+        back = nxt if nxt.startswith("/") and not nxt.startswith("//") \
+            else f"/trackers/{tracker_id}"
+        command = logic.check_command(data.get("command"))
+        if not command.ok:
+            flash(request, command.error, "err")
+            return redirect(back)
+        if not tracker.get("active"):
+            flash(request, "Трекер снят с наблюдения - опрос до него не дойдёт.", "err")
+            return redirect(back)
+        alert_id = int(data["alert_id"]) if (data.get("alert_id") or "").isdigit() else None
+        note = logic.check_note(data.get("note"))
+        try:
+            await crm.queue_tracker_command(
+                tracker_id=tracker_id, command=command.value, by=who(request),
+                alert_id=alert_id, note=note.value if note.ok else None)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower() or "pending" in str(exc):
+                flash(request, "Команда уже в очереди: опрос отнесёт её в StarLine "
+                               "на ближайшем круге.", "err")
+                return redirect(back)
+            raise
+        flash(request, f"«{logic.TRACKER_COMMANDS[command.value]}» поставлена в "
+                       "очередь: опрос отнесёт её в StarLine в ближайшие минуты, "
+                       "ответ появится на карточке трекера и в служебном чате.")
+        return redirect(back)
+
     @app.post("/trackers/alerts/{alert_id}")
     async def tracker_alert_handle(request: Request, alert_id: int) -> Response:
         if not may_edit(request, "trackers"):
@@ -5100,6 +5213,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             until=datetime.combine(last + timedelta(days=1), datetime.min.time(),
                                    tzinfo=tz))
         return render(request, "tracker.html", tracker=row, track=track,
+                      block=logic.block_state(row, await crm.pending_command_of(tracker_id)),
+                      commands=logic.command_rows(await crm.tracker_commands(tracker_id)),
                       run_km=logic.track_distance(track),
                       track_range=kind, track_since=first, track_until=last,
                       line_json=json.dumps(logic.track_line(track)),

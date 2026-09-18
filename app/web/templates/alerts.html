@@ -72,6 +72,16 @@
           {% if a.state != 'normal' %}<button type="submit" name="action" value="normal" class="ghost">это норма</button>{% endif %}
           <button type="submit" name="action" value="close" class="ghost danger">закрыть</button>
         </form>
+        {# Едет без аренды или сработала метка - блокировка прямо отсюда.
+           Сработает после остановки, команду относит опрос. #}
+        {% if a.kind in BLOCKABLE_ALERTS and not a.tracker_blocked %}
+        <form method="post" action="/trackers/{{ a.tracker_id }}/command" class="inline-form" onsubmit="return confirm('Заблокировать мотор? Сработает после остановки велосипеда.')">
+          <input type="hidden" name="next" value="/alerts?view={{ view }}">
+          <input type="hidden" name="command" value="block">
+          <input type="hidden" name="alert_id" value="{{ a.id }}">
+          <button type="submit" class="ghost danger">🔒 блокировать мотор</button>
+        </form>
+        {% elif a.tracker_blocked %}<span class="tag bad">мотор заблокирован</span>{% endif %}
         {% endif %}
       </td>
     </tr>
