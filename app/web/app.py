@@ -4164,9 +4164,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if current is not None:
             state = logic.shift_state(current,
                                       await crm.shift_payments(current["id"]),
-                                      await crm.cash_moves(current["id"]))
+                                      await crm.cash_moves(current["id"]),
+                                      other=await crm.shift_payments(current["id"],
+                                                                     cash=False))
+        # Что должно лежать в ящике при открытии - «насчитали» прошлой
+        # смены на той же точке: открывать с нуля, не глядя, нельзя.
+        previous = sorted(await crm.last_closed_shifts(),
+                          key=lambda x: str(x.get("location") or ""))
         return render(request, "cash.html", rows=rows, current=current, state=state,
-                      locations=await location_names())
+                      previous=previous, locations=await location_names())
 
     @app.post("/cash")
     async def cash_open(request: Request) -> Response:
@@ -4198,10 +4204,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if shift is None:
             return render(request, "missing.html", status_code=404, what="Смена")
         payments = await crm.shift_payments(shift_id)
+        other = await crm.shift_payments(shift_id, cash=False)
         moves = await crm.cash_moves(shift_id)
         return render(request, "cash_shift.html", shift=shift, payments=payments,
-                      moves=moves,
-                      state=logic.shift_state(shift, payments, moves))
+                      other=other, moves=moves,
+                      state=logic.shift_state(shift, payments, moves, other=other))
 
     @app.post("/cash/{shift_id}/move")
     async def cash_move(request: Request, shift_id: int) -> Response:

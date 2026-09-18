@@ -10,24 +10,42 @@
   <div class="tile"><b>{{ money(state.cash) }}</b><span>принято наличными</span></div>
   <div class="tile"><b>{{ money(shift.opening) }}</b><span>размен на начало</span></div>
   <div class="tile {% if state.big_diff %}warn{% endif %}"><b>{% if state.diff is not none %}{{ money(state.diff) }}{% else %}—{% endif %}</b><span>расхождение</span></div>
+  <div class="tile"><b>{{ money(state.other) }}</b><span>не в ящике<br><small class="muted">{% for code, sum in state.by_method.items() %}{{ METHODS.get(code, code) }} {{ money(sum) }}{% if not loop.last %} · {% endif %}{% else %}переводом и картой{% endfor %}</small></span></div>
+  <div class="tile"><b>{{ money(state.revenue) }}</b><span>выручка за смену</span></div>
 </div>
 
 <div class="cols">
 <section class="card">
   <h2>Наличные платежи</h2>
   <table>
-    <tr><th>Когда</th><th>Клиент</th><th class="num">Сумма</th><th class="opt">Заметка</th></tr>
+    <tr><th>Когда</th><th>Клиент</th><th class="num">Сумма</th><th class="opt">Кто принял</th><th class="opt">Заметка</th></tr>
     {% for p in payments %}
     <tr>
       <td>{{ p.created_at|dmy }}</td>
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ p.client_id }}">{{ p.full_name }}</a>{% else %}{{ p.full_name }}{% endif %}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ p.client_id }}">{{ p.full_name }}</a>{% else %}{{ p.full_name }}{% endif %}{% if p.rental_id %} <small class="muted"><a href="/rentals/{{ p.rental_id }}">аренда #{{ p.rental_id }}</a></small>{% endif %}</td>
       <td class="num">{{ money(p.amount) }}</td>
+      <td class="opt muted">{{ p.created_by or '—' }}</td>
       <td class="opt muted">{{ p.note or '' }}</td>
     </tr>
-    {% else %}<tr><td colspan="4" class="muted">Наличными пока не платили.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="5" class="muted">Наличными пока не платили.</td></tr>{% endfor %}
   </table>
   <p class="muted">Строки берутся из журнала клиентов, копии здесь нет:
     копия разошлась бы с журналом при первой же правке платежа.</p>
+
+  <h2>Не в ящике <span class="muted">· переводом, СБП, картой</span></h2>
+  {# Деньги смены, но не ящика: в ожидаемое не входят, в выручку - да. #}
+  <table>
+    <tr><th>Когда</th><th>Как</th><th>Клиент</th><th class="num">Сумма</th><th class="opt">Кто принял</th></tr>
+    {% for p in other %}
+    <tr>
+      <td>{{ p.created_at|dmy }}</td>
+      <td>{{ METHODS.get(p.method, p.method or 'не указано') }}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ p.client_id }}">{{ p.full_name }}</a>{% else %}{{ p.full_name }}{% endif %}</td>
+      <td class="num">{{ money(p.amount) }}</td>
+      <td class="opt muted">{{ p.created_by or '—' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="5" class="muted">За смену не наличными не платили.</td></tr>{% endfor %}
+  </table>
 </section>
 
 <section class="card">

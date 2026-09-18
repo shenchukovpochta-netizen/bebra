@@ -347,7 +347,11 @@ class TestCashPanel(tw.WebCase):
                                  method="sbp", note="перевод", by="t"))
         card = self.get_ok(f"/cash/{shift_id}")
         self.assertIn("3 000 ₽", card)
-        self.assertNotIn("перевод", card, "СБП в ящик не попадает")
+        # СБП в ящик не попадает, но деньги смены - и он тоже: отдельной
+        # плиткой «не в ящике» и в выручке смены.
+        self.assertIn("СБП 5 000 ₽", card)
+        self.assertIn("8 000 ₽", card, "выручка смены = наличные + не в ящике")
+        self.assertIn("Кто принял", card)
 
         self.client.post(f"/cash/{shift_id}/move",
                          data={"kind": "out", "amount": "1000", "reason": "инкассация"})
@@ -360,6 +364,31 @@ class TestCashPanel(tw.WebCase):
         self.assertEqual(shift["diff"], D(-500))
         self.assertEqual(shift["status"], "closed")
         self.assertIn("недостача", self.get_ok("/cash"))
+
+    def test_previous_count_is_shown_before_opening_the_next_shift(self):
+        self.assertNotIn("насчитали в прошлой смене", self.get_ok("/cash"))
+        shift_id = self.open_shift()
+        self.client.post(f"/cash/{shift_id}/close", data={"counted": "2100", "note": ""})
+        page = self.get_ok("/cash")
+        self.assertIn("насчитали в прошлой смене", page)
+        self.assertIn("Павлюхина — <b>2 100 ₽</b>", page)
+
+    def test_non_cash_payments_never_enter_the_expected_amount(self):
+        shift_id = self.open_shift(opening="1000")
+        client = tw.run(self.crm.client(self.client_id))
+        tw.run(service.add_entry(self.crm, client, kind="payment", amount=D(700),
+                                 method="card", note="", by="t"))
+        tw.run(service.add_entry(self.crm, client, kind="payment", amount=D(300),
+                                 method="transfer", note="", by="t"))
+        state = logic.shift_state(tw.run(self.crm.cash_shift(shift_id)),
+                                  tw.run(self.crm.shift_payments(shift_id)),
+                                  tw.run(self.crm.cash_moves(shift_id)),
+                                  other=tw.run(self.crm.shift_payments(shift_id, cash=False)))
+        self.assertEqual(state["expected"], D(1000), "в ящике только размен")
+        self.assertEqual(state["other"], D(1000))
+        self.assertEqual(state["by_method"], {"card": D(700), "transfer": D(300)})
+        self.assertEqual(state["revenue"], D(1000))
+        self.assertEqual(state["cash"], D(0))
 
     def test_second_shift_on_the_same_point_is_refused(self):
         self.open_shift()

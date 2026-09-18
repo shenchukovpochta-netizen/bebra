@@ -2151,14 +2151,26 @@ class FakeCrm:
     async def cash_moves(self, shift_id):
         return [dict(m) for m in self.cash_moves_ if m["shift_id"] == shift_id]
 
-    async def shift_payments(self, shift_id):
+    async def last_closed_shifts(self):
+        best = {}
+        for s in self.shifts_.values():
+            if s.get("status") != "closed":
+                continue
+            key = s.get("location") or ""
+            if key not in best or s["closed_at"] > best[key]["closed_at"]:
+                best[key] = s
+        return [dict(s) for s in best.values()]
+
+    async def shift_payments(self, shift_id, *, cash=True):
         shift = self.shifts_.get(shift_id)
         if shift is None:
             return []
         until = shift.get("closed_at") or self._now()
         rows = []
         for entry in self.ledger_:
-            if entry["kind"] not in ("payment", "refund") or entry.get("method") != "cash":
+            if entry["kind"] not in ("payment", "refund"):
+                continue
+            if ((entry.get("method") or "") == "cash") != cash:
                 continue
             if not shift["opened_at"] <= entry["created_at"] < until:
                 continue

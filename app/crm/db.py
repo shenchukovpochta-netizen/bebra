@@ -2647,6 +2647,17 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.cash_shifts order by opened_at desc limit $1", limit))
 
+    async def last_closed_shifts(self) -> list[dict]:
+        """Последняя закрытая смена на каждой точке: её «насчитали» - это
+        то, что должно лежать в ящике при открытии следующей."""
+        return _rows(await self.pool.fetch(
+            """
+            select distinct on (coalesce(location, '')) *
+              from crm.cash_shifts
+             where status = 'closed'
+             order by coalesce(location, ''), closed_at desc
+            """))
+
     async def cash_shift(self, shift_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
             "select * from crm.cash_shifts where id = $1", shift_id))
@@ -2692,20 +2703,23 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.cash_moves where shift_id = $1 order by id", shift_id))
 
-    async def shift_payments(self, shift_id: int) -> list[dict]:
-        """Наличные платежи за время смены - из журнала клиентов.
+    async def shift_payments(self, shift_id: int, *, cash: bool = True) -> list[dict]:
+        """Платежи за время смены - из журнала клиентов. cash=False -
+        всё, что НЕ наличными: переводы, СБП, карта - деньги смены, но
+        не ящика.
 
         Смена не хранит копию этих строк: копия разошлась бы с журналом
         при первой же правке платежа, а сходимость кассы держится именно
         на том, что деньги в ящике и деньги в журнале - одно и то же.
         """
+        method = "l.method = 'cash'" if cash else "coalesce(l.method, '') <> 'cash'"
         return _rows(await self.pool.fetch(
-            """
+            f"""
             select l.*, c.full_name
               from crm.ledger l
               join crm.clients c on c.id = l.client_id
               join crm.cash_shifts s on s.id = $1
-             where l.kind in ('payment', 'refund') and l.method = 'cash'
+             where l.kind in ('payment', 'refund') and {method}
                and l.created_at >= s.opened_at
                and l.created_at < coalesce(s.closed_at, now())
              order by l.id

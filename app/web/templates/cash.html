@@ -11,6 +11,8 @@
     <div class="tile"><b>{{ money(state.cash) }}</b><span>принято наличными<br><small class="muted">{{ state.payments }} платежей</small></span></div>
     <div class="tile"><b>{{ money(state.inflow) }}</b><span>внесено</span></div>
     <div class="tile"><b>{{ money(state.outflow) }}</b><span>изъято</span></div>
+    <div class="tile"><b>{{ money(state.other) }}</b><span>не в ящике<br><small class="muted">{% for code, sum in state.by_method.items() %}{{ METHODS.get(code, code) }} {{ money(sum) }}{% if not loop.last %} · {% endif %}{% else %}переводом и картой{% endfor %}</small></span></div>
+    <div class="tile"><b>{{ money(state.revenue) }}</b><span>выручка за смену<br><small class="muted">наличные и не в ящике вместе</small></span></div>
   </div>
   <p><a class="btn" href="/cash/{{ current.id }}">Открыть смену</a>
     <span class="muted">Открыл {{ current.opened_by or '' }} · {{ current.opened_at|dmy }} · размен {{ money(current.opening) }}</span></p>
@@ -24,6 +26,11 @@
     <label class="wide">Заметка <input name="note" placeholder="кто на точке, чем разменялись"></label>
     <button type="submit">Открыть</button>
   </form>
+  {% if previous %}
+  <p class="muted">В ящике должно лежать то, что насчитали в прошлой смене:
+    {% for s in previous %}{{ s.location or 'без точки' }} — <b>{{ money(s.counted or 0) }}</b> <small>({{ s.no }}, {{ s.closed_at|dmy }})</small>{% if not loop.last %}; {% endif %}{% endfor %}.
+    Меньше — значит, деньги ушли между сменами; впишите как есть и отметьте в заметке.</p>
+  {% endif %}
   <p class="muted">Одна открытая смена на точку. Наличные платежи попадают
     в смену сами — из журнала клиентов, по способу оплаты «наличные».</p>
 </section>

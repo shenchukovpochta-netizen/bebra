@@ -3285,15 +3285,32 @@ def shift_expected(shift: Mapping[str, Any], payments: Iterable[Mapping[str, Any
 
 
 def shift_state(shift: Mapping[str, Any], payments: Iterable[Mapping[str, Any]],
-                moves: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """Состояние смены для карточки: ожидаемое, посчитанное, расхождение."""
-    payments, moves = list(payments), list(moves)
+                moves: Iterable[Mapping[str, Any]],
+                other: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """Состояние смены для карточки: ожидаемое, посчитанное, расхождение.
+
+    `other` - платежи смены не наличными: переводы, СБП, карта. В ящик
+    они не попадают и в ожидаемое не входят, но выручка смены - это
+    и они тоже: «сколько приняли за смену» и «сколько в ящике» - два
+    разных вопроса.
+    """
+    payments, moves, other = list(payments), list(moves), list(other)
     expected = shift_expected(shift, payments, moves)
     counted = (to_money(shift["counted"]) if shift.get("counted") is not None
                else None)
     diff = to_money(counted - expected) if counted is not None else None
+    cash = to_money(sum(to_money(p.get("amount") or 0) for p in payments))
+    by_method: dict[str, Decimal] = {}
+    for p in other:
+        code = str(p.get("method") or "other")
+        by_method[code] = to_money(by_method.get(code, Decimal(0))
+                                   + to_money(p.get("amount") or 0))
+    other_total = to_money(sum(by_method.values(), Decimal(0)))
     return {"expected": expected, "counted": counted, "diff": diff,
-            "cash": to_money(sum(to_money(p.get("amount") or 0) for p in payments)),
+            "cash": cash,
+            "other": other_total, "by_method": by_method,
+            "other_count": len(other),
+            "revenue": to_money(cash + other_total),
             "inflow": to_money(sum(to_money(m["amount"]) for m in moves
                                    if m.get("kind") == "in")),
             "outflow": to_money(sum(to_money(m["amount"]) for m in moves
