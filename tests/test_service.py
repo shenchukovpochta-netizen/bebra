@@ -123,6 +123,65 @@ class TestServiceInPanel(tw.WebCase):
         self.assertEqual(tw.run(self.crm.bike(self.bike_id))["status"], "repair",
                          "наряд открыт - велосипед не должен числиться свободным")
 
+    def test_payer_changes_while_nothing_was_promised(self):
+        """«Наш» ремонт оказался клиентским после разборки: плательщик
+        меняется на месте, а не закрытием и новым нарядом."""
+        self.open_order()
+        order = self.current()
+        r = self.client.post(f"/orders/{order['id']}/edit", data={
+            "status": "in_work", "tech_id": "", "estimate": "0", "note": "",
+            "payer": "client", "client_phone": ""})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.current()["payer"], "own", "без клиента клиентским не станет")
+        self.assertIn("укажите клиента", self.get_ok(f"/orders/{order['id']}"))
+        self.client.post(f"/orders/{order['id']}/edit", data={
+            "status": "in_work", "tech_id": "", "estimate": "0", "note": "",
+            "payer": "client", "client_phone": "8 (999) 000-00-00"})
+        order = self.current()
+        self.assertEqual(order["payer"], "client")
+        self.assertEqual(order["client_id"], self.client_id, "клиент найден по телефону")
+        # Смета ушла - плательщик заперт.
+        tw.run(self.crm.update_work_order(order["id"], estimate_sent_at=datetime.now(UTC)))
+        self.client.post(f"/orders/{order['id']}/edit", data={
+            "status": "in_work", "tech_id": "", "estimate": "0", "note": "",
+            "payer": "own"})
+        self.assertEqual(self.current()["payer"], "client")
+        self.assertIn("не сменить", self.get_ok(f"/orders/{order['id']}"))
+        self.assertIn("disabled", self.get_ok(f"/orders/{order['id']}"))
+
+    def test_unknown_phone_does_not_bind_a_client(self):
+        self.open_order()
+        order = self.current()
+        self.client.post(f"/orders/{order['id']}/edit", data={
+            "status": "in_work", "tech_id": "", "estimate": "0", "note": "",
+            "payer": "own", "client_phone": "+79991112233"})
+        self.assertIsNone(self.current().get("client_id"))
+        self.assertIn("нет", self.get_ok(f"/orders/{order['id']}"))
+
+    def test_work_type_category_and_node_are_editable(self):
+        self.client.post("/work-types", data={"title": "Замена мотор-колеса",
+                                              "category": "Электрика", "minutes": "90",
+                                              "price": "1500", "node": ""})
+        row = tw.run(self.crm.work_types())[0]
+        r = self.client.post(f"/work-types/{row['id']}", data={
+            "title": "Замена мотор-колеса", "minutes": "90", "price": "1500",
+            "category": "Ходовая", "node": "motor_wheel"})
+        self.assertEqual(r.status_code, 303)
+        row = tw.run(self.crm.work_type(row["id"]))
+        self.assertEqual(row["category"], "Ходовая")
+        self.assertEqual(row["node"], "motor_wheel")
+        # Чужая категория и чужой узел отбиваются.
+        self.client.post(f"/work-types/{row['id']}", data={
+            "title": "Замена мотор-колеса", "minutes": "90", "price": "1500",
+            "category": "Кузов", "node": "motor_wheel"})
+        self.assertEqual(tw.run(self.crm.work_type(row["id"]))["category"], "Ходовая")
+        self.client.post(f"/work-types/{row['id']}", data={
+            "title": "Замена мотор-колеса", "minutes": "90", "price": "1500",
+            "category": "Ходовая", "node": "nonsense"})
+        self.assertEqual(tw.run(self.crm.work_type(row["id"]))["node"], "motor_wheel")
+        page = self.get_ok("/work-types")
+        self.assertIn('name="category" form="work', page, "категория правится в строке")
+
     def test_second_order_on_the_same_bike_is_refused(self):
         self.open_order()
         r = self.open_order()

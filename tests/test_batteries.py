@@ -373,6 +373,23 @@ class TestBatteryPanel(tw.WebCase):
         self.assertEqual(r.status_code, 303)
         self.assertEqual(tw.run(self.crm.locations())[0]["city"], "Казань")
 
+    def test_battery_model_is_editable_and_archivable(self):
+        r = self.client.post(f"/models/batteries/{self.model_id}", data={
+            "title": "48V 20Ah", "brand": "LG", "voltage": "48", "capacity": "20",
+            "price": "12000", "service_months": "18"})
+        self.assertEqual(r.status_code, 303)
+        model = tw.run(self.crm.battery_model(self.model_id))
+        self.assertEqual(model["price"], D(12000))
+        self.assertEqual(model["service_months"], 18)
+        self.assertEqual(model["brand"], "LG")
+        self.client.post(f"/models/batteries/{self.model_id}", data={"action": "toggle"})
+        self.assertFalse(tw.run(self.crm.battery_model(self.model_id))["active"])
+        self.assertIn("архив", self.get_ok("/models"))
+        self.client.post(f"/models/batteries/{self.model_id}", data={"action": "toggle"})
+        self.assertTrue(tw.run(self.crm.battery_model(self.model_id))["active"])
+        self.assertEqual(self.client.post("/models/batteries/999",
+                                          data={"action": "toggle"}).status_code, 404)
+
     def test_closed_point_stays_in_the_cards(self):
         self.client.post("/locations", data={"name": "Горького", "city": "Казань",
                                              "address": "", "note": ""})

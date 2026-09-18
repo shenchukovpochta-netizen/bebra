@@ -3102,8 +3102,36 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                            "или отправьте смету заново.", "err")
             return redirect(f"/orders/{order_id}")
         tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
-        await crm.update_work_order(order_id, status=status.value, tech_id=tech_id,
-                                    estimate=estimate.value, note=note.value)
+        fields: dict[str, Any] = {"status": status.value, "tech_id": tech_id,
+                                  "estimate": estimate.value, "note": note.value}
+        # Плательщик задавался при открытии и потом не менялся - а «наш»
+        # ремонт, оказавшийся клиентским после разборки, приходилось
+        # закрывать и заводить заново. Меняется, пока смета не ушла и
+        # счёт не выставлен: после этого клиенту уже что-то обещали.
+        payer = logic.check_choice(data.get("payer") or order["payer"], logic.PAYERS,
+                                   what="Плательщик")
+        if not payer.ok:
+            flash(request, payer.error, "err")
+            return redirect(f"/orders/{order_id}")
+        phone = bot_logic.normalize_phone(data.get("client_phone"))
+        if phone:
+            found = await crm.client_by_phone(phone)
+            if found is None:
+                flash(request, f"Клиента с телефоном {phone} нет.", "err")
+                return redirect(f"/orders/{order_id}")
+            fields["client_id"] = found["id"]
+        if payer.value != order["payer"]:
+            if order.get("estimate_sent_at") or await crm.work_order_invoices(order_id):
+                flash(request, "Плательщика не сменить: смета уже отправлена или "
+                               "счёт выставлен.", "err")
+                return redirect(f"/orders/{order_id}")
+            if payer.value == "client" and not (fields.get("client_id")
+                                                or order.get("client_id")
+                                                or order.get("object_note")):
+                flash(request, "Клиентский ремонт: укажите клиента по телефону.", "err")
+                return redirect(f"/orders/{order_id}")
+            fields["payer"] = payer.value
+        await crm.update_work_order(order_id, **fields)
         # Только смена техника: иначе человек получал бы «на тебя наряд»
         # при каждой правке сметы.
         if tech_id and tech_id != order.get("tech_id"):
@@ -3225,12 +3253,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         title = logic.check_name(data.get("title"), what="Наименование")
         minutes = count_field(data, "minutes", what="Время", default="0", limit=999)
         price = cost_field(data, "price")
-        for check in (title, minutes, price):
+        current = await crm.work_type(type_id)
+        # Категорию и узел завели при создании и потом не трогали - а
+        # «Замена мотор-колеса» в «Электрике» вместо «Ходовой» портила
+        # отчёт «что ломается» навсегда.
+        category = logic.check_choice(data.get("category") or current["category"],
+                                      logic.WORK_CATEGORIES, what="Категория")
+        node = str(data.get("node") if "node" in data else current.get("node") or "")
+        if node and node not in logic.REPAIR_NODES:
+            flash(request, "Узел: только из справочника.", "err")
+            return redirect("/work-types")
+        for check in (title, minutes, price, category):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/work-types")
         await crm.update_work_type(type_id, title=title.value, price=price.value,
-                                   minutes=minutes.value)
+                                   minutes=minutes.value, category=category.value,
+                                   node=node or None)
         flash(request, "Сохранено.")
         return redirect("/work-types")
 
@@ -3488,6 +3527,47 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/models")
         await crm.update_bike_model(model_id, note=note.value, **model_specs(data))
         flash(request, "Модель сохранена.")
+        return redirect("/models")
+
+    @app.post("/models/batteries/{model_id}")
+    async def battery_model_edit(request: Request, model_id: int) -> Response:
+        """Правка модели АКБ: цена и срок службы меняются, и амортизация
+        батарей этой модели пересчитывается с ними - каталог и есть
+        источник этих чисел."""
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if await crm.battery_model(model_id) is None:
+            return render(request, "missing.html", status_code=404, what="Модель АКБ")
+        data = await form(request)
+        if data.get("action") == "toggle":
+            current = await crm.battery_model(model_id)
+            await crm.update_battery_model(model_id, active=not current["active"])
+            flash(request, "Модель убрана в архив." if current["active"]
+                  else "Модель возвращена из архива.")
+            return redirect("/models")
+        title = logic.check_name(data.get("title"), what="Название модели")
+        price = cost_field(data, "price")
+        months = count_field(data, "service_months", what="Срок службы",
+                             default="15", limit=240)
+        volt = count_field(data, "voltage", what="Напряжение", default="0", limit=200)
+        for check in (title, price, months, volt):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect("/models")
+        capacity = cost_field(data, "capacity")
+        try:
+            await crm.update_battery_model(
+                model_id, title=title.value,
+                brand=(data.get("brand") or "").strip() or None,
+                voltage=volt.value or None,
+                capacity=capacity.value if capacity.ok and capacity.value else None,
+                price=price.value, service_months=months.value or 15)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Модель АКБ с таким названием уже есть.", "err")
+                return redirect("/models")
+            raise
+        flash(request, "Модель АКБ сохранена.")
         return redirect("/models")
 
     @app.post("/models/batteries")

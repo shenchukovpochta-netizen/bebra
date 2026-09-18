@@ -26,7 +26,8 @@
     {% for t in rows %}
     <tr class="{% if not t.active %}muted{% endif %}">
       <td class="grow"><input name="title" value="{{ t.title }}" form="work{{ t.id }}"></td>
-      <td class="opt">{{ t.category }}</td>
+      <td class="opt"><select name="category" form="work{{ t.id }}" class="mini">{% for c in WORK_CATEGORIES %}<option value="{{ c }}" {% if t.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+        <select name="node" form="work{{ t.id }}" class="mini" title="узел для отчёта «что ломается»"><option value="">— узел —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}" {% if t.node == code %}selected{% endif %}>{{ title }}</option>{% endfor %}</select></td>
       <td class="nowrap"><input name="minutes" value="{{ t.minutes }}" size="3" class="mini" form="work{{ t.id }}"> мин</td>
       <td class="nowrap"><input name="price" value="{{ t.price }}" size="7" class="mini" form="work{{ t.id }}"> ₽</td>
       <td class="num opt">{{ t.used }}</td>

@@ -72,17 +72,37 @@
 <section class="card">
   <h2>Батареи</h2>
   <table>
-    <tr><th>Название</th><th>В</th><th>А·ч</th>{% if can_view(staff, 'finance') %}<th>Цена</th>{% endif %}<th>Заведено</th></tr>
+    <tr><th>Название</th><th>В</th><th>А·ч</th>{% if can_view(staff, 'finance') %}<th>Цена</th>{% endif %}<th>Заведено</th><th></th></tr>
     {% for m in battery_models %}
     <tr class="{% if not m.active %}muted{% endif %}">
-      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}</td>
+      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}{% if not m.active %} <small class="muted">архив</small>{% endif %}</td>
       <td class="num">{{ m.voltage or '—' }}</td>
       <td class="num">{{ m.capacity or '—' }}</td>
       {% if can_view(staff, 'finance') %}<td class="num">{{ money(m.price) }}</td>{% endif %}
       <td class="num">{{ m.batteries }}</td>
+      <td class="actions nowrap">{% if can_edit(staff, 'settings') %}<form method="post" action="/models/batteries/{{ m.id }}" class="inline-form"><button type="submit" name="action" value="toggle" class="ghost">{{ 'В архив' if m.active else 'Вернуть' }}</button></form>{% endif %}</td>
     </tr>
-    {% else %}<tr><td colspan="5" class="muted">Моделей АКБ нет.</td></tr>{% endfor %}
+    {% if can_edit(staff, 'settings') %}
+    <tr class="{% if not m.active %}muted{% endif %}">
+      <td colspan="6">
+        {# Цена и срок службы - источник амортизации батарей этой модели:
+           правятся здесь, а не в каждой батарее. #}
+        <form method="post" action="/models/batteries/{{ m.id }}" class="grid2">
+          <label>Название <input name="title" value="{{ m.title }}" required></label>
+          <label>Бренд <input name="brand" value="{{ m.brand or '' }}"></label>
+          <label>Напряжение, В <input name="voltage" value="{{ m.voltage or '' }}" size="4"></label>
+          <label>Ёмкость, А·ч <input name="capacity" value="{{ m.capacity or '' }}" size="5"></label>
+          <label>Цена <input name="price" value="{{ m.price }}"></label>
+          <label>Срок службы, мес. <input name="service_months" value="{{ m.service_months or 15 }}" size="4"></label>
+          <button type="submit" class="ghost">Сохранить</button>
+        </form>
+      </td>
+    </tr>
+    {% endif %}
+    {% else %}<tr><td colspan="6" class="muted">Моделей АКБ нет.</td></tr>{% endfor %}
   </table>
+  <p class="muted">Архивная модель не предлагается при заведении батарей, но
+    заведённые остаются с ней: история парка не переписывается.</p>
   {% if can_edit(staff, 'settings') %}
   <form method="post" action="/models/batteries" class="grid2">
     <label>Название <input name="title" required></label>

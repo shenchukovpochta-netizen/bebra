@@ -33,6 +33,9 @@
     <label>Статус <select name="status">{% for code in ORDER_MANUAL_STATUSES %}<option value="{{ code }}" {% if order.status == code %}selected{% endif %}>{{ ORDER_STATUSES[code] }}</option>{% endfor %}</select></label>
     {% endif %}
     <label>Техник <select name="tech_id"><option value="">не назначен</option>{% for t in techs %}<option value="{{ t.id }}" {% if order.tech_id == t.id %}selected{% endif %}>{{ t.name or t.login }}</option>{% endfor %}</select></label>
+    {% set payer_locked = order.estimate_sent_at or invoices %}
+    <label>Плательщик <select name="payer" {% if payer_locked %}disabled title="смета отправлена или счёт выставлен"{% endif %}>{% for code, label in PAYERS.items() %}<option value="{{ code }}" {% if order.payer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Клиент по телефону <input name="client_phone" inputmode="tel" placeholder="{% if order.client_id %}{{ order.client_name }}{% else %}+7 …{% endif %}"></label>
     <label>Смета, ₽ <input name="estimate" inputmode="decimal" value="{{ order.estimate }}"></label>
     <label>Заметка <input name="note" value="{{ order.note or '' }}"></label>
     <button type="submit">Сохранить</button>
