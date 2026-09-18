@@ -976,6 +976,11 @@ class CrmDB:
 
     # ─────────────────────── сервис: наряды ───────────────────────
 
+    # Открытые статусы наряда - из logic.ORDER_OPEN, а не списком в SQL:
+    # зашитый список терял «на согласовании», и наряд на смете выглядел
+    # на рабочем столе как «без наряда» - самый дорогой простой прятался.
+    _OPEN_SQL = "(" + ", ".join(f"'{s}'" for s in logic.ORDER_OPEN) + ")"
+
     _ORDER_SELECT = """
         select o.*, b.code as bike_code, b.model as bike_model, b.status as bike_status,
                c.full_name as client_name, c.phone as client_phone,
@@ -1003,7 +1008,7 @@ class CrmDB:
             values.append(bike_id)
             where.append(f"o.bike_id = ${len(values)}")
         if open_only:
-            where.append("o.status in ('new', 'in_work', 'waiting')")
+            where.append(f"o.status in {self._OPEN_SQL}")
         values.append(limit)
         clause = ("where " + " and ".join(where)) if where else ""
         return _rows(await self.pool.fetch(
@@ -1017,14 +1022,14 @@ class CrmDB:
     async def open_order_of(self, bike_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
             f"{self._ORDER_SELECT} where o.bike_id = $1 "
-            "and o.status in ('new', 'in_work', 'waiting')", bike_id))
+            f"and o.status in {self._OPEN_SQL}", bike_id))
 
     async def open_orders_by_bike(self) -> dict[int, dict]:
         """Открытые наряды разом: рабочему столу нужен наряд у каждой
         строки, и запрос на велосипед превратил бы экран в сотню запросов."""
         rows = _rows(await self.pool.fetch(
             f"{self._ORDER_SELECT} where o.bike_id is not null "
-            "and o.status in ('new', 'in_work', 'waiting')"))
+            f"and o.status in {self._OPEN_SQL}"))
         return {int(r["bike_id"]): r for r in rows}
 
     async def create_work_order(self, *, bike_id: int | None, payer: str,

@@ -9,17 +9,26 @@
     <a href="/rentals?status=all" {% if status == 'all' %}class="on"{% endif %}>Все</a>
     <a href="/rentals/search">Розыск</a>
   </nav>
+  <form method="get" class="search">
+    <input type="hidden" name="status" value="{{ status }}">
+    {% if view %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
+    <input name="q" value="{{ q }}" placeholder="клиент, телефон, № велосипеда, договор">
+    <button type="submit">Найти</button>
+  </form>
   {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Форма</a>{% endif %}
-  <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}">Excel</a>
-  <a class="btn ghost" href="/rentals.csv?status={{ status }}&view={{ view }}">CSV</a>
+  <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}&q={{ q|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/rentals.csv?status={{ status }}&view={{ view }}&q={{ q|urlencode }}">CSV</a>
 </div>
 {# Состояния поверх статуса: «без техники» - не статус, а положение дел,
    когда аренда идёт, а велосипеда на руках нет. #}
+{% set qs = '&q=' ~ (q|urlencode) if q else '' %}
 <nav class="tabs">
-  <a href="/rentals?status={{ status }}" class="{% if not view %}on{% endif %}">Все</a>
-  <a href="/rentals?status={{ status }}&view=debt" class="{% if view == 'debt' %}on{% endif %}">Долг{% if counts.debt %} · {{ counts.debt }}{% endif %}</a>
-  <a href="/rentals?status={{ status }}&view=nobike" class="{% if view == 'nobike' %}on{% endif %}">Без техники{% if counts.nobike %} · {{ counts.nobike }}{% endif %}</a>
-  <a href="/rentals?status={{ status }}&view=search" class="{% if view == 'search' %}on{% endif %}">В розыске{% if counts.search %} · {{ counts.search }}{% endif %}</a>
+  <a href="/rentals?status={{ status }}{{ qs }}" class="{% if not view %}on{% endif %}">Все</a>
+  <a href="/rentals?status={{ status }}&view=debt{{ qs }}" class="{% if view == 'debt' %}on{% endif %}">Долг{% if counts.debt %} · {{ counts.debt }}{% endif %}</a>
+  <a href="/rentals?status={{ status }}&view=overdue{{ qs }}" class="{% if view == 'overdue' %}on{% endif %}">Просрочка{% if counts.overdue %} · {{ counts.overdue }}{% endif %}</a>
+  <a href="/rentals?status={{ status }}&view=repair{{ qs }}" class="{% if view == 'repair' %}on{% endif %}">В ремонте{% if counts.repair %} · {{ counts.repair }}{% endif %}</a>
+  <a href="/rentals?status={{ status }}&view=nobike{{ qs }}" class="{% if view == 'nobike' %}on{% endif %}">Без техники{% if counts.nobike %} · {{ counts.nobike }}{% endif %}</a>
+  <a href="/rentals?status={{ status }}&view=search{{ qs }}" class="{% if view == 'search' %}on{% endif %}">В розыске{% if counts.search %} · {{ counts.search }}{% endif %}</a>
 </nav>
 <div class="card">
 {{ list.views(views, '/rentals', tools, staff) }}
@@ -32,7 +41,9 @@
     {{ list.th('Велосипед', 'bike', tools) }}
     {{ list.th('Тариф', 'tariff', tools) }}
     {{ list.th('С', 'started', tools) }}
+    {{ list.th('Идёт', 'days', tools, 'num') }}
     {{ list.th('Оплачено', 'paid', tools) }}
+    {{ list.th('Просрочка', 'overdue', tools, 'num') }}
     {% if money_ok %}{{ list.th('Баланс', 'debt', tools, 'num') }}{% endif %}
   </tr>
   {% for r in rows %}
@@ -42,12 +53,16 @@
     <td>{{ r.bike_code or '—' }} <span class="muted">{{ r.bike_model or '' }}</span></td>
     <td>{{ r.tariff_name }}{% if money_ok %} · {{ money(r.price) }}/{% else %} · {% endif %}{{ r.period_days }} дн. <small class="muted">{{ BILLING[r.billing] }}</small></td>
     <td>{{ r.started_on|dmy }}{% if r.closed_on %} — {{ r.closed_on|dmy }}{% endif %}</td>
+    <td class="num">{{ r.days_running }}{% if r.in_repair %} <span class="tag repair" title="на велосипеде открыт наряд">ремонт</span>{% endif %}</td>
     <td>{% if r.status == 'active' %}{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">закрыта</span>{% endif %}</td>
+    <td class="num">{% if r.overdue_days %}<span class="bad">{{ r.overdue_days }} дн.</span>{% else %}<span class="muted">—</span>{% endif %}</td>
     {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
   </tr>
-  {% else %}<tr><td colspan="7" class="muted">Пусто.</td></tr>{% endfor %}
-  {{ list.footer(tools, '/rentals', 7,
-                 ('долг ' ~ money(-debt_total)) if money_ok and debt_total else '') }}
+  {% else %}<tr><td colspan="9" class="muted">Пусто.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/rentals', 9,
+                 ((('долг ' ~ money(-debt_total)) if money_ok and debt_total else '')
+                  ~ (' · ' if money_ok and debt_total and overdue_total else '')
+                  ~ (('просрочено ' ~ overdue_total) if overdue_total else ''))) }}
 </table>
 </div>
 <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>

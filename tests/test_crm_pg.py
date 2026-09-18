@@ -1741,6 +1741,22 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["to_status"], "available")
         self.assertEqual(rows[0]["mileage_km"], 4266)
 
+    async def test_order_on_approval_is_still_open_on_postgres(self):
+        """«На согласовании» - открытый статус: SQL брал список из головы
+        и терял его, и такой наряд на рабочем столе выглядел как «без наряда»."""
+        await self.seed()
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="client", client_id=self.client_id,
+            complaint="тормоза", object_note=None, tech_id=None,
+            estimate=D("0"), created_by="t")
+        await self.crm.update_work_order(order_id, status="approve")
+        self.assertIn(self.bike_id, await self.crm.open_orders_by_bike())
+        self.assertEqual((await self.crm.open_order_of(self.bike_id))["id"], order_id)
+        self.assertEqual([o["id"] for o in await self.crm.work_orders(open_only=True)],
+                         [order_id])
+        await self.crm.update_work_order(order_id, status="cancelled")
+        self.assertNotIn(self.bike_id, await self.crm.open_orders_by_bike())
+
     async def test_mileage_column_survives_reapply(self):
         """schema.sql идемпотентен: повторный старт не теряет колонку."""
         await Database(self.pool).apply_schema(SCHEMA)

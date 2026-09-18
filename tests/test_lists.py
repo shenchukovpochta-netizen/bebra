@@ -162,6 +162,36 @@ class TestExports(tw.WebCase):
         self.assertEqual(self.client.get("/parts.csv").status_code, 200)
 
 
+class TestRentalListLogic(unittest.TestCase):
+    ROW = {"id": 7, "full_name": "Иванов Иван", "phone": "+7 (917) 000-11-22",
+           "bike_code": "B-1", "bike_model": "Kugoo V3", "contract_no": "АВ-2026-000001"}
+
+    def test_search_matches_every_field_and_digits_in_the_phone(self):
+        for q in ("иван", "kugoo", "b-1", "АВ-2026", "7", "9170001", "917 000 11"):
+            self.assertEqual(len(logic.rental_search([self.ROW], q)), 1, q)
+        self.assertEqual(logic.rental_search([self.ROW], "Петров"), [])
+        self.assertEqual(logic.rental_search([self.ROW], "8"), [],
+                         "чужая цифра не цепляет ни телефон, ни номер")
+        self.assertEqual(len(logic.rental_search([self.ROW], "  ")), 1, "пусто - все")
+
+    def test_running_days_count_from_issue_to_today_or_closing(self):
+        self.assertEqual(logic.rental_days({"started_on": date(2026, 9, 10)},
+                                           today=date(2026, 9, 18)), 8)
+        self.assertEqual(logic.rental_days({"started_on": date(2026, 9, 18)},
+                                           today=date(2026, 9, 18)), 0, "выдана сегодня")
+        self.assertEqual(logic.rental_days({"started_on": date(2026, 9, 1),
+                                            "closed_on": date(2026, 9, 5)},
+                                           today=date(2026, 9, 18)), 4)
+        self.assertEqual(logic.rental_days({}), 0)
+
+    def test_overdue_days_come_from_the_summary(self):
+        self.assertEqual(logic.overdue_days({"active": True, "days_left": -3}), 3)
+        self.assertEqual(logic.overdue_days({"active": True, "days_left": 2}), 0)
+        self.assertEqual(logic.overdue_days({"active": False, "days_left": -9}), 0,
+                         "закрытая аренда не просрочена")
+        self.assertEqual(logic.overdue_days(None), 0)
+
+
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
 class TestRentalViews(tw.WebCase):
     def setUp(self):
@@ -187,6 +217,48 @@ class TestRentalViews(tw.WebCase):
                                  rental_id=self.rental_id, kind="charge",
                                  amount=D(-3000)))
         self.assertIn("Иванов", self.get_ok("/rentals?view=debt"))
+
+    def test_search_finds_by_name_phone_bike_and_contract(self):
+        for q in ("иванов", "9990000000", "+7 999", "B-1", "АВ-1", str(self.rental_id)):
+            self.assertIn("Иванов", self.get_ok(f"/rentals?q={q}"), q)
+        self.assertNotIn("Иванов", self.get_ok("/rentals?q=Петров"))
+        page = self.get_ok("/rentals?q=Петров")
+        self.assertIn('value="Петров"', page, "строка поиска остаётся в поле")
+
+    def test_overdue_view_and_column(self):
+        """Аренда с 1 сентября на неделю - просрочена: сроки давно вышли."""
+        page = self.get_ok("/rentals?view=overdue")
+        self.assertIn("Иванов", page)
+        self.assertIn("Просрочка ·", page, "чип считает просроченные")
+        self.assertIn("просрочено 1", page, "подвал считает по всему найденному")
+        fresh = _run(self.crm.create_client(full_name="Петров Пётр",
+                                            phone="+79990000001"))
+        bike = _run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        _run(self.crm.create_rental(
+            client_id=fresh, bike_id=bike, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="weekly",
+            started_on=date.today(), contract_no="АВ-2", created_by="тест"))
+        page = self.get_ok("/rentals?view=overdue")
+        self.assertIn("Иванов", page)
+        self.assertNotIn("Петров", page, "свежая аренда не просрочена")
+        self.assertEqual(self.client.get("/rentals?sort=overdue&dir=desc").status_code, 200)
+
+    def test_repair_view_shows_rentals_with_an_open_order(self):
+        self.assertNotIn("Иванов", self.get_ok("/rentals?view=repair"))
+        _run(self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None, complaint="стук",
+            object_note=None, tech_id=None, estimate=D(0), created_by="т"))
+        page = self.get_ok("/rentals?view=repair")
+        self.assertIn("Иванов", page)
+        self.assertIn("В ремонте · 1", page)
+        self.assertIn("открыт наряд", page, "в строке видно, что велосипед в сервисе")
+
+    def test_export_carries_days_and_overdue(self):
+        text = self.client.get("/rentals.csv").text
+        self.assertIn("Идёт, дн.", text)
+        self.assertIn("Просрочка, дн.", text)
+        self.assertIn("Иванов", self.client.get("/rentals.csv?q=иванов").text)
+        self.assertNotIn("Иванов", self.client.get("/rentals.csv?q=петров").text)
 
     def test_tabs_are_on_the_page(self):
         text = self.get_ok("/rentals")

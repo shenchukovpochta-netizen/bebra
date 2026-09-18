@@ -1585,7 +1585,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     RENTAL_SORTS = {"no": "id", "client": "full_name", "bike": "bike_code",
                     "started": "started_on", "paid": "billed_until",
-                    "debt": "balance", "tariff": "tariff_name"}
+                    "debt": "balance", "tariff": "tariff_name",
+                    "days": "days_running", "overdue": "overdue_days"}
     ORDER_SORTS = {"no": "no", "bike": "bike_code", "status": "status",
                    "payer": "payer", "client": "client_name",
                    "tech": "tech_name", "total": "total", "opened": "opened_at"}
@@ -1594,66 +1595,100 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   "cost_total": "cost_total", "price_total": "price_total",
                   "min": "min_stock", "model": "model"}
 
-    def rental_rows(rows: list[dict], view: str) -> list[dict]:
-        """Аренды с посчитанной сводкой и фильтром вида.
+    def rental_rows(rows: list[dict], q: str = "",
+                    open_orders: dict | None = None) -> list[dict]:
+        """Аренды после поиска, со сводкой, сутками и просрочкой.
+
+        «В ремонте» у аренды - это открытый наряд на велосипеде, который
+        сейчас у клиента: статус велосипеда остаётся «в аренде» (его ставит
+        и снимает только аренда), а вот наряд на нём - факт сервиса.
+        """
+        today = date.today()
+        out = logic.rental_search(rows, q)
+        for r in out:
+            r["summary"] = summarize(r if r["status"] == "active" else None,
+                                     r.get("balance", 0))
+            r["overdue_days"] = logic.overdue_days(r["summary"])
+            r["days_running"] = logic.rental_days(r, today=today)
+            r["in_repair"] = bool(r["status"] == "active" and r.get("bike_id")
+                                  and open_orders and r["bike_id"] in open_orders)
+        return out
+
+    def rental_view(rows: list[dict], view: str) -> list[dict]:
+        """Фильтр вида поверх статуса.
 
         «Без техники» - не статус, а состояние: аренда идёт, а велосипеда
         на руках нет. Так бывает после замены, когда подменный уже забрали,
         а новый ещё не выдали, - и такую аренду видно только отсюда.
         """
-        for r in rows:
-            r["summary"] = summarize(r if r["status"] == "active" else None,
-                                     r.get("balance", 0))
         if view == "nobike":
             return [r for r in rows if r["status"] == "active" and not r.get("bike_id")]
         if view == "debt":
             return [r for r in rows if logic.to_money(r.get("balance")) < 0]
         if view == "search":
             return [r for r in rows if logic.in_search(r)]
+        if view == "overdue":
+            return [r for r in rows if r["overdue_days"] > 0]
+        if view == "repair":
+            return [r for r in rows if r["in_repair"]]
         return rows
+
+    def rental_counts(rows: list[dict]) -> dict[str, int]:
+        return {"nobike": sum(1 for r in rows if r["status"] == "active"
+                              and not r.get("bike_id")),
+                "debt": sum(1 for r in rows if logic.to_money(r.get("balance")) < 0),
+                "search": sum(1 for r in rows if logic.in_search(r)),
+                "overdue": sum(1 for r in rows if r["overdue_days"] > 0),
+                "repair": sum(1 for r in rows if r["in_repair"])}
 
     @app.get("/rentals")
     async def rentals(request: Request) -> Response:
         status = request.query_params.get("status") or "active"
         view = request.query_params.get("view") or ""
-        rows = await crm.rentals(status=status if status != "all" else None)
-        shown = rental_rows(rows, view)
+        q = request.query_params.get("q") or ""
+        rows = rental_rows(await crm.rentals(status=status if status != "all" else None),
+                           q, await crm.open_orders_by_bike())
+        shown = rental_view(rows, view)
         tools = list_tools(request, shown, allowed=RENTAL_SORTS)
         return render(request, "rentals.html", rows=tools["rows"], tools=tools,
-                      status=status, view=view,
+                      status=status, view=view, q=q,
                       views=await views_of(request, "/rentals"),
                       debt_total=logic.sum_of(
                           [r for r in tools["all_rows"]
                            if logic.to_money(r.get("balance")) < 0], "balance"),
-                      counts={
-                          "nobike": sum(1 for r in rows if r["status"] == "active"
-                                        and not r.get("bike_id")),
-                          "debt": sum(1 for r in rows
-                                      if logic.to_money(r.get("balance")) < 0),
-                          "search": sum(1 for r in rows if logic.in_search(r))})
+                      overdue_total=sum(1 for r in tools["all_rows"]
+                                        if r["overdue_days"] > 0),
+                      # Счётчики - по найденному: чипы отвечают на «сколько
+                      # из этих», а не «сколько вообще».
+                      counts=rental_counts(rows))
 
     @app.get("/rentals.{ext}")
     async def rentals_csv(request: Request, ext: str) -> Response:
         if not may_view(request, "rentals"):
             return denied(request, "rentals")
         status = request.query_params.get("status") or "active"
-        rows = rental_rows(
-            await crm.rentals(status=status if status != "all" else None),
+        rows = rental_view(
+            rental_rows(await crm.rentals(status=status if status != "all" else None),
+                        request.query_params.get("q") or "",
+                        await crm.open_orders_by_bike()),
             request.query_params.get("view") or "")
         money_ok = may_view(request, "finance")
         header = ["Аренда", "Клиент", "Телефон", "Велосипед", "Тариф",
-                  "Начало", "Оплачено до", "Статус", "Договор"]
+                  "Начало", "Идёт, дн.", "Оплачено до", "Просрочка, дн.",
+                  "Статус", "Договор"]
         if money_ok:
-            header.insert(7, "Баланс")
+            header.insert(9, "Баланс")
         out = []
         for r in rows:
             line = [r["id"], r.get("full_name"), r.get("phone"),
                     r.get("bike_code"), r.get("tariff_name"), r.get("started_on"),
+                    r["days_running"],
                     (r["summary"] or {}).get("covered_until"),
+                    r["overdue_days"],
                     logic.RENTAL_STATUSES.get(r["status"], r["status"]),
                     r.get("contract_no")]
             if money_ok:
-                line.insert(7, logic.to_money(r.get("balance") or 0))
+                line.insert(9, logic.to_money(r.get("balance") or 0))
             out.append(line)
         return _table(ext, "rentals", header, out)
 

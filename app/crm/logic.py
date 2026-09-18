@@ -4657,3 +4657,49 @@ def stock_value_chart(rows: Iterable[Mapping[str, Any]], *,
     return {"months": shown, "top": top, "now": shown[-1]["value"],
             "delta": shown[-1]["value"] - started,
             "peak": max(r["value"] for r in shown)}
+
+
+# ─────────────────────────── список аренд ───────────────────────────
+
+def rental_search(rows: Iterable[Mapping[str, Any]], q: str | None) -> list[dict]:
+    """Аренды по строке поиска: клиент, телефон, номер велосипеда,
+    номер договора, номер аренды.
+
+    Цифры ищутся и в телефоне без форматирования: оператор набирает
+    «9170» с экрана телефона, а в базе лежит «+7 917 …».
+    """
+    text = " ".join(str(q or "").lower().split())
+    if not text:
+        return [dict(r) for r in rows]
+    digits = re.sub(r"\D", "", text)
+    out = []
+    for r in rows:
+        hay = " ".join(str(r.get(k) or "") for k in
+                       ("full_name", "bike_code", "bike_model", "contract_no")).lower()
+        phone = re.sub(r"\D", "", str(r.get("phone") or ""))
+        if (text in hay or str(r.get("id")) == text
+                or (digits and (digits in phone or digits == str(r.get("id"))))):
+            out.append(dict(r))
+    return out
+
+
+def rental_days(rental: Mapping[str, Any], *, today: date | None = None) -> int:
+    """Сколько суток идёт (или шла) аренда: от выдачи по сегодня или
+    по закрытие. Выдача сегодня - это 0, а не 1: сутки ещё не прошли."""
+    started = rental.get("started_on")
+    if started is None:
+        return 0
+    if isinstance(started, datetime):
+        started = started.date()
+    end = rental.get("closed_on") or today or date.today()
+    if isinstance(end, datetime):
+        end = end.date()
+    return max((end - started).days, 0)
+
+
+def overdue_days(summary: Mapping[str, Any] | None) -> int:
+    """Дней просрочки по сводке аренды: 0, если долга по сроку нет."""
+    if not summary or not summary.get("active"):
+        return 0
+    left = summary.get("days_left")
+    return max(-int(left), 0) if left is not None else 0
