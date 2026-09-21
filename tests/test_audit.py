@@ -26,7 +26,7 @@ from app.services import tochka  # noqa: E402
 try:
     import test_web as tw
 
-    from app.crm import paying, service
+    from app.crm import paying, service, sync
     HAVE_WEB = tw.HAVE_WEB
 except ImportError:                                    # pragma: no cover
     HAVE_WEB = False
@@ -351,6 +351,38 @@ class TestTeamNoticeAddress(tw.WebCase):
         self.assertFalse(tw.run(paying.report_paid(self.bot, self.crm, self.cfg,
                                                    order)))
         self.assertEqual(self.bot.sent, [])
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/starlette")
+class TestBotClosesRental(tw.WebCase):
+    """Акт возврата подписан в боте - батареи возвращаются вместе с
+    велосипедом. Синхронизация закрывала аренду мимо сервисного слоя, и
+    батареи оставались «у клиента» навсегда: по две штуки на аренду."""
+
+    def setUp(self):
+        super().setUp()
+        self.seed()
+
+    def test_batteries_come_back_with_the_bike(self):
+        model = tw.run(self.crm.create_battery_model(
+            title="48V 20Ah", brand="Kugoo", voltage=48, capacity=20,
+            price=D(9000), service_months=24, note=None))
+        battery_id = tw.run(self.crm.create_battery(
+            by="test", code="AKB-1", model_id=model, status="available"))
+        rental_id = tw.run(service.open_rental(
+            self.crm, client=tw.run(self.crm.client(self.client_id)),
+            bike=tw.run(self.crm.bike(self.bike_id)),
+            tariff=tw.run(self.crm.tariff(self.tariff_id)),
+            started_on=date(2026, 9, 1), contract_no="АВ-1", by="test"))
+        tw.run(service.issue_with_batteries(self.crm, rental_id,
+                                            bike=tw.run(self.crm.bike(self.bike_id)),
+                                            battery_ids=[battery_id], by="test"))
+        self.assertEqual(tw.run(self.crm.battery(battery_id))["status"], "rented")
+        tw.run(sync.on_rental_closed(self.crm, {"tg_id": 5001, "contract_no": "АВ-1"},
+                                     today=date(2026, 9, 21)))
+        self.assertEqual(tw.run(self.crm.rental(rental_id))["status"], "closed")
+        self.assertEqual(tw.run(self.crm.battery(battery_id))["status"], "available",
+                         "батарея вернулась вместе с велосипедом")
 
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/starlette")

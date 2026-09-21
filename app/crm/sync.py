@@ -217,8 +217,11 @@ async def on_rental_closed(crm: Any, user: dict, *, today: date) -> None:
         rental = await crm.active_rental_of(client["id"])
         if rental is None:
             return
-        await crm.close_rental(rental["id"], closed_on=today, closed_by="bot",
-                               note="Акт возврата подписан в боте")
+        # Через сервис, а не напрямую в базу: закрытие обязано вернуть и
+        # батареи. Прямой вызов `crm.close_rental` оставлял их «у клиента»
+        # навсегда - по две штуки на каждой аренде, закрытой из бота.
+        await service.close_rental(crm, rental, closed_on=today, by="bot",
+                                   note="Акт возврата подписан в боте")
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не закрыта", user.get("contract_no"))
 

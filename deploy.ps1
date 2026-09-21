@@ -36,7 +36,7 @@ if (-not $SkipTests) {
 # не уедут на сервер по случайности.
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
           'schema.sql', 'bootstrap.sh', 'install.sh', '.env.example', '.gitignore',
-          'README.md', 'CLAUDE.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'instrukciya-po-botu.html',
+          'README.md', 'CLAUDE.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'CODE.md', 'instrukciya-po-botu.html',
           'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
