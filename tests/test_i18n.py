@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import string
 import unittest
+from datetime import date
 
 from app import faq, i18n, logic, texts
 from app.i18n import en
@@ -140,6 +141,13 @@ class TestErrors(unittest.TestCase):
         bad(logic.support_question("хм"))
         bad(logic.support_question("о" * 1600))
         bad(logic.close_reason("ху"))
+        # Ветка иностранца: гражданство, номер документа и срок действия.
+        # Без них три ошибки не попадали в обойму, и то, что переводов у
+        # них нет вовсе, тест не замечал - а видят их как раз те, кто
+        # выбрал узбекский или таджикский.
+        bad(logic.validate_citizenship("ы"))
+        bad(logic.validate_passport_number_foreign("AA1"))
+        bad(logic.validate_passport_expiry("07.03.2020", today=date(2026, 9, 21)))
         return errors
 
     def test_translated_errors_are_real_validator_errors(self):

@@ -72,8 +72,14 @@ async def auto_credit(crm: Any, *, by: str = "bank") -> int:
     return done
 
 
-async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10) -> int:
-    """Напомнить оператору о неразобранных поступлениях."""
+async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10, *,
+                           chat_id: Any = None) -> int:
+    """Напомнить оператору о неразобранных поступлениях.
+
+    Зовётся дневным проходом (`billing.run_daily`) в свой час. Раньше её
+    не звал никто: функция была написана, тумблер в панели показывался,
+    а сообщение не уходило никогда.
+    """
     if not await notices.allowed(crm, "bank_unmatched"):
         return 0
     rows = [r for r in await crm.bank_txns(status="new", limit=100)
@@ -88,7 +94,7 @@ async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10) -> int
     if len(rows) > limit:
         lines.append(f"…и ещё {len(rows) - limit}")
     try:
-        await bot.send_message(cfg.contract_chat_id, "\n".join(lines))
+        await bot.send_message(chat_id or cfg.contract_chat_id, "\n".join(lines))
     except TelegramAPIError as exc:
         log.exception("сводка по выписке не доставлена")
         await notices.record(crm, "bank_unmatched", status="failed",

@@ -122,9 +122,15 @@ async def _catch_invite(crm: Any, command: CommandObject | None, tg_id: int) -> 
     try:
         if await crm_service.ref_click(crm, command.args, tg_id) is None:
             return None
-        promise = crm_logic.bonus_promise(crm_logic.bonus_settings(await crm.settings()))
+        settings = crm_logic.bonus_settings(await crm.settings())
+        promise = crm_logic.bonus_promise(settings)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: переход по приглашению %s не записан", command.args)
+        return None
+    # Программа выключена - молчим совсем: переход в воронку записан,
+    # но обещать бонус, которого не будет, нельзя даже словами
+    # «условия уточняйте у менеджера».
+    if not settings["enabled"]:
         return None
     if not promise:
         return texts.REF_FRIEND_HELLO_NO_SUM
@@ -856,9 +862,12 @@ async def send_moderation_card(bot: Bot, db: Database, cfg: Config, vault: Vault
         if flagged is not None:
             crm_line = texts.CARD_CRM_LINE.format(status=logic.esc(flagged[0]),
                                                   note=logic.esc(flagged[1]))
+    # Готовые строки экранируются: и заметка оператора из CRM, и строка
+    # сверки МЧЗ идут внутрь шаблона, который тут же прогоняется через
+    # .format() - фигурная скобка в чужом тексте иначе роняет сборку.
     caption = logic.caption_with_fields(
-        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else "") + crm_line
-        + await ocr.card_line(data, anketa),
+        texts.CONTRACT_CARD + (texts.CARD_MINOR_LINE if minor else "")
+        + logic.literal(crm_line) + logic.literal(await ocr.card_line(data, anketa)),
         anketa_lines(data, anketa),
         number=logic.esc(data.get("contract_no") or "будет присвоен"),
         tg_id=tg_id,

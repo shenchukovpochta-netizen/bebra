@@ -602,6 +602,33 @@ class FakeCrm:
                     self.bikes_[bike_id].get("mileage_km") or 0, int(mileage_start))
         return rid
 
+    async def start_rental_charged(self, *, client_id, bike_id, tariff_name,
+                                   period_days, price, billing, started_on,
+                                   period_to, contract_no, note, created_by):
+        """Аренда и первое начисление одной транзакцией - как в базе."""
+        rid = await self.create_rental(
+            client_id=client_id, bike_id=bike_id, tariff_id=None,
+            tariff_name=tariff_name, period_days=period_days, price=price,
+            billing=billing, started_on=started_on, contract_no=contract_no,
+            created_by=created_by)
+        await self.charge_period(rid, client_id, period_from=started_on,
+                                 period_to=period_to, amount=-Decimal(price),
+                                 note=note, created_by=created_by)
+        return rid
+
+    async def extend_rental_paid(self, rental_id, client_id, *, amount, period_from,
+                                 period_to, pay_note, charge_note, method,
+                                 created_by):
+        """Платёж и начисление продления одной транзакцией - как в базе."""
+        if amount:
+            await self.add_ledger(client_id=client_id, rental_id=rental_id,
+                                  kind="payment", amount=Decimal(amount),
+                                  method=method, note=pay_note,
+                                  created_by=created_by)
+        await self.charge_period(rental_id, client_id, period_from=period_from,
+                                 period_to=period_to, amount=-Decimal(amount),
+                                 note=charge_note, created_by=created_by)
+
     async def update_rental(self, rental_id, **fields):
         self.rentals_[rental_id].update(fields)
 
@@ -730,6 +757,10 @@ class FakeCrm:
         return {**p, "full_name": c["full_name"], "phone": c["phone"], "tg_id": c["tg_id"]}
 
     async def create_claim(self, client_id, amount_hint):
+        # Частичный уникальный индекс: одна открытая заявка на клиента.
+        if any(c["client_id"] == client_id and c["status"] == "pending"
+               for c in self.claims_.values()):
+            return None
         pid = self._id()
         self.claims_[pid] = {"id": pid, "client_id": client_id, "amount_hint": amount_hint,
                              "receipt_file_id": None, "receipt_is_photo": True,
@@ -2563,7 +2594,7 @@ class FakeCrm:
         self.cards_[cid] = {"id": cid, "client_id": client_id, "provider": provider,
                             "token": token, "mask": mask, "expires": expires,
                             "active": True, "created_at": self._now(),
-                            "used_at": None}
+                            "used_at": None, "fails": 0}
         return cid
 
     async def card_of(self, client_id, provider="tochka"):
@@ -2586,6 +2617,16 @@ class FakeCrm:
         card = self.cards_.get(card_id)
         if card is not None:
             card["used_at"] = self._now()
+            card["fails"] = 0
+
+    async def card_failed(self, card_id, *, limit):
+        card = self.cards_.get(card_id)
+        if card is None:
+            return 0
+        card["fails"] = int(card.get("fails") or 0) + 1
+        if card["fails"] >= limit:
+            card["active"] = False
+        return card["fails"]
 
 
     # ─────────────────── уведомления ───────────────────

@@ -460,6 +460,12 @@ T: dict[str, str] = {
 }
 
 ERRORS: dict[str, str] = {
+    'Гражданство - название страны, например Узбекистан.':
+        'Raýatlyk — döwletiň ady, meselem Türkmenistan.',
+    'Документ просрочен: срок действия уже прошёл. Нужен действующий документ.':
+        'Resminamanyň möhleti geçdi: hereket möhleti gutardy. Hereket edýän resminama gerek.',
+    'Номер документа - от 6 до 20 букв и цифр, как в документе. Например: AA1234567.':
+        'Resminama belgisi — resminamadaky ýaly 6-dan 20-ä çenli harp we san. Meselem: AA1234567.',
     "Год должен быть не раньше 1900.":
         "Ýyl 1900-den ir bolmaly däl.",
     "Прокат доступен с 16 лет (до 18 - с письменного согласия родителя).":

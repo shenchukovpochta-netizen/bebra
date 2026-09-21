@@ -115,6 +115,20 @@ CODE_LIMIT = 40
 CENT = Decimal("0.01")
 
 
+def local_date(value: Any) -> date | None:
+    """Дата события по местному времени, а не по UTC.
+
+    asyncpg отдаёт timestamptz осведомлённым временем в UTC, и обычное
+    `.date()` у события, случившегося ночью по Москве, возвращало
+    вчерашний день: переход по ссылке в час ночи не попадал в «за сутки»,
+    а приглашение на ТО считалось на день старше, чем оно есть.
+    Контейнеры живут в Europe/Moscow, поэтому местный пояс и берём.
+    """
+    if isinstance(value, datetime):
+        return (value.astimezone() if value.tzinfo is not None else value).date()
+    return value if isinstance(value, date) else None
+
+
 def to_money(value: Any) -> Decimal:
     """Любое число -> Decimal с двумя знаками. Не для пользовательского ввода."""
     return Decimal(str(value or 0)).quantize(CENT, rounding=ROUND_HALF_UP)
@@ -4282,9 +4296,14 @@ NOTICES: dict[str, dict[str, Any]] = {
                 "Молчит, когда всё сходится.",
     },
     "bank_unmatched": {
-        "group": "team", "target": "chat", "hour": None,
+        # Час, а не «сразу по событию»: строка выписки появляется молча,
+        # и напоминать о ней нужно раз в день, а не на каждый круг опроса
+        # банка. Без часа расписание это уведомление не подхватывало вовсе,
+        # и тумблер в панели ничего не включал.
+        "group": "team", "target": "chat", "hour": 10,
         "title": "Не разобранные поступления",
-        "hint": "Деньги на счёте есть, а кому - неизвестно.",
+        "hint": "Деньги на счёте есть, а кому - неизвестно. "
+                "Раз в сутки, пока строки висят неразобранными.",
     },
     "pay_paid": {
         "group": "team", "target": "chat", "hour": None,
@@ -4576,6 +4595,11 @@ def bonus_promise(settings: Mapping[str, Any], *, for_agent: bool = False) -> st
     Суммы нет - и обещать нечего: пустая строка, и текст скажет «условия
     уточняйте у менеджера». Это честнее «0 ₽ на баланс».
     """
+    # Выключенная программа ничего не обещает: суммы в настройках
+    # остаются, но платить по ним уже не будут, и старая ссылка-приглашение
+    # иначе обещала бы бонус, которого никто не начислит.
+    if not settings.get("enabled", True):
+        return ""
     agent = to_money(settings.get("bonus"))
     friend = to_money(settings.get("friend_bonus"))
     if agent <= 0 and friend <= 0:
@@ -4616,7 +4640,7 @@ def ref_spikes(referrals: Iterable[Mapping[str, Any]], *,
     by_agent: dict[int, int] = {}
     for ref in referrals:
         made = ref.get("created_at")
-        day = made.date() if isinstance(made, datetime) else made
+        day = local_date(made)
         if day == today and ref.get("agent_id") is not None:
             by_agent[int(ref["agent_id"])] = by_agent.get(int(ref["agent_id"]), 0) + 1
     rows = [{"agent_id": agent, "friends": n}

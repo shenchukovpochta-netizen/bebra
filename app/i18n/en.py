@@ -479,6 +479,12 @@ T: dict[str, str] = {
 
 # Ошибки валидации: русский текст из logic.py -> перевод.
 ERRORS: dict[str, str] = {
+    'Гражданство - название страны, например Узбекистан.':
+        'Citizenship is the name of a country, for example Uzbekistan.',
+    'Документ просрочен: срок действия уже прошёл. Нужен действующий документ.':
+        'The document has expired: its validity period is over. A valid document is required.',
+    'Номер документа - от 6 до 20 букв и цифр, как в документе. Например: AA1234567.':
+        'The document number is 6 to 20 letters and digits, exactly as in the document. For example: AA1234567.',
     "Год должен быть не раньше 1900.":
         "The year must be 1900 or later.",
     "Прокат доступен с 16 лет (до 18 - с письменного согласия родителя).":

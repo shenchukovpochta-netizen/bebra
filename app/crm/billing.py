@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from aiogram.exceptions import TelegramAPIError
@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramAPIError
 from .. import i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
-from . import logic, notices, notify, service
+from . import banking, logic, notices, notify, service
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +38,18 @@ REMIND_CODE = {
 
 
 async def remind_once(bot: Any, db: Any, crm: Any, cfg: Any, *,
-                      today: date, state: dict | None = None) -> tuple[int, str]:
+                      today: date, state: dict | None = None,
+                      codes: set[str] | None = None) -> tuple[int, str]:
     """Напоминания по идущим арендам. Возвращает (отправлено, сводка).
 
     Отметка notified_on ставится и при недоставке: заблокировавший бота
     клиент не должен заставлять систему пытаться снова каждые 15 минут.
+
+    `codes` - какие из трёх напоминаний сейчас по расписанию. Без него
+    уходят все: так проход зовут из панели и из тестов. С ним чужие
+    отметкой notified_on НЕ помечаются - иначе «истекает через два дня»
+    уходило бы в восемь утра вместе с просрочкой, а в свои два часа дня
+    видело бы аренду уже помеченной и молчало.
     """
     rentals = await crm.active_rentals()
     state = state if state is not None else await notices.settings(crm)
@@ -52,6 +59,8 @@ async def remind_once(bot: Any, db: Any, crm: Any, cfg: Any, *,
         if kind is None:
             continue
         code = REMIND_CODE[kind]
+        if codes is not None and code not in codes:
+            continue                     # не его час, придёт в свой слот
         if not state.get(code, {}).get("enabled", True):
             # Выключенное уведомление всё равно помечаем отправленным:
             # иначе при обратном включении клиенту прилетит всё, что
@@ -194,7 +203,7 @@ async def invite_to_service(crm: Any, bot: Any, *, state: dict,
     recent = {r["client_id"] for r in await crm.notice_log(
         code="maintenance_invite", limit=1000)
         if r.get("client_id") and r.get("status") == "sent"
-        and (today - r["created_at"].date()).days < after}
+        and (today - logic.local_date(r["created_at"])).days < after}
     sent = 0
     for rental in await crm.active_rentals():
         if rental.get("client_id") in recent or not rental.get("tg_id"):
@@ -220,14 +229,14 @@ async def ask_for_review(crm: Any, bot: Any, *, state: dict, today: date) -> int
     отрицательный. Просим один раз на аренду.
     """
     after = logic.notice_param(state.get("review_ask"), "after_days", 21)
-    asked = {r["client_id"] for r in await crm.notice_log(
-        code="review_ask", limit=2000)
-        if r.get("client_id") and r.get("status") == "sent"}
     links = logic.review_links(await crm.settings())
     sent = 0
     for rental in await crm.active_rentals():
         client_id = rental.get("client_id")
-        if client_id in asked or not rental.get("tg_id"):
+        # Отметка живёт на аренде, а не в истории отправок: история
+        # чистится через 30 дней, и аренда длиннее полутора месяцев
+        # получала просьбу заново, хотя просим мы один раз.
+        if rental.get("review_asked_at") or not rental.get("tg_id"):
             continue
         started = rental.get("started_on")
         if started is None or (today - started).days < after:
@@ -237,6 +246,10 @@ async def ask_for_review(crm: Any, bot: Any, *, state: dict, today: date) -> int
         ok = await notices.send_client(
             crm, "review_ask", client_id,
             lambda r=rental: notify.review_ask(bot, r, links))
+        # Отметку ставим и когда уведомление выключено или не доставлено:
+        # «просим один раз» - про попытку, а не про удачу. Иначе при
+        # обратном включении тумблера просьба ушла бы всем разом.
+        await crm.update_rental(rental["id"], review_asked_at=datetime.now(UTC))
         sent += int(ok)
     return sent
 
@@ -331,24 +344,29 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
     # Начисления - не уведомление, тумблера у них нет: это деньги.
     # Один раз в сутки, в тот же час, что и раньше.
     if manual or done.get("charge") != today:
-        notices.mark(done, "charge", today)
         try:
             charged = await service.charge_all(crm, today=today)
+            # Отметка - после прохода, а не до: сбой базы в начисленный
+            # час иначе оставлял бы парк без начислений до завтра.
+            # Повтор безвреден, период защищён уникальным индексом.
+            notices.mark(done, "charge", today)
             if charged:
                 log.info("CRM: начислений сделано %s", charged)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: проход начислений не удался")
 
     digest = ""
-    # Напоминания об аренде: три кода, но один проход по арендам -
-    # второй раз читать их незачем. Пора хотя бы одному - идём.
-    if any(due(code) for code in REMIND_CODE.values()):
-        for code in REMIND_CODE.values():
-            if due(code):
-                notices.mark(done, code, today)
+    # Напоминания об аренде: три кода со своими часами, но один проход
+    # по арендам - второй раз читать их незачем. Идём, когда пора хотя бы
+    # одному, и шлём только то, чей час настал.
+    due_codes = {code for code in REMIND_CODE.values() if due(code)}
+    if due_codes:
+        for code in due_codes:
+            notices.mark(done, code, today)
         try:
             sent, digest = await remind_once(bot, db, crm, cfg, today=today,
-                                             state=state)
+                                             state=state,
+                                             codes=None if manual else due_codes)
             if sent:
                 log.info("CRM: напоминаний об оплате отправлено %s", sent)
         except Exception:                                # noqa: BLE001
@@ -393,6 +411,16 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
         except Exception:                                # noqa: BLE001
             log.exception("CRM: сводка по согласованиям не собрана")
 
+    if due("bank_unmatched"):
+        notices.mark(done, "bank_unmatched", today)
+        try:
+            left = await banking.report_unmatched(bot, crm, cfg,
+                                                  chat_id=chat("bank_unmatched"))
+            if left:
+                log.info("CRM: неразобранных поступлений %s", left)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: сводка по выписке не собрана")
+
     if due("ref_spike"):
         notices.mark(done, "ref_spike", today)
         try:
@@ -436,15 +464,25 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
         except Exception:                                # noqa: BLE001
             log.exception("CRM: чистка журналов не удалась")
 
-    if digest and due("daily_digest"):
+    # Сводка по оплатам собирается здесь, а не берётся из прохода
+    # напоминаний: у напоминаний свои часы (8, 9 и 14), у сводки свой
+    # (20:00), и в один круг они не попадают никогда. Раньше сводка
+    # уходила только если бота перезапускали вечером.
+    if due("daily_digest"):
         notices.mark(done, "daily_digest", today)
-        text = (texts.CAB_DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
-                + "\n\n" + digest)
-        for part in bot_logic.split_message(text):
-            try:
-                await bot.send_message(chat("daily_digest"), part)
-            except TelegramAPIError:
-                log.exception("сводка по оплатам не доставлена")
-                await notices.record(crm, "daily_digest", status="failed")
-                return
-        await notices.record(crm, "daily_digest", status="sent")
+        if not digest:
+            digest = logic.digest(await crm.active_rentals(), today=today,
+                                  before_days=cfg.remind_before_days)
+        # Пустая сводка не уходит: молчание означает «всё оплачено»,
+        # а ежедневное «долгов нет» перестают читать через неделю.
+        if digest:
+            text = (texts.CAB_DIGEST_INTRO.format(today=today.strftime("%d.%m.%Y"))
+                    + "\n\n" + digest)
+            for part in bot_logic.split_message(text):
+                try:
+                    await bot.send_message(chat("daily_digest"), part)
+                except TelegramAPIError:
+                    log.exception("сводка по оплатам не доставлена")
+                    await notices.record(crm, "daily_digest", status="failed")
+                    return
+            await notices.record(crm, "daily_digest", status="sent")

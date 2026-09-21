@@ -1830,6 +1830,77 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.work_type(row["id"]))["price"], D("1000"))
         self.assertEqual(len(await self.crm.work_types()), len(types) + 1)
 
+    async def test_one_pending_claim_per_client(self):
+        """Двойное нажатие «Я оплатил(а)» давало две карточки оператору
+        и риск зачислить один платёж дважды: теперь вторую открытую
+        заявку не даёт частичный уникальный индекс."""
+        await self.seed()
+        first = await self.crm.create_claim(self.client_id, D("3000"))
+        self.assertIsNotNone(first)
+        self.assertIsNone(await self.crm.create_claim(self.client_id, D("3000")),
+                          "вторая открытая заявка не заводится")
+        await self.crm.resolve_claim(first, status="rejected", resolved_by="t")
+        self.assertIsNotNone(await self.crm.create_claim(self.client_id, D("3000")),
+                             "после разбора первой можно завести новую")
+
+    async def test_schema_collapses_duplicate_claims_before_the_index(self):
+        """Индекс создаётся на живой базе, где дубли уже могли накопиться:
+        схема применяется при каждом старте и упасть на них не должна."""
+        await self.seed()
+        await self.pool.execute("drop index if exists crm.claims_one_pending")
+        for _ in range(3):
+            await self.pool.execute(
+                "insert into crm.payment_claims (client_id) values ($1)",
+                self.client_id)
+        await Database(self.pool).apply_schema(SCHEMA)
+        left = await self.pool.fetchval(
+            "select count(*) from crm.payment_claims where status = 'pending'")
+        self.assertEqual(left, 1, "лишние открытые заявки схлопнуты")
+        await Database(self.pool).apply_schema(SCHEMA)   # идемпотентность
+
+    async def test_rental_and_its_first_charge_are_one_transaction(self):
+        """Аренда из бота заводится вместе с начислением: порознь сбой между
+        ними оставлял клиента с лишним периодом на балансе навсегда."""
+        await self.seed()
+        today = date.today()
+        rental_id = await self.crm.start_rental_charged(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_name="Неделя",
+            period_days=7, price=D("3000"), billing="manual", started_on=today,
+            period_to=today + timedelta(days=7), contract_no="АВ-7",
+            note="Аренда по договору № АВ-7", created_by="bot")
+        rental = await self.crm.rental(rental_id)
+        self.assertEqual(rental["billed_until"], today + timedelta(days=7))
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("-3000.00"))
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "rented")
+
+        # Продление: платёж и начисление тоже одной парой.
+        await self.crm.extend_rental_paid(
+            rental_id, self.client_id, amount=D("3000"),
+            period_from=today + timedelta(days=7), period_to=today + timedelta(days=14),
+            pay_note="Продление", charge_note="Продление: неделя",
+            method="sbp", created_by="bot")
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("-3000.00"))
+        self.assertEqual((await self.crm.rental(rental_id))["billed_until"],
+                         today + timedelta(days=14))
+
+    async def test_card_is_dropped_after_three_refusals(self):
+        """«Три отказа подряд снимают карту» было написано в коде, но
+        считать их было нечем: просроченная карта получала отказ каждые
+        сутки и каждые сутки писала об этом клиенту."""
+        await self.seed()
+        card_id = await self.crm.save_card_token(
+            client_id=self.client_id, token="tok", mask="4477", expires="12/28")
+        self.assertEqual(await self.crm.card_failed(card_id, limit=3), 1)
+        self.assertEqual(await self.crm.card_failed(card_id, limit=3), 2)
+        self.assertTrue(await self.crm.cards(), "на втором отказе карта ещё жива")
+        self.assertEqual(await self.crm.card_failed(card_id, limit=3), 3)
+        self.assertEqual(await self.crm.cards(), [], "на третьем снята")
+        # Удачное списание обнуляет счётчик: отказы считаются подряд идущими.
+        await self.pool.execute(
+            "update crm.card_tokens set active = true where id = $1", card_id)
+        await self.crm.touch_card(card_id)
+        self.assertEqual(await self.crm.card_failed(card_id, limit=3), 1)
+
     async def test_tracker_commands_on_postgres(self):
         """Очередь команд: одна в ожидании на трекер, ответ ложится на команду."""
         await self.seed()

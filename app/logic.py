@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -767,6 +767,17 @@ def clip_fields(fields: str, budget: int) -> str:
         used += len(line) + 1
     kept.append(FIELDS_TRIMMED)
     return "\n".join(kept)
+
+
+def literal(text: Any) -> str:
+    """Готовый текст, который ляжет внутрь шаблона `.format()`.
+
+    Фигурные скобки в нём - просто скобки, а не подстановка. Без этого
+    заметка оператора вида «вернул велик {сломан}» роняла сборку карточки
+    модерации с KeyError, и заявка тихо не доходила до чата: человеку уже
+    сказано «отправлено», а карточки нет ни у кого.
+    """
+    return str(text or "").replace("{", "{{").replace("}", "}}")
 
 
 def caption_with_fields(template: str, fields: str, **fmt: Any) -> str:
@@ -1611,8 +1622,10 @@ def buyout_plan(data: dict) -> dict[str, Any] | None:
                       or issue.get("buyout_payments")) or 0
     if not 1 <= payments <= BUYOUT_MAX_PAYMENTS:
         return None
+    # Точное деление, а не float: суммы в проекте считаются Decimal,
+    # и округление платежа графика не должно зависеть от двоичной дроби.
     return {"total": total, "payments": payments,
-            "per_payment": total / payments}
+            "per_payment": Decimal(total) / Decimal(payments)}
 
 
 def buyout_state(data: dict, *, today: date | None = None) -> dict[str, Any] | None:
@@ -1644,7 +1657,10 @@ def buyout_state(data: dict, *, today: date | None = None) -> dict[str, Any] | N
         done_days = max((edge - start).days + 1, 0)
     done_days += max(int(data.get("buyout_days") or 0), 0)
     done_days = min(done_days, plan["payments"])
-    paid = round(plan["per_payment"] * done_days)
+    # Округление «половина вверх», как у денег в CRM: round()
+    # у Decimal округляет половину к чётному, и 500,5 давало 500.
+    paid = int((plan["per_payment"] * done_days).quantize(
+        Decimal(1), rounding=ROUND_HALF_UP))
     if done_days >= plan["payments"]:
         paid = plan["total"]
     left = max(plan["total"] - paid, 0)

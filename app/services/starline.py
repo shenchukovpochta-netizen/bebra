@@ -64,7 +64,10 @@ def check_state(data: Any, *, what: str) -> dict:
     state = data.get("state")
     desc = data.get("desc")
     if state != 1:
-        code = data.get("code") or (desc or {}).get("code") if isinstance(desc, dict) else None
+        # Скобки не для красоты: без них условное выражение забирало
+        # весь «or», и при неожиданной форме ответа код ошибки терялся.
+        code = data.get("code") or ((desc or {}).get("code")
+                                    if isinstance(desc, dict) else None)
         raise StarlineError(f"{what}: StarLine отказал (state={state}, code={code})")
     return desc if isinstance(desc, dict) else {}
 

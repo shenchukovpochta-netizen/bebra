@@ -1315,8 +1315,7 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
             log.warning("автосписание клиенту %s не прошло", item["client_id"],
                         exc_info=True)
             await crm.mark_pay_failed(order_id, error=str(err))
-            await _tell_autocharge(crm, bot, client, card, item["amount"],
-                                   ok=False, reason=str(err))
+            await _card_failed(crm, bot, client, card, item["amount"], str(err))
             failed += 1
             continue
         if state.get("state") == "paid":
@@ -1331,10 +1330,31 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
         else:
             reason = f"банк: {state.get('status') or 'списание не прошло'}"
             await crm.mark_pay_failed(order_id, error=reason)
-            await _tell_autocharge(crm, bot, client, card, item["amount"],
-                                   ok=False, reason=reason)
+            await _card_failed(crm, bot, client, card, item["amount"], reason)
             failed += 1
     return {"charged": charged, "failed": failed, "skipped": ""}
+
+
+async def _card_failed(crm: Any, bot: Any, client: dict, card: dict,
+                       amount: Decimal, reason: str) -> None:
+    """Отказ банка: посчитать его и снять карту на третьем подряд.
+
+    Считать было нечем, и просроченная карта получала отказ каждые сутки,
+    каждые сутки сообщая об этом клиенту. Счётчик сбрасывается удачным
+    списанием: три отказа подряд - это мёртвая карта, а не пустой счёт
+    в один конкретный день.
+    """
+    fails = 0
+    try:
+        fails = await crm.card_failed(card["id"], limit=logic.AUTOCHARGE_FAILS)
+    except Exception:                                    # noqa: BLE001
+        log.warning("отказ по карте клиента %s не посчитан", client.get("id"),
+                    exc_info=True)
+    dropped = fails >= logic.AUTOCHARGE_FAILS
+    if dropped:
+        reason = (f"{reason}. Карта отвязана после {fails} отказов подряд, "
+                  "привяжите её заново при следующей оплате по ссылке")
+    await _tell_autocharge(crm, bot, client, card, amount, ok=False, reason=reason)
 
 
 async def _tell_autocharge(crm: Any, bot: Any, client: dict, card: dict,

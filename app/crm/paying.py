@@ -99,11 +99,18 @@ async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
             today = date.today()
             hour = logic.pay_settings(await crm.settings())["autocharge_hour"]
             if charged_on != today and datetime.now().hour >= hour:
-                charged_on = today
-                charge = await autocharge_daily(crm, acquiring, bot=bot, today=today)
-                if charge.get("charged") or charge.get("failed"):
-                    log.info("автосписание: списано %s, отказов %s",
-                             charge["charged"], charge["failed"])
+                # Отметка ставится в finally: одна попытка в сутки при любом
+                # исходе. Ставить её до прохода нельзя - сбой базы отменял бы
+                # списание молча; не ставить вовсе тоже нельзя - при сбое
+                # банка круг повторялся бы каждую минуту до полуночи.
+                try:
+                    charge = await autocharge_daily(crm, acquiring, bot=bot,
+                                                    today=today)
+                    if charge.get("charged") or charge.get("failed"):
+                        log.info("автосписание: списано %s, отказов %s",
+                                 charge["charged"], charge["failed"])
+                finally:
+                    charged_on = today
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

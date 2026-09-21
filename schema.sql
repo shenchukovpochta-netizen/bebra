@@ -2071,3 +2071,32 @@ create unique index if not exists tracker_commands_one_pending
   on crm.tracker_commands (tracker_id) where sent_at is null;
 create index if not exists tracker_commands_idx
   on crm.tracker_commands (tracker_id, requested_at desc);
+
+-- ────── просьба об отзыве, отказы карты, одна заявка на клиента ──────
+--
+-- Три мелочи, каждая из которых чинит своё тихое неудобство.
+
+-- «Просим отзыв один раз на аренду» держалось только на истории
+-- отправок, а она чистится через 30 дней: аренда длиннее полутора
+-- месяцев получала просьбу заново. Отметка живёт на самой аренде.
+alter table crm.rentals add column if not exists review_asked_at timestamptz;
+
+-- Счётчик отказов банка по карте. В коде автосписания написано «три
+-- отказа подряд снимают карту», но считать их было нечем: просроченная
+-- карта получала отказ каждый день и каждый день писала об этом клиенту.
+alter table crm.card_tokens add column if not exists fails integer not null default 0;
+
+-- Одна открытая заявка на зачисление у клиента. Проверка «уже есть»
+-- и вставка шли двумя запросами, а обновления бот обрабатывает
+-- параллельно: двойное нажатие «Я оплатил(а)» давало две карточки
+-- оператору и риск зачислить один платёж дважды.
+-- Уже задвоившиеся заявки схлопываем, иначе индекс не создастся,
+-- а схема применяется при каждом старте.
+update crm.payment_claims p set status = 'rejected', resolved_at = now(),
+       resolved_by = 'схема: дубль заявки'
+ where p.status = 'pending'
+   and exists (select 1 from crm.payment_claims q
+                where q.client_id = p.client_id and q.status = 'pending'
+                  and q.id > p.id);
+create unique index if not exists claims_one_pending
+  on crm.payment_claims (client_id) where status = 'pending';

@@ -355,8 +355,9 @@ def claim_confirm(claim_id: int, amount_text: str) -> InlineKeyboardMarkup:
 
 def fleet_card(bike_id: int, status: str, rented: bool) -> InlineKeyboardMarkup:
     """Кнопки статуса на карточке велосипеда в служебном чате. В аренде -
-    кнопок нет: статус «в аренде» снимает только закрытие аренды."""
-    if rented:
+    кнопок нет: статус «в аренде» снимает только закрытие аренды.
+    На сборке - тоже: оттуда выпускает только ввод в эксплуатацию."""
+    if rented or status == "new":
         return InlineKeyboardMarkup(inline_keyboard=[])
     options = [("repair", "🔧 В ремонт"), ("maintenance", "🛠 На ТО"),
                ("available", "✅ Свободен"), ("written_off", "🗑 Списан")]

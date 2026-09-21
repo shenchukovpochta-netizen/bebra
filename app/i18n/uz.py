@@ -471,6 +471,12 @@ T: dict[str, str] = {
 }
 
 ERRORS: dict[str, str] = {
+    'Гражданство - название страны, например Узбекистан.':
+        "Fuqarolik — davlat nomi, masalan O'zbekiston.",
+    'Документ просрочен: срок действия уже прошёл. Нужен действующий документ.':
+        "Hujjat muddati o'tgan: amal qilish muddati tugagan. Amaldagi hujjat kerak.",
+    'Номер документа - от 6 до 20 букв и цифр, как в документе. Например: AA1234567.':
+        'Hujjat raqami — hujjatdagidek 6 dan 20 gacha harf va raqam. Masalan: AA1234567.',
     "Год должен быть не раньше 1900.":
         "Yil 1900 dan oldin bo'lmasligi kerak.",
     "Прокат доступен с 16 лет (до 18 - с письменного согласия родителя).":

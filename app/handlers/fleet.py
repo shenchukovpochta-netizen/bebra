@@ -127,6 +127,12 @@ async def cb_status(callback: CallbackQuery, bot: Bot, cfg: Config, crm: Any = N
     if bike.get("rental_id"):
         await callback.answer(texts.FLEET_RENTED_LOCK, show_alert=True)
         return
+    # «На сборке» снимает только ввод в эксплуатацию: иначе кнопка
+    # «Свободен» из чата выпускала бы технику мимо сверки - ровно то,
+    # что сверка и должна ловить. В панели этот запрет уже стоит.
+    if bike.get("status") == "new":
+        await callback.answer(texts.FLEET_NEW_LOCK, show_alert=True)
+        return
     label = crm_logic.BIKE_STATUSES[status]
     if bike["status"] == status:
         await callback.answer(texts.FLEET_SAME_STATUS.format(status=label))

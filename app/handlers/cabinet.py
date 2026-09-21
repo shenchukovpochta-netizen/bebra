@@ -295,7 +295,14 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
     rental = await crm.active_rental_of(client["id"])
     summary = crm_logic.rental_summary(rental, balance, today=date.today())
     hint = crm_logic.topup_hint(summary)
+    # None - заявка уже открыта: второе нажатие пришло параллельно и
+    # упёрлось в уникальный индекс. Для человека это то же самое, что
+    # увидеть «заявка уже есть», а оператору вторая карточка на один
+    # платёж означала бы риск зачислить его дважды.
     claim_id = await crm.create_claim(client["id"], hint or None)
+    if claim_id is None:
+        await callback.answer(i18n.t(lang, "CAB_CLAIM_EXISTS"), show_alert=True)
+        return
     claim = await crm.claim(claim_id) or {"id": claim_id, **client, "amount_hint": hint}
     await callback.answer(i18n.t(lang, "CAB_CLAIM_TOAST"))
     try:
@@ -514,7 +521,12 @@ async def cb_claim(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
             await callback.answer(texts.CAB_CLAIM_NOT_PENDING, show_alert=True)
             return
         await callback.answer(texts.CAB_CLAIM_REJECTED_TOAST)
-        await _mark_card(bot, claim, texts.CAB_CLAIM_REJECTED_MARK.format(who=who))
+        # Баланс в карточку передаётся явно: в самой заявке его нет, и
+        # отказ переписывал карточку нулём - у должника это читалось
+        # как «ничего не должен».
+        balance = await crm.client_balance(claim["client_id"])
+        await _mark_card(bot, {**claim, "balance_before": balance},
+                         texts.CAB_CLAIM_REJECTED_MARK.format(who=who))
         await notify.payment_rejected(bot, db, claim)
         return
     amount = crm_logic.to_money(claim.get("amount_hint") or 0)

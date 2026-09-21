@@ -347,7 +347,12 @@ class Database:
             # Акт приёма подписан, акт возврата нет - велосипед у клиента:
             # договор и сканы нужны до конца аренды, сколько бы она ни шла.
             "  and not (act_in_signed_at is not null and act_out_signed_at is null) "
-            "  and (doc_path is not null or doc2_path is not null "
+            # Анкета в условии наравне с файлами: если загрузка скана
+            # сорвалась (диск, сеть, слишком большой файл), у строки все
+            # пути пустые, и по старому условию она в чистку не попадала
+            # никогда - зашифрованные паспортные данные жили бы вечно.
+            "  and (anketa_enc is not null "
+            "       or doc_path is not null or doc2_path is not null "
             "       or parent_path is not null "
             "       or contract_path is not null or soglasie_path is not null "
             "       or act_in_path is not null or act_out_path is not null "

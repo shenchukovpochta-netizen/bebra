@@ -72,7 +72,7 @@ RENTAL_FIELDS = frozenset({
     "tariff_id", "tariff_name", "period_days", "price", "base_price", "billing",
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
     "intent", "intent_until", "intent_by", "intent_at", "snooze_until",
-    "mileage_start", "mileage_end",
+    "mileage_start", "mileage_end", "review_asked_at",
 })
 
 
@@ -657,6 +657,74 @@ class CrmDB:
                     "updated_at = now() where id = $1", bike_id, mileage_start)
             return rental_id
 
+    async def start_rental_charged(self, *, client_id: int, bike_id: int | None,
+                                   tariff_name: str, period_days: int, price: Decimal,
+                                   billing: str, started_on: date, period_to: date,
+                                   contract_no: str | None, note: str,
+                                   created_by: str | None) -> int:
+        """Аренда и её первое начисление - одной транзакцией.
+
+        Так аренду заводит бот по подписанному акту. Двумя запросами сбой
+        между ними оставлял аренду без начисления навсегда: такие аренды
+        начисляются по событиям, а не по календарю, и догонять их некому -
+        баланс клиента оказывался завышен ровно на один период, а выглядел
+        правдоподобно, потому что «оплачено до» считается от баланса.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select set_config('crm.actor', $1, true)",
+                               created_by or "")
+            rental_id = int(await conn.fetchval(
+                """
+                insert into crm.rentals
+                  (client_id, bike_id, tariff_name, period_days, price, base_price,
+                   billing, started_on, billed_until, contract_no, created_by)
+                values ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
+                returning id
+                """, client_id, bike_id, tariff_name, period_days, price, billing,
+                started_on, period_to, contract_no, created_by))
+            await conn.execute(
+                """
+                insert into crm.ledger
+                  (client_id, rental_id, kind, amount, period_from, period_to,
+                   note, created_by)
+                values ($1, $2, 'charge', $3, $4, $5, $6, $7)
+                """, client_id, rental_id, -price, started_on, period_to, note,
+                created_by)
+            if bike_id is not None:
+                await conn.execute(
+                    "update crm.bikes set status = 'rented', updated_at = now() "
+                    "where id = $1", bike_id)
+            return rental_id
+
+    async def extend_rental_paid(self, rental_id: int, client_id: int, *,
+                                 amount: Decimal, period_from: date, period_to: date,
+                                 pay_note: str, charge_note: str,
+                                 method: str | None, created_by: str) -> None:
+        """Платёж за продление и начисление за новый срок - одной транзакцией.
+
+        Порознь сбой между ними оставлял платёж без начисления, и клиент
+        уходил в плюс на целый период.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            if amount:
+                await conn.execute(
+                    """
+                    insert into crm.ledger (client_id, rental_id, kind, amount,
+                                            method, note, created_by)
+                    values ($1, $2, 'payment', $3, $4, $5, $6)
+                    """, client_id, rental_id, amount, method, pay_note, created_by)
+            await conn.execute(
+                """
+                insert into crm.ledger (client_id, rental_id, kind, amount,
+                                        period_from, period_to, note, created_by)
+                values ($1, $2, 'charge', $3, $4, $5, $6, $7)
+                on conflict do nothing
+                """, client_id, rental_id, -amount, period_from, period_to,
+                charge_note, created_by)
+            await conn.execute(
+                "update crm.rentals set billed_until = greatest(billed_until, $2), "
+                "updated_at = now() where id = $1", rental_id, period_to)
+
     async def update_rental(self, rental_id: int, **fields: Any) -> None:
         sets, values = _set_clause(fields, RENTAL_FIELDS, 2)
         await self.pool.execute(
@@ -867,10 +935,18 @@ class CrmDB:
 
     # ─────────────────────── заявки на оплату ───────────────────────
 
-    async def create_claim(self, client_id: int, amount_hint: Decimal | None) -> int:
-        return int(await self.pool.fetchval(
+    async def create_claim(self, client_id: int,
+                           amount_hint: Decimal | None) -> int | None:
+        """Заявка на зачисление. None - открытая заявка уже есть.
+
+        Гонку решает частичный уникальный индекс, а не проверка перед
+        вставкой: двойное нажатие «Я оплатил(а)» обрабатывается двумя
+        параллельными задачами, и обе успевали увидеть пустоту.
+        """
+        return await self.pool.fetchval(
             "insert into crm.payment_claims (client_id, amount_hint) "
-            "values ($1, $2) returning id", client_id, amount_hint))
+            "values ($1, $2) on conflict do nothing returning id",
+            client_id, amount_hint)
 
     _CLAIM_SELECT = """
         select p.*, c.full_name, c.phone, c.tg_id
@@ -3260,8 +3336,27 @@ class CrmDB:
             "where client_id = $1 and provider = $2 and active", client_id, provider)
 
     async def touch_card(self, card_id: int) -> None:
+        """Списание прошло: отметить время и обнулить счётчик отказов -
+        отказы считаются подряд идущими, а не за всю жизнь карты."""
         await self.pool.execute(
-            "update crm.card_tokens set used_at = now() where id = $1", card_id)
+            "update crm.card_tokens set used_at = now(), fails = 0 where id = $1",
+            card_id)
+
+    async def card_failed(self, card_id: int, *, limit: int) -> int:
+        """Банк отказал: увеличить счётчик и снять карту на пороге.
+
+        Возвращает число отказов подряд. Без этого просроченная карта
+        получала отказ каждые сутки и каждые сутки писала об этом
+        клиенту - бесконечно.
+        """
+        row = await self.pool.fetchrow(
+            "update crm.card_tokens set fails = fails + 1 where id = $1 "
+            "returning fails", card_id)
+        fails = int(row["fails"]) if row else 0
+        if fails >= limit:
+            await self.pool.execute(
+                "update crm.card_tokens set active = false where id = $1", card_id)
+        return fails
 
     async def repairs_since(self, bike_id: int, since: date) -> int:
         """Сколько раз велосипед был в сервисе с даты. Нужен приглашению

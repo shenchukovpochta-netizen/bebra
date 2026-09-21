@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 # Длины строк по ICAO 9303: паспорт-книжка и пластиковая карта.
 TD3_LEN = 44
@@ -137,14 +137,26 @@ def _date(raw: str, *, future_ok: bool, today: date | None = None) -> date | Non
         return None
     year, month, day = int(raw[0:2]), int(raw[2:4]), int(raw[4:6])
     today = today or date.today()
+    options = []
     for century in (2000, 1900):
         try:
-            value = date(century + year, month, day)
+            options.append(date(century + year, month, day))
         except ValueError:
             continue
-        if future_ok or value <= today:
-            return value
-    return None
+    if not options:
+        return None
+    if not future_ok:
+        past = [value for value in options if value <= today]
+        return past[0] if past else None
+    # Срок действия: в будущем он и должен быть, но не на век вперёд.
+    # Раньше век выбирался первым подошедшим, и «97» у документа,
+    # истёкшего в 1997-м, читалось как 2097-й: просроченный документ
+    # выглядел действующим, а проверка срока молчала - ровно то, ради
+    # чего машиночитаемую зону у иностранца и читают.
+    window = [value for value in options
+              if today - timedelta(days=365 * 80) <= value
+              <= today + timedelta(days=365 * 20)]
+    return window[0] if window else options[0]
 
 
 @dataclass(frozen=True)

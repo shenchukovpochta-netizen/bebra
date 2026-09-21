@@ -145,16 +145,16 @@ async def on_rental_started(crm: Any, user: dict, *, today: date) -> None:
         spec = logic.rental_from_issue(user.get("issue_data"), user.get("rent_from"),
                                        user.get("rent_until"), today=today)
         bike_id = await _bike_for(crm, spec)
-        rental_id = await crm.create_rental(
-            client_id=client["id"], bike_id=bike_id, tariff_id=None,
+        period_to = spec["started_on"] + timedelta(days=spec["period_days"])
+        # Аренда и её первое начисление - одной транзакцией: порознь сбой
+        # между ними оставлял аренду без начисления навсегда, а клиента -
+        # с лишним периодом на балансе.
+        await crm.start_rental_charged(
+            client_id=client["id"], bike_id=bike_id,
             tariff_name=spec["tariff_name"], period_days=spec["period_days"],
             price=spec["price"], billing=spec["billing"],
-            started_on=spec["started_on"], contract_no=user.get("contract_no"),
-            created_by="bot")
-        period_to = spec["started_on"] + timedelta(days=spec["period_days"])
-        await crm.charge_period(
-            rental_id, client["id"], period_from=spec["started_on"],
-            period_to=period_to, amount=-spec["price"],
+            started_on=spec["started_on"], period_to=period_to,
+            contract_no=user.get("contract_no"),
             note=f"Аренда по договору № {user.get('contract_no') or '—'}: "
                  f"{logic.period_label(spec['started_on'], period_to)}",
             created_by="bot")
@@ -177,27 +177,34 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
         if client is None:
             return
         amount = _price_of(user)
-        if amount:
+        rental = await crm.active_rental_of(client["id"])
+        manual = rental is not None and rental.get("billing") == "manual"
+        start = rental["billed_until"] if rental else None
+        if manual and start is not None and until > start:
+            if not amount:
+                log.warning("CRM: продление %s до %s - цена «%s» не разобрана, "
+                            "начислено 0; поправьте в панели",
+                            user.get("contract_no"), until,
+                            (user.get("issue_data") or {}).get("rent_price"))
+            # Платёж и начисление - одной транзакцией: порознь сбой между
+            # ними уводил клиента в плюс на целый период.
+            await crm.extend_rental_paid(
+                rental["id"], client["id"], amount=amount or logic.to_money(0),
+                period_from=start, period_to=until, method="sbp", created_by=by,
+                pay_note=f"Продление по договору № "
+                         f"{user.get('contract_no') or '—'} "
+                         f"до {until.strftime('%d.%m.%Y')}",
+                charge_note=f"Продление: {logic.period_label(start, until)}")
+        elif amount:
+            # Аренда начисляется по календарю или продление уже начислено:
+            # остаётся один платёж.
             await crm.add_ledger(client_id=client["id"], kind="payment", amount=amount,
                                  method="sbp", created_by=by,
                                  note=f"Продление по договору № "
                                       f"{user.get('contract_no') or '—'} "
                                       f"до {until.strftime('%d.%m.%Y')}")
+        if amount:
             await service.ref_paid(crm, client, amount, by=by)
-        rental = await crm.active_rental_of(client["id"])
-        if rental is None or rental.get("billing") != "manual":
-            return
-        start = rental["billed_until"]
-        if until <= start:
-            return
-        if not amount:
-            log.warning("CRM: продление %s до %s - цена «%s» не разобрана, начислено 0; "
-                        "поправьте в панели", user.get("contract_no"), until,
-                        (user.get("issue_data") or {}).get("rent_price"))
-        await crm.charge_period(
-            rental["id"], client["id"], period_from=start, period_to=until,
-            amount=-(amount or logic.to_money(0)),
-            note=f"Продление: {logic.period_label(start, until)}", created_by=by)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: продление по договору %s не записано", user.get("contract_no"))
 
