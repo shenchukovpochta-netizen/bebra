@@ -23,6 +23,20 @@ class ServiceError(Exception):
     """Понятное человеку сообщение об отказе: показывается как есть."""
 
 
+async def cash_shift_id(crm: Any, method: str | None, by: str | None) -> int | None:
+    """Смена, в которую лягут эти наличные. Безнал в ящик не попадает.
+
+    Точек две, и смены на них открыты одновременно: по одному окну
+    времени наличный платёж попадал в обе смены сразу, и на второй
+    точке закрытие писало недостачу на ту же сумму как факт. Смену
+    выбираем по тому, кто принял деньги, - и запоминаем в записи.
+    """
+    if method != "cash":
+        return None
+    shift = await crm.cash_shift_for(by)
+    return int(shift["id"]) if shift else None
+
+
 async def credit_claim(crm: Any, claim: dict, amount: Decimal, *, by: str,
                        method: str = "sbp") -> int | None:
     """Зачислить заявку клиента. None - её уже закрыл кто-то другой.
@@ -33,7 +47,8 @@ async def credit_claim(crm: Any, claim: dict, amount: Decimal, *, by: str,
     """
     return await crm.credit_claim(
         claim["id"], client_id=claim["client_id"], amount=abs(amount), method=method,
-        note=f"Пополнение по заявке #{claim['id']}", created_by=by)
+        note=f"Пополнение по заявке #{claim['id']}", created_by=by,
+        shift_id=await cash_shift_id(crm, method, by))
 
 
 async def reject_claim(crm: Any, claim: dict, *, by: str) -> bool:
@@ -50,7 +65,7 @@ async def add_entry(crm: Any, client: dict, *, kind: str, amount: Decimal,
     return await crm.add_ledger(
         client_id=client["id"], rental_id=rental_id, kind=kind,
         amount=logic.signed_amount(kind, amount), method=method, note=note,
-        created_by=by)
+        created_by=by, shift_id=await cash_shift_id(crm, method, by))
 
 
 async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict,
@@ -163,13 +178,23 @@ async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | N
 
 
 async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -> None:
-    """Сменить тариф с ближайшего неначисленного периода."""
+    """Сменить тариф с ближайшего неначисленного периода.
+
+    Цена периода - это велосипед плюс живые позиции (доп. аккумулятор), и
+    смена тарифа обязана пересобрать её так же, как выдача. Раньше сюда
+    писалась голая цена тарифа: доп. аккумулятор переставал начисляться,
+    а снятие позиции возвращало аренду к цене СТАРОГО тарифа, потому что
+    `base_price` оставался прежним.
+    """
     if billing not in logic.BILLING:
         raise ServiceError("Недопустимый режим начисления.")
+    base = logic.to_money(tariff["price"])
+    extras = await crm.rental_extras(rental["id"], live_only=True)
     await crm.update_rental(rental["id"], tariff_id=tariff.get("id"),
                             tariff_name=tariff["name"],
                             period_days=int(tariff["period_days"]),
-                            price=logic.to_money(tariff["price"]), billing=billing)
+                            price=logic.period_price(base, extras),
+                            base_price=base, billing=billing)
 
 
 
@@ -225,22 +250,27 @@ async def close_order(crm: Any, order: dict, *, by: str,
         raise ServiceError("Наряд уже закрыт.")
     items = await crm.order_items(order["id"])
     totals = logic.order_totals(items)
-    log_id = None
-    # Пишем через тот же create_repair, что и ручной ремонт: шапка и позиции
-    # одной транзакцией, отчёт «что ломается» собирается по ним и наряда
-    # не знает вовсе.
+    # Пишем ту же пару bike_log + repair_items, что и ручной ремонт: отчёт
+    # «что ломается» собран по ним и о нарядах не знает вовсе. Шапка нужна
+    # и тогда, когда узел не выбран ни в одной строке: иначе себестоимость
+    # ремонта пропадала из месячного отчёта и из окупаемости по моделям.
     nodes = [{"node": i["node"],
-              "parts_cost": logic.to_money(i.get("parts_cost") or 0) * int(i.get("qty") or 1),
-              "labor_cost": logic.to_money(i.get("labor_cost") or 0) * int(i.get("qty") or 1),
+              "parts_cost": logic.to_money(i.get("parts_cost") or 0) * logic.item_qty(i),
+              "labor_cost": logic.to_money(i.get("labor_cost") or 0) * logic.item_qty(i),
               "note": i.get("title")}
              for i in items if i.get("node")]
-    if order.get("bike_id") and nodes:
-        log_id = await crm.create_repair(
-            order["bike_id"], items=nodes,
-            note="Наряд " + str(order.get("no") or ""), created_by=by)
-    await crm.update_work_order(order["id"], status="done",
-                                total=totals["total"], cost=totals["cost"],
-                                closed_at=datetime.now(UTC), log_id=log_id)
+    repair = None
+    if order.get("bike_id") and (nodes or totals["cost"] > 0):
+        repair = {"bike_id": order["bike_id"], "items": nodes,
+                  "cost": totals["cost"],
+                  "note": "Наряд " + str(order.get("no") or ""), "created_by": by}
+    # Закрытие - заявкой: два нажатия «Закрыть наряд» писали в журнал
+    # велосипеда два ремонта с одинаковыми позициями.
+    done = await crm.close_work_order(
+        order["id"], total=totals["total"], cost=totals["cost"],
+        closed_at=datetime.now(UTC), repair=repair)
+    if done is None:
+        raise ServiceError("Наряд уже закрыт.")
     if order.get("bike_id"):
         bike = await crm.bike(order["bike_id"])
         # Из аренды велосипед наряд не забирает и не возвращает: там его
@@ -607,13 +637,14 @@ async def issue_part_to_order(crm: Any, order: dict, part: dict, qty: int, *,
         raise ServiceError(f"«{part['title']}»: на складе {stock}. "
                            "Закажите запчасть или спишите меньше.")
     cost = logic.to_money(part.get("cost") or 0)
-    await crm.add_part_move(part_id=part["id"], kind="order", qty=-qty, cost=cost,
-                            order_id=order["id"], created_by=by,
-                            note=f"Наряд {order.get('no') or ''}".strip())
+    move_id = await crm.add_part_move(
+        part_id=part["id"], kind="order", qty=-qty, cost=cost,
+        order_id=order["id"], created_by=by,
+        note=f"Наряд {order.get('no') or ''}".strip())
     item_id = await crm.add_order_item(
         order["id"], title=part["title"], node=part.get("node"), work_type_id=None,
         qty=qty, price=logic.to_money(part.get("price") or 0), parts_cost=cost,
-        labor_cost=Decimal(0), note="Со склада")
+        labor_cost=Decimal(0), note="Со склада", move_id=move_id)
     return {"item_id": item_id, "cost": cost, "qty": qty,
             "stock_left": stock - qty}
 
@@ -677,14 +708,24 @@ async def receive_part_order(crm: Any, order: dict, *, by: str) -> int:
     items = await crm.part_order_items(order["id"])
     if not items:
         raise ServiceError("В заказе нет строк.")
-    doc_id = await receive_parts(
-        crm, supplier_id=order.get("supplier_id"),
-        lines=[{"part_id": i["part_id"], "qty": i["qty"], "price": i["price"]}
-               for i in items],
-        note=f"Заказ {order.get('no') or ''}".strip(), by=by)
-    await crm.update_part_order(order["id"], status="received",
-                                closed_at=datetime.now(UTC), doc_id=doc_id,
-                                total=logic.order_total(items))
+    # Сперва занять заказ, потом приходовать: двойной клик по «Принять»
+    # делал два прихода ПРХ и удваивал остаток на полке.
+    if not await crm.claim_part_order(order["id"],
+                                      total=logic.order_total(items),
+                                      closed_at=datetime.now(UTC)):
+        raise ServiceError("Заказ уже принят.")
+    try:
+        doc_id = await receive_parts(
+            crm, supplier_id=order.get("supplier_id"),
+            lines=[{"part_id": i["part_id"], "qty": i["qty"], "price": i["price"]}
+                   for i in items],
+            note=f"Заказ {order.get('no') or ''}".strip(), by=by)
+    except Exception:
+        # Приход не получился - заказ снова в работе, иначе он остался бы
+        # «принят» без единого движения на складе.
+        await crm.release_part_order(order["id"], status=order["status"])
+        raise
+    await crm.update_part_order(order["id"], doc_id=doc_id)
     return doc_id
 
 
@@ -803,12 +844,19 @@ async def buy_bikes(crm: Any, *, supplier_id: int | None, purchased_on: date,
     if taken:
         raise ServiceError("Эти номера уже есть в парке: " + ", ".join(taken[:5])
                            + ("…" if len(taken) > 5 else ""))
+    # Партия заводится по тем же правилам, что и одиночный велосипед из
+    # панели: включена сверка - вся партия встаёт «на сборке». Иначе
+    # двадцать рам с накладной сразу попадали в свободные, то есть в
+    # знаменатель простоя и в убыток, хотя их ещё никто не собирал.
+    status = ("new" if logic.bike_check_settings(await crm.settings())["required"]
+              else "available")
     bikes = [{"code": code, "model": model, "battery_count": int(battery_count),
               "purchase_price": logic.to_money(price),
               "service_months": int(service_months),
               "residual_price": logic.to_money(residual),
               "battery_price": battery_price, "location": location,
-              "battery_service_months": int(battery_months), "note": note}
+              "battery_service_months": int(battery_months), "note": note,
+              "status": status}
              for code in codes]
     try:
         purchase_id = await crm.create_purchase(
@@ -993,12 +1041,13 @@ async def credit_bank_txn(crm: Any, txn: dict, client: dict, *, by: str,
         raise ServiceError("Это списание со счёта, а не поступление.")
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
-    ledger_id = await add_entry(
-        crm, client, kind="payment", amount=logic.to_money(txn["amount"]),
-        method=method, note=f"Выписка банка: {txn.get('purpose') or txn['txn_id']}"[:500],
-        by=by)
-    await crm.mark_bank_txn(txn["id"], status="matched", client_id=client["id"],
-                            ledger_id=ledger_id, by=by)
+    ledger_id = await crm.credit_bank_txn(
+        txn["id"], client_id=client["id"], amount=logic.to_money(txn["amount"]),
+        method=method,
+        note=f"Выписка банка: {txn.get('purpose') or txn['txn_id']}"[:500],
+        created_by=by)
+    if ledger_id is None:
+        raise ServiceError("Эта строка выписки уже разобрана.")
     return ledger_id
 
 
@@ -1273,7 +1322,8 @@ async def credit_pay_order(crm: Any, order: dict, *, by: str,
         raise ServiceError("Счёт уже оплачен")
     if order.get("status") == "cancelled":
         raise ServiceError("Счёт снят, оплачивать нечего")
-    return await crm.mark_pay_paid(order["id"], method=method, by=by)
+    return await crm.mark_pay_paid(order["id"], method=method, by=by,
+                                   shift_id=await cash_shift_id(crm, method, by))
 
 
 async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
@@ -1288,12 +1338,14 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
     today = today or date.today()
     settings = logic.pay_settings(await crm.settings())
     if not settings["autocharge"]:
-        return {"charged": 0, "failed": 0, "skipped": "выключено"}
+        return {"charged": 0, "failed": 0, "pending": 0,
+                "skipped": "выключено"}
     cards = {int(c["client_id"]): c for c in await crm.cards()}
     if not cards:
-        return {"charged": 0, "failed": 0, "skipped": "нет привязанных карт"}
+        return {"charged": 0, "failed": 0, "pending": 0,
+                "skipped": "нет привязанных карт"}
     due = logic.autocharge_due(await crm.active_rentals(), today=today, cards=cards)
-    charged = failed = 0
+    charged = failed = pending = 0
     for item in due[:limit]:
         card = cards[item["client_id"]]
         client = await crm.client(item["client_id"])
@@ -1327,12 +1379,22 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
             await _tell_autocharge(crm, bot, client, card, item["amount"],
                                    ok=True, until=summary.get("covered_until"))
             charged += 1
+        elif state.get("state") == "pending" and state.get("operation_id"):
+            # Банк принял платёж, но ещё не подтвердил. Это не отказ:
+            # счёт остаётся открытым с номером операции, и минутный
+            # опрос спросит банк сам. Раньше такой ответ считался
+            # отказом - клиенту уходило «списание не прошло», карта
+            # получала штрафное очко, а деньги потом списывались.
+            await crm.set_pay_link(order_id, link="",
+                                   operation_id=state["operation_id"])
+            pending += 1
         else:
             reason = f"банк: {state.get('status') or 'списание не прошло'}"
             await crm.mark_pay_failed(order_id, error=reason)
             await _card_failed(crm, bot, client, card, item["amount"], reason)
             failed += 1
-    return {"charged": charged, "failed": failed, "skipped": ""}
+    return {"charged": charged, "failed": failed, "pending": pending,
+            "skipped": ""}
 
 
 async def _card_failed(crm: Any, bot: Any, client: dict, card: dict,
@@ -1442,10 +1504,12 @@ async def answer_estimate(crm: Any, order: dict, *, agree: bool, by: str) -> dic
                 raise ServiceError("В наряде нет строк с ценой клиенту — "
                                    "согласовывать нечего.")
             fields["estimate"] = total
-        await crm.update_work_order(order["id"], **fields)
+        if not await crm.answer_work_order(order["id"], **fields):
+            raise ServiceError("По этой смете уже ответили.")
     else:
-        await crm.update_work_order(order["id"], status="cancelled",
-                                    declined_at=now, closed_at=now)
+        if not await crm.answer_work_order(order["id"], status="cancelled",
+                                           declined_at=now, closed_at=now):
+            raise ServiceError("По этой смете уже ответили.")
         if order.get("bike_id"):
             bike = await crm.bike(order["bike_id"])
             if bike and bike.get("status") in ("repair", "maintenance"):

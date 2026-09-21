@@ -11,7 +11,11 @@
 <script src="{{ map_cfg.js }}"></script>
 <script>
 (function () {
-  var points = {{ points_json|safe }};
+  /* tojson, а не json.dumps|safe: Jinja экранирует < > & и апостроф,
+     поэтому кличка трекера с «</script>» внутри остаётся строкой, а не
+     закрывает скрипт. Кличка приходит и из формы панели, и из имени
+     устройства в кабинете StarLine - оба источника чужие. */
+  var points = {{ points|tojson }};
   var node = document.getElementById('map');
   if (!node) { return; }
   if (!window.L) {
@@ -22,13 +26,22 @@
     return;
   }
   var colors = {alarm: '#d32f2f', rented: '#FF5907', parked: '#2e7d32', offline: '#777'};
+  function popup(p) {
+    var box = document.createElement('div');
+    var name = document.createElement('b');
+    name.textContent = p.code || '';
+    box.appendChild(name);
+    box.appendChild(document.createElement('br'));
+    box.appendChild(document.createTextNode(p.title || ''));
+    return box;
+  }
   var map = L.map(node);
   L.tileLayer({{ map_cfg.tiles|tojson }},
               {maxZoom: 19, attribution: {{ map_cfg.attribution|tojson }}}).addTo(map);
   var bounds = [];
   /* Линия трека: её рисуем только на карточке трекера, на общей карте
      её нет - сто линий поверх друг друга читать нельзя. */
-  var line = {{ (line_json or '[]')|safe }};
+  var line = {{ (line or [])|tojson }};
   if (line.length > 1) {
     L.polyline(line, {color: '#FF5907', weight: 3, opacity: 0.8}).addTo(map);
     line.forEach(function (p) { bounds.push(p); });
@@ -38,7 +51,9 @@
   points.forEach(function (p) {
     L.circleMarker([p.lat, p.lon], {radius: 7, weight: 2, color: colors[p.state] || '#555',
                                     fillColor: colors[p.state] || '#555', fillOpacity: 0.8})
-      .addTo(map).bindPopup('<b>' + p.code + '</b><br>' + p.title);
+      /* Подпись собирается узлами, а не склейкой HTML: в кличке может
+         быть что угодно, и innerHTML сделал бы из неё разметку. */
+      .addTo(map).bindPopup(popup(p));
     bounds.push([p.lat, p.lon]);
   });
   if (bounds.length) { map.fitBounds(bounds, {padding: [30, 30], maxZoom: 15}); }

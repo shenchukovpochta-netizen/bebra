@@ -619,21 +619,15 @@ async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
 
 async def _tell_estimate_answer(bot: Bot, crm: Any, cfg: Config, order: dict,
                                 client: dict, *, agree: bool) -> None:
-    if not await notices.allowed(crm, "order_answer"):
-        return
     mark = "✅ согласовал" if agree else "✖️ отказался"
     text = (f"🔧 Клиент {mark}: наряд {order.get('no')}\n"
             f"{client.get('full_name') or '—'} · "
             f"{crm_logic.money(order.get('estimate'))}")
-    try:
-        await bot.send_message(cfg.contract_chat_id, text)
-    except Exception as err:                             # noqa: BLE001
-        log.warning("ответ на смету не доставлен в чат: %s", err)
-        await notices.record(crm, "order_answer", status="failed",
-                             client_id=client["id"], detail=str(err))
-        return
-    await notices.record(crm, "order_answer", status="sent",
-                         client_id=client["id"])
+    # Получателя этого уведомления владелец назначает в панели - обычно
+    # техника, который и ждёт ответа. Прямой send в служебный чат его
+    # выбор игнорировал.
+    await notices.send_team(crm, bot, "order_answer", text,
+                            cfg.contract_chat_id, client_id=client["id"])
 
 
 @router.callback_query(F.data == "cab:review")

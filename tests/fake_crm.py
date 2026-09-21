@@ -670,13 +670,14 @@ class FakeCrm:
     # ─── журнал ───
     async def add_ledger(self, *, client_id, kind, amount, rental_id=None, method=None,
                          note=None, created_by=None, period_from=None, period_to=None,
-                         created_at=None):
+                         created_at=None, shift_id=None):
         lid = self._id()
         self.ledger_.append({"id": lid, "client_id": client_id, "rental_id": rental_id,
                              "kind": kind, "amount": Decimal(amount), "method": method,
                              "period_from": period_from, "period_to": period_to,
                              "note": note, "created_by": created_by,
-                             "created_at": created_at or self._now()})
+                             "created_at": created_at or self._now(),
+                             "shift_id": shift_id})
         return lid
 
     async def ledger_of(self, client_id, limit=100):
@@ -793,12 +794,14 @@ class FakeCrm:
     async def set_claim_receipt(self, claim_id, file_id, is_photo):
         self.claims_[claim_id].update(receipt_file_id=file_id, receipt_is_photo=is_photo)
 
-    async def credit_claim(self, claim_id, *, client_id, amount, method, note, created_by):
+    async def credit_claim(self, claim_id, *, client_id, amount, method, note,
+                           created_by, shift_id=None):
         p = self.claims_.get(claim_id)
         if p is None or p["status"] != "pending":
             return None
         lid = await self.add_ledger(client_id=client_id, kind="payment", amount=amount,
-                                    method=method, note=note, created_by=created_by)
+                                    method=method, note=note, created_by=created_by,
+                                    shift_id=shift_id)
         p.update(status="confirmed", resolved_by=created_by, ledger_id=lid,
                  resolved_at=self._now())
         return lid
@@ -915,7 +918,7 @@ class FakeCrm:
         return [dict(i) for i in self.order_items_ if i["order_id"] == order_id]
 
     async def add_order_item(self, order_id, *, title, node, work_type_id, qty,
-                             price, parts_cost, labor_cost, note=None):
+                             price, parts_cost, labor_cost, note=None, move_id=None):
         iid = self._id()
         self.order_items_.append({
             "id": iid, "order_id": order_id, "work_type_id": work_type_id,
@@ -923,14 +926,50 @@ class FakeCrm:
             "price": Decimal(str(price or 0)),
             "parts_cost": Decimal(str(parts_cost or 0)),
             "labor_cost": Decimal(str(labor_cost or 0)),
-            "note": note, "created_at": self._now()})
+            "note": note, "move_id": move_id, "created_at": self._now()})
         return iid
 
-    async def delete_order_item(self, order_id, item_id):
-        before = len(self.order_items_)
-        self.order_items_ = [i for i in self.order_items_
-                             if not (i["id"] == item_id and i["order_id"] == order_id)]
-        return len(self.order_items_) < before
+    async def delete_order_item(self, order_id, item_id, *, by=None):
+        gone = next((i for i in self.order_items_
+                     if i["id"] == item_id and i["order_id"] == order_id), None)
+        if gone is None:
+            return False
+        self.order_items_ = [i for i in self.order_items_ if i is not gone]
+        move = next((m for m in self.part_moves_
+                     if m["id"] == gone.get("move_id")), None)
+        if move is not None:
+            await self.add_part_move(
+                part_id=move["part_id"], kind="order", qty=-int(move["qty"]),
+                cost=move["cost"], order_id=order_id, created_by=by,
+                note="Возврат: строка наряда убрана")
+        return True
+
+    async def close_work_order(self, order_id, *, total, cost, closed_at, repair):
+        order = self.orders_.get(order_id)
+        if order is None or order.get("closed_at") is not None:
+            return None
+        order.update(status="done", total=total, cost=cost, closed_at=closed_at)
+        log_id = None
+        if repair is not None:
+            log_id = await self.add_bike_log(
+                repair["bike_id"], "repair", repair.get("note"), repair["cost"],
+                repair.get("created_by"))
+            for i in repair.get("items") or []:
+                self.repair_items_.append({
+                    "id": self._id(), "log_id": log_id,
+                    "bike_id": repair["bike_id"], "node": i["node"],
+                    "parts_cost": Decimal(str(i.get("parts_cost") or 0)),
+                    "labor_cost": Decimal(str(i.get("labor_cost") or 0)),
+                    "note": i.get("note"), "created_at": self._now()})
+            order["log_id"] = log_id
+        return {"log_id": log_id}
+
+    async def answer_work_order(self, order_id, **fields):
+        order = self.orders_.get(order_id)
+        if order is None or order.get("approved_at") or order.get("declined_at"):
+            return False
+        order.update(fields)
+        return True
 
     async def order_stats(self, since, until):
         closed = [o for o in self.orders_.values()
@@ -1290,7 +1329,7 @@ class FakeCrm:
         if ref is None or ref["status"] == "paid":
             return None
         ref.update(status="paid", paid_at=self._now(), bonus=Decimal(str(amount)))
-        ledger_id = await self.add_ledger(client_id=agent_id, kind="adjust",
+        ledger_id = await self.add_ledger(client_id=agent_id, kind="bonus",
                                           amount=Decimal(str(amount)), note=note,
                                           created_by=created_by)
         ref["ledger_id"] = ledger_id
@@ -1468,6 +1507,19 @@ class FakeCrm:
             "ordered_at": None, "closed_at": None, "doc_id": None}
         return order_id
 
+    async def claim_part_order(self, order_id, *, total, closed_at):
+        order = self.part_orders_.get(order_id)
+        if order is None or order["status"] in ("received", "cancelled"):
+            return False
+        order.update(status="received", closed_at=closed_at, total=total)
+        return True
+
+    async def release_part_order(self, order_id, *, status):
+        order = self.part_orders_.get(order_id)
+        if (order is not None and order["status"] == "received"
+                and order.get("doc_id") is None):
+            order.update(status=status, closed_at=None, total=None)
+
     async def update_part_order(self, order_id, **fields):
         if order_id in self.part_orders_:
             self.part_orders_[order_id].update(fields)
@@ -1635,6 +1687,8 @@ class FakeCrm:
                 battery_service_months=bike["battery_service_months"],
                 note=bike.get("note"))
             self.bikes_[bike_id]["purchase_id"] = purchase_id
+            if bike.get("status"):
+                self.bikes_[bike_id]["status"] = bike["status"]
         return purchase_id
 
     async def purchase_bikes(self, purchase_id):
@@ -2176,6 +2230,14 @@ class FakeCrm:
         rows = [dict(x) for x in self.shifts_.values() if x["status"] == "open"]
         return sorted(rows, key=lambda s: s["opened_at"])[0] if rows else None
 
+    async def cash_shift_for(self, by):
+        if by:
+            mine = [dict(x) for x in self.shifts_.values()
+                    if x["status"] == "open" and x.get("opened_by") == by]
+            if mine:
+                return sorted(mine, key=lambda s: s["opened_at"])[0]
+        return await self.open_shift()
+
     async def open_shift_at(self, location):
         return next((dict(x) for x in self.shifts_.values()
                      if x["status"] == "open"
@@ -2225,6 +2287,14 @@ class FakeCrm:
             if ((entry.get("method") or "") == "cash") != cash:
                 continue
             if not shift["opened_at"] <= entry["created_at"] < until:
+                continue
+            if entry.get("shift_id") is not None:
+                if entry["shift_id"] != shift_id:
+                    continue
+            elif any(other["id"] != shift_id
+                     and other["opened_at"] <= entry["created_at"]
+                     < (other.get("closed_at") or self._now())
+                     for other in self.shifts_.values()):
                 continue
             client = self.clients_.get(entry["client_id"]) or {}
             rows.append({**entry, "full_name": client.get("full_name")})
@@ -2276,6 +2346,18 @@ class FakeCrm:
         if txn is not None:
             txn.update(status=status, client_id=client_id, ledger_id=ledger_id,
                        handled_at=self._now(), handled_by=by)
+
+    async def credit_bank_txn(self, txn_id, *, client_id, amount, method, note,
+                              created_by):
+        txn = self.bank_.get(txn_id)
+        if txn is None or txn["status"] != "new":
+            return None
+        ledger_id = await self.add_ledger(
+            client_id=client_id, kind="payment", amount=amount, method=method,
+            note=note, created_by=created_by)
+        txn.update(status="matched", client_id=client_id, ledger_id=ledger_id,
+                   handled_at=self._now(), handled_by=created_by)
+        return ledger_id
 
     async def last_bank_txn_at(self):
         moments = [t["booked_at"] for t in self.bank_.values()]
@@ -2519,7 +2601,7 @@ class FakeCrm:
         order.update(link=link, operation_id=operation_id, status="sent",
                      sent_at=self._now(), error=None)
 
-    async def mark_pay_paid(self, order_id, *, method="card", by=None):
+    async def mark_pay_paid(self, order_id, *, method="card", by=None, shift_id=None):
         order = self.pay_orders_.get(order_id)
         if order is None or order["status"] == "paid":
             return None
@@ -2534,7 +2616,8 @@ class FakeCrm:
         ledger_id = await self.add_ledger(
             client_id=order["client_id"], rental_id=order["rental_id"],
             kind="payment", amount=order["amount"], method=method,
-            note=f"Счёт {order['no']}", created_by=by or "эквайринг")
+            note=f"Счёт {order['no']}", created_by=by or "эквайринг",
+            shift_id=shift_id)
         order.update(status="paid", paid_at=self._now(), checked_at=self._now(),
                      ledger_id=ledger_id, error=None)
         return ledger_id

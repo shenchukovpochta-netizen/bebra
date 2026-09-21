@@ -694,8 +694,23 @@ create index if not exists work_orders_bike_idx on crm.work_orders (bike_id, ope
 create index if not exists work_orders_tech_idx on crm.work_orders (tech_id, status);
 -- Один открытый наряд на велосипед: два параллельных - это два техника,
 -- которые не знают друг о друге, и двойная смета клиенту.
+--
+-- `approve` в предикате обязателен: это открытый статус - техника
+-- разобрана и держит место. Без него на велосипеде, ждущем ответа по
+-- смете, открывался второй наряд, и индекс этого не замечал. Старый
+-- индекс сносим по имени: предикат у частичного индекса не меняется
+-- на месте, а `if not exists` увидел бы имя и ничего не сделал.
+do $$
+begin
+  if exists (select 1 from pg_indexes
+              where schemaname = 'crm' and indexname = 'work_orders_one_open'
+                and indexdef not like '%approve%') then
+    execute 'drop index crm.work_orders_one_open';
+  end if;
+end $$;
 create unique index if not exists work_orders_one_open on crm.work_orders (bike_id)
-  where bike_id is not null and status in ('new', 'in_work', 'waiting');
+  where bike_id is not null
+    and status in ('new', 'in_work', 'approve', 'waiting');
 
 create table if not exists crm.work_order_items (
   id           bigserial primary key,
@@ -904,6 +919,11 @@ create table if not exists crm.part_moves (
 );
 create index if not exists part_moves_part_idx on crm.part_moves (part_id, created_at desc);
 create index if not exists part_moves_order_idx on crm.part_moves (order_id);
+
+-- Строка, пришедшая со склада, помнит своё движение: убрать строку -
+-- значит вернуть запчасть на полку, а не оставить там минус.
+alter table crm.work_order_items
+  add column if not exists move_id bigint references crm.part_moves (id);
 
 -- Заказ запчастей поставщику: ЗАП-000001. Приёмка превращается в приход.
 create table if not exists crm.part_orders (
@@ -1234,6 +1254,20 @@ create table if not exists crm.cash_shifts (
 create unique index if not exists cash_shifts_one_open
   on crm.cash_shifts (coalesce(location, '')) where status = 'open';
 
+-- В чью смену легли наличные. Точек две, и смены на них открыты
+-- одновременно: по одному только окну времени наличный платёж попадал
+-- в ОБЕ смены сразу, и на второй точке закрытие писало недостачу на ту
+-- же сумму как факт. Колонка ставится в момент платежа - по смене того,
+-- кто его принял.
+--
+-- Старые строки остаются с null: они считаются по окну времени, но лишь
+-- когда другая смена в ту же секунду не была открыта. История от этого
+-- не поедет, а двойного счёта больше нет.
+alter table crm.ledger
+  add column if not exists shift_id bigint references crm.cash_shifts (id);
+create index if not exists ledger_shift_idx on crm.ledger (shift_id)
+  where shift_id is not null;
+
 create table if not exists crm.cash_moves (
   id         bigserial primary key,
   shift_id   bigint      not null references crm.cash_shifts (id) on delete cascade,
@@ -1467,20 +1501,9 @@ values
    '125х43х110', 'Работаем 7/0, бесплатное обслуживание')
 on conflict (title) do nothing;
 
-insert into crm.tariffs (name, model, period_days, price, sort) values
-  ('Неделя',   'Monster Truck + (Два АКБ)',                 7,  3000, 10),
-  ('Две недели','Monster Truck + (Два АКБ)',               14,  5400, 20),
-  ('Месяц',    'Monster Truck + (Два АКБ)',                30, 11000, 30),
-  ('Неделя',   'Monster Truck + с задними амортизаторами',  7,  3300, 11),
-  ('Две недели','Monster Truck + с задними амортизаторами',14,  5900, 21),
-  ('Месяц',    'Monster Truck + с задними амортизаторами', 30, 12000, 31),
-  ('Неделя',   'Kugoo V3 Pro (Два АКБ)',                    7,  3500, 12),
-  ('Две недели','Kugoo V3 Pro (Два АКБ)',                  14,  6000, 22),
-  ('Месяц',    'Kugoo V3 Pro (Два АКБ)',                   30, 12500, 32),
-  ('Неделя',   'Kugoo V3 Pro + (Два АКБ)',                  7,  3500, 13),
-  ('Две недели','Kugoo V3 Pro + (Два АКБ)',                14,  6000, 23),
-  ('Месяц',    'Kugoo V3 Pro + (Два АКБ)',                 30, 12500, 33)
-on conflict do nothing;
+-- Цены владельца приезжают ниже, вместе с видом тарифа и его
+-- индексом: до них у таблицы нет ни колонки kind, ни уникального
+-- индекса, по которому «уже есть» вообще можно определить.
 
 -- ────────────────────── приём оплаты ──────────────────────
 --
@@ -1720,6 +1743,34 @@ alter table crm.tariffs add column if not exists kind text not null default 'bik
 drop index if exists crm.tariffs_model_period_idx;
 create unique index if not exists tariffs_kind_model_period_idx
   on crm.tariffs (kind, coalesce(model, ''), period_days) where active;
+
+-- Цены владельца: один раз на пустое место и больше никогда.
+--
+-- `on conflict do nothing` здесь не годится: уникальный индекс частичный
+-- (`where active`), и выключенный владельцем тариф из него выпадает - при
+-- следующем старте контейнера сид вставлял его заново, уже активным, и
+-- выключенная цена снова предлагалась на выдаче. Поэтому «уже есть»
+-- считаем по строке любой активности.
+insert into crm.tariffs (name, model, period_days, price, sort, kind)
+select v.name, v.model, v.period_days, v.price, v.sort, 'bike'
+  from (values
+    ('Неделя', 'Monster Truck + (Два АКБ)', 7, 3000, 10),
+    ('Две недели', 'Monster Truck + (Два АКБ)', 14, 5400, 20),
+    ('Месяц', 'Monster Truck + (Два АКБ)', 30, 11000, 30),
+    ('Неделя', 'Monster Truck + с задними амортизаторами', 7, 3300, 11),
+    ('Две недели', 'Monster Truck + с задними амортизаторами', 14, 5900, 21),
+    ('Месяц', 'Monster Truck + с задними амортизаторами', 30, 12000, 31),
+    ('Неделя', 'Kugoo V3 Pro (Два АКБ)', 7, 3500, 12),
+    ('Две недели', 'Kugoo V3 Pro (Два АКБ)', 14, 6000, 22),
+    ('Месяц', 'Kugoo V3 Pro (Два АКБ)', 30, 12500, 32),
+    ('Неделя', 'Kugoo V3 Pro + (Два АКБ)', 7, 3500, 13),
+    ('Две недели', 'Kugoo V3 Pro + (Два АКБ)', 14, 6000, 23),
+    ('Месяц', 'Kugoo V3 Pro + (Два АКБ)', 30, 12500, 33)
+       ) as v(name, model, period_days, price, sort)
+ where not exists (select 1 from crm.tariffs t
+                    where t.kind = 'bike'
+                      and coalesce(t.model, '') = v.model
+                      and t.period_days = v.period_days);
 
 -- Цена велосипеда на момент выдачи. `rentals.price` - цена периода
 -- целиком, вместе с позициями; вычитать их обратно каждый раз, когда

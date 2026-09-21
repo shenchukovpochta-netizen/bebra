@@ -81,24 +81,28 @@ async def send_client(crm: Any, code: str, client_id: int | None,
 
 
 async def send_team(crm: Any, bot: Any, code: str, text: str, default_chat: Any,
-                    *, reply_markup: Any = None) -> bool:
+                    *, reply_markup: Any = None,
+                    client_id: int | None = None) -> bool:
     """Командное уведомление: адресат - переопределение владельца
     (конкретный сотрудник) или служебный чат. True - доставлено."""
     state = await settings(crm)
     if not state.get(code, {}).get("enabled", True):
-        await record(crm, code, status="skipped", detail="выключено в настройках")
+        await record(crm, code, status="skipped", detail="выключено в настройках",
+                     client_id=client_id)
         return False
     chat = chat_for(state, code, default_chat)
     if bot is None or not chat:
-        await record(crm, code, status="skipped", detail="служебный чат не задан")
+        await record(crm, code, status="skipped", detail="служебный чат не задан",
+                     client_id=client_id)
         return False
     try:
         await bot.send_message(chat, text, reply_markup=reply_markup)
     except Exception as err:                             # noqa: BLE001
         log.warning("уведомление %s команде не ушло", code, exc_info=True)
-        await record(crm, code, status="failed", detail=str(err))
+        await record(crm, code, status="failed", detail=str(err),
+                     client_id=client_id)
         return False
-    await record(crm, code, status="sent")
+    await record(crm, code, status="sent", client_id=client_id)
     return True
 
 

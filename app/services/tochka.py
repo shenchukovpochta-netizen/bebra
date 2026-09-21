@@ -147,8 +147,15 @@ class TochkaClient:
             raise TochkaError("выписка заказана, но банк не вернул её номер")
         return str(number)
 
-    async def read_statement(self, session, statement_id: str) -> list[dict]:
-        """Прочитать готовую выписку. Пусто - ещё собирается."""
+    async def read_statement(self, session,
+                             statement_id: str) -> tuple[list[dict], bool]:
+        """Прочитать выписку: строки и готовность.
+
+        Готовность берётся из статуса банка, а не из числа строк: за
+        выходные по счёту может не быть ни одной операции, и собранная
+        пустая выписка читалась как «ещё собирается» - круг заказывал её
+        заново и не читал никогда.
+        """
         data = await self._json(
             session, "GET",
             f"{BANKING}/statements/{self.account_id}/{statement_id}")
@@ -156,13 +163,13 @@ class TochkaClient:
         if isinstance(statement, list):
             statement = statement[0] if statement else {}
         if str(statement.get("status") or "") not in READY:
-            return []
+            return [], False
         rows = []
         for raw in statement.get("Transaction") or []:
             parsed = parse_transaction(raw, account=self.account_id)
             if parsed is not None:
                 rows.append(parsed)
-        return rows
+        return rows, True
 
     async def statement(self, *, since: date, until: date,
                         statement_id: str | None = None) -> dict:
@@ -170,7 +177,8 @@ class TochkaClient:
 
         Банк собирает выписку не мгновенно. Если она не готова, номер
         возвращается наружу: следующий заход прочитает её по номеру, не
-        заказывая заново.
+        заказывая заново. Заказывать каждый круг новую и читать её тут же
+        значит не прочитать выписку никогда.
         """
         if not self.ready:
             return {"rows": [], "statement_id": None, "ready": False}
@@ -178,8 +186,8 @@ class TochkaClient:
         try:
             number = statement_id or await self.request_statement(
                 session, since=since, until=until)
-            rows = await self.read_statement(session, number)
-            return {"rows": rows, "statement_id": number, "ready": bool(rows)}
+            rows, ready = await self.read_statement(session, number)
+            return {"rows": rows, "statement_id": number, "ready": ready}
         finally:
             close = getattr(session, "close", None)
             if close is not None:

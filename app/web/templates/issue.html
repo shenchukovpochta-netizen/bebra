@@ -259,7 +259,7 @@
   <ol class="docs">
     {% for d in req.docs %}
     <li>{{ d.title }}
-      {% if d.path %}<a href="/signings/{{ req.id }}/doc/{{ loop.index0 }}">открыть</a>
+      {% if d.path and can_act(staff, 'client_docs') %}<a href="/signings/{{ req.id }}/doc/{{ loop.index0 }}">открыть</a>
       {% else %}<span class="muted">текстом в заявке</span>{% endif %}</li>
     {% endfor %}
   </ol>

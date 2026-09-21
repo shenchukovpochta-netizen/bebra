@@ -21,8 +21,6 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-from aiogram.exceptions import TelegramAPIError
-
 from . import logic, notices, service
 
 log = logging.getLogger(__name__)
@@ -61,20 +59,14 @@ async def report_paid(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
     обновлять список счетов в панели, пока клиент держит телефон, ему
     некогда.
     """
-    if not await notices.allowed(crm, "pay_paid"):
-        return False
     text = (f"💳 Оплачен счёт {order.get('no')} — "
             f"{logic.money(order.get('amount'))}\n"
             f"{order.get('full_name') or 'клиент'} · {order.get('purpose') or ''}")
-    try:
-        await bot.send_message(cfg.contract_chat_id, text.strip())
-    except TelegramAPIError as exc:
-        log.exception("сообщение об оплате счёта не доставлено")
-        await notices.record(crm, "pay_paid", status="failed", detail=str(exc))
-        return False
-    await notices.record(crm, "pay_paid", status="sent",
-                         client_id=order.get("client_id"))
-    return True
+    # send_team, а не прямой send: получателя этого уведомления владелец
+    # задаёт в панели, и отправка мимо него сделала бы настройку пустой.
+    return await notices.send_team(crm, bot, "pay_paid", text.strip(),
+                                   cfg.contract_chat_id,
+                                   client_id=order.get("client_id"))
 
 
 async def autocharge_daily(crm: Any, acquiring: Any, *, bot: Any = None,
@@ -106,9 +98,11 @@ async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
                 try:
                     charge = await autocharge_daily(crm, acquiring, bot=bot,
                                                     today=today)
-                    if charge.get("charged") or charge.get("failed"):
-                        log.info("автосписание: списано %s, отказов %s",
-                                 charge["charged"], charge["failed"])
+                    if (charge.get("charged") or charge.get("failed")
+                            or charge.get("pending")):
+                        log.info("автосписание: списано %s, отказов %s, "
+                                 "ждут банк %s", charge["charged"],
+                                 charge["failed"], charge.get("pending", 0))
                 finally:
                     charged_on = today
         except asyncio.CancelledError:

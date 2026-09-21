@@ -16,11 +16,21 @@ from . import i18n, logic
 
 
 def subscribe(channel_url: str, lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=i18n.t(lang, "BTN_SUBSCRIBE"), url=channel_url)],
-        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CHECK_SUB"),
-                              callback_data="check_sub")],
-    ])
+    """Гейт подписки: ссылка на канал и «я подписался».
+
+    Кнопка со ссылкой - только если это похожа на ссылку. Telegram
+    отвергает СООБЩЕНИЕ ЦЕЛИКОМ из-за кнопки с битым url, и
+    `CHANNEL_URL=t.me/...` без схемы оставлял всех неподписанных вообще
+    без ответа - ни текста, ни ссылки. Сама ссылка остаётся в тексте,
+    там она безобидна. Так же устроена `paid()`.
+    """
+    rows = []
+    if channel_url.startswith(("http://", "https://")):
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_SUBSCRIBE"),
+                                          url=channel_url)])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CHECK_SUB"),
+                                      callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def lang_pick() -> InlineKeyboardMarkup:

@@ -523,7 +523,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
 
         rows = await self.crm.ledger_of(agent["id"], limit=10)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["kind"], "adjust")
+        self.assertEqual(rows[0]["kind"], "bonus")
         now = datetime.now(UTC)
         self.assertEqual(await self.crm.rental_revenue(now - timedelta(days=1), now),
                          D(0), "бонус не арендная выручка и средний чек не поднимает")
@@ -1927,6 +1927,155 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                    bike_id=self.bike_id, lat=None, lon=None,
                                    level="urgent")
         self.assertTrue((await self.crm.tracker_alerts())[0]["tracker_blocked"])
+
+    # ───────────── сверка кода: то, что нашли агенты ─────────────
+
+    async def test_one_open_order_index_knows_approve(self):
+        """«На согласовании» - открытый статус, и индекс обязан его знать:
+        без этого на велосипеде, ждущем ответа по смете, открывался второй
+        наряд, и два техника не знали друг о друге."""
+        await self.seed()
+        first = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="client", client_id=self.client_id,
+            complaint="тормоза", object_note=None, tech_id=None,
+            estimate=D("0"), created_by="t")
+        await self.crm.update_work_order(first, status="approve")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_work_order(
+                bike_id=self.bike_id, payer="own", client_id=None,
+                complaint="ещё и руль", object_note=None, tech_id=None,
+                estimate=D("0"), created_by="t")
+
+    async def test_disabled_tariff_is_not_resurrected_by_the_seed(self):
+        """Сид цен опирался на частичный индекс `where active`, из которого
+        выключенный тариф выпадает: следующий старт контейнера вставлял его
+        заново, уже активным."""
+        rows = await self.pool.fetch(
+            "select id from crm.tariffs where kind = 'bike' and model = "
+            "'Monster Truck + (Два АКБ)' and period_days = 7")
+        self.assertEqual(len(rows), 1, "сид кладёт ровно одну строку")
+        await self.pool.execute("update crm.tariffs set active = false where id = $1",
+                                rows[0]["id"])
+        await Database(self.pool).apply_schema(SCHEMA)
+        again = await self.pool.fetch(
+            "select id, active from crm.tariffs where kind = 'bike' and model = "
+            "'Monster Truck + (Два АКБ)' and period_days = 7")
+        self.assertEqual(len(again), 1, "перезапуск не вставил вторую строку")
+        self.assertFalse(again[0]["active"], "выключил владелец - выключенным и остаётся")
+
+    async def test_document_numbers_come_from_the_last_number(self):
+        """Номер считался как count(*) + 1: удалённая смена сдвигала
+        нумерацию, а две открытые в одну секунду получали один номер и
+        падали на уникальном `no`."""
+        first = await self.crm.create_shift(location="Павлюхина", opening=D(0),
+                                            note=None, by="staff:admin")
+        await self.crm.close_shift(first, counted=D(0), expected=D(0), note=None,
+                                   by="staff:admin")
+        second = await self.crm.create_shift(location="Павлюхина", opening=D(0),
+                                             note=None, by="staff:admin")
+        await self.pool.execute("delete from crm.cash_shifts where id = $1", first)
+        third = await self.crm.create_shift(location="Адоратского", opening=D(0),
+                                            note=None, by="staff:other")
+        self.assertEqual((await self.crm.cash_shift(second))["no"], "КСМ-000002")
+        self.assertEqual((await self.crm.cash_shift(third))["no"], "КСМ-000003",
+                         "номер идёт от последнего, а не от количества строк")
+
+    async def test_cash_belongs_to_one_shift_of_two(self):
+        """Точек две, смены открыты одновременно: наличный платёж попадал
+        в обе, и на второй точке закрытие писало недостачу как факт."""
+        await self.seed()
+        mine = await self.crm.create_shift(location="Павлюхина", opening=D(0),
+                                           note=None, by="staff:admin")
+        other = await self.crm.create_shift(location="Адоратского", opening=D(0),
+                                            note=None, by="staff:other")
+        shift = await self.crm.cash_shift_for("staff:admin")
+        self.assertEqual(shift["id"], mine)
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                  amount=D("3000"), method="cash",
+                                  created_by="staff:admin", shift_id=shift["id"])
+        self.assertEqual([p["amount"] for p in await self.crm.shift_payments(mine)],
+                         [D("3000.00")])
+        self.assertEqual(await self.crm.shift_payments(other), [])
+
+    async def test_bank_row_is_credited_once(self):
+        """Автозачисление и оператор видели статус строки по словарю,
+        прочитанному раньше, - в журнале оказывались две записи `payment`
+        на одно поступление."""
+        await self.seed()
+        txn_id = await self.crm.save_bank_txn({
+            "txn_id": "T-1", "booked_at": datetime.now(UTC), "amount": D("3000"),
+            "direction": "credit", "purpose": "оплата АВ-1",
+            "payer_name": "Иванов", "payer_inn": None, "payer_account": None})
+        first = await self.crm.credit_bank_txn(
+            txn_id, client_id=self.client_id, amount=D("3000"), method="transfer",
+            note="Выписка банка: оплата", created_by="staff:admin")
+        self.assertIsNotNone(first)
+        second = await self.crm.credit_bank_txn(
+            txn_id, client_id=self.client_id, amount=D("3000"), method="transfer",
+            note="Выписка банка: оплата", created_by="staff:other")
+        self.assertIsNone(second, "строку уже разобрали")
+        rows = await self.crm.ledger_of(self.client_id, limit=10)
+        self.assertEqual([r["kind"] for r in rows], ["payment"])
+        self.assertEqual((await self.crm.bank_txn(txn_id))["ledger_id"], first)
+
+    async def test_removing_a_line_returns_the_part_to_the_shelf(self):
+        """Строка наряда помнит своё движение склада: убрали строку -
+        запчасть вернулась, иначе на полке остаётся минус."""
+        await self.seed()
+        part_id = await self.crm.create_part(
+            title="Камера", node="tube_tire", unit="шт", cost=D("300"),
+            price=D("500"), min_stock=0, model=None, note=None)
+        await self.crm.add_part_move(part_id=part_id, kind="receipt", qty=10,
+                                     cost=D("300"), created_by="t")
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None, complaint="прокол",
+            object_note=None, tech_id=None, estimate=D("0"), created_by="t")
+        order = await self.crm.work_order(order_id)
+        part = await self.crm.part(part_id)
+        result = await service.issue_part_to_order(self.crm, order, part, 5, by="t")
+        self.assertEqual(await self.crm.part_stock(part_id), 5)
+        self.assertTrue(await self.crm.delete_order_item(order_id, result["item_id"],
+                                                         by="t"))
+        self.assertEqual(await self.crm.part_stock(part_id), 10)
+        self.assertEqual(await self.crm.order_items(order_id), [])
+
+    async def test_order_closes_once_and_writes_one_repair(self):
+        await self.seed()
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None, complaint="стук",
+            object_note=None, tech_id=None, estimate=D("0"), created_by="t")
+        await self.crm.add_order_item(
+            order_id, title="Перебрать каретку", node=None, work_type_id=None,
+            qty=1, price=D("0"), parts_cost=D("1500"), labor_cost=D("2500"))
+        order = await self.crm.work_order(order_id)
+        await service.close_order(self.crm, order, by="t")
+        with self.assertRaises(service.ServiceError):
+            await service.close_order(self.crm, order, by="t")
+        logs = [r for r in await self.crm.bike_log(self.bike_id)
+                if r["kind"] == "repair"]
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["cost"], D("4000.00"),
+                         "узел не выбран, но себестоимость ремонта в журнале есть")
+
+    async def test_purchase_puts_the_batch_on_the_bench(self):
+        """Партия по накладной заводится «на сборке», как и одиночный
+        велосипед: недособранный в операционный парк не входит."""
+        await service.buy_bikes(
+            self.crm, supplier_id=None, purchased_on=date(2026, 9, 1),
+            codes=["P-1", "P-2"], model="Kugoo V3", price=D("50000"),
+            battery_count=2, service_months=36, residual=D("5000"),
+            battery_price=D("9000"), battery_months=24, location=None,
+            note=None, by="t")
+        for code in ("P-1", "P-2"):
+            self.assertEqual((await self.crm.bike_by_code(code))["status"], "new")
+        await self.crm.set_setting("bike_check_required", "0", by="t")
+        await service.buy_bikes(
+            self.crm, supplier_id=None, purchased_on=date(2026, 9, 1),
+            codes=["P-3"], model="Kugoo V3", price=D("50000"),
+            battery_count=2, service_months=36, residual=D("5000"),
+            battery_price=D("9000"), battery_months=24, location=None,
+            note=None, by="t")
+        self.assertEqual((await self.crm.bike_by_code("P-3"))["status"], "available")
 
 
 if __name__ == "__main__":

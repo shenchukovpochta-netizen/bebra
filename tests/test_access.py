@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -304,6 +305,27 @@ class TestAccessInPanel(tw.WebCase):
         page = self.get_ok(f"/clients/{self.client_id}")
         self.assertNotIn("скачать подписанный", page)
         r = self.client.get(f"/clients/{self.client_id}/contract")
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("Паспортные документы", r.text)
+
+    def test_client_docs_guards_the_same_file_in_the_signing_packet(self):
+        """Тот же договор с паспортными данными открывался со страницы
+        заявки на подпись по одному лишь праву на раздел «Клиенты» -
+        и отдельное право `client_docs` не защищало ничего."""
+        self.db.users[5001] = {"tg_id": 5001, "contract_status": "signed",
+                               "contract_path": "/tmp/kyc/нет.pdf",
+                               "phone": "+79990000000"}
+        req = tw.run(self.crm.create_sign_request(
+            client_id=self.client_id, rental_id=None, token="tok-1",
+            docs=[{"title": "Договор", "path": "/tmp/kyc/нет.pdf",
+                   "sha256": "x"}],
+            agreement="соглашение",
+            expires_at=datetime.now(UTC) + timedelta(days=1), by="admin"))
+        self.add("ivan", "manager")
+        self.as_("ivan")
+        page = self.get_ok(f"/signings/{req['id']}")
+        self.assertNotIn(f"/signings/{req['id']}/doc/0", page)
+        r = self.client.get(f"/signings/{req['id']}/doc/0")
         self.assertEqual(r.status_code, 403)
         self.assertIn("Паспортные документы", r.text)
 

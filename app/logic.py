@@ -115,6 +115,27 @@ def is_known_state(state: str | None) -> bool:
     return state in KNOWN_STATES
 
 
+# ─────────────────────────── местное время ───────────────────────────
+
+def local_date(value: Any) -> date | None:
+    """Дата события по местному времени, а не по UTC.
+
+    `utcnow()` и asyncpg отдают осведомлённое время в UTC, и обычное
+    `.date()` у события, случившегося ночью по Москве, возвращало
+    вчерашний день: договор, подписанный в час ночи, печатался вчерашним
+    числом, а аренда закрывалась днём раньше, чем открылась. Контейнеры
+    живут в Europe/Moscow, поэтому местный пояс и берём.
+    """
+    if isinstance(value, datetime):
+        return (value.astimezone() if value.tzinfo is not None else value).date()
+    return value if isinstance(value, date) else None
+
+
+def local_today() -> date:
+    """Сегодня по местному времени."""
+    return datetime.now().astimezone().date()
+
+
 # ─────────────────────────── экранирование ───────────────────────────
 
 def esc(value: Any) -> str:

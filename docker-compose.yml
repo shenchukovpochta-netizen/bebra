@@ -218,6 +218,10 @@ services:
       CRM_TITLE: ${CRM_TITLE:-МАЙБАЙК}
       # Непустой домен = панель за Caddy: адрес клиента из X-Forwarded-For.
       CRM_DOMAIN: ${CRM_DOMAIN:-}
+      # Кому верить по X-Forwarded-For. Пусто - частные сети, в которых
+      # и живёт compose. «Верить всем» нельзя: uvicorn берёт первый адрес
+      # из заголовка, и клиент подставил бы в протокол подписи выдуманный.
+      CRM_TRUSTED_PROXIES: ${CRM_TRUSTED_PROXIES:-}
       # Порт внутри контейнера фиксирован; наружу пробрасывается CRM_PORT.
       CRM_PORT: "8080"
       REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}

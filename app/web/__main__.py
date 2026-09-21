@@ -55,8 +55,12 @@ async def run() -> None:
     server = uvicorn.Server(uvicorn.Config(
         app, host="0.0.0.0", port=cfg.port, log_level="info", proxy_headers=True,
         # Без этого uvicorn верит заголовкам только от 127.0.0.1, а Caddy
-        # приходит из сети compose - адрес клиента терялся бы.
-        forwarded_allow_ips="*" if cfg.trust_proxy else None))
+        # приходит из сети compose - адрес клиента терялся бы. Но и «верить
+        # всем» нельзя: uvicorn берёт ПЕРВЫЙ адрес из X-Forwarded-For, а
+        # Caddy дописывает настоящий в конец - клиент, приславший свой
+        # заголовок, подставил бы в протокол подписи выдуманный адрес.
+        # Поэтому доверяем сетям, из которых приходит прокси, а не всем.
+        forwarded_allow_ips=cfg.trusted_proxies if cfg.trust_proxy else None))
     try:
         await server.serve()
     finally:

@@ -179,8 +179,13 @@ class PipelineMiddleware(BaseMiddleware):
         if verdict == "drop":
             return None      # молча: ответ на флуд сам становится флудом
         if verdict == "warn":
-            await self._reply(data["bot"], user_id,
-                              i18n.t(user.get("lang"), "RATE_LIMITED"))
+            lang = i18n.user_lang(user)
+            await self._reply(data["bot"], user_id, i18n.t(lang, "RATE_LIMITED"))
+            # Нажатие кнопки надо закрыть явно, иначе Telegram крутит
+            # индикатор до своего таймаута, и человек жмёт ещё раз -
+            # прямо в ту же отсечку. Так же сделано в гейте подписки.
+            if isinstance(inner, CallbackQuery):
+                await inner.answer(i18n.t(lang, "RATE_LIMITED"), show_alert=True)
             return None
 
         # Гейт подписки: без кэша, всегда живой запрос. Ветка частых

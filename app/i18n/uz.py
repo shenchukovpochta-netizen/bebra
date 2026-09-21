@@ -131,6 +131,9 @@ T: dict[str, str] = {
         "— orqa tomoni).\n\nAgar barcha ma'lumot birinchi suratda "
         "ko'rinsa, quyidagi tugmani bosing."
     ),
+    "DOC_NOT_TAKEN": (
+        "Bu rasm qabul qilinmadi: hujjat bosqichi allaqachon o'tilgan. Qayta suratga olish kerak bo'lsa, «Qayta to'ldirish»ni bosing."
+    ),
     "DOC2_NEED_PHOTO": (
         "Hujjatning ikkinchi sahifasi surati kerak. Rasm biriktiring "
         "yoki «Bitta surat yetarli» tugmasini bosing."

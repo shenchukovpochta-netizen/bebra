@@ -12,6 +12,7 @@ import asyncio
 import logging
 
 from .. import logic, texts
+from ..crm import company
 from . import handlers, parse
 from . import keyboards as kb
 from .client import MaxAPIError
@@ -104,6 +105,12 @@ async def _dispatch_service(ctx: Ctx, info: dict) -> None:
 
 async def _dispatch_dialog(ctx: Ctx, update: dict, info: dict) -> None:
     user_id = info["user_id"]
+    # Тот же снимок реквизитов, что и в конвейере Telegram (middlewares.py):
+    # контакт менеджера правит панель, а подставляет его company.with_contact.
+    # Без этой строки снимок в процессе MAX оставался пустым навсегда, и
+    # настройка владельца тут не работала вовсе. TTL бережёт базу от
+    # запроса на каждый апдейт.
+    await company.refresh(ctx.crm)
     row = await ctx.db.upsert_user(user_id, info.get("username"))
     user = dict(row)
 

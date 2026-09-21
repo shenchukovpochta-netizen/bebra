@@ -237,6 +237,12 @@ class StarlineClient:
         now = now if now is not None else datetime.now(UTC).timestamp()
         session = self._session()
         try:
+            # Путь собирается из user_id, а тот появляется только после
+            # connect. Без этой строки первый круг опроса после каждого
+            # перезапуска уходил на /v2/user//user_info и падал: позиции,
+            # тревоги и отметка moved_at терялись до следующего круга.
+            if not self._slnet or not self._user_id:
+                await self.connect(session, now=now)
             data = await self._call(session, "GET",
                                     f"/v2/user/{self._user_id}/user_info", now=now)
             devices = (data or {}).get("devices") if isinstance(data, dict) else None

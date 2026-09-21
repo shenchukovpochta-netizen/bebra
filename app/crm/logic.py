@@ -115,18 +115,9 @@ CODE_LIMIT = 40
 CENT = Decimal("0.01")
 
 
-def local_date(value: Any) -> date | None:
-    """Дата события по местному времени, а не по UTC.
-
-    asyncpg отдаёт timestamptz осведомлённым временем в UTC, и обычное
-    `.date()` у события, случившегося ночью по Москве, возвращало
-    вчерашний день: переход по ссылке в час ночи не попадал в «за сутки»,
-    а приглашение на ТО считалось на день старше, чем оно есть.
-    Контейнеры живут в Europe/Moscow, поэтому местный пояс и берём.
-    """
-    if isinstance(value, datetime):
-        return (value.astimezone() if value.tzinfo is not None else value).date()
-    return value if isinstance(value, date) else None
+# Одна функция на бота и на панель: разъехавшееся «сегодня» у двух
+# процессов одной базы - это разные даты в договоре и в журнале.
+local_date = bot_logic.local_date
 
 
 def to_money(value: Any) -> Decimal:
@@ -1435,15 +1426,26 @@ def check_payer(raw: Any) -> Check:
     return check_choice(raw, PAYERS, what="Плательщик")
 
 
+def item_qty(item: Mapping[str, Any]) -> int:
+    """Количество в строке. Пусто - одна штука, ноль - именно ноль.
+
+    `qty` в базе `not null default 1`, поэтому `or 1` срабатывал ровно
+    на нуле: в таблице наряда строка печаталась как 0 ₽, а в «Итого»,
+    в смету и в журнал ремонта уходила как одна штука.
+    """
+    qty = item.get("qty")
+    return 1 if qty is None else int(qty)
+
+
 def item_total(item: dict) -> Decimal:
     """Строка наряда клиенту: цена за единицу на количество."""
-    return to_money(item.get("price") or 0) * int(item.get("qty") or 1)
+    return to_money(item.get("price") or 0) * item_qty(item)
 
 
 def item_cost(item: dict) -> Decimal:
     """Себестоимость строки: запчасти плюс работа, тоже на количество."""
     parts = to_money(item.get("parts_cost") or 0) + to_money(item.get("labor_cost") or 0)
-    return parts * int(item.get("qty") or 1)
+    return parts * item_qty(item)
 
 
 def order_totals(items: Iterable[dict]) -> dict[str, Decimal]:
@@ -1464,9 +1466,9 @@ def order_days(order: dict, *, today: date | None = None) -> int:
     opened = order.get("opened_at")
     if opened is None:
         return 0
-    start = opened.date() if isinstance(opened, datetime) else opened
+    start = local_date(opened)
     closed = order.get("closed_at")
-    end = closed.date() if isinstance(closed, datetime) else (closed or today or date.today())
+    end = local_date(closed) or today or date.today()
     return max((end - start).days, 0)
 
 
@@ -2081,7 +2083,9 @@ def channel_rows(clients: Iterable[dict], *, months: int = 12,
         created = client.get("created_at")
         if created is None:
             continue
-        day = created.date() if isinstance(created, datetime) else created
+        day = local_date(created)
+        if day is None:
+            continue
         month = day.replace(day=1)
         if month not in known:
             continue
@@ -2308,7 +2312,7 @@ def part_rows(parts: Iterable[dict], stocks: dict[int, int],
         stock = int(stocks.get(int(part["id"]), 0))
         minimum = int(part.get("min_stock") or 0)
         last = moved.get(int(part["id"]))
-        last_day = last.date() if isinstance(last, datetime) else last
+        last_day = local_date(last)
         days = (today - last_day).days if last_day else None
         rows.append({**part, "stock": stock,
                      "short": max(minimum - stock, 0),
@@ -2386,7 +2390,7 @@ def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = ()) -> list[dict]
 
 
 def order_total(items: Iterable[dict]) -> Decimal:
-    return to_money(sum((to_money(i.get("price") or 0) * int(i.get("qty") or 1)
+    return to_money(sum((to_money(i.get("price") or 0) * item_qty(i)
                          for i in items), Decimal(0)))
 
 
@@ -2486,7 +2490,7 @@ def search_days(rental: dict, *, today: date | None = None) -> int:
     started = rental.get("search_at")
     if started is None:
         return 0
-    start = started.date() if isinstance(started, datetime) else started
+    start = local_date(started)
     return max(((today or date.today()) - start).days, 0)
 
 
@@ -2760,7 +2764,10 @@ def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,
         "days_left": days_left,
         # Чтобы выйти на план, столько велосипедов должно кататься каждый
         # оставшийся день по целевому чеку.
-        "need_rented": (int(-(-left / (plan["check"] * days_left) // 1))
+        # Округление вверх - через math.ceil: у Decimal `//` усекает к нулю,
+        # и трюк `-(-a // b)` превращается там в обычный floor. 6,67 велосипеда
+        # он давал как 6, а шести на плановый чек уже не хватает.
+        "need_rented": (int(math.ceil(left / (plan["check"] * days_left)))
                         if days_left > 0 and plan["check"] > 0 and left > 0 else 0),
     }
 
@@ -2813,7 +2820,7 @@ def months_between(since: Any, until: date) -> int:
     """Полных месяцев между датами. Меньше месяца - ноль."""
     if since is None:
         return 0
-    start = since.date() if isinstance(since, datetime) else since
+    start = local_date(since)
     months = (until.year - start.year) * 12 + until.month - start.month
     if until.day < start.day:
         months -= 1
@@ -3855,7 +3862,10 @@ def pick_audience(code: str, clients: Iterable[dict],
             last = client.get("last_rental_on")
             if last is None:
                 continue
-            days = (today - (last.date() if isinstance(last, datetime) else last)).days
+            last_day = local_date(last)
+            if last_day is None:
+                continue
+            days = (today - last_day).days
             if not COMEBACK_FROM_DAYS <= days <= COMEBACK_TO_DAYS:
                 continue
         out.append({**client, "rental": rental,
@@ -4471,7 +4481,7 @@ def estimate_lines(items: Iterable[Mapping[str, Any]]) -> str:
     """
     lines = []
     for item in items:
-        qty = int(item.get("qty") or 1)
+        qty = item_qty(item)
         price = to_money(item.get("price")) * qty
         title = str(item.get("title") or "работа")
         lines.append(f"• {title}"
@@ -4483,7 +4493,7 @@ def estimate_lines(items: Iterable[Mapping[str, Any]]) -> str:
 def order_totals_client(items: Iterable[Mapping[str, Any]]) -> Decimal:
     """Сколько к оплате клиенту. Отдельно от order_totals: там ещё и
     себестоимость, а в смету она не идёт."""
-    return to_money(sum(to_money(i.get("price")) * int(i.get("qty") or 1)
+    return to_money(sum(to_money(i.get("price")) * item_qty(i)
                         for i in items))
 
 

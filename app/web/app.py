@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import json
 import logging
 import os
 import time
@@ -344,8 +343,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # распакована ДО проверки входа, поэтому SessionMiddleware добавляется
     # после auth.
     app.add_middleware(BaseHTTPMiddleware, dispatch=auth)
+    # https_only под доменом: в профиле https Caddy слушает и 80, и 443,
+    # и адрес панели, набранный без схемы, отправил бы cookie сессии
+    # открытым текстом ещё до редиректа. Без домена (панель по адресу
+    # сервера, по http) флаг Secure сделал бы вход невозможным.
     app.add_middleware(SessionMiddleware, secret_key=cfg.secret, session_cookie="crm_session",
-                       same_site="strict", max_age=SESSION_DAYS * 24 * 3600)
+                       same_site="strict", https_only=bool(cfg.trust_proxy),
+                       max_age=SESSION_DAYS * 24 * 3600)
 
     login_failures: dict[str, list[float]] = {}
 
@@ -385,11 +389,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return logic.check_amount(raw)
 
     def count_field(data: dict, name: str, *, what: str, default: str = "1",
-                    limit: int = 999) -> logic.Check:
-        """Небольшое целое из формы: количество в наряде, минуты норматива."""
+                    limit: int = 999, least: int = 0) -> logic.Check:
+        """Небольшое целое из формы: количество в наряде, минуты норматива.
+
+        `least` поднимает нижнюю границу там, где ноль бессмысленен:
+        строка наряда на ноль штук и списание со склада на ноль штук -
+        это не «бесплатно», это опечатка.
+        """
         raw = (data.get(name) or "").strip() or default
-        if not raw.isdigit() or not 0 <= int(raw) <= limit:
-            return logic.Check(False, error=f"{what}: целое число от 0 до {limit}.")
+        if not raw.isdigit() or not least <= int(raw) <= limit:
+            return logic.Check(False,
+                               error=f"{what}: целое число от {least} до {limit}.")
         return logic.Check(True, int(raw))
 
     def summarize(rental: dict | None, balance: Any) -> dict:
@@ -492,7 +502,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             until=(datetime.now().astimezone() if span["is_current"] else
                    datetime.combine(next_month, datetime.min.time()).astimezone()))
         soon = logic.freeing_soon(rows, today=today)
-        month_totals = await crm.ledger_totals(since=today.replace(day=1))
+        # Плитки денег - за ТОТ ЖЕ месяц, что и всё остальное на сводке.
+        # Раньше здесь стояло первое число сегодняшнего месяца без верхней
+        # границы: оператор листал стрелкой на август, а плитки над планом
+        # продолжали показывать сентябрь.
+        month_totals = await crm.ledger_totals(since=first, until=span["last"])
         # Деньги по дням месяца: столбики «пришло», линия накопленного
         # долга и пунктир плана в день. Помесячных чисел мало - по ним
         # не видно, в какой день всё пошло не так.
@@ -643,19 +657,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """В служебный чат: пришла запчасть, которую ждал наряд."""
         if not orders or bot is None or not cfg.contract_chat_id:
             return
-        if not await notices.allowed(crm, "part_arrived"):
-            return
         lines = ["📦 Пришла запчасть — наряды могут ехать дальше:"]
         lines += [f"• {o.get('no')} — {o.get('bike_code') or o.get('object_note') or '—'}"
                   for o in orders[:10]]
-        try:
-            await bot.send_message(cfg.contract_chat_id, "\n".join(lines))
-        except Exception as err:                         # noqa: BLE001
-            log.warning("сообщение о приходе запчасти не ушло: %s", err)
-            await notices.record(crm, "part_arrived", status="failed",
-                                 detail=str(err))
-            return
-        await notices.record(crm, "part_arrived", status="sent")
+        # send_team знает про получателя, назначенного владельцем в панели.
+        await notices.send_team(crm, bot, "part_arrived", "\n".join(lines),
+                                cfg.contract_chat_id)
 
     async def referral_bonus(client: dict, amount: Decimal, by: str) -> None:
         """Друг заплатил - начислить бонус агенту и сказать ему об этом.
@@ -3086,7 +3093,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if (data.get("work_type_id") or "").isdigit() else None
         title = logic.check_name(data.get("title") or (work_type or {}).get("title"),
                                  what="Работа")
-        qty = count_field(data, "qty", what="Количество", limit=99)
+        qty = count_field(data, "qty", what="Количество", limit=99, least=1)
         price = cost_field(data, "price")
         # Цена из прайса: лист по объекту наряда, только когда платит
         # клиент и поле оставили пустым. «0» руками - это ноль, а не
@@ -3132,7 +3139,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         part = await crm.part(int(data["part_id"])) \
             if (data.get("part_id") or "").isdigit() else None
-        qty = count_field(data, "qty", what="Количество", default="1", limit=999)
+        qty = count_field(data, "qty", what="Количество", default="1",
+                          limit=999, least=1)
         if part is None or not qty.ok:
             flash(request, qty.error or "Выберите позицию склада.", "err")
             return redirect(f"/orders/{order_id}")
@@ -3149,7 +3157,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/orders/{order_id}/items/{item_id}/delete")
     async def order_delete_item(request: Request, order_id: int,
                                 item_id: int) -> Response:
-        if not await crm.delete_order_item(order_id, item_id):
+        if not may_edit(request, "service"):
+            return denied(request, "service")
+        if not await crm.delete_order_item(order_id, item_id, by=who(request)):
             flash(request, "Строки уже нет.", "err")
         return redirect(f"/orders/{order_id}")
 
@@ -3159,7 +3169,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if order is None:
             return render(request, "missing.html", status_code=404, what="Наряд")
         data = await form(request)
-        status = logic.check_order_status(data.get("status") or order["status"])
+        # Выпадающий список формы - ORDER_MANUAL_STATUSES: «на согласовании»
+        # ставит отправка сметы, и мимо формы его принимать нельзя - наряд
+        # встал бы в approve без сметы, а вывести его оттуда нечем. «Готов»
+        # в список входит нарочно: у него ниже свой ответ про кнопку
+        # закрытия, и общее «недопустимое значение» его бы съело.
+        allowed = {k: logic.ORDER_STATUSES[k]
+                   for k in (*logic.ORDER_MANUAL_STATUSES, "done",
+                             order["status"])
+                   if k in logic.ORDER_STATUSES}
+        status = logic.check_choice(data.get("status") or order["status"],
+                                    allowed, what="Статус наряда")
         estimate = cost_field(data, "estimate")
         note = logic.check_note(data.get("note"))
         for check in (status, estimate, note):
@@ -4001,6 +4021,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """
         if not may_view(request, "clients"):
             return denied(request, "clients")
+        # В пакете лежит договор с паспортными данными - ровно тот файл,
+        # который /clients/{id}/contract отдаёт только по праву
+        # `client_docs`. Без этой проверки право не защищало ничего:
+        # тот же документ открывался со страницы заявки на подпись.
+        if not logic.can_act(request.state.staff, "client_docs"):
+            return denied(request, "client_docs")
         row = await crm.sign_request(request_id)
         if row is None:
             return render(request, "missing.html", status_code=404, what="Заявка")
@@ -4069,11 +4095,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       digest=logic.sign_docs_digest(row.get("docs") or []),
                       company=await sign_company())
 
+    def sign_link_alive(row: dict) -> bool:
+        """Живая ли ссылка. Подписанная заявка остаётся открытой: пакет
+        документов принадлежит клиенту, и забрать свой экземпляр он
+        вправе. Отменённая и просроченная - нет: оператор отменил её
+        именно для того, чтобы ссылка перестала работать."""
+        return bool(logic.sign_state(row)["open"] or row.get("status") == "signed")
+
     @app.get("/sign/{token}/agreement")
     async def sign_agreement(request: Request, token: str) -> Response:
         """Соглашение об ЭП - ровно тот текст, который подписывают."""
         row = await sign_by_token(token)
-        if row is None:
+        if row is None or not sign_link_alive(row):
             return render(request, "sign_missing.html", status_code=404)
         return render(request, "sign_agreement.html", req=row,
                       text=row.get("agreement") or "")
@@ -4083,7 +4116,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Файл из пакета. Отдаём только то, что лежит в самой заявке:
         путь приходит не из запроса, а из её списка документов."""
         row = await sign_by_token(token)
-        if row is None:
+        if row is None or not sign_link_alive(row):
             return render(request, "sign_missing.html", status_code=404)
         docs = list(row.get("docs") or [])
         if not 0 <= index < len(docs) or not docs[index].get("path"):
@@ -4914,12 +4947,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect(back)
         if action in ("cash", "transfer"):
             try:
-                await service.credit_pay_order(crm, order, by=who(request),
-                                               method=action)
+                ledger_id = await service.credit_pay_order(
+                    crm, order, by=who(request), method=action)
             except service.ServiceError as exc:
                 flash(request, str(exc), "err")
                 return redirect(back)
-            client = await crm.client(order["client_id"])
+            # Бонус за друга - только за настоящий платёж в журнале. У
+            # счёта за ремонт записи в журнале нет вовсе (красная линия:
+            # журнал - это аренда), и бонус агенту шёл бы за человека,
+            # который аренду не брал.
+            client = (await crm.client(order["client_id"])
+                      if ledger_id is not None else None)
             if client is not None:
                 await referral_bonus(client, logic.to_money(order["amount"]),
                                      who(request))
@@ -4957,7 +4995,6 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         points = logic.map_points(tools["all_rows"])
         return render(request, "map.html", rows=tools["rows"], tools=tools, q=q,
                       points=points,
-                      points_json=json.dumps(points, ensure_ascii=False),
                       map_cfg=logic.map_config(settings),
                       summary=logic.tracker_summary(rows),
                       alerts=await crm.tracker_alerts(open_only=True, limit=50))
@@ -5217,10 +5254,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       commands=logic.command_rows(await crm.tracker_commands(tracker_id)),
                       run_km=logic.track_distance(track),
                       track_range=kind, track_since=first, track_until=last,
-                      line_json=json.dumps(logic.track_line(track)),
+                      line=logic.track_line(track),
                       map_cfg=logic.map_config(settings),
-                      points_json=json.dumps(logic.map_points([row]),
-                                             ensure_ascii=False),
+                      points=logic.map_points([row]),
                       free_bikes=await crm.bikes(limit=10000),
                       alerts=[a for a in await crm.tracker_alerts(open_only=False,
                                                                   limit=50)

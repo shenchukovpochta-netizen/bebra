@@ -112,8 +112,10 @@ class TestReferralsInPanel(tw.WebCase):
         self.assertEqual(ref["bonus"], logic.REF_BONUS_DEFAULT)
         rows = tw.run(self.crm.ledger_of(self.agent_id, limit=10))
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["kind"], "adjust",
-                         "бонус - корректировка: платежом он завысил бы средний чек")
+        self.assertEqual(rows[0]["kind"], "bonus",
+                         "бонус агенту - баллы, как и бонус другу: платежом он "
+                         "завысил бы средний чек, а корректировкой смешался бы "
+                         "с ручными правками и не попал в плитку «оплачено баллами»")
         self.assertEqual(rows[0]["amount"], logic.REF_BONUS_DEFAULT)
 
     def test_bonus_is_paid_once(self):
@@ -343,7 +345,7 @@ class TestReferralFullCycle(tc.CabinetCase):
         self.assertEqual(ref["status"], "paid")
         self.assertEqual(ref["bonus"], logic.REF_BONUS_DEFAULT)
         rows = await self.crm.ledger_of(agent_id, limit=5)
-        self.assertEqual([r["kind"] for r in rows], ["adjust"])
+        self.assertEqual([r["kind"] for r in rows], ["bonus"])
 
     async def test_funnel_marks_the_bike_step_before_payment(self):
         """Аренду из бота оформляет не open_rental - шаг всё равно виден."""

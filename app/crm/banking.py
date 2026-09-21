@@ -19,8 +19,6 @@ import logging
 from datetime import date, timedelta
 from typing import Any
 
-from aiogram.exceptions import TelegramAPIError
-
 from . import logic, notices, service
 
 log = logging.getLogger(__name__)
@@ -35,18 +33,24 @@ STATEMENT_DAYS = 3
 
 
 async def import_once(crm: Any, client: Any, *, today: date | None = None,
-                      days: int = STATEMENT_DAYS) -> dict:
-    """Забрать выписку и сложить в базу. Зачисления - отдельным шагом."""
+                      days: int = STATEMENT_DAYS,
+                      statement_id: str | None = None) -> dict:
+    """Забрать выписку и сложить в базу. Зачисления - отдельным шагом.
+
+    Банк собирает документ не мгновенно, поэтому номер заказанной
+    выписки возвращается наружу в `pending`: следующий круг читает ЕЁ,
+    а не заказывает новую. Заказывать каждый раз новую и читать её тут
+    же значит не прочитать выписку никогда.
+    """
     today = today or date.today()
     statement = await client.statement(since=today - timedelta(days=days),
-                                       until=today)
+                                       until=today, statement_id=statement_id)
     if not statement.get("ready"):
-        # Банк ещё собирает документ: номер сохранять негде и незачем -
-        # следующий проход закажет заново, это дешёвая операция.
-        return {"seen": 0, "saved": 0, "credited": 0}
+        return {"seen": 0, "saved": 0, "credited": 0,
+                "pending": statement.get("statement_id")}
     result = await service.import_statement(crm, statement["rows"])
     credited = await auto_credit(crm)
-    return {**result, "credited": credited}
+    return {**result, "credited": credited, "pending": None}
 
 
 async def auto_credit(crm: Any, *, by: str = "bank") -> int:
@@ -80,8 +84,6 @@ async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10, *,
     не звал никто: функция была написана, тумблер в панели показывался,
     а сообщение не уходило никогда.
     """
-    if not await notices.allowed(crm, "bank_unmatched"):
-        return 0
     rows = [r for r in await crm.bank_txns(status="new", limit=100)
             if r["direction"] == "credit"]
     if not rows:
@@ -93,14 +95,12 @@ async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10, *,
         lines.append(f"• {logic.money(row['amount'])} — {who}")
     if len(rows) > limit:
         lines.append(f"…и ещё {len(rows) - limit}")
-    try:
-        await bot.send_message(chat_id or cfg.contract_chat_id, "\n".join(lines))
-    except TelegramAPIError as exc:
-        log.exception("сводка по выписке не доставлена")
-        await notices.record(crm, "bank_unmatched", status="failed",
-                             detail=str(exc))
+    # Через send_team, а не напрямую в чат: владелец мог назначить этому
+    # уведомлению своего получателя в панели, и отправка мимо него
+    # означала бы, что настройка ничего не делает.
+    if not await notices.send_team(crm, bot, "bank_unmatched", "\n".join(lines),
+                                   chat_id or cfg.contract_chat_id):
         return 0
-    await notices.record(crm, "bank_unmatched", status="sent")
     return len(rows)
 
 
@@ -111,9 +111,11 @@ async def banking_loop(bot: Any, crm: Any, cfg: Any, client: Any, *,
         log.info("счёт в Точке не настроен, выписка не тянется")
         return
     del bot, cfg
+    pending: str | None = None
     while True:
         try:
-            result = await import_once(crm, client)
+            result = await import_once(crm, client, statement_id=pending)
+            pending = result.get("pending")
             if result["saved"] or result["credited"]:
                 log.info("выписка: новых строк %s, зачислено %s",
                          result["saved"], result["credited"])

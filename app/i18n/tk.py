@@ -126,6 +126,9 @@ T: dict[str, str] = {
         "tarapy).\n\nEger ähli maglumat birinji suratda görünýän bolsa, "
         "aşakdaky düwmä basyň."
     ),
+    "DOC_NOT_TAKEN": (
+        "Bu surat kabul edilmedi: resminama ädimi eýýäm geçildi. Täzeden surata düşürmek gerek bolsa, «Täzeden doldurmak» düwmesine basyň."
+    ),
     "DOC2_NEED_PHOTO": (
         "Resminamanyň ikinji sahypasynyň suraty gerek. Surat birikdiriň "
         "ýa-da «Bir surat ýeterlik» düwmesine basyň."

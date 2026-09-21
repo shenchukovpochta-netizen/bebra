@@ -49,7 +49,7 @@ def _context(cfg: Config, data: dict, anketa: dict, *, number: str,
     # другая дата в шапке, другой отпечаток, и сохранённый при выдаче хэш
     # переставал бы соответствовать чему бы то ни было.
     ctx = logic.contract_context(data, anketa, number=number,
-                                 today=issued_at.date() if issued_at else None)
+                                 today=logic.local_date(issued_at))
     # Данные выдачи (вин-номера, комплектация, срок, оплата) - из ответа
     # оператора; до него в документ ушли бы прочерки, но issue() зовётся
     # только после сохранения issue_data.
@@ -304,11 +304,17 @@ async def start_payment(bot: Bot, db: Database, cfg: Config, data: dict) -> None
     tg_id = data["tg_id"]
     number = data.get("contract_no") or ""
     lang = i18n.user_lang(data)
-    await bot.send_message(
-        tg_id, i18n.t(lang, "PAY_PROMPT").format(
-            price=logic.esc(rent_price(data)),
-            pay_url=logic.esc(cfg.pay_url)),
-        reply_markup=kb.paid(cfg.pay_url, lang))
+    try:
+        await bot.send_message(
+            tg_id, i18n.t(lang, "PAY_PROMPT").format(
+                price=logic.esc(rent_price(data)),
+                pay_url=logic.esc(cfg.pay_url)),
+            reply_markup=kb.paid(cfg.pay_url, lang))
+    except TelegramAPIError:
+        # Клиент заблокировал бота - это не повод срывать карточку
+        # оператору: без неё оплату некому подтвердить, и продление
+        # застревает молча.
+        log.warning("приглашение к оплате не доставлено клиенту %s", tg_id)
     try:
         sent = await bot.send_message(
             cfg.contract_chat_id, pay_card(data),
@@ -562,11 +568,13 @@ def _act_context(cfg: Config, data: dict, anketa: dict, *,
     """Контекст актов: реквизиты договора + данные выдачи + даты акта."""
     ctx = _context(cfg, data, anketa, number=data.get("contract_no") or "",
                    signed_at=signed_at, issued_at=data.get("contract_issued_at"))
-    ctx["act_date"] = utcnow().strftime("%d.%m.%Y")
+    # Дата акта - местная: `utcnow()` ночью по Москве печатал в документе
+    # вчерашнее число, и подписанный экземпляр расходился с днём выдачи.
+    ctx["act_date"] = logic.local_today().strftime("%d.%m.%Y")
     ret = dict(data.get("return_data") or {})
     ctx["return_notes"] = str(ret.get("return_notes") or "—")
     ctx["return_date"] = str(ret.get("return_date") or
-                             utcnow().strftime("%d.%m.%Y"))
+                             logic.local_today().strftime("%d.%m.%Y"))
     # Акт о переходе права собственности: сумма выкупа и цвет (в договоре
     # он один - чёрный, но пусть приходит из данных выдачи, если укажут).
     plan = logic.buyout_plan(data)
@@ -674,7 +682,8 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
     if crm is not None:
         # Имущество передано - в CRM появляется аренда и первое начисление.
-        await crm_sync.on_rental_started(crm, data, today=signed_at.date())
+        await crm_sync.on_rental_started(crm, data,
+                                         today=logic.local_date(signed_at))
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
@@ -822,7 +831,8 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
         files.remove(old_path)      # акт прошлого цикла, ссылки на него уже нет
     await db.log_event(tg_id, "act_out_signed", {"number": number})
     if crm is not None:
-        await crm_sync.on_rental_closed(crm, data, today=signed_at.date())
+        await crm_sync.on_rental_closed(crm, data,
+                                        today=logic.local_date(signed_at))
     # Аренда закрыта - хранение отсчитывается от закрытия, а не от подписи
     # договора: иначе долгая аренда пережила бы собственные документы.
     await db.set_purge_after(tg_id, cfg.purge_approved_days)

@@ -568,6 +568,16 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
                           doc_path=None, doc_sha256=None,
                           doc2_file_id=None, doc2_path=None, doc2_sha256=None,
                           purge_after=None, state=logic.WAIT_DOC2):
+        # Не наша очередь: разворот прислали альбомом, оба снимка пришли
+        # отдельными апдейтами и оба дошли сюда, пока состояние было
+        # «жду документ». Проигравший не молчит - его снимок уходит во
+        # второй слот, ради которого шаг и сделан. Состояние ушло дальше
+        # (отказ, «заполнить повторно») - честно говорим, что не приняли.
+        fresh = await db.get(message.from_user.id)
+        if fresh and fresh.get("state") == logic.WAIT_DOC2:
+            await _store_doc2(message, bot, db, cfg, vault, fresh)
+        else:
+            await message.answer(i18n.t(i18n.user_lang(user), "DOC_NOT_TAKEN"))
         return
     # Прежние сканы ссылку в базе только что потеряли: не удалить их
     # здесь - значит оставить паспорт на диске навсегда.
@@ -608,6 +618,13 @@ async def st_doc2(message: Message, bot: Bot, db: Database, cfg: Config,
     попадает в шаг документа, второй сюда, и человеку не приходится
     отправлять их по одной.
     """
+    await _store_doc2(message, bot, db, cfg, vault, user)
+
+
+async def _store_doc2(message: Message, bot: Bot, db: Database, cfg: Config,
+                      vault: Vault, user: dict) -> None:
+    """Положить снимок во второй слот. Общее тело шага и «догоняющего»
+    снимка из альбома, который не успел занять первый."""
     check = _check_upload(message)
     if not check.ok:
         await message.answer(i18n.err(user.get("lang"), check.error))

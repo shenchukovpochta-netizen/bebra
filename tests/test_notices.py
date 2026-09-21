@@ -189,6 +189,18 @@ class TestTeamNotice(tw.WebCase):
         self.assertFalse(tw.run(notices.send_team(self.crm, self.bot, "estimate_waiting",
                                                   "ждём", "")), "чат не задан")
 
+    def test_every_team_notice_asks_the_owner_where_to_send(self):
+        """Четыре уведомления слали напрямую в служебный чат мимо
+        `chat_for`, и выбор получателя в панели у них ничего не делал."""
+        for code in ("pay_paid", "part_arrived", "order_answer",
+                     "bank_unmatched"):
+            tw.run(self.crm.set_notice(code, enabled=True, at_hour=None,
+                                       chat_id="777", by="t"))
+            self.bot.sent.clear()
+            tw.run(notices.send_team(self.crm, self.bot, code, "текст", "-1001"))
+            self.assertEqual(self.bot.sent[-1][0], "777",
+                             f"{code}: адресат - сотрудник, не служебный чат")
+
     def test_page_offers_staff_with_telegram_as_recipients(self):
         staff_id = tw.run(self.crm.create_staff(
             "tech", logic.hash_password("tech-pass-1"), "Хомяков И.", "tech", None))

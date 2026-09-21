@@ -807,15 +807,17 @@ class CrmDB:
                          note: str | None = None, created_by: str | None = None,
                          period_from: date | None = None,
                          period_to: date | None = None,
-                         created_at: datetime | None = None) -> int:
+                         created_at: datetime | None = None,
+                         shift_id: int | None = None) -> int:
         return int(await self.pool.fetchval(
             """
             insert into crm.ledger (client_id, rental_id, kind, amount, method,
-                                    note, created_by, period_from, period_to, created_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, coalesce($10, now()))
+                                    note, created_by, period_from, period_to,
+                                    created_at, shift_id)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, coalesce($10, now()), $11)
             returning id
             """, client_id, rental_id, kind, amount, method, note, created_by,
-            period_from, period_to, created_at))
+            period_from, period_to, created_at, shift_id))
 
     async def ledger_of(self, client_id: int, limit: int = 100) -> list[dict]:
         return _rows(await self.pool.fetch(
@@ -982,7 +984,8 @@ class CrmDB:
             "where id = $1", claim_id, file_id, is_photo)
 
     async def credit_claim(self, claim_id: int, *, client_id: int, amount: Decimal,
-                           method: str, note: str, created_by: str) -> int | None:
+                           method: str, note: str, created_by: str,
+                           shift_id: int | None = None) -> int | None:
         """Зачислить заявку: закрыть её и записать платёж одной транзакцией.
 
         None - заявку уже закрыл кто-то другой (двойной тап, панель и
@@ -1000,9 +1003,10 @@ class CrmDB:
                 return None
             ledger_id = int(await conn.fetchval(
                 """
-                insert into crm.ledger (client_id, kind, amount, method, note, created_by)
-                values ($1, 'payment', $2, $3, $4, $5) returning id
-                """, client_id, amount, method, note, created_by))
+                insert into crm.ledger (client_id, kind, amount, method, note,
+                                        created_by, shift_id)
+                values ($1, 'payment', $2, $3, $4, $5, $6) returning id
+                """, client_id, amount, method, note, created_by, shift_id))
             await conn.execute(
                 "update crm.payment_claims set ledger_id = $2 where id = $1",
                 claim_id, ledger_id)
@@ -1147,6 +1151,64 @@ class CrmDB:
         await self.pool.execute(
             f"update crm.work_orders set {sets} where id = $1", order_id, *values)
 
+    async def close_work_order(self, order_id: int, *, total: Decimal,
+                               cost: Decimal, closed_at: datetime,
+                               repair: dict | None) -> dict | None:
+        """Закрыть наряд и записать ремонт в журнал велосипеда - одной
+        транзакцией и только один раз.
+
+        None - наряд закрыл кто-то другой (двойной клик по «Закрыть»,
+        две вкладки). Без этой заявки оба нажатия писали в журнал
+        велосипеда по записи `repair`, и стоимость ремонта удваивалась
+        и в карточке, и в отчёте «что ломается».
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                update crm.work_orders
+                   set status = 'done', total = $2, cost = $3, closed_at = $4
+                 where id = $1 and closed_at is null
+                returning id
+                """, order_id, total, cost, closed_at)
+            if row is None:
+                return None
+            log_id = None
+            if repair is not None:
+                log_id = int(await conn.fetchval(
+                    "insert into crm.bike_log (bike_id, kind, note, cost, created_by) "
+                    "values ($1, 'repair', $2, $3, $4) returning id",
+                    repair["bike_id"], repair.get("note"), repair["cost"],
+                    repair.get("created_by")))
+                for i in repair.get("items") or []:
+                    await conn.execute(
+                        """
+                        insert into crm.repair_items
+                          (log_id, bike_id, node, parts_cost, labor_cost, note)
+                        values ($1, $2, $3, $4, $5, $6)
+                        """, log_id, repair["bike_id"], i["node"],
+                        Decimal(str(i.get("parts_cost") or 0)),
+                        Decimal(str(i.get("labor_cost") or 0)), i.get("note"))
+                await conn.execute(
+                    "update crm.work_orders set log_id = $2 where id = $1",
+                    order_id, log_id)
+            return {"log_id": log_id}
+
+    async def answer_work_order(self, order_id: int, **fields: Any) -> bool:
+        """Записать ответ на смету, если по ней ещё не отвечали.
+
+        False - ответ уже есть. Клиент жмёт «Согласен» и «Отказался»
+        подряд, оба нажатия - отдельные задачи aiogram, и без этой
+        заявки в наряде оказывались сразу approved_at и declined_at.
+        """
+        if not fields:
+            return False
+        sets, values = _set_clause(fields, ORDER_FIELDS, 2)
+        row = await self.pool.fetchrow(
+            f"update crm.work_orders set {sets} where id = $1 "
+            "and approved_at is null and declined_at is null returning id",
+            order_id, *values)
+        return row is not None
+
     async def order_items(self, order_id: int) -> list[dict]:
         return _rows(await self.pool.fetch(
             "select * from crm.work_order_items where order_id = $1 order by id",
@@ -1155,21 +1217,46 @@ class CrmDB:
     async def add_order_item(self, order_id: int, *, title: str, node: str | None,
                              work_type_id: int | None, qty: int, price: Decimal,
                              parts_cost: Decimal, labor_cost: Decimal,
-                             note: str | None = None) -> int:
+                             note: str | None = None,
+                             move_id: int | None = None) -> int:
         return int(await self.pool.fetchval(
             """
             insert into crm.work_order_items
                 (order_id, work_type_id, title, node, qty, price,
-                 parts_cost, labor_cost, note)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id
+                 parts_cost, labor_cost, note, move_id)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id
             """, order_id, work_type_id, title, node, qty, price,
-            parts_cost, labor_cost, note))
+            parts_cost, labor_cost, note, move_id))
 
-    async def delete_order_item(self, order_id: int, item_id: int) -> bool:
-        row = await self.pool.fetchrow(
-            "delete from crm.work_order_items where id = $1 and order_id = $2 "
-            "returning id", item_id, order_id)
-        return row is not None
+    async def delete_order_item(self, order_id: int, item_id: int, *,
+                                by: str | None = None) -> bool:
+        """Убрать строку наряда. Пришедшее со склада - вернуть на полку.
+
+        Списание в наряд и строка наряда рождаются одним действием
+        (`issue_part_to_order`), поэтому и уходить обязаны вместе: иначе
+        на полке остаётся минус по запчасти, которой в наряде уже нет,
+        а вернуть её можно только пересчётом, то есть недостачей.
+        Возврат пишется встречным движением с той же себестоимостью -
+        средневзвешенную цену он не двигает.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "delete from crm.work_order_items where id = $1 and order_id = $2 "
+                "returning move_id", item_id, order_id)
+            if row is None:
+                return False
+            move = await conn.fetchrow(
+                "select part_id, qty, cost from crm.part_moves where id = $1",
+                row["move_id"]) if row["move_id"] else None
+            if move is not None:
+                await conn.execute(
+                    """
+                    insert into crm.part_moves (part_id, kind, qty, cost, order_id,
+                                                note, created_by)
+                    values ($1, 'order', $2, $3, $4, $5, $6)
+                    """, move["part_id"], -int(move["qty"]), move["cost"], order_id,
+                    "Возврат: строка наряда убрана", by)
+            return True
 
     async def order_stats(self, since: datetime, until: datetime) -> dict[str, Any]:
         """Итоги сервиса за период: сколько закрыто и сколько заработано
@@ -1589,9 +1676,10 @@ class CrmDB:
         """Начислить бонус агенту и отметить друга оплатившим - одной
         транзакцией. None - бонус по этому другу уже платили.
 
-        Вид записи - adjust, а не payment: платежи клиентов формируют
-        средний чек парка, и бонус завысил бы его на деньги, которых
-        никто не вносил.
+        Вид записи - bonus, как у любых баллов: это не деньги, а скидка,
+        и в средний чек она не идёт (его формируют платежи). Видом
+        adjust бонус агенту смешивался с ручными корректировками и не
+        попадал в плитку «оплачено баллами».
         """
         async with self.pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -1602,7 +1690,7 @@ class CrmDB:
                 return None
             ledger_id = int(await conn.fetchval(
                 "insert into crm.ledger (client_id, kind, amount, note, created_by) "
-                "values ($1, 'adjust', $2, $3, $4) returning id",
+                "values ($1, 'bonus', $2, $3, $4) returning id",
                 agent_id, amount, note, created_by))
             await conn.execute("update crm.referrals set ledger_id = $2 where id = $1",
                                ref_id, ledger_id)
@@ -1917,6 +2005,27 @@ class CrmDB:
         await self.pool.execute(
             f"update crm.part_orders set {sets} where id = $1", order_id, *values)
 
+    async def claim_part_order(self, order_id: int, *, total: Decimal,
+                               closed_at: datetime) -> bool:
+        """Занять заказ под приёмку. False - его уже приняли.
+
+        Без заявки двойной клик по «Принять заказ» делал два прихода
+        ПРХ с одними и теми же строками: остаток вырастал вдвое, а
+        средневзвешенная себестоимость пересчитывалась дважды.
+        """
+        row = await self.pool.fetchrow(
+            "update crm.part_orders set status = 'received', closed_at = $2, "
+            "total = $3 where id = $1 and status not in ('received', 'cancelled') "
+            "returning id, status", order_id, closed_at, total)
+        return row is not None
+
+    async def release_part_order(self, order_id: int, *, status: str) -> None:
+        """Вернуть заказ в прежний статус, если приход не получился."""
+        await self.pool.execute(
+            "update crm.part_orders set status = $2, closed_at = null, "
+            "total = null where id = $1 and status = 'received' and doc_id is null",
+            order_id, status)
+
     async def part_order_items(self, order_id: int) -> list[dict]:
         return _rows(await self.pool.fetch(
             """
@@ -2212,13 +2321,15 @@ class CrmDB:
                     insert into crm.bikes (code, model, battery_count, purchase_price,
                                            purchased_on, location, service_months,
                                            residual_price, battery_price,
-                                           battery_service_months, purchase_id, note)
-                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                           battery_service_months, purchase_id, note,
+                                           status)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                            coalesce($13, 'available'))
                     """, bike["code"], bike["model"], bike["battery_count"],
                     bike["purchase_price"], purchased_on, bike.get("location"),
                     bike["service_months"], bike["residual_price"],
                     bike.get("battery_price"), bike["battery_service_months"],
-                    purchase_id, bike.get("note"))
+                    purchase_id, bike.get("note"), bike.get("status"))
             return purchase_id
 
     async def purchase_bikes(self, purchase_id: int) -> list[dict]:
@@ -2815,13 +2926,34 @@ class CrmDB:
             "where status = 'open' and coalesce(location, '') = coalesce($1, '')",
             location))
 
+    async def cash_shift_for(self, by: str | None) -> dict | None:
+        """В чью смену легут наличные, принятые этим человеком.
+
+        Сперва - смена, которую он сам и открыл: оператор работает на
+        своей точке. Нет такой - единственная открытая; открыты обе и
+        человек ни одной не открывал - самая ранняя, лишь бы деньги
+        попали ровно в одну кассу, а не в обе.
+        """
+        if by:
+            mine = _row(await self.pool.fetchrow(
+                "select * from crm.cash_shifts where status = 'open' "
+                "and opened_by = $1 order by opened_at limit 1", by))
+            if mine is not None:
+                return mine
+        return await self.open_shift()
+
     async def create_shift(self, *, location: str | None, opening: Decimal,
                            note: str | None, by: str) -> int:
-        """Открыть смену. Номер выдаётся в той же транзакции: иначе две
-        кассы, открытые в одну секунду, получат один номер."""
+        """Открыть смену. Номер выдаётся под блокировкой таблицы: иначе две
+        кассы, открытые в одну секунду, получат один номер и вторая
+        вставка упадёт на уникальном `no`. Счёт по count(*) тут не
+        годится и сам по себе - удалённая смена сдвинула бы нумерацию."""
         async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "lock table crm.cash_shifts in share row exclusive mode")
             number = int(await conn.fetchval(
-                "select count(*) + 1 from crm.cash_shifts"))
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.cash_shifts") or 1)
             return int(await conn.fetchval(
                 """
                 insert into crm.cash_shifts (no, location, opening, note, opened_by)
@@ -2861,6 +2993,13 @@ class CrmDB:
              where l.kind in ('payment', 'refund') and {method}
                and l.created_at >= s.opened_at
                and l.created_at < coalesce(s.closed_at, now())
+               and (l.shift_id = s.id
+                    or (l.shift_id is null
+                        and not exists (select 1 from crm.cash_shifts o
+                                         where o.id <> s.id
+                                           and o.opened_at <= l.created_at
+                                           and coalesce(o.closed_at, now())
+                                               > l.created_at)))
              order by l.id
             """, shift_id))
 
@@ -2921,6 +3060,40 @@ class CrmDB:
                    handled_at = now(), handled_by = $5
              where id = $1
             """, txn_id, status, client_id, ledger_id, by)
+
+    async def credit_bank_txn(self, txn_id: int, *, client_id: int,
+                              amount: Decimal, method: str, note: str,
+                              created_by: str) -> int | None:
+        """Зачислить поступление: строку выписки занять, платёж записать -
+        одной транзакцией.
+
+        None - строку уже разобрал кто-то другой. Раньше статус
+        проверялся по словарю, прочитанному раньше, а `mark_bank_txn`
+        писал `where id = $1` без сверки: автозачисление и оператор,
+        нажавший «Зачислить», делали в журнале две записи `payment`
+        на одно поступление.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                update crm.bank_txns
+                   set status = 'matched', client_id = $2,
+                       handled_at = now(), handled_by = $3
+                 where id = $1 and status = 'new'
+                returning id
+                """, txn_id, client_id, created_by)
+            if row is None:
+                return None
+            ledger_id = int(await conn.fetchval(
+                """
+                insert into crm.ledger (client_id, kind, amount, method, note,
+                                        created_by)
+                values ($1, 'payment', $2, $3, $4, $5) returning id
+                """, client_id, amount, method, note, created_by))
+            await conn.execute(
+                "update crm.bank_txns set ledger_id = $2 where id = $1",
+                txn_id, ledger_id)
+            return ledger_id
 
     async def last_bank_txn_at(self) -> datetime | None:
         return await self.pool.fetchval("select max(booked_at) from crm.bank_txns")
@@ -3003,8 +3176,11 @@ class CrmDB:
     async def create_campaign(self, *, title: str, template_id: int,
                               audience: str, note: str | None, by: str) -> int:
         async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "lock table crm.campaigns in share row exclusive mode")
             number = int(await conn.fetchval(
-                "select count(*) + 1 from crm.campaigns"))
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.campaigns") or 1)
             return int(await conn.fetchval(
                 """
                 insert into crm.campaigns (no, title, template_id, audience,
@@ -3102,11 +3278,14 @@ class CrmDB:
     async def create_sign_request(self, *, client_id: int, rental_id: int | None,
                                   token: str, docs: list[dict], agreement: str,
                                   expires_at: datetime, by: str) -> dict:
-        """Завести заявку. Номер выдаётся в той же транзакции: две заявки,
-        созданные одновременно, иначе получат один номер."""
+        """Завести заявку. Номер выдаётся под блокировкой таблицы: две
+        заявки, созданные одновременно, иначе получат один номер."""
         async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "lock table crm.sign_requests in share row exclusive mode")
             number = int(await conn.fetchval(
-                "select count(*) + 1 from crm.sign_requests"))
+                "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
+                "from crm.sign_requests") or 1)
             row = await conn.fetchrow(
                 """
                 insert into crm.sign_requests (no, client_id, rental_id, token,
@@ -3209,7 +3388,8 @@ class CrmDB:
             """, order_id, link, operation_id)
 
     async def mark_pay_paid(self, order_id: int, *, method: str = "card",
-                            by: str | None = None) -> int | None:
+                            by: str | None = None,
+                            shift_id: int | None = None) -> int | None:
         """Оплата подтверждена: счёт закрывается и ровно одной записью
         ложится в журнал. Обе правки в одной транзакции - иначе рестарт
         между ними оставил бы оплаченный счёт без денег в журнале.
@@ -3236,10 +3416,10 @@ class CrmDB:
             ledger_id = int(await conn.fetchval(
                 """
                 insert into crm.ledger (client_id, rental_id, kind, amount,
-                                        method, note, created_by)
-                values ($1, $2, 'payment', $3, $4, $5, $6) returning id
+                                        method, note, created_by, shift_id)
+                values ($1, $2, 'payment', $3, $4, $5, $6, $7) returning id
                 """, order["client_id"], order["rental_id"], order["amount"],
-                method, f"Счёт {order['no']}", by or "эквайринг"))
+                method, f"Счёт {order['no']}", by or "эквайринг", shift_id))
             await conn.execute(
                 "update crm.pay_orders set status = 'paid', paid_at = now(), "
                 "checked_at = now(), ledger_id = $2, error = null where id = $1",

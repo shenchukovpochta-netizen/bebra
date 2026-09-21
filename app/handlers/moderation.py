@@ -660,7 +660,8 @@ async def _return_reply(message: Message, bot: Bot, db: Database,
     # Замечания для акта собираются из формы: акт говорит о состоянии
     # имущества, а причина сдачи и отзывы - это уже отчёт.
     parsed["return_notes"] = logic.close_notes(parsed)
-    parsed["return_date"] = utcnow().strftime("%d.%m.%Y")
+    # Местная дата, не UTC: ночью по Москве акт печатался вчерашним днём.
+    parsed["return_date"] = logic.local_today().strftime("%d.%m.%Y")
     tg_id = target["tg_id"]
     # Из approved или из wait_return_sign (повторные данные) - но не из
     # состояний, где человек ещё что-то подписывает или спрашивает поддержку.

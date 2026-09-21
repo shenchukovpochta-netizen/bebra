@@ -126,6 +126,9 @@ T: dict[str, str] = {
         "reverse side).\n\nIf every detail is already visible on the first "
         "photo, tap the button below."
     ),
+    "DOC_NOT_TAKEN": (
+        "This photo was not accepted: the document step is already done. If you need to retake it, tap «Fill in again»."
+    ),
     "DOC2_NEED_PHOTO": (
         "We need a photo of the second page of the document. Attach an "
         "image or tap «One photo is enough»."

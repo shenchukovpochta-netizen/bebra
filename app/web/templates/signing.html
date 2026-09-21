@@ -44,7 +44,7 @@
     <tr><th>Документ</th><th>SHA-256</th></tr>
     {% for d in req.docs %}
     <tr>
-      <td>{{ d.title }}{% if d.path %} <a href="/signings/{{ req.id }}/doc/{{ loop.index0 }}">открыть</a>{% endif %}</td>
+      <td>{{ d.title }}{% if d.path and can_act(staff, 'client_docs') %} <a href="/signings/{{ req.id }}/doc/{{ loop.index0 }}">открыть</a>{% endif %}</td>
       <td><code class="hash">{{ d.sha256 or '— файла нет, подписывается перечнем' }}</code></td>
     </tr>
     {% endfor %}
