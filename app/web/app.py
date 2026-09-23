@@ -766,8 +766,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/billing/run")
     async def billing_run(request: Request) -> Response:
-        done = await service.charge_all(crm, today=date.today())
-        flash(request, f"Начислений сделано: {done}.")
+        applied: list[dict] = []
+        done = await service.charge_all(crm, today=date.today(), applied=applied)
+        # Скидки по акциям легли вместе с начислениями - клиентам о них
+        # говорит тот, кто начислил, иначе дневной проход их уже не увидит.
+        told = await billing.tell_promos(bot, db, crm, applied)
+        flash(request, f"Начислений сделано: {done}."
+                       + (f" Скидок по акциям: {len(applied)}, уведомлений: {told}."
+                          if applied else ""))
         return redirect("/")
 
     # ─────────────────────── клиенты ───────────────────────
@@ -1529,24 +1535,32 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         promo_error = ""
         if promo_code:
             try:
-                await service.check_promo_code(crm, promo_code, today=date.today())
+                await service.check_promo_code(crm, promo_code, today=date.today(),
+                                               started_on=start)
             except service.ServiceError as exc:
                 promo_error = str(exc)
                 promo_code = ""
         picked = logic.pick_promo(
             await crm.promos(active_only=True),
-            {"period_index": 1, "today": date.today(), "code": promo_code,
+            {"period_index": 1, "period_from": start, "today": max(date.today(), start),
+             "code": promo_code,
              "client_uses": await crm.promo_client_uses(client["id"]),
              **logic.rental_history(await crm.client_rentals(client["id"]), None)},
             tariff["price"])
+        if promo_code and (picked is None
+                           or logic.clean_promo_code(picked[0].get("code")) != promo_code):
+            # Код живой, но этому клиенту не положен - сказать сейчас, а не
+            # молча выдать без скидки.
+            promo_error = (f"Промокод {promo_code} действует, но этому клиенту не "
+                           "подходит: он уже получал эту акцию.")
         discount = picked[1] if picked else Decimal(0)
+        pay_due = max(logic.issue_payment_default(tariff["price"], balance) - discount,
+                      Decimal(0))
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
                    mileage=int(ctx["bike"].get("mileage_km") or 0),
-                   pay_default=plain_amount(max(
-                       logic.issue_payment_default(tariff["price"], balance) - discount,
-                       Decimal(0))),
+                   pay_default=plain_amount(pay_due), pay_due=pay_due,
                    contract_no=(client.get("contract_no")
                                 or (bot_user or {}).get("contract_no") or ""),
                    promo=picked[0] if picked else None, promo_discount=discount,
@@ -1578,8 +1592,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/issue")
     async def issue_create(request: Request) -> Response:
         data = await form(request)
+        # Назад - на тот же шаг с той же датой и кодом: ошибка в одном
+        # поле не должна стирать остальные.
         back = issue_url(client=data.get("client_id"), tariff=data.get("tariff_id"),
-                         bike=data.get("bike_id"))
+                         bike=data.get("bike_id"), started_on=data.get("started_on"),
+                         promo=logic.clean_promo_code(data.get("promo_code")))
         try:
             client = await crm.client(int(data.get("client_id") or 0))
             tariff = await crm.tariff(int(data.get("tariff_id") or 0))
@@ -1620,7 +1637,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # денег, а не выдача без скидки, о которой клиент узнает потом.
         promo_code = logic.clean_promo_code(data.get("promo_code"))
         try:
-            await service.check_promo_code(crm, promo_code, today=date.today())
+            await service.check_promo_code(crm, promo_code, today=date.today(),
+                                           started_on=started.value)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(back)
@@ -1699,8 +1717,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, f"Акция «{got['promo']['title']}»: {logic.money(got['amount'])} "
                            "начислено баллами.")
         if promo_code and not applied:
-            flash(request, f"Промокод {promo_code} к этой выдаче не подошёл: "
-                           "клиент уже получал эту акцию или выбран предел.", "err")
+            if started.value > date.today():
+                flash(request, f"Промокод {promo_code} сохранён на аренде: скидка "
+                               f"начислится {started.value:%d.%m.%Y}, в день начала.")
+            else:
+                flash(request, f"Промокод {promo_code} к этой выдаче не подошёл: "
+                               "клиент уже получал эту акцию или выбран предел.", "err")
         # Пятый шаг мастера: документы и подпись. У них они собираются до
         # аренды, у нас - после: в договор и акт идёт номер велосипеда и
         # дата выдачи, а до открытия аренды их ещё нет. Оператору это
@@ -1891,15 +1913,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, started.error or "Недопустимый режим начисления.", "err")
             return redirect("/rentals/new")
         contract_no = (data.get("contract_no") or "").strip() or client.get("contract_no")
+        applied: list[dict] = []
         try:
             rental_id = await service.open_rental(
                 crm, client=client, bike=bike, tariff=tariff, started_on=started.value,
-                contract_no=contract_no, by=who(request), billing=billing)
+                contract_no=contract_no, by=who(request), billing=billing,
+                applied=applied)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect("/rentals/new")
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
+        await tell_promos(client, applied)
+        for got in applied:
+            flash(request, f"Акция «{got['promo']['title']}»: {logic.money(got['amount'])} "
+                           "начислено баллами.")
         if billing == "manual":
             flash(request, "Аренда оформлена без начисления: записи в журнал делаете вы.")
         elif started.value > date.today():
@@ -4524,8 +4552,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         code = f"promo_{promo_id}"
         existing = next((t for t in await crm.templates() if t["code"] == code), None)
         if existing is not None:
+            # body_max тоже сбрасывается: иначе MAX получал бы прошлый текст.
             await crm.update_template(existing["id"], title=f"Акция: {promo['title']}",
-                                      body=body.value, active=True)
+                                      body=body.value, body_max=None, active=True)
         else:
             await crm.create_template(code=code, title=f"Акция: {promo['title']}",
                                       body=body.value, body_max=None,

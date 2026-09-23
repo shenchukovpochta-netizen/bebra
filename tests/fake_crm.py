@@ -655,7 +655,8 @@ class FakeCrm:
         return True
 
     async def charge_period(self, rental_id, client_id, *, period_from, period_to,
-                            amount, note, created_by="billing", created_at=None):
+                            amount, note, created_by="billing", created_at=None,
+                            bonus=None):
         if any(x["kind"] == "charge" and x["rental_id"] == rental_id
                and x["period_from"] == period_from for x in self.ledger_):
             return False
@@ -665,6 +666,23 @@ class FakeCrm:
                               created_at=created_at)
         r = self.rentals_[rental_id]
         r["billed_until"] = max(r["billed_until"], period_to)
+        if bonus and Decimal(bonus.get("amount") or 0) > 0:
+            self._bonus_unique(client_id, "promo", bonus["promo_id"], rental_id,
+                               period_from)
+            ledger_id = await self.add_ledger(
+                client_id=client_id, rental_id=rental_id, kind="bonus",
+                amount=Decimal(bonus["amount"]), note=bonus.get("note"),
+                created_by=bonus.get("by") or "promo",
+                period_from=period_from, period_to=period_to)
+            bid = self._id()
+            self.bonuses_[bid] = {"id": bid, "client_id": client_id, "kind": "promo",
+                                  "amount": Decimal(bonus["amount"]),
+                                  "ledger_id": ledger_id, "ref_id": None,
+                                  "note": bonus.get("note"),
+                                  "created_by": bonus.get("by") or "promo",
+                                  "promo_id": bonus["promo_id"], "rental_id": rental_id,
+                                  "period_from": period_from,
+                                  "created_at": self._now()}
         return True
 
     async def mark_notified(self, rental_id, today, kind):
@@ -2785,22 +2803,24 @@ class FakeCrm:
         ledger_id = await self.add_ledger(client_id=client_id, kind="bonus",
                                           amount=amount, note=note,
                                           created_by=by, rental_id=rental_id)
-        return await self.record_bonus(client_id=client_id, kind=kind,
-                                       amount=amount, ledger_id=ledger_id,
-                                       ref_id=ref_id, note=note, by=by,
-                                       promo_id=promo_id, rental_id=rental_id,
-                                       period_from=period_from)
+        bid = self._id()
+        self.bonuses_[bid] = {"id": bid, "client_id": client_id, "kind": kind,
+                              "amount": amount, "ledger_id": ledger_id,
+                              "ref_id": ref_id, "note": note, "created_by": by,
+                              "promo_id": promo_id, "rental_id": rental_id,
+                              "period_from": period_from,
+                              "created_at": self._now()}
+        return bid
 
     async def record_bonus(self, *, client_id, kind, amount, ledger_id=None,
-                           ref_id=None, note=None, by=None, promo_id=None,
-                           rental_id=None, period_from=None):
-        self._bonus_unique(client_id, kind, promo_id, rental_id, period_from)
+                           ref_id=None, note=None, by=None):
+        self._bonus_unique(client_id, kind)
         bid = self._id()
         self.bonuses_[bid] = {"id": bid, "client_id": client_id, "kind": kind,
                               "amount": Decimal(amount), "ledger_id": ledger_id,
                               "ref_id": ref_id, "note": note, "created_by": by,
-                              "promo_id": promo_id, "rental_id": rental_id,
-                              "period_from": period_from,
+                              "promo_id": None, "rental_id": None,
+                              "period_from": None,
                               "created_at": self._now()}
         return bid
 

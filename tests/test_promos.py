@@ -252,15 +252,51 @@ class TestPromoFlow(tw.WebCase):
         rid = self.open_rental()
         self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(-2700))
         rental = _run(self.crm.rental(rid))
-        _run(service.charge_due(self.crm, rental=rental, today=date.today()))
-        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(-2700),
-                         "период не начислился второй раз - и скидка тоже")
-        # прямой повтор того же периода упирается в уникальность
-        got = _run(service.apply_promo(self.crm, rental=rental,
-                                       period_from=date.today(), price=D(3000),
-                                       today=date.today()))
-        self.assertIsNone(got)
+        applied = []
+        self.assertEqual(_run(service.charge_due(self.crm, rental=rental,
+                                                 today=date.today(), applied=applied)), 0)
+        self.assertEqual(applied, [], "период не начислился второй раз - и скидка тоже")
         self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(-2700))
+        # начисление и скидка - одна запись за другой, с периодом у обеих
+        rows = [x for x in _run(self.crm.ledger_of(self.client_id)) if x["rental_id"] == rid]
+        self.assertEqual(sorted(x["kind"] for x in rows), ["bonus", "charge"])
+        bonus = next(x for x in rows if x["kind"] == "bonus")
+        self.assertEqual(bonus["period_from"], date.today())
+        self.assertEqual(bonus["period_to"], date.today() + timedelta(days=7))
+        self.assertIn(logic.period_label(date.today(), date.today() + timedelta(days=7)),
+                      bonus["note"])
+
+    def test_discount_is_taken_from_the_bike_price_not_the_extras(self):
+        """Доп. аккумулятор - отдельная позиция: скидка считается от цены
+        велосипеда, ровно той, что оператор видел на шаге выдачи."""
+        self.make("season", percent=10)
+        applied = []
+        _run(service.open_rental(
+            self.crm, client=_run(self.crm.client(self.client_id)),
+            bike=_run(self.crm.bike(self.bike_id)),
+            tariff=_run(self.crm.tariff(self.tariff_id)),
+            started_on=date.today(), contract_no=None, by="t",
+            extras=[{"kind": "battery", "title": "Доп. АКБ", "price": D(500)}],
+            applied=applied))
+        self.assertEqual(applied[0]["amount"], D(300), "10 % от 3000, а не от 3500")
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(-3200))
+
+    def test_comeback_break_is_measured_to_the_start_date(self):
+        self.make("comeback", percent=15, params={"after_days": 30})
+        self.open_rental(started=date.today() - timedelta(days=60))
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        _run(service.close_rental(self.crm, rental,
+                                  closed_on=date.today() - timedelta(days=32), note=None,
+                                  by="t"))
+        # перерыв до начала аренды 22 дня, до сегодня 32: акция не положена
+        applied = []
+        self.open_rental(started=date.today() - timedelta(days=10), applied=applied)
+        self.assertEqual(applied, [])
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        _run(service.close_rental(self.crm, rental, closed_on=date.today(), note=None,
+                                  by="t"))
+        self.assertEqual(logic.rental_history(_run(self.crm.client_rentals(self.client_id)),
+                                              None)["last_closed_on"], date.today())
 
     def test_season_applies_to_every_period_in_window(self):
         self.make("season", percent=10, ends_on=date.today() + timedelta(days=30))
@@ -294,6 +330,11 @@ class TestPromoFlow(tw.WebCase):
         with self.assertRaises(service.ServiceError):
             _run(service.check_promo_code(self.crm, "ЛЕТО", today=date.today()))
         self.assertIsNone(_run(service.check_promo_code(self.crm, "", today=date.today())))
+        # код действует сегодня, но к дате начала аренды выйдет срок
+        _run(self.crm.update_promo(pid, ends_on=date.today() + timedelta(days=2)))
+        with self.assertRaises(service.ServiceError):
+            _run(service.check_promo_code(self.crm, "ВЕСНА", today=date.today(),
+                                          started_on=date.today() + timedelta(days=5)))
         applied = []
         self.open_rental(code="весна", applied=applied)
         self.assertEqual(applied[0]["amount"], D(600))
@@ -332,6 +373,21 @@ class TestPromoFlow(tw.WebCase):
         applied = []
         self.open_rental(code="ЕЩЁ", applied=applied)
         self.assertEqual(applied, [], "промокод один раз на клиента, первая выключена")
+
+    def test_billing_run_button_tells_the_client_too(self):
+        """«Начислить» в панели - те же скидки, что и дневной проход,
+        и клиенту о них говорит тот, кто начислил."""
+        self.make("season", percent=10)
+        self.open_rental(started=date.today() - timedelta(days=8))
+        self.bot.sent.clear()
+        # следующий период наступит через 6 дней: сдвигаем его сегодня
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        self.crm.rentals_[rental["id"]]["billed_until"] = date.today()
+        r = self.client.post("/billing/run")
+        self.assertEqual(r.status_code, 303)
+        self.assertTrue(any(chat == 5001 and "300 ₽" in t for chat, t in self.bot.sent),
+                        self.bot.sent)
+        self.assertIn("Скидок по акциям: 1", self.get_ok("/"))
 
     def test_daily_pass_tells_the_client(self):
         self.make("season", percent=10)
@@ -440,6 +496,62 @@ class TestPromoPages(tw.WebCase):
             started_on=date.today(), contract_no=None, by="t", applied=applied))
         self.assertEqual(applied, [])
 
+    def test_future_issue_keeps_the_code_without_a_false_error(self):
+        _run(self.crm.create_promo(
+            kind="promocode", title="Завтра", percent=10, amount=None, code="ЗАВТРА",
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        start = date.today() + timedelta(days=2)
+        r = self.client.post("/issue", data={"client_id": self.client_id,
+                                             "tariff_id": self.tariff_id,
+                                             "bike_id": self.bike_id,
+                                             "started_on": start.isoformat(),
+                                             "pay_amount": "2700", "pay_method": "cash",
+                                             "mileage": "10", "promo_code": "завтра"})
+        self.assertEqual(r.status_code, 303)
+        page = self.get_ok(r.headers["location"])
+        self.assertNotIn("не подошёл", page)
+        self.assertIn("сохранён на аренде", page)
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        self.assertEqual(rental["promo_code"], "ЗАВТРА")
+
+    def test_bad_form_keeps_code_and_date_on_the_way_back(self):
+        _run(self.crm.create_promo(
+            kind="promocode", title="Весна", percent=20, amount=None, code="ВЕСНА",
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        start = date.today() + timedelta(days=1)
+        r = self.client.post("/issue", data={"client_id": self.client_id,
+                                             "tariff_id": self.tariff_id,
+                                             "bike_id": self.bike_id,
+                                             "started_on": start.isoformat(),
+                                             "pay_amount": "много", "pay_method": "cash",
+                                             "mileage": "10", "promo_code": "весна"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("promo=%D0%92%D0%95%D0%A1%D0%9D%D0%90", r.headers["location"])
+        self.assertIn(f"started_on={start.isoformat()}", r.headers["location"])
+        page = self.get_ok(r.headers["location"])
+        self.assertIn("Акция «Весна»", page)
+
+    def test_check_says_when_the_code_does_not_fit_this_client(self):
+        _run(self.crm.create_promo(
+            kind="promocode", title="Весна", percent=20, amount=None, code="ВЕСНА",
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        # клиент уже получал эту акцию
+        _run(service.open_rental(
+            self.crm, client=_run(self.crm.client(self.client_id)),
+            bike=_run(self.crm.bike(self.bike_id)),
+            tariff=_run(self.crm.tariff(self.tariff_id)),
+            started_on=date.today(), contract_no=None, by="t", promo_code="ВЕСНА"))
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        _run(service.close_rental(self.crm, rental, closed_on=date.today(), note=None,
+                                  by="t"))
+        base = f"/issue?client={self.client_id}&tariff={self.tariff_id}&bike={self.bike_id}"
+        page = self.get_ok(base + "&promo=ВЕСНА")
+        self.assertIn("этому клиенту не подходит", page)
+        self.assertNotIn("Акция «Весна»", page)
+
     def test_issue_step_shows_discount_and_checks_code(self):
         _run(self.crm.create_promo(
             kind="promocode", title="Весна", percent=20, amount=None, code="ВЕСНА",
@@ -494,6 +606,7 @@ class TestPromoPages(tw.WebCase):
         templates = _run(self.crm.templates())
         self.assertEqual(len(templates), 1, "второй раз - тот же шаблон")
         self.assertEqual(templates[0]["body"], "Код ВЕСНА даёт 25 %")
+        self.assertIsNone(templates[0]["body_max"], "MAX берёт основной текст")
 
     def test_manager_sees_but_does_not_edit(self):
         manager = _run(self.crm.access_profile_by_code("manager"))

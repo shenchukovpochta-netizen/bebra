@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-import json
 import re
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -776,13 +776,19 @@ class CrmDB:
     async def charge_period(self, rental_id: int, client_id: int, *,
                             period_from: date, period_to: date, amount: Decimal,
                             note: str, created_by: str = "billing",
-                            created_at: datetime | None = None) -> bool:
+                            created_at: datetime | None = None,
+                            bonus: Mapping[str, Any] | None = None) -> bool:
         """Начислить период и сдвинуть billed_until - одной транзакцией.
 
         Повтор того же периода (второй проход, ручной запуск) упирается
         в уникальный индекс и возвращает False, ничего не списав.
         created_at задаёт только импорт: записи из таблицы датируются
         днём выдачи, а не днём загрузки, чтобы не раздувать текущий месяц.
+
+        `bonus` - скидка по акции на этот же период: строка журнала
+        видом bonus и повод в crm.bonuses ложатся в ту же транзакцию,
+        что и начисление. Порознь сбой между ними оставлял бы клиента
+        с долгом, а обещанную скидку - без пути повторить.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             try:
@@ -799,6 +805,22 @@ class CrmDB:
             await conn.execute(
                 "update crm.rentals set billed_until = greatest(billed_until, $2), "
                 "updated_at = now() where id = $1", rental_id, period_to)
+            if bonus and _money(bonus.get("amount")):
+                ledger_id = int(await conn.fetchval(
+                    """
+                    insert into crm.ledger (client_id, rental_id, kind, amount,
+                                            period_from, period_to, note, created_by)
+                    values ($1, $2, 'bonus', $3, $4, $5, $6, $7) returning id
+                    """, client_id, rental_id, _money(bonus["amount"]), period_from,
+                    period_to, bonus.get("note"), bonus.get("by") or "promo"))
+                await conn.execute(
+                    """
+                    insert into crm.bonuses (client_id, kind, amount, ledger_id, note,
+                                             created_by, promo_id, rental_id, period_from)
+                    values ($1, 'promo', $2, $3, $4, $5, $6, $7, $8)
+                    """, client_id, _money(bonus["amount"]), ledger_id, bonus.get("note"),
+                    bonus.get("by") or "promo", int(bonus["promo_id"]), rental_id,
+                    period_from)
             return True
 
     async def mark_notified(self, rental_id: int, today: date, kind: str) -> None:
@@ -3739,12 +3761,14 @@ class CrmDB:
                                     text, note, created_by)
             values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13)
             returning id
-            """, kind, title, percent, _money(amount), code, json.dumps(params),
+            """, kind, title, percent, _money(amount), code, dict(params or {}),
             starts_on, ends_on, max_uses, once_per_client, text, note, by))
 
     async def update_promo(self, promo_id: int, **fields: Any) -> None:
+        # jsonb кодирует кодек пула (app/db.py): словарь уходит как есть,
+        # json.dumps здесь превратил бы объект в строку внутри jsonb.
         if "params" in fields:
-            fields["params"] = json.dumps(fields["params"])
+            fields["params"] = dict(fields["params"] or {})
         if "amount" in fields:
             fields["amount"] = _money(fields["amount"])
         sets, values = _set_clause(fields, PROMO_FIELDS, 2)

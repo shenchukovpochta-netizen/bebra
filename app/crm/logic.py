@@ -5184,7 +5184,8 @@ def clean_promo_code(raw: Any) -> str:
 
 def promo_params(promo: Mapping[str, Any]) -> dict[str, int]:
     """Параметры акции поверх умолчаний шаблона: чужие ключи и мусор
-    отбрасываются, число в строке (jsonb без кодека) читается."""
+    отбрасываются; строка вместо словаря (заглушка, старая запись)
+    разбирается, а не роняет."""
     kind = str(promo.get("kind") or "")
     defaults = dict(PROMO_KINDS.get(kind, {}).get("params", {}))
     raw = promo.get("params")
@@ -5205,7 +5206,8 @@ def promo_params(promo: Mapping[str, Any]) -> dict[str, int]:
 
 
 def promo_discount(promo: Mapping[str, Any], price: Any) -> Decimal:
-    """Скидка с цены периода: процент или сумма, не больше самой цены."""
+    """Скидка с цены велосипеда за период: процент или сумма, не больше
+    самой цены. Доп. аккумулятор - отдельная позиция, в скидку не входит."""
     price = to_money(price)
     if price <= 0:
         return Decimal(0)
@@ -5242,10 +5244,11 @@ def promo_alive(promo: Mapping[str, Any], *, today: date) -> bool:
 def promo_fits(promo: Mapping[str, Any], ctx: Mapping[str, Any]) -> bool:
     """Подходит ли акция к этому начислению.
 
-    `ctx`: period_index (1 - первый период аренды), today, code (промокод,
-    названный на выдаче), previous_rentals (сколько аренд у клиента было
-    до этой), last_closed_on (когда закрылась последняя из них),
-    client_uses ({promo_id: сколько раз клиент уже получал эту акцию}).
+    `ctx`: period_index (1 - первый период аренды), period_from (его
+    начало), today, code (промокод, названный на выдаче), previous_rentals
+    (сколько аренд у клиента было до этой), last_closed_on (когда
+    закрылась последняя из них), client_uses ({promo_id: сколько раз
+    клиент уже получал эту акцию}).
     """
     kind = str(promo.get("kind") or "")
     if kind not in PROMO_KINDS:
@@ -5264,7 +5267,10 @@ def promo_fits(promo: Mapping[str, Any], ctx: Mapping[str, Any]) -> bool:
         last = ctx.get("last_closed_on")
         if last is None or not int(ctx.get("previous_rentals") or 0):
             return False
-        return (ctx["today"] - last).days >= params["after_days"]
+        # Перерыв - до начала аренды, а не до дня начисления: выдача задним
+        # числом не делает перерыв длиннее, чем он был.
+        since = ctx.get("period_from") or ctx["today"]
+        return (since - last).days >= params["after_days"]
     if kind == "promocode":
         code = clean_promo_code(ctx.get("code"))
         return bool(code) and code == clean_promo_code(promo.get("code"))

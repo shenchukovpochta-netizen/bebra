@@ -186,7 +186,8 @@
        баллы после оплаты. Скидка ляжет баллами следом за начислением. #}
     {% if promo %}
     <p class="flash">Акция «{{ promo.title }}»: скидка <b>{{ money(promo_discount) }}</b>
-      начислится баллами — к оплате <b>{{ money(tariff.price - promo_discount) }}</b>.</p>
+      с цены велосипеда начислится баллами — к оплате <b>{{ money(pay_due) }}</b>{% if balance > 0 %} с учётом баланса{% endif %}.
+      <span class="muted">Доп. аккумулятор в скидку не входит.</span></p>
     {% endif %}
     {% if promo_error %}<p class="flash err">{{ promo_error }}</p>{% endif %}
     <label>Принять сейчас, ₽ <input name="pay_amount" inputmode="decimal" value="{{ pay_default }}"></label>

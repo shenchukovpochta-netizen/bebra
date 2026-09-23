@@ -321,7 +321,12 @@ async def tell_promos(bot: Any, db: Any, crm: Any, applied: list[dict]) -> int:
     """Клиентам о сработавших акциях: одно сообщение на скидку."""
     sent = 0
     for got in applied:
-        client = await crm.client(got["client_id"])
+        try:
+            client = await crm.client(got["client_id"])
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: клиент %s для уведомления об акции не прочитан",
+                          got.get("client_id"))
+            continue
         if client is None:
             continue
         ok = await notices.send_client(
@@ -373,9 +378,12 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
             log.exception("CRM: проход начислений не удался")
         # Скидки по акциям уже в журнале - сообщение о них клиенту
         # доставляется отдельно и начисление не откатывает.
-        told = await tell_promos(bot, db, crm, applied)
-        if told:
-            log.info("CRM: уведомлений о скидках отправлено %s", told)
+        try:
+            told = await tell_promos(bot, db, crm, applied)
+            if told:
+                log.info("CRM: уведомлений о скидках отправлено %s", told)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: уведомления о скидках не ушли")
 
     digest = ""
     # Напоминания об аренде: три кода со своими часами, но один проход

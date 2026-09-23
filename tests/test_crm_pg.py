@@ -2111,14 +2111,25 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             started_on=date.today(), contract_no="АВ-1", by="t", applied=applied)
         self.assertEqual(len(applied), 1)
         self.assertEqual((await self.crm.rental(rid))["balance"], D("-2700.00"))
-        # повтор того же периода упирается в индекс: ни баллов, ни строки журнала
-        again = await service.apply_promo(self.crm, rental=await self.crm.rental(rid),
-                                          period_from=date.today(), price=D(3000),
-                                          today=date.today())
-        self.assertIsNone(again)
+        # повтор того же периода упирается в индекс начисления: вся
+        # транзакция откатывается, ни баллов, ни строки журнала
+        promo = (await self.crm.promos())[0]
+        again = await self.crm.charge_period(
+            rid, self.client_id, period_from=date.today(),
+            period_to=date.today() + timedelta(days=7), amount=D(-3000), note="повтор",
+            bonus={"promo_id": promo["id"], "amount": D(300), "note": "повтор", "by": "t"})
+        self.assertFalse(again)
         self.assertEqual((await self.crm.rental(rid))["balance"], D("-2700.00"))
         rows = await self.crm.ledger_of(self.client_id)
         self.assertEqual(sorted(r["kind"] for r in rows), ["bonus", "charge"])
+        bonus = next(r for r in rows if r["kind"] == "bonus")
+        self.assertEqual(bonus["period_from"], date.today())
+        self.assertEqual(bonus["rental_id"], rid)
+        # jsonb хранит объект, а не строку: кодек пула кодирует сам
+        self.assertEqual(await self.pool.fetchval(
+            "select jsonb_typeof(params) from crm.promos where id = $1", promo["id"]),
+            "object")
+        self.assertEqual(promo["params"], {})
         self.assertEqual(await self.crm.rental_revenue(
             datetime.now(UTC) - timedelta(days=1), datetime.now(UTC)), D(0),
             "скидка в выручку среднего чека не попала")
