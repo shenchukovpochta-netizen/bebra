@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 import unittest
 from datetime import UTC, date, datetime, timedelta
@@ -351,6 +352,57 @@ class TestTeamNoticeAddress(tw.WebCase):
         self.assertFalse(tw.run(paying.report_paid(self.bot, self.crm, self.cfg,
                                                    order)))
         self.assertEqual(self.bot.sent, [])
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/starlette")
+class TestStaticCache(tw.WebCase):
+    """Метка сборки в адресе стилей.
+
+    Без неё браузер держал старую таблицу стилей после обновления
+    панели: `StaticFiles` не шлёт `Cache-Control`, и новая разметка
+    ехала по чужим стилям - боковое меню разваливалось в столбец, а
+    технический чекбокс вылезал полем во всю ширину.
+    """
+
+    def test_stylesheets_carry_a_build_stamp(self):
+        self.login()
+        page = self.get_ok("/")
+        self.assertRegex(page, r'/static/style\.css\?v=[0-9a-f]{8}"')
+        self.assertRegex(page, r'/static/fonts\.css\?v=[0-9a-f]{8}"')
+
+    def test_stamp_changes_when_a_file_changes(self):
+        from app.web.app import static_stamp
+        folder = Path(tempfile.mkdtemp())
+        (folder / "style.css").write_text("a{}")
+        before = static_stamp(folder)
+        (folder / "style.css").write_text("a{color:red}")
+        os.utime(folder / "style.css", (0, 0))
+        self.assertNotEqual(static_stamp(folder), before)
+        self.assertEqual(len(before), 8)
+
+    def test_pages_are_never_cached_and_static_is(self):
+        """Страница с балансом и телефоном клиента в памяти браузера не
+        остаётся; версионированная статика, наоборот, живёт долго."""
+        self.login()
+        page = self.client.get("/")
+        self.assertEqual(page.headers.get("cache-control"), "no-store")
+        css = self.client.get("/static/style.css?v=abc")
+        self.assertEqual(css.status_code, 200)
+        self.assertIn("max-age=31536000", css.headers.get("cache-control", ""))
+        # Без метки год давать нельзя: на шрифты ссылается сам fonts.css,
+        # и подменённый файл иначе не подхватился бы до конца года.
+        bare = self.client.get("/static/style.css")
+        self.assertEqual(bare.headers.get("cache-control"), "no-cache")
+        self.assertEqual(self.client.get("/static/нет.css").status_code, 404)
+
+    def test_hidden_beats_the_input_rule(self):
+        """Правило `input{display:block}` сильнее браузерного
+        `[hidden]{display:none}` - скрытое надо защитить явно."""
+        root = Path(__file__).resolve().parent.parent
+        css = (root / "app/web/static/style.css").read_text()
+        hidden = css.index("[hidden]{display:none !important}")
+        fields = css.index("input,select,textarea{display:block")
+        self.assertLess(hidden, fields, "защита стоит до правила полей")
 
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/starlette")

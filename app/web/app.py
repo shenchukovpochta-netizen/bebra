@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import logging
 import os
@@ -207,11 +208,56 @@ def _iso(value: Any) -> str:
     return value.strftime("%Y-%m-%d") if isinstance(value, date) else ""
 
 
+def static_stamp(folder: Path) -> str:
+    """Отпечаток статики: им помечены ссылки на style.css и fonts.css.
+
+    Без метки браузер держит старую таблицу стилей после обновления:
+    `StaticFiles` не шлёт `Cache-Control`, и браузер кэширует файл по
+    своему усмотрению - на часы. Панель после деплоя выглядела сломанной
+    (новая разметка со старыми стилями), а лечилось это только
+    Ctrl+Shift+R, о котором оператору знать неоткуда.
+
+    Считается один раз на старте по именам, размерам и времени правки:
+    читать файлы целиком ради восьми знаков незачем.
+    """
+    parts = []
+    for item in sorted(folder.rglob("*")):
+        if item.is_file():
+            stat = item.stat()
+            parts.append(f"{item.name}:{stat.st_size}:{int(stat.st_mtime)}")
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:8]
+
+
+class CachedStatic(StaticFiles):
+    """Статика с честным сроком жизни в кэше.
+
+    Год - только тем адресам, где есть метка сборки (`?v=`): такой файл
+    по этому адресу уже не изменится, а новый придёт по новому адресу.
+    Остальным - `no-cache`: это шрифты, на которые ссылается сам
+    `fonts.css` без метки, и подменённый файл должен подхватиться сразу.
+    Проверка стоит один запрос и отвечает 304.
+
+    Без заголовков вовсе браузер решает сам и держит вчерашний
+    `style.css` часами: панель после обновления выглядит сломанной.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code != 200:
+            return response
+        stamped = b"v=" in dict(scope).get("query_string", b"")
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if stamped else "no-cache")
+        return response
+
+
 def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI:
     app = FastAPI(title=cfg.title, docs_url=None, redoc_url=None, openapi_url=None)
-    app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+    app.mount("/static", CachedStatic(directory=str(HERE / "static")),
+              name="static")
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.globals.update(
+        static_v=static_stamp(HERE / "static"),
         money=logic.money, money_signed=logic.money_signed, period_label=logic.period_label,
         per_day=logic.per_day,
         KINDS=logic.KINDS, METHODS=logic.METHODS, BIKE_STATUSES=logic.BIKE_STATUSES,
@@ -291,7 +337,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if messages:
             request.session["flash"] = []
         ctx.update(staff=getattr(request.state, "staff", None), flash=messages)
-        return templates.TemplateResponse(request, name, ctx, status_code=status_code)
+        page = templates.TemplateResponse(request, name, ctx, status_code=status_code)
+        # Страницы панели не кэшируются вовсе: на них баланс клиента, его
+        # телефон и статус аренды, а кнопка «назад» после выхода не должна
+        # показывать чужую карточку из памяти браузера. Заодно после
+        # обновления панели не остаётся вчерашней разметки.
+        page.headers["Cache-Control"] = "no-store"
+        return page
 
     def flash(request: Request, text: str, kind: str = "ok") -> None:
         # Присваивание, а не append: сессия Starlette пишет cookie только

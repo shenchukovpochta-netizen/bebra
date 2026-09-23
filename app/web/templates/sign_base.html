@@ -7,8 +7,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>{% block title %}Подписание документов{% endblock %}</title>
-<link rel="stylesheet" href="/static/fonts.css">
-<link rel="stylesheet" href="/static/style.css">
+{# Метка сборки в адресе: без неё браузер держит старые стили после
+   обновления панели, и новая разметка едет по чужой таблице. #}
+<link rel="stylesheet" href="/static/fonts.css?v={{ static_v }}">
+<link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
 </head>
 <body class="sign-body">
 <main class="sign-main">
