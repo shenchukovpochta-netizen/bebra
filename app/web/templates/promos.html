@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Акции — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Акции</h1>
+  {% if can_view(staff, 'mailing') %}<a class="btn ghost" href="/mailing">Рассылки</a>{% endif %}
+  {% if can_view(staff, 'reports') and can_view(staff, 'finance') %}<a class="btn ghost" href="/reports/referrals">Приглашения</a>{% endif %}
+</div>
+
+<div class="tiles">
+  <div class="tile"><b>{{ totals.active }}</b><span>действует<br><small class="muted">всего заведено {{ totals.count }}</small></span></div>
+  <div class="tile"><b>{{ totals.uses }}</b><span>раз сработали</span></div>
+  <div class="tile"><b>{{ money(totals.total) }}</b><span>роздано баллами<br><small class="muted">не деньги, наша скидка</small></span></div>
+</div>
+
+{# Шаблоны - карточками: акция заводится в два клика, параметры уже
+   подставлены. Свободного вида «придумайте сами» нет намеренно: правило,
+   которого нет в коде, начислять некому. #}
+{% if can_edit(staff, 'promos') %}
+<h2>Завести по шаблону</h2>
+<div class="kinds">
+  {% for code, spec in PROMO_KINDS.items() %}
+  <div class="kind">
+    <b>{{ spec.title }}</b>
+    <small>{{ spec.hint }}</small>
+    <small class="when">Срабатывает: {{ spec.when }}</small>
+    <a class="btn" href="/promos/new?kind={{ code }}">Создать</a>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Акции</h2>
+  <table>
+    <tr><th>Акция</th><th>Шаблон</th><th>Скидка</th><th class="opt">Условие</th><th class="opt">Действует</th><th class="num">Сработала</th><th class="num">Роздано</th><th>Статус</th></tr>
+    {% for p in rows %}
+    {% set spec = PROMO_KINDS.get(p.kind, {}) %}
+    {% set params = promo_params(p) %}
+    <tr class="{% if not p.active %}muted{% endif %}">
+      <td><a href="/promos/{{ p.id }}"><b>{{ p.title }}</b></a>{% if p.code %} <code>{{ p.code }}</code>{% endif %}</td>
+      <td>{{ spec.get('title', p.kind) }}</td>
+      <td>{{ promo_discount_label(p) }}</td>
+      <td class="opt muted">{% for key, value in params.items() %}{{ PROMO_PARAM_LABELS[key] }}: {{ value }}{% if not loop.last %} · {% endif %}{% else %}{{ spec.get('when', '') }}{% endfor %}{% if p.once_per_client %} · один раз на клиента{% endif %}</td>
+      <td class="opt">{% if p.starts_on or p.ends_on %}{{ p.starts_on|dmy if p.starts_on else '…' }} — {{ p.ends_on|dmy if p.ends_on else '…' }}{% else %}<span class="muted">без срока</span>{% endif %}{% if p.max_uses %}<br><small class="muted">не больше {{ p.max_uses }} раз</small>{% endif %}</td>
+      <td class="num">{{ p.uses }}</td>
+      <td class="num">{{ money(p.total) }}</td>
+      <td>{% if not p.active %}<span class="tag">выключена</span>{% elif p.ends_on and p.ends_on < today %}<span class="tag">срок вышел</span>{% elif p.starts_on and p.starts_on > today %}<span class="tag">ещё не началась</span>{% elif p.max_uses and p.uses >= p.max_uses %}<span class="tag">предел выбран</span>{% else %}<span class="tag ok">действует</span>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="8" class="muted">Акций ещё нет. Выберите шаблон выше — параметры уже подставлены.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Скидка ложится клиенту баллами, как бонус за друга или за
+    отзыв: она меняет баланс, но платежом не считается — средний чек парка
+    считается по платежам, и скидка его не завышает. На одно начисление
+    периода срабатывает одна акция, выгоднейшая для клиента.</p>
+</div>
+
+{% if recent %}
+<div class="card">
+  <h2>Последние скидки</h2>
+  <table>
+    <tr><th>Когда</th><th>Клиент</th><th>Акция</th><th class="num">Сумма</th></tr>
+    {% for b in recent %}
+    <tr>
+      <td class="nowrap muted">{{ b.created_at|dmy }}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}</td>
+      <td>{% if b.promo_id %}<a href="/promos/{{ b.promo_id }}">{{ b.promo_title or b.note }}</a>{% else %}{{ b.note or '—' }}{% endif %}</td>
+      <td class="num">{{ money(b.amount) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}

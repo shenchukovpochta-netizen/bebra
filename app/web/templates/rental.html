@@ -14,6 +14,7 @@
       {%- else %}<span class="muted">не указан</span>{% endif %}</dd>
     <dt>Тариф</dt><dd>{{ rental.tariff_name }}{% if money_ok %} — {{ money(rental.price) }}{% endif %} / {{ rental.period_days }} дн., {{ BILLING[rental.billing] }}</dd>
     <dt>Договор</dt><dd>{{ rental.contract_no or '—' }}</dd>
+    {% if rental.promo_code %}<dt>Промокод</dt><dd><code>{{ rental.promo_code }}</code></dd>{% endif %}
     <dt>Начало</dt><dd>{{ rental.started_on|dmy }} · {% if rental.status == 'active' %}идёт{% else %}шла{% endif %} <b>{{ days_running }}</b> сут.</dd>
     <dt>Начислено по</dt><dd>{{ rental.billed_until|dmy }}</dd>
     {% set km = ridden(rental) %}

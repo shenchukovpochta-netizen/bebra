@@ -448,6 +448,7 @@ T: dict[str, str] = {
     "CAB_FRIENDS_EMPTY": 'अभी तक आपके लिंक से कोई नहीं आया।',
     "CAB_FRIENDS_OFF": '👥 <b>मेरे दोस्त</b>\n\nनिमंत्रण कार्यक्रम अभी बंद है।',
     "CAB_REF_BONUS": '🎁 आपके दोस्त {name} ने किराया लिया और पहला भुगतान किया।\n{amount} बोनस आपके बैलेंस में जोड़ दिया गया। धन्यवाद!',
+    "CAB_PROMO_APPLIED": '🎉 ऑफ़र «{title}»: आपको {amount} पॉइंट्स मिले।\nबैलेंस: {balance}.{text}',
     "BTN_CABINET": '🚲 मेरा कैबिनेट',
     "BTN_CAB_TOPUP": '💳 बैलेंस भरें',
     "BTN_CAB_HISTORY": '🧾 इतिहास',

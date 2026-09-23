@@ -465,6 +465,7 @@ T: dict[str, str] = {
     "CAB_FRIENDS_EMPTY": 'Hozircha havolangiz orqali hech kim kelmadi.',
     "CAB_FRIENDS_OFF": "👥 <b>Do'stlarim</b>\n\nTaklif dasturi hozir o'chirilgan.",
     "CAB_REF_BONUS": "🎁 Do'stingiz {name} ijara rasmiylashtirdi va birinchi to'lovni qildi.\n{amount} bonus balansingizga qo'shildi. Rahmat!",
+    "CAB_PROMO_APPLIED": "🎉 «{title}» aksiyasi: sizga {amount} ball qo'shildi.\nBalans: {balance}.{text}",
     "BTN_CABINET": '🚲 Mening kabinetim',
     "BTN_CAB_TOPUP": "💳 Balansni to'ldirish",
     "BTN_CAB_HISTORY": '🧾 Tarix',

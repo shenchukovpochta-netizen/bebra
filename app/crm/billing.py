@@ -317,6 +317,22 @@ async def report_ref_spikes(bot: Any, crm: Any, cfg: Any, *, today: date,
 TRACK_KEEP_DAYS = 30
 
 
+async def tell_promos(bot: Any, db: Any, crm: Any, applied: list[dict]) -> int:
+    """Клиентам о сработавших акциях: одно сообщение на скидку."""
+    sent = 0
+    for got in applied:
+        client = await crm.client(got["client_id"])
+        if client is None:
+            continue
+        ok = await notices.send_client(
+            crm, "promo_applied", client["id"],
+            lambda c=client, g=got: notify.promo_applied(
+                bot, db, crm, c, g["promo"], g["amount"],
+                period_index=g.get("period_index") or 0))
+        sent += 1 if ok else 0
+    return sent
+
+
 async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
                     now: datetime | None = None,
                     done: dict[str, date] | None = None) -> None:
@@ -344,8 +360,9 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
     # Начисления - не уведомление, тумблера у них нет: это деньги.
     # Один раз в сутки, в тот же час, что и раньше.
     if manual or done.get("charge") != today:
+        applied: list[dict] = []
         try:
-            charged = await service.charge_all(crm, today=today)
+            charged = await service.charge_all(crm, today=today, applied=applied)
             # Отметка - после прохода, а не до: сбой базы в начисленный
             # час иначе оставлял бы парк без начислений до завтра.
             # Повтор безвреден, период защищён уникальным индексом.
@@ -354,6 +371,11 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
                 log.info("CRM: начислений сделано %s", charged)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: проход начислений не удался")
+        # Скидки по акциям уже в журнале - сообщение о них клиенту
+        # доставляется отдельно и начисление не откатывает.
+        told = await tell_promos(bot, db, crm, applied)
+        if told:
+            log.info("CRM: уведомлений о скидках отправлено %s", told)
 
     digest = ""
     # Напоминания об аренде: три кода со своими часами, но один проход

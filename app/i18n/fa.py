@@ -445,6 +445,7 @@ T: dict[str, str] = {
     "CAB_FRIENDS_EMPTY": 'هنوز کسی از پیوند شما نیامده است.',
     "CAB_FRIENDS_OFF": '👥 <b>دوستان من</b>\n\nبرنامه دعوت در حال حاضر خاموش است.',
     "CAB_REF_BONUS": '🎁 دوست شما {name} اجاره گرفت و اولین پرداخت را انجام داد.\nپاداش {amount} به موجودی شما افزوده شد. سپاسگزاریم!',
+    "CAB_PROMO_APPLIED": '🎉 کمپین «{title}»: {amount} امتیاز برای شما ثبت شد.\nموجودی: {balance}.{text}',
     "BTN_CABINET": '🚲 کابینت من',
     "BTN_CAB_TOPUP": '💳 شارژ موجودی',
     "BTN_CAB_HISTORY": '🧾 تاریخچه',

@@ -58,6 +58,7 @@ class FakeCrm:
         self.bank_: dict[int, dict] = {}
         self.pay_orders_: dict[int, dict] = {}
         self.notices_: dict[str, dict] = {}
+        self.promos_: dict[int, dict] = {}
         self.bonuses_: dict[int, dict] = {}
         self.doc_templates_: dict[int, dict] = {}
         self.marks_: dict[str, dict] = {}
@@ -573,7 +574,8 @@ class FakeCrm:
 
     async def create_rental(self, *, client_id, bike_id, tariff_id, tariff_name,
                             period_days, price, billing, started_on, contract_no,
-                            created_by, mileage_start=None, base_price=None):
+                            created_by, mileage_start=None, base_price=None,
+                            promo_code=None):
         if self._active(client_id) is not None:
             raise UniqueError("rentals_active_client_idx")
         if bike_id is not None and any(r["bike_id"] == bike_id and r["status"] == "active"
@@ -592,6 +594,7 @@ class FakeCrm:
                               "intent": None, "intent_until": None, "intent_by": None,
                               "intent_at": None, "snooze_until": None,
                               "mileage_start": mileage_start, "mileage_end": None,
+                              "promo_code": promo_code,
                               "created_by": created_by, "created_at": self._now(),
                               "updated_at": self._now()}
         if bike_id is not None:
@@ -2760,42 +2763,56 @@ class FakeCrm:
 
     # ─────────────────── баллы ───────────────────
 
-    def _bonus_unique(self, client_id, kind):
+    def _bonus_unique(self, client_id, kind, promo_id=None, rental_id=None,
+                      period_from=None):
         if kind in ("review", "friend") and any(
                 b["client_id"] == client_id and b["kind"] == kind
                 for b in self.bonuses_.values()):
             raise UniqueError(f"bonuses_{kind}_once")
+        if promo_id is not None and rental_id is not None and any(
+                b.get("promo_id") == promo_id and b.get("rental_id") == rental_id
+                and b.get("period_from") == period_from
+                for b in self.bonuses_.values()):
+            raise UniqueError("bonuses_promo_period_once")
 
     async def grant_bonus(self, *, client_id, kind, amount, note=None,
-                          ref_id=None, by=None):
+                          ref_id=None, by=None, promo_id=None, rental_id=None,
+                          period_from=None):
         amount = Decimal(amount)
         if amount <= 0:
             return None
-        self._bonus_unique(client_id, kind)
+        self._bonus_unique(client_id, kind, promo_id, rental_id, period_from)
         ledger_id = await self.add_ledger(client_id=client_id, kind="bonus",
                                           amount=amount, note=note,
-                                          created_by=by)
+                                          created_by=by, rental_id=rental_id)
         return await self.record_bonus(client_id=client_id, kind=kind,
                                        amount=amount, ledger_id=ledger_id,
-                                       ref_id=ref_id, note=note, by=by)
+                                       ref_id=ref_id, note=note, by=by,
+                                       promo_id=promo_id, rental_id=rental_id,
+                                       period_from=period_from)
 
     async def record_bonus(self, *, client_id, kind, amount, ledger_id=None,
-                           ref_id=None, note=None, by=None):
-        self._bonus_unique(client_id, kind)
+                           ref_id=None, note=None, by=None, promo_id=None,
+                           rental_id=None, period_from=None):
+        self._bonus_unique(client_id, kind, promo_id, rental_id, period_from)
         bid = self._id()
         self.bonuses_[bid] = {"id": bid, "client_id": client_id, "kind": kind,
                               "amount": Decimal(amount), "ledger_id": ledger_id,
                               "ref_id": ref_id, "note": note, "created_by": by,
+                              "promo_id": promo_id, "rental_id": rental_id,
+                              "period_from": period_from,
                               "created_at": self._now()}
         return bid
 
     async def bonuses(self, *, client_id=None, kind=None, since=None,
-                      until=None, limit=500):
+                      until=None, limit=500, promo_id=None):
         rows = []
         for b in sorted(self.bonuses_.values(), key=lambda x: -x["id"]):
             if client_id is not None and b["client_id"] != client_id:
                 continue
             if kind and b["kind"] != kind:
+                continue
+            if promo_id is not None and b.get("promo_id") != promo_id:
                 continue
             day = b["created_at"].date()
             if since and day < since:
@@ -2803,9 +2820,75 @@ class FakeCrm:
             if until and day > until:
                 continue
             client = self.clients_.get(b["client_id"], {})
+            promo = self.promos_.get(b.get("promo_id") or 0, {})
             rows.append({**b, "full_name": client.get("full_name"),
-                         "phone": client.get("phone")})
+                         "phone": client.get("phone"),
+                         "promo_title": promo.get("title")})
         return rows[:limit]
+
+    # ─────────────────── акции ───────────────────
+
+    def _promo_row(self, p):
+        grants = [b for b in self.bonuses_.values() if b.get("promo_id") == p["id"]]
+        return {**p, "uses": len(grants),
+                "total": sum((b["amount"] for b in grants), Decimal(0))}
+
+    def _promo_code_unique(self, code, active, promo_id=None):
+        if not active or not code:
+            return
+        if any(p["active"] and p.get("code") and p["code"].upper() == code.upper()
+               and p["id"] != promo_id for p in self.promos_.values()):
+            raise UniqueError("promos_code_active_idx")
+
+    async def promos(self, *, active_only=False):
+        rows = [self._promo_row(p) for p in self.promos_.values()
+                if not active_only or p["active"]]
+        return sorted(rows, key=lambda p: (not p["active"], -p["id"]))
+
+    async def promo(self, promo_id):
+        p = self.promos_.get(promo_id)
+        return self._promo_row(p) if p else None
+
+    async def promo_by_code(self, code):
+        for p in self.promos_.values():
+            if p["active"] and p.get("code") and p["code"].upper() == str(code).upper():
+                return self._promo_row(p)
+        return None
+
+    async def create_promo(self, *, kind, title, percent, amount, code, params,
+                           starts_on, ends_on, max_uses, once_per_client, text,
+                           note, by):
+        self._promo_code_unique(code, True)
+        pid = self._id()
+        self.promos_[pid] = {
+            "id": pid, "kind": kind, "title": title, "percent": percent,
+            "amount": Decimal(amount) if amount is not None else None,
+            "code": code, "params": dict(params or {}), "starts_on": starts_on,
+            "ends_on": ends_on, "max_uses": max_uses,
+            "once_per_client": bool(once_per_client), "text": text, "active": True,
+            "note": note, "created_by": by, "created_at": self._now(),
+            "updated_at": self._now()}
+        return pid
+
+    async def update_promo(self, promo_id, **fields):
+        p = self.promos_[promo_id]
+        merged = {**p, **fields}
+        self._promo_code_unique(merged.get("code"), merged.get("active"), promo_id)
+        if "amount" in fields and fields["amount"] is not None:
+            fields["amount"] = Decimal(fields["amount"])
+        p.update(fields)
+        p["updated_at"] = self._now()
+
+    async def promo_client_uses(self, client_id):
+        out = {}
+        for b in self.bonuses_.values():
+            if b["client_id"] == client_id and b.get("promo_id"):
+                out[b["promo_id"]] = out.get(b["promo_id"], 0) + 1
+        return out
+
+    async def rental_charge_count(self, rental_id):
+        return sum(1 for x in self.ledger_
+                   if x["rental_id"] == rental_id and x["kind"] == "charge")
 
     async def bonus_of(self, client_id, kind):
         for b in sorted(self.bonuses_.values(), key=lambda x: -x["id"]):

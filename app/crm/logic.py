@@ -1157,6 +1157,7 @@ SECTIONS: dict[str, str] = {
     "trackers": "Трекеры и карта парка",
     "cash": "Касса и банк",
     "mailing": "Рассылки и шаблоны",
+    "promos": "Акции",
     "service": "Сервис: наряды и виды работ",
     "inventory": "Склад: запчасти, приходы, заказы",
     "claims": "Заявки на зачисление",
@@ -1210,6 +1211,7 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/cash", "cash"),
     ("/bank", "cash"),
     ("/mailing", "mailing"),
+    ("/promos", "promos"),
     # После /finance: home_for берёт первый путь раздела, а /plan - это
     # форма на сводке, открывать её как страницу нечего.
     ("/plan", "finance"),
@@ -1303,7 +1305,8 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
                    "reports": "view", "inventory": "view", "batteries": "view",
-                   "trackers": "view", "cash": "edit", "mailing": "view"},
+                   "trackers": "view", "cash": "edit", "mailing": "view",
+                   "promos": "view"},
       "actions": {}}, False),
     ("tech", "Механик",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
@@ -4253,6 +4256,12 @@ NOTICES: dict[str, dict[str, Any]] = {
         "title": "Списание с карты не прошло",
         "hint": "Банк отказал: на карте нет денег или она недействительна.",
     },
+    "promo_applied": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Скидка по акции",
+        "hint": "Уходит сразу, как акция сработала: на выдаче или при "
+                "начислении периода.",
+    },
     "estimate_sent": {
         "group": "client", "target": "client", "hour": None,
         "title": "Смета на ремонт",
@@ -4559,6 +4568,7 @@ BONUS_KINDS: dict[str, str] = {
     "referral": "Агенту за друга",
     "friend": "Новому клиенту по приглашению",
     "review": "За опубликованный отзыв",
+    "promo": "По акции",
     "manual": "Начислено руками",
 }
 # Бонус другу и за отзыв по умолчанию нулевые: обещать клиенту то, чего
@@ -5076,3 +5086,367 @@ def overdue_days(summary: Mapping[str, Any] | None) -> int:
         return 0
     left = summary.get("days_left")
     return max(-int(left), 0) if left is not None else 0
+
+
+# ─────────────────────────── акции ───────────────────────────
+#
+# Акция - правило, по которому клиент получает баллы. Шесть шаблонов
+# в коде, параметры - в строке crm.promos. Скидка ложится в журнал видом
+# bonus, как и остальные баллы: платежом она не становится никогда,
+# иначе средний чек парка вырос бы на деньги, которых никто не вносил.
+#
+# Одна акция на одно начисление периода. Три шаблона про первый период
+# (первая аренда, возвращение, промокод), три про каждый следующий
+# (сезонная, долгая аренда, каждый N-й). Подходят две - берётся
+# выгоднейшая для клиента, а не первая по списку.
+
+PROMO_KINDS: dict[str, dict[str, Any]] = {
+    "first": {
+        "title": "Первая аренда",
+        "hint": "Скидка на первый период клиенту, у которого аренд ещё не было.",
+        "when": "первый период первой аренды",
+        "defaults": {"percent": 10, "once_per_client": True},
+        "params": {},
+        "text": "Добро пожаловать! На первый период аренды - скидка {discount}.",
+    },
+    "comeback": {
+        "title": "Возвращение",
+        "hint": "Клиент без аренды дольше N дней берёт велосипед снова.",
+        "when": "первый период после перерыва",
+        "defaults": {"percent": 15, "once_per_client": True},
+        "params": {"after_days": 30},
+        "text": "С возвращением! На первый период - скидка {discount}.",
+    },
+    "promocode": {
+        "title": "Промокод",
+        "hint": "Код называют на выдаче: из объявления, листовки или от партнёра.",
+        "when": "первый период, если назван код",
+        "defaults": {"percent": 10, "once_per_client": True, "max_uses": 100},
+        "params": {},
+        "text": "Промокод {code} принят: скидка {discount} на первый период.",
+    },
+    "season": {
+        "title": "Сезонная",
+        "hint": "Скидка на каждый период, начисленный в окне дат акции.",
+        "when": "каждый период в окне дат",
+        "defaults": {"percent": 10, "once_per_client": False},
+        "params": {},
+        "text": "Акция «{title}»: скидка {discount} на период аренды.",
+    },
+    "renewal": {
+        "title": "Долгая аренда",
+        "hint": "С N-го периода подряд - скидка на каждый следующий.",
+        "when": "каждый период начиная с N-го",
+        "defaults": {"percent": 10, "once_per_client": False},
+        "params": {"from_period": 4},
+        "text": "Вы с нами уже {period}-й период: скидка {discount}.",
+    },
+    "loyalty": {
+        "title": "Каждый N-й период",
+        "hint": "Каждый N-й период со скидкой: четвёртая неделя за полцены.",
+        "when": "каждый N-й период",
+        "defaults": {"percent": 50, "once_per_client": False},
+        "params": {"every": 4},
+        "text": "Каждый {every}-й период - со скидкой: вам начислено {discount}.",
+    },
+}
+# Шаблоны про первый период: остальные три считают номер периода.
+PROMO_FIRST_KINDS = frozenset({"first", "comeback", "promocode"})
+PROMO_PARAM_LABELS: dict[str, str] = {
+    "after_days": "Дней без аренды",
+    "from_period": "С какого периода",
+    "every": "Каждый N-й период",
+}
+# Границы параметров: год без аренды - уже не «возвращение», а новый
+# клиент; 52 периода - год недельных.
+PROMO_PARAM_RANGES: dict[str, tuple[int, int]] = {
+    "after_days": (1, 365), "from_period": (2, 52), "every": (2, 52),
+}
+# Подстановки в тексте клиенту. {name} и {balance} - те же, что в
+# рассылках, остальные - свои: мост в шаблон рассылки подставляет их сам.
+PROMO_TEXT_FIELDS: dict[str, str] = {
+    "discount": "скидка: «10 %» или «300 ₽»",
+    "title": "название акции",
+    "code": "промокод",
+    "period": "номер периода",
+    "every": "каждый N-й",
+    "name": "имя клиента",
+    "balance": "баланс",
+}
+PROMO_CODE_RE = re.compile(r"[A-ZА-ЯЁ0-9_-]{2,20}")
+PROMO_TEXT_LIMIT = 1000
+
+
+def clean_promo_code(raw: Any) -> str:
+    """Код с формы или с выдачи: без пробелов, в верхнем регистре."""
+    return re.sub(r"\s+", "", str(raw or "")).upper()
+
+
+def promo_params(promo: Mapping[str, Any]) -> dict[str, int]:
+    """Параметры акции поверх умолчаний шаблона: чужие ключи и мусор
+    отбрасываются, число в строке (jsonb без кодека) читается."""
+    kind = str(promo.get("kind") or "")
+    defaults = dict(PROMO_KINDS.get(kind, {}).get("params", {}))
+    raw = promo.get("params")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = {}
+    out: dict[str, int] = {}
+    for key, default in defaults.items():
+        try:
+            value = int((raw or {}).get(key, default))
+        except (TypeError, ValueError, AttributeError):
+            value = int(default)
+        low, high = PROMO_PARAM_RANGES.get(key, (1, 10**6))
+        out[key] = value if low <= value <= high else int(default)
+    return out
+
+
+def promo_discount(promo: Mapping[str, Any], price: Any) -> Decimal:
+    """Скидка с цены периода: процент или сумма, не больше самой цены."""
+    price = to_money(price)
+    if price <= 0:
+        return Decimal(0)
+    percent = promo.get("percent")
+    if percent:
+        return to_money(price * Decimal(int(percent)) / Decimal(100))
+    amount = to_money(promo.get("amount"))
+    return min(amount, price) if amount > 0 else Decimal(0)
+
+
+def promo_discount_label(promo: Mapping[str, Any]) -> str:
+    """«10 %» или «300 ₽» - для текста клиенту и списка."""
+    if promo.get("percent"):
+        return f"{int(promo['percent'])} %"
+    return money(promo.get("amount"))
+
+
+def promo_alive(promo: Mapping[str, Any], *, today: date) -> bool:
+    """Действует ли акция сегодня: включена, в окне дат, предел не выбран."""
+    if not promo.get("active"):
+        return False
+    starts = promo.get("starts_on")
+    ends = promo.get("ends_on")
+    if starts and today < starts:
+        return False
+    if ends and today > ends:
+        return False
+    max_uses = promo.get("max_uses")
+    if max_uses is not None and int(promo.get("uses") or 0) >= int(max_uses):
+        return False
+    return True
+
+
+def promo_fits(promo: Mapping[str, Any], ctx: Mapping[str, Any]) -> bool:
+    """Подходит ли акция к этому начислению.
+
+    `ctx`: period_index (1 - первый период аренды), today, code (промокод,
+    названный на выдаче), previous_rentals (сколько аренд у клиента было
+    до этой), last_closed_on (когда закрылась последняя из них),
+    client_uses ({promo_id: сколько раз клиент уже получал эту акцию}).
+    """
+    kind = str(promo.get("kind") or "")
+    if kind not in PROMO_KINDS:
+        return False
+    params = promo_params(promo)
+    index = int(ctx.get("period_index") or 0)
+    if promo.get("once_per_client"):
+        used = (ctx.get("client_uses") or {}).get(promo.get("id"), 0)
+        if int(used or 0) > 0:
+            return False
+    if kind in PROMO_FIRST_KINDS and index != 1:
+        return False
+    if kind == "first":
+        return int(ctx.get("previous_rentals") or 0) == 0
+    if kind == "comeback":
+        last = ctx.get("last_closed_on")
+        if last is None or not int(ctx.get("previous_rentals") or 0):
+            return False
+        return (ctx["today"] - last).days >= params["after_days"]
+    if kind == "promocode":
+        code = clean_promo_code(ctx.get("code"))
+        return bool(code) and code == clean_promo_code(promo.get("code"))
+    if kind == "season":
+        return True                      # окно дат проверил promo_alive
+    if kind == "renewal":
+        return index >= params["from_period"]
+    if kind == "loyalty":
+        return index > 0 and index % params["every"] == 0
+    return False
+
+
+def pick_promo(promos: Iterable[Mapping[str, Any]], ctx: Mapping[str, Any],
+               price: Any) -> tuple[dict, Decimal] | None:
+    """Одна акция на начисление: выгоднейшая для клиента, при равной
+    скидке - заведённая раньше. None - ничего не подошло."""
+    best: tuple[dict, Decimal] | None = None
+    for promo in promos:
+        if not promo_alive(promo, today=ctx["today"]) or not promo_fits(promo, ctx):
+            continue
+        discount = promo_discount(promo, price)
+        if discount <= 0:
+            continue
+        if best is None or discount > best[1] or (
+                discount == best[1] and int(promo["id"]) < int(best[0]["id"])):
+            best = (dict(promo), discount)
+    return best
+
+
+def rental_history(rentals: Iterable[Mapping[str, Any]],
+                   rental_id: int | None) -> dict[str, Any]:
+    """Что было у клиента до этой аренды: сколько аренд и когда закрылась
+    последняя. Текущая аренда из счёта исключается."""
+    previous = [r for r in rentals if rental_id is None or int(r["id"]) != int(rental_id)]
+    closed = [r.get("closed_on") for r in previous if r.get("closed_on")]
+    closed_days = [c.date() if isinstance(c, datetime) else c for c in closed]
+    return {"previous_rentals": len(previous),
+            "last_closed_on": max(closed_days) if closed_days else None}
+
+
+def promo_text(promo: Mapping[str, Any], *, discount: Any,
+               period_index: int = 0, name: str = "",
+               balance: Any = None) -> str:
+    """Текст клиенту: свой из строки, иначе из шаблона. Неизвестная
+    подстановка остаётся как есть - падать в момент отправки незачем."""
+    kind = str(promo.get("kind") or "")
+    body = str(promo.get("text") or "").strip() or PROMO_KINDS.get(kind, {}).get("text", "")
+    values = {
+        "discount": money(discount), "title": str(promo.get("title") or ""),
+        "code": str(promo.get("code") or ""), "period": str(period_index or ""),
+        "every": str(promo_params(promo).get("every", "")),
+        "name": name, "balance": money(balance) if balance is not None else "",
+    }
+    return render_template(body, values)
+
+
+def promo_mailing_body(promo: Mapping[str, Any]) -> str:
+    """Текст акции как тело шаблона рассылки: свои подстановки уходят
+    значениями, {name} и {balance} остаются рассылке."""
+    body = str(promo.get("text") or "").strip() or \
+        PROMO_KINDS.get(str(promo.get("kind") or ""), {}).get("text", "")
+    values = {
+        "discount": promo_discount_label(promo), "title": str(promo.get("title") or ""),
+        "code": str(promo.get("code") or ""),
+        "period": str(promo_params(promo).get("from_period", "")),
+        "every": str(promo_params(promo).get("every", "")),
+    }
+    return render_template(body, values)
+
+
+def check_promo_text(raw: Any) -> Check:
+    text = str(raw or "").strip()
+    if len(text) > PROMO_TEXT_LIMIT:
+        return Check(False, error=f"Текст клиенту: длиннее {PROMO_TEXT_LIMIT} "
+                                  "символов не уйдёт.")
+    unknown = [f for f in re.findall(r"{([a-zA-Z_]+)}", text)
+               if f not in PROMO_TEXT_FIELDS]
+    if unknown:
+        return Check(False, error=f"Текст клиенту: неизвестная подстановка "
+                                  f"{{{unknown[0]}}}.")
+    return Check(True, text or None)
+
+
+def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None) -> Check:
+    """Форма акции целиком: возвращает словарь колонок или первую ошибку.
+
+    Скидка - либо процент, либо сумма: обе сразу это спор, ни одной -
+    пустая акция. Код нужен только промокоду, у остальных он отбрасывается,
+    чтобы случайное слово в поле не сделало из сезонной акции промокод.
+    """
+    kind = str(kind or data.get("kind") or "").strip()
+    if kind not in PROMO_KINDS:
+        return Check(False, error="Шаблон акции: недопустимое значение.")
+    title = check_name(data.get("title"), what="Название акции")
+    if not title.ok:
+        return title
+    raw_percent = str(data.get("percent") or "").strip()
+    raw_amount = str(data.get("amount") or "").strip()
+    percent: int | None = None
+    amount: Decimal | None = None
+    if raw_percent and raw_amount not in ("", "0"):
+        return Check(False, error="Скидка: либо процент, либо сумма, не обе.")
+    if raw_percent:
+        if not raw_percent.isdigit() or not 1 <= int(raw_percent) <= 100:
+            return Check(False, error="Процент скидки: целое от 1 до 100.")
+        percent = int(raw_percent)
+    elif raw_amount:
+        got = check_amount(raw_amount)
+        if not got.ok:
+            return got
+        amount = got.value
+    else:
+        return Check(False, error="Скидка: укажите процент или сумму.")
+    code: str | None = None
+    if kind == "promocode":
+        code = clean_promo_code(data.get("code"))
+        if not PROMO_CODE_RE.fullmatch(code):
+            return Check(False, error="Промокод: буквы, цифры, дефис, от 2 до 20 "
+                                      "символов.")
+    params: dict[str, int] = {}
+    for key, default in PROMO_KINDS[kind]["params"].items():
+        raw = str(data.get(key) or "").strip() or str(default)
+        low, high = PROMO_PARAM_RANGES[key]
+        if not raw.isdigit() or not low <= int(raw) <= high:
+            return Check(False, error=f"{PROMO_PARAM_LABELS[key]}: целое от {low} "
+                                      f"до {high}.")
+        params[key] = int(raw)
+    starts = ends = None
+    if str(data.get("starts_on") or "").strip():
+        got = check_date(data.get("starts_on"))
+        if not got.ok:
+            return Check(False, error="Действует с: " + got.error)
+        starts = got.value
+    if str(data.get("ends_on") or "").strip():
+        got = check_date(data.get("ends_on"))
+        if not got.ok:
+            return Check(False, error="Действует по: " + got.error)
+        ends = got.value
+    if starts and ends and ends < starts:
+        return Check(False, error="Окно дат: «по» раньше, чем «с».")
+    max_uses: int | None = None
+    raw_max = str(data.get("max_uses") or "").strip()
+    if raw_max:
+        if not raw_max.isdigit() or not 1 <= int(raw_max) <= 100000:
+            return Check(False, error="Предел применений: целое от 1 до 100000, "
+                                      "пусто - без предела.")
+        max_uses = int(raw_max)
+    text = check_promo_text(data.get("text"))
+    if not text.ok:
+        return text
+    note = check_note(data.get("note"))
+    if not note.ok:
+        return note
+    return Check(True, {
+        "kind": kind, "title": title.value, "percent": percent, "amount": amount,
+        "code": code, "params": params, "starts_on": starts, "ends_on": ends,
+        "max_uses": max_uses, "once_per_client": bool(data.get("once_per_client")),
+        "text": text.value, "note": note.value,
+    })
+
+
+def promo_form_defaults(kind: str) -> dict[str, Any]:
+    """Заготовка формы по шаблону: с ней акция заводится в два клика."""
+    spec = PROMO_KINDS.get(kind) or {}
+    defaults = dict(spec.get("defaults", {}))
+    return {
+        "kind": kind, "title": spec.get("title", ""),
+        "percent": defaults.get("percent"), "amount": None, "code": None,
+        "params": dict(spec.get("params", {})),
+        "starts_on": None, "ends_on": None,
+        "max_uses": defaults.get("max_uses"),
+        "once_per_client": bool(defaults.get("once_per_client", True)),
+        "text": spec.get("text", ""), "note": None, "active": True,
+    }
+
+
+def promo_totals(promos: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Плитки раздела: сколько акций действует, сколько раз сработали
+    и на какую сумму - по всем, включая выключенные: скидка, розданная
+    закрытой акцией, никуда не делась."""
+    rows = list(promos)
+    uses = sum(int(p.get("uses") or 0) for p in rows)
+    total = to_money(sum((to_money(p.get("total")) for p in rows), Decimal(0)))
+    return {"active": sum(1 for p in rows if p.get("active")),
+            "count": len(rows), "uses": uses, "total": total}

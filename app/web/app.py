@@ -310,6 +310,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
+        PROMO_KINDS=logic.PROMO_KINDS, PROMO_PARAM_LABELS=logic.PROMO_PARAM_LABELS,
+        PROMO_TEXT_FIELDS=logic.PROMO_TEXT_FIELDS,
+        promo_discount_label=logic.promo_discount_label,
+        promo_params=logic.promo_params,
         COMPANY_FIELDS=company.COMPANY_FIELDS,
         CONTACT_FIELDS=company.CONTACT_FIELDS,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
@@ -1517,14 +1521,36 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                                    tariff["period_days"]),
                    battery_slots=int(ctx["bike"].get("battery_count") or 0),
                    max_extra=logic.MAX_EXTRA_BATTERIES)
+        # Акция видна до денег: оператор называет клиенту сумму со
+        # скидкой, а не объясняет баллы после оплаты. Промокод приходит
+        # адресом (?promo=) - мастер без скрипта, проверка кода это
+        # перезагрузка шага.
+        promo_code = logic.clean_promo_code(p.get("promo"))
+        promo_error = ""
+        if promo_code:
+            try:
+                await service.check_promo_code(crm, promo_code, today=date.today())
+            except service.ServiceError as exc:
+                promo_error = str(exc)
+                promo_code = ""
+        picked = logic.pick_promo(
+            await crm.promos(active_only=True),
+            {"period_index": 1, "today": date.today(), "code": promo_code,
+             "client_uses": await crm.promo_client_uses(client["id"]),
+             **logic.rental_history(await crm.client_rentals(client["id"]), None)},
+            tariff["price"])
+        discount = picked[1] if picked else Decimal(0)
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
                    mileage=int(ctx["bike"].get("mileage_km") or 0),
-                   pay_default=plain_amount(
-                       logic.issue_payment_default(tariff["price"], balance)),
+                   pay_default=plain_amount(max(
+                       logic.issue_payment_default(tariff["price"], balance) - discount,
+                       Decimal(0))),
                    contract_no=(client.get("contract_no")
-                                or (bot_user or {}).get("contract_no") or ""))
+                                or (bot_user or {}).get("contract_no") or ""),
+                   promo=picked[0] if picked else None, promo_discount=discount,
+                   promo_code=promo_code, promo_error=promo_error)
         return render(request, "issue.html", **ctx)
 
     @app.post("/issue/client")
@@ -1590,6 +1616,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if pay.value > 0 and method not in logic.METHODS:
             flash(request, "Выберите способ оплаты.", "err")
             return redirect(back)
+        # Промокод проверяется до аренды: неверный код - это отказ до
+        # денег, а не выдача без скидки, о которой клиент узнает потом.
+        promo_code = logic.clean_promo_code(data.get("promo_code"))
+        try:
+            await service.check_promo_code(crm, promo_code, today=date.today())
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(back)
         # Номер договора: с формы, иначе из карточки, иначе из бота - оператор
         # его наизусть не помнит, а в акте и отчётах он нужен.
         contract_no = contract.value or client.get("contract_no")
@@ -1622,11 +1656,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                            "title": logic.extra_title("battery",
                                                       battery.get("model_title")),
                            "price": price})
+        applied: list[dict] = []
         try:
             rental_id = await service.open_rental(
                 crm, client=client, bike=bike, tariff=tariff, started_on=started.value,
                 contract_no=contract_no, by=who(request), mileage=mileage.value,
-                extras=extras)
+                extras=extras, promo_code=promo_code or None, applied=applied)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(back)
@@ -1651,12 +1686,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             await referral_bonus(client, pay.value, who(request))
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
+        # Сообщение об акции - после платежа и после «аренда оформлена»:
+        # в нём баланс, и он обязан быть уже с деньгами.
+        await tell_promos(client, applied)
         if pay.value > 0:
             flash(request, f"Выдача оформлена: № {bike['code']} у клиента, "
                            f"принято {logic.money(pay.value)}.")
         else:
             flash(request, f"Выдача оформлена без оплаты: № {bike['code']} у клиента, "
                            "первый период остался долгом на балансе.")
+        for got in applied:
+            flash(request, f"Акция «{got['promo']['title']}»: {logic.money(got['amount'])} "
+                           "начислено баллами.")
+        if promo_code and not applied:
+            flash(request, f"Промокод {promo_code} к этой выдаче не подошёл: "
+                           "клиент уже получал эту акцию или выбран предел.", "err")
         # Пятый шаг мастера: документы и подпись. У них они собираются до
         # аренды, у нас - после: в договор и акт идёт номер велосипеда и
         # дата выдачи, а до открытия аренды их ещё нет. Оператору это
@@ -4347,6 +4391,148 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                        "Отправленное не отзывается — ни Telegram, ни MAX этого "
                        "не умеют.")
         return redirect(f"/mailing/{campaign_id}")
+
+    # ─────────────────────── акции ───────────────────────
+    #
+    # Акция - правило начисления баллов, шаблон в коде, параметры в строке.
+    # Раздел свой, а не вкладка приглашений: акции живут рядом с
+    # рассылками, а не с отчётами, и правит их тот, кто ведёт клиентов.
+
+    async def tell_promos(client: dict, applied: list[dict]) -> None:
+        """Клиенту о сработавших на выдаче акциях. Баллы уже в журнале."""
+        for got in applied:
+            await notices.send_client(
+                crm, "promo_applied", client["id"],
+                lambda g=got: notify.promo_applied(
+                    bot, db, crm, client, g["promo"], g["amount"],
+                    period_index=g.get("period_index") or 0))
+
+    @app.get("/promos")
+    async def promos_page(request: Request) -> Response:
+        rows = await crm.promos()
+        return render(request, "promos.html", rows=rows,
+                      totals=logic.promo_totals(rows), today=date.today(),
+                      recent=await crm.bonuses(kind="promo", limit=20))
+
+    @app.get("/promos/new")
+    async def promo_new(request: Request) -> Response:
+        if not may_edit(request, "promos"):
+            return denied(request, "promos")
+        kind = (request.query_params.get("kind") or "").strip()
+        if kind not in logic.PROMO_KINDS:
+            flash(request, "Выберите шаблон акции.", "err")
+            return redirect("/promos")
+        return render(request, "promo_form.html", promo=logic.promo_form_defaults(kind),
+                      kind=kind, spec=logic.PROMO_KINDS[kind], is_new=True)
+
+    @app.post("/promos")
+    async def promo_create(request: Request) -> Response:
+        if not may_edit(request, "promos"):
+            return denied(request, "promos")
+        data = await form(request)
+        got = logic.check_promo_form(data)
+        if not got.ok:
+            flash(request, got.error, "err")
+            return redirect(f"/promos/new?kind={quote(data.get('kind') or '', safe='')}")
+        try:
+            promo_id = await crm.create_promo(**got.value, by=who(request))
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, f"Промокод {got.value['code']} уже действует у "
+                               "другой акции: выключите её или выберите другое слово.",
+                      "err")
+                return redirect(f"/promos/new?kind={got.value['kind']}")
+            raise
+        flash(request, f"Акция «{got.value['title']}» заведена и действует.")
+        return redirect(f"/promos/{promo_id}")
+
+    @app.get("/promos/{promo_id}")
+    async def promo_card(request: Request, promo_id: int) -> Response:
+        promo = await crm.promo(promo_id)
+        if promo is None:
+            return render(request, "missing.html", status_code=404, what="Акция")
+        kind = promo["kind"]
+        return render(request, "promo_form.html", promo=promo, kind=kind,
+                      spec=logic.PROMO_KINDS.get(kind, {}), is_new=False,
+                      grants=await crm.bonuses(promo_id=promo_id, limit=50),
+                      alive=logic.promo_alive(promo, today=date.today()),
+                      mailing_body=logic.promo_mailing_body(promo))
+
+    @app.post("/promos/{promo_id}")
+    async def promo_edit(request: Request, promo_id: int) -> Response:
+        if not may_edit(request, "promos"):
+            return denied(request, "promos")
+        promo = await crm.promo(promo_id)
+        if promo is None:
+            return render(request, "missing.html", status_code=404, what="Акция")
+        data = await form(request)
+        # Шаблон у заведённой акции не меняется: у каждого свои параметры,
+        # и «сезонная», ставшая «промокодом», потеряла бы смысл журнала.
+        got = logic.check_promo_form(data, kind=promo["kind"])
+        if not got.ok:
+            flash(request, got.error, "err")
+            return redirect(f"/promos/{promo_id}")
+        fields = {k: v for k, v in got.value.items() if k != "kind"}
+        try:
+            await crm.update_promo(promo_id, **fields)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, f"Промокод {fields['code']} уже действует у "
+                               "другой акции.", "err")
+                return redirect(f"/promos/{promo_id}")
+            raise
+        flash(request, "Акция сохранена. Правка действует со следующего "
+                       "начисления: начисленное задним числом не переписывается.")
+        return redirect(f"/promos/{promo_id}")
+
+    @app.post("/promos/{promo_id}/toggle")
+    async def promo_toggle(request: Request, promo_id: int) -> Response:
+        if not may_edit(request, "promos"):
+            return denied(request, "promos")
+        promo = await crm.promo(promo_id)
+        if promo is None:
+            return render(request, "missing.html", status_code=404, what="Акция")
+        try:
+            await crm.update_promo(promo_id, active=not promo["active"])
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, f"Промокод {promo.get('code')} уже действует у "
+                               "другой акции: сначала выключите её.", "err")
+                return redirect(f"/promos/{promo_id}")
+            raise
+        flash(request, "Акция выключена: новых скидок по ней не будет, "
+                       "начисленное остаётся." if promo["active"]
+              else "Акция включена.")
+        return redirect(f"/promos/{promo_id}")
+
+    @app.post("/promos/{promo_id}/mailing")
+    async def promo_mailing(request: Request, promo_id: int) -> Response:
+        """Текст акции - шаблоном рассылки: рассказать о ней клиентам.
+
+        Код шаблона привязан к акции, поэтому вторая кнопка обновляет
+        тот же шаблон, а не плодит копии.
+        """
+        if not may_edit(request, "promos") or not may_edit(request, "mailing"):
+            return denied(request, "mailing")
+        promo = await crm.promo(promo_id)
+        if promo is None:
+            return render(request, "missing.html", status_code=404, what="Акция")
+        body = logic.check_template_body(logic.promo_mailing_body(promo))
+        if not body.ok:
+            flash(request, body.error, "err")
+            return redirect(f"/promos/{promo_id}")
+        code = f"promo_{promo_id}"
+        existing = next((t for t in await crm.templates() if t["code"] == code), None)
+        if existing is not None:
+            await crm.update_template(existing["id"], title=f"Акция: {promo['title']}",
+                                      body=body.value, active=True)
+        else:
+            await crm.create_template(code=code, title=f"Акция: {promo['title']}",
+                                      body=body.value, body_max=None,
+                                      note=f"Из акции #{promo_id}")
+        flash(request, f"Шаблон «Акция: {promo['title']}» готов — соберите "
+                       "рассылку по нему.")
+        return redirect("/mailing")
 
     # ─────────────────────── касса и банк ───────────────────────
 

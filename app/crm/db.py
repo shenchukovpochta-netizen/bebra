@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -50,6 +51,10 @@ BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
                                   "price", "service_months", "active", "note"})
 TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
                                 "note"})
+PROMO_FIELDS = frozenset({
+    "kind", "title", "percent", "amount", "code", "params", "starts_on", "ends_on",
+    "max_uses", "once_per_client", "text", "active", "note",
+})
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
                             "alarm", "note", "blocked", "blocked_at", "blocked_by"})
@@ -625,7 +630,8 @@ class CrmDB:
                             started_on: date, contract_no: str | None,
                             created_by: str | None,
                             mileage_start: int | None = None,
-                            base_price: Decimal | None = None) -> int:
+                            base_price: Decimal | None = None,
+                            promo_code: str | None = None) -> int:
         """Аренда и статус велосипеда - одной транзакцией.
 
         `price` - цена периода целиком, вместе с позициями; `base_price` -
@@ -642,12 +648,12 @@ class CrmDB:
                 insert into crm.rentals
                   (client_id, bike_id, tariff_id, tariff_name, period_days, price,
                    base_price, billing, started_on, billed_until, contract_no,
-                   created_by, mileage_start)
-                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11)
+                   created_by, mileage_start, promo_code)
+                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11, $13)
                 returning id
                 """, client_id, bike_id, tariff_id, tariff_name, period_days,
                 price, billing, started_on, contract_no, created_by, mileage_start,
-                base_price if base_price is not None else price))
+                base_price if base_price is not None else price, promo_code))
             if bike_id is not None:
                 # greatest: пробег велосипеда не уменьшается никогда, даже
                 # если аренду задним числом оформили с меньшим числом.
@@ -3611,12 +3617,15 @@ class CrmDB:
 
     async def grant_bonus(self, *, client_id: int, kind: str, amount: Decimal,
                           note: str | None = None, ref_id: int | None = None,
-                          by: str | None = None) -> int | None:
+                          by: str | None = None, promo_id: int | None = None,
+                          rental_id: int | None = None,
+                          period_from: date | None = None) -> int | None:
         """Начислить баллы: запись в журнал и повод рядом.
 
-        Обе вставки одной транзакцией. Повторный бонус за отзыв или другу
-        упирается в частичный уникальный индекс - тогда в журнале тоже
-        ничего не появляется, и баланс не поедет.
+        Обе вставки одной транзакцией. Повторный бонус за отзыв, другу
+        или по акции за тот же период упирается в частичный уникальный
+        индекс - тогда в журнале тоже ничего не появляется, и баланс
+        не поедет.
         """
         amount = _money(amount) or Decimal(0)
         if amount <= 0:
@@ -3624,15 +3633,18 @@ class CrmDB:
         async with self.pool.acquire() as conn, conn.transaction():
             ledger_id = int(await conn.fetchval(
                 """
-                insert into crm.ledger (client_id, kind, amount, note, created_by)
-                values ($1, 'bonus', $2, $3, $4) returning id
-                """, client_id, amount, note, by))
+                insert into crm.ledger (client_id, rental_id, kind, amount, note,
+                                        created_by)
+                values ($1, $2, 'bonus', $3, $4, $5) returning id
+                """, client_id, rental_id, amount, note, by))
             return int(await conn.fetchval(
                 """
                 insert into crm.bonuses (client_id, kind, amount, ledger_id,
-                                         ref_id, note, created_by)
-                values ($1, $2, $3, $4, $5, $6, $7) returning id
-                """, client_id, kind, amount, ledger_id, ref_id, note, by))
+                                         ref_id, note, created_by, promo_id,
+                                         rental_id, period_from)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id
+                """, client_id, kind, amount, ledger_id, ref_id, note, by,
+                promo_id, rental_id, period_from))
 
     async def record_bonus(self, *, client_id: int, kind: str, amount: Decimal,
                            ledger_id: int | None = None,
@@ -3650,7 +3662,8 @@ class CrmDB:
 
     async def bonuses(self, *, client_id: int | None = None,
                       kind: str | None = None, since: date | None = None,
-                      until: date | None = None, limit: int = 500) -> list[dict]:
+                      until: date | None = None, limit: int = 500,
+                      promo_id: int | None = None) -> list[dict]:
         conds: list[str] = []
         args: list[Any] = []
         if client_id is not None:
@@ -3659,6 +3672,9 @@ class CrmDB:
         if kind:
             args.append(kind)
             conds.append(f"b.kind = ${len(args)}")
+        if promo_id is not None:
+            args.append(promo_id)
+            conds.append(f"b.promo_id = ${len(args)}")
         if since:
             args.append(since)
             conds.append(f"b.created_at >= ${len(args)}::date")
@@ -3669,8 +3685,9 @@ class CrmDB:
         args.append(limit)
         return _rows(await self.pool.fetch(
             f"""
-            select b.*, c.full_name, c.phone
+            select b.*, c.full_name, c.phone, p.title as promo_title
               from crm.bonuses b join crm.clients c on c.id = b.client_id
+              left join crm.promos p on p.id = b.promo_id
              {where} order by b.id desc limit ${len(args)}
             """, *args))
 
@@ -3678,6 +3695,78 @@ class CrmDB:
         return _row(await self.pool.fetchrow(
             "select * from crm.bonuses where client_id = $1 and kind = $2 "
             "order by id desc limit 1", client_id, kind))
+
+    # ─────────────────────── акции ───────────────────────
+    #
+    # Число применений и сумма считаются по crm.bonuses, а не хранятся
+    # в строке акции: колонка-счётчик разошлась бы с журналом при первом
+    # же откате транзакции.
+
+    _PROMO_SELECT = """
+        select p.*,
+               coalesce(u.uses, 0) as uses, coalesce(u.total, 0) as total
+          from crm.promos p
+          left join (select promo_id, count(*) as uses, sum(amount) as total
+                       from crm.bonuses where promo_id is not null
+                      group by promo_id) u on u.promo_id = p.id
+    """
+
+    async def promos(self, *, active_only: bool = False) -> list[dict]:
+        where = "where p.active" if active_only else ""
+        return _rows(await self.pool.fetch(
+            f"{self._PROMO_SELECT} {where} order by p.active desc, p.id desc"))
+
+    async def promo(self, promo_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._PROMO_SELECT} where p.id = $1", promo_id))
+
+    async def promo_by_code(self, code: str) -> dict | None:
+        """Действующий промокод по слову: регистр не важен."""
+        return _row(await self.pool.fetchrow(
+            f"{self._PROMO_SELECT} where p.active and p.code is not null "
+            "and upper(p.code) = upper($1)", code))
+
+    async def create_promo(self, *, kind: str, title: str, percent: int | None,
+                           amount: Decimal | None, code: str | None,
+                           params: dict, starts_on: date | None,
+                           ends_on: date | None, max_uses: int | None,
+                           once_per_client: bool, text: str | None,
+                           note: str | None, by: str | None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.promos (kind, title, percent, amount, code, params,
+                                    starts_on, ends_on, max_uses, once_per_client,
+                                    text, note, created_by)
+            values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13)
+            returning id
+            """, kind, title, percent, _money(amount), code, json.dumps(params),
+            starts_on, ends_on, max_uses, once_per_client, text, note, by))
+
+    async def update_promo(self, promo_id: int, **fields: Any) -> None:
+        if "params" in fields:
+            fields["params"] = json.dumps(fields["params"])
+        if "amount" in fields:
+            fields["amount"] = _money(fields["amount"])
+        sets, values = _set_clause(fields, PROMO_FIELDS, 2)
+        if not sets:
+            return
+        await self.pool.execute(
+            f"update crm.promos set {sets}, updated_at = now() where id = $1",
+            promo_id, *values)
+
+    async def promo_client_uses(self, client_id: int) -> dict[int, int]:
+        """Сколько раз клиент получал каждую акцию: для «один раз на клиента»."""
+        rows = await self.pool.fetch(
+            "select promo_id, count(*) as n from crm.bonuses "
+            "where client_id = $1 and promo_id is not null group by promo_id",
+            client_id)
+        return {int(r["promo_id"]): int(r["n"]) for r in rows}
+
+    async def rental_charge_count(self, rental_id: int) -> int:
+        """Номер текущего периода аренды: сколько периодов начислено."""
+        return int(await self.pool.fetchval(
+            "select count(*) from crm.ledger where rental_id = $1 and kind = 'charge'",
+            rental_id) or 0)
 
     async def payments_total(self, *, since: date, until: date) -> Decimal:
         """Сумма платежей за период - знаменатель доли баллов."""

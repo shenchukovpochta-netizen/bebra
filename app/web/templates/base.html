@@ -19,7 +19,8 @@
 {% set g_fleet = can_view(staff, 'bikes') or can_view(staff, 'batteries')
                  or can_view(staff, 'trackers') %}
 {% set g_client = can_view(staff, 'clients') or can_view(staff, 'rentals')
-                  or can_view(staff, 'claims') or can_view(staff, 'mailing') %}
+                  or can_view(staff, 'claims') or can_view(staff, 'mailing')
+                  or can_view(staff, 'promos') %}
 {% set g_service = can_view(staff, 'service') or can_view(staff, 'inventory') %}
 {% set g_money = can_view(staff, 'finance') or can_view(staff, 'cash')
                  or can_view(staff, 'tariffs') %}
@@ -39,46 +40,47 @@
     <small>{{ ROLES.get(staff.role, staff.role) }}</small>
   </a>
   <nav>
-    {% if g_main %}<div class="grp">Главное</div>
+    {% if g_main %}<div class="blk"><div class="grp">Главное</div>
       {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
       {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>{% endif %}
-    {% endif %}
+    </div>{% endif %}
 
-    {% if g_client %}<div class="grp">Клиенты</div>
+    {% if g_client %}<div class="blk"><div class="grp">Клиенты</div>
       {% if can_view(staff, 'clients') %}<a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>{% endif %}
       {% if can_view(staff, 'rentals') %}<a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>{% endif %}
       {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
       {% if can_view(staff, 'mailing') %}<a href="/mailing" {% if request.url.path.startswith('/mailing') %}class="on"{% endif %}>Рассылки</a>{% endif %}
-    {% endif %}
+      {% if can_view(staff, 'promos') %}<a href="/promos" {% if request.url.path.startswith('/promos') %}class="on"{% endif %}>Акции</a>{% endif %}
+    </div>{% endif %}
 
-    {% if g_fleet %}<div class="grp">Парк</div>
+    {% if g_fleet %}<div class="blk"><div class="grp">Парк</div>
       {% if can_view(staff, 'bikes') %}<a href="/bikes" {% if request.url.path.startswith('/bikes') %}class="on"{% endif %}>Парк</a>{% endif %}
       {% if can_view(staff, 'batteries') %}<a href="/batteries" {% if request.url.path.startswith('/batteries') %}class="on"{% endif %}>АКБ</a>{% endif %}
       {% if can_view(staff, 'trackers') %}<a href="/map" {% if request.url.path.startswith(('/map', '/trackers')) %}class="on"{% endif %}>Карта</a>
       <a href="/alerts" {% if request.url.path.startswith('/alerts') %}class="on"{% endif %}>Тревоги</a>{% endif %}
-    {% endif %}
+    </div>{% endif %}
 
-    {% if g_service %}<div class="grp">Сервис</div>
+    {% if g_service %}<div class="blk"><div class="grp">Сервис</div>
       {% if can_view(staff, 'service') %}<a href="/service" {% if request.url.path.startswith(('/service', '/orders', '/work-types')) %}class="on"{% endif %}>Сервис</a>{% endif %}
       {% if can_view(staff, 'inventory') %}<a href="/parts" {% if request.url.path.startswith(('/parts', '/part-orders', '/suppliers')) %}class="on"{% endif %}>Склад</a>{% endif %}
-    {% endif %}
+    </div>{% endif %}
 
-    {% if g_money %}<div class="grp">Деньги</div>
+    {% if g_money %}<div class="blk"><div class="grp">Деньги</div>
       {% if can_view(staff, 'finance') %}<a href="/finance" {% if request.url.path.startswith(('/finance', '/payments')) %}class="on"{% endif %}>Финансы</a>{% endif %}
       {% if can_view(staff, 'cash') %}<a href="/cash" {% if request.url.path.startswith(('/cash', '/bank')) %}class="on"{% endif %}>Касса</a>{% endif %}
       {% if can_view(staff, 'tariffs') %}<a href="/tariffs" {% if request.url.path.startswith('/tariffs') %}class="on"{% endif %}>Тарифы</a>{% endif %}
-    {% endif %}
+    </div>{% endif %}
 
-    {% if g_reports %}<div class="grp">Отчёты</div>
+    {% if g_reports %}<div class="blk"><div class="grp">Отчёты</div>
       {% if can_view(staff, 'reports') %}<a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>{% endif %}
       {% if can_view(staff, 'import') %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}
-    {% endif %}
+    </div>{% endif %}
 
-    {% if g_setup %}<div class="grp">Настройки</div>
+    {% if g_setup %}<div class="blk"><div class="grp">Настройки</div>
       {% if can_view(staff, 'staff') %}<a href="/staff" {% if request.url.path.startswith('/staff') or request.url.path.startswith('/profiles') %}class="on"{% endif %}>Сотрудники</a>{% endif %}
       {% if can_view(staff, 'settings') %}<a href="/company" {% if request.url.path.startswith(('/company', '/documents', '/locations', '/models',
                                        '/notices', '/intake')) %}class="on"{% endif %}>Настройки</a>{% endif %}
-    {% endif %}
+    </div>{% endif %}
   </nav>
   <div class="side-bolt">{% include "_bolt.html" %}</div>
 </aside>

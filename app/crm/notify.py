@@ -96,6 +96,24 @@ async def rental_closed(bot: Any, db: Any, crm: Any, client: dict, rental: dict)
     return await _send(bot, client["tg_id"], text)
 
 
+async def promo_applied(bot: Any, db: Any, crm: Any, client: dict, promo: dict,
+                        amount: Any, *, period_index: int = 0) -> bool:
+    """Клиенту: акция сработала, баллы на балансе. Текст акции - свой
+    из строки или из шаблона; деньги уже начислены, недоставленное
+    сообщение их не отменяет."""
+    if not client.get("tg_id") or bot is None:
+        return False
+    lang = await _lang(db, client["tg_id"])
+    balance = await crm.client_balance(client["id"])
+    own = logic.promo_text(promo, discount=amount, period_index=period_index,
+                           name=client.get("full_name") or "", balance=balance)
+    text = i18n.t(lang, "CAB_PROMO_APPLIED").format(
+        title=bot_logic.esc(promo.get("title") or ""), amount=logic.money(amount),
+        balance=logic.money(balance),
+        text=("\n\n" + bot_logic.esc(own)) if own else "")
+    return await _send(bot, client["tg_id"], text, kb.cabinet_entry(lang))
+
+
 async def referral_bonus(bot: Any, db: Any, agent: dict, friend: dict,
                          amount: Any) -> bool:
     """Агенту: друг заплатил, бонус на балансе. Деньги уже начислены -

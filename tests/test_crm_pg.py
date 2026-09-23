@@ -2077,6 +2077,73 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             note=None, by="t")
         self.assertEqual((await self.crm.bike_by_code("P-3"))["status"], "available")
 
+    # ─── акции: индексы живут в базе, проверяем их там ───
+
+    async def make(self, **over):
+        fields = {"kind": "promocode", "title": "Весна", "percent": 10, "amount": None,
+                  "code": "ВЕСНА", "params": {}, "starts_on": None, "ends_on": None,
+                  "max_uses": None, "once_per_client": True, "text": None,
+                  "note": None, "by": "t"}
+        fields.update(over)
+        return await self.crm.create_promo(**fields)
+
+    async def test_one_live_code_per_word(self):
+        first = await self.make()
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.make(title="Дубль", code="весна")
+        await self.crm.update_promo(first, active=False)
+        second = await self.make(title="Снова")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.update_promo(first, active=True)
+        got = await self.crm.promo_by_code("весна")
+        self.assertEqual(got["id"], second)
+        self.assertEqual(got["uses"], 0)
+        self.assertEqual(got["total"], D(0))
+
+    async def test_discount_once_per_period_and_never_a_payment(self):
+        await self.seed()
+        await self.make(kind="season", code=None, once_per_client=False)
+        applied: list[dict] = []
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no="АВ-1", by="t", applied=applied)
+        self.assertEqual(len(applied), 1)
+        self.assertEqual((await self.crm.rental(rid))["balance"], D("-2700.00"))
+        # повтор того же периода упирается в индекс: ни баллов, ни строки журнала
+        again = await service.apply_promo(self.crm, rental=await self.crm.rental(rid),
+                                          period_from=date.today(), price=D(3000),
+                                          today=date.today())
+        self.assertIsNone(again)
+        self.assertEqual((await self.crm.rental(rid))["balance"], D("-2700.00"))
+        rows = await self.crm.ledger_of(self.client_id)
+        self.assertEqual(sorted(r["kind"] for r in rows), ["bonus", "charge"])
+        self.assertEqual(await self.crm.rental_revenue(
+            datetime.now(UTC) - timedelta(days=1), datetime.now(UTC)), D(0),
+            "скидка в выручку среднего чека не попала")
+        grants = await self.crm.bonuses(kind="promo")
+        self.assertEqual(grants[0]["promo_title"], "Весна")
+        self.assertEqual(await self.crm.promo_client_uses(self.client_id),
+                         {grants[0]["promo_id"]: 1})
+        self.assertEqual(await self.crm.rental_charge_count(rid), 1)
+
+    async def test_promo_code_lives_on_the_rental(self):
+        await self.seed()
+        await self.make()
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() + timedelta(days=3), contract_no=None, by="t",
+            promo_code="весна")
+        self.assertEqual((await self.crm.rental(rid))["promo_code"], "ВЕСНА")
+        self.assertEqual(await self.crm.bonuses(kind="promo"), [])
+        applied: list[dict] = []
+        await service.charge_all(self.crm, today=date.today() + timedelta(days=3),
+                                 applied=applied)
+        self.assertEqual([a["rental_id"] for a in applied], [rid])
+
 
 if __name__ == "__main__":
     unittest.main()

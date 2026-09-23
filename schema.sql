@@ -359,8 +359,8 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
   ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
@@ -2151,3 +2151,52 @@ update crm.payment_claims p set status = 'rejected', resolved_at = now(),
                   and q.id > p.id);
 create unique index if not exists claims_one_pending
   on crm.payment_claims (client_id) where status = 'pending';
+
+-- ─────────────────────────── акции ───────────────────────────
+--
+-- Акция - правило, по которому клиент получает баллы: вид из каталога
+-- в коде (logic.PROMO_KINDS), параметры - в строке. Скидка ложится в
+-- журнал видом `bonus`, как и остальные баллы: платежом она не
+-- становится никогда, иначе средний чек парка вырос бы на деньги,
+-- которых никто не вносил. Одна акция на одно начисление периода:
+-- подходят две - берётся выгоднейшая для клиента.
+--
+-- Промокод хранится на аренде, а не только в форме выдачи: аренда с
+-- датой начала в будущем начисляется дневным проходом, и код обязан
+-- дожить до него.
+
+create table if not exists crm.promos (
+  id              bigserial primary key,
+  kind            text        not null,          -- first|comeback|promocode|season|renewal|loyalty
+  title           text        not null,
+  percent         integer,                       -- скидка в процентах от цены периода...
+  amount          numeric(12,2),                 -- ...или суммой, не больше цены периода
+  code            text,                          -- промокод, только у kind = promocode
+  params          jsonb       not null default '{}'::jsonb,
+  starts_on       date,
+  ends_on         date,
+  max_uses        integer,                       -- предел применений, null - без предела
+  once_per_client boolean     not null default true,
+  text            text,                          -- что сказать клиенту
+  active          boolean     not null default true,
+  note            text,
+  created_by      text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+-- Один действующий промокод на слово: два живых кода «ВЕСНА» - это спор,
+-- который выдача решала бы наугад.
+create unique index if not exists promos_code_active_idx
+  on crm.promos (upper(code)) where active and code is not null;
+
+alter table crm.bonuses add column if not exists promo_id    bigint references crm.promos (id);
+alter table crm.bonuses add column if not exists rental_id   bigint references crm.rentals (id);
+alter table crm.bonuses add column if not exists period_from date;
+create index if not exists bonuses_promo_idx on crm.bonuses (promo_id, created_at desc);
+-- Одна скидка акции на период аренды: повторный проход начислений
+-- упирается сюда, и в журнале второй строки не появляется.
+create unique index if not exists bonuses_promo_period_once
+  on crm.bonuses (promo_id, rental_id, coalesce(period_from, '1970-01-01'::date))
+  where promo_id is not null and rental_id is not null;
+
+alter table crm.rentals add column if not exists promo_code text;

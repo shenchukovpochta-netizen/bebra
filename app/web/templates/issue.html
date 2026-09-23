@@ -182,9 +182,18 @@
     <p>Баланс сейчас <b class="{% if balance < 0 %}bad{% endif %}">{{ money(balance) }}</b>.
       Первый период начислится сразу: <b>{{ money(tariff.price) }}</b>.
       {% if balance < 0 %}Долг {{ money(-balance) }} остаётся на балансе и виден в карточке.{% endif %}</p>
+    {# Акция - до денег: оператор называет сумму со скидкой, а не объясняет
+       баллы после оплаты. Скидка ляжет баллами следом за начислением. #}
+    {% if promo %}
+    <p class="flash">Акция «{{ promo.title }}»: скидка <b>{{ money(promo_discount) }}</b>
+      начислится баллами — к оплате <b>{{ money(tariff.price - promo_discount) }}</b>.</p>
+    {% endif %}
+    {% if promo_error %}<p class="flash err">{{ promo_error }}</p>{% endif %}
     <label>Принять сейчас, ₽ <input name="pay_amount" inputmode="decimal" value="{{ pay_default }}"></label>
     <label>Способ <select name="pay_method">{% for code, label in METHODS.items() %}<option value="{{ code }}" {% if code == 'sbp' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
-    <p class="muted">0 — выдать без оплаты: клиент получит уведомление с долгом и ссылкой на оплату из кабинета (если Telegram привязан).</p>
+    <label>Промокод <input name="promo_code" value="{{ promo_code }}" placeholder="если клиент назвал" style="max-width:220px;text-transform:uppercase"></label>
+    <p class="muted">0 — выдать без оплаты: клиент получит уведомление с долгом и ссылкой на оплату из кабинета (если Telegram привязан).
+      Неверный промокод остановит оформление; проверить его заранее можно в блоке ниже.</p>
   </section>
   {% if batteries %}
   <section class="card">
@@ -221,6 +230,18 @@
     <span class="spacer"></span>
     <button type="submit">✓ Оформить выдачу</button>
   </div>
+</form>
+{# Проверка промокода - перезагрузка шага с кодом в адресе: мастер без
+   скрипта, а скидку оператор должен увидеть до того, как назовёт сумму.
+   Отдельная форма, потому что форма внутри формы в HTML не живёт. #}
+<form method="get" action="/issue" class="card inline-form" style="margin-top:12px">
+  <input type="hidden" name="client" value="{{ client.id }}">
+  <input type="hidden" name="tariff" value="{{ tariff.id }}">
+  <input type="hidden" name="bike" value="{{ bike.id }}">
+  <input type="hidden" name="started_on" value="{{ started_on|iso }}">
+  <label style="margin:0">Проверить промокод <input name="promo" value="{{ promo_code }}" placeholder="ВЕСНА" style="text-transform:uppercase"></label>
+  <button type="submit" class="ghost">Проверить</button>
+  <span class="muted">Действующие акции без кода подставляются сами.</span>
 </form>
 {# Итог за период считается на месте: оператор при живом клиенте должен
    видеть сумму до нажатия, а не после. Без скрипта строка показывает

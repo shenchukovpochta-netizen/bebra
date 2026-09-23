@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}{% if is_new %}Новая акция{% else %}{{ promo.title }}{% endif %} — {{ app_title }}{% endblock %}
+{% block content %}
+{% set editable = can_edit(staff, 'promos') %}
+{% set params = promo_params(promo) %}
+<div class="bar"><h1>{% if is_new %}Новая акция · {{ spec.title }}{% else %}{{ promo.title }}
+  {% if not promo.active %}<span class="tag">выключена</span>{% elif alive %}<span class="tag ok">действует</span>{% else %}<span class="tag">не действует</span>{% endif %}{% endif %}</h1>
+  <a class="btn ghost" href="/promos">Все акции</a>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>{{ spec.title }} <small class="muted">· {{ spec.when }}</small></h2>
+  <p class="muted">{{ spec.hint }}</p>
+  {% if editable %}
+  <form method="post" action="{% if is_new %}/promos{% else %}/promos/{{ promo.id }}{% endif %}" class="grid2">
+    <input type="hidden" name="kind" value="{{ kind }}">
+    <label class="wide">Название <input name="title" value="{{ promo.title or '' }}" required placeholder="{{ spec.title }}"></label>
+    <label>Скидка, % <input name="percent" inputmode="numeric" value="{{ promo.percent or '' }}" placeholder="10"></label>
+    <label>или суммой, ₽ <input name="amount" inputmode="decimal" value="{{ promo.amount or '' }}" placeholder="300"></label>
+    {% if kind == 'promocode' %}
+    <label>Промокод <input name="code" value="{{ promo.code or '' }}" required placeholder="ВЕСНА" style="text-transform:uppercase"></label>
+    {% endif %}
+    {% for key, value in params.items() %}
+    <label>{{ PROMO_PARAM_LABELS[key] }} <input name="{{ key }}" inputmode="numeric" value="{{ value }}"></label>
+    {% endfor %}
+    <label>Действует с <input type="date" name="starts_on" value="{{ promo.starts_on|iso if promo.starts_on else '' }}"></label>
+    <label>Действует по <input type="date" name="ends_on" value="{{ promo.ends_on|iso if promo.ends_on else '' }}"></label>
+    <label>Предел применений <input name="max_uses" inputmode="numeric" value="{{ promo.max_uses or '' }}" placeholder="пусто — без предела"></label>
+    <label class="check"><input type="checkbox" name="once_per_client" value="1" {% if promo.once_per_client %}checked{% endif %}> Один раз на клиента</label>
+    <label class="wide">Текст клиенту <textarea name="text" rows="3" placeholder="{{ spec.text }}">{{ promo.text or '' }}</textarea></label>
+    <label class="wide">Заметка <input name="note" value="{{ promo.note or '' }}"></label>
+    <button type="submit">{% if is_new %}Завести и включить{% else %}Сохранить{% endif %}</button>
+  </form>
+  <p class="muted">Подстановки в тексте: {% for code, label in PROMO_TEXT_FIELDS.items() %}<code>{{ '{' }}{{ code }}{{ '}' }}</code> — {{ label }}{% if not loop.last %}, {% endif %}{% endfor %}.
+    Пустой текст — уйдёт текст шаблона. Скидка — либо процент от цены периода,
+    либо сумма, но не больше самой цены.</p>
+  {% else %}
+  <dl>
+    <dt>Скидка</dt><dd>{{ promo_discount_label(promo) }}</dd>
+    {% if promo.code %}<dt>Промокод</dt><dd><code>{{ promo.code }}</code></dd>{% endif %}
+    {% for key, value in params.items() %}<dt>{{ PROMO_PARAM_LABELS[key] }}</dt><dd>{{ value }}</dd>{% endfor %}
+    <dt>Действует</dt><dd>{% if promo.starts_on or promo.ends_on %}{{ promo.starts_on|dmy if promo.starts_on else '…' }} — {{ promo.ends_on|dmy if promo.ends_on else '…' }}{% else %}без срока{% endif %}</dd>
+    <dt>Предел</dt><dd>{{ promo.max_uses or 'нет' }}</dd>
+    <dt>Один раз на клиента</dt><dd>{{ 'да' if promo.once_per_client else 'нет' }}</dd>
+    <dt>Текст клиенту</dt><dd>{{ promo.text or spec.text }}</dd>
+  </dl>
+  {% endif %}
+</section>
+
+{% if not is_new %}
+<section class="card">
+  <h2>Что сделала</h2>
+  <div class="tiles">
+    <div class="tile"><b>{{ promo.uses }}</b><span>раз сработала{% if promo.max_uses %}<br><small class="muted">из {{ promo.max_uses }}</small>{% endif %}</span></div>
+    <div class="tile"><b>{{ money(promo.total) }}</b><span>роздано баллами</span></div>
+  </div>
+  {% if editable %}
+  <div class="inline-form">
+    <form method="post" action="/promos/{{ promo.id }}/toggle"><button type="submit" class="ghost">{{ 'Выключить' if promo.active else 'Включить' }}</button></form>
+    {% if can_edit(staff, 'mailing') %}
+    <form method="post" action="/promos/{{ promo.id }}/mailing"><button type="submit" class="ghost">📣 Шаблон рассылки</button></form>
+    {% endif %}
+  </div>
+  <p class="muted">Выключенная акция новых скидок не даёт, начисленное остаётся.
+    Шаблон рассылки собирается из текста акции: скидка, код и название
+    подставлены, имя клиента подставит рассылка.</p>
+  <pre class="preview">{{ mailing_body }}</pre>
+  {% endif %}
+  <h3>Кому начислено</h3>
+  <table>
+    <tr><th>Когда</th><th>Клиент</th><th class="opt">Период</th><th class="num">Сумма</th></tr>
+    {% for b in grants %}
+    <tr>
+      <td class="nowrap muted">{{ b.created_at|dmy }}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}</td>
+      <td class="opt muted">{% if b.rental_id %}<a href="/rentals/{{ b.rental_id }}">аренда #{{ b.rental_id }}</a>{% endif %}{% if b.period_from %} · с {{ b.period_from|dmy }}{% endif %}</td>
+      <td class="num">{{ money(b.amount) }}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">Пока никому.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+</div>
+{% endblock %}

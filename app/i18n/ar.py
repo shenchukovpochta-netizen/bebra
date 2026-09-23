@@ -436,6 +436,7 @@ T: dict[str, str] = {
     "CAB_FRIENDS_EMPTY": 'لم يأت أحد عبر رابطك حتى الآن.',
     "CAB_FRIENDS_OFF": '👥 <b>أصدقائي</b>\n\nبرنامج الدعوات متوقف حاليًا.',
     "CAB_REF_BONUS": '🎁 صديقك {name} استأجر دراجة وسدّد الدفعة الأولى.\nتمت إضافة مكافأة {amount} إلى رصيدك. شكرًا لك!',
+    "CAB_PROMO_APPLIED": '🎉 عرض «{title}»: تمت إضافة {amount} كنقاط إلى حسابك.\nالرصيد: {balance}.{text}',
     "BTN_CABINET": '🚲 حسابي',
     "BTN_CAB_TOPUP": '💳 شحن الرصيد',
     "BTN_CAB_HISTORY": '🧾 السجل',

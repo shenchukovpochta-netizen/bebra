@@ -71,7 +71,9 @@ async def add_entry(crm: Any, client: dict, *, kind: str, amount: Decimal,
 async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict,
                       started_on: date, contract_no: str | None, by: str,
                       billing: str = "auto", mileage: int | None = None,
-                      extras: Sequence[Mapping[str, Any]] = ()) -> int:
+                      extras: Sequence[Mapping[str, Any]] = (),
+                      promo_code: str | None = None,
+                      applied: list[dict] | None = None) -> int:
     """Оформить аренду и начислить первый период.
 
     Аренда с датой начала в будущем не начисляется заранее: первый период
@@ -82,6 +84,10 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
     заводятся до первого начисления, потому что начисляется цена периода
     целиком: завести их после значило бы подарить клиенту первый период
     второй батареи.
+
+    `promo_code` ложится на аренду: у выдачи с датой в будущем первый
+    период начислит дневной проход, и код обязан дожить до него.
+    Сработавшие акции собираются в `applied` - для уведомления клиенту.
     """
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
@@ -99,7 +105,8 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             tariff_id=tariff.get("id"), tariff_name=tariff["name"],
             period_days=int(tariff["period_days"]), price=price, base_price=base,
             billing=billing, started_on=started_on, contract_no=contract_no,
-            created_by=by, mileage_start=mileage)
+            created_by=by, mileage_start=mileage,
+            promo_code=logic.clean_promo_code(promo_code) or None)
     except Exception as exc:                            # noqa: BLE001
         # Уникальные индексы на активную аренду: гонка двух операторов.
         if "unique" in type(exc).__name__.lower():
@@ -121,8 +128,9 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
                                       "period_days": int(tariff["period_days"]),
                                       "price": price,
                                       "tariff_name": tariff["name"],
-                                      "billing": "auto", "status": "active"},
-                         today=date.today())
+                                      "billing": "auto", "status": "active",
+                                      "promo_code": logic.clean_promo_code(promo_code)},
+                         today=date.today(), applied=applied)
     # Шаг воронки приглашений. Учёт не вправе сорвать выдачу велосипеда,
     # поэтому ошибка здесь только в логе.
     try:
@@ -133,8 +141,14 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
     return rental_id
 
 
-async def charge_due(crm: Any, *, rental: dict, today: date) -> int:
-    """Начислить аренде все периоды по сегодня. Возвращает число начислений."""
+async def charge_due(crm: Any, *, rental: dict, today: date,
+                     applied: list[dict] | None = None) -> int:
+    """Начислить аренде все периоды по сегодня. Возвращает число начислений.
+
+    После каждого начисления - проверка акций: скидка на период ложится
+    баллами следом за самим начислением. `applied` собирает сработавшие
+    акции для уведомлений: у сервиса бота нет, шлёт вызывающий.
+    """
     if rental.get("billing") != "auto" or rental.get("status") != "active":
         return 0
     done = 0
@@ -147,16 +161,84 @@ async def charge_due(crm: Any, *, rental: dict, today: date) -> int:
             period_to=period_to, amount=-price,
             note=f"{rental.get('tariff_name') or 'Аренда'}: "
                  f"{logic.period_label(period_from, period_to)}")
-        if ok:
-            done += 1
+        if not ok:
+            continue
+        done += 1
+        # Акция не вправе сорвать начисление: сбой здесь - только в логе.
+        try:
+            got = await apply_promo(crm, rental=rental, period_from=period_from,
+                                    price=price, today=today)
+        except Exception:                                # noqa: BLE001
+            log.exception("акции: период %s аренды %s не проверен",
+                          period_from, rental.get("id"))
+            got = None
+        if got is not None and applied is not None:
+            applied.append(got)
     return done
 
 
-async def charge_all(crm: Any, *, today: date) -> int:
+async def charge_all(crm: Any, *, today: date,
+                     applied: list[dict] | None = None) -> int:
     total = 0
     for rental in await crm.active_rentals():
-        total += await charge_due(crm, rental=rental, today=today)
+        total += await charge_due(crm, rental=rental, today=today, applied=applied)
     return total
+
+
+async def apply_promo(crm: Any, *, rental: dict, period_from: date, price: Decimal,
+                      today: date, by: str = "promo") -> dict | None:
+    """Скидка по акции на только что начисленный период. None - не подошла.
+
+    Одна на период, выгоднейшая для клиента. Баллы, а не платёж: они
+    меняют баланс, но средний чек не трогают. Повтор того же периода
+    упирается в уникальный индекс и возвращает None: второй проход
+    начислений скидку не удваивает.
+    """
+    promos = await crm.promos(active_only=True)
+    if not promos:
+        return None
+    history = logic.rental_history(await crm.client_rentals(rental["client_id"]),
+                                   rental["id"])
+    ctx = {
+        "period_index": await crm.rental_charge_count(rental["id"]),
+        "today": today, "code": rental.get("promo_code"),
+        "client_uses": await crm.promo_client_uses(rental["client_id"]),
+        **history,
+    }
+    picked = logic.pick_promo(promos, ctx, price)
+    if picked is None:
+        return None
+    promo, discount = picked
+    try:
+        bonus_id = await crm.grant_bonus(
+            client_id=rental["client_id"], kind="promo", amount=discount,
+            note=f"Акция «{promo['title']}»: {logic.period_label(period_from, None)}",
+            by=by, promo_id=promo["id"], rental_id=rental["id"],
+            period_from=period_from)
+    except Exception as exc:                            # noqa: BLE001
+        if "unique" in type(exc).__name__.lower():
+            return None
+        raise
+    if bonus_id is None:
+        return None
+    return {"client_id": rental["client_id"], "rental_id": rental["id"],
+            "promo": promo, "amount": discount, "period_index": ctx["period_index"],
+            "bonus_id": bonus_id}
+
+
+async def check_promo_code(crm: Any, code: Any, *, today: date) -> dict | None:
+    """Промокод с выдачи: действующая акция или ServiceError с причиной.
+    Пустой код - None, выдача без акции."""
+    code = logic.clean_promo_code(code)
+    if not code:
+        return None
+    promo = await crm.promo_by_code(code)
+    if promo is None:
+        raise ServiceError(f"Промокод {code} не найден или выключен.")
+    if not logic.promo_alive(promo, today=today):
+        raise ServiceError(f"Промокод {code} уже не действует: вышел срок "
+                           "или выбран предел применений.")
+    return promo
 
 
 async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | None,

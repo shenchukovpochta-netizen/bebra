@@ -715,7 +715,11 @@ service.charge_all(crm, *, today: date) -> int                                  
 
 Баллы в журнал попадают, но никогда видом `payment`. `CrmDB.grant_bonus` (`app/crm/db.py`)
 пишет `kind = 'bonus'` и повод в `crm.bonuses` одной транзакцией, `CrmDB.pay_referral_bonus`
-(`app/crm/db.py`) делает то же для агента. Выручку на средний чек отбирает
+(`app/crm/db.py`) делает то же для агента. Скидка по акции идёт тем же путём:
+`service.apply_promo` (`app/crm/service.py`) зовётся из `charge_due` следом за каждым
+начислением, выбирает одну акцию через `logic.pick_promo` и пишет бонус с `promo_id`,
+`rental_id` и `period_from`; частичный уникальный индекс `bonuses_promo_period_once` не даёт
+повторному проходу начислить её дважды. Выручку на средний чек отбирает
 `CrmDB.rental_revenue` (`app/crm/db.py`) - строго `kind = 'payment'`, - а делит её на
 велосипеде-дни аренды уже `logic.fleet_metrics`. Бонус, попавший в платежи, испортил бы одно
 из трёх чисел парка.
@@ -739,6 +743,9 @@ service.credit_bank_txn(crm, txn, client, *, by, method="transfer") -> int
 service.credit_pay_order(crm, order, *, by, method="cash") -> int | None
 # service.py  баллы руками, никогда не платёж
 service.grant_manual_bonus(crm, client, amount: Decimal, *, note, by) -> Decimal
+# service.py  скидка по акции на начисленный период; None - не подошла
+#             или уже начислена; зовётся из charge_due, руками не нужна
+service.apply_promo(crm, *, rental, period_from, price, today, by="promo") -> dict | None
 # service.py   выдача: аренда, позиции и первый период
 service.open_rental(crm, *, client, bike, tariff, started_on, contract_no, by, ...) -> int
 ```
