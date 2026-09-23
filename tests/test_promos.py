@@ -389,6 +389,58 @@ class TestPromoFlow(tw.WebCase):
                         self.bot.sent)
         self.assertIn("Скидок по акциям: 1", self.get_ok("/"))
 
+    def test_limit_is_enforced_at_write_time(self):
+        """Снимок «применений 0» у двух выдач в одну секунду не должен
+        раздать на одну скидку больше: предел проверяет запись."""
+        pid = self.make("promocode", code="ОДИН", percent=10, max_uses=1)
+        self.open_rental(code="ОДИН")
+        other = _run(self.crm.create_client(full_name="Петров Пётр",
+                                            phone="+79990000002", tg_id=5002))
+        bike2 = _run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        rid = _run(self.crm.create_rental(
+            client_id=other, bike_id=bike2, tariff_id=self.tariff_id, tariff_name="Неделя",
+            period_days=7, price=D(3000), billing="auto", started_on=date.today(),
+            contract_no=None, created_by="t", promo_code="ОДИН"))
+        bonus = {"promo_id": pid, "amount": D(300), "note": "снимок", "by": "t"}
+        ok = _run(self.crm.charge_period(rid, other, period_from=date.today(),
+                                         period_to=date.today() + timedelta(days=7),
+                                         amount=D(-3000), note="период", bonus=bonus))
+        self.assertTrue(ok, "начисление прошло")
+        self.assertFalse(bonus["granted"], "скидка - нет: предел выбран")
+        self.assertEqual(_run(self.crm.client_balance(other)), D(-3000))
+        self.assertEqual(_run(self.crm.promo(pid))["uses"], 1)
+
+    def test_one_broken_rental_does_not_stop_the_pass(self):
+        self.make("season", percent=10)
+        self.open_rental(started=date.today() - timedelta(days=8))
+        other = _run(self.crm.create_client(full_name="Петров Пётр",
+                                            phone="+79990000002", tg_id=5002))
+        bike2 = _run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        rid2 = _run(service.open_rental(
+            self.crm, client=_run(self.crm.client(other)), bike=_run(self.crm.bike(bike2)),
+            tariff=_run(self.crm.tariff(self.tariff_id)),
+            started_on=date.today() - timedelta(days=8), contract_no=None, by="t"))
+        first = _run(self.crm.active_rental_of(self.client_id))["id"]
+        real = self.crm.rental_charge_count
+
+        async def broken(rental_id):
+            if rental_id == first:
+                raise RuntimeError("база моргнула")
+            return await real(rental_id)
+        self.crm.rental_charge_count = broken
+        later = date.today() + timedelta(days=6)
+        applied = []
+        with self.assertRaises(service.ChargeError) as caught:
+            _run(service.charge_all(self.crm, today=later, applied=applied))
+        self.assertEqual(caught.exception.done, 1, "вторая аренда начислена, первая - в лог")
+        self.assertEqual(caught.exception.failed, [first])
+        self.assertEqual([a["rental_id"] for a in applied], [rid2])
+        self.crm.rental_charge_count = real
+        # первая догоняет следующим проходом, скидка вместе с ней
+        applied = []
+        self.assertEqual(_run(service.charge_all(self.crm, today=later, applied=applied)), 1)
+        self.assertEqual([a["rental_id"] for a in applied], [first])
+
     def test_daily_pass_tells_the_client(self):
         self.make("season", percent=10)
         self.open_rental(started=date.today() - timedelta(days=8))
@@ -532,6 +584,67 @@ class TestPromoPages(tw.WebCase):
         self.assertIn(f"started_on={start.isoformat()}", r.headers["location"])
         page = self.get_ok(r.headers["location"])
         self.assertIn("Акция «Весна»", page)
+
+    def test_bigger_promo_wins_without_a_false_error(self):
+        _run(self.crm.create_promo(
+            kind="promocode", title="Весна", percent=10, amount=None, code="ВЕСНА",
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        _run(self.crm.create_promo(
+            kind="first", title="Новичок", percent=15, amount=None, code=None,
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        base = f"/issue?client={self.client_id}&tariff={self.tariff_id}&bike={self.bike_id}"
+        page = self.get_ok(base + "&promo=ВЕСНА")
+        self.assertNotIn("не подходит", page)
+        self.assertIn("Акция «Новичок»", page)
+        self.assertIn("выгоднее", page)
+        self.assertIn('value="2550"', page)
+
+    def test_future_issue_collects_full_price_and_credits_later(self):
+        _run(self.crm.create_promo(
+            kind="first", title="Новичок", percent=10, amount=None, code=None,
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        start = date.today() + timedelta(days=2)
+        base = f"/issue?client={self.client_id}&tariff={self.tariff_id}&bike={self.bike_id}"
+        page = self.get_ok(base + f"&started_on={start.isoformat()}")
+        self.assertIn("в день начала", page)
+        self.assertIn('value="3000"', page, "скидку с оплаты сейчас не снимаем")
+        r = self.client.post("/issue", data={"client_id": self.client_id,
+                                             "tariff_id": self.tariff_id,
+                                             "bike_id": self.bike_id,
+                                             "started_on": start.isoformat(),
+                                             "pay_amount": "3000", "pay_method": "cash",
+                                             "mileage": "10"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(3000))
+        _run(service.charge_all(self.crm, today=start))
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(300),
+                         "период списан, скидка легла баллами в плюс")
+
+    def test_code_that_does_not_fit_is_refused_before_money(self):
+        _run(self.crm.create_promo(
+            kind="promocode", title="Весна", percent=20, amount=None, code="ВЕСНА",
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=True, text=None, note=None, by="t"))
+        _run(service.open_rental(
+            self.crm, client=_run(self.crm.client(self.client_id)),
+            bike=_run(self.crm.bike(self.bike_id)),
+            tariff=_run(self.crm.tariff(self.tariff_id)),
+            started_on=date.today(), contract_no=None, by="t", promo_code="ВЕСНА"))
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        _run(service.close_rental(self.crm, rental, closed_on=date.today(), note=None,
+                                  by="t"))
+        r = self.client.post("/issue", data={"client_id": self.client_id,
+                                             "tariff_id": self.tariff_id,
+                                             "bike_id": self.bike_id,
+                                             "pay_amount": "2400", "pay_method": "cash",
+                                             "mileage": "10", "promo_code": "ВЕСНА"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIsNone(_run(self.crm.active_rental_of(self.client_id)),
+                          "код не положен - отказ до денег")
+        self.assertIn("не подходит", self.get_ok(r.headers["location"]))
 
     def test_check_says_when_the_code_does_not_fit_this_client(self):
         _run(self.crm.create_promo(

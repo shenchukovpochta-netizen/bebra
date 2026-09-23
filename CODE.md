@@ -744,9 +744,18 @@ service.credit_bank_txn(crm, txn, client, *, by, method="transfer") -> int
 service.credit_pay_order(crm, order, *, by, method="cash") -> int | None
 # service.py  баллы руками, никогда не платёж
 service.grant_manual_bonus(crm, client, amount: Decimal, *, note, by) -> Decimal
+# service.py  проход по всем арендам: сбой одной - в лог, остальные начисляются,
+#             а в конце ChargeError(done, failed): проход сделанным не считается,
+#             следующий круг повторит его, начисленное защищено индексом
+service.charge_all(crm, *, today, applied=None) -> int
 # service.py  какая акция ляжет на период, который сейчас начислится; только
-#             чтение, пишет charge_period(bonus=...) в транзакции начисления
+#             чтение, пишет charge_period(bonus=...) в транзакции начисления,
+#             и там же, под замком строки акции, решается предел применений
 service.promo_for_period(crm, *, rental, period_from, period_to, today) -> dict | None
+# service.py  та же выборка до денег, для шага выдачи: error - отказ (кода нет,
+#             срок вышел, клиенту не положен), note - другая акция выгоднее,
+#             deferred - начало в будущем, скидку с оплаты сейчас не снимать
+service.preview_promo(crm, *, client, tariff, started_on, code, today) -> dict
 # service.py   выдача: аренда, позиции и первый период
 service.open_rental(crm, *, client, bike, tariff, started_on, contract_no, by, ...) -> int
 ```

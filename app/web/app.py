@@ -767,7 +767,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/billing/run")
     async def billing_run(request: Request) -> Response:
         applied: list[dict] = []
-        done = await service.charge_all(crm, today=date.today(), applied=applied)
+        try:
+            done = await service.charge_all(crm, today=date.today(), applied=applied)
+        except service.ChargeError as exc:
+            # Часть аренд начислена, часть ждёт: сказать, какие, и не
+            # прятать сделанное.
+            done = exc.done
+            flash(request, str(exc), "err")
         # Скидки по акциям легли вместе с начислениями - клиентам о них
         # говорит тот, кто начислил, иначе дневной проход их уже не увидит.
         told = await billing.tell_promos(bot, db, crm, applied)
@@ -1530,32 +1536,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Акция видна до денег: оператор называет клиенту сумму со
         # скидкой, а не объясняет баллы после оплаты. Промокод приходит
         # адресом (?promo=) - мастер без скрипта, проверка кода это
-        # перезагрузка шага.
-        promo_code = logic.clean_promo_code(p.get("promo"))
-        promo_error = ""
-        if promo_code:
-            try:
-                await service.check_promo_code(crm, promo_code, today=date.today(),
-                                               started_on=start)
-            except service.ServiceError as exc:
-                promo_error = str(exc)
-                promo_code = ""
-        picked = logic.pick_promo(
-            await crm.promos(active_only=True),
-            {"period_index": 1, "period_from": start, "today": max(date.today(), start),
-             "code": promo_code,
-             "client_uses": await crm.promo_client_uses(client["id"]),
-             **logic.rental_history(await crm.client_rentals(client["id"]), None)},
-            tariff["price"])
-        if promo_code and (picked is None
-                           or logic.clean_promo_code(picked[0].get("code")) != promo_code):
-            # Код живой, но этому клиенту не положен - сказать сейчас, а не
-            # молча выдать без скидки.
-            promo_error = (f"Промокод {promo_code} действует, но этому клиенту не "
-                           "подходит: он уже получал эту акцию.")
-        discount = picked[1] if picked else Decimal(0)
-        pay_due = max(logic.issue_payment_default(tariff["price"], balance) - discount,
-                      Decimal(0))
+        # перезагрузка шага. Выборка та же, что у начисления.
+        preview = await service.preview_promo(crm, client=client, tariff=tariff,
+                                              started_on=start, code=p.get("promo"),
+                                              today=date.today())
+        discount = preview["discount"]
+        # Начало в будущем: скидка ляжет в свой день, если акция доживёт, -
+        # с оплаты сейчас её не снимаем, баллы зачтутся в следующий период.
+        pay_due = logic.issue_payment_default(tariff["price"], balance)
+        if not preview["deferred"]:
+            pay_due = max(pay_due - discount, Decimal(0))
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
@@ -1563,8 +1553,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                    pay_default=plain_amount(pay_due), pay_due=pay_due,
                    contract_no=(client.get("contract_no")
                                 or (bot_user or {}).get("contract_no") or ""),
-                   promo=picked[0] if picked else None, promo_discount=discount,
-                   promo_code=promo_code, promo_error=promo_error)
+                   promo=preview["promo"], promo_discount=discount,
+                   promo_code=preview["code"], promo_error=preview["error"],
+                   promo_note=preview["note"], promo_deferred=preview["deferred"])
         return render(request, "issue.html", **ctx)
 
     @app.post("/issue/client")
@@ -1636,12 +1627,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Промокод проверяется до аренды: неверный код - это отказ до
         # денег, а не выдача без скидки, о которой клиент узнает потом.
         promo_code = logic.clean_promo_code(data.get("promo_code"))
-        try:
-            await service.check_promo_code(crm, promo_code, today=date.today(),
-                                           started_on=started.value)
-        except service.ServiceError as exc:
-            flash(request, str(exc), "err")
-            return redirect(back)
+        if promo_code:
+            preview = await service.preview_promo(
+                crm, client=client, tariff=tariff, started_on=started.value,
+                code=promo_code, today=date.today())
+            if preview["error"]:
+                flash(request, preview["error"], "err")
+                return redirect(back)
         # Номер договора: с формы, иначе из карточки, иначе из бота - оператор
         # его наизусть не помнит, а в акте и отчётах он нужен.
         contract_no = contract.value or client.get("contract_no")
@@ -1706,7 +1698,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         await notify.rental_opened(bot, db, crm, client, rental)
         # Сообщение об акции - после платежа и после «аренда оформлена»:
         # в нём баланс, и он обязан быть уже с деньгами.
-        await tell_promos(client, applied)
+        await billing.tell_promos(bot, db, crm, applied)
         if pay.value > 0:
             flash(request, f"Выдача оформлена: № {bike['code']} у клиента, "
                            f"принято {logic.money(pay.value)}.")
@@ -1902,14 +1894,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except (TypeError, ValueError):
             client = tariff = bike = None
         started = logic.check_date(data.get("started_on"), default=date.today())
-        billing = data.get("billing") or "auto"
+        billing_mode = data.get("billing") or "auto"
         if client is None or tariff is None:
             flash(request, "Выберите клиента и тариф.", "err")
             return redirect("/rentals/new")
         if bike is None and (data.get("bike_id") or "").strip():
             flash(request, "Такого велосипеда нет.", "err")
             return redirect("/rentals/new")
-        if not started.ok or billing not in logic.BILLING:
+        if not started.ok or billing_mode not in logic.BILLING:
             flash(request, started.error or "Недопустимый режим начисления.", "err")
             return redirect("/rentals/new")
         contract_no = (data.get("contract_no") or "").strip() or client.get("contract_no")
@@ -1917,18 +1909,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         try:
             rental_id = await service.open_rental(
                 crm, client=client, bike=bike, tariff=tariff, started_on=started.value,
-                contract_no=contract_no, by=who(request), billing=billing,
+                contract_no=contract_no, by=who(request), billing=billing_mode,
                 applied=applied)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect("/rentals/new")
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
-        await tell_promos(client, applied)
+        await billing.tell_promos(bot, db, crm, applied)
         for got in applied:
             flash(request, f"Акция «{got['promo']['title']}»: {logic.money(got['amount'])} "
                            "начислено баллами.")
-        if billing == "manual":
+        if billing_mode == "manual":
             flash(request, "Аренда оформлена без начисления: записи в журнал делаете вы.")
         elif started.value > date.today():
             flash(request, f"Аренда оформлена. Первый период начислится "
@@ -4425,15 +4417,6 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # Акция - правило начисления баллов, шаблон в коде, параметры в строке.
     # Раздел свой, а не вкладка приглашений: акции живут рядом с
     # рассылками, а не с отчётами, и правит их тот, кто ведёт клиентов.
-
-    async def tell_promos(client: dict, applied: list[dict]) -> None:
-        """Клиенту о сработавших на выдаче акциях. Баллы уже в журнале."""
-        for got in applied:
-            await notices.send_client(
-                crm, "promo_applied", client["id"],
-                lambda g=got: notify.promo_applied(
-                    bot, db, crm, client, g["promo"], g["amount"],
-                    period_index=g.get("period_index") or 0))
 
     @app.get("/promos")
     async def promos_page(request: Request) -> Response:

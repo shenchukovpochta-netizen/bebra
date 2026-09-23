@@ -664,11 +664,23 @@ class FakeCrm:
                               amount=Decimal(amount), note=note, created_by=created_by,
                               period_from=period_from, period_to=period_to,
                               created_at=created_at)
+        # Скидка решается до записи: настоящая база откатила бы всю
+        # транзакцию, и половинчатого периода в заглушке быть не должно.
+        granted = False
+        if bonus and Decimal(bonus.get("amount") or 0) > 0:
+            promo = self.promos_.get(bonus["promo_id"])
+            uses = sum(1 for b in self.bonuses_.values()
+                       if b.get("promo_id") == bonus["promo_id"])
+            dup = any(b.get("promo_id") == bonus["promo_id"]
+                      and b.get("rental_id") == rental_id
+                      and b.get("period_from") == period_from
+                      for b in self.bonuses_.values())
+            granted = (promo is not None and promo["active"] and not dup
+                       and (promo["max_uses"] is None or uses < promo["max_uses"]))
+            bonus["granted"] = granted
         r = self.rentals_[rental_id]
         r["billed_until"] = max(r["billed_until"], period_to)
-        if bonus and Decimal(bonus.get("amount") or 0) > 0:
-            self._bonus_unique(client_id, "promo", bonus["promo_id"], rental_id,
-                               period_from)
+        if granted:
             ledger_id = await self.add_ledger(
                 client_id=client_id, rental_id=rental_id, kind="bonus",
                 amount=Decimal(bonus["amount"]), note=bonus.get("note"),
@@ -2781,36 +2793,23 @@ class FakeCrm:
 
     # ─────────────────── баллы ───────────────────
 
-    def _bonus_unique(self, client_id, kind, promo_id=None, rental_id=None,
-                      period_from=None):
+    def _bonus_unique(self, client_id, kind):
         if kind in ("review", "friend") and any(
                 b["client_id"] == client_id and b["kind"] == kind
                 for b in self.bonuses_.values()):
             raise UniqueError(f"bonuses_{kind}_once")
-        if promo_id is not None and rental_id is not None and any(
-                b.get("promo_id") == promo_id and b.get("rental_id") == rental_id
-                and b.get("period_from") == period_from
-                for b in self.bonuses_.values()):
-            raise UniqueError("bonuses_promo_period_once")
 
     async def grant_bonus(self, *, client_id, kind, amount, note=None,
-                          ref_id=None, by=None, promo_id=None, rental_id=None,
-                          period_from=None):
+                          ref_id=None, by=None):
         amount = Decimal(amount)
         if amount <= 0:
             return None
-        self._bonus_unique(client_id, kind, promo_id, rental_id, period_from)
+        self._bonus_unique(client_id, kind)
         ledger_id = await self.add_ledger(client_id=client_id, kind="bonus",
-                                          amount=amount, note=note,
-                                          created_by=by, rental_id=rental_id)
-        bid = self._id()
-        self.bonuses_[bid] = {"id": bid, "client_id": client_id, "kind": kind,
-                              "amount": amount, "ledger_id": ledger_id,
-                              "ref_id": ref_id, "note": note, "created_by": by,
-                              "promo_id": promo_id, "rental_id": rental_id,
-                              "period_from": period_from,
-                              "created_at": self._now()}
-        return bid
+                                          amount=amount, note=note, created_by=by)
+        return await self.record_bonus(client_id=client_id, kind=kind, amount=amount,
+                                       ledger_id=ledger_id, ref_id=ref_id, note=note,
+                                       by=by)
 
     async def record_bonus(self, *, client_id, kind, amount, ledger_id=None,
                            ref_id=None, note=None, by=None):

@@ -777,7 +777,7 @@ class CrmDB:
                             period_from: date, period_to: date, amount: Decimal,
                             note: str, created_by: str = "billing",
                             created_at: datetime | None = None,
-                            bonus: Mapping[str, Any] | None = None) -> bool:
+                            bonus: dict[str, Any] | None = None) -> bool:
         """Начислить период и сдвинуть billed_until - одной транзакцией.
 
         Повтор того же периода (второй проход, ручной запуск) упирается
@@ -788,7 +788,11 @@ class CrmDB:
         `bonus` - скидка по акции на этот же период: строка журнала
         видом bonus и повод в crm.bonuses ложатся в ту же транзакцию,
         что и начисление. Порознь сбой между ними оставлял бы клиента
-        с долгом, а обещанную скидку - без пути повторить.
+        с долгом, а обещанную скидку - без пути повторить. Предел
+        применений и тумблер акции проверяются здесь же, под замком
+        строки акции: снимок «применений 0» у двух операторов в одну
+        секунду раздал бы на одну скидку больше. Что вышло, пишется в
+        `bonus["granted"]`; отказ в скидке начисление не отменяет.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             try:
@@ -806,22 +810,49 @@ class CrmDB:
                 "update crm.rentals set billed_until = greatest(billed_until, $2), "
                 "updated_at = now() where id = $1", rental_id, period_to)
             if bonus and _money(bonus.get("amount")):
+                bonus["granted"] = await self._grant_period_bonus(
+                    conn, client_id=client_id, rental_id=rental_id,
+                    period_from=period_from, period_to=period_to, bonus=bonus)
+            return True
+
+    @staticmethod
+    async def _grant_period_bonus(conn: Any, *, client_id: int,
+                                  rental_id: int, period_from: date, period_to: date,
+                                  bonus: Mapping[str, Any]) -> bool:
+        """Скидка по акции внутри транзакции начисления. False - не положена:
+        акция выключена, предел выбран или на этот период уже есть."""
+        promo_id = int(bonus["promo_id"])
+        promo = await conn.fetchrow(
+            "select active, max_uses from crm.promos where id = $1 for update", promo_id)
+        if promo is None or not promo["active"]:
+            return False
+        uses = int(await conn.fetchval(
+            "select count(*) from crm.bonuses where promo_id = $1", promo_id) or 0)
+        if promo["max_uses"] is not None and uses >= int(promo["max_uses"]):
+            return False
+        amount = _money(bonus["amount"])
+        by = bonus.get("by") or "promo"
+        try:
+            # Точка сохранения: повтор скидки на период откатывает только
+            # её, а начисление остаётся.
+            async with conn.transaction():
                 ledger_id = int(await conn.fetchval(
                     """
                     insert into crm.ledger (client_id, rental_id, kind, amount,
                                             period_from, period_to, note, created_by)
                     values ($1, $2, 'bonus', $3, $4, $5, $6, $7) returning id
-                    """, client_id, rental_id, _money(bonus["amount"]), period_from,
-                    period_to, bonus.get("note"), bonus.get("by") or "promo"))
+                    """, client_id, rental_id, amount, period_from, period_to,
+                    bonus.get("note"), by))
                 await conn.execute(
                     """
                     insert into crm.bonuses (client_id, kind, amount, ledger_id, note,
                                              created_by, promo_id, rental_id, period_from)
                     values ($1, 'promo', $2, $3, $4, $5, $6, $7, $8)
-                    """, client_id, _money(bonus["amount"]), ledger_id, bonus.get("note"),
-                    bonus.get("by") or "promo", int(bonus["promo_id"]), rental_id,
-                    period_from)
-            return True
+                    """, client_id, amount, ledger_id, bonus.get("note"), by, promo_id,
+                    rental_id, period_from)
+        except asyncpg.UniqueViolationError:
+            return False
+        return True
 
     async def mark_notified(self, rental_id: int, today: date, kind: str) -> None:
         await self.pool.execute(
@@ -3639,15 +3670,13 @@ class CrmDB:
 
     async def grant_bonus(self, *, client_id: int, kind: str, amount: Decimal,
                           note: str | None = None, ref_id: int | None = None,
-                          by: str | None = None, promo_id: int | None = None,
-                          rental_id: int | None = None,
-                          period_from: date | None = None) -> int | None:
+                          by: str | None = None) -> int | None:
         """Начислить баллы: запись в журнал и повод рядом.
 
-        Обе вставки одной транзакцией. Повторный бонус за отзыв, другу
-        или по акции за тот же период упирается в частичный уникальный
-        индекс - тогда в журнале тоже ничего не появляется, и баланс
-        не поедет.
+        Обе вставки одной транзакцией. Повторный бонус за отзыв или другу
+        упирается в частичный уникальный индекс - тогда в журнале тоже
+        ничего не появляется, и баланс не поедет. Скидка по акции сюда
+        не ходит: она пишется в транзакции начисления (charge_period).
         """
         amount = _money(amount) or Decimal(0)
         if amount <= 0:
@@ -3655,18 +3684,15 @@ class CrmDB:
         async with self.pool.acquire() as conn, conn.transaction():
             ledger_id = int(await conn.fetchval(
                 """
-                insert into crm.ledger (client_id, rental_id, kind, amount, note,
-                                        created_by)
-                values ($1, $2, 'bonus', $3, $4, $5) returning id
-                """, client_id, rental_id, amount, note, by))
+                insert into crm.ledger (client_id, kind, amount, note, created_by)
+                values ($1, 'bonus', $2, $3, $4) returning id
+                """, client_id, amount, note, by))
             return int(await conn.fetchval(
                 """
                 insert into crm.bonuses (client_id, kind, amount, ledger_id,
-                                         ref_id, note, created_by, promo_id,
-                                         rental_id, period_from)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id
-                """, client_id, kind, amount, ledger_id, ref_id, note, by,
-                promo_id, rental_id, period_from))
+                                         ref_id, note, created_by)
+                values ($1, $2, $3, $4, $5, $6, $7) returning id
+                """, client_id, kind, amount, ledger_id, ref_id, note, by))
 
     async def record_bonus(self, *, client_id: int, kind: str, amount: Decimal,
                            ledger_id: int | None = None,

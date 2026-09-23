@@ -2139,6 +2139,48 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          {grants[0]["promo_id"]: 1})
         self.assertEqual(await self.crm.rental_charge_count(rid), 1)
 
+    async def test_limit_and_duplicate_are_decided_under_lock(self):
+        """Предел применений считается в транзакции начисления под замком
+        строки акции, а повтор скидки на период откатывает только её."""
+        await self.seed()
+        pid = await self.make(kind="season", code=None, once_per_client=False, max_uses=1)
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() - timedelta(days=8), contract_no=None, by="t")
+        # два периода начислены, скидка одна: предел выбран на втором
+        self.assertEqual((await self.crm.promo(pid))["uses"], 1)
+        self.assertEqual((await self.crm.rental(rid))["balance"], D("-5700.00"))
+        other = await self.crm.create_client(full_name="Петров Пётр",
+                                             phone="+79990000002", tg_id=5002)
+        bike2 = await self.crm.create_bike(code="B-2", model="Kugoo V3")
+        rid2 = await self.crm.create_rental(
+            client_id=other, bike_id=bike2, tariff_id=self.tariff_id, tariff_name="Неделя",
+            period_days=7, price=D(3000), billing="auto", started_on=date.today(),
+            contract_no=None, created_by="t")
+        bonus = {"promo_id": pid, "amount": D(300), "note": "снимок", "by": "t"}
+        self.assertTrue(await self.crm.charge_period(
+            rid2, other, period_from=date.today(),
+            period_to=date.today() + timedelta(days=7), amount=D(-3000), note="п",
+            bonus=bonus))
+        self.assertFalse(bonus["granted"])
+        self.assertEqual((await self.crm.rental(rid2))["balance"], D("-3000.00"))
+        # повтор скидки на период при новом начислении: начисление есть,
+        # второй скидки нет, транзакция не развалилась
+        await self.crm.update_promo(pid, max_uses=None)
+        await self.pool.execute(
+            "insert into crm.bonuses (client_id, kind, amount, promo_id, rental_id, "
+            "period_from) values ($1, 'promo', 1, $2, $3, $4)",
+            other, pid, rid2, date.today() + timedelta(days=7))
+        bonus = {"promo_id": pid, "amount": D(300), "note": "повтор", "by": "t"}
+        self.assertTrue(await self.crm.charge_period(
+            rid2, other, period_from=date.today() + timedelta(days=7),
+            period_to=date.today() + timedelta(days=14), amount=D(-3000), note="п",
+            bonus=bonus))
+        self.assertFalse(bonus["granted"])
+        self.assertEqual((await self.crm.rental(rid2))["balance"], D("-6000.00"))
+
     async def test_promo_code_lives_on_the_rental(self):
         await self.seed()
         await self.make()

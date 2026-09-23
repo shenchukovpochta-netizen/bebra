@@ -184,11 +184,16 @@
       {% if balance < 0 %}Долг {{ money(-balance) }} остаётся на балансе и виден в карточке.{% endif %}</p>
     {# Акция - до денег: оператор называет сумму со скидкой, а не объясняет
        баллы после оплаты. Скидка ляжет баллами следом за начислением. #}
-    {% if promo %}
+    {% if promo and promo_deferred %}
+    <p class="flash">Акция «{{ promo.title }}»: скидка <b>{{ money(promo_discount) }}</b>
+      начислится баллами {{ started_on|dmy }}, в день начала, если акция ещё будет действовать.
+      К оплате сейчас <b>{{ money(pay_due) }}</b> — баллы зачтутся в следующий период.</p>
+    {% elif promo %}
     <p class="flash">Акция «{{ promo.title }}»: скидка <b>{{ money(promo_discount) }}</b>
       с цены велосипеда начислится баллами — к оплате <b>{{ money(pay_due) }}</b>{% if balance > 0 %} с учётом баланса{% endif %}.
       <span class="muted">Доп. аккумулятор в скидку не входит.</span></p>
     {% endif %}
+    {% if promo_note %}<p class="muted">{{ promo_note }}</p>{% endif %}
     {% if promo_error %}<p class="flash err">{{ promo_error }}</p>{% endif %}
     <label>Принять сейчас, ₽ <input name="pay_amount" inputmode="decimal" value="{{ pay_default }}"></label>
     <label>Способ <select name="pay_method">{% for code, label in METHODS.items() %}<option value="{{ code }}" {% if code == 'sbp' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>

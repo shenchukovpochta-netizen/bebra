@@ -143,7 +143,8 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
 
 
 async def charge_due(crm: Any, *, rental: dict, today: date,
-                     applied: list[dict] | None = None) -> int:
+                     applied: list[dict] | None = None,
+                     promos: list[dict] | None = None) -> int:
     """Начислить аренде все периоды по сегодня. Возвращает число начислений.
 
     Акция подбирается до начисления и ложится с ним в одну транзакцию
@@ -161,7 +162,7 @@ async def charge_due(crm: Any, *, rental: dict, today: date,
                                                     int(rental["period_days"]),
                                                     today=today):
         picked = await promo_for_period(crm, rental=rental, period_from=period_from,
-                                        period_to=period_to, today=today)
+                                        period_to=period_to, today=today, promos=promos)
         bonus = None
         if picked is not None:
             bonus = {"promo_id": picked["promo"]["id"], "amount": picked["amount"],
@@ -177,41 +178,83 @@ async def charge_due(crm: Any, *, rental: dict, today: date,
         if not ok:
             continue
         done += 1
-        if picked is not None and applied is not None:
+        # База могла отказать в скидке уже под замком (предел выбран
+        # секундой раньше): сработавшей считается только записанная.
+        if picked is not None and applied is not None and (bonus or {}).get("granted"):
             applied.append(picked)
     return done
 
 
+class ChargeError(ServiceError):
+    """Проход начислений прошёл не по всем арендам: `done` - сколько
+    начислено, `failed` - аренды, которые ждут следующего круга."""
+
+    def __init__(self, done: int, failed: list[int]) -> None:
+        self.done = done
+        self.failed = failed
+        super().__init__(f"Начислено {done}, не удалось по арендам: "
+                         + ", ".join(str(x) for x in failed))
+
+
 async def charge_all(crm: Any, *, today: date,
                      applied: list[dict] | None = None) -> int:
+    """Начислить всем идущим арендам. Сбой одной аренды - в лог, остальные
+    начисляются: иначе одна битая строка оставила бы без начислений весь
+    парк. Но проход с таким сбоем сделанным не считается: в конце
+    поднимается ChargeError, и следующий круг повторит его - начисленное
+    защищено уникальным индексом, повтор им не грозит. Акции читаются
+    один раз на проход."""
     total = 0
+    failed: list[int] = []
+    promos = await crm.promos(active_only=True)
     for rental in await crm.active_rentals():
-        total += await charge_due(crm, rental=rental, today=today, applied=applied)
+        try:
+            total += await charge_due(crm, rental=rental, today=today, applied=applied,
+                                      promos=promos)
+        except Exception:                                # noqa: BLE001
+            log.exception("начисление аренды %s не удалось, остальные идут",
+                          rental.get("id"))
+            failed.append(int(rental.get("id") or 0))
+    if failed:
+        raise ChargeError(total, failed)
     return total
 
 
+async def promo_context(crm: Any, *, client_id: int, rental_id: int | None,
+                        period_index: int, period_from: date, today: date,
+                        code: Any) -> dict[str, Any]:
+    """Контекст для logic.promo_fits - один и тот же у предпросмотра на
+    выдаче и у начисления: иначе оператор видел бы одну скидку, а в
+    журнал ложилась бы другая."""
+    history = logic.rental_history(await crm.client_rentals(client_id), rental_id)
+    return {
+        "period_index": period_index, "period_from": period_from, "today": today,
+        "code": logic.clean_promo_code(code),
+        "client_uses": await crm.promo_client_uses(client_id),
+        **history,
+    }
+
+
 async def promo_for_period(crm: Any, *, rental: dict, period_from: date,
-                           period_to: date, today: date) -> dict | None:
+                           period_to: date, today: date,
+                           promos: list[dict] | None = None) -> dict | None:
     """Акция на период, который сейчас начислится. None - не подошла.
 
     Одна на период, выгоднейшая для клиента. Скидка считается от цены
     велосипеда (`base_price`): доп. аккумулятор - отдельная позиция, и
     ровно эту цену оператор видит на шаге выдачи. Только чтение: сама
-    запись идёт в транзакции начисления.
+    запись идёт в транзакции начисления, и предел применений база
+    проверяет там же, под замком.
     """
-    promos = await crm.promos(active_only=True)
+    if promos is None:
+        promos = await crm.promos(active_only=True)
     if not promos:
         return None
-    history = logic.rental_history(await crm.client_rentals(rental["client_id"]),
-                                   rental["id"])
     # Номер периода - сколько уже начислено плюс этот.
     period_index = await crm.rental_charge_count(rental["id"]) + 1
-    ctx = {
-        "period_index": period_index, "period_from": period_from,
-        "today": today, "code": rental.get("promo_code"),
-        "client_uses": await crm.promo_client_uses(rental["client_id"]),
-        **history,
-    }
+    ctx = await promo_context(crm, client_id=rental["client_id"], rental_id=rental["id"],
+                              period_index=period_index, period_from=period_from,
+                              today=today, code=rental.get("promo_code"))
     base = logic.to_money(rental.get("base_price") or rental["price"])
     picked = logic.pick_promo(promos, ctx, base)
     if picked is None:
@@ -220,6 +263,45 @@ async def promo_for_period(crm: Any, *, rental: dict, period_from: date,
     return {"client_id": rental["client_id"], "rental_id": rental["id"],
             "promo": promo, "amount": discount, "period_index": period_index,
             "period_from": period_from}
+
+
+async def preview_promo(crm: Any, *, client: dict, tariff: dict, started_on: date,
+                        code: Any, today: date) -> dict[str, Any]:
+    """Что акция даст на выдаче - до денег.
+
+    Та же выборка, что и у начисления первого периода: тот же контекст,
+    та же цена велосипеда. `error` - отказ (кода нет, срок вышел, этому
+    клиенту не положен): выдача с таким кодом не оформляется, иначе
+    клиент узнал бы об отсутствии скидки после оплаты. `note` - код
+    живой, но другая акция выгоднее. `deferred` - начало в будущем:
+    скидка ляжет в день начала, и брать её с оплаты сейчас нельзя -
+    к тому дню акция может кончиться.
+    """
+    out: dict[str, Any] = {"promo": None, "discount": Decimal(0),
+                           "code": logic.clean_promo_code(code), "error": "",
+                           "note": "", "deferred": started_on > today}
+    code_promo = None
+    if out["code"]:
+        try:
+            code_promo = await check_promo_code(crm, out["code"], today=today,
+                                                started_on=started_on)
+        except ServiceError as exc:
+            out.update(error=str(exc), code="")
+    ctx = await promo_context(crm, client_id=client["id"], rental_id=None,
+                              period_index=1, period_from=started_on,
+                              today=max(today, started_on), code=out["code"])
+    if code_promo is not None and not logic.promo_fits(code_promo, ctx):
+        out.update(error=f"Промокод {out['code']} действует, но этому клиенту не "
+                         "подходит: он уже получал эту акцию.", code="")
+        code_promo = None
+        ctx["code"] = ""
+    picked = logic.pick_promo(await crm.promos(active_only=True), ctx, tariff["price"])
+    if picked is not None:
+        out["promo"], out["discount"] = picked
+        if code_promo is not None and int(picked[0]["id"]) != int(code_promo["id"]):
+            out["note"] = (f"Промокод {out['code']} действует, но акция "
+                           f"«{picked[0]['title']}» выгоднее - применится она.")
+    return out
 
 
 async def check_promo_code(crm: Any, code: Any, *, today: date,

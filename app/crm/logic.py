@@ -5305,8 +5305,13 @@ def rental_history(rentals: Iterable[Mapping[str, Any]],
     """Что было у клиента до этой аренды: сколько аренд и когда закрылась
     последняя. Текущая аренда из счёта исключается."""
     previous = [r for r in rentals if rental_id is None or int(r["id"]) != int(rental_id)]
-    closed = [r.get("closed_on") for r in previous if r.get("closed_on")]
-    closed_days = [c.date() if isinstance(c, datetime) else c for c in closed]
+    closed_days: list[date] = []
+    for r in previous:
+        closed = r.get("closed_on")
+        if isinstance(closed, datetime):
+            closed_days.append(closed.date())
+        elif isinstance(closed, date):
+            closed_days.append(closed)
     return {"previous_rentals": len(previous),
             "last_closed_on": max(closed_days) if closed_days else None}
 
