@@ -771,8 +771,10 @@ class TestBankPanel(tw.WebCase):
     def test_import_is_idempotent(self):
         class Client:
             ready = True
+            accounts = ["ACC"]
 
-            async def statement(self, *, since, until, statement_id=None):
+            async def statement(self, *, since, until, statement_id=None,
+                                account_id=None):
                 return {"ready": True, "statement_id": "S-1", "rows": [
                     {"txn_id": "T-1", "booked_at": datetime.now(UTC),
                      "amount": D(3000), "direction": "credit",

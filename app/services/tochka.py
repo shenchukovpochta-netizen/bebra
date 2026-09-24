@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import ssl
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -122,9 +123,26 @@ def receipt_items(title: str, amount: Decimal, *, vat: str = "none") -> list[dic
              "paymentObject": "service", "measure": "pc"}]
 
 
+def parse_accounts(raw: str | None) -> list[str]:
+    """Счета из настройки: через запятую, точку с запятой или пробел.
+
+    Расчётных счетов у одного клиента банка бывает десяток, а деньги за
+    аренду приходят на любой из них. Повтор счёта - одна выписка, не две.
+    """
+    out: list[str] = []
+    for part in re.split(r"[,;\s]+", raw or ""):
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
 @dataclass
 class TochkaClient:
-    """Клиент Точки. `session_factory` подменяется в тестах."""
+    """Клиент Точки. `session_factory` подменяется в тестах.
+
+    `account_id` - один счёт или несколько через запятую: выписка
+    заказывается по каждому отдельно, банк принимает один счёт на запрос.
+    """
 
     token: str
     customer_code: str = ""
@@ -133,8 +151,15 @@ class TochkaClient:
     session_factory: Any = None
 
     @property
+    def accounts(self) -> list[str]:
+        return parse_accounts(self.account_id)
+
+    @property
     def ready(self) -> bool:
-        return bool(self.token and self.account_id)
+        return bool(self.token and self.accounts)
+
+    def _account(self, account_id: str | None) -> str:
+        return account_id or (self.accounts or [""])[0]
 
     def _session(self):
         if self.session_factory is not None:
@@ -156,11 +181,12 @@ class TochkaClient:
             raise TochkaError(f"{path}: ответ не разобрать")
         return data
 
-    async def request_statement(self, session, *, since: date, until: date) -> str:
+    async def request_statement(self, session, *, since: date, until: date,
+                                account_id: str | None = None) -> str:
         """Заказать выписку за период. Возвращает её номер."""
         data = await self._json(
             session, "POST", f"{BANKING}/statements",
-            json={"Data": {"Statement": {"accountId": self.account_id,
+            json={"Data": {"Statement": {"accountId": self._account(account_id),
                                          "startDateTime": since.isoformat(),
                                          "endDateTime": until.isoformat()}}})
         statement = (data.get("Data") or {}).get("Statement") or {}
@@ -169,8 +195,8 @@ class TochkaClient:
             raise TochkaError("выписка заказана, но банк не вернул её номер")
         return str(number)
 
-    async def read_statement(self, session,
-                             statement_id: str) -> tuple[list[dict], bool]:
+    async def read_statement(self, session, statement_id: str, *,
+                             account_id: str | None = None) -> tuple[list[dict], bool]:
         """Прочитать выписку: строки и готовность.
 
         Готовность берётся из статуса банка, а не из числа строк: за
@@ -178,9 +204,9 @@ class TochkaClient:
         пустая выписка читалась как «ещё собирается» - круг заказывал её
         заново и не читал никогда.
         """
+        account = self._account(account_id)
         data = await self._json(
-            session, "GET",
-            f"{BANKING}/statements/{self.account_id}/{statement_id}")
+            session, "GET", f"{BANKING}/statements/{account}/{statement_id}")
         statement = (data.get("Data") or {}).get("Statement") or {}
         if isinstance(statement, list):
             statement = statement[0] if statement else {}
@@ -188,13 +214,14 @@ class TochkaClient:
             return [], False
         rows = []
         for raw in statement.get("Transaction") or []:
-            parsed = parse_transaction(raw, account=self.account_id)
+            parsed = parse_transaction(raw, account=account)
             if parsed is not None:
                 rows.append(parsed)
         return rows, True
 
     async def statement(self, *, since: date, until: date,
-                        statement_id: str | None = None) -> dict:
+                        statement_id: str | None = None,
+                        account_id: str | None = None) -> dict:
         """Заказать и сразу попытаться прочитать.
 
         Банк собирает выписку не мгновенно. Если она не готова, номер
@@ -207,8 +234,9 @@ class TochkaClient:
         session = self._session()
         try:
             number = statement_id or await self.request_statement(
-                session, since=since, until=until)
-            rows, ready = await self.read_statement(session, number)
+                session, since=since, until=until, account_id=account_id)
+            rows, ready = await self.read_statement(session, number,
+                                                    account_id=account_id)
             return {"rows": rows, "statement_id": number, "ready": ready}
         finally:
             close = getattr(session, "close", None)

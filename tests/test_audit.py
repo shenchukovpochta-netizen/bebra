@@ -142,6 +142,100 @@ class TestSubscribeKeyboard(unittest.TestCase):
         self.assertEqual(bad.inline_keyboard[0][0].callback_data, "check_sub")
 
 
+class TestSeveralAccounts(unittest.TestCase):
+    """Деньги за аренду приходят на любой из десятка счетов: выписка - по
+    каждому, номер заказа - свой у каждого, отказ одного не слепит все."""
+
+    def test_accounts_are_parsed_from_one_setting(self):
+        self.assertEqual(tochka.parse_accounts(
+            "4080/1, 4080/2;4080/3  4080/1\n4080/4"),
+            ["4080/1", "4080/2", "4080/3", "4080/4"])
+        self.assertEqual(tochka.parse_accounts(""), [])
+        self.assertTrue(tochka.TochkaClient(token="t", account_id="A, B").ready)
+        self.assertFalse(tochka.TochkaClient(token="t", account_id=" , ").ready)
+
+    def test_each_account_has_its_own_statement(self):
+        calls: list = []
+
+        class Response:
+            def __init__(self, data):
+                self._data, self.status = data, 200
+
+            async def json(self, content_type=None):
+                return self._data
+
+        class Session:
+            async def request(self, method, url, **kwargs):
+                if method == "POST":
+                    account = kwargs["json"]["Data"]["Statement"]["accountId"]
+                    calls.append(("POST", account))
+                    return Response({"Data": {"Statement": {
+                        "statementId": f"S-{account}"}}})
+                account, number = url.rsplit("/", 2)[-2:]
+                calls.append(("GET", account, number))
+                if account == "B":
+                    return Response({"Data": {"Statement": {"status": "Processing"}}})
+                if account == "C":
+                    return Response({"Data": {"Statement": {"status": "Ready",
+                        "Transaction": [{"transactionId": "T-C1", "amount": 3000,
+                                         "creditDebitIndicator": "Credit",
+                                         "documentDate": "2026-09-16",
+                                         "paymentPurpose": "аренда"}]}}})
+                return Response({"Data": {"Statement": {"status": "Ready",
+                                                        "Transaction": []}}})
+
+            async def close(self):
+                pass
+
+        saved: list = []
+
+        class Crm:
+            async def save_bank_txn(self, row):
+                saved.append(row)
+                return len(saved)
+
+            async def settings(self):
+                return {}
+
+        client = tochka.TochkaClient(token="t", account_id="A, B, C",
+                                     session_factory=Session)
+        first = _run(banking.import_once(Crm(), client, today=date(2026, 9, 16)))
+        self.assertEqual(first["pending"], {"B": "S-B"})
+        self.assertEqual([r["account"] for r in saved], ["C"], "счёт строки - свой")
+        calls.clear()
+        _run(banking.import_once(Crm(), client, today=date(2026, 9, 16),
+                                 pending=first["pending"]))
+        self.assertIn(("GET", "B", "S-B"), calls, "B читается по своему номеру")
+        self.assertNotIn(("POST", "B"), calls, "и не заказывается заново")
+
+    def test_one_failing_account_does_not_blind_the_rest(self):
+        class Client:
+            accounts = ["A", "BAD"]
+
+            async def statement(self, *, since, until, statement_id=None,
+                                account_id=None):
+                if account_id == "BAD":
+                    raise tochka.TochkaError("счёт закрыт")
+                return {"ready": True, "statement_id": "S", "rows": [
+                    {"txn_id": "T-1", "account": "A"}]}
+
+        class Crm:
+            async def save_bank_txn(self, row):
+                return 1
+
+            async def settings(self):
+                return {}
+
+        out = _run(banking.import_once(Crm(), Client(), today=date(2026, 9, 16)))
+        self.assertEqual(out["saved"], 1)
+
+        class Broken(Client):
+            accounts = ["BAD"]
+
+        with self.assertRaises(tochka.TochkaError):
+            _run(banking.import_once(Crm(), Broken(), today=date(2026, 9, 16)))
+
+
 class TestStatementReadiness(unittest.TestCase):
     """Выписку заказывают один раз и читают по её номеру.
 
@@ -188,10 +282,10 @@ class TestStatementReadiness(unittest.TestCase):
         client = self.client({"Data": {"Statement": {"status": "Processing"}}},
                              calls)
         first = _run(banking.import_once(None, client, today=date(2026, 9, 16)))
-        self.assertEqual(first["pending"], "S-1")
+        self.assertEqual(first["pending"], {"ACC": "S-1"})
         second = _run(banking.import_once(None, client, today=date(2026, 9, 16),
-                                          statement_id=first["pending"]))
-        self.assertEqual(second["pending"], "S-1")
+                                          pending=first["pending"]))
+        self.assertEqual(second["pending"], {"ACC": "S-1"})
         self.assertEqual([m for m, _ in calls], ["POST", "GET", "GET"],
                          "заказ один, чтений сколько угодно")
 

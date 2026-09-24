@@ -34,24 +34,47 @@ STATEMENT_DAYS = 3
 
 async def import_once(crm: Any, client: Any, *, today: date | None = None,
                       days: int = STATEMENT_DAYS,
-                      statement_id: str | None = None,
+                      pending: dict[str, str] | None = None,
                       bot: Any = None, db: Any = None) -> dict:
-    """Забрать выписку и сложить в базу. Зачисления - отдельным шагом.
+    """Забрать выписки по всем счетам и сложить в базу. Зачисления -
+    отдельным шагом.
 
-    Банк собирает документ не мгновенно, поэтому номер заказанной
-    выписки возвращается наружу в `pending`: следующий круг читает ЕЁ,
-    а не заказывает новую. Заказывать каждый раз новую и читать её тут
-    же значит не прочитать выписку никогда.
+    Банк собирает документ не мгновенно, поэтому номера заказанных
+    выписок возвращаются наружу в `pending` - по счёту на номер: следующий
+    круг читает ИХ, а не заказывает новые. Заказывать каждый раз новую и
+    читать её тут же значит не прочитать выписку никогда.
+
+    Счёт, по которому банк отказал, не останавливает остальные: деньги
+    за аренду приходят на любой из десятка счетов, и один закрытый счёт
+    не повод слепнуть по всем. Отказали все - это ошибка круга.
     """
     today = today or date.today()
-    statement = await client.statement(since=today - timedelta(days=days),
-                                       until=today, statement_id=statement_id)
-    if not statement.get("ready"):
-        return {"seen": 0, "saved": 0, "credited": 0,
-                "pending": statement.get("statement_id")}
-    result = await service.import_statement(crm, statement["rows"])
-    credited = await auto_credit(crm, bot=bot, db=db)
-    return {**result, "credited": credited, "pending": None}
+    pending = dict(pending or {})
+    accounts = list(getattr(client, "accounts", None) or [])
+    rows: list[dict] = []
+    waiting: dict[str, str] = {}
+    ready = 0
+    failed: list[Exception] = []
+    for account in accounts:
+        try:
+            statement = await client.statement(
+                since=today - timedelta(days=days), until=today,
+                statement_id=pending.get(account), account_id=account)
+        except Exception as exc:                        # noqa: BLE001
+            log.warning("выписка по счёту %s не получена: %s", account, exc)
+            failed.append(exc)
+            continue
+        if statement.get("ready"):
+            ready += 1
+            rows.extend(statement["rows"])
+        elif statement.get("statement_id"):
+            waiting[account] = statement["statement_id"]
+    if failed and len(failed) == len(accounts):
+        raise failed[0]
+    result = (await service.import_statement(crm, rows) if rows
+              else {"seen": 0, "saved": 0})
+    credited = await auto_credit(crm, bot=bot, db=db) if ready else 0
+    return {**result, "credited": credited, "pending": waiting}
 
 
 async def tell_credited(bot: Any, db: Any, crm: Any, client: dict, amount: Any, *,
@@ -143,12 +166,12 @@ async def banking_loop(bot: Any, crm: Any, cfg: Any, client: Any, *,
         log.info("счёт в Точке не настроен, выписка не тянется")
         return
     del cfg
-    pending: str | None = None
+    pending: dict[str, str] = {}
     while True:
         try:
-            result = await import_once(crm, client, statement_id=pending,
+            result = await import_once(crm, client, pending=pending,
                                        bot=bot, db=db)
-            pending = result.get("pending")
+            pending = result.get("pending") or {}
             if result["saved"] or result["credited"]:
                 log.info("выписка: новых строк %s, зачислено %s",
                          result["saved"], result["credited"])

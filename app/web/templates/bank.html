@@ -21,7 +21,7 @@
   <tr><th>Когда</th><th>Плательщик</th><th class="num">Сумма</th><th>Назначение</th><th>Куда</th></tr>
   {% for t in rows %}
   <tr class="{% if t.status == 'new' and t.direction == 'credit' %}warn-row{% endif %}">
-    <td>{{ t.booked_at|dmy }}</td>
+    <td>{{ t.booked_at|dmy }}{% if t.account %}<br><small class="muted" title="{{ t.account }}">сч. …{{ t.account.split('/')[0][-4:] }}</small>{% endif %}</td>
     <td>{{ t.payer_name or '—' }}{% if t.payer_inn %} <span class="muted">ИНН {{ t.payer_inn }}</span>{% endif %}</td>
     <td class="num {% if t.direction == 'debit' %}muted{% endif %}">{% if t.direction == 'debit' %}−{% endif %}{{ money(t.amount) }}</td>
     <td class="muted">{{ t.purpose or '' }}</td>
