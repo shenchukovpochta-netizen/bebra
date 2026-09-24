@@ -60,7 +60,7 @@ app.web` для панели, `python -m app.max_main` для бота в MAX. �
    `fleet`, `moderation`, `contract`, `registration`, `faq`, `menu`. Порядок несущий, в
    `app/main.py` он прокомментирован построчно. `menu` последний: у него ловушка на любое
    сообщение.
-4. Запускает шесть задач `asyncio.create_task`.
+4. Запускает семь задач `asyncio.create_task`.
 
 | Задача | Модуль | Период |
 |---|---|---|
@@ -70,6 +70,7 @@ app.web` для панели, `python -m app.max_main` для бота в MAX. �
 | выписка Точки в `crm.bank_txns` | `crm.banking.banking_loop` | `TOCHKA_POLL_SECONDS`, по умолчанию 1800 |
 | статусы счетов эквайринга и автосписание | `crm.paying.paying_loop` | минута |
 | отправка кампаний в Telegram и MAX | `crm.mailing.mailing_loop` | свой круг |
+| «Входящие»: ответы из панели в Telegram, MAX и Авито, сигналы о новых, опрос чатов Авито | `crm.inbox.inbox_loop` | 15 секунд, Авито — `AVITO_POLL_SECONDS` |
 
 Все фоновые опросы живут здесь, а не в панели: веб-процессов может быть несколько, и каждый
 спрашивал бы банк об одном и том же. Правило «панель в интернет не ходит» — про фоновые
@@ -87,7 +88,8 @@ app.web` для панели, `python -m app.max_main` для бота в MAX. �
 дашборд, клиенты, парк, аренды, тарифы, отчёты, сервис, справочники, батареи, ПЭП, рассылки,
 касса, трекеры, склад, пересчёт, импорт. Обвязки две: `SessionMiddleware` с cookie
 `crm_session` снаружи и проверка входа внутри, порядок важен и подписан в коде. Страница без
-входа должна попасть в кортеж `PUBLIC = ("/login", "/static", "/healthz", "/sign/")`. Формы
+входа должна попасть в кортеж `PUBLIC = ("/login", "/static", "/healthz", "/sign/", "/hook/")`;
+хук `/hook/inbox` проверяет свой токен сам, без сессии. Формы
 без JS-фреймворка: страница это шаблон, действие это POST и редирект.
 
 `forwarded_allow_ips` открывается только когда задан `CRM_DOMAIN`: Caddy приходит из сети
@@ -124,12 +126,13 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 `doctemplates` кладётся поверх: свой шаблон владелец загружает в панели, и пересборка для
 этого не нужна.
 
-Секретов девять, все файлами в `secrets/`: `db_password`, `bot_token`, `pdn_key`,
+Секретов двенадцать, все файлами в `secrets/`: `db_password`, `bot_token`, `pdn_key`,
 `crm_secret`, `crm_admin_password`, `max_bot_token`, `starline_app_secret`,
-`starline_password`, `tochka_token`. Содержимое окружения видно в `docker inspect` и в
+`starline_password`, `tochka_token`, `avito_client_secret`, `inbox_key`,
+`inbox_hook_token`. Содержимое окружения видно в `docker inspect` и в
 трейсбеках, поэтому в переменной лежит путь, а не значение: `_secret()` в `app/config.py`
-читает суффикс `*_FILE`. `bootstrap.sh` генерирует `db_password`, `pdn_key`, `crm_secret` и
-`crm_admin_password`, требует `bot_token` руками и создаёт пустыми остальные: пустой файл
+читает суффикс `*_FILE`. `bootstrap.sh` генерирует `db_password`, `pdn_key`, `crm_secret`,
+`crm_admin_password` и `inbox_key`, требует `bot_token` руками и создаёт пустыми остальные: пустой файл
 означает «интеграции нет», и цикл просто не запускается. `_env()` считает пустую строку
 отсутствием значения, потому что compose подставляет `""` для любой незаданной `${VAR}`.
 
@@ -155,6 +158,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/crm/company.py`, `doctemplates.py`, `esign.py` | реквизиты снимком, выбор шаблона документа, текст соглашения об ЭП |
 | `app/crm/import_xlsx.py` | импорт рабочей таблицы «ДЕЙСТВУЮЩИЕ АРЕНДАТОРЫ» |
 | `app/crm/opsgroup.py` | рабочая группа точек: сверка форм из тем с базой, ответы про долг и трекер (бывший n8n) |
+| `app/crm/inbox.py` | «Входящие»: запись обращений из ботов, отправка ответов из очереди, опрос чатов Авито |
 | `app/handlers/*.py` | сценарий Telegram: кабинет, договор, вопросы, парк из чата, меню, модерация, регистрация, привязка сотрудника, рабочая группа точек (`ops.py`, подключается первым) |
 | `app/middlewares.py`, `app/filters.py` | конвейер до обработчиков и общие фильтры |
 | `app/texts.py`, `app/i18n/*.py` | тексты бота и переводы на восемь языков (`i18n.PACKS`) |
@@ -193,7 +197,8 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | новый фоновый цикл | модуль в `app/crm/`, `create_task` в `app/main.py` и отмена в его `finally` |
 | новую переменную окружения | `.env.example`, `docker-compose.yml`, `app/config.py` или `app/web/config.py` |
 | новый файл в проекте | список заливки в `deploy.ps1`, иначе `consistency.py` ругнётся |
-| работу с внешним API | `app/services/starline.py`, `app/services/tochka.py`, циклы в `app/crm/` |
+| работу с внешним API | `app/services/starline.py`, `app/services/tochka.py`, `app/services/avito.py`, циклы в `app/crm/` |
+| входящее из нового канала или шлюза | разбор тела хука `parse_inbound` в `app/crm/logic.py`, запись `service.inbox_in`, отправка ответа `send_once` в `app/crm/inbox.py` |
 | разбор формы из рабочей группы точек | `parse_ops_*` в `app/crm/logic.py`, сверка в `app/crm/opsgroup.py`, темы в `filters.ops_topic` |
 | договор, акты, печать | `app/services/contract.py`, шаблоны `app/*.docx`, выбор шаблона `app/crm/doctemplates.py` |
 
@@ -1270,6 +1275,26 @@ docx, сети не касается) и `tochka`. StarLine в коде пане
 токене: `acquiring_live()` спрашивает `logic.acquiring_enabled(settings)`, выключатель в
 панели, а не удаление токена из окружения. Тесты: `tests/test_paying.py`,
 `tests/test_cash.py`.
+
+### Авито, `app/services/avito.py`
+
+Messenger API: токен по `client_credentials` (живёт сутки, держится до `expires_in` минус
+две минуты), `self_id` один раз, чаты, сообщения чата, отправка текста. Ключи - основного
+аккаунта компании: ключ сотрудника не видит чатов по объявлениям компании. Грабли, на
+которых сломаться проще всего:
+
+- просроченный токен у Авито - 403, а не 401: `_call` берёт новый и повторяет ровно раз;
+- 402 - это не сбой, а тариф без API сообщений: `inbox_loop` ставит опрос на час, панель
+  видит это по `settings.inbox_avito_state` и показывает плашку;
+- версии путей разные: чаты v2, сообщения v3 со слэшем на конце, отправка v1;
+- список сообщений приходит то списком, то `{"messages": [...]}`;
+- тело ответа читается внутри `async with` сессии: после выхода из неё оно недоступно.
+
+Разбор (`parse_chat`, `parse_message`) отделён от сети. Шум - системные сообщения,
+автоответы (`flow_id`) и заглушки «перейдите на подписку» - в ленту не попадает. Опрос
+(`inbox.avito_once`) перечитывает чат, только когда его последнее сообщение сменилось
+(`inbox_threads.ext_cursor`), и первым кругом берёт только сутки (`inbox_avito_since`).
+Своё сообщение из приложения Авито пишется исходящим и снимает ожидание.
 
 ### Чтение документа, `app/services/ocr.py` и `mrz.py`
 

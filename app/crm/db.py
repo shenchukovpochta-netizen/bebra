@@ -59,6 +59,8 @@ PROMO_FIELDS = frozenset({
     "kind", "title", "percent", "amount", "code", "params", "starts_on", "ends_on",
     "max_uses", "once_per_client", "text", "active", "note",
 })
+INBOX_FIELDS = frozenset({"status", "note", "client_id", "handled_by", "handled_at",
+                          "ext_cursor", "announced_at"})
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
                             "alarm", "note", "blocked", "blocked_at", "blocked_by",
@@ -4189,3 +4191,248 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             f"{self._OPS_SELECT} where o.rental_id = $1 order by o.created_at, o.id",
             rental_id))
+
+    # ─────────────────── входящие обращения ───────────────────
+
+    async def client_by_max(self, max_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.clients where max_id = $1", max_id))
+
+    async def inbox_record(self, *, channel: str, origin: str, ext_id: str,
+                           direction: str, kind: str = "text", msg_id: str | None = None,
+                           body_enc: str | None = None, author: str | None = None,
+                           name: str | None = None, username: str | None = None,
+                           phone: str | None = None, subject: str | None = None,
+                           subject_url: str | None = None, client_id: int | None = None,
+                           at: datetime | None = None, announce: bool = True) -> dict:
+        """Сообщение в обращение - одной транзакцией.
+
+        Обращение одно на собеседника в канале (channel, ext_id): повтор
+        не заводит второе, а дополняет пустые поля. Сообщение с тем же
+        ext_id не пишется второй раз - повтор доставки хука и опрос Авито
+        дублей не дают. Только новое сообщение двигает обращение: входящее
+        ставит «ждёт с» и возвращает разобранное в новые, ответ снимает
+        ожидание.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            thread = await conn.fetchrow(
+                """
+                insert into crm.inbox_threads (channel, origin, ext_id, name, username,
+                                               phone, subject, subject_url, client_id,
+                                               announced_at)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                        case when $10::boolean then null else now() end)
+                on conflict (channel, ext_id) do update
+                   set name = coalesce(excluded.name, crm.inbox_threads.name),
+                       username = coalesce(excluded.username, crm.inbox_threads.username),
+                       phone = coalesce(excluded.phone, crm.inbox_threads.phone),
+                       subject = coalesce(excluded.subject, crm.inbox_threads.subject),
+                       subject_url = coalesce(excluded.subject_url,
+                                              crm.inbox_threads.subject_url),
+                       client_id = coalesce(crm.inbox_threads.client_id,
+                                            excluded.client_id),
+                       updated_at = now()
+                returning id, (xmax = 0) as created
+                """, channel, origin, ext_id, name, username, phone, subject,
+                subject_url, client_id, announce)
+            thread_id = int(thread["id"])
+            status = "sent" if direction == "out" else None
+            message_id = await conn.fetchval(
+                """
+                insert into crm.inbox_messages (thread_id, direction, kind, ext_id,
+                                                body_enc, author, status, created_at,
+                                                sent_at)
+                values ($1, $2, $3, $4, $5, $6, $7, coalesce($8, now()),
+                        case when $7 = 'sent' then now() end)
+                on conflict (thread_id, ext_id) where ext_id is not null do nothing
+                returning id
+                """, thread_id, direction, kind, msg_id, body_enc, author, status, at)
+            if message_id is not None:
+                if direction == "out":
+                    await conn.execute(
+                        """
+                        update crm.inbox_threads
+                           set last_out_at = now(), waiting_since = null,
+                               status = case when status = 'new' then 'work' else status end,
+                               updated_at = now()
+                         where id = $1
+                        """, thread_id)
+                else:
+                    await conn.execute(
+                        """
+                        update crm.inbox_threads
+                           set last_in_at = greatest(coalesce(last_in_at, $2), $2),
+                               waiting_since = case when $3 = 'in'
+                                   then coalesce(waiting_since, $2) else waiting_since end,
+                               announced_at = case when $4::boolean and status = 'done'
+                                   then null else announced_at end,
+                               status = case when status = 'done' then 'new' else status end,
+                               updated_at = now()
+                         where id = $1
+                        """, thread_id, at or datetime.now(UTC), direction, announce)
+            return {"thread_id": thread_id, "created": bool(thread["created"]),
+                    "message_id": int(message_id) if message_id is not None else None}
+
+    _INBOX_SELECT = """
+        select t.*, c.full_name as client_name, c.phone as client_phone,
+               exists (select 1 from crm.rentals r
+                        where r.client_id = t.client_id and r.status = 'active') as renting,
+               exists (select 1 from crm.bookings b
+                        where b.client_id = t.client_id and b.status = 'new') as booking_open,
+               m.body_enc as last_body_enc, m.kind as last_kind,
+               m.direction as last_direction
+          from crm.inbox_threads t
+          left join crm.clients c on c.id = t.client_id
+          left join lateral (select body_enc, kind, direction from crm.inbox_messages
+                              where thread_id = t.id and direction <> 'event'
+                              order by id desc limit 1) m on true
+    """
+
+    async def inbox_threads(self, *, statuses: tuple[str, ...] | list[str] | None = None,
+                            channel: str | None = None, limit: int = 500) -> list[dict]:
+        conds, args = [], []
+        if statuses:
+            args.append(list(statuses))
+            conds.append(f"t.status = any(${len(args)}::text[])")
+        if channel:
+            args.append(channel)
+            conds.append(f"t.channel = ${len(args)}")
+        args.append(limit)
+        where = ("where " + " and ".join(conds)) if conds else ""
+        return _rows(await self.pool.fetch(
+            f"{self._INBOX_SELECT} {where} "
+            f"order by t.waiting_since nulls last, t.updated_at desc limit ${len(args)}",
+            *args))
+
+    async def inbox_thread(self, thread_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._INBOX_SELECT} where t.id = $1", thread_id))
+
+    async def inbox_messages(self, thread_id: int, limit: int = 500) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from (select * from crm.inbox_messages where thread_id = $1 "
+            "order by id desc limit $2) m order by id", thread_id, limit))
+
+    async def inbox_open_count(self) -> int:
+        return int(await self.pool.fetchval(
+            "select count(*) from crm.inbox_threads where status in ('new', 'work') "
+            "and waiting_since is not null"))
+
+    async def update_inbox_thread(self, thread_id: int, **fields: Any) -> None:
+        sets, values = _set_clause(fields, INBOX_FIELDS, 2)
+        await self.pool.execute(
+            f"update crm.inbox_threads set {sets}, updated_at = now() where id = $1",
+            thread_id, *values)
+
+    async def queue_inbox_reply(self, thread_id: int, *, body_enc: str,
+                                author: str) -> int | None:
+        """Ответ в очередь процесса бота. None - в очереди уже есть ответ
+        (частичный уникальный индекс): двойной клик не шлёт два сообщения."""
+        try:
+            return int(await self.pool.fetchval(
+                """
+                insert into crm.inbox_messages (thread_id, direction, kind, body_enc,
+                                                author, status)
+                values ($1, 'out', 'text', $2, $3, 'queued') returning id
+                """, thread_id, body_enc, author))
+        except asyncpg.UniqueViolationError:
+            return None
+
+    async def claim_inbox_out(self) -> dict | None:
+        """Взять следующий ответ из очереди: queued -> sending одним UPDATE,
+        второй процесс ту же строку не получит."""
+        return _row(await self.pool.fetchrow(
+            """
+            with next as (
+              select id from crm.inbox_messages
+               where status = 'queued' order by id limit 1
+               for update skip locked
+            )
+            update crm.inbox_messages m set status = 'sending'
+              from next, crm.inbox_threads t
+             where m.id = next.id and t.id = m.thread_id
+            returning m.*, t.channel, t.origin, t.ext_id as thread_ext_id,
+                      t.client_id, t.status as thread_status
+            """))
+
+    async def finish_inbox_out(self, message_id: int, *, ok: bool,
+                               error: str | None = None,
+                               ext_id: str | None = None) -> bool:
+        """Итог отправки. Ушло - обращение «в работе», ожидание снято."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            thread_id = await conn.fetchval(
+                """
+                update crm.inbox_messages
+                   set status = $2, error = $3, ext_id = coalesce($4, ext_id),
+                       sent_at = now()
+                 where id = $1 and status = 'sending'
+                returning thread_id
+                """, message_id, "sent" if ok else "failed",
+                (error or "")[:500] or None, ext_id)
+            if thread_id is None:
+                return False
+            if ok:
+                await conn.execute(
+                    """
+                    update crm.inbox_threads
+                       set last_out_at = now(), waiting_since = null,
+                           status = case when status = 'new' then 'work' else status end,
+                           updated_at = now()
+                     where id = $1
+                    """, thread_id)
+            return True
+
+    async def fail_stuck_inbox_out(self) -> int:
+        """«Отправляется» после перезапуска: неизвестно, ушло ли. Повторять
+        нельзя - второе сообщение человеку; человек решит сам."""
+        return len(await self.pool.fetch(
+            "update crm.inbox_messages set status = 'failed', "
+            "error = 'неизвестно, ушло ли: процесс перезапускался', sent_at = now() "
+            "where status = 'sending' returning id"))
+
+    async def inbox_retry(self, message_id: int, *, author: str) -> int | None:
+        """Повтор не ушедшего ответа - новой строкой в очередь."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select * from crm.inbox_messages where id = $1 and status = 'failed' "
+                "for update", message_id)
+            if row is None:
+                return None
+            try:
+                async with conn.transaction():
+                    return int(await conn.fetchval(
+                        """
+                        insert into crm.inbox_messages (thread_id, direction, kind,
+                                                        body_enc, author, status)
+                        values ($1, 'out', 'text', $2, $3, 'queued') returning id
+                        """, row["thread_id"], row["body_enc"], author))
+            except asyncpg.UniqueViolationError:
+                return None
+
+    async def inbox_to_announce(self, limit: int = 20) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.inbox_threads where announced_at is null "
+            "order by id limit $1", limit))
+
+    async def purge_inbox(self, days: int) -> int:
+        """Переписка старше срока - в любом обращении: срок хранения ПДн
+        не ждёт, пока обращение разберут. Очередь не трогается, а пустые
+        разобранные обращения уходят следом за своей перепиской."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            gone = await conn.fetch(
+                """
+                delete from crm.inbox_messages m
+                 where m.created_at < now() - make_interval(days => $1)
+                   and m.status is distinct from 'queued'
+                   and m.status is distinct from 'sending'
+                returning m.id
+                """, days)
+            await conn.execute(
+                """
+                delete from crm.inbox_threads t
+                 where t.status in ('done', 'spam')
+                   and t.updated_at < now() - make_interval(days => $1)
+                   and not exists (select 1 from crm.inbox_messages m
+                                    where m.thread_id = t.id)
+                """, days)
+            return len(gone)

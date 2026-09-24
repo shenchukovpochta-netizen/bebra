@@ -293,9 +293,8 @@ STARLINE_POLL_SECONDS="${STARLINE_POLL_SECONDS:-300}"
 BACKUP_KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
 CRM_TRUSTED_PROXIES="${CRM_TRUSTED_PROXIES:-}"
 
-# Авито: client_secret - файлом в secrets/, здесь номер приложения и группа.
+# Авито: client_secret - файлом в secrets/, здесь номер приложения.
 AVITO_CLIENT_ID="${AVITO_CLIENT_ID:-}"
-AVITO_CHAT_ID="${AVITO_CHAT_ID:-}"
 AVITO_POLL_SECONDS="${AVITO_POLL_SECONDS:-60}"
 
 # Рабочая группа точек: бот сверяет формы в темах с CRM. Пусто - выключено.

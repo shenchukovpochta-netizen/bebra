@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+import hmac
 import io
+import json
 import logging
 import os
 import secrets
@@ -23,7 +25,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -44,7 +46,9 @@ BIKE_PHOTO_MAX = 8 * 1024 * 1024
 HERE = Path(__file__).resolve().parent
 # Страница подписания открыта клиенту: он не сотрудник и в панель
 # не входит. Защита у неё одна - случайный токен в ссылке.
-PUBLIC = ("/login", "/static", "/healthz", "/sign/")
+# Хук «Входящих» (/hook/) - для шлюзов WhatsApp и n8n: входа в панель у
+# них нет, защита - свой токен в заголовке, лимит неудач и размера.
+PUBLIC = ("/login", "/static", "/healthz", "/sign/", "/hook/")
 # Свой кабинет доступен любому сотруднику, каким бы урезанным ни был профиль.
 ALWAYS_OPEN = ("/logout", "/me", "/me/password")
 SESSION_DAYS = 14
@@ -326,6 +330,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         MOVE_KINDS=logic.MOVE_KINDS, DOC_KINDS=logic.DOC_KINDS,
         SWAP_REASONS=logic.SWAP_REASONS, in_search=logic.in_search,
         OPS_KINDS=logic.OPS_KINDS, ops_report_summary=logic.ops_report_summary,
+        INBOX_CHANNELS=logic.INBOX_CHANNELS, INBOX_STATUSES=logic.INBOX_STATUSES,
+        INBOX_KINDS=logic.INBOX_KINDS, INBOX_OUT_STATUSES=logic.INBOX_OUT_STATUSES,
+        INBOX_KEEP_DAYS=logic.INBOX_KEEP_DAYS,
         search_days=logic.search_days,
         PART_ORDER_STATUSES=logic.PART_ORDER_STATUSES,
         NEED_SOURCES=logic.NEED_SOURCES, PART_UNITS=logic.PART_UNITS,
@@ -635,6 +642,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             today=today)
         return render(request, "dashboard.html",
                       tasks=tasks,
+                      inbox_waiting=(await crm.inbox_open_count()
+                                     if may_view(request, "inbox") else None),
                       plan=plan, span=span, bot_state=await bot_health(),
                       progress=logic.plan_progress(
                           plan, month_metrics,
@@ -704,7 +713,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         section = str(data.get("section") or "")
         back = section + (("?" + str(data.get("query") or ""))
                           if data.get("query") else "")
-        if not staff.get("id") or not section.startswith("/"):
+        if not staff.get("id") or logic.safe_next(section, "") != section:
             return redirect("/")
         name = logic.check_name(data.get("name"), what="Название фильтра")
         if not name.ok:
@@ -1855,6 +1864,200 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                          tariff=booking.get("tariff_id"), booking=booking["id"],
                          started_on=(booking["wanted_on"].isoformat()
                                      if booking.get("wanted_on") else None))
+
+    # ─────────────────────── входящие ───────────────────────
+
+    INBOX_SORTS = {"wait": "waiting_since", "last": "last_in_at", "channel": "channel",
+                   "name": "who", "status": "status"}
+    INBOX_TABS = {"open": logic.INBOX_OPEN, "new": ("new",), "work": ("work",),
+                  "done": ("done",), "spam": ("spam",), "all": None}
+    inbox_vault = service.inbox_vault(getattr(cfg, "inbox_key", ""))
+
+    async def inbox_avito() -> dict:
+        return logic.avito_state(await crm.settings())
+
+    async def inbox_or_404(request: Request, thread_id: int) -> dict | None:
+        return await crm.inbox_thread(thread_id)
+
+    @app.get("/inbox")
+    async def inbox_page(request: Request) -> Response:
+        """Входящие обращения из всех каналов - одной лентой.
+
+        Первым стоит тот, кто ждёт ответа дольше всех: обращение, на
+        которое не ответили за час, уже уходит к конкуренту.
+        """
+        p = request.query_params
+        tab = p.get("tab") if p.get("tab") in INBOX_TABS else "open"
+        channel = p.get("channel") if p.get("channel") in logic.INBOX_CHANNELS else None
+        rows = logic.inbox_rows(await crm.inbox_threads(
+            statuses=INBOX_TABS[tab], channel=channel, limit=2000))
+        q = (p.get("q") or "").strip()
+        rows = [r for r in rows if logic.inbox_matches(r, q)]
+        tools = list_tools(request, rows, allowed=INBOX_SORTS)
+        for row in tools["rows"]:
+            row["preview"] = logic.inbox_preview(
+                service.inbox_open(inbox_vault, row.get("last_body_enc")),
+                row.get("last_kind"))
+        counts = logic.inbox_counts(await crm.inbox_threads(statuses=logic.INBOX_OPEN,
+                                                            limit=5000))
+        return render(request, "inbox.html", rows=tools["rows"], tools=tools, tab=tab,
+                      channel=channel or "", q=q, counts=counts,
+                      avito=await inbox_avito(), keyed=inbox_vault is not None,
+                      hook_on=bool(getattr(cfg, "inbox_hook_token", "")),
+                      views=await views_of(request, "/inbox"))
+
+    @app.get("/inbox/{thread_id}")
+    async def inbox_card(request: Request, thread_id: int) -> Response:
+        thread = await inbox_or_404(request, thread_id)
+        if thread is None:
+            return render(request, "missing.html", status_code=404, what="Обращение")
+        messages = []
+        for m in await crm.inbox_messages(thread_id):
+            messages.append({**m, "text": service.inbox_open(inbox_vault, m.get("body_enc"))})
+        avito = await inbox_avito()
+        can_reply, why = logic.inbox_can_reply(thread, avito_ok=avito["live"])
+        bot_state = None
+        if thread["channel"] == "tg" and db is not None and str(thread["ext_id"]).isdigit():
+            row = await db.get_user(int(thread["ext_id"]))
+            bot_state = logic.bot_client_state(dict(row) if row else None)
+        [row] = logic.inbox_rows([thread])
+        return render(request, "inbox_thread.html", t=row, messages=messages,
+                      links=logic.inbox_links(thread), can_reply=can_reply and
+                      inbox_vault is not None, why=why if not can_reply else (
+                          "" if inbox_vault is not None else
+                          "Не задан ключ INBOX_KEY - ответ негде хранить."),
+                      bot_state=bot_state, avito=avito,
+                      reply_limit=logic.INBOX_REPLY_LIMITS.get(thread["channel"], 3500))
+
+    @app.post("/inbox/{thread_id}/reply")
+    async def inbox_reply(request: Request, thread_id: int) -> Response:
+        thread = await inbox_or_404(request, thread_id)
+        if thread is None:
+            return render(request, "missing.html", status_code=404, what="Обращение")
+        data = await form(request)
+        back = f"/inbox/{thread_id}"
+        if not form_once(data):
+            flash(request, "Этот ответ уже отправлен — повторное нажатие пропущено.", "err")
+            return redirect(back)
+        try:
+            await service.inbox_reply(crm, inbox_vault, thread, data.get("text"),
+                                      by=who(request),
+                                      avito_ok=(await inbox_avito())["live"])
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(back)
+        flash(request, "Ответ в очереди: бот отправит его в течение минуты.")
+        return redirect(back)
+
+    @app.post("/inbox/{thread_id}/status")
+    async def inbox_status(request: Request, thread_id: int) -> Response:
+        thread = await inbox_or_404(request, thread_id)
+        if thread is None:
+            return render(request, "missing.html", status_code=404, what="Обращение")
+        data = await form(request)
+        try:
+            await service.inbox_set_status(crm, thread, str(data.get("status") or ""),
+                                           note=data.get("note"), by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/inbox/{thread_id}")
+        flash(request, "Сохранено.")
+        return redirect(f"/inbox/{thread_id}")
+
+    @app.post("/inbox/{thread_id}/client")
+    async def inbox_client(request: Request, thread_id: int) -> Response:
+        thread = await inbox_or_404(request, thread_id)
+        if thread is None:
+            return render(request, "missing.html", status_code=404, what="Обращение")
+        data = await form(request)
+        try:
+            client = await service.inbox_link_client(crm, thread, data.get("client"),
+                                                     by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/inbox/{thread_id}")
+        flash(request, f"Привязано к карточке: {client['full_name']}." if client
+              else "Обращение отвязано от карточки.")
+        return redirect(f"/inbox/{thread_id}")
+
+    @app.post("/inbox/{thread_id}/answered")
+    async def inbox_answered(request: Request, thread_id: int) -> Response:
+        thread = await inbox_or_404(request, thread_id)
+        if thread is None:
+            return render(request, "missing.html", status_code=404, what="Обращение")
+        await service.inbox_answered_elsewhere(crm, thread, by=who(request))
+        flash(request, "Отмечено: ответили вне панели.")
+        return redirect(f"/inbox/{thread_id}")
+
+    @app.post("/inbox/{thread_id}/out/{message_id}/again")
+    async def inbox_again(request: Request, thread_id: int, message_id: int) -> Response:
+        thread = await inbox_or_404(request, thread_id)
+        if thread is None:
+            return render(request, "missing.html", status_code=404, what="Обращение")
+        if not any(m["id"] == message_id for m in await crm.inbox_messages(thread_id)):
+            return render(request, "missing.html", status_code=404, what="Ответ")
+        try:
+            await service.inbox_retry(crm, message_id, by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/inbox/{thread_id}")
+        flash(request, "Ответ снова в очереди.")
+        return redirect(f"/inbox/{thread_id}")
+
+    @app.post("/hook/inbox")
+    async def inbox_hook(request: Request) -> Response:
+        """Точка входа для шлюза WhatsApp (Green-API, Wazzup) и n8n.
+
+        Входа в панель у отправителя нет, поэтому проверки свои: пустой
+        токен - хука нет вовсе (404), неверный - 401 и счёт неудач с
+        адреса, тело больше лимита - 413. Запрос ничего не шлёт наружу и
+        не пишет в лог содержимого: только счётчики.
+        """
+        token = str(getattr(cfg, "inbox_hook_token", "") or "")
+        if not token:
+            return JSONResponse({"ok": False}, status_code=404)
+        ip_key = "hook:" + client_ip(request)
+        if login_throttled(ip_key, logic.HOOK_FAIL_LIMIT):
+            return JSONResponse({"ok": False, "error": "too many attempts"},
+                                status_code=429)
+        header = request.headers.get("authorization") or ""
+        given = header[7:].strip() if header[:7].lower() == "bearer " else ""
+        if not given or not hmac.compare_digest(given.encode(), token.encode()):
+            login_failures.setdefault(ip_key, []).append(time.monotonic())
+            return JSONResponse({"ok": False}, status_code=401)
+        declared = request.headers.get("content-length") or ""
+        if declared.isdigit() and int(declared) > logic.HOOK_MAX_BYTES:
+            return JSONResponse({"ok": False, "error": "too large"}, status_code=413)
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > logic.HOOK_MAX_BYTES:
+                return JSONResponse({"ok": False, "error": "too large"}, status_code=413)
+        try:
+            payload = json.loads(body.decode("utf-8")) if body.strip() else {}
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"ok": False, "error": "not json"}, status_code=400)
+        items, skipped = logic.parse_inbound(payload)
+        saved = duplicates = 0
+        for item in items[:logic.HOOK_BATCH_LIMIT]:
+            try:
+                got = await service.inbox_in(
+                    crm, inbox_vault, channel=item["channel"], origin="hook",
+                    ext_id=item["ext_id"], kind=item["kind"], text=item["text"],
+                    msg_id=item["msg_id"], name=item["name"], phone=item["phone"],
+                    subject=item["subject"], subject_url=item["subject_url"],
+                    at=item["at"], announce=True)
+            except service.ServiceError:
+                skipped += 1
+                continue
+            if got["message_id"] is None:
+                duplicates += 1
+            else:
+                saved += 1
+        log.info("хук входящих: принято %s, повторов %s, пропущено %s",
+                 saved, duplicates, skipped)
+        return JSONResponse({"ok": True, "saved": saved, "duplicates": duplicates,
+                             "skipped": skipped})
 
     @app.get("/bookings")
     async def bookings_page(request: Request) -> Response:

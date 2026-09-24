@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% import "_list.html" as list %}
+{% block title %}Входящие — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Входящие</h1>
+  <form method="get" class="search">
+    <input type="hidden" name="tab" value="{{ tab }}">
+    <input name="q" value="{{ q }}" placeholder="имя, @, телефон, объявление">
+    <select name="channel"><option value="">все каналы</option>{% for code, label in INBOX_CHANNELS.items() %}<option value="{{ code }}" {% if channel == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <button type="submit">Найти</button>
+  </form>
+</div>
+{# Одна лента на всех, кто написал сам: бот в Telegram и MAX, Авито,
+   WhatsApp через шлюз. Раздел по умолчанию только у «Владельца». #}
+<div class="tiles">
+  <div class="tile {% if counts.new %}hot{% endif %}"><b>{{ counts.new }}</b><span>новых</span></div>
+  <div class="tile"><b>{{ counts.work }}</b><span>в работе</span></div>
+  <div class="tile {% if counts.waiting %}warn{% endif %}"><b>{{ counts.waiting }}</b><span>ждут ответа дольше часа</span></div>
+</div>
+{% if not keyed %}<p class="flash err">Не задан ключ <code>secrets/inbox_key</code>: обращения пишутся без текста, ответить из панели нельзя. Ключ создаёт <code>bootstrap.sh</code>.</p>{% endif %}
+{% if avito.configured and not avito.live %}<p class="flash err">Авито: опрос не работает{% if avito.error %} — {{ avito.error }}{% endif %}{% if avito.at %} (последняя отметка {{ avito.at|dmy }}){% endif %}. Ответить в Авито из панели сейчас нельзя.</p>{% endif %}
+<nav class="tabs">
+  {% for code, label in (('open', 'Открытые'), ('new', 'Новые'), ('work', 'В работе'), ('done', 'Разобранные'), ('spam', 'Спам'), ('all', 'Все')) %}
+  <a href="/inbox?tab={{ code }}{% if channel %}&channel={{ channel }}{% endif %}" class="{% if tab == code %}on{% endif %}">{{ label }}</a>
+  {% endfor %}
+</nav>
+<div class="card">
+{{ list.views(views, '/inbox', tools, staff) }}
+<div class="table-wrap">
+<table>
+  <tr>
+    <th>№</th>
+    {{ list.th('Канал', 'channel', tools) }}
+    {{ list.th('Кто', 'name', tools) }}
+    <th>Последнее</th>
+    {{ list.th('Ждёт', 'wait', tools) }}
+    {{ list.th('Состояние', 'status', tools) }}
+  </tr>
+  {% for t in rows %}
+  <tr class="{% if t.status == 'new' %}warn-row{% elif t.status in ('done', 'spam') %}muted{% endif %}">
+    <td class="nowrap"><a href="/inbox/{{ t.id }}">{{ t.no }}</a></td>
+    <td><span class="tag">{{ t.channel_label }}</span></td>
+    <td><a href="/inbox/{{ t.id }}">{{ t.who }}</a>
+      {% if t.client_id %}<br><small class="muted">клиент{% if t.renting %} · в аренде{% endif %}{% if t.booking_open %} · есть бронь{% endif %}</small>{% endif %}
+      {% if t.subject %}<br><small class="muted">{{ t.subject }}</small>{% endif %}</td>
+    <td>{% if t.last_direction == 'out' %}<span class="muted">вы: </span>{% endif %}{{ t.preview or '—' }}</td>
+    <td class="nowrap">{% if t.waiting_since %}{% if t.waiting_hours is not none and t.waiting_hours >= 1 %}<b>{{ t.waiting_hours }} ч</b>{% else %}меньше часа{% endif %}<br><small class="muted">с {{ t.waiting_since|dmy }}</small>{% else %}—{% endif %}</td>
+    <td><span class="tag {% if t.status == 'new' %}rented{% endif %}">{{ t.status_label }}</span>{% if t.handled_by %}<br><small class="muted">{{ t.handled_by }}</small>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="muted">Обращений нет.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/inbox', 6) }}
+</table>
+</div>
+<p class="muted">Сюда попадают: вопросы в поддержку и заявки из Telegram- и MAX-бота,
+  гости, нажавшие тему, где нужен человек, чаты Авито (когда подключён API) и WhatsApp
+  через шлюз{% if not hook_on %} (хук выключен: пустой <code>secrets/inbox_hook_token</code>){% endif %}.
+  Переписка хранится {{ INBOX_KEEP_DAYS }} дней в зашифрованном виде.</p>
+</div>
+{% endblock %}

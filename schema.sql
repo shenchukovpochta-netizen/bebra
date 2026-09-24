@@ -359,7 +359,7 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
   ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
   ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
@@ -2285,3 +2285,88 @@ create index if not exists ops_reports_rental_idx on crm.ops_reports (rental_id)
 -- Номер SIM-карты трекера: по нему звонят на трекер, когда он молчит.
 -- StarLine отдаёт его не у всех устройств, поэтому правится и руками.
 alter table crm.trackers add column if not exists phone text;
+
+-- ─────────── входящие обращения: Telegram, MAX, Авито, WhatsApp ───────────
+--
+-- Обращение - человек, который написал нам сам и ждёт ответа. Это не
+-- клиент и не деньги: в crm.ledger обращение не пишет ничего, аренду и
+-- бронь не создаёт, статусы техники не трогает. Одна строка на
+-- собеседника в канале: новое сообщение в разобранное обращение
+-- возвращает его в «новые», а не заводит второе (спам остаётся спамом).
+-- origin - кто завёл строку. От него зависит ответ из панели: в Telegram
+-- и MAX бот пишет только тем, кого завёл сам бот. Хук принимает лишь
+-- avito и wa: с утёкшим токеном бот не станет рассыльщиком по чужим tg_id.
+-- Раздел видит только встроенный «Владелец» (литерал owner выше).
+create table if not exists crm.inbox_threads (
+  id            bigserial primary key,
+  channel       text        not null check (channel in ('tg', 'max', 'avito', 'wa')),
+  origin        text        not null check (origin in ('bot', 'max_bot', 'avito_api', 'hook')),
+  -- tg_id | user_id MAX | id чата Авито | телефон WhatsApp +7XXXXXXXXXX
+  ext_id        text        not null,
+  name          text,                    -- как подписан в канале
+  username      text,                    -- @ в Telegram
+  phone         text,                    -- только после normalize_phone
+  subject       text,                    -- объявление Авито, тема вопроса
+  subject_url   text,                    -- только https://(www.)avito.ru/...
+  client_id     bigint      references crm.clients (id) on delete set null,
+  status        text        not null default 'new'
+                            check (status in ('new', 'work', 'done', 'spam')),
+  note          text,
+  -- С какого момента человек ждёт ответа: первое входящее после ответа.
+  -- Снимается ответом (из панели или из чата). Второе «алло?» не обнуляет.
+  waiting_since timestamptz,
+  last_in_at    timestamptz,
+  last_out_at   timestamptz,
+  -- null - сигнал inbox_new в служебный чат ещё не уходил. Вопросу в
+  -- поддержку ставится сразу: у него своя карточка в чате.
+  announced_at  timestamptz,
+  ext_cursor    text,                    -- Авито: id последнего увиденного сообщения
+  handled_by    text,
+  handled_at    timestamptz,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  unique (channel, ext_id)
+);
+create index if not exists inbox_threads_open_idx
+  on crm.inbox_threads (status, waiting_since) where status in ('new', 'work');
+create index if not exists inbox_threads_phone_idx
+  on crm.inbox_threads (phone) where phone is not null;
+create index if not exists inbox_threads_announce_idx
+  on crm.inbox_threads (id) where announced_at is null;
+
+-- Лента обращения: входящие, события («анкета на проверке») и ответы.
+-- Ответ из панели - это и есть очередь процесса бота. Текст - шифротекст
+-- ключа INBOX_KEY, отдельного от pdn_key: переписку панели показывать
+-- нужно, анкету - нельзя. Нет ключа - текста нет (NULL). Вложения не
+-- хранятся вовсе, только вид. Живёт logic.INBOX_KEEP_DAYS.
+create table if not exists crm.inbox_messages (
+  id          bigserial primary key,
+  thread_id   bigint      not null references crm.inbox_threads (id) on delete cascade,
+  direction   text        not null check (direction in ('in', 'out', 'event')),
+  kind        text        not null default 'text'
+                          check (kind in ('text', 'image', 'voice', 'file', 'call', 'other')),
+  ext_id      text,                      -- id сообщения у площадки
+  body_enc    text,
+  author      text,                      -- staff:логин | tg:<id> | max:<id> | avito-app
+  -- Только у ответов: queued -> sending -> sent | failed. Застрявшее
+  -- sending процесс сам не переотправляет: отправка не идемпотентна, и
+  -- повтор после таймаута - второе сообщение человеку.
+  status      text        check (status in ('queued', 'sending', 'sent', 'failed')),
+  error       text,
+  created_at  timestamptz not null default now(),
+  sent_at     timestamptz,
+  check ((direction = 'out') = (status is not null))
+);
+-- Повторная доставка хука и опрос Авито не дублируют сообщение; сюда же
+-- упирается свой ответ Авито, вернувшийся опросом.
+create unique index if not exists inbox_messages_ext_uq
+  on crm.inbox_messages (thread_id, ext_id) where ext_id is not null;
+-- Один ответ в очереди на обращение: двойной клик не даст два сообщения.
+create unique index if not exists inbox_messages_one_queued
+  on crm.inbox_messages (thread_id) where status in ('queued', 'sending');
+create index if not exists inbox_messages_thread_idx
+  on crm.inbox_messages (thread_id, id);
+create index if not exists inbox_messages_queue_idx
+  on crm.inbox_messages (id) where status = 'queued';
+create index if not exists inbox_messages_created_idx
+  on crm.inbox_messages (created_at);

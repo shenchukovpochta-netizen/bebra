@@ -14,6 +14,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from .. import logic as bot_logic
+from ..services.crypto import KeyProblem, Vault
 from . import esign, logic, notices, notify
 
 log = logging.getLogger(__name__)
@@ -1859,3 +1861,149 @@ async def close_booking(crm: Any, booking_id: int, *, rental_id: int, by: str) -
         return
     await crm.update_booking(booking_id, status="done", rental_id=rental_id,
                              handled_by=by, handled_at=datetime.now(UTC))
+
+
+# ─────────────────── входящие обращения ───────────────────
+#
+# Переписка шифруется своим ключом INBOX_KEY, не ключом анкеты: панель
+# показывает переписку администратору, а анкету панель не читает вовсе.
+# Нет ключа - текст не пишется (строка есть, текста нет), ответить из
+# панели нельзя: хранить ответ открытым текстом мы не станем.
+
+_INBOX_VAULTS: dict[str, Vault | None] = {}
+
+
+def inbox_vault(raw_key: str | None) -> Vault | None:
+    """Шифр переписки по ключу из секрета или None, если ключа нет."""
+    key = (raw_key or "").strip()
+    if not key:
+        return None
+    if key not in _INBOX_VAULTS:
+        try:
+            _INBOX_VAULTS[key] = Vault.from_raw(key)
+        except KeyProblem:
+            log.error("INBOX_KEY непригоден - переписка во «Входящих» не пишется")
+            _INBOX_VAULTS[key] = None
+    return _INBOX_VAULTS[key]
+
+
+def inbox_seal(vault: Vault | None, text: str | None) -> str | None:
+    return vault.encrypt({"t": text}) if vault is not None and text else None
+
+
+def inbox_open(vault: Vault | None, body_enc: str | None) -> str | None:
+    """Текст сообщения для экрана. Битый шифротекст или чужой ключ - не
+    исключение, а видимая пометка: переписка не должна ронять страницу."""
+    if not body_enc:
+        return None
+    if vault is None:
+        return "[текст зашифрован, ключа INBOX_KEY нет]"
+    data = vault.decrypt(body_enc)
+    return str(data["t"]) if data.get("t") else "[не расшифровано]"
+
+
+async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
+                   ext_id: Any, direction: str = "in", kind: str = "text",
+                   text: str | None = None, msg_id: Any = None, name: str | None = None,
+                   username: str | None = None, phone: str | None = None,
+                   subject: str | None = None, subject_url: str | None = None,
+                   author: str | None = None, at: datetime | None = None,
+                   announce: bool = True) -> dict:
+    """Записать сообщение во «Входящие» и найти карточку клиента.
+
+    Карточка ищется по tg_id, по аккаунту MAX и по телефону - привязка
+    сразу видна в списке, и администратор не гадает, клиент это или нет.
+    """
+    ext = str(ext_id or "").strip()[:100]
+    if not ext:
+        raise ServiceError("Нет адреса собеседника.")
+    client = None
+    if channel == "tg" and ext.isdigit():
+        client = await crm.client_by_tg(int(ext))
+    elif channel == "max" and ext.isdigit():
+        client = await crm.client_by_max(int(ext))
+    norm = bot_logic.normalize_phone(phone) if phone else None
+    if client is None and norm:
+        client = await crm.client_by_phone(norm)
+    return await crm.inbox_record(
+        channel=channel, origin=origin, ext_id=ext, direction=direction, kind=kind,
+        msg_id=str(msg_id)[:100] if msg_id is not None else None,
+        body_enc=inbox_seal(vault, (text or "")[:logic.INBOX_TEXT_MAX] or None),
+        author=author, name=(name or "").strip()[:logic.INBOX_NAME_MAX] or None,
+        username=(username or "").lstrip("@").strip()[:64] or None, phone=norm,
+        subject=(subject or "").strip()[:logic.INBOX_SUBJECT_MAX] or None,
+        subject_url=logic.safe_avito_url(subject_url),
+        client_id=client["id"] if client else None, at=at, announce=announce)
+
+
+async def inbox_reply(crm: Any, vault: Vault | None, thread: dict, text: Any, *,
+                      by: str, avito_ok: bool) -> int:
+    """Ответ из панели - строкой в очередь; отправляет процесс бота."""
+    ok, why = logic.inbox_can_reply(thread, avito_ok=avito_ok)
+    if not ok:
+        raise ServiceError(why)
+    if vault is None:
+        raise ServiceError("Не задан ключ INBOX_KEY: ответ негде хранить. "
+                           "Ответьте в самом мессенджере.")
+    check = logic.check_inbox_reply(thread.get("channel"), text)
+    if not check.ok:
+        raise ServiceError(check.error)
+    message_id = await crm.queue_inbox_reply(
+        thread["id"], body_enc=inbox_seal(vault, check.value), author=by)
+    if message_id is None:
+        raise ServiceError("Предыдущий ответ ещё отправляется - подождите минуту.")
+    if thread.get("status") == "new":
+        await crm.update_inbox_thread(thread["id"], status="work", handled_by=by,
+                                      handled_at=datetime.now(UTC))
+    return message_id
+
+
+async def inbox_set_status(crm: Any, thread: dict, status: str, *,
+                           note: str | None, by: str) -> None:
+    if status not in logic.INBOX_STATUSES:
+        raise ServiceError("Нет такого состояния.")
+    fields: dict[str, Any] = {"status": status, "handled_by": by,
+                              "handled_at": datetime.now(UTC)}
+    if note is not None:
+        check = logic.check_note(note)
+        if not check.ok:
+            raise ServiceError(check.error)
+        fields["note"] = check.value
+    await crm.update_inbox_thread(thread["id"], **fields)
+
+
+async def inbox_link_client(crm: Any, thread: dict, raw: Any, *, by: str) -> dict | None:
+    """Привязать обращение к карточке: номер карточки или телефон.
+    Пусто - отвязать."""
+    text = str(raw or "").strip()
+    if not text:
+        await crm.update_inbox_thread(thread["id"], client_id=None, handled_by=by,
+                                      handled_at=datetime.now(UTC))
+        return None
+    client = None
+    if text.isdigit() and len(text) <= 9:
+        client = await crm.client(int(text))
+    else:
+        phone = bot_logic.normalize_phone(text)
+        client = await crm.client_by_phone(phone) if phone else None
+    if client is None:
+        raise ServiceError("Клиента с таким номером карточки или телефоном нет.")
+    await crm.update_inbox_thread(thread["id"], client_id=client["id"], handled_by=by,
+                                  handled_at=datetime.now(UTC))
+    return client
+
+
+async def inbox_answered_elsewhere(crm: Any, thread: dict, *, by: str) -> None:
+    """«Ответил вне панели»: по телефону, в приложении Авито, в WhatsApp.
+    Ожидание снимается так же, как настоящим ответом."""
+    await crm.inbox_record(channel=thread["channel"], origin=thread["origin"],
+                           ext_id=thread["ext_id"], direction="out", author=by,
+                           announce=False)
+
+
+async def inbox_retry(crm: Any, message_id: int, *, by: str) -> int:
+    new_id = await crm.inbox_retry(message_id, author=by)
+    if new_id is None:
+        raise ServiceError("Повторить можно только не ушедший ответ, "
+                           "и пока предыдущий не отправляется.")
+    return new_id

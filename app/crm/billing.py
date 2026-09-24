@@ -505,6 +505,12 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
             old = await crm.purge_notice_log(logic.NOTICE_LOG_DAYS)
             if old:
                 log.info("CRM: старых записей истории отправок удалено %s", old)
+            # Переписка «Входящих» - персональные данные с ограниченным
+            # сроком: сообщения живут 90 дней, разобранное обращение без них
+            # удаляется целиком.
+            talk = await crm.purge_inbox(logic.INBOX_KEEP_DAYS)
+            if talk:
+                log.info("CRM: старых сообщений «Входящих» удалено %s", talk)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: чистка журналов не удалась")
 

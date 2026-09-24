@@ -71,6 +71,8 @@ class FakeCrm:
         self.alerts_: dict[int, dict] = {}
         self.settings_: dict[str, str] = {}
         self.ops_: dict[int, dict] = {}
+        self.inbox_threads_: dict[int, dict] = {}
+        self.inbox_messages_: dict[int, dict] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
@@ -3129,6 +3131,178 @@ class FakeCrm:
     async def ops_reports_of_rental(self, rental_id):
         rows = [self._ops_row(o) for o in self.ops_.values() if o["rental_id"] == rental_id]
         return sorted(rows, key=lambda o: (o["created_at"], o["id"]))
+
+    # ────────── входящие обращения ──────────
+
+    async def client_by_max(self, max_id):
+        return next((dict(c) for c in self.clients_.values()
+                     if c.get("max_id") == max_id), None)
+
+    async def inbox_record(self, *, channel, origin, ext_id, direction, kind="text",
+                           msg_id=None, body_enc=None, author=None, name=None,
+                           username=None, phone=None, subject=None, subject_url=None,
+                           client_id=None, at=None, announce=True):
+        assert channel in crm_logic.INBOX_CHANNELS and origin in crm_logic.INBOX_ORIGINS
+        assert direction in ("in", "out", "event") and kind in crm_logic.INBOX_KINDS
+        now = self._now()
+        thread = next((t for t in self.inbox_threads_.values()
+                       if t["channel"] == channel and t["ext_id"] == ext_id), None)
+        created = thread is None
+        if created:
+            tid = self._id()
+            thread = self.inbox_threads_[tid] = {
+                "id": tid, "channel": channel, "origin": origin, "ext_id": ext_id,
+                "name": name, "username": username, "phone": phone, "subject": subject,
+                "subject_url": subject_url, "client_id": client_id, "status": "new",
+                "note": None, "waiting_since": None, "last_in_at": None,
+                "last_out_at": None, "announced_at": None if announce else now,
+                "ext_cursor": None, "handled_by": None, "handled_at": None,
+                "created_at": now, "updated_at": now}
+        else:
+            for key, value in (("name", name), ("username", username), ("phone", phone),
+                               ("subject", subject), ("subject_url", subject_url)):
+                if value is not None:
+                    thread[key] = value
+            if thread["client_id"] is None:
+                thread["client_id"] = client_id
+            thread["updated_at"] = now
+        if msg_id is not None and any(m["thread_id"] == thread["id"] and m["ext_id"] == msg_id
+                                      for m in self.inbox_messages_.values()):
+            return {"thread_id": thread["id"], "created": created, "message_id": None}
+        mid = self._id()
+        self.inbox_messages_[mid] = {
+            "id": mid, "thread_id": thread["id"], "direction": direction, "kind": kind,
+            "ext_id": msg_id, "body_enc": body_enc, "author": author,
+            "status": "sent" if direction == "out" else None, "error": None,
+            "created_at": at or now, "sent_at": now if direction == "out" else None}
+        if direction == "out":
+            thread.update(last_out_at=now, waiting_since=None)
+            if thread["status"] == "new":
+                thread["status"] = "work"
+        else:
+            moment = at or now
+            thread["last_in_at"] = max(filter(None, (thread["last_in_at"], moment)))
+            if direction == "in" and thread["waiting_since"] is None:
+                thread["waiting_since"] = moment
+            if thread["status"] == "done":
+                if announce:
+                    thread["announced_at"] = None
+                thread["status"] = "new"
+        return {"thread_id": thread["id"], "created": created, "message_id": mid}
+
+    def _inbox_row(self, t):
+        c = self.clients_.get(t.get("client_id")) if t.get("client_id") else None
+        last = [m for m in self.inbox_messages_.values()
+                if m["thread_id"] == t["id"] and m["direction"] != "event"]
+        last = max(last, key=lambda m: m["id"]) if last else None
+        return {**t, "client_name": c["full_name"] if c else None,
+                "client_phone": c["phone"] if c else None,
+                "renting": bool(c) and any(r["client_id"] == c["id"] and r["status"] == "active"
+                                           for r in self.rentals_.values()),
+                "booking_open": bool(c) and any(b["client_id"] == c["id"]
+                                                and b["status"] == "new"
+                                                for b in self.bookings_.values()),
+                "last_body_enc": last["body_enc"] if last else None,
+                "last_kind": last["kind"] if last else None,
+                "last_direction": last["direction"] if last else None}
+
+    async def inbox_threads(self, *, statuses=None, channel=None, limit=500):
+        rows = [self._inbox_row(t) for t in self.inbox_threads_.values()
+                if (not statuses or t["status"] in statuses)
+                and (not channel or t["channel"] == channel)]
+        far = datetime.max.replace(tzinfo=UTC)
+        rows.sort(key=lambda t: (t["waiting_since"] or far, -t["updated_at"].timestamp()))
+        return rows[:limit]
+
+    async def inbox_thread(self, thread_id):
+        t = self.inbox_threads_.get(thread_id)
+        return self._inbox_row(t) if t else None
+
+    async def inbox_messages(self, thread_id, limit=500):
+        rows = sorted((dict(m) for m in self.inbox_messages_.values()
+                       if m["thread_id"] == thread_id), key=lambda m: m["id"])
+        return rows[-limit:]
+
+    async def inbox_open_count(self):
+        return sum(1 for t in self.inbox_threads_.values()
+                   if t["status"] in ("new", "work") and t["waiting_since"] is not None)
+
+    async def update_inbox_thread(self, thread_id, **fields):
+        unknown = set(fields) - {"status", "note", "client_id", "handled_by", "handled_at",
+                                 "ext_cursor", "announced_at"}
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        if thread_id in self.inbox_threads_:
+            self.inbox_threads_[thread_id].update(fields, updated_at=self._now())
+
+    async def queue_inbox_reply(self, thread_id, *, body_enc, author):
+        if any(m["thread_id"] == thread_id and m["status"] in ("queued", "sending")
+               for m in self.inbox_messages_.values()):
+            return None
+        mid = self._id()
+        self.inbox_messages_[mid] = {
+            "id": mid, "thread_id": thread_id, "direction": "out", "kind": "text",
+            "ext_id": None, "body_enc": body_enc, "author": author, "status": "queued",
+            "error": None, "created_at": self._now(), "sent_at": None}
+        return mid
+
+    async def claim_inbox_out(self):
+        queued = sorted((m for m in self.inbox_messages_.values() if m["status"] == "queued"),
+                        key=lambda m: m["id"])
+        if not queued:
+            return None
+        m = queued[0]
+        m["status"] = "sending"
+        t = self.inbox_threads_[m["thread_id"]]
+        return {**m, "channel": t["channel"], "origin": t["origin"],
+                "thread_ext_id": t["ext_id"], "client_id": t["client_id"],
+                "thread_status": t["status"]}
+
+    async def finish_inbox_out(self, message_id, *, ok, error=None, ext_id=None):
+        m = self.inbox_messages_.get(message_id)
+        if m is None or m["status"] != "sending":
+            return False
+        m.update(status="sent" if ok else "failed", error=(error or "")[:500] or None,
+                 sent_at=self._now())
+        if ext_id is not None:
+            m["ext_id"] = ext_id
+        if ok:
+            t = self.inbox_threads_[m["thread_id"]]
+            t.update(last_out_at=self._now(), waiting_since=None)
+            if t["status"] == "new":
+                t["status"] = "work"
+        return True
+
+    async def fail_stuck_inbox_out(self):
+        stuck = [m for m in self.inbox_messages_.values() if m["status"] == "sending"]
+        for m in stuck:
+            m.update(status="failed", error="неизвестно, ушло ли: процесс перезапускался",
+                     sent_at=self._now())
+        return len(stuck)
+
+    async def inbox_retry(self, message_id, *, author):
+        m = self.inbox_messages_.get(message_id)
+        if m is None or m["status"] != "failed":
+            return None
+        return await self.queue_inbox_reply(m["thread_id"], body_enc=m["body_enc"],
+                                            author=author)
+
+    async def inbox_to_announce(self, limit=20):
+        rows = sorted((dict(t) for t in self.inbox_threads_.values()
+                       if t["announced_at"] is None), key=lambda t: t["id"])
+        return rows[:limit]
+
+    async def purge_inbox(self, days):
+        edge = self._now() - timedelta(days=days)
+        gone = [mid for mid, m in self.inbox_messages_.items()
+                if m["created_at"] < edge and m["status"] not in ("queued", "sending")]
+        for mid in gone:
+            del self.inbox_messages_[mid]
+        for tid in [tid for tid, t in self.inbox_threads_.items()
+                    if t["status"] in ("done", "spam") and t["updated_at"] < edge
+                    and not any(m["thread_id"] == tid for m in self.inbox_messages_.values())]:
+            del self.inbox_threads_[tid]
+        return len(gone)
 
     async def part_last_moved(self):
         out = {}

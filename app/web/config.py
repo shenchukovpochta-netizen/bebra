@@ -61,6 +61,10 @@ class WebConfig:
     # дёргал бы банк втройне, а нажатие кнопки - это один запрос.
     tochka_token: str = ""
     tochka_customer_code: str = ""
+    # «Входящие»: ключ переписки (тот же, что у бота) и токен хука
+    # /hook/inbox для шлюзов WhatsApp и n8n. Пустой токен - хука нет.
+    inbox_key: str = ""
+    inbox_hook_token: str = ""
 
     @classmethod
     def load(cls) -> WebConfig:
@@ -90,4 +94,6 @@ class WebConfig:
             contract_chat_id=_env("CONTRACT_CHAT_ID"),
             tochka_token=_secret("TOCHKA_TOKEN", required=False),
             tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
+            inbox_key=_secret("INBOX_KEY", required=False),
+            inbox_hook_token=_secret("INBOX_HOOK_TOKEN", required=False),
         )

@@ -353,3 +353,8 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
 .saved-views{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
              margin:8px 0;font-size:13px}
 .saved-views .inline-form{display:inline-flex;gap:4px;margin:0}
+/* Входящие: лента переписки */
+.thread{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;max-height:60vh;overflow:auto}
+.thread .msg{border:1px solid var(--line,#ddd);border-radius:8px;padding:6px 10px;max-width:85%;white-space:pre-wrap;word-break:break-word}
+.thread .msg.out{align-self:flex-end;background:var(--brand-pale)}
+.thread .msg.event{align-self:center;border-style:dashed}

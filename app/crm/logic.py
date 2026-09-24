@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import urlsplit
 
 from .. import logic as bot_logic
 
@@ -1230,6 +1231,7 @@ def ridden_per_day(rental: dict, *, days: int | None = None) -> int | None:
 SECTIONS: dict[str, str] = {
     "dashboard": "Сводка",
     "issue": "Быстрая выдача",
+    "inbox": "Входящие: Авито, Telegram, MAX, WhatsApp",
     "clients": "Клиенты",
     "rentals": "Аренды",
     "bikes": "Парк",
@@ -1268,6 +1270,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/issue", "issue"),
     # Заявки на аренду - часть выдачи: из заявки открывается мастер.
     ("/bookings", "issue"),
+    # Входящие обращения: по умолчанию только у встроенного «Владельца».
+    ("/inbox", "inbox"),
     ("/clients", "clients"),
     # Журнал подписаний - тот же раздел, что и клиенты: подписывает
     # документы тот, кто ведёт клиента. Страница /sign/<токен> в список
@@ -4698,6 +4702,13 @@ NOTICES: dict[str, dict[str, Any]] = {
         "hint": "Согласовал или отказался - техник ждёт именно этого.",
     },
     # ─ в канал ─
+    "inbox_new": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Новое обращение во «Входящих»",
+        "hint": "Написали с Авито, WhatsApp или гость в боте. В сообщении "
+                "номер обращения, канал и объявление - без имени, телефона "
+                "и текста: служебный чат читают все.",
+    },
     "booking_new": {
         "group": "team", "target": "chat", "hour": None,
         "title": "Новая заявка на аренду",
@@ -6469,3 +6480,366 @@ def ops_query(text: Any) -> str | None:
     if len(lines) != 1 or len(lines[0].split()) > 3 or len(lines[0]) > 40:
         return None
     return lines[0]
+
+
+# ─────────────────── входящие обращения ───────────────────
+#
+# Одна лента на всех, кто написал сам: Telegram, MAX, Авито, WhatsApp.
+# Обращение - не клиент и не деньги: оно ничего не пишет в журнал и не
+# создаёт аренд. Раздел по умолчанию только у встроенного «Владельца».
+
+INBOX_CHANNELS: dict[str, str] = {
+    "tg": "Telegram", "max": "MAX", "avito": "Авито", "wa": "WhatsApp",
+}
+INBOX_ORIGINS = ("bot", "max_bot", "avito_api", "hook")
+INBOX_STATUSES: dict[str, str] = {
+    "new": "Новое", "work": "В работе", "done": "Разобрано", "spam": "Спам",
+}
+INBOX_OPEN = ("new", "work")
+INBOX_KINDS: dict[str, str] = {
+    "text": "текст", "image": "фото", "voice": "голосовое", "file": "файл",
+    "call": "звонок", "other": "вложение",
+}
+INBOX_OUT_STATUSES: dict[str, str] = {
+    "queued": "в очереди", "sending": "отправляется", "sent": "отправлено",
+    "failed": "не ушло",
+}
+# Переписка - ПДн: держим три месяца. Ответ на «что он писал» дальше не
+# нужен, а срок хранения короче - меньше, что может утечь.
+INBOX_KEEP_DAYS = 90
+INBOX_TEXT_MAX = 4000
+INBOX_NAME_MAX = 120
+INBOX_SUBJECT_MAX = 200
+# Длина ответа по каналу: у Авито жёсткий предел 1000 знаков, у Telegram
+# и MAX запас под обёртку «Ответ оператора».
+INBOX_REPLY_LIMITS: dict[str, int] = {"tg": 3500, "max": 3500, "avito": 1000, "wa": 3500}
+# Хук: тело до 64 КиБ, до 50 сообщений за раз, после 20 неудачных
+# токенов с адреса - пауза, как у входа в панель.
+HOOK_MAX_BYTES = 64 * 1024
+HOOK_BATCH_LIMIT = 50
+HOOK_FAIL_LIMIT = 20
+# Хук принимает только эти каналы: Telegram и MAX пишет сам бот, и чужой
+# запрос с утёкшим токеном не должен заводить обращения на чужие tg_id.
+HOOK_CHANNELS = ("avito", "wa")
+_TG_USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
+
+
+def inbox_no(thread_id: Any) -> str:
+    return f"ВХ-{int(thread_id or 0):06d}"
+
+
+def _cut(value: Any, limit: int) -> str | None:
+    text = str(value or "").strip()
+    return text[:limit] if text else None
+
+
+def safe_avito_url(url: Any) -> str | None:
+    """Ссылка на объявление - только https на домен Авито. Чужой адрес
+    или «javascript:» в карточку обращения не попадает."""
+    text = str(url or "").strip()
+    if not text:
+        return None
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not (host == "avito.ru" or host.endswith(".avito.ru")):
+        return None
+    return text[:500]
+
+
+def inbox_links(thread: Mapping[str, Any]) -> dict[str, str | None]:
+    """Куда ответить вне панели: t.me по @, wa.me по цифрам телефона."""
+    username = str(thread.get("username") or "").lstrip("@")
+    phone = bot_logic.normalize_phone(thread.get("phone"))
+    digits = re.sub(r"\D", "", phone or "")
+    return {
+        "tg": f"https://t.me/{username}" if _TG_USERNAME.fullmatch(username) else None,
+        "wa": f"https://wa.me/{digits}" if digits else None,
+        "avito": safe_avito_url(thread.get("subject_url")),
+    }
+
+
+def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool) -> tuple[bool, str]:
+    """(можно ли ответить из панели, почему нет).
+
+    В Telegram и MAX бот может написать только тому, кто сам писал боту:
+    обращение, заведённое хуком, этого не доказывает. WhatsApp - только
+    вне панели: отправка через шлюз не подключена.
+    """
+    channel = thread.get("channel")
+    if thread.get("status") == "spam":
+        return False, "Это спам - отвечать не нужно."
+    if channel == "tg":
+        if thread.get("origin") != "bot":
+            return False, "В Telegram ответит только сам бот тем, кто писал ему."
+        return True, ""
+    if channel == "max":
+        if thread.get("origin") != "max_bot":
+            return False, "В MAX ответит только MAX-бот тем, кто писал ему."
+        return True, ""
+    if channel == "avito":
+        if not avito_ok:
+            return False, ("Опрос Авито не работает - ответ уйдёт некуда. "
+                           "Ответьте в приложении Авито.")
+        return True, ""
+    return False, ("WhatsApp: ответьте по ссылке wa.me и отметьте "
+                   "«ответил вне панели».")
+
+
+def check_inbox_reply(channel: Any, raw: Any) -> Check:
+    text = str(raw or "").strip()
+    if not text:
+        return Check(False, error="Напишите текст ответа.")
+    limit = INBOX_REPLY_LIMITS.get(str(channel), 3500)
+    if len(text) > limit:
+        return Check(False, error=f"Ответ длиннее {limit} знаков - сократите его.")
+    return Check(True, text)
+
+
+def _moment(value: Any) -> datetime | None:
+    """Время из чужого JSON: unix-секунды или ISO. Не разобрали - None."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value).strip()
+    if text.isdigit():
+        return _moment(int(text))
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def _wa_phone(raw: Any) -> str | None:
+    """«79001234567@c.us» или «79001234567» -> +79001234567."""
+    digits = re.sub(r"\D", "", str(raw or "").split("@", 1)[0])
+    if not 10 <= len(digits) <= 15:
+        return None
+    return bot_logic.normalize_phone("+" + digits) or bot_logic.normalize_phone(digits)
+
+
+def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = None,
+                  phone: Any = None, text: Any = None, kind: str = "text",
+                  subject: Any = None, subject_url: Any = None,
+                  at: Any = None) -> dict | None:
+    ext = _cut(ext_id, 100)
+    if channel not in HOOK_CHANNELS or not ext:
+        return None
+    return {
+        "channel": channel, "ext_id": ext, "msg_id": _cut(msg_id, 100),
+        "name": _cut(name, INBOX_NAME_MAX),
+        "phone": bot_logic.normalize_phone(str(phone)) if phone else None,
+        "text": _cut(text, INBOX_TEXT_MAX),
+        "kind": kind if kind in INBOX_KINDS else "other",
+        "subject": _cut(subject, INBOX_SUBJECT_MAX),
+        "subject_url": safe_avito_url(subject_url),
+        "at": _moment(at),
+    }
+
+
+_GREEN_KINDS = {"textMessage": "text", "extendedTextMessage": "text",
+                "quotedMessage": "text", "imageMessage": "image",
+                "audioMessage": "voice", "documentMessage": "file",
+                "videoMessage": "other", "stickerMessage": "other",
+                "contactMessage": "other", "locationMessage": "other"}
+_WAZZUP_KINDS = {"text": "text", "image": "image", "audio": "voice",
+                 "document": "file", "missing_call": "call"}
+_WAZZUP_CHANNELS = {"whatsapp": "wa", "whatsgroup": None, "avito": "avito"}
+
+
+def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
+    """Вебхук Green-API. Берём только входящие личные сообщения и звонки:
+    группы (@g.us), свои исходящие и смены состояния - не обращения."""
+    kind_hook = payload.get("typeWebhook")
+    sender = payload.get("senderData") or payload.get("from") or {}
+    if kind_hook == "incomingCall":
+        chat = str(payload.get("from") or "")
+        phone = _wa_phone(chat)
+        item = _inbound_item("wa", phone, msg_id=payload.get("idMessage"), phone=phone,
+                             kind="call", at=payload.get("timestamp"))
+        return ([item], 0) if item else ([], 1)
+    if kind_hook != "incomingMessageReceived" or not isinstance(sender, dict):
+        return [], 1
+    chat = str(sender.get("chatId") or "")
+    if not chat.endswith("@c.us"):
+        return [], 1
+    data = payload.get("messageData") or {}
+    type_message = str(data.get("typeMessage") or "")
+    text = ((data.get("textMessageData") or {}).get("textMessage")
+            or (data.get("extendedTextMessageData") or {}).get("text")
+            or (data.get("fileMessageData") or {}).get("caption"))
+    phone = _wa_phone(chat)
+    item = _inbound_item(
+        "wa", phone, msg_id=payload.get("idMessage"),
+        name=sender.get("senderName") or sender.get("chatName")
+        or sender.get("senderContactName"),
+        phone=phone, text=text, kind=_GREEN_KINDS.get(type_message, "other"),
+        at=payload.get("timestamp"))
+    return ([item], 0) if item else ([], 1)
+
+
+def _wazzup(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
+    """Вебхук Wazzup: {messages: [...]}. isEcho - наше же исходящее."""
+    items, skipped = [], 0
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict) or message.get("isEcho"):
+            skipped += 1
+            continue
+        channel = _WAZZUP_CHANNELS.get(str(message.get("chatType") or ""))
+        contact = message.get("contact") if isinstance(message.get("contact"), dict) else {}
+        chat = message.get("chatId")
+        phone = _wa_phone(chat) if channel == "wa" else None
+        item = _inbound_item(
+            channel or "", phone if channel == "wa" else chat,
+            msg_id=message.get("messageId"), name=contact.get("name"), phone=phone,
+            text=message.get("text"),
+            kind=_WAZZUP_KINDS.get(str(message.get("type") or ""), "other"),
+            at=message.get("dateTime"))
+        if item is None:
+            skipped += 1
+        else:
+            items.append(item)
+    return items, skipped
+
+
+def parse_inbound(payload: Any) -> tuple[list[dict], int]:
+    """Тело хука -> (сообщения, сколько пропущено).
+
+    Понимает три формы: наш нормализованный JSON (для n8n: один объект
+    или {"items": [...]}), вебхук Green-API и вебхук Wazzup. Неизвестная
+    форма - пусто, а не ошибка: шлюз шлёт и служебные уведомления.
+    """
+    if not isinstance(payload, dict):
+        return [], 1
+    if payload.get("test") is True and len(payload) <= 2:
+        return [], 0                   # проверка адреса от Wazzup
+    if "typeWebhook" in payload:
+        return _green(payload)
+    if "messages" in payload and isinstance(payload.get("messages"), list):
+        return _wazzup(payload)
+    raw_items = payload.get("items") if isinstance(payload.get("items"), list) else [payload]
+    items, skipped = [], 0
+    for raw in raw_items[:HOOK_BATCH_LIMIT]:
+        if not isinstance(raw, dict):
+            skipped += 1
+            continue
+        channel = str(raw.get("channel") or "").strip().lower()
+        phone = raw.get("phone")
+        ext = raw.get("ext_id") or raw.get("from") or raw.get("chat_id")
+        if channel == "wa" and not ext:
+            ext = _wa_phone(phone)
+        if channel == "wa":
+            ext = _wa_phone(ext) or ext
+            phone = phone or ext
+        item = _inbound_item(
+            channel, ext, msg_id=raw.get("msg_id") or raw.get("message_id") or raw.get("id"),
+            name=raw.get("name"), phone=phone, text=raw.get("text"),
+            kind=str(raw.get("kind") or "text"), subject=raw.get("subject"),
+            subject_url=raw.get("subject_url"), at=raw.get("at"))
+        if item is None:
+            skipped += 1
+        else:
+            items.append(item)
+    skipped += max(len(raw_items) - HOOK_BATCH_LIMIT, 0)
+    return items, skipped
+
+
+def inbox_team_text(thread: Mapping[str, Any]) -> str:
+    """Сигнал в служебный чат. Без имени, телефона и текста: чат читают
+    все, а переписка - ПДн и живёт в панели под ключом."""
+    channel = INBOX_CHANNELS.get(str(thread.get("channel")), str(thread.get("channel")))
+    line = f"📨 Новое обращение {inbox_no(thread.get('id'))} · {channel}"
+    subject = thread.get("subject")
+    if subject:
+        line += f"\n{html.escape(str(subject)[:INBOX_SUBJECT_MAX], quote=False)}"
+    return line + "\nОткройте раздел «Входящие» в панели."
+
+
+def inbox_rows(threads: Iterable[Mapping[str, Any]], *,
+               now: datetime | None = None) -> list[dict]:
+    """Строки списка: номер, сколько ждёт, подписи."""
+    now = now or datetime.now(UTC)
+    rows = []
+    for thread in threads:
+        row = dict(thread)
+        waiting = row.get("waiting_since")
+        row["no"] = inbox_no(row.get("id"))
+        row["waiting_hours"] = (
+            max(int((now - waiting).total_seconds() // 3600), 0)
+            if isinstance(waiting, datetime) and waiting.tzinfo else None)
+        row["channel_label"] = INBOX_CHANNELS.get(row.get("channel"), row.get("channel"))
+        row["status_label"] = INBOX_STATUSES.get(row.get("status"), row.get("status"))
+        row["who"] = (row.get("client_name") or row.get("name")
+                      or (f"@{row['username']}" if row.get("username") else None)
+                      or row.get("phone") or row["no"])
+        rows.append(row)
+    return rows
+
+
+def inbox_matches(row: Mapping[str, Any], query: Any) -> bool:
+    q = str(query or "").strip().lower()
+    if not q:
+        return True
+    hay = " ".join(str(row.get(k) or "") for k in (
+        "name", "username", "phone", "subject", "client_name", "no", "ext_id")).lower()
+    digits = re.sub(r"\D", "", q)
+    return q in hay or (len(digits) >= 5 and digits in re.sub(r"\D", "", hay))
+
+
+def inbox_counts(threads: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Плитки: сколько новых, в работе и ждут ответа дольше часа."""
+    out = {"new": 0, "work": 0, "waiting": 0}
+    now = datetime.now(UTC)
+    for t in threads:
+        status = t.get("status")
+        if status in out:
+            out[status] += 1
+        waiting = t.get("waiting_since")
+        if (status in INBOX_OPEN and isinstance(waiting, datetime) and waiting.tzinfo
+                and (now - waiting) > timedelta(hours=1)):
+            out["waiting"] += 1
+    return out
+
+
+# Состояние опроса Авито пишет процесс бота в crm.settings - панель в
+# интернет не ходит и узнаёт о нём только так. Отметка старше этого
+# срока - опрос не живой, и ответ в Авито из панели не принимается.
+AVITO_STALE_MINUTES = 15
+
+
+def avito_state(settings: Mapping[str, Any], *,
+                now: datetime | None = None) -> dict[str, Any]:
+    """{configured, ok, live, at, error} из settings.inbox_avito_state."""
+    raw = settings.get("inbox_avito_state")
+    data: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        data = raw
+    elif raw:
+        try:
+            loaded = json.loads(str(raw))
+            data = loaded if isinstance(loaded, dict) else {}
+        except ValueError:
+            data = {}
+    at = _moment(data.get("at"))
+    now = now or datetime.now(UTC)
+    live = bool(data.get("ok")) and at is not None and (
+        now - at) <= timedelta(minutes=AVITO_STALE_MINUTES)
+    return {"configured": bool(data), "ok": bool(data.get("ok")), "live": live,
+            "at": at, "error": str(data.get("error") or "")[:300]}
+
+
+def inbox_preview(text: str | None, kind: str | None, *, limit: int = 90) -> str:
+    """Строка превью: начало текста или вид вложения."""
+    if text:
+        line = " ".join(text.split())
+        return line if len(line) <= limit else line[:limit - 1] + "…"
+    if kind and kind != "text":
+        return f"[{INBOX_KINDS.get(kind, kind)}]"
+    return ""

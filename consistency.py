@@ -60,7 +60,11 @@ if not_passed:
     problems.append(
         f"config.py читает переменные, которых compose не передаёт: {sorted(not_passed)}")
 
-for secret in config_secrets:
+# Секреты читают три процесса: бот, панель и MAX-бот. Забытый в compose
+# секрет панели молча выключает её часть (хук «Входящих» без токена).
+for extra in ("app/web/config.py", "app/max_main.py"):
+    config_secrets |= set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', read(extra)))
+for secret in sorted(config_secrets):
     if f"{secret}_FILE" not in compose:
         problems.append(f"секрет {secret} не пробрасывается через {secret}_FILE в compose")
 

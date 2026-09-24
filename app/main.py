@@ -21,13 +21,14 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
-from .crm import banking, mailing, paying, tracking
+from .crm import banking, inbox, mailing, paying, tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, ops, registration
 from .handlers import staff as staff_h
 from .max.client import MaxClient
 from .middlewares import PipelineMiddleware
+from .services.avito import AvitoClient
 from .services.contract import load_template
 from .services.crypto import Vault
 from .services.starline import StarlineClient
@@ -128,6 +129,13 @@ async def run() -> None:
     max_client = MaxClient(cfg.max_bot_token) if cfg.max_bot_token else None
     mailing_task = asyncio.create_task(
         mailing.mailing_loop(bot, crm, cfg, max_client=max_client))
+    # «Входящие»: ответы из панели уходят отсюда (панель в интернет не
+    # ходит), здесь же опрос чатов Авито. Без ключей Авито круг только
+    # отправляет ответы в Telegram и MAX.
+    avito = AvitoClient(client_id=cfg.avito_client_id,
+                        client_secret=cfg.avito_client_secret)
+    inbox_task = asyncio.create_task(
+        inbox.inbox_loop(bot, crm, cfg, db=db, max_client=max_client, avito=avito))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([
@@ -160,8 +168,10 @@ async def run() -> None:
         banking_task.cancel()
         paying_task.cancel()
         mailing_task.cancel()
+        inbox_task.cancel()
         await asyncio.gather(retention, reminders, tracking_task, banking_task,
-                             paying_task, mailing_task, return_exceptions=True)
+                             paying_task, mailing_task, inbox_task,
+                             return_exceptions=True)
         if max_client is not None:
             await max_client.close()
         await tasks.drain()

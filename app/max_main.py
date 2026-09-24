@@ -87,6 +87,9 @@ def load_config() -> Config:
         # Различимый префикс: у MAX своя последовательность, и без него
         # два договора из разных мессенджеров получили бы одинаковый номер.
         contract_prefix=_env("MAX_CONTRACT_PREFIX", "АВМ"),
+        # Переписка во «Входящих» основной базы - тем же ключом, что у
+        # Telegram-бота и панели.
+        inbox_key=_secret("INBOX_KEY", required=False),
     )
 
 

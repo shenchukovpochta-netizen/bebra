@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -12,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import faq, i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import inbox
 from ..db import Database, utcnow
 from ..filters import StateIs
 from .faq import home, reply_for
@@ -31,7 +33,7 @@ BTN_TARIFFS, BTN_SUPPORT = "💰 Тарифы", "🆘 Поддержка"
 
 
 async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
-                        user: dict, text: str, *, state: str) -> bool:
+                        user: dict, text: str, *, state: str, crm: Any = None) -> bool:
     """Кнопка меню, набранная посреди диалога: выйти и сделать, что просят.
 
     True - сообщение было кнопкой (или «Отмена») и уже обработано.
@@ -47,7 +49,7 @@ async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
     fresh = {**user, "state": logic.APPROVED}
     lang = i18n.user_lang(user)
     if key == "BTN_RENT":
-        await start_rent(message, bot, db, cfg, fresh)
+        await start_rent(message, bot, db, cfg, fresh, crm=crm)
     elif key == "BTN_TARIFFS":
         await message.answer(i18n.t(lang, "TARIFFS"),
                              reply_markup=kb.main_menu(lang))
@@ -77,7 +79,7 @@ async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
 # неожиданно уезжало карточкой в чат модерации.
 @router.message(StateIs(logic.WAIT_SUPPORT), F.text)
 async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
-                     user: dict) -> None:
+                     user: dict, crm: Any = None) -> None:
     text = message.text.strip()
     lang = i18n.user_lang(user)
     if i18n.button_key(text) == "BTN_SUPPORT":
@@ -86,7 +88,7 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                              reply_markup=kb.support_cancel(lang))
         return
     if await menu_shortcut(message, bot, db, cfg, user, text,
-                           state=logic.WAIT_SUPPORT):
+                           state=logic.WAIT_SUPPORT, crm=crm):
         return
 
     question = logic.support_question(message.text)
@@ -127,6 +129,13 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                    support_chat_id=sent.chat.id, support_message_id=sent.message_id)
     await db.log_event(user["tg_id"], "support_question",
                        {"intent": intent.code if intent else None})
+    # Во «Входящие» - после карточки: сигнал в чат уже ушёл карточкой,
+    # второй не нужен (announce=False). Сбой записи ответа не отменяет.
+    await inbox.record(
+        crm, cfg, channel="tg", origin="bot", ext_id=user["tg_id"], text=question.value,
+        msg_id=message.message_id, name=user.get("full_name"),
+        username=user.get("username"), phone=user.get("phone"),
+        subject=intent.title if intent else None, announce=False)
 
     if intent is None:
         await message.answer(i18n.t(lang, "SUPPORT_SENT"),
@@ -160,7 +169,7 @@ async def st_support_wrong(message: Message, user: dict) -> None:
 # ─────────────────── повторная аренда по запросу клиента ───────────────────
 
 async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
-                     user: dict) -> None:
+                     user: dict, *, crm: Any = None) -> None:
     """«Арендовать»: у действующего клиента - заявка на повторную выдачу.
 
     Первую аренду оформляет регистрация. Эта ветка - для клиента
@@ -205,6 +214,11 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
     await db.patch(tg_id, issue_chat_id=sent.chat.id,
                    issue_message_id=sent.message_id)
     await db.log_event(tg_id, "rent_requested")
+    await inbox.record(
+        crm, cfg, channel="tg", origin="bot", ext_id=tg_id, direction="event",
+        kind="other", text="Хочет арендовать снова: заявка ушла в чат договоров",
+        msg_id=f"rent:{sent.message_id}", name=user.get("full_name"),
+        username=user.get("username"), phone=user.get("phone"), announce=False)
     await message.answer(i18n.t(lang, "RENT_REQUEST_SENT"),
                          reply_markup=kb.main_menu(lang))
 
@@ -289,11 +303,11 @@ async def start_close(message: Message, db: Database, user: dict) -> None:
 
 @router.message(StateIs(logic.WAIT_CLOSE_REASON), F.text)
 async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
-                          user: dict) -> None:
+                          user: dict, crm: Any = None) -> None:
     """Причина от клиента -> запрос оператору с формой закрытия."""
     text = message.text.strip()
     if await menu_shortcut(message, bot, db, cfg, user, text,
-                           state=logic.WAIT_CLOSE_REASON):
+                           state=logic.WAIT_CLOSE_REASON, crm=crm):
         return
     reason = logic.close_reason(text)
     if not reason.ok:
@@ -347,8 +361,8 @@ async def tariffs(message: Message, user: dict) -> None:
 
 @router.message(F.text.in_(i18n.variants("BTN_RENT")))
 async def rent(message: Message, bot: Bot, db: Database, cfg: Config,
-               user: dict) -> None:
-    await start_rent(message, bot, db, cfg, user)
+               user: dict, crm: Any = None) -> None:
+    await start_rent(message, bot, db, cfg, user, crm=crm)
 
 
 async def rentals_text(db: Database, user: dict) -> str:

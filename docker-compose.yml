@@ -27,6 +27,13 @@ secrets:
   # Секрет приложения API Авито: чаты Авито темами в Telegram-группе.
   avito_client_secret:
     file: ./secrets/avito_client_secret
+  # «Входящие»: ключ шифрования переписки (генерирует bootstrap.sh, в
+  # бэкап - отдельно от базы) и токен хука /hook/inbox для шлюзов
+  # WhatsApp и n8n (пустой - хука нет).
+  inbox_key:
+    file: ./secrets/inbox_key
+  inbox_hook_token:
+    file: ./secrets/inbox_hook_token
   # Ключ подписи cookie веб-панели и пароль её первого администратора.
   # Оба генерирует bootstrap.sh; пароль нужен только до первого входа.
   crm_secret:
@@ -100,7 +107,8 @@ services:
       postgres:
         condition: service_healthy
     secrets: [db_password, bot_token, pdn_key, starline_app_secret,
-              starline_password, tochka_token, max_bot_token, avito_client_secret]
+              starline_password, tochka_token, max_bot_token, avito_client_secret,
+              inbox_key]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
@@ -111,6 +119,7 @@ services:
       STARLINE_PASSWORD_FILE: /run/secrets/starline_password
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
       AVITO_CLIENT_SECRET_FILE: /run/secrets/avito_client_secret
+      INBOX_KEY_FILE: /run/secrets/inbox_key
       # Нужен ровно для рассылок: тем клиентам, у кого привязан MAX.
       # Пустой файл - такие получатели помечаются пропущенными.
       MAX_BOT_TOKEN_FILE: /run/secrets/max_bot_token
@@ -167,9 +176,8 @@ services:
       TOCHKA_CUSTOMER_CODE: ${TOCHKA_CUSTOMER_CODE}
       TOCHKA_POLL_SECONDS: ${TOCHKA_POLL_SECONDS:-1800}
 
-      # Авито: чаты темами в Telegram-группе. Опрашивает тоже бот.
+      # Авито: чаты объявлений - во «Входящие» панели. Опрашивает тоже бот.
       AVITO_CLIENT_ID: ${AVITO_CLIENT_ID:-}
-      AVITO_CHAT_ID: ${AVITO_CHAT_ID:-}
       AVITO_POLL_SECONDS: ${AVITO_POLL_SECONDS:-60}
 
       # Рабочая группа точек: формы в темах сверяются с CRM (бывший n8n).
@@ -211,7 +219,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    secrets: [db_password, bot_token, crm_secret, crm_admin_password, tochka_token]
+    secrets: [db_password, bot_token, crm_secret, crm_admin_password, tochka_token,
+              inbox_key, inbox_hook_token]
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       BOT_TOKEN_FILE: /run/secrets/bot_token
@@ -220,6 +229,8 @@ services:
       # Эквайринг: панель ходит в банк ровно за ссылкой на оплату, по
       # нажатию оператора. Опрос статусов остался в процессе бота.
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
+      INBOX_KEY_FILE: /run/secrets/inbox_key
+      INBOX_HOOK_TOKEN_FILE: /run/secrets/inbox_hook_token
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}
@@ -292,11 +303,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    secrets: [db_password, max_bot_token, pdn_key]
+    secrets: [db_password, max_bot_token, pdn_key, inbox_key]
     environment:
       MAX_BOT_TOKEN_FILE: /run/secrets/max_bot_token
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       PDN_KEY_FILE: /run/secrets/pdn_key
+      INBOX_KEY_FILE: /run/secrets/inbox_key
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}

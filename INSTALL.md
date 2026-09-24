@@ -539,6 +539,39 @@ docker compose logs -f bot-max
 
 ---
 
+## Входящие: Авито и WhatsApp (необязательно)
+
+Раздел панели «Входящие» (только владельцу) собирает обращения из
+Telegram и MAX сам, без настройки. Авито и WhatsApp подключаются так:
+
+1. **Ключ переписки** `secrets/inbox_key` установка создаёт сама. Если
+   бот ставился раньше этого раздела — один раз:
+   ```bash
+   openssl rand -base64 32 > secrets/inbox_key
+   docker compose up -d
+   ```
+   Ключ положите в бэкап отдельно от базы: без него переписка не читается.
+2. **Авито.** В кабинете ОСНОВНОГО аккаунта компании: «Для профессионалов
+   → API» → client_id и client_secret. Нужен тариф с доступом к API
+   сообщений. `AVITO_CLIENT_ID` — в `.env`, секрет — в файл
+   `secrets/avito_client_secret`, затем `docker compose up -d bot`. Если
+   опрос не работает, во «Входящих» висит красная плашка с причиной;
+   «402» — тариф без API сообщений.
+3. **WhatsApp** — через шлюз (Green-API или Wazzup) или n8n. Нужен домен
+   панели (`CRM_DOMAIN`, профиль https).
+   ```bash
+   openssl rand -hex 32 > secrets/inbox_hook_token
+   docker compose up -d crm
+   ```
+   В шлюзе: адрес `https://<CRM_DOMAIN>/hook/inbox`, токен — содержимое
+   `secrets/inbox_hook_token` (шлюз пришлёт его заголовком
+   `Authorization: Bearer`). Отвечают в WhatsApp в самом мессенджере,
+   в панели — кнопка «Ответил вне панели».
+
+Подробности и формат для n8n — CRM.md, раздел «Входящие».
+
+---
+
 ## Обновление бота, установленного до появления CRM
 
 Если на сервере уже работает бот из прежнего архива (`mybike-bot.zip`

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, Message
@@ -24,6 +25,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import faq, faq_i18n, i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import inbox
 from ..db import Database
 from ..filters import StateIs
 
@@ -95,7 +97,7 @@ async def faq_set_lang(callback: CallbackQuery, bot: Bot, db: Database,
 
 @router.callback_query(F.data.startswith("faq:"))
 async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
-                    cfg: Config, user: dict | None = None) -> None:
+                    cfg: Config, user: dict | None = None, crm: Any = None) -> None:
     """Ответ по выбранной теме - в любом состоянии.
 
     Ответ уходит через bot по tg_id, а не через callback.message: список тем
@@ -140,6 +142,17 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
         t = faq_i18n.T.get(lang, {})
         await bot.send_message(tg_id, t.get("contact",
                                             texts.FAQ_GUEST_CONTACT))
+        # Гостю вопрос в поддержку не задать - но во «Входящих» видно,
+        # что человеку нужен человек, и ответить ему можно оттуда.
+        # Одна отметка на тему в сутки: повторные нажатия - не новые обращения.
+        sender = callback.from_user
+        await inbox.record(
+            crm, cfg, channel="tg", origin="bot", ext_id=tg_id, direction="event",
+            kind="other", text=f"Гость нажал тему «{intent.title}»",
+            msg_id=f"faq:{intent.code}:{datetime.now().date().isoformat()}",
+            name=data.get("full_name") or (sender.full_name if sender else None),
+            username=data.get("username") or (sender.username if sender else None),
+            phone=data.get("phone"), subject=intent.title, announce=True)
         return
     # Теме нужен человек: заряженные АКБ, забор велосипеда, возврат, выкуп.
     # Переводим в режим вопроса сразу, иначе следующее сообщение человека

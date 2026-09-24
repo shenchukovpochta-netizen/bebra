@@ -61,6 +61,7 @@
   {% if can_view(staff, 'rentals') %}<a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>{% endif %}
   {% if can_view(staff, 'clients') %}<a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>{% endif %}
   <a class="tile" href="/bikes?status=available"><b>{{ bikes.get('available', 0) }}</b><span>свободных из {{ counts.bikes }}</span></a>
+  {% if inbox_waiting is not none %}<a class="tile {% if inbox_waiting %}hot{% endif %}" href="/inbox"><b>{{ inbox_waiting }}</b><span>входящих ждут ответа</span></a>{% endif %}
   {% if can_view(staff, 'claims') %}<a class="tile {% if counts.claims %}hot{% endif %}" href="/claims"><b>{{ counts.claims }}</b><span>заявок на зачисление</span></a>{% endif %}
   {% if money_ok %}
   <div class="tile"><b>{{ money(month.get('payment', 0)) }}</b><span>поступило за месяц</span></div>

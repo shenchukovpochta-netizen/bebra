@@ -104,6 +104,15 @@ fi
 [ -f secrets/tochka_token ] || : > secrets/tochka_token
 # Авито - тоже: пустой секрет значит «интеграция выключена».
 [ -f secrets/avito_client_secret ] || : > secrets/avito_client_secret
+# «Входящие»: ключ переписки генерируется сразу - без него обращения
+# пишутся без текста. Смена ключа делает старую переписку нечитаемой.
+if [ ! -s secrets/inbox_key ]; then
+  openssl rand -base64 32 | tr -d '\n' > secrets/inbox_key
+  say "сгенерирован secrets/inbox_key — положите его в бэкап отдельно от базы"
+fi
+# Токен хука для шлюза WhatsApp и n8n: пустой - хук выключен. Включить:
+#   openssl rand -hex 32 | tr -d '\n' > secrets/inbox_hook_token
+[ -f secrets/inbox_hook_token ] || : > secrets/inbox_hook_token
 chmod 600 secrets/* .env
 # Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
 # Вне swarm docker compose не копирует файл секрета, а подключает хостовый как

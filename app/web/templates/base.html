@@ -15,7 +15,7 @@
    оператор не упирался в «нет доступа» там, где для него ничего нет.
    Заголовок группы считается заранее: у механика половина групп пуста,
    и подпись над пустотой выглядела бы как поломка. #}
-{% set g_main = can_view(staff, 'dashboard') or can_view(staff, 'issue') %}
+{% set g_main = can_view(staff, 'dashboard') or can_view(staff, 'issue') or can_view(staff, 'inbox') %}
 {% set g_fleet = can_view(staff, 'bikes') or can_view(staff, 'batteries')
                  or can_view(staff, 'trackers') %}
 {% set g_client = can_view(staff, 'clients') or can_view(staff, 'rentals')
@@ -44,6 +44,7 @@
       {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
       {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
       <a href="/bookings" {% if request.url.path.startswith('/bookings') %}class="on"{% endif %}>Брони</a>{% endif %}
+      {% if can_view(staff, 'inbox') %}<a href="/inbox" {% if request.url.path.startswith('/inbox') %}class="on"{% endif %}>Входящие</a>{% endif %}
     </div>{% endif %}
 
     {% if g_client %}<div class="blk"><div class="grp">Клиенты</div>

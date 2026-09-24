@@ -173,15 +173,17 @@ class Config:
     tochka_account_id: str = ""
     tochka_customer_code: str = ""
     tochka_poll_seconds: int = 1800
-    # Авито: чаты темами в Telegram-группе с включёнными темами. Пусто
-    # (нет client_id, секрета или группы) - интеграция выключена.
+    # Авито: чаты объявлений - во «Входящих» панели, ответ оттуда уходит
+    # в тот же чат Авито. Нет client_id или секрета - опрос выключен.
     avito_client_id: str = ""
     avito_client_secret: str = ""
-    avito_chat_id: int | None = None
     avito_poll_seconds: int = 60
     # Рабочая группа точек (бывший сценарий n8n): бот сверяет формы в
     # темах с базой. Пусто - группа не читается. Темы - номера из ссылки
     # на сообщение темы: https://t.me/c/2631509993/7/123 - тема 7.
+    # Ключ шифрования переписки во «Входящих» (secrets/inbox_key). Пусто -
+    # обращения пишутся без текста, ответить из панели нельзя.
+    inbox_key: str = ""
     ops_chat_id: int | None = None
     ops_topic_fix: int | None = None
     ops_topic_return: int | None = None
@@ -275,8 +277,8 @@ class Config:
             tochka_poll_seconds=_int("TOCHKA_POLL_SECONDS", "1800"),
             avito_client_id=_env("AVITO_CLIENT_ID"),
             avito_client_secret=_secret("AVITO_CLIENT_SECRET", required=False),
-            avito_chat_id=_int_or_none("AVITO_CHAT_ID"),
             avito_poll_seconds=_int("AVITO_POLL_SECONDS", "60"),
+            inbox_key=_secret("INBOX_KEY", required=False),
             ops_chat_id=_int_or_none("OPS_CHAT_ID"),
             ops_topic_fix=_int_or_none("OPS_TOPIC_FIX"),
             ops_topic_return=_int_or_none("OPS_TOPIC_RETURN"),

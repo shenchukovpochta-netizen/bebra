@@ -62,7 +62,7 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/sync.py', 'app/crm/import_xlsx.py', 'app/crm/tracking.py',
          'app/crm/banking.py', 'app/crm/mailing.py', 'app/crm/esign.py',
          'app/crm/paying.py', 'app/crm/notices.py',
-         'app/crm/doctemplates.py', 'app/crm/opsgroup.py')
+         'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -125,6 +125,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/mailing.html',
                   'app/web/templates/campaign.html',
                   'app/web/templates/signings.html', 'app/web/templates/ops.html',
+                  'app/web/templates/inbox.html', 'app/web/templates/inbox_thread.html',
                   'app/web/templates/signing.html',
                   'app/web/templates/sign_base.html',
                   'app/web/templates/sign.html',
@@ -154,6 +155,7 @@ $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/contract.py', 'app/services/crypto.py',
               'app/services/mrz.py', 'app/services/ocr.py',
               'app/services/starline.py', 'app/services/tochka.py',
+              'app/services/avito.py',
               'app/services/tochka_ca.pem')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')

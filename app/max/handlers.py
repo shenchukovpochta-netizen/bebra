@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 from .. import logic, tasks, texts
 from ..config import Config
-from ..crm import company
+from ..crm import company, inbox
 from ..db import Database, utcnow
 from ..services import contract as contract_service
 from ..services import files, ocr
@@ -83,6 +84,21 @@ class Ctx:
         # клиента одна на оба мессенджера. Может быть None - тогда моста
         # просто нет, и бот работает как раньше.
         self.crm = crm
+
+
+async def _inbox(ctx: Ctx, user: dict, *, direction: str = "in", kind: str = "text",
+                 text: str | None = None, msg_id: Any = None,
+                 author: str | None = None) -> None:
+    """Во «Входящие» основной базы - через мост. Без моста не пишется:
+    сама переписка MAX живёт в своей базе, панель её не видит.
+
+    Сигнала в чат нет: карточка вопроса и анкеты уже ушла туда сама.
+    """
+    await inbox.record(
+        ctx.crm, ctx.cfg, channel="max", origin="max_bot", ext_id=user["tg_id"],
+        direction=direction, kind=kind, text=text, msg_id=msg_id,
+        name=user.get("full_name"), username=user.get("username"),
+        phone=user.get("phone"), author=author, announce=False)
 
 
 async def _say(ctx: Ctx, user_id: int, text: str,
@@ -385,6 +401,9 @@ async def cb_confirm(ctx: Ctx, user: dict, callback_id: str) -> None:
         await ctx.cl.answer_callback(callback_id)
         return
     await ctx.db.log_event(user["tg_id"], "submitted")
+    await _inbox(ctx, user, direction="event", kind="other",
+                 text="Анкета отправлена на проверку",
+                 msg_id=f"anketa:{datetime.now().date().isoformat()}")
     await ctx.cl.answer_callback(callback_id, texts.SUBMITTED_TOAST)
     await _say(ctx, user["tg_id"], texts.SUBMITTED)
     try:
@@ -690,6 +709,7 @@ async def st_support(ctx: Ctx, user: dict, text: str | None) -> None:
                        support_chat_id=ctx.cfg.admin_chat_id,
                        support_message_id=mid)
     await ctx.db.log_event(user["tg_id"], "support_question")
+    await _inbox(ctx, user, text=question.value, msg_id=mid or None)
     await _say(ctx, user["tg_id"], texts.SUPPORT_SENT, kb.main_menu())
 
 
@@ -818,6 +838,8 @@ async def mod_reply(ctx: Ctx, moderator_id: int, chat_id: int,
             return
         await ctx.db.log_event(dict(asked)["tg_id"], "support_answered",
                                {"by": moderator_id})
+        await _inbox(ctx, dict(asked), direction="out", text=answer.value,
+                     author=f"max:{moderator_id}")
         await ctx.cl.send(chat_id=chat_id, text=texts.SUPPORT_REPLIED)
         return
 

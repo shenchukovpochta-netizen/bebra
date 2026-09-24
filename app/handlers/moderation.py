@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
+from ..crm import inbox
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import ServiceChatReply, is_operator
@@ -256,7 +257,7 @@ async def cb_reject_reason(callback: CallbackQuery, bot: Bot, db: Database,
 
 @router.message(ServiceChatReply())
 async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
-                    vault: Vault) -> None:
+                    vault: Vault, crm: Any = None) -> None:
     """Ответ на карточку в служебном чате: заявка или вопрос в поддержку.
 
     Пользователь ищется по (chat_id, message_id) карточки, а не разбором её
@@ -289,7 +290,7 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
 
     asked = await db.user_by_support_message(message.chat.id, replied.message_id)
     if asked is not None:
-        await _support_reply(message, bot, db, dict(asked))
+        await _support_reply(message, bot, db, dict(asked), cfg=cfg, crm=crm)
         return
 
     row = await db.user_by_mod_message(message.chat.id, replied.message_id)
@@ -707,7 +708,7 @@ async def _closure_report(message: Message, bot: Bot, cfg: Config,
 
 
 async def _support_reply(message: Message, bot: Bot, db: Database,
-                         asked: dict) -> None:
+                         asked: dict, *, cfg: Any = None, crm: Any = None) -> None:
     """Ответ модератора на вопрос в поддержку - пересылается пользователю.
 
     Карточка остаётся привязанной: на неё можно ответить ещё раз, и каждое
@@ -729,6 +730,13 @@ async def _support_reply(message: Message, bot: Bot, db: Database,
         return
     await db.log_event(asked["tg_id"], "support_answered",
                        {"by": message.from_user.id})
+    # Ответ из чата модерации - тоже ответ: во «Входящих» он снимает
+    # ожидание, и администратор не пишет человеку второй раз.
+    await inbox.record(
+        crm, cfg, channel="tg", origin="bot", ext_id=asked["tg_id"], direction="out",
+        text=answer.value, msg_id=f"mod:{message.chat.id}:{message.message_id}",
+        name=asked.get("full_name"), username=asked.get("username"),
+        phone=asked.get("phone"), author=f"tg:{message.from_user.id}", announce=False)
     await message.reply(texts.SUPPORT_REPLIED)
 
 
