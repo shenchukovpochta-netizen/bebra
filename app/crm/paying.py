@@ -32,22 +32,31 @@ POLL_SECONDS = 60
 
 
 async def poll_once(crm: Any, acquiring: Any, *, limit: int = 100) -> dict:
-    """Спросить банк про все открытые счета. Протухшие - закрыть."""
+    """Спросить банк про все открытые счета. Протухшие - закрыть.
+
+    Сначала банк, потом часы: ссылку, оплаченную за минуту до конца
+    суток, опрос мог увидеть уже после них, и закрытие «по времени»
+    без вопроса банку оставляло деньги клиента мимо журнала.
+    """
     now = datetime.now().astimezone()
     orders = await crm.open_pay_orders(limit=limit)
     paid: list[dict] = []
     failed = expired = 0
     for order in orders:
-        if logic.pay_expired(order, now=now):
-            await crm.mark_pay_failed(
-                order["id"], error="ссылка просрочена, оплата не поступила")
-            expired += 1
-            continue
         state = await service.check_pay_order(crm, order, acquiring=acquiring)
         if state == "paid":
             paid.append(order)
-        elif state == "failed":
+            continue
+        if state == "paid_before":
+            continue                 # закрыл другой: сообщает тоже он
+        if order.get("status") not in logic.PAY_OPEN:
+            continue                 # перепроверка закрытого: ответ прежний
+        if state == "failed":
             failed += 1
+        elif logic.pay_expired(order, now=now):
+            await crm.mark_pay_failed(
+                order["id"], error="ссылка просрочена, оплата не поступила")
+            expired += 1
     return {"seen": len(orders), "paid": paid, "failed": failed,
             "expired": expired}
 
@@ -61,7 +70,8 @@ async def report_paid(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
     """
     text = (f"💳 Оплачен счёт {order.get('no')} — "
             f"{logic.money(order.get('amount'))}\n"
-            f"{order.get('full_name') or 'клиент'} · {order.get('purpose') or ''}")
+            + logic.html.escape(f"{order.get('full_name') or 'клиент'} · "
+                                f"{order.get('purpose') or ''}", quote=False))
     # send_team, а не прямой send: получателя этого уведомления владелец
     # задаёт в панели, и отправка мимо него сделала бы настройку пустой.
     return await notices.send_team(crm, bot, "pay_paid", text.strip(),

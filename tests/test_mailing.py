@@ -256,6 +256,30 @@ class TestMailingPanel(tw.WebCase):
         self.assertEqual(sends["tg"]["status"], "skipped")
         self.assertEqual(self.bot.sent, [])
 
+    def test_cancel_stops_the_batch_in_flight(self):
+        """Отмена посреди порции: остаток очереди не уходит, хотя порция
+        уже прочитана из базы."""
+        campaign_id = int(self.make().headers["location"].rsplit("/", 1)[1])
+        self.client.post(f"/mailing/{campaign_id}/start")
+        crm = self.crm
+
+        class CancelOnFirst:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, chat_id, text, **kw):
+                self.sent.append((chat_id, text))
+                campaign = await crm.campaign(campaign_id)
+                await tw.service.cancel_campaign(crm, campaign)
+
+        bot = CancelOnFirst()
+        counts = tw.run(mailing.run_campaign(
+            bot, crm, tw.run(crm.campaign(campaign_id)),
+            max_client=self.MaxClient(), pause=0))
+        self.assertEqual(counts["sent"], 1)
+        sends = {s["channel"]: s for s in tw.run(crm.campaign_sends(campaign_id))}
+        self.assertEqual(sends["max"]["status"], "skipped", "второй адресат не получил")
+
     def test_cancel_clears_the_queue_only(self):
         campaign_id = int(self.make().headers["location"].rsplit("/", 1)[1])
         self.client.post(f"/mailing/{campaign_id}/start")

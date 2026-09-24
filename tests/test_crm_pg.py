@@ -1192,9 +1192,10 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          [invoice["id"]])
 
         # Оплата ремонта: наряд помечен, журнал пуст.
-        self.assertIsNone(await self.crm.mark_pay_paid(invoice["id"],
-                                                       method="card"),
-                          "записи в журнале быть не должно")
+        self.assertEqual(await self.crm.mark_pay_paid(invoice["id"], method="card"), 0,
+                         "закрыт этим вызовом, но записи в журнале нет")
+        self.assertIsNone(await self.crm.mark_pay_paid(invoice["id"], method="card"),
+                          "второй раз - уже оплачен")
         self.assertEqual(await self.crm.client_balance(self.client_id), D(0))
         self.assertEqual(await self.crm.ledger_of(self.client_id), [])
         self.assertIsNotNone((await self.crm.work_order(order_id))["paid_at"])
@@ -2249,3 +2250,101 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_PG, "pgserver или asyncpg не установлены")
+class TestOpsAndFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
+    """Запросы, которые FakeCrm только имитирует: поиск по номеру с
+    кириллицей, журнал группы, стоп-лист, перепроверка счетов.
+
+    Обвязка - та же, что у TestCrmOnPostgres, но без наследования: иначе
+    все его тесты прогонялись бы второй раз."""
+
+    setUpClass = classmethod(TestCrmOnPostgres.setUpClass.__func__)
+    tearDownClass = classmethod(TestCrmOnPostgres.tearDownClass.__func__)
+    asyncSetUp = TestCrmOnPostgres.asyncSetUp
+    asyncTearDown = TestCrmOnPostgres.asyncTearDown
+    seed = TestCrmOnPostgres.seed
+
+    async def test_bike_by_vin_normalises_like_logic(self):
+        await self.seed()
+        await self.crm.update_bike(self.bike_id, motor_no="60V240W 2305-001")
+        other = await self.crm.create_bike(code="B-2", model="Kugoo V3",
+                                           frame_no="LXR99", motor_no="60v240w2305999")
+        # Кириллические «В» и «С» с телефона, пробелы и регистр.
+        self.assertEqual((await self.crm.bike_by_vin("60В240W2305001"))["id"], self.bike_id)
+        self.assertEqual((await self.crm.bike_by_vin("60v240w 2305 999"))["id"], other)
+        self.assertEqual((await self.crm.bike_by_vin("lxr99"))["id"], other)
+        self.assertEqual((await self.crm.bike_by_vin("b-2"))["id"], other, "по коду")
+        self.assertIsNone(await self.crm.bike_by_vin("6"), "один знак - не номер")
+        self.assertIsNone(await self.crm.bike_by_vin("60V"), "только точное совпадение")
+        self.assertIsNone(await self.crm.bike_by_vin("NOPE1234"))
+
+    async def test_ops_report_is_one_per_message(self):
+        await self.seed()
+        base = dict(kind="fix", chat_id=-100, message_id=7, thread_id=7, author_tg=1,
+                    author="@p", bike_id=self.bike_id, rental_id=None,
+                    client_id=self.client_id, data={"fio": "Иванов"}, ok=False,
+                    note="нет аренды")
+        first = await self.crm.save_ops_report(**base)
+        again = await self.crm.save_ops_report(**{**base, "ok": True, "note": None})
+        self.assertEqual(first, again)
+        [row] = await self.crm.ops_reports()
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["data"], {"fio": "Иванов"})
+        self.assertEqual(row["bike_code"], "B-1")
+        self.assertEqual(await self.crm.ops_reports(ok=False), [])
+
+    async def test_flagged_clients_and_rental_by_bike(self):
+        await self.seed()
+        await self.crm.update_client(self.client_id, status="blacklist")
+        [row] = await self.crm.flagged_clients()
+        self.assertEqual(row["id"], self.client_id)
+        self.assertIsNone(await self.crm.active_rental_of_bike(self.bike_id))
+        self.assertIsNone(await self.crm.last_rental_of_bike(self.bike_id))
+
+    async def test_closed_links_are_rechecked_for_a_week(self):
+        await self.seed()
+        order_id = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("100"),
+            purpose="Аренда", created_by="t")
+        await self.crm.set_pay_link(order_id, link="https://pay/1", operation_id="op-7")
+        await self.crm.cancel_pay_order(order_id, by="оператор")
+        self.assertEqual(await self.crm.open_pay_orders(), [],
+                         "только что снят и проверен - полчаса не спрашиваем")
+        await self.pool.execute("update crm.pay_orders set checked_at = now() - "
+                                "interval '1 hour' where id = $1", order_id)
+        self.assertEqual([o["id"] for o in await self.crm.open_pay_orders()], [order_id])
+        await self.pool.execute("update crm.pay_orders set created_at = now() - "
+                                "interval '9 days' where id = $1", order_id)
+        self.assertEqual(await self.crm.open_pay_orders(), [], "неделя прошла")
+
+    async def test_ignore_does_not_touch_a_credited_row(self):
+        await self.seed()
+        txn_id = await self.crm.save_bank_txn({
+            "txn_id": "T-9", "booked_at": datetime.now(UTC), "amount": D("300"),
+            "direction": "credit", "purpose": "оплата", "payer_name": "И",
+            "payer_inn": None, "payer_account": None})
+        await self.crm.credit_bank_txn(txn_id, client_id=self.client_id, amount=D("300"),
+                                       method="transfer", note="x", created_by="t")
+        self.assertFalse(await self.crm.mark_bank_txn(txn_id, status="ignored", by="t"))
+        self.assertEqual((await self.crm.bank_txn(txn_id))["status"], "matched")
+
+    async def test_closed_order_line_stays(self):
+        await self.seed()
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="own", client_id=None, complaint="x",
+            object_note=None, tech_id=None, estimate=D("0"), created_by="t")
+        item_id = await self.crm.add_order_item(
+            order_id, title="Работа", node=None, work_type_id=None, qty=1,
+            price=D("0"), parts_cost=D("0"), labor_cost=D("100"))
+        await self.crm.update_work_order(order_id, status="cancelled")
+        self.assertFalse(await self.crm.delete_order_item(order_id, item_id))
+        await self.crm.update_work_order(order_id, status="in_work")
+        self.assertTrue(await self.crm.delete_order_item(order_id, item_id))
+
+    async def test_tracker_phone_is_kept_when_starline_has_none(self):
+        await self.seed()
+        await self.crm.save_tracker_state({"device_id": "D1", "phone": "+79005554433"})
+        await self.crm.save_tracker_state({"device_id": "D1", "phone": None})
+        self.assertEqual((await self.crm.tracker_by_device("D1"))["phone"], "+79005554433")

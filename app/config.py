@@ -179,6 +179,15 @@ class Config:
     avito_client_secret: str = ""
     avito_chat_id: int | None = None
     avito_poll_seconds: int = 60
+    # Рабочая группа точек (бывший сценарий n8n): бот сверяет формы в
+    # темах с базой. Пусто - группа не читается. Темы - номера из ссылки
+    # на сообщение темы: https://t.me/c/2631509993/7/123 - тема 7.
+    ops_chat_id: int | None = None
+    ops_topic_fix: int | None = None
+    ops_topic_return: int | None = None
+    ops_topic_debt: int | None = None
+    ops_topic_gps: int | None = None
+    ops_topic_daily: int | None = None
     # Токен бота MAX. Телеграм-боту он нужен ровно для одного: отправить
     # рассылку тем клиентам, у кого привязан MAX. Пусто - такие получатели
     # помечаются пропущенными.
@@ -268,5 +277,11 @@ class Config:
             avito_client_secret=_secret("AVITO_CLIENT_SECRET", required=False),
             avito_chat_id=_int_or_none("AVITO_CHAT_ID"),
             avito_poll_seconds=_int("AVITO_POLL_SECONDS", "60"),
+            ops_chat_id=_int_or_none("OPS_CHAT_ID"),
+            ops_topic_fix=_int_or_none("OPS_TOPIC_FIX"),
+            ops_topic_return=_int_or_none("OPS_TOPIC_RETURN"),
+            ops_topic_debt=_int_or_none("OPS_TOPIC_DEBT"),
+            ops_topic_gps=_int_or_none("OPS_TOPIC_GPS"),
+            ops_topic_daily=_int_or_none("OPS_TOPIC_DAILY"),
             max_bot_token=_secret("MAX_BOT_TOKEN", required=False),
         )

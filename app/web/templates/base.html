@@ -48,7 +48,8 @@
 
     {% if g_client %}<div class="blk"><div class="grp">Клиенты</div>
       {% if can_view(staff, 'clients') %}<a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>{% endif %}
-      {% if can_view(staff, 'rentals') %}<a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>{% endif %}
+      {% if can_view(staff, 'rentals') %}<a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>
+      <a href="/ops" {% if request.url.path.startswith('/ops') %}class="on"{% endif %}>Группа точек</a>{% endif %}
       {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
       {% if can_view(staff, 'mailing') %}<a href="/mailing" {% if request.url.path.startswith('/mailing') %}class="on"{% endif %}>Рассылки</a>{% endif %}
       {% if can_view(staff, 'promos') %}<a href="/promos" {% if request.url.path.startswith('/promos') %}class="on"{% endif %}>Акции</a>{% endif %}

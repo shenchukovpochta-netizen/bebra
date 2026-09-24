@@ -24,7 +24,7 @@ from .config import Config
 from .crm import banking, mailing, paying, tracking
 from .crm.db import CrmDB
 from .db import Database
-from .handlers import cabinet, contract, faq, fleet, menu, moderation, registration
+from .handlers import cabinet, contract, faq, fleet, menu, moderation, ops, registration
 from .handlers import staff as staff_h
 from .max.client import MaxClient
 from .middlewares import PipelineMiddleware
@@ -81,6 +81,9 @@ async def run() -> None:
     # Кабинет - первым: /cabinet должен открываться из любого шага анкеты,
     # а ответ оператора суммой на карточку заявки - не доехать до общего
     # обработчика реплаев модерации.
+    # Рабочая группа точек - самой первой: её роутер забирает любое
+    # сообщение из своих тем, и до меню с его ловушкой они не доходят.
+    dp.include_router(ops.router)
     dp.include_router(cabinet.router)
     dp.include_router(staff_h.router)
     # Парк из служебного чата - до модерации: ответ на карточку велосипеда

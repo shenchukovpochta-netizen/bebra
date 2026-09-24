@@ -376,3 +376,22 @@ class TestServiceInPanel(tw.WebCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
+class TestOrdersExportFilter(tw.WebCase):
+    def test_export_from_a_bike_keeps_the_bike_filter(self):
+        """Excel/CSV с «всех нарядов велосипеда» - это его история, а не весь парк."""
+        import re
+        self.login()
+        a = tw.run(self.crm.create_bike(code="B-1", model="Kugoo V3", status="available"))
+        b = tw.run(self.crm.create_bike(code="B-2", model="Kugoo V3", status="available"))
+        for bike in (a, b):
+            tw.run(self.crm.create_work_order(bike_id=bike, payer="own", client_id=None,
+                                              complaint="скрип", object_note=None,
+                                              tech_id=None, estimate=D(0), created_by="t"))
+        page = self.get_ok(f"/orders?bike={a}")
+        link = re.search(r'href="(/orders\.csv[^"]*)"', page).group(1).replace("&amp;", "&")
+        csv = self.client.get(link).text
+        self.assertIn("B-1", csv)
+        self.assertNotIn("B-2", csv)

@@ -338,6 +338,29 @@ class TestMoneyFixes(tw.WebCase):
         self.assertEqual(tw.run(self.crm.part_stock(part_id)), 10,
                          "строку убрали - запчасть вернулась на полку")
 
+    def test_closed_order_keeps_its_parts(self):
+        """У закрытого наряда запчасть уже в ремонте велосипеда: «вернуть
+        на полку» значило бы держать одну деталь и на складе, и в ремонте."""
+        part_id = tw.run(self.crm.create_part(
+            title="Колодки", node="brake_pads", unit="шт", price=D(400), cost=D(200),
+            min_stock=0, model=None, note=None))
+        tw.run(self.crm.add_part_move(part_id=part_id, kind="receipt", qty=5,
+                                      cost=D(200), created_by="test"))
+        self.client.post("/orders", data={"bike_id": self.bike_id, "payer": "own",
+                                          "estimate": "0", "complaint": "тормоза"})
+        order = tw.run(self.crm.work_orders())[0]
+        self.client.post(f"/orders/{order['id']}/parts",
+                         data={"part_id": part_id, "qty": "2"})
+        self.client.post(f"/orders/{order['id']}/close", data={})
+        self.assertFalse(tw.run(self.crm.work_order(order["id"]))["status"] in
+                         logic.ORDER_OPEN, "наряд закрылся")
+        item = tw.run(self.crm.order_items(order["id"]))[0]
+        self.client.post(f"/orders/{order['id']}/items/{item['id']}/delete")
+        self.assertEqual(tw.run(self.crm.part_stock(part_id)), 3)
+        self.assertEqual(len(tw.run(self.crm.order_items(order["id"]))), 1)
+        self.assertFalse(tw.run(self.crm.delete_order_item(order["id"], item["id"])),
+                         "и мимо панели тоже")
+
     def test_closing_an_order_without_nodes_still_records_the_repair(self):
         """Узел в строке необязателен. Без шапки bike_log себестоимость
         ремонта пропадала из месячного отчёта и из окупаемости."""
@@ -529,6 +552,40 @@ class TestBotClosesRental(tw.WebCase):
         self.assertEqual(tw.run(self.crm.rental(rental_id))["status"], "closed")
         self.assertEqual(tw.run(self.crm.battery(battery_id))["status"], "available",
                          "батарея вернулась вместе с велосипедом")
+
+    def test_buyout_closes_the_rental_and_sells_the_bike(self):
+        """Выкупленный велосипед - чужой: аренда закрыта, в парк не вернётся,
+        а аккумулятор по акту выкупа возвращён и свободен."""
+        model = tw.run(self.crm.create_battery_model(
+            title="48V 20Ah", brand="Kugoo", voltage=48, capacity=20,
+            price=D(9000), service_months=24, note=None))
+        battery_id = tw.run(self.crm.create_battery(
+            by="test", code="AKB-2", model_id=model, status="available"))
+        rental_id = tw.run(service.open_rental(
+            self.crm, client=tw.run(self.crm.client(self.client_id)),
+            bike=tw.run(self.crm.bike(self.bike_id)),
+            tariff=tw.run(self.crm.tariff(self.tariff_id)),
+            started_on=date(2026, 8, 1), contract_no="АВ-1", by="test"))
+        tw.run(service.issue_with_batteries(self.crm, rental_id,
+                                            bike=tw.run(self.crm.bike(self.bike_id)),
+                                            battery_ids=[battery_id], by="test"))
+        tw.run(sync.on_buyout_signed(self.crm, {"tg_id": 5001, "contract_no": "АВ-1"},
+                                     today=date(2026, 9, 21)))
+        self.assertEqual(tw.run(self.crm.rental(rental_id))["status"], "closed")
+        self.assertEqual(tw.run(self.crm.bike(self.bike_id))["status"], "sold")
+        self.assertEqual(tw.run(self.crm.battery(battery_id))["status"], "available")
+
+    def test_return_act_after_buyout_does_not_free_the_bike(self):
+        rental_id = tw.run(service.open_rental(
+            self.crm, client=tw.run(self.crm.client(self.client_id)),
+            bike=tw.run(self.crm.bike(self.bike_id)),
+            tariff=tw.run(self.crm.tariff(self.tariff_id)),
+            started_on=date(2026, 8, 1), contract_no="АВ-1", by="test"))
+        tw.run(sync.on_rental_closed(self.crm, {"tg_id": 5001, "contract_no": "АВ-1",
+                                                "buyout_signed_at": datetime.now(UTC)},
+                                     today=date(2026, 9, 21)))
+        self.assertEqual(tw.run(self.crm.rental(rental_id))["status"], "closed")
+        self.assertEqual(tw.run(self.crm.bike(self.bike_id))["status"], "sold")
 
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/starlette")

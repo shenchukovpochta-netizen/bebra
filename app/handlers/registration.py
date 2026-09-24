@@ -573,7 +573,8 @@ async def st_doc(message: Message, bot: Bot, db: Database, cfg: Config,
         # «жду документ». Проигравший не молчит - его снимок уходит во
         # второй слот, ради которого шаг и сделан. Состояние ушло дальше
         # (отказ, «заполнить повторно») - честно говорим, что не приняли.
-        fresh = await db.get(message.from_user.id)
+        row = await db.get_user(message.from_user.id)
+        fresh = dict(row) if row else None
         if fresh and fresh.get("state") == logic.WAIT_DOC2:
             await _store_doc2(message, bot, db, cfg, vault, fresh)
         else:

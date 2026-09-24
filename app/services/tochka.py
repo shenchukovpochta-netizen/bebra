@@ -31,6 +31,10 @@ log = logging.getLogger(__name__)
 API_URL = "https://enter.tochka.com/uapi"
 BANKING = "open-banking/v1.0"
 ACQUIRING = "acquiring/v1.0"
+# Срок жизни платёжной ссылки у банка, минут. Должен совпадать с
+# `crm.logic.PAY_LINK_HOURS`: сервис банка про CRM не знает, поэтому
+# число здесь, а равенство держит тест.
+PAY_LINK_MINUTES = 24 * 60
 TIMEOUT = 30
 # enter.tochka.com подписан НУЦ Минцифры, а этого корня нет ни в образе
 # python:slim, ни в обычном Linux: без него каждый запрос падает на
@@ -264,6 +268,10 @@ class TochkaClient:
                     "customerCode": self.customer_code,
                     "amount": str(amount), "purpose": purpose[:210],
                     "paymentMode": ["sbp", "card"],
+                    # Срок ссылки у банка - тот же, что у нас. Без него
+                    # Точка держит ссылку неделю, а мы закрывали счёт
+                    # через сутки: оплата на третий день шла мимо журнала.
+                    "ttl": PAY_LINK_MINUTES,
                     "Client": {"email": client_email, "phone": client_phone},
                     "Items": receipt_items(purpose, amount)}})
             payment = (data.get("Data") or {})

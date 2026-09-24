@@ -276,4 +276,4 @@ async def estimate(bot: Any, client: dict, order: dict, items: list[dict],
         lines=bot_logic.esc(logic.estimate_lines(items)),
         total=logic.money(total))
     return await _send(bot, client["tg_id"], text,
-                       kb.estimate_answer(int(order["id"])))
+                       kb.estimate_answer(int(order["id"]), logic.cents(total)))

@@ -144,6 +144,11 @@ def money(value: Any) -> str:
     return f"{sign}{text} ₽"
 
 
+def cents(value: Any) -> int:
+    """Сумма в копейках целым числом - для кнопок, где место дорого."""
+    return int(to_money(value) * 100)
+
+
 def money_signed(value: Any) -> str:
     """Как money, но с явным плюсом у прихода - для журнала."""
     amount = to_money(value)
@@ -467,6 +472,28 @@ def hash_password(password: str, *, salt: bytes | None = None) -> str:
     digest_bytes = hashlib.scrypt(password.encode("utf-8"), salt=salt,
                                   n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32)
     return f"scrypt${salt.hex()}${digest_bytes.hex()}"
+
+
+def session_mark(password_hash: str | None) -> str:
+    """Отпечаток пароля для сессии. Cookie сессии подписан, но живёт две
+    недели сам по себе: без отпечатка смена пароля (свой или сброс
+    владельцем после ухода сотрудника) не выбивала бы уже открытые
+    сессии. Соль внутри хэша, так что по отпечатку пароль не подобрать."""
+    return hashlib.sha256(str(password_hash or "").encode("utf-8")).hexdigest()[:16]
+
+
+def safe_next(target: Any, home: str) -> str:
+    """Куда вернуть после входа: только свой адрес.
+
+    «//site» и «/\\site» браузер читает как адрес чужого сайта (обратную
+    косую Chrome и Firefox считают прямой), и ссылка «войдите в панель»
+    уводила бы сотрудника на подделку с теми же полями логина.
+    """
+    text = str(target or "")
+    if (not text.startswith("/") or text.startswith(("//", "/\\"))
+            or "\\" in text or any(ord(ch) < 32 for ch in text)):
+        return home
+    return text
 
 
 def verify_password(password: str, stored: str | None) -> bool:
@@ -1247,6 +1274,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     # не входит: она открыта клиенту и стража раздела не знает.
     ("/signings", "clients"),
     ("/rentals", "rentals"),
+    # Журнал рабочей группы точек - про аренды: фиксация, замена, сдача.
+    ("/ops", "rentals"),
     ("/bikes", "bikes"),
     ("/batteries", "batteries"),
     ("/map", "trackers"),
@@ -4351,6 +4380,12 @@ PAY_METHOD_LEDGER: dict[str, str] = {
 # Ссылка живёт сутки: дольше банк её всё равно не держит, а счёт
 # недельной давности в списке «ждём оплату» только мешает смотреть.
 PAY_LINK_HOURS = 24
+# Закрытый у нас счёт ещё неделю спрашивают у банка: ссылки, выданные
+# до того, как срок стал уходить в банк, живут у Точки 7 суток. Раз в
+# полчаса - этого хватает, чтобы деньги не потерялись, и банк не
+# заваливается запросами про мёртвые счета.
+PAY_RECHECK_DAYS = 8
+PAY_RECHECK_MINUTES = 30
 # Автосписание пробуем в этот час - после утреннего напоминания, чтобы
 # клиент успел положить деньги сам, и задолго до конца рабочего дня.
 AUTOCHARGE_HOUR = 12
@@ -4473,21 +4508,30 @@ def pay_purpose(client: Mapping[str, Any] | None,
 
 def autocharge_due(rentals: Iterable[Mapping[str, Any]],
                    *, today: date | None = None,
-                   cards: Mapping[int, Any] | None = None) -> list[dict]:
+                   cards: Mapping[int, Any] | None = None,
+                   busy: Iterable[int] = ()) -> list[dict]:
     """Кому сегодня можно списать с карты.
 
     Списываем только то, что уже начислено и не оплачено: автосписание
     закрывает долг, а не берёт вперёд «на всякий случай». Без карты и
     без долга аренда сюда не попадает.
+
+    busy - клиенты с открытым счётом: вчерашнее списание, которое банк
+    ещё не подтвердил, или ссылка, которую клиент вот-вот оплатит. Долг
+    в журнале у них прежний, и новое списание взяло бы ту же сумму второй
+    раз - с карты уходило бы вдвое.
     """
     today = today or date.today()
     cards = cards or {}
+    busy = {int(x) for x in busy}
     due = []
     for rental in rentals:
         if rental.get("status") != "active":
             continue
         client_id = rental.get("client_id")
         if client_id is None or not cards.get(int(client_id)):
+            continue
+        if int(client_id) in busy:
             continue
         debt = to_money(rental.get("balance"))
         if debt >= 0:
@@ -5814,16 +5858,24 @@ def booking_models(models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[
     return out
 
 
-def booking_when(offset: Any, *, today: date) -> date | None:
-    """День выдачи по смещению кнопки: 0 - сегодня, 1 - завтра... None -
-    кнопка чужая или слишком далеко."""
+def booking_when(raw: Any, *, today: date) -> date | None:
+    """День выдачи из кнопки: дата «ГГГГММДД». None - кнопка устарела,
+    чужая или слишком далеко.
+
+    В кнопке сама дата, а не «через сколько дней»: кнопку «Завтра, 25.09»,
+    нажатую 25-го, смещение превращало в 26-е - клиент приходил за
+    велосипедом, которого на этот день никто не ждал.
+    """
+    text = str(raw or "")
+    if not re.fullmatch(r"\d{8}", text):
+        return None
     try:
-        days = int(offset)
-    except (TypeError, ValueError):
+        day = date(int(text[:4]), int(text[4:6]), int(text[6:]))
+    except ValueError:
         return None
-    if not 0 <= days <= BOOKING_DAYS_AHEAD:
+    if not today <= day <= today + timedelta(days=BOOKING_DAYS_AHEAD):
         return None
-    return today + timedelta(days=days)
+    return day
 
 
 def booking_line(booking: Mapping[str, Any]) -> str:
@@ -5921,3 +5973,499 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
     order = {level: i for i, level in enumerate(TASK_LEVELS)}
     tasks.sort(key=lambda t: (order[t["level"]], -t["count"]))
     return tasks
+
+
+# ─────────────────── операционная группа ───────────────────
+#
+# Рабочая группа точек с темами: фиксация выдачи, сдача, проверка долга,
+# поиск трекера, итоги дня сервиса. Раньше её читал сценарий n8n и
+# переписывал сообщения в Google-таблицу «Действующие арендаторы». Теперь
+# сообщения читает бот и сверяет их с базой: кто на каком велосипеде,
+# CRM знает сама, и сообщение в группе - проверка, что точка и база
+# говорят одно и то же. 👍 - совпало, 👎 - нет, и ответом сказано, что.
+
+OPS_KINDS: dict[str, str] = {
+    "fix": "Фиксация выдачи", "swap": "Замена велосипеда",
+    "return": "Сдача", "daily": "Итоги дня сервиса",
+}
+# Кириллица, похожая на латиницу: номер набирают с телефона, и раскладку
+# не переключают. «В» - особый случай: в «60В240W» это «вольт», то есть
+# латинская V, а на глаз - латинская B. Поэтому В, B и V в номере -
+# один символ: два велосипеда, чьи номера разнятся только этим, в парке
+# не встречаются, а «60В» с телефона находится.
+VIN_LOOKALIKE_FROM = "АВСЕНКМОРТХУавсенкмортхуB"
+VIN_LOOKALIKE_TO = "AVCEHKMOPTXYAVCEHKMOPTXYV"
+_VIN_LOOKALIKE = str.maketrans(VIN_LOOKALIKE_FROM, VIN_LOOKALIKE_TO)
+# Короче - это уже не номер. Два знака - чтобы находился и код парка
+# «B-1»: совпадение только точное, а на реплики без совпадения бот молчит.
+VIN_MIN = 2
+OPS_VALUE_LIMIT = 300
+OPS_KIT_LIMIT = 15
+_OPS_BLANKS = frozenset({"", "-", "—", "–", "нет данных"})
+
+
+def vin_key(raw: Any) -> str:
+    """Номер рамы или мотора для сравнения: латиница, верхний регистр,
+    без пробелов и дефисов. В базе сравнивается тем же выражением
+    (`db.VIN_SQL`), иначе номер «60v240w 123» не нашёлся бы."""
+    text = str(raw or "").upper().translate(_VIN_LOOKALIKE)
+    return re.sub(r"[^0-9A-Z]", "", text)
+
+
+def _ops_norm(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
+
+
+def ops_lines(text: Any) -> list[str]:
+    return [line.strip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def _ops_pair(line: str) -> tuple[str, str] | None:
+    """(ключ, значение) строки «ключ: значение». Номер пункта «1.» и
+    маркер списка «-» к ключу не относятся."""
+    if ":" not in line:
+        return None
+    key, _, value = line.partition(":")
+    key = re.sub(r"^\s*(?:\d+\s*[.)]\s*|[-•–—]\s*)", "", key)
+    return _ops_norm(key), value.strip()
+
+
+def _ops_blank(value: str) -> str:
+    value = value.strip()
+    return "" if _ops_norm(value) in _OPS_BLANKS else value[:OPS_VALUE_LIMIT]
+
+
+def ops_value(lines: Sequence[str], pattern: str, *, multiline: bool = False) -> str:
+    """Значение первой строки, чей КЛЮЧ подходит под шаблон.
+
+    Ищется по ключу, а не по всей строке, как делал n8n: иначе «рама»
+    находилась бы в «Реф.программа», а адрес - в любом тексте со словом
+    «адрес». multiline - следующие строки без двоеточия и без номера
+    пункта считаются продолжением (повреждения пишут абзацем).
+    """
+    for i, line in enumerate(lines):
+        pair = _ops_pair(line)
+        if pair is None or not re.search(pattern, pair[0]):
+            continue
+        value = pair[1]
+        if multiline:
+            parts = [value] if value else []
+            for nxt in lines[i + 1:]:
+                if ":" in nxt or re.match(r"^(?:\d+\s*[.)]|[-•–—])", nxt):
+                    break
+                parts.append(nxt)
+            value = " ".join(parts)
+        return _ops_blank(value)
+    return ""
+
+
+def ops_money(raw: Any) -> Decimal | None:
+    """Сумма из свободного текста: «1 500 наличными» -> 1500, «нет» -> 0.
+
+    n8n выкидывал из строки всё, кроме цифр, и «1500.50» становилось
+    150050. Здесь берётся первое число целиком. None - суммы в строке нет.
+    """
+    text = _ops_norm(raw)
+    if text in _OPS_BLANKS or text in ("0", "нет", "не платил", "ничего"):
+        return Decimal("0.00")
+    match = re.search(r"\d[\d  ]*(?:[.,]\d{1,2})?", text)
+    if not match:
+        return None
+    return parse_money(match.group().strip())
+
+
+def _ops_phones(lines: Sequence[str]) -> list[str]:
+    phones: list[str] = []
+    for pattern in (r"основн", r"телефон\w*\s*2|дополнит", r"телефон\w*\s*3"):
+        phone = bot_logic.normalize_phone(ops_value(lines, pattern))
+        if phone and phone not in phones:
+            phones.append(phone)
+    return phones
+
+
+def _ops_kit(lines: Sequence[str]) -> dict[str, str]:
+    """Комплектация: строки «- АКБ: 2» под пунктом «4. Комплектация»."""
+    kit: dict[str, str] = {}
+    for line in lines:
+        if not re.match(r"^[-•–—]", line):
+            continue
+        pair = _ops_pair(line)
+        if pair is None:
+            continue
+        name = re.sub(r"^[-•–—]\s*", "", line.partition(":")[0]).strip()[:60]
+        if name and len(kit) < OPS_KIT_LIMIT:
+            kit[name] = _ops_blank(pair[1])[:40]
+    return kit
+
+
+def is_ops_fix(text: Any) -> bool:
+    """Форма фиксации: начинается с «1. ФИО:» - как у фильтра n8n."""
+    lines = ops_lines(text)
+    return bool(lines) and bool(re.match(r"^1\s*[.)]\s*фио\s*:", _ops_norm(lines[0])))
+
+
+def is_ops_swap(text: Any) -> bool:
+    lines = ops_lines(text)
+    return bool(lines) and _ops_norm(lines[0]).startswith("замена")
+
+
+def parse_ops_fix(text: Any) -> tuple[dict | None, str]:
+    """Форма фиксации выдачи (`bot_logic.fixation_form`, заполненная на точке).
+
+    Адреса прописки и проживания НЕ разбираются и не хранятся: анкета
+    лежит в базе зашифрованной, и класть те же адреса открытым текстом
+    в журнал группы значило бы обойти шифрование. Телефоны нужны только
+    для сверки с чёрным списком и в отчёт не пишутся.
+    """
+    lines = ops_lines(text)
+    data = {
+        "fio": ops_value(lines, r"\bфио\b"),
+        "vin_frame": ops_value(lines, r"\bрам[аы]\b"),
+        "vin_motor": ops_value(lines, r"\bмотор"),
+        "rent_term": ops_value(lines, r"\bсрок"),
+        "payment": ops_value(lines, r"\bсумма\b|\bоплат"),
+        "telegram": ops_value(lines, r"\bник\b|telegram"),
+        "gps": ops_value(lines, r"трекер|\bgps\b"),
+        "given_by": ops_value(lines, r"\bвыдал"),
+        "referral": ops_value(lines, r"\bреф"),
+        "kit": _ops_kit(lines),
+    }
+    phones = _ops_phones(lines)
+    if not vin_key(data["vin_motor"]) and not vin_key(data["vin_frame"]):
+        return None, "В форме нет номера рамы или мотора - сверять не с чем."
+    data["phones"] = phones
+    return data, ""
+
+
+SWAP_REASON_WORDS: tuple[tuple[str, str], ...] = (
+    ("repair", r"слом|полом|ремонт|не\s*работ|неисправ|сгорел|\bдтп\b|авари|прокол"
+               r"|спуст|барахл|глючит|не\s*едет|не\s*заряж|стуч|скрип|люфт|тормоз"),
+    ("maintenance", r"(?:^|[^а-я])то(?:[^а-я]|$)|обслуж|планов"),
+    ("client", r"просьб|попросил|хочет|захотел|клиент|модел|удобн"),
+)
+
+
+def swap_reason_code(text: Any) -> str:
+    """Причина замены словами -> код `SWAP_REASONS`. Поломка проверяется
+    первой: «клиент сломал» - это ремонт, а не просьба клиента, и снятый
+    велосипед должен уйти в ремонт, а не обратно в выдачу."""
+    norm = _ops_norm(text)
+    for code, pattern in SWAP_REASON_WORDS:
+        if re.search(pattern, norm):
+            return code
+    return "other"
+
+
+def _ops_int(raw: str) -> int | None:
+    digits = re.sub(r"\D", "", raw or "")
+    return int(digits) if digits and len(digits) <= 7 else None
+
+
+def parse_ops_swap(text: Any) -> tuple[dict | None, str]:
+    """«ЗАМЕНА»: что было и что стало, по строке «стало:» посередине.
+
+    n8n брал причину СЕДЬМОЙ строкой сообщения - лишняя пустая строка,
+    и причиной становился номер рамы. Здесь причина - строка «причина:»,
+    а без неё - первая строка без двоеточия.
+    """
+    lines = ops_lines(text)
+    if not lines or not _ops_norm(lines[0]).startswith("замена"):
+        return None, "Замена начинается со слова «ЗАМЕНА»."
+    split = next((i for i, line in enumerate(lines)
+                  if re.match(r"^стал[оа]\b", _ops_norm(line))), None)
+    if split is None:
+        return None, "Нет строки «стало:» - непонятно, что на что поменяли."
+    before, after = lines[1:split], lines[split:]
+    reason = ops_value(lines, r"причин")
+    if not reason:
+        free = [line for line in lines[1:]
+                if ":" not in line and not re.match(r"^(?:был[оа]?|стал[оа])\b",
+                                                    _ops_norm(line))]
+        reason = free[0][:OPS_VALUE_LIMIT] if free else ""
+    data = {
+        "fio": ops_value(lines, r"\bфио\b"),
+        "from_location": ops_value(lines, r"откуда"),
+        "reason_text": reason,
+        "reason": swap_reason_code(reason),
+        "old_frame": ops_value(before, r"\bрам[аы]\b"),
+        "old_motor": ops_value(before, r"\bмотор"),
+        "new_frame": ops_value(after, r"\bрам[аы]\b"),
+        "new_motor": ops_value(after, r"\bмотор"),
+        "mileage_old": _ops_int(ops_value(before, r"пробег")),
+        "mileage_new": _ops_int(ops_value(after, r"пробег")),
+    }
+    if not vin_key(data["old_motor"]) and not vin_key(data["old_frame"]):
+        return None, "Не указан номер снятого велосипеда (до строки «стало:»)."
+    if not vin_key(data["new_motor"]) and not vin_key(data["new_frame"]):
+        return None, "Не указан номер нового велосипеда (после строки «стало:»)."
+    return data, ""
+
+
+def parse_ops_return(text: Any) -> tuple[dict | None, str]:
+    """Отчёт о сдаче (`bot_logic.closure_report`, пересланный в тему).
+
+    Суммы разбираются числом для сверки, но в журнал денег отсюда не
+    идёт ничего: платёж проводит человек в панели, а текст в группе -
+    не касса. Строки ищутся по ключу, так что «Кто принял велик» и
+    «Кто принял вело» (оба написания живут в группе) читаются одинаково.
+    """
+    lines = ops_lines(text)
+    data: dict[str, Any] = {
+        "closed_at": ops_value(lines, r"\bкогда\b"),
+        "debt_paid": ops_value(lines, r"\bдолг"),
+        "damage": ops_value(lines, r"поврежд", multiline=True),
+        "repair_paid": ops_value(lines, r"\bремонт"),
+        "wash_paid": ops_value(lines, r"\bмойк"),
+        "reason": ops_value(lines, r"причин", multiline=True),
+        "return_address": ops_value(lines, r"\bадрес"),
+        "accepted_by": ops_value(lines, r"\bпринял"),
+        "review": ops_value(lines, r"\bотзыв"),
+        "feedback": ops_value(lines, r"рекоменд", multiline=True),
+        "fio": ops_value(lines, r"\bфио\b"),
+        "vin_frame": ops_value(lines, r"\bрам[аы]\b"),
+        "vin_motor": ops_value(lines, r"\bмотор"),
+    }
+    if not vin_key(data["vin_motor"]) and not vin_key(data["vin_frame"]):
+        return None, "В отчёте нет номера рамы или мотора - сверять не с чем."
+    for field in ("debt_paid", "repair_paid", "wash_paid"):
+        amount = ops_money(data[field])
+        data[field + "_sum"] = str(amount) if amount is not None else None
+    return data, ""
+
+
+OPS_DAILY_METRICS: tuple[tuple[str, str, str], ...] = (
+    ("repair_start", r"начал\w* дня", "В ремонте на начало дня"),
+    ("repaired_stock", r"склад", "Отремонтировано со склада"),
+    ("repaired_clients", r"арендатор", "Отремонтировано у арендаторов"),
+    ("repair_end", r"конц\w* дня|конец дня", "В ремонте на конец дня"),
+    ("washed", r"помыт|мойк", "Помыто велосипедов"),
+)
+OPS_PARTS_LIMIT = 40
+
+
+def _ops_line_number(lines: Sequence[str], pattern: str) -> int | None:
+    """Первое число ПОСЛЕ ключевых слов: номер пункта «1.» стоит перед ними."""
+    for line in lines:
+        norm = _ops_norm(line)
+        match = re.search(pattern, norm)
+        if match is None:
+            continue
+        number = re.search(r"\d+", norm[match.end():])
+        if number and len(number.group()) <= 5:
+            return int(number.group())
+    return None
+
+
+def parse_ops_daily(text: Any) -> tuple[dict | None, str]:
+    """Итоги дня сервиса: точка первой строкой, пункты 1-6 числами,
+    в пункте 5 - израсходованные детали списком до пункта 6."""
+    lines = ops_lines(text)
+    if not lines:
+        return None, "Пустой отчёт."
+    data: dict[str, Any] = {"location": lines[0][:80]}
+    for key, pattern, _ in OPS_DAILY_METRICS:
+        data[key] = _ops_line_number(lines[1:], pattern)
+    if all(data[key] is None for key, _, _ in OPS_DAILY_METRICS):
+        return None, "Не похоже на итоги дня: нет ни одного числа по пунктам."
+    parts: list[str] = []
+    start = next((i for i, line in enumerate(lines) if "детал" in _ops_norm(line)), None)
+    if start is not None:
+        for line in lines[start + 1:]:
+            if re.match(r"^\d+\s*[.)]", line):
+                break
+            if len(parts) < OPS_PARTS_LIMIT:
+                parts.append(re.sub(r"^[-•–—]\s*", "", line)[:120])
+    data["parts"] = parts
+    return data, ""
+
+
+def _name_tokens(name: Any) -> set[str]:
+    return {t for t in re.split(r"[^a-zа-я]+", _ops_norm(name)) if len(t) >= 2}
+
+
+def same_person(a: Any, b: Any) -> bool:
+    """ФИО из формы и из карточки - про одного человека?
+
+    Порядок слов и отчество не важны: на точке пишут «Иван Иванов», в
+    договоре «Иванов Иван Иванович». Нужны два общих слова (или одно,
+    если с одной стороны оно одно).
+    """
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    common = ta & tb
+    return bool(common) and len(common) >= min(2, len(ta), len(tb))
+
+
+def blacklist_hit(phones: Iterable[str], fio: Any,
+                  clients: Iterable[Mapping[str, Any]]) -> tuple[dict, str] | None:
+    """(клиент, «по чему совпало») среди НЕактивных карточек или None.
+
+    n8n держал чёрный список пятью строками прямо в коде - и это были
+    образцы, а не люди. Здесь список - карточки со статусом «чёрный
+    список» и «заблокирован»: его ведут в панели, и бот видит правку сразу.
+    Телефон сильнее ФИО: однофамильцев больше, чем общих номеров.
+    """
+    wanted = {p for p in (bot_logic.normalize_phone(x) for x in phones) if p}
+    rows = [dict(c) for c in clients if c.get("status") != "active"]
+    for client in rows:
+        own = {bot_logic.normalize_phone(client.get(f)) for f in ("phone", "phone2", "phone3")}
+        if wanted & (own - {None}):
+            return client, "телефон"
+    key = _ops_norm(fio)
+    if key:
+        for client in rows:
+            if _ops_norm(client.get("full_name")) == key:
+                return client, "ФИО"
+    return None
+
+
+def ops_blacklist_text(client: Mapping[str, Any], matched_by: str) -> str:
+    status = CLIENT_STATUSES.get(client.get("status") or "", client.get("status") or "")
+    note = (client.get("note") or "").strip()
+    return ("⚠️ Клиент в стоп-листе CRM: " + html.escape(status, quote=False)
+            + f"\nСовпадение по: {matched_by}"
+            + f"\nКарточка: {html.escape(client.get('full_name') or '—', quote=False)}"
+            + (f"\nЗаметка: {html.escape(note[:300], quote=False)}" if note else "")
+            + "\nВыдачу не подтверждаю - решение за старшим смены.")
+
+
+def _when(moment: datetime | None, now: datetime) -> str:
+    if moment is None:
+        return "нет данных"
+    local = moment.astimezone() if moment.tzinfo else moment
+    minutes = int((now - moment).total_seconds() // 60) if moment.tzinfo else None
+    ago = ""
+    if minutes is not None and minutes >= 0:
+        ago = (f" ({minutes} мин назад)" if minutes < 120
+               else f" ({minutes // 60} ч назад)" if minutes < 48 * 60
+               else f" ({minutes // 1440} дн. назад)")
+    return local.strftime("%d.%m %H:%M") + ago
+
+
+def _bike_head(bike: Mapping[str, Any]) -> str:
+    parts = [f"Велосипед {html.escape(bike.get('code') or '—', quote=False)}"]
+    if bike.get("model"):
+        parts.append(html.escape(bike["model"], quote=False))
+    if bike.get("motor_no"):
+        parts.append("мотор " + html.escape(bike["motor_no"], quote=False))
+    return " · ".join(parts)
+
+
+OPS_DEBT_HINT = ("Нет данных или клиент спорит - пусть покажет чеки или платит "
+                 "на месте, без расписок.")
+
+
+def ops_debt_text(bike: Mapping[str, Any], rental: Mapping[str, Any] | None,
+                  client: Mapping[str, Any] | None, bal: Any, *,
+                  today: date) -> str:
+    """Ответ в теме «проверка долга»: кто на велосипеде, сколько должен,
+    до какого дня оплачено. Цифры - из журнала, а не из таблицы, которую
+    кто-то забыл обновить."""
+    status = BIKE_STATUSES.get(bike.get("status") or "", bike.get("status") or "")
+    head = _bike_head(bike)
+    if rental is None or client is None:
+        return f"{head}\nАренды нет, статус: {status}."
+    # Тот же расчёт, что в кабинете и карточке: у аренды с ручным
+    # начислением долг в журнале нулевой, а платить за новый срок уже пора.
+    summary = rental_summary(rental, bal, today=today)
+    until = summary["covered_until"]
+    paid = until.strftime("%d.%m.%Y") if until else "—"
+    if summary["overdue"] and summary["days_left"] is not None:
+        paid += f" (просрочка {-summary['days_left']} дн.)"
+    lines = [
+        head,
+        f"Клиент: {html.escape(client.get('full_name') or '—', quote=False)}, "
+        f"{html.escape(client.get('phone') or '—', quote=False)}",
+        f"Тариф: {money(rental.get('price'))} за {int(rental.get('period_days') or 0)} дн.",
+        f"Долг по журналу: {money(summary['debt'])}" if summary["debt"] > 0 else "Долга нет",
+    ]
+    if summary["due"] > summary["debt"]:
+        lines.append(f"К оплате сейчас: {money(summary['due'])}")
+    lines += [
+        f"Оплачено до: {paid}",
+        f"Статус велосипеда: {status}",
+    ]
+    if rental.get("search_at"):
+        lines.append("🔎 В розыске")
+    lines.append("")
+    lines.append(OPS_DEBT_HINT)
+    return "\n".join(lines)
+
+
+OPS_GPS_HINT = ("Сфотографируйте номер на корпусе трекера и пришлите сюда. "
+                "Нет номера SIM - позвоните с трекера на свой телефон.")
+
+
+def ops_gps_text(bike: Mapping[str, Any], tracker: Mapping[str, Any] | None, *,
+                 now: datetime) -> str:
+    head = _bike_head(bike)
+    if tracker is None:
+        return f"{head}\nТрекер к велосипеду не привязан.\n\n{OPS_GPS_HINT}"
+    name = tracker.get("alias") or tracker.get("device_id") or "—"
+    lines = [
+        head,
+        f"Трекер: {html.escape(str(name), quote=False)}"
+        + ("" if tracker.get("active", True) else " (снят с наблюдения)"),
+        "SIM: " + html.escape(tracker.get("phone") or "номер не записан", quote=False),
+        "На связи: " + _when(tracker.get("last_seen"), now),
+    ]
+    if tracker.get("voltage") is not None:
+        lines.append(f"Питание: {tracker['voltage']} В")
+    if tracker.get("blocked"):
+        lines.append("⛔ Мотор заблокирован")
+    url = map_url(tracker.get("lat"), tracker.get("lon"))
+    lines.append(f"Карта: {url}" if url else "Координат нет")
+    if not tracker.get("phone"):
+        lines += ["", OPS_GPS_HINT]
+    return "\n".join(lines)
+
+
+def ops_report_summary(report: Mapping[str, Any]) -> str:
+    """Одна строка о сообщении из группы - для журнала в панели."""
+    data = report.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            data = {}
+    kind = report.get("kind")
+    if kind == "daily":
+        parts = [f"{label}: {data.get(key)}"
+                 for key, _, label in OPS_DAILY_METRICS if data.get(key) is not None]
+        return f"{data.get('location') or ''} · " + "; ".join(parts)
+    if kind == "swap":
+        return (f"{data.get('old_motor') or data.get('old_frame') or '—'} → "
+                f"{data.get('new_motor') or data.get('new_frame') or '—'}"
+                + (f" · {data.get('reason_text')}" if data.get("reason_text") else ""))
+    if kind == "return":
+        return " · ".join(x for x in (
+            data.get("closed_at"), data.get("reason"),
+            f"принял {data['accepted_by']}" if data.get("accepted_by") else "") if x)
+    return " · ".join(x for x in (data.get("fio"), data.get("rent_term"),
+                                  data.get("payment")) if x)
+
+
+def ops_client_matches(phones: Iterable[str], fio: Any,
+                       client: Mapping[str, Any]) -> bool:
+    """Форма и карточка - один человек: общий телефон или то же ФИО."""
+    own = {bot_logic.normalize_phone(client.get(f)) for f in ("phone", "phone2", "phone3")}
+    wanted = {bot_logic.normalize_phone(p) for p in phones}
+    if (own - {None}) & (wanted - {None}):
+        return True
+    return bool(_ops_norm(fio)) and same_person(fio, client.get("full_name"))
+
+
+def looks_like_return(text: Any) -> bool:
+    """Похоже на отчёт о сдаче, даже если номер забыли: тогда сказать
+    об ошибке, а не промолчать, как на обычную реплику в теме."""
+    return any((pair := _ops_pair(line)) is not None
+               and re.search(r"когда сдал|принял|причина сдачи", pair[0])
+               for line in ops_lines(text))
+
+
+def ops_query(text: Any) -> str | None:
+    """Запрос в теме долга или GPS: номер или телефон одной строкой.
+    Реплика из нескольких слов - это разговор, на неё бот молчит."""
+    lines = ops_lines(text)
+    if len(lines) != 1 or len(lines[0].split()) > 3 or len(lines[0]) > 40:
+        return None
+    return lines[0]

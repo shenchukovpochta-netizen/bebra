@@ -960,7 +960,8 @@ async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
 
 @router.callback_query(StateIs(logic.WAIT_BUYOUT_SIGN), F.data == "buyout_sign")
 async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
-                         cfg: Config, vault: Vault, user: dict) -> None:
+                         cfg: Config, vault: Vault, user: dict,
+                         crm: Any = None) -> None:
     """Подпись Акта о переходе права собственности - велосипед стал его."""
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_BUYOUT_SIGN,
@@ -996,6 +997,11 @@ async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
         files.remove(old_path)
     await db.log_event(tg_id, "buyout_signed", {"number": number})
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
+    if crm is not None:
+        # Велосипед продан: аренда в CRM закрывается, иначе начисления и
+        # напоминания о долге шли бы новому владельцу велосипеда.
+        await crm_sync.on_buyout_signed(crm, {**data, "tg_id": tg_id},
+                                        today=logic.local_date(signed_at))
 
     await bot.send_document(
         tg_id, BufferedInputFile(docx, filename=_act_filename("vykup", number)),

@@ -29,6 +29,7 @@
 <section class="card">
   <h2>Записать в журнал</h2>
   <form method="post" action="/clients/{{ client.id }}/ledger" class="grid2">
+    <input type="hidden" name="once" value="{{ once() }}">
     <label>Вид <select name="kind">
       <option value="payment">Платёж (приход)</option>
       <option value="fine">Штраф / ремонт (списание)</option>

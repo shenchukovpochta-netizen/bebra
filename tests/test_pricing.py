@@ -186,3 +186,53 @@ class TestPricingPanel(tw.WebCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestRentalFormTariff(tw.WebCase):
+    """Форма аренды и «сменить тариф» - те же правила цены, что на выдаче:
+    тариф велосипеда, а не аккумулятора, и цена модели этого велосипеда."""
+
+    def setUp(self):
+        super().setUp()
+        self.login()
+        self.cid = tw.run(self.crm.create_client(full_name="Иванов Иван",
+                                                 phone="+79990000000"))
+        self.bike = tw.run(self.crm.create_bike(code="B-1", model="Monster",
+                                                status="available"))
+        tw.run(self.crm.create_tariff("Неделя", 7, D(3000), None))
+        self.t_monster = tw.run(self.crm.create_tariff("Неделя Monster", 7, D(4200), None,
+                                                       model="Monster"))
+        self.t_kugoo = tw.run(self.crm.create_tariff("Неделя Kugoo", 7, D(2500), None,
+                                                     model="Kugoo V3"))
+        self.t_bat = tw.run(self.crm.create_tariff("Аккумулятор · неделя", 7, D(1170),
+                                                   None, kind="battery"))
+
+    def open(self, tariff_id):
+        return self.client.post("/rentals", data={
+            "client_id": self.cid, "bike_id": self.bike, "tariff_id": tariff_id,
+            "started_on": date.today().isoformat(), "billing": "auto"})
+
+    def test_battery_tariff_is_not_a_rent_price(self):
+        self.assertNotIn("Аккумулятор · неделя", self.get_ok("/rentals/new"))
+        r = self.open(self.t_bat)
+        self.assertEqual(r.headers["location"], "/rentals/new")
+        self.assertIsNone(tw.run(self.crm.active_rental_of(self.cid)))
+
+    def test_other_models_price_is_swapped_for_this_one(self):
+        self.open(self.t_kugoo)
+        rental = tw.run(self.crm.active_rental_of(self.cid))
+        self.assertEqual((rental["tariff_name"], rental["price"]),
+                         ("Неделя Monster", D("4200.00")))
+
+    def test_change_tariff_keeps_to_bike_prices(self):
+        self.open(self.t_monster)
+        rental = tw.run(self.crm.active_rental_of(self.cid))
+        self.assertNotIn("Аккумулятор · неделя", self.get_ok(f"/rentals/{rental['id']}"))
+        self.client.post(f"/rentals/{rental['id']}/tariff",
+                         data={"tariff_id": self.t_bat, "billing": "auto"})
+        self.assertEqual(tw.run(self.crm.rental(rental["id"]))["price"], D("4200.00"))
+        self.client.post(f"/rentals/{rental['id']}/tariff",
+                         data={"tariff_id": self.t_kugoo, "billing": "auto"})
+        self.assertEqual(tw.run(self.crm.rental(rental["id"]))["price"], D("4200.00"),
+                         "Kugoo-цена на Monster не встаёт")

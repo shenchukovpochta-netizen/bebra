@@ -655,7 +655,8 @@ def validate_upload(is_photo: bool, mime: str | None, size: int | None) -> Valid
 def should_process(chat_type: str | None, *, from_admin_chat: bool,
                    is_moderation_callback: bool,
                    is_moderation_reply: bool = False,
-                   is_service_command: bool = False) -> bool:
+                   is_service_command: bool = False,
+                   is_ops_message: bool = False) -> bool:
     """Пускать ли апдейт дальше.
 
     Личные чаты - да: там идёт вся регистрация. Групповые - только если это
@@ -667,8 +668,13 @@ def should_process(chat_type: str | None, *, from_admin_chat: bool,
     Отдельно пропускается ответ на карточку: отказ «с указанием ошибок»
     модератор пишет реплаем, и без этой ветки его сообщение отбрасывалось бы
     здесь - кнопка «Свой текст» просила бы ответ, которого бот не увидит.
+
+    Сообщения из тем рабочей группы точек (`filters.ops_topic`) идут
+    своей дорогой: это не служебный чат модерации, но и не клиент.
     """
     if chat_type == "private":
+        return True
+    if is_ops_message:
         return True
     return from_admin_chat and (is_moderation_callback or is_moderation_reply
                                 or is_service_command)

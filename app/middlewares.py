@@ -16,7 +16,7 @@ from . import keyboards as kb
 from .config import Config
 from .crm import company, doctemplates
 from .db import Database
-from .filters import is_service_chat
+from .filters import is_service_chat, ops_topic
 from .services.crypto import Vault
 from .services.subscription import check_subscription
 
@@ -117,12 +117,16 @@ class PipelineMiddleware(BaseMiddleware):
             isinstance(inner, Message) and inner.reply_to_message is not None
         )
         is_fleet = isinstance(inner, Message) and logic.is_fleet_command(inner.text)
+        # Тема рабочей группы точек: у сотрудника на точке нет анкеты,
+        # подписка и рейт-лимит к нему не относятся - как к модератору.
+        is_ops = isinstance(inner, Message) and ops_topic(self.cfg, inner) is not None
         if not logic.should_process(
             payload.get("chat_type"),
             from_admin_chat=self._is_service_chat(chat_id),
             is_moderation_callback=is_moderation,
             is_moderation_reply=is_moderation_reply,
             is_service_command=is_fleet,
+            is_ops_message=is_ops,
         ):
             return None
 
@@ -134,8 +138,8 @@ class PipelineMiddleware(BaseMiddleware):
         # из служебного чата. Чат утверждения договоров - это личка, и без
         # проверки чата владелец @arenda_velo_kazan попадал бы под гейт
         # подписки и рейт-лимит наравне с клиентами.
-        service = self._is_service_chat(chat_id) and (is_moderation or is_moderation_reply
-                                                      or is_fleet)
+        service = is_ops or (self._is_service_chat(chat_id)
+                             and (is_moderation or is_moderation_reply or is_fleet))
 
         try:
             result = await self._dispatch(handler, event, data, inner, user_id, service)

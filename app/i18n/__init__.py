@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+import html
+
 from .. import texts
 from ..crm import company
 from ..faq_i18n import LANG_TITLES, LANGS, pick_prompt  # noqa: F401 - реэкспорт
@@ -124,11 +126,15 @@ def t(lang: str | None, key: str) -> str:
 
 
 def err(lang: str | None, message: str) -> str:
-    """Перевод ошибки валидации по её русскому тексту. Нет перевода - как есть."""
+    """Перевод ошибки валидации по её русскому тексту. Нет перевода - как есть.
+
+    Результат экранирован под HTML: ошибки говорят «недопустимы символы
+    < > и &», а бот шлёт с parse_mode=HTML - сырой текст Telegram отвергал,
+    и человек на шаге анкеты не получал ответа вовсе.
+    """
     lang = norm(lang)
-    if lang == "ru":
-        return message
-    return ERRORS[lang].get(message, message)
+    text = message if lang == "ru" else ERRORS[lang].get(message, message)
+    return html.escape(text, quote=False)
 
 
 def variants(key: str) -> frozenset[str]:

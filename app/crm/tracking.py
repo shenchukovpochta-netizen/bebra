@@ -69,20 +69,28 @@ async def poll_once(crm: Any, client: Any, *, now: datetime | None = None) -> di
     now = now or datetime.now(UTC)
     commands = await send_commands(crm, client, now=now)
     devices = await client.devices()
+    # Настройки - до записи состояний: порог «едет» из панели решает,
+    # ставить ли отметку «ехал», а по ней считается «стоит при аренде».
+    settings = await crm.settings()
+    moving = logic.tracker_settings(settings)["moving_speed"]
     seen = 0
     fresh: list[dict] = []
     for device in devices:
-        saved = await crm.save_tracker_state(device)
+        saved = await crm.save_tracker_state(device, moving_speed=moving)
         seen += 1
         if saved.get("created"):
             log.info("трекер %s заведён сам: он есть в StarLine, "
                      "но не был привязан к велосипеду", device["device_id"])
-    settings = await crm.settings()
     rows = logic.tracker_rows(await crm.trackers(active_only=True), now=now,
                               settings=settings)
     open_now: dict[int, set[str]] = {}
     for alert in await crm.tracker_alerts(open_only=True, limit=1000):
         open_now.setdefault(int(alert["tracker_id"]), set()).add(alert["kind"])
+    # Снятый с наблюдения трекер в круг не входит - и его тревоги иначе
+    # висели бы открытыми вечно: закрыть их некому, кроме человека.
+    watched = {int(row["id"]) for row in rows}
+    for tracker_id in sorted(set(open_now) - watched):
+        await crm.close_alerts(tracker_id, sorted(open_now[tracker_id]), by="tracking")
     for row in rows:
         wanted = logic.detect_alerts(row, settings=settings)
         kinds = {alert["kind"] for alert in wanted}

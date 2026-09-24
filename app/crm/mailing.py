@@ -68,6 +68,11 @@ async def run_campaign(bot: Any, crm: Any, campaign: dict, *,
         return {"sent": 0, "failed": 0, "skipped": 0, "done": True}
     counts = {"sent": 0, "failed": 0, "skipped": 0, "done": False}
     for send in queued:
+        # Кампанию могли отменить посреди порции: без этой проверки после
+        # «Отменить» уходили бы ещё до полусотни сообщений из снимка очереди.
+        fresh = await crm.campaign(campaign["id"])
+        if fresh is None or fresh.get("status") != "sending":
+            break
         client = await crm.client(send["client_id"])
         if client is None or client.get("status") != "active":
             # Пока кампания шла, клиента заблокировали: это ровно тот

@@ -93,6 +93,8 @@
 <form method="get" action="/issue">
   <input type="hidden" name="client" value="{{ client.id }}">
   {% if bike %}<input type="hidden" name="bike" value="{{ bike.id }}">{% endif %}
+  {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
+  {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
   <div class="card">
     <h2>Модель <small class="muted">(свободные сейчас; от неё зависит цена)</small></h2>
     {% if bike %}
@@ -146,12 +148,17 @@
     <input type="hidden" name="client" value="{{ client.id }}">
     <input type="hidden" name="tariff" value="{{ tariff.id }}">
     <input type="hidden" name="model" value="{{ model }}">
+    {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
+    {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
+
     <label style="margin:0;flex:1 1 200px">Поиск по номеру <input name="q" value="{{ q or '' }}" placeholder="B-03"></label>
     <button type="submit" class="ghost">Найти</button>
   </form>
   <form method="get" action="/issue">
     <input type="hidden" name="client" value="{{ client.id }}">
     <input type="hidden" name="tariff" value="{{ tariff.id }}">
+    {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
+    {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
     {% if bikes %}
     <p class="muted">Первым стоит тот, что простаивает дольше всех: выдавайте его — это и есть снижение простоя.</p>
     <div class="choices">
@@ -266,6 +273,7 @@
   <input type="hidden" name="tariff" value="{{ tariff.id }}">
   <input type="hidden" name="bike" value="{{ bike.id }}">
   <input type="hidden" name="started_on" value="{{ started_on|iso }}">
+  {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
   <label style="margin:0">Проверить промокод <input name="promo" value="{{ promo_code }}" placeholder="ВЕСНА" style="text-transform:uppercase"></label>
   <button type="submit" class="ghost">Проверить</button>
   <span class="muted">Действующие акции без кода подставляются сами.</span>

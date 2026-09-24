@@ -615,6 +615,21 @@ class TestCashPanel(tw.WebCase):
                                             "opening": opening, "note": ""})
         return int(r.headers["location"].rsplit("/", 1)[1])
 
+    def test_second_point_opens_its_own_shift(self):
+        """Точек две: открытая смена Павлюхина не прячет форму от
+        Адоратского, и обе смены видны на странице."""
+        self.open_shift()
+        page = self.get_ok("/cash")
+        self.assertIn("Открыть смену на другой точке", page)
+        self.assertIn('<option value="Адоратского">', page)
+        self.assertNotIn('<option value="Павлюхина">', page, "у неё смена уже открыта")
+        r = self.client.post("/cash", data={"location": "Адоратского",
+                                            "opening": "500", "note": ""})
+        self.assertTrue(r.headers["location"].startswith("/cash/"))
+        page = self.get_ok("/cash")
+        self.assertEqual(page.count("<h2>Открыта смена"), 2)
+        self.assertNotIn("Открыть смену на другой точке", page)
+
     def test_shift_collects_cash_payments_and_closes_with_a_difference(self):
         shift_id = self.open_shift()
         self.assertIn("Открыта смена", self.get_ok("/cash"))
@@ -733,6 +748,19 @@ class TestBankPanel(tw.WebCase):
         self.assertEqual(r.headers["location"], "/bank")
         self.assertEqual(tw.run(self.crm.bank_txn(self.txn_id))["status"], "ignored")
         self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(0))
+
+    def test_ignore_cannot_overwrite_a_credited_row(self):
+        """Строку, которую уже зачислило автозачисление, «не наше» из
+        старого экрана не перепишет: платёж остался бы без строки."""
+        stale = tw.run(self.crm.bank_txn(self.txn_id))
+        tw.run(tw.service.credit_bank_txn(self.crm, stale,
+                                          client=tw.run(self.crm.client(self.client_id)),
+                                          by="автозачисление"))
+        with self.assertRaises(tw.service.ServiceError):
+            tw.run(tw.service.ignore_bank_txn(self.crm, stale, by="оператор"))
+        txn = tw.run(self.crm.bank_txn(self.txn_id))
+        self.assertEqual(txn["status"], "matched")
+        self.assertIsNotNone(txn["ledger_id"])
 
     def test_credit_needs_a_client(self):
         self.client.post(f"/bank/{self.txn_id}", data={"client_id": ""})

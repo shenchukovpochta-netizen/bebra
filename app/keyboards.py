@@ -444,12 +444,18 @@ def fleet_card(bike_id: int, status: str, rented: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[row[:2], row[2:]])
 
 
-def estimate_answer(order_id: int) -> InlineKeyboardMarkup:
+def estimate_answer(order_id: int, cents: int) -> InlineKeyboardMarkup:
     """Под сметой: согласен или нет. Третьего варианта нет намеренно -
-    «подумаю» оставляет технику разобранной на неопределённый срок."""
+    «подумаю» оставляет технику разобранной на неопределённый срок.
+
+    Сумма сметы (в копейках) едет в кнопке: смету могут переслать с новой
+    строкой, и «Согласен» под старым сообщением на 1 000 ₽ иначе
+    согласовывал бы новые 10 000 ₽."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Согласен", callback_data=f"est:ok:{order_id}"),
-         InlineKeyboardButton(text="✖️ Не надо", callback_data=f"est:no:{order_id}")],
+        [InlineKeyboardButton(text="✅ Согласен",
+                              callback_data=f"est:ok:{order_id}:{cents}"),
+         InlineKeyboardButton(text="✖️ Не надо",
+                              callback_data=f"est:no:{order_id}:{cents}")],
     ])
 
 

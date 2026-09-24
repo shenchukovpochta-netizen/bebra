@@ -154,7 +154,8 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/crm/banking.py`, `paying.py`, `tracking.py`, `mailing.py` | фоновые циклы выписки, счетов, трекеров, рассылок |
 | `app/crm/company.py`, `doctemplates.py`, `esign.py` | реквизиты снимком, выбор шаблона документа, текст соглашения об ЭП |
 | `app/crm/import_xlsx.py` | импорт рабочей таблицы «ДЕЙСТВУЮЩИЕ АРЕНДАТОРЫ» |
-| `app/handlers/*.py` | сценарий Telegram: кабинет, договор, вопросы, парк из чата, меню, модерация, регистрация, привязка сотрудника |
+| `app/crm/opsgroup.py` | рабочая группа точек: сверка форм из тем с базой, ответы про долг и трекер (бывший n8n) |
+| `app/handlers/*.py` | сценарий Telegram: кабинет, договор, вопросы, парк из чата, меню, модерация, регистрация, привязка сотрудника, рабочая группа точек (`ops.py`, подключается первым) |
 | `app/middlewares.py`, `app/filters.py` | конвейер до обработчиков и общие фильтры |
 | `app/texts.py`, `app/i18n/*.py` | тексты бота и переводы на восемь языков (`i18n.PACKS`) |
 | `app/faq.py`, `app/faq_i18n.py` | факты проката и автоответы, русский в `faq.py` вместе с фактами |
@@ -193,6 +194,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | новую переменную окружения | `.env.example`, `docker-compose.yml`, `app/config.py` или `app/web/config.py` |
 | новый файл в проекте | список заливки в `deploy.ps1`, иначе `consistency.py` ругнётся |
 | работу с внешним API | `app/services/starline.py`, `app/services/tochka.py`, циклы в `app/crm/` |
+| разбор формы из рабочей группы точек | `parse_ops_*` в `app/crm/logic.py`, сверка в `app/crm/opsgroup.py`, темы в `filters.ops_topic` |
 | договор, акты, печать | `app/services/contract.py`, шаблоны `app/*.docx`, выбор шаблона `app/crm/doctemplates.py` |
 
 Перед коммитом: `python3 -m unittest discover -s tests -q`, `ruff check .`, `python3

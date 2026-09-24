@@ -2131,6 +2131,9 @@ create index if not exists tracker_commands_idx
 -- отправок, а она чистится через 30 дней: аренда длиннее полутора
 -- месяцев получала просьбу заново. Отметка живёт на самой аренде.
 alter table crm.rentals add column if not exists review_asked_at timestamptz;
+-- То же с приглашением на ТО: повтор отсекала история отправок, а она
+-- живёт 30 дней, и при сроке «раз в 60 дней» клиента звали каждый месяц.
+alter table crm.rentals add column if not exists service_invited_at timestamptz;
 
 -- Счётчик отказов банка по карте. В коде автосписания написано «три
 -- отказа подряд снимают карту», но считать их было нечем: просроченная
@@ -2248,3 +2251,37 @@ begin
     on conflict (key) do nothing;
   end if;
 end $$;
+
+-- ─────────────────── операционная группа ───────────────────
+--
+-- Сообщения рабочей группы точек, которые бот сверил с базой: фиксация
+-- выдачи, замена, сдача, итоги дня сервиса. Раньше их переписывал в
+-- Google-таблицу сценарий n8n; теперь таблица - это CRM, а здесь след
+-- того, что написали на точке и совпало ли это с базой. Одно сообщение -
+-- одна строка (уникальный ключ): повторная доставка апдейта не заводит
+-- второй отчёт. Адресов и телефонов из формы здесь нет - только то,
+-- что нужно для сверки и уже есть в карточке.
+create table if not exists crm.ops_reports (
+  id          bigserial primary key,
+  kind        text        not null check (kind in ('fix', 'swap', 'return', 'daily')),
+  chat_id     bigint      not null,
+  message_id  bigint      not null,
+  thread_id   bigint,
+  author_tg   bigint,
+  author      text,
+  bike_id     bigint      references crm.bikes (id),
+  rental_id   bigint      references crm.rentals (id),
+  client_id   bigint      references crm.clients (id),
+  data        jsonb       not null default '{}'::jsonb,
+  ok          boolean     not null default false,
+  note        text,
+  created_at  timestamptz not null default now(),
+  unique (chat_id, message_id)
+);
+create index if not exists ops_reports_kind_idx on crm.ops_reports (kind, created_at desc);
+create index if not exists ops_reports_rental_idx on crm.ops_reports (rental_id)
+  where rental_id is not null;
+
+-- Номер SIM-карты трекера: по нему звонят на трекер, когда он молчит.
+-- StarLine отдаёт его не у всех устройств, поэтому правится и руками.
+alter table crm.trackers add column if not exists phone text;

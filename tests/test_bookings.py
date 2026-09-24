@@ -50,11 +50,25 @@ class TestBookingLogic(unittest.TestCase):
         self.assertEqual(got[0]["id"], 1)
 
     def test_when_is_bounded(self):
-        self.assertEqual(logic.booking_when("0", today=TODAY), TODAY)
-        self.assertEqual(logic.booking_when(2, today=TODAY), TODAY + timedelta(days=2))
-        self.assertIsNone(logic.booking_when("9", today=TODAY))
+        day = TODAY.strftime("%Y%m%d")
+        self.assertEqual(logic.booking_when(day, today=TODAY), TODAY)
+        later = (TODAY + timedelta(days=2)).strftime("%Y%m%d")
+        self.assertEqual(logic.booking_when(later, today=TODAY), TODAY + timedelta(days=2))
+        far = (TODAY + timedelta(days=9)).strftime("%Y%m%d")
+        self.assertIsNone(logic.booking_when(far, today=TODAY))
         self.assertIsNone(logic.booking_when("x", today=TODAY))
-        self.assertIsNone(logic.booking_when(-1, today=TODAY))
+        self.assertIsNone(logic.booking_when("20261399", today=TODAY))
+        # Смещение вместо даты - кнопка старого вида: по ней не понять,
+        # какой день человек видел, поэтому она устарела.
+        self.assertIsNone(logic.booking_when("1", today=TODAY))
+
+    def test_tomorrow_pressed_tomorrow_is_still_that_day(self):
+        """«Завтра, 25.09», нажатая 25-го, - это 25-е, а не 26-е."""
+        tomorrow = TODAY + timedelta(days=1)
+        self.assertEqual(logic.booking_when(tomorrow.strftime("%Y%m%d"), today=tomorrow),
+                         tomorrow)
+        yesterday = (TODAY - timedelta(days=1)).strftime("%Y%m%d")
+        self.assertIsNone(logic.booking_when(yesterday, today=TODAY), "прошедший день")
 
     def test_line(self):
         self.assertEqual(logic.booking_line({"model": "Kugoo V3", "tariff_name": "Неделя",
@@ -163,3 +177,88 @@ class TestBookingFlow(tw.WebCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Forms:
+    """Поля форм страницы - как их отправит браузер (без JS)."""
+
+    def __init__(self, page: str):
+        from html.parser import HTMLParser
+        forms: list[dict] = []
+
+        class Parser(HTMLParser):
+            cur = None
+
+            def handle_starttag(self, tag, attrs):
+                a = dict(attrs)
+                if tag == "form":
+                    self.cur = {"method": a.get("method", "get"),
+                                "action": a.get("action"), "fields": []}
+                    forms.append(self.cur)
+                elif tag == "input" and self.cur is not None and a.get("name"):
+                    if a.get("type") in ("radio", "checkbox") and "checked" not in a:
+                        return
+                    self.cur["fields"].append((a["name"], a.get("value", "")))
+
+            def handle_endtag(self, tag):
+                if tag == "form":
+                    self.cur = None
+
+        Parser().feed(page)
+        self.forms = forms
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestBookingThroughTheWizard(tw.WebCase):
+    """Заявка из кабинета проходит мастер настоящими формами: без этого
+    шаг 3 терял номер заявки и день, и выданная заявка оставалась
+    открытой, а аренда начиналась сегодня."""
+
+    def test_booking_and_day_survive_every_step(self):
+        import re
+        from urllib.parse import urlencode
+        self.login()
+        self.seed()
+        wanted = date.today() + timedelta(days=2)
+        booking = tw.run(tw.service.create_booking(
+            self.crm, client=tw.run(self.crm.client(self.client_id)), model="Kugoo V3",
+            tariff=tw.run(self.crm.tariff(self.tariff_id)), location=None,
+            wanted_on=wanted))
+        link = re.search(r'href="(/issue\?client=[^"]*booking=[^"]*)"',
+                         self.get_ok("/issue")).group(1).replace("&amp;", "&")
+        page = self.get_ok(link)
+        form = next(f for f in _Forms(page).forms
+                    if any(n == "bike" for n, _ in f["fields"]))
+        page = self.get_ok("/issue?" + urlencode(form["fields"]))
+        post = next(f for f in _Forms(page).forms
+                    if f["action"] == "/issue" and f["method"] == "post")
+        data = dict(post["fields"])
+        self.assertEqual(data.get("started_on"), wanted.isoformat())
+        data.update({"pay_amount": "3000", "pay_method": "cash", "mileage": "10"})
+        self.client.post("/issue", data=data)
+        self.assertEqual(tw.run(self.crm.booking(booking["id"]))["status"], "done")
+        rental = tw.run(self.crm.active_rental_of(self.client_id))
+        self.assertEqual(rental["started_on"], wanted)
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestBookingByCatalogueTitle(tw.WebCase):
+    def test_step_three_finds_the_bike_under_its_factory_name(self):
+        """Заявка названа по каталогу, велосипед в парке - по накладной."""
+        import re
+        self.login()
+        cid = tw.run(self.crm.create_client(full_name="Иванов Иван", phone="+79990000000",
+                                            tg_id=5001))
+        tw.run(self.crm.create_bike_model(title="Городской H10", brand="M",
+                                          factory_title="Maikaolin H10",
+                                          battery_slots=1, note=None))
+        tw.run(self.crm.create_bike(code="B-1", model="Maikaolin H10", status="available"))
+        tid = tw.run(self.crm.create_tariff("Неделя", 7, Decimal(3000), None))
+        tw.run(tw.service.create_booking(
+            self.crm, client=tw.run(self.crm.client(cid)), model="Городской H10",
+            tariff=tw.run(self.crm.tariff(tid)), location=None, wanted_on=date.today()))
+        link = re.search(r'href="(/issue\?client=[^"]*booking=[^"]*)"',
+                         self.get_ok("/issue")).group(1).replace("&amp;", "&")
+        page = self.get_ok(link)
+        self.assertIn("№ B-1", page)
+        self.assertNotIn("Свободных велосипедов этой модели нет", page)

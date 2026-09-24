@@ -14,6 +14,30 @@ def is_service_chat(cfg: Any, chat_id: int | None) -> bool:
     return chat_id is not None and chat_id in {cfg.admin_chat_id, cfg.contract_chat_id}
 
 
+def ops_topic(cfg: Any, message: Any) -> str | None:
+    """Тема рабочей группы точек, в которой написано сообщение, или None.
+
+    fix - фиксация выдачи и замены, return - сдача, debt - проверка долга,
+    gps - поиск трекера, daily - итоги дня сервиса. Номер темы берётся из
+    самого сообщения, а у ответа внутри темы - ещё и из того, на что
+    ответили: так его отдаёт Telegram, так его читал и n8n.
+    """
+    chat_id = getattr(cfg, "ops_chat_id", None)
+    chat = getattr(message, "chat", None)
+    if not chat_id or chat is None or chat.id != chat_id:
+        return None
+    thread = getattr(message, "message_thread_id", None)
+    replied = getattr(message, "reply_to_message", None)
+    if thread is None and replied is not None:
+        thread = getattr(replied, "message_thread_id", None)
+    if thread is None:
+        return None
+    topics = {getattr(cfg, f"ops_topic_{kind}", None): kind
+              for kind in ("fix", "return", "debt", "gps", "daily")}
+    topics.pop(None, None)
+    return topics.get(thread)
+
+
 def is_operator(cfg: Any, user_id: int | None) -> bool:
     """Кто жмёт кнопки модерации и командует парком: ADMINS из .env."""
     return user_id is not None and user_id in cfg.admins

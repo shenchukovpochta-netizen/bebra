@@ -79,3 +79,21 @@ class TestClientCard(tw.WebCase):
 
 if __name__ == "__main__":                             # pragma: no cover
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestPaymentFormOnce(tw.WebCase):
+    def test_double_click_records_one_payment(self):
+        """Двойной клик по «Принять» - одна запись в журнале, а не две."""
+        import re
+        self.login()
+        self.seed()
+        page = self.get_ok(f"/clients/{self.client_id}")
+        key = re.search(r'name="once" value="([^"]+)"', page).group(1)
+        data = {"kind": "payment", "amount": "1500", "method": "cash", "note": "",
+                "once": key}
+        self.client.post(f"/clients/{self.client_id}/ledger", data=data)
+        self.client.post(f"/clients/{self.client_id}/ledger", data=data)
+        from decimal import Decimal
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), Decimal("1500"))
+        self.assertIn("повторное нажатие пропущено", self.get_ok(f"/clients/{self.client_id}"))

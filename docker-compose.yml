@@ -172,6 +172,14 @@ services:
       AVITO_CHAT_ID: ${AVITO_CHAT_ID:-}
       AVITO_POLL_SECONDS: ${AVITO_POLL_SECONDS:-60}
 
+      # Рабочая группа точек: формы в темах сверяются с CRM (бывший n8n).
+      OPS_CHAT_ID: ${OPS_CHAT_ID:-}
+      OPS_TOPIC_FIX: ${OPS_TOPIC_FIX:-}
+      OPS_TOPIC_RETURN: ${OPS_TOPIC_RETURN:-}
+      OPS_TOPIC_DEBT: ${OPS_TOPIC_DEBT:-}
+      OPS_TOPIC_GPS: ${OPS_TOPIC_GPS:-}
+      OPS_TOPIC_DAILY: ${OPS_TOPIC_DAILY:-}
+
       STORAGE_DIR: /files/kyc
       # Свои шаблоны документов и печать: их кладёт панель.
       DOC_TEMPLATE_DIR: /doctemplates

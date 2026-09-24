@@ -220,10 +220,36 @@ async def on_rental_closed(crm: Any, user: dict, *, today: date) -> None:
         # Через сервис, а не напрямую в базу: закрытие обязано вернуть и
         # батареи. Прямой вызов `crm.close_rental` оставлял их «у клиента»
         # навсегда - по две штуки на каждой аренде, закрытой из бота.
+        # Выкупленный велосипед в парк не возвращается: он теперь чужой.
+        bought = bool(user.get("buyout_signed_at"))
         await service.close_rental(crm, rental, closed_on=today, by="bot",
+                                   bike_status="sold" if bought else "available",
                                    note="Акт возврата подписан в боте")
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не закрыта", user.get("contract_no"))
+
+
+async def on_buyout_signed(crm: Any, user: dict, *, today: date) -> None:
+    """Акт выкупа подписан: велосипед - собственность клиента.
+
+    Бот после выкупа замолкает, а CRM без этого хука продолжала бы
+    аренду: начисляла периоды, слала «долг, сдайте велосипед», звала в
+    розыск и, закрыв аренду возвратом, выпускала бы проданный велосипед
+    в «свободные». Аккумуляторы и прочее оборудование в выкуп не входят
+    и по акту возвращены - поэтому батареи уходят в «свободна».
+    """
+    try:
+        client = await crm.client_by_tg(user["tg_id"])
+        if client is None:
+            return
+        rental = await crm.active_rental_of(client["id"])
+        if rental is None:
+            return
+        await service.close_rental(crm, rental, closed_on=today, by="bot",
+                                   bike_status="sold",
+                                   note="Выкуп: акт о переходе права собственности подписан")
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: выкуп по договору %s не отражён", user.get("contract_no"))
 
 
 async def card_flag(crm: Any, user: dict) -> tuple[str, str] | None:

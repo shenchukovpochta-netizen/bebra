@@ -1220,10 +1220,9 @@ async def credit_bank_txn(crm: Any, txn: dict, client: dict, *, by: str,
 
 async def ignore_bank_txn(crm: Any, txn: dict, *, by: str) -> None:
     """Платёж не наш: ремонт чужой техники, возврат поставщика, личное."""
-    if txn.get("status") == "matched":
+    if txn.get("status") == "matched" or not await crm.mark_bank_txn(
+            txn["id"], status="ignored", client_id=None, ledger_id=None, by=by):
         raise ServiceError("Поступление уже зачислено клиенту.")
-    await crm.mark_bank_txn(txn["id"], status="ignored", client_id=None,
-                            ledger_id=None, by=by)
 
 
 async def import_statement(crm: Any, rows: Iterable[dict]) -> dict:
@@ -1445,13 +1444,20 @@ async def check_pay_order(crm: Any, order: dict, *, acquiring: Any) -> str:
         await crm.touch_pay_order(order["id"])
         return str(order.get("status") or "")
     if state.get("state") == "paid":
-        await crm.mark_pay_paid(order["id"], method="card", by="эквайринг")
+        closed = await crm.mark_pay_paid(order["id"], method="card", by="эквайринг")
         await _remember_card(crm, order, state.get("card") or {})
-        return "paid"
-    if state.get("state") == "dead":
+        # «Оплачено» - только тому, кто счёт и закрыл: кнопка «Проверить
+        # оплату» в кабинете и минутный опрос спрашивают банк одновременно,
+        # и оба слали бы клиенту «зачислено», а команде - карточку.
+        # None - счёт закрыл кто-то раньше; 0 - закрыт сейчас, но это счёт
+        # за ремонт, и записи в журнале у него нет.
+        return "paid_before" if closed is None else "paid"
+    if state.get("state") == "dead" and order.get("status") in logic.PAY_OPEN:
         await crm.mark_pay_failed(
             order["id"], error=f"банк: {state.get('status') or 'оплата не прошла'}")
         return "failed"
+    # Закрытый у нас счёт, который банк ещё не оплатил, остаётся как был:
+    # «снял оператор» не должно превращаться в «отказ банка».
     await crm.touch_pay_order(order["id"])
     return str(order.get("status") or "")
 
@@ -1511,7 +1517,10 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
     if not cards:
         return {"charged": 0, "failed": 0, "pending": 0,
                 "skipped": "нет привязанных карт"}
-    due = logic.autocharge_due(await crm.active_rentals(), today=today, cards=cards)
+    busy = {int(o["client_id"]) for o in await crm.open_pay_orders(limit=1000)
+            if o.get("status") in logic.PAY_OPEN}
+    due = logic.autocharge_due(await crm.active_rentals(), today=today, cards=cards,
+                               busy=busy)
     charged = failed = pending = 0
     for item in due[:limit]:
         card = cards[item["client_id"]]

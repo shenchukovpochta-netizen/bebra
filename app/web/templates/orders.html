@@ -10,8 +10,9 @@
     <button type="submit">Показать</button>
   </form>
   {% if can_edit(staff, 'service') %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
-  <a class="btn ghost" href="/orders.xlsx?status={{ status }}&payer={{ payer }}">Excel</a>
-  <a class="btn ghost" href="/orders.csv?status={{ status }}&payer={{ payer }}">CSV</a>
+  {% set bike_q = '&bike=' ~ bike_filter.id if bike_filter else '' %}
+  <a class="btn ghost" href="/orders.xlsx?status={{ status }}&payer={{ payer }}{{ bike_q }}">Excel</a>
+  <a class="btn ghost" href="/orders.csv?status={{ status }}&payer={{ payer }}{{ bike_q }}">CSV</a>
 </div>
 {# «На согласовании» вынесено кнопкой: это самый дорогой статус - техника
    разобрана и ждёт, а в выпадающем списке его не видно. #}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Группа точек — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Группа точек</h1></div>
+
+{% if not rows and not kind and not bad %}
+<div class="card"><p class="muted">Сообщений из группы ещё нет. Бот читает её, когда в
+  <code>.env</code> задан <code>OPS_CHAT_ID</code>. Номера тем — <code>OPS_TOPIC_FIX</code>, <code>OPS_TOPIC_RETURN</code>,
+  <code>OPS_TOPIC_DEBT</code>, <code>OPS_TOPIC_GPS</code>, <code>OPS_TOPIC_DAILY</code>; бот должен
+  быть администратором группы, иначе Telegram не отдаёт ему сообщения.</p></div>
+{% endif %}
+
+<form method="get" class="search">
+  <select name="kind" onchange="this.form.submit()">
+    <option value="">все сообщения</option>
+    {% for code, title in OPS_KINDS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ title }}</option>{% endfor %}
+  </select>
+  <label><input type="checkbox" name="bad" value="1" {% if bad %}checked{% endif %} onchange="this.form.submit()"> только 👎</label>
+</form>
+
+<div class="card">
+<table>
+  <tr><th>Когда</th><th>Что</th><th></th><th>Велосипед</th><th>Клиент</th><th>Суть</th><th class="opt">Кто написал</th></tr>
+  {% for r in rows %}
+  <tr class="{% if not r.ok %}warn-row{% endif %}">
+    <td>{{ r.created_at|dmy }}</td>
+    <td>{{ OPS_KINDS.get(r.kind, r.kind) }}</td>
+    <td>{% if r.ok %}👍{% else %}👎{% endif %}</td>
+    <td>{% if r.bike_id %}<a href="/bikes/{{ r.bike_id }}">№ {{ r.bike_code }}</a>{% else %}—{% endif %}</td>
+    <td>{% if r.rental_id %}<a href="/rentals/{{ r.rental_id }}">{{ r.full_name or 'аренда' }}</a>{% else %}{{ r.full_name or '—' }}{% endif %}</td>
+    <td>{{ ops_report_summary(r) }}{% if r.note %}<br><span class="muted">{{ r.note }}</span>{% endif %}</td>
+    <td class="opt muted">{{ r.author or '' }}</td>
+  </tr>
+  {% if r.kind == 'daily' and r.data.parts %}
+  <tr><td></td><td colspan="6" class="muted">Детали: {{ r.data.parts|join(', ') }}</td></tr>
+  {% endif %}
+  {% else %}<tr><td colspan="7" class="muted">Сообщений из группы ещё не было.</td></tr>{% endfor %}
+</table>
+<p class="muted">Бот сверяет формы из тем группы с базой: 👍 — совпало, 👎 — нет, и в группе
+  ответом сказано, что именно. Денег отсюда в журнал не пишется: «оплатил 1 500» в группе —
+  слова, платёж проводят в карточке клиента или кассе.</p>
+</div>
+{% endblock %}

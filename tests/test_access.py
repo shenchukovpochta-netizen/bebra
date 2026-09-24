@@ -433,3 +433,44 @@ class TestAccessInPanel(tw.WebCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionHardening(tw.WebCase if tw.HAVE_WEB else unittest.TestCase):
+    """Сессия привязана к паролю, адрес возврата - только свой, и
+    страницы нельзя встроить в чужой сайт."""
+
+    def test_backslash_next_does_not_leave_the_panel(self):
+        for bad in ("/\\evil.example", "//evil.example", "https://evil.example",
+                    "/ok\\@evil.example"):
+            r = self.client.post("/login", data={"login": "admin",
+                                                 "password": "admin-pass-123",
+                                                 "next": bad})
+            self.assertEqual(r.headers["location"], "/", bad)
+            self.client.post("/logout")
+        r = self.client.post("/login", data={"login": "admin",
+                                             "password": "admin-pass-123",
+                                             "next": "/clients?q=1"})
+        self.assertEqual(r.headers["location"], "/clients?q=1")
+
+    def test_security_headers(self):
+        self.login()
+        r = self.client.get("/")
+        self.assertEqual(r.headers["x-frame-options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", r.headers["content-security-policy"])
+        self.assertEqual(r.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(r.headers["referrer-policy"], "same-origin")
+        self.assertNotIn("strict-transport-security", r.headers, "без домена https нет")
+        self.assertEqual(self.client.get("/login").headers["x-frame-options"], "DENY")
+
+    def test_password_change_ends_other_sessions(self):
+        from fastapi.testclient import TestClient
+        self.login()
+        other = TestClient(self.app, follow_redirects=False)
+        other.post("/login", data={"login": "admin", "password": "admin-pass-123"})
+        self.assertEqual(other.get("/").status_code, 200)
+        r = self.client.post("/me/password", data={"old": "admin-pass-123",
+                                                   "new": "new-pass-456789"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.client.get("/").status_code, 200, "своя сессия жива")
+        self.assertEqual(other.get("/").status_code, 303, "чужая выбита")
+        self.assertTrue(other.get("/").headers["location"].startswith("/login"))

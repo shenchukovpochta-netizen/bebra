@@ -336,3 +336,33 @@ class TestNoticePages(tw.WebCase):
 
 if __name__ == "__main__":                              # pragma: no cover
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
+class TestServiceInvite(tw.WebCase):
+    """Приглашение на ТО - не чаще срока из настройки. История отправок
+    живёт 30 дней, поэтому держаться только на ней нельзя."""
+
+    def setUp(self):
+        super().setUp()
+        self.seed()
+        self.rental_id = _run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id,
+            tariff_id=self.tariff_id, tariff_name="Неделя", period_days=7,
+            price=D(3000), billing="weekly", started_on=date(2026, 1, 1),
+            contract_no="АВ-1", created_by="тест"))
+        _run(self.crm.set_notice("maintenance_invite", enabled=True, at_hour=None,
+                                 by="тест", extra={"after_days": 60}))
+
+    def invite(self, today):
+        state = _run(notices.settings(self.crm))
+        return _run(billing.invite_to_service(self.crm, self.bot, state=state,
+                                              today=today))
+
+    def test_long_period_survives_the_log_purge(self):
+        self.assertEqual(self.invite(date(2026, 4, 1)), 1)
+        self.crm.rentals_[self.rental_id]["service_invited_at"] = datetime(
+            2026, 4, 1, 12, tzinfo=UTC)
+        _run(self.crm.purge_notice_log(0))            # история отправок пуста
+        self.assertEqual(self.invite(date(2026, 5, 2)), 0, "31 день из 60 - рано")
+        self.assertEqual(self.invite(date(2026, 6, 1)), 1, "прошло 60 дней")

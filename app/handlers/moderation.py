@@ -372,7 +372,7 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
     """
     parsed, err = logic.parse_issue_form(message.text or message.caption)
     if parsed is None:
-        await message.reply(err)
+        await message.reply(logic.esc(err))
         return
     tg_id = target["tg_id"]
     if logic.rental_is_active(target):
@@ -529,7 +529,7 @@ async def _extend_reply(message: Message, bot: Bot, db: Database, cfg: Config,
         return
     parsed, err = logic.parse_extend_form(message.text or message.caption)
     if parsed is None:
-        await message.reply(err)
+        await message.reply(logic.esc(err))
         return
     price = str(parsed["rent_price"])
     issue = dict(target.get("issue_data") or {})
@@ -655,7 +655,7 @@ async def _return_reply(message: Message, bot: Bot, db: Database,
     parsed, err = logic.parse_close_form(message.text or message.caption,
                                          reason=target.get("close_reason") or "")
     if parsed is None:
-        await message.reply(err)
+        await message.reply(logic.esc(err))
         return
     # Замечания для акта собираются из формы: акт говорит о состоянии
     # имущества, а причина сдачи и отзывы - это уже отчёт.

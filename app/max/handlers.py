@@ -109,11 +109,31 @@ async def _ask(ctx: Ctx, user_id: int, state: str,
 # ─────────────────────────── старт и оферта ───────────────────────────
 
 async def start(ctx: Ctx, user: dict) -> None:
+    """/start - те же ветки, что у Telegram-бота (`registration.cmd_start`).
+
+    Сброс на ФИО - только для того, кому продолжать нечего: заявка на
+    проверке, договор на подписи и отказ «с возвратом на шаг» свой шаг
+    сохраняют. Иначе человек проходил анкету заново, а у модератора
+    появлялась вторая карточка на того же клиента.
+    """
+    state = user["state"]
+    if state == logic.PENDING:
+        await _say(ctx, user["tg_id"], texts.PENDING_WAIT)
+        return
+    if state == logic.WAIT_SIGN:
+        # Меню здесь не работает (договор не подписан) - вернуть договор.
+        await st_wait_sign(ctx, user)
+        return
     if user["status"] == logic.ST_APPROVED:
-        if user["state"] == logic.WAIT_SUPPORT:
+        if state == logic.WAIT_SUPPORT:
             await ctx.db.patch(user["tg_id"], expected_state=logic.WAIT_SUPPORT,
                                state=logic.APPROVED)
         await _say(ctx, user["tg_id"], texts.ALREADY_REGISTERED, kb.main_menu())
+        return
+    if user["status"] == logic.ST_REJECTED and state in PROMPTS:
+        # Текст отказа обещает «/start, чтобы продолжить с этого места».
+        await _ask(ctx, user["tg_id"], state,
+                   ctx.vault.decrypt(user.get("anketa_enc")))
         return
     await ctx.db.patch(user["tg_id"], state=logic.WAIT_FIO)
     await _say(ctx, user["tg_id"], texts.WELCOME)
@@ -122,7 +142,7 @@ async def start(ctx: Ctx, user: dict) -> None:
 async def st_fio(ctx: Ctx, user: dict, text: str | None) -> None:
     result = logic.validate_fio(text)
     if not result.ok:
-        await _say(ctx, user["tg_id"], result.error)
+        await _say(ctx, user["tg_id"], logic.esc(result.error))
         return
     if not await ctx.db.patch(user["tg_id"], expected_state=logic.WAIT_FIO,
                               full_name=result.value, state=logic.WAIT_OFERTA):
@@ -228,7 +248,7 @@ async def st_anketa(ctx: Ctx, user: dict, text: str | None) -> None:
         result = step.validate(text)
 
     if not result.ok:
-        await _say(ctx, user["tg_id"], result.error)
+        await _say(ctx, user["tg_id"], logic.esc(result.error))
         return
 
     if step.state == logic.WAIT_PASSPORT_DATE and not logic.passport_date_consistent(
@@ -644,7 +664,7 @@ async def st_support(ctx: Ctx, user: dict, text: str | None) -> None:
         return
     question = logic.support_question(text)
     if not question.ok:
-        await _say(ctx, user["tg_id"], question.error)
+        await _say(ctx, user["tg_id"], logic.esc(question.error))
         return
     try:
         sent = await ctx.cl.send(
@@ -786,7 +806,7 @@ async def mod_reply(ctx: Ctx, moderator_id: int, chat_id: int,
     if asked is not None:
         answer = logic.support_answer(text)
         if not answer.ok:
-            await ctx.cl.send(chat_id=chat_id, text=answer.error)
+            await ctx.cl.send(chat_id=chat_id, text=logic.esc(answer.error))
             return
         try:
             await ctx.cl.send(user_id=dict(asked)["tg_id"],
@@ -815,7 +835,7 @@ async def mod_reply(ctx: Ctx, moderator_id: int, chat_id: int,
         return
     comment = logic.reject_comment(text)
     if not comment.ok:
-        await ctx.cl.send(chat_id=chat_id, text=comment.error)
+        await ctx.cl.send(chat_id=chat_id, text=logic.esc(comment.error))
         return
     if not await ctx.db.patch(target["tg_id"], expected_status=logic.ST_PENDING,
                               status=logic.ST_REJECTED, state=logic.WAIT_FIO,

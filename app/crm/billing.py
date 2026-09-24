@@ -209,6 +209,12 @@ async def invite_to_service(crm: Any, bot: Any, *, state: dict,
     for rental in await crm.active_rentals():
         if rental.get("client_id") in recent or not rental.get("tg_id"):
             continue
+        # История отправок чистится через 30 дней, а срок владелец ставит
+        # до года: без отметки на аренде при сроке 60 дней клиента звали
+        # бы каждый месяц.
+        invited = rental.get("service_invited_at")
+        if invited is not None and (today - logic.local_date(invited)).days < after:
+            continue
         started = rental.get("started_on")
         if started is None or (today - started).days < after:
             continue
@@ -218,6 +224,8 @@ async def invite_to_service(crm: Any, bot: Any, *, state: dict,
         ok = await notices.send_client(
             crm, "maintenance_invite", rental.get("client_id"),
             lambda r=rental: notify.maintenance_invite(bot, r))
+        # Как у просьбы об отзыве: отметка - про попытку, а не про удачу.
+        await crm.update_rental(rental["id"], service_invited_at=datetime.now(UTC))
         sent += int(ok)
     return sent
 

@@ -19,6 +19,7 @@
     <dt>Где</dt><dd>{% if tracker.map %}<a href="{{ tracker.map }}" target="_blank" rel="noopener">{{ '%.5f'|format(tracker.lat) }}, {{ '%.5f'|format(tracker.lon) }}</a>{% else %}координат нет{% endif %}</dd>
     <dt>Накатано по треку</dt><dd>{{ run_km }} км <span class="muted">за {{ track|length }} точек журнала</span></dd>
     <dt>Период</dt><dd>{{ track_since|dmy }} — {{ track_until|dmy }}</dd>
+    <dt>SIM</dt><dd>{{ tracker.phone or '—' }}</dd>
     <dt>Заметка</dt><dd>{{ tracker.note or '—' }}</dd>
   </dl>
   {% if can_edit(staff, 'trackers') %}
@@ -27,6 +28,10 @@
       {% for b in free_bikes %}<option value="{{ b.id }}" {% if tracker.bike_id == b.id %}selected{% endif %}>№ {{ b.code }} {{ b.model }}</option>{% endfor %}
     </select>
     <button type="submit">Привязать</button>
+  </form>
+  <form method="post" action="/trackers/{{ tracker.id }}/phone" class="inline-form">
+    <input name="phone" value="{{ tracker.phone or '' }}" placeholder="номер SIM трекера" maxlength="32">
+    <button type="submit" class="ghost">Сохранить SIM</button>
   </form>
   <form method="post" action="/trackers/{{ tracker.id }}/toggle" class="inline-form">
     <button type="submit" class="ghost">{{ 'Снять с наблюдения' if tracker.active else 'Вернуть под наблюдение' }}</button>

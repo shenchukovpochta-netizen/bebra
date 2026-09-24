@@ -583,7 +583,8 @@ class TestBooking(CabinetCase):
         self.assertEqual(sorted(self.labels()[:2]), ["Адоратского", "Павлюхина"])
         await self.feed(cb(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc2}"))
         self.assertTrue(self.labels()[0].startswith("Сегодня"))
-        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc2}:1"))
+        tomorrow = (date.today() + timedelta(days=1)).strftime("%Y%m%d")
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc2}:{tomorrow}"))
         booking = await self.crm.open_booking_of(self.client["id"])
         self.assertIsNotNone(booking)
         self.assertEqual(booking["model"], "Kugoo V3")
@@ -609,9 +610,11 @@ class TestBooking(CabinetCase):
         await self.crm.update_location(self.loc2, active=False)
         await self.feed(cb(f"cab:book:t:{self.model_id}:{self.tariff_id}"))
         self.assertTrue(self.labels()[0].startswith("Сегодня"), self.labels())
-        self.assertIn(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:0",
+        today = date.today().strftime("%Y%m%d")
+        self.assertIn(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:{today}",
                       self.callbacks())
-        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:7"))
+        week = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:{week}"))
         self.assertIsNone(await self.crm.open_booking_of(self.client["id"]),
                           "неделя вперёд - кнопка чужая")
         await self.feed(cb("cab:book:m:999"))

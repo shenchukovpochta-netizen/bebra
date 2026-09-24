@@ -649,8 +649,9 @@ async def _book_tariffs(crm: Any, model: dict) -> list[dict]:
 
 def _when_rows(lang: str, tail: str, *, today: date) -> list[tuple[str, str]]:
     keys = ("CAB_BOOK_TODAY", "CAB_BOOK_TOMORROW", "CAB_BOOK_DAY2")
-    return [(i18n.t(lang, key).format(date=(today + timedelta(days=n)).strftime("%d.%m")),
-             f"cab:book:d:{tail}:{n}") for n, key in enumerate(keys)]
+    days = [today + timedelta(days=n) for n in range(len(keys))]
+    return [(i18n.t(lang, key).format(date=day.strftime("%d.%m")),
+             f"cab:book:d:{tail}:{day:%Y%m%d}") for day, key in zip(days, keys, strict=True)]
 
 
 @router.callback_query(F.data == "cab:book")
@@ -758,10 +759,10 @@ async def cb_book_when(callback: CallbackQuery, bot: Bot, cfg: Config, user: dic
     if client is None:
         return
     lang = i18n.user_lang(user)
-    _, _, _, model_id, tariff_id, loc_id, offset = str(callback.data).split(":")
+    _, _, _, model_id, tariff_id, loc_id, day = str(callback.data).split(":")
     model = await _book_model(crm, int(model_id))
     tariff = await crm.tariff(int(tariff_id))
-    wanted = crm_logic.booking_when(offset, today=date.today())
+    wanted = crm_logic.booking_when(day, today=date.today())
     if model is None or tariff is None or wanted is None:
         await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
         return
@@ -940,7 +941,7 @@ async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
     а чужой наряд отменить или согласовать клиент не должен.
     """
     parts = str(callback.data or "").split(":")
-    if crm is None or len(parts) != 3 or not parts[2].isdigit():
+    if crm is None or len(parts) not in (3, 4) or not parts[2].isdigit():
         await callback.answer()
         return
     agree = parts[1] == "ok"
@@ -952,6 +953,13 @@ async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
         return
     if order.get("status") != "approve":
         await callback.answer("По этому наряду уже решили", show_alert=True)
+        return
+    # Кнопка под старой сметой: сумма в ней не та, что сейчас в наряде.
+    # Кнопки без суммы (до этой правки) тоже не принимаются - по ним не
+    # понять, какую смету человек видел.
+    if len(parts) != 4 or parts[3] != str(crm_logic.cents(order.get("estimate"))):
+        await callback.answer("Смета изменилась. Ответьте на последнее сообщение "
+                              "со сметой или позвоните менеджеру.", show_alert=True)
         return
     try:
         await service.answer_estimate(crm, order, agree=agree, by="клиент")
@@ -998,8 +1006,10 @@ async def cb_review(callback: CallbackQuery, bot: Bot, user: dict,
     settings = crm_logic.bonus_settings(await crm.settings())
     links = crm_logic.review_links(await crm.settings())
     if not links:
+        # Клавиатура кабинета - та же, что на главном экране: с арендой
+        # это «продлю / сдаю», а не «забронировать велосипед».
         await bot.send_message(user["tg_id"], texts.CAB_REVIEW_NONE,
-                               reply_markup=kb.cabinet(lang))
+                               reply_markup=await home_markup(crm, client, lang))
         return
     bonus = crm_logic.to_money(settings["review_bonus"])
     tail = (f"\n\nЗа опубликованный отзыв начислим "

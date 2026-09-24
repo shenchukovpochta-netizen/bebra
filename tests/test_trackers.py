@@ -377,6 +377,26 @@ class TestTrackingPoll(tw.WebCase):
         out = self.poll([self.device(speed=25.0)])
         self.assertEqual(out["alerts"], [])
 
+    def test_unwatched_tracker_loses_its_alerts(self):
+        """Снятый с наблюдения трекер в круг не входит - его тревоги
+        закрывает опрос, а не висят они вечно."""
+        self.poll([self.device()])
+        tracker_row = tw.run(self.crm.tracker_by_device("1001"))
+        self.poll([self.device(alarm=True)])
+        self.assertEqual(len(tw.run(self.crm.tracker_alerts())), 1)
+        tw.run(self.crm.update_tracker(tracker_row["id"], active=False))
+        self.poll([self.device(alarm=True)])
+        self.assertEqual(tw.run(self.crm.tracker_alerts()), [])
+
+    def test_moving_threshold_from_the_panel_marks_the_ride(self):
+        """«Ехал» ставится по порогу из панели, а не по зашитым 5 км/ч."""
+        tw.run(self.crm.set_setting("tracker_moving_speed", "20", by="t"))
+        self.poll([self.device(speed=10.0)])
+        tracker_row = tw.run(self.crm.tracker_by_device("1001"))
+        self.assertIsNone(tracker_row.get("moved_at"), "10 км/ч при пороге 20 - стоит")
+        self.poll([self.device(speed=25.0, recorded_at=datetime.now(UTC))])
+        self.assertIsNotNone(tw.run(self.crm.tracker_by_device("1001")).get("moved_at"))
+
     def test_digest_goes_to_the_service_chat(self):
         self.poll([self.device()])
         out = self.poll([self.device(alarm=True)])

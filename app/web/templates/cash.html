@@ -3,7 +3,7 @@
 {% block content %}
 <div class="bar"><h1>Касса</h1>{% include "_cash_tabs.html" %}</div>
 
-{% if current %}
+{% for o in opened %}{% set current = o.shift %}{% set state = o.state %}
 <section class="card">
   <h2>Открыта смена {{ current.no }}{% if current.location %} · {{ current.location }}{% endif %}</h2>
   <div class="tiles">
@@ -17,11 +17,12 @@
   <p><a class="btn" href="/cash/{{ current.id }}">Открыть смену</a>
     <span class="muted">Открыл {{ current.opened_by or '' }} · {{ current.opened_at|dmy }} · размен {{ money(current.opening) }}</span></p>
 </section>
-{% elif can_edit(staff, 'cash') %}
+{% endfor %}
+{% if can_open and can_edit(staff, 'cash') %}
 <section class="card narrow">
-  <h2>Открыть смену</h2>
+  <h2>Открыть смену{% if opened %} на другой точке{% endif %}</h2>
   <form method="post" action="/cash" class="grid2">
-    <label>Точка <select name="location"><option value="">не указана</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Точка <select name="location">{% if not opened or not locations %}<option value="">не указана</option>{% endif %}{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
     <label>Размен в ящике, ₽ <input name="opening" inputmode="decimal" value="0"></label>
     <label class="wide">Заметка <input name="note" placeholder="кто на точке, чем разменялись"></label>
     <button type="submit">Открыть</button>

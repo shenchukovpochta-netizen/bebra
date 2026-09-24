@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -114,7 +115,15 @@ def parse_device(raw: dict) -> dict:
         "alarm": _alarm(raw),
         # У StarLine 1 - на связи, 2 - нет; bool(2) выдал бы «на связи».
         "online": status == 1 if status is not None else None,
+        # Номер SIM трекера: по нему звонят, когда трекер молчит. Есть не
+        # у всех устройств - пустой не затирает вписанный руками.
+        "phone": _phone(raw.get("phone")),
     }
+
+
+def _phone(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text[:32] if re.search(r"\d{5}", re.sub(r"\D", "", text)) else None
 
 
 # Координаты ближе к нулю - не место, а «спутников нет».

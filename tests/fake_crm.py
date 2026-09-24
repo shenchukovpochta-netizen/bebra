@@ -70,6 +70,7 @@ class FakeCrm:
         self.positions_: list[dict] = []
         self.alerts_: dict[int, dict] = {}
         self.settings_: dict[str, str] = {}
+        self.ops_: dict[int, dict] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
@@ -367,6 +368,16 @@ class FakeCrm:
     async def bike_by_code(self, code):
         return next((dict(b) for b in self.bikes_.values() if b["code"] == code), None)
 
+    async def bike_by_vin(self, raw):
+        key = crm_logic.vin_key(raw)
+        if len(key) < crm_logic.VIN_MIN:
+            return None
+        for field in ("motor_no", "frame_no", "code"):
+            for b in sorted(self.bikes_.values(), key=lambda b: b["id"]):
+                if crm_logic.vin_key(b.get(field)) == key:
+                    return dict(b)
+        return None
+
     async def create_bike(self, *, by=None, **fields):
         if any(b["code"] == fields.get("code") for b in self.bikes_.values()):
             raise UniqueError("code")
@@ -569,6 +580,20 @@ class FakeCrm:
     async def active_rental_of(self, client_id):
         r = self._active(client_id)
         return self._rental_row(r) if r else None
+
+    async def active_rental_of_bike(self, bike_id):
+        r = next((r for r in self.rentals_.values()
+                  if r["bike_id"] == bike_id and r["status"] == "active"), None)
+        return self._rental_row(r) if r else None
+
+    async def last_rental_of_bike(self, bike_id):
+        rows = [r for r in self.rentals_.values() if r["bike_id"] == bike_id]
+        return self._rental_row(max(rows, key=lambda r: r["id"])) if rows else None
+
+    async def flagged_clients(self):
+        return [{k: c.get(k) for k in ("id", "full_name", "phone", "phone2", "phone3",
+                                       "status", "note")}
+                for c in self.clients_.values() if c.get("status") != "active"]
 
     async def active_rentals(self):
         return [self._rental_row(r) for r in self.rentals_.values() if r["status"] == "active"]
@@ -966,7 +991,7 @@ class FakeCrm:
     async def delete_order_item(self, order_id, item_id, *, by=None):
         gone = next((i for i in self.order_items_
                      if i["id"] == item_id and i["order_id"] == order_id), None)
-        if gone is None:
+        if gone is None or not crm_logic.order_is_open(self.orders_.get(order_id)):
             return False
         self.order_items_ = [i for i in self.order_items_ if i is not gone]
         move = next((m for m in self.part_moves_
@@ -2260,6 +2285,10 @@ class FakeCrm:
         shift = self.shifts_.get(shift_id)
         return dict(shift) if shift else None
 
+    async def open_shifts(self):
+        return sorted((dict(x) for x in self.shifts_.values() if x["status"] == "open"),
+                      key=lambda x: x["opened_at"])
+
     async def open_shift(self):
         rows = [dict(x) for x in self.shifts_.values() if x["status"] == "open"]
         return sorted(rows, key=lambda s: s["opened_at"])[0] if rows else None
@@ -2377,9 +2406,11 @@ class FakeCrm:
     async def mark_bank_txn(self, txn_id, *, status, client_id=None,
                             ledger_id=None, by):
         txn = self.bank_.get(txn_id)
-        if txn is not None:
-            txn.update(status=status, client_id=client_id, ledger_id=ledger_id,
-                       handled_at=self._now(), handled_by=by)
+        if txn is None or txn["status"] == "matched":
+            return False
+        txn.update(status=status, client_id=client_id, ledger_id=ledger_id,
+                   handled_at=self._now(), handled_by=by)
+        return True
 
     async def credit_bank_txn(self, txn_id, *, client_id, amount, method, note,
                               created_by):
@@ -2444,7 +2475,7 @@ class FakeCrm:
             "active": True, "last_seen": None, "lat": None, "lon": None,
             "speed": None, "course": None, "voltage": None, "gsm_level": None,
             "alarm": False, "note": None, "blocked": False, "blocked_at": None,
-            "blocked_by": None, "created_at": self._now(),
+            "blocked_by": None, "phone": None, "created_at": self._now(),
             "updated_at": self._now(), **fields}
         return tracker_id
 
@@ -2457,7 +2488,7 @@ class FakeCrm:
             self.trackers_[tracker_id].update(fields)
             self.trackers_[tracker_id]["updated_at"] = self._now()
 
-    async def save_tracker_state(self, device):
+    async def save_tracker_state(self, device, *, moving_speed=None):
         tracker = next((t for t in self.trackers_.values()
                         if t["device_id"] == device["device_id"]), None)
         created = tracker is None
@@ -2465,7 +2496,7 @@ class FakeCrm:
             tracker_id = await self.create_tracker(device_id=device["device_id"],
                                                    alias=device.get("alias"))
             tracker = self.trackers_[tracker_id]
-        for key in ("alias", "lat", "lon", "voltage"):
+        for key in ("alias", "lat", "lon", "voltage", "phone"):
             if device.get(key) is not None:
                 tracker[key] = device[key]
         if crm_logic.tracker_seen_at(device) is not None:
@@ -2477,7 +2508,8 @@ class FakeCrm:
         tracker["voltage"] = _num(tracker.get("voltage"))
         # Отметка «ехал» не сбрасывается, когда велосипед остановился:
         # она и нужна, чтобы считать, сколько он уже стоит.
-        if (_num(device.get("speed") or 0) >= crm_logic.TRACKER_MOVING_SPEED
+        if (_num(device.get("speed") or 0)
+                >= _num(moving_speed or crm_logic.TRACKER_MOVING_SPEED)
                 and device.get("recorded_at") is not None):
             tracker["moved_at"] = device["recorded_at"]
         tracker["updated_at"] = self._now()
@@ -2647,7 +2679,7 @@ class FakeCrm:
                 work["paid_at"] = self._now()
             order.update(status="paid", paid_at=self._now(),
                          checked_at=self._now(), error=None)
-            return None
+            return 0
         ledger_id = await self.add_ledger(
             client_id=order["client_id"], rental_id=order["rental_id"],
             kind="payment", amount=order["amount"], method=method,
@@ -2692,8 +2724,19 @@ class FakeCrm:
         return rows[:limit]
 
     async def open_pay_orders(self, limit=200):
+        now = self._now()
+
+        def recheck(o):
+            if o["status"] not in ("failed", "cancelled") or o.get("ledger_id"):
+                return False
+            if o["created_at"] <= now - timedelta(days=crm_logic.PAY_RECHECK_DAYS):
+                return False
+            checked = o.get("checked_at")
+            return checked is None or checked < now - timedelta(
+                minutes=crm_logic.PAY_RECHECK_MINUTES)
+
         rows = [self._pay_row(o) for o in self.pay_orders_.values()
-                if o["status"] in ("new", "sent") and o["operation_id"]]
+                if o["operation_id"] and (o["status"] in ("new", "sent") or recheck(o))]
         rows.sort(key=lambda o: o["id"])
         return rows[:limit]
 
@@ -3054,6 +3097,38 @@ class FakeCrm:
                 and since <= x["recorded_at"] < until]
         rows.sort(key=lambda x: x["recorded_at"])
         return rows[:limit]
+
+    # ────────── операционная группа ──────────
+
+    async def save_ops_report(self, *, kind, chat_id, message_id, thread_id, author_tg,
+                              author, bike_id, rental_id, client_id, data, ok, note):
+        row = next((o for o in self.ops_.values()
+                    if o["chat_id"] == chat_id and o["message_id"] == message_id), None)
+        fields = {"kind": kind, "bike_id": bike_id, "rental_id": rental_id,
+                  "client_id": client_id, "data": dict(data), "ok": ok, "note": note}
+        if row is not None:
+            row.update(fields)
+            return row["id"]
+        oid = self._id()
+        self.ops_[oid] = {"id": oid, "chat_id": chat_id, "message_id": message_id,
+                          "thread_id": thread_id, "author_tg": author_tg,
+                          "author": author, "created_at": self._now(), **fields}
+        return oid
+
+    def _ops_row(self, o):
+        b = self.bikes_.get(o["bike_id"]) if o.get("bike_id") else None
+        c = self.clients_.get(o["client_id"]) if o.get("client_id") else None
+        return {**o, "bike_code": b["code"] if b else None,
+                "full_name": c["full_name"] if c else None}
+
+    async def ops_reports(self, *, kind=None, ok=None, limit=300):
+        rows = [self._ops_row(o) for o in self.ops_.values()
+                if (not kind or o["kind"] == kind) and (ok is None or o["ok"] == ok)]
+        return sorted(rows, key=lambda o: (o["created_at"], o["id"]), reverse=True)[:limit]
+
+    async def ops_reports_of_rental(self, rental_id):
+        rows = [self._ops_row(o) for o in self.ops_.values() if o["rental_id"] == rental_id]
+        return sorted(rows, key=lambda o: (o["created_at"], o["id"]))
 
     async def part_last_moved(self):
         out = {}

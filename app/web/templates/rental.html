@@ -42,6 +42,7 @@
   <form method="post" action="/clients/{{ rental.client_id }}/ledger" class="grid2">
     <input type="hidden" name="kind" value="payment">
     <input type="hidden" name="next" value="/rentals/{{ rental.id }}">
+    <input type="hidden" name="once" value="{{ once() }}">
     <label>Сумма, ₽ <input name="amount" inputmode="decimal" value="{{ summary.due if summary.due else '' }}" required></label>
     <label>Способ <select name="method">{% for code, label in METHODS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
     <label class="wide">Заметка <input name="note" placeholder="необязательно"></label>
@@ -178,6 +179,20 @@
     {% endfor %}
   </table>
   <p class="muted">За всю аренду накатано <b>{{ total_km }} км</b> по всем велосипедам вместе: после замены одометр нового считается со своего начала.</p>
+</section>
+{% endif %}
+{% if ops %}
+<section class="card">
+  <h2>Группа точек</h2>
+  <table>
+    <tr><th>Когда</th><th>Что</th><th></th><th>Суть</th><th class="opt">Кто написал</th></tr>
+    {% for r in ops %}
+    <tr class="{% if not r.ok %}warn-row{% endif %}"><td>{{ r.created_at|dmy }}</td>
+      <td>{{ OPS_KINDS.get(r.kind, r.kind) }}</td><td>{% if r.ok %}👍{% else %}👎{% endif %}</td>
+      <td>{{ ops_report_summary(r) }}{% if r.note %}<br><span class="muted">{{ r.note }}</span>{% endif %}</td>
+      <td class="opt muted">{{ r.author or '' }}</td></tr>
+    {% endfor %}
+  </table>
 </section>
 {% endif %}
 {% if money_ok %}

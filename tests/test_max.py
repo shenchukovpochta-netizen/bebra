@@ -193,3 +193,61 @@ class TestMaxConfig(unittest.TestCase):
                 else:
                     os.environ[key] = value
         self.assertFalse(cfg.oferta_url)
+
+
+class _FakeMax:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *, user_id=None, chat_id=None, text, keyboard=None,
+                   attachments=None, fmt="html", reply_to_mid=None):
+        self.sent.append({"to": user_id or chat_id, "text": text, "kb": keyboard})
+        return {"message": {"body": {"mid": f"mid.{len(self.sent)}"}}}
+
+    async def answer_callback(self, cid, notification=None):
+        self.sent.append({"to": "cb", "text": notification})
+
+    async def upload_file(self, name, data):
+        return {"type": "file", "payload": {"token": "f"}}
+
+
+class TestMaxStart(unittest.IsolatedAsyncioTestCase):
+    """/start в MAX - те же ветки, что в Telegram: отказ продолжается с
+    шага, заявка на проверке не заполняется заново, договор на подписи
+    приходит снова, а не меню, кнопки которого не работают."""
+
+    async def asyncSetUp(self):
+        from app.max.handlers import Ctx
+        from app.services.crypto import Vault
+        from tests import test_flow as tf
+        self.cfg = tf.make_config()
+        self.db = tf.FakeDB()
+        self.cl = _FakeMax()
+        self.ctx = Ctx(self.cl, self.db, self.cfg, Vault.from_raw(self.cfg.pdn_key), crm=None)
+
+    def user(self, **over):
+        row = {"tg_id": 42, "username": "u", "state": logic.WAIT_FIO,
+               "status": logic.ST_NEW, "anketa_enc": None, "full_name": "Иванов Иван"}
+        row.update(over)
+        self.db.users[42] = row
+        return row
+
+    async def start(self, user):
+        from app.max import handlers
+        await handlers.start(self.ctx, user)
+        return self.db.users[42]["state"], self.cl.sent[-1]["text"]
+
+    async def test_rejected_continues_from_its_step(self):
+        state, text = await self.start(self.user(state=logic.WAIT_REG_ADDR,
+                                                 status=logic.ST_REJECTED))
+        self.assertEqual(state, logic.WAIT_REG_ADDR)
+        self.assertIn("Адрес регистрации", text)
+
+    async def test_pending_is_not_reset(self):
+        state, _ = await self.start(self.user(state=logic.PENDING,
+                                              status=logic.ST_PENDING))
+        self.assertEqual(state, logic.PENDING)
+
+    async def test_new_user_starts_over(self):
+        state, _ = await self.start(self.user(state=logic.NEW, status=logic.ST_NEW))
+        self.assertEqual(state, logic.WAIT_FIO)

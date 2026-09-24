@@ -394,6 +394,74 @@ class TestPayFlow(tw.WebCase):
         self.assertEqual(result["expired"], 1)
         self.assertEqual(_run(self.crm.pay_order(order["id"]))["status"], "failed")
 
+    def test_link_paid_just_before_expiry_is_not_lost(self):
+        """Банк спрашивают до часов: оплата в 23:59 первых суток, увиденная
+        опросом после суток, ложится в журнал, а не в «просрочено»."""
+        acq = FakeAcquiring(answers=[{"state": "paid", "status": "APPROVED", "card": {}}])
+        order = self.order(acquiring=acq)
+        self.crm.pay_orders_[order["id"]]["created_at"] = (
+            datetime.now(UTC) - timedelta(hours=24, minutes=1))
+        result = _run(paying.poll_once(self.crm, acq))
+        self.assertEqual(result["expired"], 0)
+        self.assertEqual([o["id"] for o in result["paid"]], [order["id"]])
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(3000))
+
+    def test_closed_link_paid_later_still_lands(self):
+        """Снятый оператором счёт банк ещё принимает - опрос его не бросает."""
+        acq = FakeAcquiring()
+        order = self.order(acquiring=acq)
+        _run(service.cancel_pay_order(self.crm, _run(self.crm.pay_order(order["id"])),
+                                      by="оператор"))
+        self.crm.pay_orders_[order["id"]]["checked_at"] = None
+        acq.answers = [{"state": "dead", "status": "EXPIRED"}]
+        _run(paying.poll_once(self.crm, acq))
+        closed = _run(self.crm.pay_order(order["id"]))
+        self.assertEqual(closed["status"], "cancelled", "«снял оператор» остаётся как было")
+        self.crm.pay_orders_[order["id"]]["checked_at"] = None
+        acq.answers = [{"state": "paid", "status": "APPROVED", "card": {}}]
+        result = _run(paying.poll_once(self.crm, acq))
+        self.assertEqual([o["id"] for o in result["paid"]], [order["id"]])
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(3000))
+        # Перепроверка - не чаще раза в полчаса: минутный опрос банк не долбит.
+        calls = len(acq.calls)
+        second = self.order(acquiring=FakeAcquiring(operation_id="op-2"))
+        _run(service.cancel_pay_order(self.crm, _run(self.crm.pay_order(second["id"])),
+                                      by="оператор"))
+        _run(paying.poll_once(self.crm, acq))
+        self.assertEqual(len([c for c in acq.calls[calls:] if c[0] == "status"]), 0)
+
+    def test_two_checks_at_once_report_the_payment_once(self):
+        """«Проверить оплату» в кабинете и минутный опрос спросили банк
+        одновременно: «оплачено» - только у того, кто закрыл счёт."""
+        acq = FakeAcquiring()
+        order = self.order(acquiring=acq)
+        snapshot = _run(self.crm.pay_order(order["id"]))
+        acq.answers = [{"state": "paid", "status": "APPROVED", "card": {}},
+                       {"state": "paid", "status": "APPROVED", "card": {}}]
+        first = _run(service.check_pay_order(self.crm, snapshot, acquiring=acq))
+        second = _run(service.check_pay_order(self.crm, snapshot, acquiring=acq))
+        self.assertEqual((first, second), ("paid", "paid_before"))
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(3000))
+
+    def test_link_lifetime_matches_the_bank(self):
+        self.assertEqual(tochka.PAY_LINK_MINUTES, logic.PAY_LINK_HOURS * 60)
+
+    def test_autocharge_waits_for_the_pending_one(self):
+        """Вчерашнее списание банк не подтвердил - второе не делается: долг
+        в журнале прежний, и с карты ушло бы вдвое."""
+        _run(self.crm.set_setting("autocharge", "1", by="тест"))
+        _run(self.crm.save_card_token(client_id=self.client_id, token="tk"))
+        rental_id = self.rent()
+        _run(self.crm.add_ledger(client_id=self.client_id, rental_id=rental_id,
+                                 kind="charge", amount=D(-3000)))
+        acq = FakeAcquiring(charge={"state": "pending", "operation_id": "op-9"})
+        _run(service.autocharge_once(self.crm, acquiring=acq, today=date(2026, 9, 8)))
+        _run(service.autocharge_once(self.crm, acquiring=acq, today=date(2026, 9, 9)))
+        self.assertEqual(len([c for c in acq.calls if c[0] == "charge"]), 1)
+        self.assertEqual(logic.autocharge_due(
+            [{"status": "active", "client_id": 1, "balance": D(-5)}],
+            cards={1: {"token": "t"}}, busy=[1]), [])
+
     def test_autocharge_is_off_until_switched_on(self):
         acq = FakeAcquiring(charge={"state": "paid", "status": "APPROVED"})
         got = _run(service.autocharge_once(self.crm, acquiring=acq))

@@ -385,6 +385,40 @@ class TestEstimateFromBot(tw.WebCase):
         self.assertEqual(_run(self.crm.work_order(self.order_id))["approved_by"],
                          "клиент")
 
+    def press(self, data):
+        import types
+
+        from app.handlers import cabinet
+        from tests.test_flow import make_config
+        answered = []
+
+        async def answer(text=None, show_alert=False):
+            answered.append(text)
+        cb = types.SimpleNamespace(data=data, answer=answer)
+        _run(cabinet.cb_estimate(cb, self.bot, make_config(),
+                                 {"tg_id": 5001, "lang": None}, crm=self.crm))
+        return answered
+
+    def test_button_under_an_old_estimate_does_not_approve_the_new_one(self):
+        """Смету переслали с новой строкой: «Согласен» под старым сообщением
+        на 1 500 ₽ не согласует новые 10 500 ₽."""
+        old = f"est:ok:{self.order_id}:{logic.cents(D(1500))}"
+        _run(self.crm.add_order_item(
+            self.order_id, title="Мотор-колесо", node="motor_wheel",
+            work_type_id=None, qty=1, price=D(9000), parts_cost=D(0),
+            labor_cost=D(0), note=None))
+        _run(service.send_estimate(self.crm, _run(self.crm.work_order(self.order_id)),
+                                   by="оператор", bot=self.bot))
+        answered = self.press(old)
+        self.assertIn("Смета изменилась", answered[0])
+        self.assertEqual(_run(self.crm.work_order(self.order_id))["status"], "approve")
+        self.assertIn("Смета изменилась", self.press(f"est:ok:{self.order_id}")[0],
+                      "кнопка без суммы - не видно, какую смету видел клиент")
+        self.press(f"est:ok:{self.order_id}:{logic.cents(D(10500))}")
+        order = _run(self.crm.work_order(self.order_id))
+        self.assertEqual((order["approved_by"], order["estimate"]),
+                         ("клиент", D("10500.00")))
+
 
 if __name__ == "__main__":                              # pragma: no cover
     unittest.main()

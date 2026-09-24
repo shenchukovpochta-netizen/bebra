@@ -61,7 +61,8 @@ PROMO_FIELDS = frozenset({
 })
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
-                            "alarm", "note", "blocked", "blocked_at", "blocked_by"})
+                            "alarm", "note", "blocked", "blocked_at", "blocked_by",
+                            "phone"})
 SUPPLIER_FIELDS = frozenset({"name", "phone", "note", "active"})
 PART_FIELDS = frozenset({"title", "node", "unit", "cost", "price", "min_stock",
                          "model", "active", "note"})
@@ -81,7 +82,7 @@ RENTAL_FIELDS = frozenset({
     "tariff_id", "tariff_name", "period_days", "price", "base_price", "billing",
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
     "intent", "intent_until", "intent_by", "intent_at", "snooze_until",
-    "mileage_start", "mileage_end", "review_asked_at",
+    "mileage_start", "mileage_end", "review_asked_at", "service_invited_at",
 })
 
 
@@ -112,6 +113,16 @@ def _set_clause(fields: dict[str, Any], allowed: frozenset[str],
     cols = list(fields)
     sets = [f"{col} = ${i}" for i, col in enumerate(cols, start=start)]
     return ", ".join(sets), [fields[c] for c in cols]
+
+
+def _vin_sql(column: str) -> str:
+    """Номер рамы или мотора для сравнения - то же, что `logic.vin_key`:
+    кириллица-двойник в латиницу, верхний регистр, только буквы и цифры.
+    Нижний регистр кириллицы переводится явно: upper() в локали C её не
+    трогает."""
+    return (f"regexp_replace(translate(upper(coalesce({column}, '')), "
+            f"'{logic.VIN_LOOKALIKE_FROM}', '{logic.VIN_LOOKALIKE_TO}'), "
+            "'[^0-9A-Z]', '', 'g')")
 
 
 class CrmDB:
@@ -294,6 +305,26 @@ class CrmDB:
     async def bike_by_code(self, code: str) -> dict | None:
         return _row(await self.pool.fetchrow(
             "select * from crm.bikes where code = $1", code))
+
+    async def bike_by_vin(self, raw: str) -> dict | None:
+        """Велосипед по номеру из сообщения: мотор, потом рама, потом код.
+
+        Мотор первым - по нему точки ищут велосипед («ВИН КОЛЕСА» в старой
+        таблице). Совпадение по нормализованному номеру: «60v240w 123»
+        с телефона и «60V240W123» из накладной - один номер.
+        """
+        key = logic.vin_key(raw)
+        if len(key) < logic.VIN_MIN:
+            return None
+        return _row(await self.pool.fetchrow(
+            f"""
+            select * from crm.bikes
+             where {_vin_sql('motor_no')} = $1 or {_vin_sql('frame_no')} = $1
+                or {_vin_sql('code')} = $1
+             order by ({_vin_sql('motor_no')} = $1) desc,
+                      ({_vin_sql('frame_no')} = $1) desc, id
+             limit 1
+            """, key))
 
     async def create_bike(self, *, by: str | None = None, **fields: Any) -> int:
         unknown = set(fields) - BIKE_FIELDS
@@ -622,6 +653,24 @@ class CrmDB:
         return _row(await self.pool.fetchrow(
             f"{self._RENTAL_SELECT} where r.client_id = $1 and r.status = 'active'",
             client_id))
+
+    async def active_rental_of_bike(self, bike_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._RENTAL_SELECT} where r.bike_id = $1 and r.status = 'active'",
+            bike_id))
+
+    async def last_rental_of_bike(self, bike_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._RENTAL_SELECT} where r.bike_id = $1 order by r.id desc limit 1",
+            bike_id))
+
+    async def flagged_clients(self) -> list[dict]:
+        """Карточки с закрытым статусом - стоп-лист для сверки выдачи.
+        Их единицы, поэтому сравнение идёт в Python: lower() кириллицы
+        в базе зависит от локали, а нормализация ФИО - от `logic`."""
+        return _rows(await self.pool.fetch(
+            "select id, full_name, phone, phone2, phone3, status, note "
+            "from crm.clients where status <> 'active'"))
 
     async def active_rentals(self) -> list[dict]:
         """Все идущие аренды с балансом - для биллинга, сводки и дашборда."""
@@ -1303,9 +1352,14 @@ class CrmDB:
         средневзвешенную цену он не двигает.
         """
         async with self.pool.acquire() as conn, conn.transaction():
+            # Только из открытого наряда: у закрытого запчасть уже в ремонте
+            # велосипеда и в сумме bike_log, и «возврат на полку» дал бы
+            # деталь, которая стоит и на складе, и на велосипеде.
             row = await conn.fetchrow(
-                "delete from crm.work_order_items where id = $1 and order_id = $2 "
-                "returning move_id", item_id, order_id)
+                "delete from crm.work_order_items i where i.id = $1 and i.order_id = $2 "
+                "and exists (select 1 from crm.work_orders o where o.id = $2 "
+                "            and o.status = any($3::text[])) "
+                "returning i.move_id", item_id, order_id, list(logic.ORDER_OPEN))
             if row is None:
                 return False
             move = await conn.fetchrow(
@@ -2750,7 +2804,8 @@ class CrmDB:
             f"update crm.trackers set {sets}, updated_at = now() where id = $1",
             tracker_id, *fields.values())
 
-    async def save_tracker_state(self, device: dict) -> dict:
+    async def save_tracker_state(self, device: dict, *,
+                                 moving_speed: Any = None) -> dict:
         """Состояние устройства из StarLine: карточка и точка журнала.
 
         Устройство, которого ещё нет, заводится само: связать его с
@@ -2764,10 +2819,13 @@ class CrmDB:
                 """
                 insert into crm.trackers (device_id, alias, last_seen, lat, lon,
                                           speed, course, voltage, gsm_level, alarm,
-                                          moved_at)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                          moved_at, phone)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 on conflict (device_id) do update
                    set alias = coalesce(excluded.alias, crm.trackers.alias),
+                       -- Номер SIM, вписанный руками, StarLine без номера
+                       -- не стирает: у многих устройств его там просто нет.
+                       phone = coalesce(excluded.phone, crm.trackers.phone),
                        last_seen = coalesce(excluded.last_seen, crm.trackers.last_seen),
                        lat = coalesce(excluded.lat, crm.trackers.lat),
                        lon = coalesce(excluded.lon, crm.trackers.lon),
@@ -2787,8 +2845,10 @@ class CrmDB:
                 _money(device.get("voltage")), device.get("gsm_level"),
                 bool(device.get("alarm")),
                 device.get("recorded_at")
-                if _money(device.get("speed") or 0) >= logic.TRACKER_MOVING_SPEED
-                else None)
+                if _money(device.get("speed") or 0)
+                >= _money(moving_speed or logic.TRACKER_MOVING_SPEED)
+                else None,
+                device.get("phone"))
             tracker_id = int(row["id"])
             if device.get("lat") is not None and device.get("recorded_at") is not None:
                 await conn.execute(
@@ -2983,6 +3043,11 @@ class CrmDB:
             "select * from crm.cash_shifts where status = 'open' "
             "order by opened_at limit 1"))
 
+    async def open_shifts(self) -> list[dict]:
+        """Все открытые смены - по одной на точку."""
+        return _rows(await self.pool.fetch(
+            "select * from crm.cash_shifts where status = 'open' order by opened_at"))
+
     async def open_shift_at(self, location: str | None) -> dict | None:
         return _row(await self.pool.fetchrow(
             "select * from crm.cash_shifts "
@@ -3115,14 +3180,18 @@ class CrmDB:
 
     async def mark_bank_txn(self, txn_id: int, *, status: str,
                             client_id: int | None = None,
-                            ledger_id: int | None = None, by: str) -> None:
-        await self.pool.execute(
+                            ledger_id: int | None = None, by: str) -> bool:
+        """Сменить статус строки выписки. Зачисленную - никогда: между
+        чтением строки в панели и нажатием «не наше» её могло зачислить
+        автозачисление, и тогда платёж остался бы в журнале, а строка -
+        «не наша» без ссылки на него."""
+        return (await self.pool.execute(
             """
             update crm.bank_txns
                set status = $2, client_id = $3, ledger_id = $4,
                    handled_at = now(), handled_by = $5
-             where id = $1
-            """, txn_id, status, client_id, ledger_id, by)
+             where id = $1 and status <> 'matched'
+            """, txn_id, status, client_id, ledger_id, by)).split()[-1] != "0"
 
     async def credit_bank_txn(self, txn_id: int, *, client_id: int,
                               amount: Decimal, method: str, note: str,
@@ -3475,7 +3544,10 @@ class CrmDB:
                 await conn.execute(
                     "update crm.pay_orders set status = 'paid', paid_at = now(), "
                     "checked_at = now(), error = null where id = $1", order_id)
-                return None
+                # 0, а не None: счёт закрыт этим вызовом, просто без записи
+                # в журнале. None значит «уже был оплачен» - по нему второй
+                # опрос понимает, что сообщать об оплате не ему.
+                return 0
             ledger_id = int(await conn.fetchval(
                 """
                 insert into crm.ledger (client_id, rental_id, kind, amount,
@@ -3534,12 +3606,25 @@ class CrmDB:
             """, *args))
 
     async def open_pay_orders(self, limit: int = 200) -> list[dict]:
-        """Счета, у которых ещё можно спросить статус."""
+        """Счета, у которых ещё можно спросить статус.
+
+        Кроме открытых - закрытые у нас, но живые у банка: снятый
+        оператором или просроченный по нашим часам счёт банк ещё
+        принимает, и клиент, заплативший по старой ссылке, иначе остался
+        бы с деньгами мимо журнала. Их спрашивают реже - раз в полчаса -
+        и неделю: столько жили ссылки, выданные без срока.
+        """
         return _rows(await self.pool.fetch(
-            """
+            f"""
             select p.*, c.full_name, c.phone, c.tg_id, c.max_id, c.contract_no
               from crm.pay_orders p join crm.clients c on c.id = p.client_id
-             where p.status in ('new', 'sent') and p.operation_id is not null
+             where p.operation_id is not null
+               and (p.status in ('new', 'sent')
+                    or (p.status in ('failed', 'cancelled') and p.ledger_id is null
+                        and p.created_at > now() - interval '{logic.PAY_RECHECK_DAYS} days'
+                        and (p.checked_at is null
+                             or p.checked_at < now() - interval
+                                '{logic.PAY_RECHECK_MINUTES} minutes')))
              order by p.id limit $1
             """, limit))
 
@@ -4053,3 +4138,54 @@ class CrmDB:
             "select part_id, max(created_at) as moved from crm.part_moves "
             "group by part_id")
         return {int(r["part_id"]): r["moved"] for r in rows}
+
+    # ─────────────────── операционная группа ───────────────────
+
+    async def save_ops_report(self, *, kind: str, chat_id: int, message_id: int,
+                              thread_id: int | None, author_tg: int | None,
+                              author: str | None, bike_id: int | None,
+                              rental_id: int | None, client_id: int | None,
+                              data: dict, ok: bool, note: str | None) -> int:
+        """Отчёт о сообщении группы. Повтор того же сообщения обновляет
+        строку, а не заводит вторую: ключ - чат и номер сообщения."""
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.ops_reports (kind, chat_id, message_id, thread_id,
+                                         author_tg, author, bike_id, rental_id,
+                                         client_id, data, ok, note)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            on conflict (chat_id, message_id) do update
+               set kind = excluded.kind, bike_id = excluded.bike_id,
+                   rental_id = excluded.rental_id, client_id = excluded.client_id,
+                   data = excluded.data, ok = excluded.ok, note = excluded.note
+            returning id
+            """, kind, chat_id, message_id, thread_id, author_tg, author,
+            bike_id, rental_id, client_id, data, ok, note))
+
+    _OPS_SELECT = """
+        select o.*, b.code as bike_code, c.full_name
+          from crm.ops_reports o
+          left join crm.bikes b on b.id = o.bike_id
+          left join crm.clients c on c.id = o.client_id
+    """
+
+    async def ops_reports(self, *, kind: str | None = None, ok: bool | None = None,
+                          limit: int = 300) -> list[dict]:
+        args: list[Any] = []
+        where = []
+        if kind:
+            args.append(kind)
+            where.append(f"o.kind = ${len(args)}")
+        if ok is not None:
+            args.append(ok)
+            where.append(f"o.ok = ${len(args)}")
+        args.append(limit)
+        clause = ("where " + " and ".join(where)) if where else ""
+        return _rows(await self.pool.fetch(
+            f"{self._OPS_SELECT} {clause} order by o.created_at desc, o.id desc "
+            f"limit ${len(args)}", *args))
+
+    async def ops_reports_of_rental(self, rental_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            f"{self._OPS_SELECT} where o.rental_id = $1 order by o.created_at, o.id",
+            rental_id))
