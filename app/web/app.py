@@ -2035,9 +2035,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 return JSONResponse({"ok": False, "error": "too large"}, status_code=413)
         try:
             payload = json.loads(body.decode("utf-8")) if body.strip() else {}
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError - тело из тысяч вложенных скобок: для хука это
+            # тоже «не JSON», а не падение обработчика.
             return JSONResponse({"ok": False, "error": "not json"}, status_code=400)
         items, skipped = logic.parse_inbound(payload)
+        # Разбор уже обрезал пачку и учёл лишнее в skipped: здесь каждое
+        # сообщение либо пишется, либо тоже идёт в счёт.
+        skipped += max(len(items) - logic.HOOK_BATCH_LIMIT, 0)
         saved = duplicates = 0
         for item in items[:logic.HOOK_BATCH_LIMIT]:
             try:

@@ -90,7 +90,7 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
         body = texts.SUPPORT_REPLY_USER.format(answer=bot_logic.esc(text))
         status, error = await mailing.send_one(bot, max_client,
                                                {"channel": "max", "max_id": ext}, body)
-    elif channel == "avito":
+    elif channel == "avito" and origin == "avito_api":
         if avito is None or not getattr(avito, "ready", False):
             error = "Авито не подключён"
         else:
@@ -128,11 +128,16 @@ async def announce_once(bot: Any, crm: Any, cfg: Any, *, limit: int = 20) -> int
 
 # ─────────────────────────── Авито ───────────────────────────
 
-async def _avito_state(crm: Any, *, ok: bool, error: str = "") -> None:
+def _poll_every(cfg: Any) -> int:
+    return max(int(getattr(cfg, "avito_poll_seconds", 60) or 60), 30)
+
+
+async def _avito_state(crm: Any, *, ok: bool, error: str = "", every: int = 60) -> None:
     """Состояние опроса - в settings: панель видит его, не ходя в Авито.
-    Пишется каждый круг: по свежести отметки панель понимает, живой ли опрос."""
+    Пишется каждый круг: по свежести отметки панель понимает, живой ли опрос,
+    а период круга (every) не даёт редкому опросу выглядеть мёртвым."""
     value = json.dumps({"ok": ok, "at": datetime.now(UTC).isoformat(),
-                        "error": error[:300]}, ensure_ascii=False)
+                        "error": error[:300], "every": every}, ensure_ascii=False)
     try:
         await crm.set_setting("inbox_avito_state", value, by="avito")
     except Exception:                                   # noqa: BLE001
@@ -166,7 +171,7 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
             if chat.get("updated") and chat["updated"] < since:
                 continue
             counts["chats"] += 1
-            thread_id = None
+            thread_id, lost = None, False
             for message in sorted(await avito.messages(chat["id"]),
                                   key=lambda m: m.get("created") or since):
                 if message.get("noise") or (message.get("created") or since) < since:
@@ -183,14 +188,19 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
                     thread_id = got["thread_id"]
                     if got.get("message_id") is not None:
                         counts["messages"] += 1
+                else:
+                    lost = True
             if thread_id is None and known:
                 thread_id = known["id"]
-            if thread_id is not None:
+            # Курсор не двигается за сообщение, которое не записалось: иначе
+            # чат пропускался бы, пока клиент не напишет ещё раз. Повторное
+            # чтение безопасно - дубли отсекает номер сообщения Авито.
+            if thread_id is not None and not lost:
                 await crm.update_inbox_thread(thread_id, ext_cursor=last)
     except AvitoError as exc:
-        await _avito_state(crm, ok=False, error=str(exc))
+        await _avito_state(crm, ok=False, error=str(exc), every=_poll_every(cfg))
         raise
-    await _avito_state(crm, ok=True)
+    await _avito_state(crm, ok=True, every=_poll_every(cfg))
     return counts
 
 
@@ -205,7 +215,14 @@ async def inbox_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
                         "помечены «не ушло»", stuck)
     except Exception:                                   # noqa: BLE001
         log.exception("входящие: очередь не проверена при старте")
-    poll_every = max(int(getattr(cfg, "avito_poll_seconds", 60) or 60), 30)
+    poll_every = _poll_every(cfg)
+    if avito is None or not avito.ready:
+        # Ключи убрали - прежняя отметка опроса не должна висеть в панели
+        # плашкой «опрос не работает» вечно.
+        try:
+            await crm.set_setting("inbox_avito_state", "", by="avito")
+        except Exception:                               # noqa: BLE001
+            log.warning("входящие: отметка Авито не сброшена")
     next_avito = 0.0
     while True:
         try:

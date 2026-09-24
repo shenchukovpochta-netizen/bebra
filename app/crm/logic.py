@@ -6516,7 +6516,7 @@ INBOX_REPLY_LIMITS: dict[str, int] = {"tg": 3500, "max": 3500, "avito": 1000, "w
 # Хук: тело до 64 КиБ, до 50 сообщений за раз, после 20 неудачных
 # токенов с адреса - пауза, как у входа в панель.
 HOOK_MAX_BYTES = 64 * 1024
-HOOK_BATCH_LIMIT = 50
+HOOK_BATCH_LIMIT = 200
 HOOK_FAIL_LIMIT = 20
 # Хук принимает только эти каналы: Telegram и MAX пишет сам бот, и чужой
 # запрос с утёкшим токеном не должен заводить обращения на чужие tg_id.
@@ -6539,12 +6539,20 @@ def safe_avito_url(url: Any) -> str | None:
     text = str(url or "").strip()
     if not text:
         return None
+    # Обратную косую браузер читает как «/»: у «https://evil.com\.avito.ru»
+    # urlsplit видит хост на avito.ru, а браузер уходит на evil.com.
+    # Пробелы, управляющие символы и логин в адресе у ссылки на объявление
+    # не встречаются - только у подделки.
+    if "\\" in text or any(ch.isspace() or ord(ch) < 32 for ch in text):
+        return None
     try:
         parts = urlsplit(text)
     except ValueError:
         return None
     host = (parts.hostname or "").lower()
     if parts.scheme != "https" or not (host == "avito.ru" or host.endswith(".avito.ru")):
+        return None
+    if "@" in parts.netloc:
         return None
     return text[:500]
 
@@ -6580,6 +6588,11 @@ def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool) -> tuple[bool,
             return False, "В MAX ответит только MAX-бот тем, кто писал ему."
         return True, ""
     if channel == "avito":
+        if thread.get("origin") != "avito_api":
+            # Чат Авито из шлюза или n8n: его номер - номер шлюза, а не
+            # чата Авито, и ответ через API ушёл бы в никуда.
+            return False, ("Этот чат Авито пришёл через шлюз - ответьте в "
+                           "приложении Авито или в самом шлюзе.")
         if not avito_ok:
             return False, ("Опрос Авито не работает - ответ уйдёт некуда. "
                            "Ответьте в приложении Авито.")
@@ -6654,6 +6667,10 @@ _WAZZUP_KINDS = {"text": "text", "image": "image", "audio": "voice",
 _WAZZUP_CHANNELS = {"whatsapp": "wa", "whatsgroup": None, "avito": "avito"}
 
 
+def _dict(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
 def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
     """Вебхук Green-API. Берём только входящие личные сообщения и звонки:
     группы (@g.us), свои исходящие и смены состояния - не обращения."""
@@ -6670,11 +6687,13 @@ def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
     chat = str(sender.get("chatId") or "")
     if not chat.endswith("@c.us"):
         return [], 1
-    data = payload.get("messageData") or {}
+    # Вложенные части - только словари: строка вместо объекта от шлюза или
+    # n8n - это сообщение без текста, а не падение хука.
+    data = _dict(payload.get("messageData"))
     type_message = str(data.get("typeMessage") or "")
-    text = ((data.get("textMessageData") or {}).get("textMessage")
-            or (data.get("extendedTextMessageData") or {}).get("text")
-            or (data.get("fileMessageData") or {}).get("caption"))
+    text = (_dict(data.get("textMessageData")).get("textMessage")
+            or _dict(data.get("extendedTextMessageData")).get("text")
+            or _dict(data.get("fileMessageData")).get("caption"))
     phone = _wa_phone(chat)
     item = _inbound_item(
         "wa", phone, msg_id=payload.get("idMessage"),
@@ -6686,9 +6705,15 @@ def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
 
 
 def _wazzup(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
-    """Вебхук Wazzup: {messages: [...]}. isEcho - наше же исходящее."""
+    """Вебхук Wazzup: {messages: [...]}. isEcho - наше же исходящее.
+
+    Сверх HOOK_BATCH_LIMIT сообщения не пишутся, но идут в счёт пропущенных:
+    ответ 200 шлюз считает доставкой, и молча потерянное он не повторит.
+    """
     items, skipped = [], 0
-    for message in payload.get("messages") or []:
+    messages = payload.get("messages") or []
+    skipped += max(len(messages) - HOOK_BATCH_LIMIT, 0)
+    for message in messages[:HOOK_BATCH_LIMIT]:
         if not isinstance(message, dict) or message.get("isEcho"):
             skipped += 1
             continue
@@ -6829,8 +6854,11 @@ def avito_state(settings: Mapping[str, Any], *,
             data = {}
     at = _moment(data.get("at"))
     now = now or datetime.now(UTC)
-    live = bool(data.get("ok")) and at is not None and (
-        now - at) <= timedelta(minutes=AVITO_STALE_MINUTES)
+    # Опрос раз в полчаса - не мёртвый опрос: порог не меньше трёх кругов.
+    every = data.get("every")
+    every = int(every) if isinstance(every, (int, float)) and every > 0 else 0
+    stale = max(timedelta(minutes=AVITO_STALE_MINUTES), timedelta(seconds=3 * every))
+    live = bool(data.get("ok")) and at is not None and (now - at) <= stale
     return {"configured": bool(data), "ok": bool(data.get("ok")), "live": live,
             "at": at, "error": str(data.get("error") or "")[:300]}
 
