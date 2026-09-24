@@ -173,6 +173,12 @@ class Config:
     tochka_account_id: str = ""
     tochka_customer_code: str = ""
     tochka_poll_seconds: int = 1800
+    # Авито: чаты темами в Telegram-группе с включёнными темами. Пусто
+    # (нет client_id, секрета или группы) - интеграция выключена.
+    avito_client_id: str = ""
+    avito_client_secret: str = ""
+    avito_chat_id: int | None = None
+    avito_poll_seconds: int = 60
     # Токен бота MAX. Телеграм-боту он нужен ровно для одного: отправить
     # рассылку тем клиентам, у кого привязан MAX. Пусто - такие получатели
     # помечаются пропущенными.
@@ -258,5 +264,9 @@ class Config:
             tochka_account_id=_env("TOCHKA_ACCOUNT_ID"),
             tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
             tochka_poll_seconds=_int("TOCHKA_POLL_SECONDS", "1800"),
+            avito_client_id=_env("AVITO_CLIENT_ID"),
+            avito_client_secret=_secret("AVITO_CLIENT_SECRET", required=False),
+            avito_chat_id=_int_or_none("AVITO_CHAT_ID"),
+            avito_poll_seconds=_int("AVITO_POLL_SECONDS", "60"),
             max_bot_token=_secret("MAX_BOT_TOKEN", required=False),
         )

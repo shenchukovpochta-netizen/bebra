@@ -292,6 +292,11 @@ STARLINE_POLL_SECONDS="${STARLINE_POLL_SECONDS:-300}"
 
 BACKUP_KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
 CRM_TRUSTED_PROXIES="${CRM_TRUSTED_PROXIES:-}"
+
+# Авито: client_secret - файлом в secrets/, здесь номер приложения и группа.
+AVITO_CLIENT_ID="${AVITO_CLIENT_ID:-}"
+AVITO_CHAT_ID="${AVITO_CHAT_ID:-}"
+AVITO_POLL_SECONDS="${AVITO_POLL_SECONDS:-60}"
 EOF
 chmod 600 .env
 ok ".env готов"

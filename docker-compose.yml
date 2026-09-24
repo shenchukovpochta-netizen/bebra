@@ -24,6 +24,9 @@ secrets:
   # Токен открытого API Точки: выписка по счёту и чек 54-ФЗ.
   tochka_token:
     file: ./secrets/tochka_token
+  # Секрет приложения API Авито: чаты Авито темами в Telegram-группе.
+  avito_client_secret:
+    file: ./secrets/avito_client_secret
   # Ключ подписи cookie веб-панели и пароль её первого администратора.
   # Оба генерирует bootstrap.sh; пароль нужен только до первого входа.
   crm_secret:
@@ -97,7 +100,7 @@ services:
       postgres:
         condition: service_healthy
     secrets: [db_password, bot_token, pdn_key, starline_app_secret,
-              starline_password, tochka_token, max_bot_token]
+              starline_password, tochka_token, max_bot_token, avito_client_secret]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
@@ -107,6 +110,7 @@ services:
       STARLINE_APP_SECRET_FILE: /run/secrets/starline_app_secret
       STARLINE_PASSWORD_FILE: /run/secrets/starline_password
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
+      AVITO_CLIENT_SECRET_FILE: /run/secrets/avito_client_secret
       # Нужен ровно для рассылок: тем клиентам, у кого привязан MAX.
       # Пустой файл - такие получатели помечаются пропущенными.
       MAX_BOT_TOKEN_FILE: /run/secrets/max_bot_token
@@ -162,6 +166,11 @@ services:
       TOCHKA_ACCOUNT_ID: ${TOCHKA_ACCOUNT_ID}
       TOCHKA_CUSTOMER_CODE: ${TOCHKA_CUSTOMER_CODE}
       TOCHKA_POLL_SECONDS: ${TOCHKA_POLL_SECONDS:-1800}
+
+      # Авито: чаты темами в Telegram-группе. Опрашивает тоже бот.
+      AVITO_CLIENT_ID: ${AVITO_CLIENT_ID:-}
+      AVITO_CHAT_ID: ${AVITO_CHAT_ID:-}
+      AVITO_POLL_SECONDS: ${AVITO_POLL_SECONDS:-60}
 
       STORAGE_DIR: /files/kyc
       # Свои шаблоны документов и печать: их кладёт панель.
