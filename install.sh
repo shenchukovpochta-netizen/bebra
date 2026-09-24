@@ -279,6 +279,19 @@ MAX_CONTRACT_CHAT_ID="${MAX_CONTRACT_CHAT_ID:-}"
 MAX_FIX_CHAT_ID="${MAX_FIX_CHAT_ID:-}"
 MAX_CONTRACT_PREFIX="${MAX_CONTRACT_PREFIX:-АВМ}"
 MAX_API_BASE="${MAX_API_BASE:-https://botapi.max.ru}"
+
+# Точка (выписка, ссылки на оплату) и трекеры StarLine: ключ банка и
+# пароли - файлами в secrets/, здесь только номера. Тоже переносятся из
+# прежнего .env: без этого повторная установка молча выключала бы банк.
+TOCHKA_ACCOUNT_ID="${TOCHKA_ACCOUNT_ID:-}"
+TOCHKA_CUSTOMER_CODE="${TOCHKA_CUSTOMER_CODE:-}"
+TOCHKA_POLL_SECONDS="${TOCHKA_POLL_SECONDS:-1800}"
+STARLINE_APP_ID="${STARLINE_APP_ID:-}"
+STARLINE_LOGIN="${STARLINE_LOGIN:-}"
+STARLINE_POLL_SECONDS="${STARLINE_POLL_SECONDS:-300}"
+
+BACKUP_KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
+CRM_TRUSTED_PROXIES="${CRM_TRUSTED_PROXIES:-}"
 EOF
 chmod 600 .env
 ok ".env готов"

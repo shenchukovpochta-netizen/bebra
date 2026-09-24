@@ -54,6 +54,18 @@ class TestScripts(unittest.TestCase):
             self.assertRegex(text, rf'(?m)^{key}="\$\{{{key}:-[^}}]*\}}"$',
                              f"{key} не переносится в новый .env")
 
+    def test_install_writes_every_key_of_env_example(self):
+        """Шаблон .env в install.sh знает все ключи .env.example: ключ,
+        которого там нет, повторная установка стирает. Так пропадали номер
+        счёта Точки и логин StarLine."""
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        text = (ROOT / "install.sh").read_text(encoding="utf-8")
+        template = text[text.index("cat > .env <<EOF"):]
+        template = template[:template.index("\nEOF\n")]
+        for key in sorted(set(re.findall(r"(?m)^([A-Z][A-Z0-9_]*)=", example))):
+            self.assertRegex(template, rf'(?m)^{key}="',
+                             f"{key} из .env.example не переносится в новый .env")
+
     def test_scripts_parse(self):
         for name in ("bootstrap.sh", "install.sh"):
             r = subprocess.run(["bash", "-n", str(ROOT / name)], capture_output=True, text=True)
