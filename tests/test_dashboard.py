@@ -136,6 +136,10 @@ class TestOperatorLogic(unittest.TestCase):
         empty = logic.fleet_losses(logic.fleet_metrics({}, 0))
         self.assertEqual(empty["lost"], D(0))
         self.assertIsNone(empty["efficiency_percent"])
+        # журнал статусов только что начат: минуты парка, деньги за месяц
+        fresh = logic.fleet_losses(logic.fleet_metrics(
+            {"rented": D("0.002"), "available": D("0.001")}, D(38500)))
+        self.assertIsNone(fresh["efficiency_percent"])
 
     def test_loss_per_day_counts_idle_bikes(self):
         out = logic.loss_per_day({"available": 7, "repair": 5, "maintenance": 1,

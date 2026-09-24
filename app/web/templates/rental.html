@@ -16,7 +16,8 @@
     <dt>Договор</dt><dd>{{ rental.contract_no or '—' }}</dd>
     {% if rental.promo_code %}<dt>Промокод</dt><dd><code>{{ rental.promo_code }}</code></dd>{% endif %}
     <dt>Начало</dt><dd>{{ rental.started_on|dmy }} · {% if rental.status == 'active' %}идёт{% else %}шла{% endif %} <b>{{ days_running }}</b> сут.</dd>
-    <dt>Начислено по</dt><dd>{{ rental.billed_until|dmy }}</dd>
+    {# billed_until - начало ещё не начисленного периода, граница не включается. #}
+    <dt>{% if rental.status == 'active' %}Следующее начисление{% else %}Начислено до{% endif %}</dt><dd>{{ rental.billed_until|dmy }}</dd>
     {% set km = ridden(rental) %}
     <dt>Пробег</dt><dd>{% if rental.mileage_start is none %}<span class="muted">не записан</span>
       {%- else %}с {{ rental.mileage_start }} км{% if rental.mileage_end is not none %} до {{ rental.mileage_end }} км{% elif bike %} · сейчас {{ bike.mileage_km or 0 }} км{% endif %}

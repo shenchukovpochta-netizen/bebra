@@ -1109,7 +1109,11 @@ def fleet_losses(metrics: dict, *, rate: Any = CHECK_TARGET) -> dict[str, Any]:
     potential = (Decimal(str(metrics.get("operational_days") or 0)) * rate).quantize(
         whole, rounding=ROUND_HALF_UP)
     earned = to_money(metrics.get("revenue") or 0)
-    efficiency = float(round(100 * earned / potential, 1)) if potential else None
+    # Порог тот же, что у чека: пока журналу статусов минуты, потенциал
+    # около рубля, а выручка уже за весь период - «КПД 3 850 000 %».
+    operational = Decimal(str(metrics.get("operational_days") or 0))
+    efficiency = (float(round(100 * earned / potential, 1))
+                  if potential and operational >= 1 else None)
     return {"rate": rate, "potential": potential, "earned": earned, "lost": lost,
             "by_status": by_status, "efficiency_percent": efficiency}
 
