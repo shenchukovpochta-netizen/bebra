@@ -19,7 +19,7 @@ import logging
 from datetime import date, timedelta
 from typing import Any
 
-from . import logic, notices, service
+from . import logic, notices, notify, service
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,8 @@ STATEMENT_DAYS = 3
 
 async def import_once(crm: Any, client: Any, *, today: date | None = None,
                       days: int = STATEMENT_DAYS,
-                      statement_id: str | None = None) -> dict:
+                      statement_id: str | None = None,
+                      bot: Any = None, db: Any = None) -> dict:
     """Забрать выписку и сложить в базу. Зачисления - отдельным шагом.
 
     Банк собирает документ не мгновенно, поэтому номер заказанной
@@ -49,11 +50,34 @@ async def import_once(crm: Any, client: Any, *, today: date | None = None,
         return {"seen": 0, "saved": 0, "credited": 0,
                 "pending": statement.get("statement_id")}
     result = await service.import_statement(crm, statement["rows"])
-    credited = await auto_credit(crm)
+    credited = await auto_credit(crm, bot=bot, db=db)
     return {**result, "credited": credited, "pending": None}
 
 
-async def auto_credit(crm: Any, *, by: str = "bank") -> int:
+async def tell_credited(bot: Any, db: Any, crm: Any, client: dict, amount: Any, *,
+                        by: str) -> None:
+    """Перевод зачислен: клиенту - новая дата «оплачено до», агенту - бонус.
+
+    То же, что после заявки и оплаченного счёта: клиент, заплативший
+    переводом, иначе не узнаёт, что деньги дошли, а агент терял бонус за
+    друга только потому, что зачислила машина, а не человек.
+    """
+    amount = logic.to_money(amount)
+    if bot is not None:
+        await notices.send_client(
+            crm, "pay_credited", client["id"],
+            lambda: notify.payment_credited(bot, db, crm, client, amount))
+    try:
+        bonus = await service.ref_paid(crm, client, amount, by=by)
+    except Exception:                                    # noqa: BLE001
+        log.exception("реферальный бонус за клиента %s не начислен", client.get("id"))
+        return
+    if bonus and bot is not None:
+        await notify.referral_bonus(bot, db, bonus["agent"], client, bonus["bonus"])
+
+
+async def auto_credit(crm: Any, *, by: str = "bank", bot: Any = None,
+                      db: Any = None) -> int:
     """Зачислить то, в чём нет сомнений: номер договора в назначении.
 
     Выключено, пока владелец не включит `bank_auto_credit` в настройках:
@@ -68,11 +92,19 @@ async def auto_credit(crm: Any, *, by: str = "bank") -> int:
     for row in rows:
         if not row.get("sure"):
             continue
+        client = row["guess"]["client"]
         try:
-            await service.credit_bank_txn(crm, row, row["guess"]["client"], by=by)
-            done += 1
+            await service.credit_bank_txn(crm, row, client, by=by)
         except service.ServiceError as exc:
             log.info("автозачисление %s пропущено: %s", row.get("txn_id"), exc)
+            continue
+        done += 1
+        try:
+            await tell_credited(bot, db, crm, client, row["amount"], by=by)
+        except Exception:                                # noqa: BLE001
+            # Деньги уже в журнале: недоставленное сообщение не повод
+            # останавливать разбор остальных строк.
+            log.exception("о зачислении %s клиенту не сообщено", row.get("txn_id"))
     return done
 
 
@@ -105,16 +137,17 @@ async def report_unmatched(bot: Any, crm: Any, cfg: Any, limit: int = 10, *,
 
 
 async def banking_loop(bot: Any, crm: Any, cfg: Any, client: Any, *,
-                       interval: int = POLL_SECONDS) -> None:
+                       interval: int = POLL_SECONDS, db: Any = None) -> None:
     """Фоновый разбор выписки. Сбой круга не останавливает следующие."""
     if client is None or not getattr(client, "ready", False):
         log.info("счёт в Точке не настроен, выписка не тянется")
         return
-    del bot, cfg
+    del cfg
     pending: str | None = None
     while True:
         try:
-            result = await import_once(crm, client, statement_id=pending)
+            result = await import_once(crm, client, statement_id=pending,
+                                       bot=bot, db=db)
             pending = result.get("pending")
             if result["saved"] or result["credited"]:
                 log.info("выписка: новых строк %s, зачислено %s",

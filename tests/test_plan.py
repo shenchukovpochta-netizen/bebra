@@ -33,6 +33,10 @@ def rental(days_left: int, **over) -> dict:
            "period_days": 7, "intent": None,
            "billed_until": TODAY + timedelta(days=days_left)}
     row.update(over)
+    # Намерение записывается с «оплачено до» на тот момент; при нулевом
+    # балансе это billed_until. Тест, которому нужно старое, задаст своё.
+    if row.get("intent") and "intent_until" not in over:
+        row["intent_until"] = row["billed_until"]
     return row
 
 
@@ -119,6 +123,13 @@ class TestForecastLogic(unittest.TestCase):
         soon = logic.freeing_soon(rows, today=TODAY)
         self.assertEqual({k: len(v) for k, v in soon.items()},
                          {"0": 1, "1": 1, "2": 0, "3": 0})
+
+    def test_stale_renewal_does_not_hide_the_bike_forever(self):
+        # «Продлит» сказали про прошлый срок, а новый так и не оплачен.
+        old = rental(1, intent="renew", intent_until=TODAY - timedelta(days=6))
+        soon = logic.freeing_soon([old], today=TODAY)
+        self.assertEqual(len(soon["1"]), 1)
+        self.assertFalse(soon["1"][0]["returning"])
 
     def test_overdue_counts_as_today(self):
         soon = logic.freeing_soon([rental(-7, balance=D(-3000))], today=TODAY)

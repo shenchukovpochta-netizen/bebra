@@ -258,6 +258,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.globals.update(
         static_v=static_stamp(HERE / "static"),
+        # «Скоро платёж» подсвечивается с того же дня, с которого бот шлёт
+        # «истекает через N дней», а не с зашитых двух.
+        REMIND_BEFORE_DAYS=cfg.remind_before_days,
         money=logic.money, money_signed=logic.money_signed, period_label=logic.period_label,
         per_day=logic.per_day,
         KINDS=logic.KINDS, METHODS=logic.METHODS, BIKE_STATUSES=logic.BIKE_STATUSES,
@@ -1829,7 +1832,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # ─────────────────────── аренды ───────────────────────
 
     RENTAL_SORTS = {"no": "id", "client": "full_name", "bike": "bike_code",
-                    "started": "started_on", "paid": "billed_until",
+                    # «Оплачено» показывает дату из баланса, а не границу
+                    # начисления: сортировать надо по тому, что видно.
+                    "started": "started_on", "paid": "covered_until",
                     "debt": "balance", "tariff": "tariff_name",
                     "days": "days_running", "overdue": "overdue_days"}
     ORDER_SORTS = {"no": "no", "bike": "bike_code", "status": "status",
@@ -1854,6 +1859,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             r["summary"] = summarize(r if r["status"] == "active" else None,
                                      r.get("balance", 0))
             r["overdue_days"] = logic.overdue_days(r["summary"])
+            r["covered_until"] = r["summary"].get("covered_until")
             r["days_running"] = logic.rental_days(r, today=today)
             r["in_repair"] = bool(r["status"] == "active" and r.get("bike_id")
                                   and open_orders and r["bike_id"] in open_orders)
@@ -1898,9 +1904,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "rentals.html", rows=tools["rows"], tools=tools,
                       status=status, view=view, q=q,
                       views=await views_of(request, "/rentals"),
+                      # Баланс - клиентский, он приходит в каждой строке его
+                      # аренд: сумма по строкам посчитала бы долг клиента с
+                      # тремя арендами трижды.
                       debt_total=logic.sum_of(
-                          [r for r in tools["all_rows"]
-                           if logic.to_money(r.get("balance")) < 0], "balance"),
+                          list({r["client_id"]: r for r in tools["all_rows"]
+                                if logic.to_money(r.get("balance")) < 0}.values()),
+                          "balance"),
                       overdue_total=sum(1 for r in tools["all_rows"]
                                         if r["overdue_days"] > 0),
                       # Счётчики - по найденному: чипы отвечают на «сколько
@@ -2165,6 +2175,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         kind = logic.manual_reminder_kind(summarize(rental, rental.get("balance", 0)))
         sent = await billing.send_reminder(bot, db, crm, rental, kind=kind,
                                            today=date.today(), manual=True)
+        if kind:
+            # Одно напоминание в день на аренду: без отметки расписание в
+            # тот же день прислало бы клиенту второе.
+            await crm.mark_notified(rental_id, date.today(), kind)
         flash(request, f"{rental['full_name']}: напоминание отправлено." if sent
               else f"{rental['full_name']}: не доставлено - клиент заблокировал бота?",
               "ok" if sent else "err")
@@ -4799,6 +4813,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect("/bank")
+        # Как после заявки: клиент, заплативший переводом, узнаёт, что
+        # деньги дошли, и видит новую дату «оплачено до».
+        await notices.send_client(
+            crm, "pay_credited", client["id"],
+            lambda: notify.payment_credited(bot, db, crm, client,
+                                            logic.to_money(txn["amount"])))
         await referral_bonus(client, logic.to_money(txn["amount"]), who(request))
         flash(request, f"{logic.money(txn['amount'])} зачислено: "
                        f"{client['full_name']}.")

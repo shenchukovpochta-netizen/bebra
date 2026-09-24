@@ -79,6 +79,16 @@ class TestSearchAndTheft(tw.WebCase):
     def battery(self):
         return _run(self.crm.battery(self.battery_id))
 
+    def test_search_buttons_without_free_bikes(self):
+        # Свободных велосипедов нет (единственный - в этой аренде): менять
+        # не на что, а объявить розыск и признать потерю всё равно надо.
+        page = self.get_ok(f"/rentals/{self.rental_id}")
+        self.assertNotIn("Заменить велосипед", page)
+        self.assertIn("Объявить в розыск", page)
+        self.client.post(f"/rentals/{self.rental_id}/search",
+                         data={"action": "start", "note": ""})
+        self.assertIn("Признать потерянным", self.get_ok(f"/rentals/{self.rental_id}"))
+
     def test_search_marks_the_battery_too(self):
         self.assertFalse(logic.battery_rows([self.battery()])[0]["in_search"])
         self.client.post(f"/rentals/{self.rental_id}/search",

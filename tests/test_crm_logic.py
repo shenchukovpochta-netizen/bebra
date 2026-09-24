@@ -154,6 +154,23 @@ class TestReminders(unittest.TestCase):
         self.assertIsNone(logic.reminder_due(self.rental(balance=D(-100)),
                                              before_days=2, today=TODAY))
 
+    def test_return_intent_silences_top_up_but_not_overdue(self):
+        # Клиент сказал «сдаю» про этот срок: «пополните баланс» ему ни к чему.
+        until = TODAY + timedelta(days=2)
+        said = self.rental(billed_until=until, intent="return", intent_until=until)
+        self.assertIsNone(logic.reminder_due(said, before_days=2, today=TODAY))
+        due = self.rental(billed_until=TODAY, intent="return", intent_until=TODAY)
+        self.assertIsNone(logic.reminder_due(due, before_days=2, today=TODAY))
+        # «сдаю» про прошлый срок уже ничего не значит
+        stale = self.rental(billed_until=until, intent="return",
+                            intent_until=until - timedelta(days=7))
+        self.assertEqual(logic.reminder_due(stale, before_days=2, today=TODAY), "soon")
+        # не сдал - просрочка напоминается как обычно
+        late = TODAY - timedelta(days=1)
+        overdue = self.rental(billed_until=late, intent="return", intent_until=late)
+        self.assertEqual(logic.reminder_due(overdue, before_days=2, today=TODAY),
+                         "overdue")
+
     def test_one_reminder_per_day(self):
         self.assertIsNone(logic.reminder_due(self.rental(notified_on=TODAY),
                                              before_days=2, today=TODAY))
@@ -183,6 +200,23 @@ class TestReminders(unittest.TestCase):
                             billed_until=TODAY - timedelta(days=4), balance=D(-3000))]
         text = logic.digest(rows, today=TODAY, before_days=2)
         self.assertIn("Иванов &lt;брат&gt; &amp; Co · &lt;1&gt;", text)
+        self.assertNotIn("<брат>", text)
+
+    def test_digest_manual_overdue_is_not_zero_debt(self):
+        """Ручная аренда просрочена, а в журнале ноль: не «долг 0 ₽»."""
+        rows = [self.rental(billed_until=TODAY - timedelta(days=3), balance=D(0))]
+        text = logic.digest(rows, today=TODAY, before_days=2)
+        self.assertIn("к оплате", text)
+        self.assertNotIn("долг 0", text)
+
+    def test_search_digest_escapes_html(self):
+        rows = {"candidates": [{"full_name": "Иванов <брат> & Co", "bike_code": "<1>",
+                                "overdue_days": 9}],
+                "searching": [{"full_name": "A<B", "bike_code": "K&1",
+                               "search_days": 30, "theft": True}]}
+        text = logic.search_digest(rows)
+        self.assertIn("Иванов &lt;брат&gt; &amp; Co · № &lt;1&gt;", text)
+        self.assertIn("A&lt;B · № K&amp;1", text)
         self.assertNotIn("<брат>", text)
 
     def test_first_amount(self):

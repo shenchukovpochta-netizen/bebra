@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -269,7 +270,10 @@ async def report_silent_estimates(bot: Any, crm: Any, cfg: Any, *,
     lines = [f"🔧 Молчат на согласовании: {len(rows)}"]
     for order in rows[:10]:
         state = logic.estimate_state(order)
-        what = order.get("bike_code") or order.get("object_note") or "—"
+        # Разметка HTML: свободный текст наряда без экранирования ломал бы
+        # всю сводку.
+        what = html.escape(order.get("bike_code") or order.get("object_note") or "—",
+                           quote=False)
         lines.append(f"• {order.get('no')} — {what}, "
                      f"{logic.money(order.get('estimate'))}, "
                      f"{state['silent_days']} дн.")
@@ -299,7 +303,9 @@ async def report_ref_spikes(bot: Any, crm: Any, cfg: Any, *, today: date,
     lines = [f"👀 Всплеск приглашений: {len(rows)}"]
     for row in rows[:10]:
         agent = await crm.client(row["agent_id"])
-        lines.append(f"• {(agent or {}).get('full_name') or row['agent_id']} — "
+        name = html.escape(str((agent or {}).get("full_name") or row["agent_id"]),
+                           quote=False)
+        lines.append(f"• {name} — "
                      f"{row['friends']} друзей за сутки")
     lines.append("Система ничего не заблокировала — посмотрите глазами.")
     try:

@@ -2781,7 +2781,7 @@ class CrmDB:
                        updated_at = now()
                 returning id, (xmax = 0) as created
                 """,
-                device["device_id"], device.get("alias"), device.get("recorded_at"),
+                device["device_id"], device.get("alias"), logic.tracker_seen_at(device),
                 device.get("lat"), device.get("lon"),
                 _money(device.get("speed")), device.get("course"),
                 _money(device.get("voltage")), device.get("gsm_level"),

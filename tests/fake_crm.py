@@ -2465,10 +2465,11 @@ class FakeCrm:
             tracker_id = await self.create_tracker(device_id=device["device_id"],
                                                    alias=device.get("alias"))
             tracker = self.trackers_[tracker_id]
-        for key in ("alias", "last_seen", "lat", "lon", "voltage"):
-            source = "recorded_at" if key == "last_seen" else key
-            if device.get(source) is not None:
-                tracker[key] = device[source]
+        for key in ("alias", "lat", "lon", "voltage"):
+            if device.get(key) is not None:
+                tracker[key] = device[key]
+        if crm_logic.tracker_seen_at(device) is not None:
+            tracker["last_seen"] = crm_logic.tracker_seen_at(device)
         tracker["speed"] = _num(device.get("speed"))
         tracker["course"] = device.get("course")
         tracker["gsm_level"] = device.get("gsm_level")

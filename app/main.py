@@ -114,7 +114,7 @@ async def run() -> None:
                           customer_code=cfg.tochka_customer_code)
     banking_task = asyncio.create_task(
         banking.banking_loop(bot, crm, cfg, tochka,
-                             interval=cfg.tochka_poll_seconds))
+                             interval=cfg.tochka_poll_seconds, db=db))
     # Счета эквайринга - своим кругом, коротким: оператор ждёт отметки
     # «оплачено», чтобы выдать велосипед, и полчаса ожидания на точке -
     # это очередь. Здесь же суточное автосписание.

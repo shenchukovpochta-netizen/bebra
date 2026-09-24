@@ -214,6 +214,39 @@ class TestRentalViews(tw.WebCase):
             price=D(3000), billing="weekly", started_on=date(2026, 9, 1),
             contract_no="АВ-1", created_by="тест"))
 
+    def test_debt_total_counts_a_client_once(self):
+        # Баланс клиентский и приходит в каждой его аренде: на вкладке
+        # «Все» у клиента закрытая и идущая аренды и 3 000 долга - в
+        # подвале 3 000, а не 6 000.
+        _run(self.crm.update_rental(self.rental_id, status="closed"))
+        second = _run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        _run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=second, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="weekly",
+            started_on=date(2026, 9, 1), contract_no="АВ-2", created_by="тест"))
+        _run(self.crm.add_ledger(client_id=self.client_id, kind="charge",
+                                 amount=D(-3000), created_by="тест"))
+        text = self.get_ok("/rentals?status=all")
+        self.assertIn("долг 3", text)
+        self.assertNotIn("долг 6", text)
+
+    def test_paid_sort_follows_the_shown_date(self):
+        other = _run(self.crm.create_client(full_name="Петров Пётр",
+                                            phone="+79990000001"))
+        second = _run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        # Петров начислен дальше, но оплачено у него меньше: граница
+        # начисления впереди, а «оплачено до» - раньше, чем у Иванова.
+        rid = _run(self.crm.create_rental(
+            client_id=other, bike_id=second, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="weekly",
+            started_on=date(2026, 9, 1), contract_no="АВ-2", created_by="тест"))
+        _run(self.crm.update_rental(rid, billed_until=date.today() + timedelta(days=14)))
+        _run(self.crm.add_ledger(client_id=other, kind="charge", amount=D(-9000),
+                                 created_by="тест"))
+        _run(self.crm.update_rental(self.rental_id, billed_until=date.today()))
+        text = self.get_ok("/rentals?sort=paid&dir=asc")
+        self.assertLess(text.index("Петров"), text.index("Иванов"))
+
     def test_nobike_shows_rentals_without_equipment(self):
         text = self.get_ok("/rentals?view=nobike")
         self.assertNotIn("АВ-1", text)
@@ -314,6 +347,10 @@ class TestRentalViews(tw.WebCase):
         self.assertEqual(log[0]["code"], "rent_overdue", "аренда с 1 сентября просрочена")
         self.assertEqual(log[0]["detail"], "вручную")
         self.assertIn("напоминание отправлено", self.get_ok("/rentals"))
+        # Расписание в тот же день второго не пришлёт.
+        rental = _run(self.crm.rental(self.rental_id))
+        self.assertEqual(rental["notified_on"], date.today())
+        self.assertEqual(rental["notified_kind"], "overdue")
 
     def test_remind_needs_telegram_and_an_active_rental(self):
         _run(self.crm.update_client(self.client_id, tg_id=None))

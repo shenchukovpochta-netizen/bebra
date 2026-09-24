@@ -92,6 +92,23 @@ class TestBankLogic(unittest.TestCase):
         self.assertEqual(got["client"]["id"], 1)
         self.assertEqual(got["reason"], "contract")
 
+    def test_contract_is_a_whole_number_not_a_piece(self):
+        # Договор «15», набранный в панели руками, не должен ловить
+        # «АВ-2026-000150»: автозачисление положило бы деньги ему.
+        clients = [{"id": 3, "full_name": "Сидоров", "phone": None,
+                    "contract_no": "15", "status": "active"}, *self.clients()]
+        got = logic.match_payment(
+            self.txn(purpose="Оплата по договору АВ-2026-000150", payer_name=""),
+            clients)
+        self.assertIsNone(got)
+        got = logic.match_payment(self.txn(purpose="договор 15 от 12.09"), clients)
+        self.assertEqual(got["client"]["id"], 3)
+        # Пробелы банк ставит как хочет - номер всё равно находится.
+        for purpose in ("Оплата по договоруАВ-2026-000042", "АВ-2026 -000042 аренда",
+                        "по договору АВ-2026-000042 12.09.2026"):
+            got = logic.match_payment(self.txn(purpose=purpose), self.clients())
+            self.assertEqual((got or {}).get("reason"), "contract", purpose)
+
     def test_phone_then_name(self):
         by_phone = logic.match_payment(
             self.txn(purpose="аренда велосипеда, тел +7 999 000-00-02"), self.clients())
@@ -438,6 +455,9 @@ class TestBankPanel(tw.WebCase):
                              data={"client_id": str(self.client_id)})
         self.assertEqual(r.headers["location"], "/bank")
         self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
+        # Клиент, заплативший переводом, узнаёт, что деньги дошли.
+        self.assertTrue(any(m[0] == 5001 for m in self.bot.sent),
+                        "клиенту ушло «платёж зачислен»")
         txn = tw.run(self.crm.bank_txn(self.txn_id))
         self.assertEqual(txn["status"], "matched")
         self.assertEqual(txn["client_id"], self.client_id)
@@ -470,8 +490,14 @@ class TestBankPanel(tw.WebCase):
                          "по умолчанию выключено")
         r = self.client.post("/bank/settings", data={"auto": "1"})
         self.assertEqual(r.headers["location"], "/bank")
-        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 1)
+        self.bot.sent.clear()
+        self.assertEqual(tw.run(banking.auto_credit(self.crm, bot=self.bot,
+                                                    db=self.db)), 1)
         self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
+        self.assertTrue(any(m[0] == 5001 for m in self.bot.sent),
+                        "автозачисление тоже сообщает клиенту")
+        log = tw.run(self.crm.notice_log(limit=10))
+        self.assertEqual(log[0]["code"], "pay_credited")
         # догадка по ФИО автозачислением не пользуется
         tw.run(self.crm.save_bank_txn({
             "txn_id": "T-3", "booked_at": datetime.now(UTC), "amount": D(1000),

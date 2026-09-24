@@ -46,28 +46,71 @@ def tracker(**over) -> dict:
 
 
 class TestStarlineParsing(unittest.TestCase):
-    def test_device_is_flattened_and_coordinates_are_not_swapped(self):
+    def test_v2_user_info_x_is_latitude(self):
+        # Форма v2 user_info, которую и читает опрос: поля устройства в
+        # корне, флаги тревог в car_alr_state (эталон - Home Assistant).
         got = starline.parse_device({
             "device_id": 1001, "alias": "Truck+ 101", "status": 1,
-            "position": {"x": 49.1440, "y": 55.7692, "s": 18, "dir": 90,
+            "position": {"x": 55.7692, "y": 49.1440, "s": 18, "dir": 90,
                          "ts": 1789000000},
-            "common": {"battery": 12.6, "gsm_lvl": 20},
-            "alarm_state": {"door": 0, "hood": 0}})
+            "battery": 12.6, "gsm_lvl": 20, "ts_activity": 1789000300,
+            "car_state": {"alarm": False, "hijack": False},
+            "car_alr_state": {"door": False, "shock_h": False}})
         self.assertEqual(got["device_id"], "1001")
-        self.assertEqual(got["lat"], 55.7692, "y - это широта")
-        self.assertEqual(got["lon"], 49.1440, "x - это долгота")
+        self.assertEqual(got["lat"], 55.7692, "в v2 x - это широта")
+        self.assertEqual(got["lon"], 49.1440, "в v2 y - это долгота")
         self.assertEqual(got["speed"], 18.0)
         self.assertEqual(got["voltage"], 12.6)
+        self.assertEqual(got["gsm_level"], 20)
         self.assertFalse(got["alarm"])
+        self.assertTrue(got["online"])
         self.assertEqual(got["recorded_at"],
                          datetime.fromtimestamp(1789000000, UTC))
+        self.assertEqual(got["active_at"], datetime.fromtimestamp(1789000300, UTC))
 
-    def test_missing_fields_stay_none_and_alarm_is_any_flag(self):
-        got = starline.parse_device({"device_id": "77", "alarm_state": {"hijack": 1}})
+    def test_v3_data_x_is_longitude(self):
+        got = starline.parse_device({
+            "device_id": 1001, "status": 1,
+            "position": {"x": 49.1440, "y": 55.7692, "s": 18, "ts": 1789000000},
+            "common": {"battery": 12.6, "gsm_lvl": 20, "ts": 1789000300},
+            "alarm_state": {"door": False, "hijack": False, "ts": 1789000000}})
+        self.assertEqual(got["lat"], 55.7692, "в v3 y - это широта")
+        self.assertEqual(got["lon"], 49.1440)
+        self.assertEqual(got["voltage"], 12.6)
+        # Метка ts среди флагов - не тревога.
+        self.assertFalse(got["alarm"])
+
+    def test_alarm_flags_and_own_block_is_not_alarm(self):
+        def alarm(**raw):
+            return starline.parse_device({"device_id": "1", **raw})["alarm"]
+        self.assertTrue(alarm(car_alr_state={"shock_h": True}))
+        self.assertTrue(alarm(car_alr_state={"tilt": 1}))
+        self.assertTrue(alarm(car_state={"alarm": "1"}))
+        self.assertTrue(alarm(alarm_state={"shock_l": 1, "ts": 1789000000}))
+        # «Антиограбление» - это наша же блокировка мотора, не угон.
+        self.assertFalse(alarm(car_alr_state={"hijack": True},
+                               car_state={"hijack": True, "alarm": False}))
+        self.assertFalse(alarm(alarm_state={"hijack": 1, "ts": 1789000000}))
+
+    def test_status_two_is_offline(self):
+        self.assertFalse(starline.parse_device({"device_id": "1", "status": 2})["online"])
+        self.assertIsNone(starline.parse_device({"device_id": "1"})["online"])
+
+    def test_missing_fields_stay_none(self):
+        got = starline.parse_device({"device_id": "77"})
         self.assertIsNone(got["lat"])
         self.assertIsNone(got["recorded_at"])
+        self.assertIsNone(got["active_at"])
         self.assertIsNone(got["voltage"])
-        self.assertTrue(got["alarm"])
+        self.assertFalse(got["alarm"])
+
+    def test_seen_at_is_the_later_of_fix_and_activity(self):
+        fix = datetime(2026, 9, 20, 8, 0, tzinfo=UTC)
+        ping = datetime(2026, 9, 24, 7, 55, tzinfo=UTC)
+        self.assertEqual(logic.tracker_seen_at({"recorded_at": fix, "active_at": ping}),
+                         ping)
+        self.assertEqual(logic.tracker_seen_at({"recorded_at": fix}), fix)
+        self.assertIsNone(logic.tracker_seen_at({}))
 
     def test_error_envelope_is_recognised(self):
         self.assertEqual(starline.check_state({"state": 1, "desc": {"code": "abc"}},
@@ -101,8 +144,11 @@ class TestStarlineParsing(unittest.TestCase):
                 if url.endswith("auth.slid"):
                     return Response({"user_id": "42"}, cookies={"slnet": "COOKIE"})
                 return Response({"devices": [{"device_id": 1, "alias": "A",
-                                              "position": {"x": 49.1, "y": 55.7,
-                                                           "ts": 1789000000}}]})
+                                              "position": {"x": 55.7, "y": 49.1,
+                                                           "ts": 1789000000}}],
+                                 # расшаренный из другого кабинета и дубль
+                                 "shared_devices": [{"device_id": 2, "alias": "B"},
+                                                    {"device_id": 1, "alias": "A2"}]})
 
             async def close(self):
                 pass
@@ -111,7 +157,9 @@ class TestStarlineParsing(unittest.TestCase):
                                          password="p", session_factory=Session)
         self.assertTrue(client.ready)
         devices = _run(client.devices(now=0.0))
-        self.assertEqual([d["device_id"] for d in devices], ["1"])
+        self.assertEqual([d["device_id"] for d in devices], ["1", "2"])
+        self.assertEqual(devices[0]["alias"], "A")
+        self.assertEqual(devices[0]["lat"], 55.7)
         self.assertEqual([url.rsplit("/apiV3", 1)[-1].rsplit("/json", 1)[-1]
                           for _, url in calls][:4],
                          ["/application/getCode/", "/application/getToken/",

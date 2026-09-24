@@ -7,7 +7,7 @@
     <span class="bad">просрочка {{ -summary.days_left }} дн.{% if with_money %} · к оплате {{ money(summary.due) }}{% endif %}</span>
   {% elif summary.days_left == 0 %}
     <span class="warn">платёж сегодня</span>
-  {% elif summary.days_left <= 2 %}
+  {% elif summary.days_left <= REMIND_BEFORE_DAYS %}
     <span class="warn">до {{ summary.covered_until|dmy }} · {{ summary.days_left }} дн.</span>
   {% else %}
     <span class="ok">до {{ summary.covered_until|dmy }} · {{ summary.days_left }} дн.</span>

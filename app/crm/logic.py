@@ -297,7 +297,14 @@ def reminder_due(rental: dict, *, before_days: int, today: date) -> str | None:
         return None
     until = covered_until(rental["billed_until"], rental.get("balance", 0),
                           rental["price"], rental["period_days"])
-    return reminder_kind(days_left(until, today=today), before_days=before_days)
+    kind = reminder_kind(days_left(until, today=today), before_days=before_days)
+    # Клиент сказал «сдаю» про этот срок: «пополните баланс - и аренда
+    # продолжится» ему ни к чему. Просрочка всё равно напоминается - не
+    # сдал, значит, должен.
+    if (kind in (REMIND_SOON, REMIND_DUE) and rental.get("intent") == "return"
+            and rental.get("intent_until") == until):
+        return None
+    return kind
 
 
 def digest(rentals: Iterable[dict], *, today: date, before_days: int) -> str:
@@ -321,8 +328,14 @@ def digest(rentals: Iterable[dict], *, today: date, before_days: int) -> str:
         bike = html.escape(r.get("bike_code") or "", quote=False)
         tail = f" · {bike}" if bike else ""
         if left < 0:
+            # Ручное начисление не уходит в минус, пока период не записан:
+            # «долг 0 ₽» при просрочке сбивал бы с толку. Сумма - как у
+            # rental_summary: долг, а без долга - цена неначисленного периода.
+            bal = to_money(r.get("balance", 0))
+            owed = (f"долг {money(-bal)}" if bal < 0
+                    else f"к оплате {money(r['price'])}")
             debtors.append(
-                f"⚠️ {who}{tail} — долг {money(-to_money(r.get('balance', 0)))}, "
+                f"⚠️ {who}{tail} — {owed}, "
                 f"не оплачено с {until.strftime('%d.%m')} ({-left} дн.)")
         elif left <= before_days:
             when = "сегодня" if left == 0 else f"{until.strftime('%d.%m')} ({left} дн.)"
@@ -2568,15 +2581,22 @@ def search_rows(rentals: Iterable[dict], *, settings: dict[str, int],
 
 
 def search_digest(rows: dict[str, list[dict]]) -> str:
-    """Строки для служебного чата. Пусто - искать некого, молчим."""
+    """Строки для служебного чата. Пусто - искать некого, молчим.
+
+    Сводка уходит с разметкой HTML: «<» или «&» в имени без экранирования
+    и Telegram отвергает её целиком, как было с дневной сводкой оплат.
+    """
+    def who(row: dict) -> str:
+        return (f"{html.escape(row.get('full_name') or '—', quote=False)} · "
+                f"№ {html.escape(row.get('bike_code') or '—', quote=False)}")
+
     lines = []
     for row in rows["candidates"]:
-        lines.append(f"• {row.get('full_name') or '—'} · № {row.get('bike_code') or '—'}"
-                     f" — просрочка {row['overdue_days']} дн., пора в розыск")
+        lines.append(f"• {who(row)} — просрочка {row['overdue_days']} дн., пора в розыск")
     for row in rows["searching"]:
         if row.get("theft"):
-            lines.append(f"• {row.get('full_name') or '—'} · № {row.get('bike_code') or '—'}"
-                         f" — в розыске {row['search_days']} дн., пора признавать потерю")
+            lines.append(f"• {who(row)} — в розыске {row['search_days']} дн., "
+                         "пора признавать потерю")
     return "\n".join(lines)
 
 
@@ -2830,16 +2850,20 @@ def freeing_soon(rentals: Iterable[dict], *, today: date | None = None,
     for rental in rentals:
         if rental.get("status") != "active" or not rental.get("bike_id"):
             continue
-        if rental.get("intent") == "renew":
-            continue
         until = covered_until(rental["billed_until"], rental.get("balance", 0),
                               rental["price"], rental["period_days"])
+        # Намерение - про тот срок, при котором его сказали (как в
+        # intent_state): старое «продлит» с прошлого периода убирало бы
+        # велосипед из прогноза навсегда.
+        intent = rental.get("intent") if rental.get("intent_until") == until else None
+        if intent == "renew":
+            continue
         left = days_left(until, today=today)
         if left < 0:
             left = 0                 # просрочка: велосипед ждут уже сегодня
         if left <= horizon:
             out[str(left)].append({**rental, "free_on": today + timedelta(days=left),
-                                   "returning": rental.get("intent") == "return"})
+                                   "returning": intent == "return"})
     for rows in out.values():
         rows.sort(key=lambda r: not r["returning"])
     return out
@@ -3209,6 +3233,17 @@ def tracker_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any
             "moving_speed": number("tracker_moving_speed", TRACKER_MOVING_SPEED),
             "low_volts": number("tracker_low_volts", TRACKER_LOW_VOLTS),
             "idle_days": int(number("tracker_idle_days", TRACKER_IDLE_DAYS))}
+
+
+def tracker_seen_at(device: Mapping[str, Any]) -> datetime | None:
+    """Когда трекер последний раз был на связи: позже из точки и связи.
+
+    Точка и связь - разные события: в подвале трекер выходит на связь,
+    а спутников не видит. По одной точке такой трекер через полсуток
+    считался бы «молчит», хотя отвечает каждые пять минут.
+    """
+    seen = [m for m in (device.get("recorded_at"), device.get("active_at")) if m]
+    return max(seen) if seen else None
 
 
 def distance_km(lat1: float | None, lon1: float | None,
@@ -3673,13 +3708,14 @@ def match_payment(txn: Mapping[str, Any],
     if txn.get("direction") != "credit":
         return None
     purpose = str(txn.get("purpose") or "")
-    flat = purpose.upper().replace(" ", "")
+    upper = purpose.upper()
+    flat = upper.replace(" ", "")
     phones = {digits(p) for p in re.findall(r"[\d\-()+ ]{10,}", purpose)}
     payer = normalize_name(txn.get("payer_name"))
     by_name = None
     for client in clients:
         contract = str(client.get("contract_no") or "").strip()
-        if contract and contract.upper().replace(" ", "") in flat:
+        if contract and contract_in(contract, upper, flat):
             return {"client": client, "reason": "contract"}
         phone = digits(client.get("phone"))
         if phone and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10):
@@ -3687,6 +3723,22 @@ def match_payment(txn: Mapping[str, Any],
         if payer and by_name is None and normalize_name(client.get("full_name")) == payer:
             by_name = {"client": client, "reason": "name"}
     return by_name
+
+
+def contract_in(contract: str, upper: str, flat: str) -> bool:
+    """Номер договора стоит в назначении отдельным номером, а не куском.
+
+    Подстрока ловила чужое: договор «15», набранный в панели руками,
+    совпадал с «АВ-2026-000150», и автозачисление клало деньги первому
+    по списку. Граница - только по цифрам: пробелы банк расставляет как
+    хочет, и в «ДОГОВОРУАВ-…» буква перед номером - норма. Подстрока
+    остаётся дешёвым предфильтром: разбор идёт по всем клиентам.
+    """
+    key = contract.upper().replace(" ", "")
+    if not key or key not in flat:
+        return False
+    pattern = r"\s*".join(re.escape(ch) for ch in key)
+    return re.search(rf"(?<!\d){pattern}(?!\d)", upper) is not None
 
 
 def normalize_name(raw: Any) -> str:

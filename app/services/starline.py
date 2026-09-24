@@ -75,31 +75,69 @@ def check_state(data: Any, *, what: str) -> dict:
 def parse_device(raw: dict) -> dict:
     """Устройство StarLine - в плоский словарь CRM.
 
-    Координаты у StarLine лежат как x (долгота) и y (широта); перепутать
-    их - значит увезти весь парк в Сомали, поэтому переименованы сразу.
+    Опрос читает v2 `user_info`, и там `position.x` - ШИРОТА, а `y` -
+    долгота (так их берёт интеграция Home Assistant, device_tracker.py).
+    В v3 `/data` (у устройства есть блок `common`) наоборот. Перепутать
+    их - значит увезти Казань в Актюбинскую область, поэтому порядок
+    выбирается по форме ответа и переименовывается сразу.
     Отсутствующие поля остаются None: половина параметров зависит от
     модели устройства, и выдумывать нули за него нечестно.
     """
     position = raw.get("position") or {}
-    alarm_state = raw.get("alarm_state") or {}
     common = raw.get("common") or {}
     recorded = position.get("ts") or common.get("gps_ts") or raw.get("ts")
+    if common:
+        lat, lon = position.get("y"), position.get("x")
+    else:
+        lat, lon = position.get("x"), position.get("y")
+    status = _int(raw.get("status"))
     return {
         "device_id": str(raw.get("device_id") or raw.get("id") or "").strip(),
         "alias": (raw.get("alias") or raw.get("name") or "").strip() or None,
-        "lat": _float(position.get("y")),
-        "lon": _float(position.get("x")),
+        "lat": _float(lat),
+        "lon": _float(lon),
         "speed": _float(position.get("s")),
         "course": _int(position.get("dir")),
         "recorded_at": _moment(recorded),
+        # Когда устройство последний раз выходило на связь - не то же,
+        # что последняя точка: в подвале связь есть, спутников нет.
+        "active_at": _moment(raw.get("ts_activity") or raw.get("activity_ts")
+                             or common.get("ts")),
         "voltage": _float(common.get("battery") or raw.get("battery")),
         "gsm_level": _int(common.get("gsm_lvl") or raw.get("gsm_lvl")),
-        # Тревога - любая из поднятых StarLine: удар, наклон, движение
-        # при охране. Разбирать их по отдельности смысла нет: оператору
-        # всё равно ехать смотреть.
-        "alarm": any(bool(v) for v in alarm_state.values()) if alarm_state else False,
-        "online": bool(raw.get("status")) if "status" in raw else None,
+        "alarm": _alarm(raw),
+        # У StarLine 1 - на связи, 2 - нет; bool(2) выдал бы «на связи».
+        "online": status == 1 if status is not None else None,
     }
+
+
+# Не тревоги: метка времени среди флагов (v3) и «антиограбление» - это
+# наша же блокировка мотора, а не угон.
+NOT_ALARM_FLAGS = frozenset({"ts", "hijack"})
+
+
+def _alarm(raw: dict) -> bool:
+    """Поднята ли тревога StarLine: удар, наклон, движение при охране.
+
+    v2 кладёт флаги зон в `car_alr_state`, а сам факт тревоги - в
+    `car_state.alarm`; v3 - в `alarm_state` с меткой `ts` внутри. Разбирать
+    зоны по отдельности смысла нет: оператору всё равно ехать смотреть.
+    """
+    flags: dict = {}
+    for key in ("car_alr_state", "alarm_state"):
+        part = raw.get(key)
+        if isinstance(part, dict):
+            flags.update(part)
+    car_state = raw.get("car_state") if isinstance(raw.get("car_state"), dict) else {}
+    return (any(_flag(v) for k, v in flags.items() if k not in NOT_ALARM_FLAGS)
+            or _flag(car_state.get("alarm")))
+
+
+def _flag(value: Any) -> bool:
+    """Флаг StarLine: приходит и True, и 1, и строкой «1»/«true»."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true")
+    return value is True or (isinstance(value, int) and value == 1)
 
 
 def _float(value: Any) -> float | None:
@@ -248,7 +286,16 @@ class StarlineClient:
             devices = (data or {}).get("devices") if isinstance(data, dict) else None
             if devices is None:
                 raise StarlineError("user_info: StarLine не вернул устройства")
-            return [d for d in (parse_device(x) for x in devices) if d["device_id"]]
+            # Трекеры, расшаренные на кабинет из другого, лежат отдельным
+            # списком; без него они для опроса как будто не существуют.
+            shared = data.get("shared_devices") or []
+            out: dict[str, dict] = {}
+            for raw in [*devices, *(shared if isinstance(shared, list) else [])]:
+                if isinstance(raw, dict):
+                    device = parse_device(raw)
+                    if device["device_id"]:
+                        out.setdefault(device["device_id"], device)
+            return list(out.values())
         finally:
             close = getattr(session, "close", None)
             if close is not None:
