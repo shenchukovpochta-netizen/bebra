@@ -3694,6 +3694,7 @@ BANK_STATUSES: dict[str, str] = {
 MATCH_SURE = "contract"
 MATCH_REASONS: dict[str, str] = {
     "contract": "номер договора в назначении",
+    "conflict": "договор есть, но рядом чужой номер, телефон или ФИО — сверьте",
     "contract_other": "номер договора не нашего вида — сверьте",
     "phone": "телефон в назначении",
     "name": "ФИО плательщика",
@@ -3702,6 +3703,24 @@ MATCH_REASONS: dict[str, str] = {
 # свой префикс). Только такой номер отличим от номера велосипеда, даты и
 # слов в назначении; всё, что набрано в карточке руками, - подсказка.
 OUR_CONTRACT = re.compile(r"([^\W\d_]{1,6})-(\d{4})-(\d{6})")
+# Разделители внутри нашего номера: банк и клиент пишут как хотят -
+# «АВ-2026-000042», «АВ 2026 000042», «№АВ2026-000042». Буквы класс не
+# съедает: на нём держится различие «АВ» у Telegram и «АВМ» у MAX.
+CONTRACT_SEP = r"[\s\-–—/№#]*"
+# Продолжение после номера: «…000042/2», «…000042-2», «…000042А»,
+# «…000042/Д1» - это уже другой договор (второй, допсоглашение), набранный
+# кому-то руками, а не наш номер с точкой после.
+CONTRACT_TAIL = r"(?![^\W_]|[/\-–—][^\W_])"
+# Любой номер нашего вида в назначении, чей бы он ни был. Буквы - вся
+# склеенная цепочка («ДОГОВОРУАВ»), префикс сверяется её концом. Год -
+# только 20xx: иначе «тел 9990000009» тоже был бы «номером». Хвост
+# запоминается, чтобы «…000042/2» не считался тем же номером.
+OUR_NUMBER_TEXT = re.compile(
+    rf"(?<!\d)([^\W\d_]+){CONTRACT_SEP}(20\d\d){CONTRACT_SEP}(\d{{6}})(?!\d)"
+    r"((?:[/\-–—]?[^\W_]+)?)")
+
+Span = tuple[int, int]
+OurNumber = tuple[str, str, str]           # префикс, год, номер
 
 
 def bank_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -3713,15 +3732,41 @@ def digits(raw: Any) -> str:
     return re.sub(r"\D", "", str(raw or ""))
 
 
+# Клиент, разобранный под выписку один раз: ключ, карточка, договор, наш
+# номер (если он нашего вида), последние 10 цифр телефона, ФИО для сравнения.
+PreparedClient = tuple[int, Mapping[str, Any], str, "OurNumber | None", str, str]
+
+
+def prepare_clients(clients: Iterable[Mapping[str, Any]]) -> list[PreparedClient]:
+    """Разобрать карточки один раз на всю выписку, а не на каждую строку:
+    при тысячах клиентов повторный разбор договора, телефона и ФИО на
+    каждое поступление держал страницу «Касса → Выписка» секундами."""
+    out: list[PreparedClient] = []
+    for client in clients:
+        key = id(client) if client.get("id") is None else int(client["id"])
+        contract = str(client.get("contract_no") or "").strip()
+        out.append((key, client, contract, our_number(contract) if contract else None,
+                    digits(client.get("phone"))[-10:],
+                    normalize_name(client.get("full_name"))))
+    return out
+
+
 def match_payment(txn: Mapping[str, Any],
-                  clients: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
+                  clients: Iterable[Mapping[str, Any]], *,
+                  prepared: list[PreparedClient] | None = None) -> dict[str, Any] | None:
     """Кому из клиентов принадлежит поступление.
 
     Признаки по убыванию надёжности: номер договора нашего вида
     (АВ-2026-000042) в назначении, телефон там же, номер договора, набранный
     в карточке руками, ФИО плательщика. Зачислять без человека можно только
-    по первому: «15», «N15», «б/н» или «01.09.2026» в назначении - это и
-    номер велосипеда, и дата, и «счёт б/н», и договор соседа.
+    по первому: «15», «N15» или «01.09.2026» в назначении - это и номер
+    велосипеда, и дата, и договор соседа.
+
+    И по первому - только когда ему ничто не возражает: ни чужой номер
+    поверх нашего («АВ-2026-000042 доп» у соседа), ни второй номер нашего
+    вида, ни телефон или ФИО другого клиента. Спор - это подсказка
+    «сверьте», а не зачисление: чужие деньги на чужом балансе дороже
+    одного нажатия оператора.
 
     Каждый признак ищется по всем клиентам, а не до первого попавшегося:
     список идёт по алфавиту, и «первый» - случайность. Признак, который
@@ -3733,60 +3778,133 @@ def match_payment(txn: Mapping[str, Any],
     upper = purpose.upper()
     phones = {digits(p) for p in re.findall(r"[\d\-()+ ]{10,}", purpose)}
     payer = normalize_name(txn.get("payer_name"))
-    ours: dict[int, Mapping[str, Any]] = {}
-    other: dict[int, Mapping[str, Any]] = {}
+    ours: dict[int, tuple[Mapping[str, Any], OurNumber, list[Span]]] = {}
+    other: dict[int, tuple[Mapping[str, Any], list[Span]]] = {}
     by_phone: dict[int, Mapping[str, Any]] = {}
     by_name: dict[int, Mapping[str, Any]] = {}
-    for client in clients:
-        key = id(client) if client.get("id") is None else int(client["id"])
-        contract = str(client.get("contract_no") or "").strip()
+    tails = {p[-10:] for p in phones if len(p) >= 10}
+    for key, client, contract, number, phone, name in (
+            prepared if prepared is not None else prepare_clients(clients)):
         if contract:
-            if our_contract_in(contract, upper):
-                ours[key] = client
-            elif other_contract_in(contract, upper):
-                other[key] = client
-        phone = digits(client.get("phone"))
-        if phone and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10):
+            # Номер нашего вида ищется только строго: «АВ-2026-000042» в
+            # «…000042/2» - это чужой договор, и подсказкой «сверьте» на
+            # владельца короткого номера он тоже быть не должен.
+            if number:
+                if spans := our_contract_in(contract, upper, number=number):
+                    ours[key] = (client, number, spans)
+            elif spans := other_contract_in(contract, upper):
+                other[key] = (client, spans)
+        if phone and phone in tails:
             by_phone[key] = client
-        if payer and normalize_name(client.get("full_name")) == payer:
+        if payer and name == payer:
             by_name[key] = client
-    for found, reason in ((ours, "contract"), (by_phone, "phone"),
-                          (other, "contract_other"), (by_name, "name")):
+    if len(ours) == 1:
+        key, (client, number, spans) = next(iter(ours.items()))
+        return contract_verdict(key, client, number, spans, upper, other,
+                                by_phone, by_name)
+    for found, reason in ((by_phone, "phone"),
+                          ({k: c for k, (c, _) in other.items()}, "contract_other"),
+                          (by_name, "name")):
         if len(found) == 1:
             return {"client": next(iter(found.values())), "reason": reason}
     return None
 
 
-def our_contract_in(contract: str, upper: str) -> bool:
-    """Номер договора нашего вида стоит в назначении.
+def contract_verdict(key: int, client: Mapping[str, Any], number: OurNumber,
+                     spans: list[Span], upper: str,
+                     other: Mapping[int, tuple[Mapping[str, Any], list[Span]]],
+                     by_phone: Mapping[int, Any],
+                     by_name: Mapping[int, Any]) -> dict[str, Any] | None:
+    """Наш номер договора нашёлся у одного клиента: уверенно или спор.
+
+    Номер соседа, набранный руками поверх нашего («АВ-2026-000042 доп»),
+    значит, что в назначении стоит более точный номер: подсказкой идёт
+    тот, чьё совпадение длиннее. Номера соседей в других местах
+    назначения («велосипед № 15») не мешают - это шум, а не спор.
+    """
+    rivals = [(k, c, span) for k, (c, found) in other.items() if k != key
+              for span in found if any(overlaps(span, s) for s in spans)]
+    if rivals:
+        mine = [(s, e) for s, e in spans
+                if any(overlaps((s, e), span) for _, _, span in rivals)]
+        longest = max(e - s for s, e in mine + [span for _, _, span in rivals])
+        owners = {k: c for k, c, (s, e) in rivals if e - s == longest}
+        if any(e - s == longest for s, e in mine):
+            owners[key] = client
+        if len(owners) != 1:
+            return None                  # одинаковой длины у двоих - решает человек
+        winner, owner = next(iter(owners.items()))
+        return {"client": owner,
+                "reason": "conflict" if winner == key else "contract_other"}
+    # Второй номер нашего вида в том же назначении («по договорам
+    # АВ-2026-000042 и АВМ-2026-000007»): за кого из двоих эти деньги,
+    # решает человек, даже если второго номера ни у кого в карточке нет.
+    foreign = any(not same_number(found, number) for found in our_numbers_in(upper))
+    # Телефон или ФИО указывают на других клиентов, а не на владельца
+    # договора: курьер мог заплатить за себя, перепутав номер.
+    clash = any(found and key not in found for found in (by_phone, by_name))
+    return {"client": client, "reason": "conflict" if foreign or clash else "contract"}
+
+
+def overlaps(a: Span, b: Span) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def our_number(contract: str) -> OurNumber | None:
+    """Префикс, год и номер из договора нашего вида, иначе None."""
+    m = OUR_CONTRACT.fullmatch(contract.upper().replace(" ", ""))
+    return None if m is None else (m[1], m[2], m[3])
+
+
+def our_numbers_in(upper: str) -> list[tuple[str, str, str, str]]:
+    """Все номера нашего вида в назначении: буквы, год, номер, хвост."""
+    return [(m[1], m[2], m[3], m[4]) for m in OUR_NUMBER_TEXT.finditer(upper)]
+
+
+def same_number(found: tuple[str, str, str, str], number: OurNumber) -> bool:
+    """Номер из назначения - этот договор. Буквы сверяются концом:
+    «ДОГОВОРУАВ-…» - это «АВ-…», а «АВМ-…» - нет."""
+    letters, year, seq, tail = found
+    prefix, own_year, own_seq = number
+    return (year, seq, tail) == (own_year, own_seq, "") and letters.endswith(prefix)
+
+
+def our_contract_in(contract: str, upper: str, *,
+                    number: OurNumber | None = None) -> list[Span]:
+    """Где в назначении стоит номер договора нашего вида (пусто - нигде).
 
     Разделители банк и клиент пишут как хотят: «АВ-2026-000042»,
-    «АВ 2026 000042», «АВ2026-000042». Границы - буква перед префиксом и
-    цифра после номера: «АВ» не находится внутри «АВМ-…» у бота MAX, а
-    «…000042» - внутри «…0000421».
+    «АВ 2026 000042», «АВ2026-000042». Граница спереди - только цифра:
+    «договоруАВ-…» банк склеивает сам, а «АВ» внутри «АВМ-…» у бота MAX
+    не находится и так - разделитель не съедает букву «М». Поэтому префикс
+    одного бота не должен быть концом префикса другого («АВ» и «ТАВ»).
+    Сзади номер не продолжается: «…0000421», «…000042/2», «…000042А» -
+    другие номера.
     """
-    m = OUR_CONTRACT.fullmatch(contract.upper().replace(" ", ""))
-    if m is None:
-        return False
-    prefix, year, seq = m.groups()
+    number = number or our_number(contract)
+    if number is None:
+        return []
+    prefix, year, seq = number
     if seq not in upper:
-        return False                     # дешёвый предфильтр: клиентов тысячи
-    sep = r"[\s\-–—/№#]*"
-    pattern = rf"(?<![^\W_]){re.escape(prefix)}{sep}{year}{sep}{seq}(?!\d)"
-    return re.search(pattern, upper) is not None
+        return []                        # дешёвый предфильтр: клиентов тысячи
+    pattern = (rf"(?<!\d){re.escape(prefix)}{CONTRACT_SEP}{year}"
+               rf"{CONTRACT_SEP}{seq}{CONTRACT_TAIL}")
+    return [m.span() for m in re.finditer(pattern, upper)]
 
 
-def other_contract_in(contract: str, upper: str) -> bool:
-    """Номер, набранный в карточке руками, стоит в назначении целым словом.
+def other_contract_in(contract: str, upper: str) -> list[Span]:
+    """Где в назначении стоит номер, набранный в карточке руками, целым словом.
 
-    Только подсказка: границы - любые буква или цифра рядом, иначе «нет»
-    находилось бы в «интернет», а «15» - в «АВ-2026-000150».
+    Только подсказка: границы - любые буква или цифра рядом, иначе «15»
+    находилось бы в «АВ-2026-000150». Номер без единой цифры - «—», «б/н»,
+    «нет», «без номера» - это заглушка «номера нет»: она совпадает со
+    «счётом б/н» и тире в любом назначении и не подсказывает никого.
     """
-    key = " ".join(contract.upper().split())
-    if not key or key.replace(" ", "") not in upper.replace(" ", ""):
-        return False
-    pattern = r"\s*".join(re.escape(ch) for ch in key.replace(" ", ""))
-    return re.search(rf"(?<![^\W_]){pattern}(?![^\W_])", upper) is not None
+    key = "".join(contract.upper().split())
+    if not any(ch.isdigit() for ch in key) or key not in upper.replace(" ", ""):
+        return []
+    pattern = r"\s*".join(re.escape(ch) for ch in key)
+    return [m.span() for m in re.finditer(rf"(?<![^\W_]){pattern}(?![^\W_])", upper)]
 
 
 def normalize_name(raw: Any) -> str:
@@ -3799,10 +3917,11 @@ def bank_rows(txns: Iterable[dict], clients: Iterable[dict] | None = None,
               *, settings: Mapping[str, Any] | None = None) -> list[dict]:
     """Выписка с догадкой, кому зачислить. Неразобранные - первыми."""
     clients = list(clients or [])
+    prepared = prepare_clients(clients)
     rows = []
     for txn in txns:
-        guess = (match_payment(txn, clients) if txn.get("status") == "new"
-                 and clients else None)
+        guess = (match_payment(txn, clients, prepared=prepared)
+                 if txn.get("status") == "new" and clients else None)
         rows.append({**txn, "guess": guess,
                      "guess_reason": MATCH_REASONS.get((guess or {}).get("reason", ""), ""),
                      "sure": bool(guess) and guess["reason"] == MATCH_SURE})
