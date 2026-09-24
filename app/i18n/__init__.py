@@ -79,6 +79,8 @@ BUTTONS_RU: dict[str, str] = {
     "BTN_CAB_REFRESH": "🔄 Обновить",
     "BTN_CAB_BACK": "◀️ Назад",
     "BTN_PAY_CHECK": "🔄 Проверить оплату",
+    "BTN_BOOK": "🚲 Забронировать велосипед",
+    "BTN_BOOK_CANCEL": "❌ Снять заявку",
     "BTN_INTENT_RENEW": "✅ Продлю",
     "BTN_INTENT_RETURN": "↩️ Сдаю",
 }

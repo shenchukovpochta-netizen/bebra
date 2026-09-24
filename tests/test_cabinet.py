@@ -547,6 +547,84 @@ class TestTopUp(CabinetCase):
         self.assertIn(texts.MOD_REPLY_NOT_A_CARD, self.texts_to(ADMIN_CHAT))
 
 
+class TestBooking(CabinetCase):
+    """Заявка на аренду из кабинета: четыре нажатия без состояния."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.approved_user()
+        self.client = await self.crm_client(tg_id=USER_ID)
+        self.model_id = await self.crm.create_bike_model(
+            title="Kugoo V3", brand="Kugoo", factory_title=None, battery_slots=2,
+            note=None)
+        self.tariff_id = await self.crm.create_tariff("Неделя", 7, D(3000), None)
+        await self.crm.create_bike(code="B-1", model="Kugoo V3")
+        self.loc1 = await self.crm.create_location(name="Павлюхина", city="Казань",
+                                                   address=None, note=None)
+        self.loc2 = await self.crm.create_location(name="Адоратского", city="Казань",
+                                                   address=None, note=None)
+
+    def labels(self):
+        markup = self.session.last_markup()
+        return [b.text for row in markup.inline_keyboard for b in row]
+
+    def callbacks(self):
+        markup = self.session.last_markup()
+        return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    async def test_four_taps_make_a_booking(self):
+        await self.feed(msg("/cabinet"))
+        self.assertIn("🚲 Забронировать велосипед", self.labels())
+        await self.feed(cb("cab:book"))
+        self.assertIn("Kugoo V3 — свободно 1", self.labels())
+        await self.feed(cb(f"cab:book:m:{self.model_id}"))
+        self.assertIn("Неделя — 3 000 ₽", self.labels())
+        await self.feed(cb(f"cab:book:t:{self.model_id}:{self.tariff_id}"))
+        self.assertEqual(sorted(self.labels()[:2]), ["Адоратского", "Павлюхина"])
+        await self.feed(cb(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc2}"))
+        self.assertTrue(self.labels()[0].startswith("Сегодня"))
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc2}:1"))
+        booking = await self.crm.open_booking_of(self.client["id"])
+        self.assertIsNotNone(booking)
+        self.assertEqual(booking["model"], "Kugoo V3")
+        self.assertEqual(booking["tariff_id"], self.tariff_id)
+        self.assertEqual(booking["location_id"], self.loc2)
+        self.assertEqual(booking["wanted_on"], date.today() + timedelta(days=1))
+        self.assertIn("Заявка принята", self.last_text())
+        cards = [t for t in self.texts_to(ADMIN_CHAT) if "Заявка на аренду" in t]
+        self.assertTrue(cards, "команде ушла карточка")
+        self.assertIn("Адоратского", cards[-1])
+        # кабинет теперь показывает заявку и кнопку снятия
+        await self.feed(cb("cab:home"))
+        self.assertIn("📝 Заявка: Kugoo V3", self.last_text())
+        self.assertIn("❌ Снять заявку", self.labels())
+        # вторая заявка не подаётся
+        await self.feed(cb("cab:book"))
+        self.assertIn("У вас уже есть заявка", self.last_text())
+        await self.feed(cb("cab:book:cancel"))
+        self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+        self.assertIn("🚲 Забронировать велосипед", self.labels())
+
+    async def test_single_point_is_skipped_and_stale_button_says_so(self):
+        await self.crm.update_location(self.loc2, active=False)
+        await self.feed(cb(f"cab:book:t:{self.model_id}:{self.tariff_id}"))
+        self.assertTrue(self.labels()[0].startswith("Сегодня"), self.labels())
+        self.assertIn(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:0",
+                      self.callbacks())
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:7"))
+        self.assertIsNone(await self.crm.open_booking_of(self.client["id"]),
+                          "неделя вперёд - кнопка чужая")
+        await self.feed(cb("cab:book:m:999"))
+        self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+
+    async def test_booking_is_refused_during_a_rental(self):
+        await self.crm_rental(self.client)
+        await self.feed(msg("/cabinet"))
+        self.assertNotIn("🚲 Забронировать велосипед", self.labels())
+        await self.feed(cb("cab:book"))
+        self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+
+
 class TestBotSync(CabinetCase):
     """Полный цикл бота отражается в CRM без участия оператора."""
 

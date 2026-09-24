@@ -310,6 +310,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
+        BOOKING_STATUSES=logic.BOOKING_STATUSES, booking_line=logic.booking_line,
         PROMO_KINDS=logic.PROMO_KINDS, PROMO_PARAM_LABELS=logic.PROMO_PARAM_LABELS,
         PROMO_TEXT_FIELDS=logic.PROMO_TEXT_FIELDS,
         promo_discount_label=logic.promo_discount_label,
@@ -1457,7 +1458,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 return render(request, "issue.html", **ctx)
             return redirect(issue_url(client=client["id"], bike=p.get("bike")))
         if client is None:
+            # Заявки из кабинета - прямо на первом шаге: оператор начинает
+            # выдачу с них, а не с поиска по телефону.
+            ctx["bookings"] = await crm.bookings(status="new")
             return render(request, "issue.html", **ctx)
+        ctx["booking_id"] = int(p["booking"]) if (p.get("booking") or "").isdigit() else None
 
         balance = await crm.client_balance(client["id"])
         active = await crm.active_rental_of(client["id"])
@@ -1694,6 +1699,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                     method=method, note=f"При выдаче № {bike['code']}",
                                     by=who(request), rental_id=rental_id)
             await referral_bonus(client, pay.value, who(request))
+        if (data.get("booking_id") or "").isdigit():
+            # Заявка из кабинета закрывается выдачей: ссылка на аренду
+            # остаётся, чтобы видеть, во что заявка превратилась.
+            await service.close_booking(crm, int(data["booking_id"]),
+                                        rental_id=rental_id, by=who(request))
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
         # Сообщение об акции - после платежа и после «аренда оформлена»:
@@ -1757,6 +1767,51 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       bot_state=logic.bot_client_state(await bot_user_for(client)),
                       extras=logic.live_extras(
                           await crm.rental_extras(rental["id"])))
+
+    # ─────────────────── заявки на аренду из кабинета ───────────────────
+    #
+    # Заявка - намерение, а не аренда: велосипед не бронируется. Оператор
+    # открывает из неё мастер выдачи с готовыми полями, и заявка
+    # закрывается выдачей; снятая заявка уходит клиенту сообщением.
+
+    def booking_issue_url(booking: dict) -> str:
+        return issue_url(client=booking["client_id"], model=booking.get("model"),
+                         tariff=booking.get("tariff_id"), booking=booking["id"],
+                         started_on=(booking["wanted_on"].isoformat()
+                                     if booking.get("wanted_on") else None))
+
+    @app.get("/bookings")
+    async def bookings_page(request: Request) -> Response:
+        rows = await crm.bookings(limit=300)
+        for row in rows:
+            row["issue_url"] = booking_issue_url(row)
+        return render(request, "bookings.html", rows=rows, today=date.today(),
+                      fresh=[r for r in rows if r["status"] == "new"])
+
+    @app.post("/bookings/{booking_id}/cancel")
+    async def booking_cancel(request: Request, booking_id: int) -> Response:
+        if not may_edit(request, "issue"):
+            return denied(request, "issue")
+        booking = await crm.booking(booking_id)
+        if booking is None:
+            return render(request, "missing.html", status_code=404, what="Заявка")
+        note = logic.check_note((await form(request)).get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+            return redirect("/bookings")
+        try:
+            await service.cancel_booking(crm, booking, by=who(request), note=note.value)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/bookings")
+        client = await crm.client(booking["client_id"])
+        if client is not None:
+            await notices.send_client(
+                crm, "booking_cancelled", client["id"],
+                lambda: notify.booking_cancelled(bot, db, client, booking, note.value))
+        flash(request, f"Заявка {booking['full_name']} снята"
+                       + (", клиенту сказано." if client and client.get("tg_id") else "."))
+        return redirect("/bookings")
 
     # ─────────────────────── аренды ───────────────────────
 

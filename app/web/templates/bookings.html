@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Брони — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Заявки на аренду</h1>
+  <a class="btn ghost" href="/issue">Выдача</a>
+</div>
+{# Заявка - намерение, а не аренда: велосипед под неё не бронируется,
+   иначе одна заявка «на завтра» держала бы простаивающий велосипед сутки.
+   Оператор открывает из неё мастер с готовыми полями. #}
+<div class="tiles">
+  <div class="tile {% if fresh %}hot{% endif %}"><b>{{ fresh|length }}</b><span>ждут выдачи</span></div>
+  <div class="tile"><b>{{ fresh|selectattr('wanted_on', 'le', today)|list|length }}</b><span>на сегодня и раньше</span></div>
+</div>
+<div class="card">
+  <table>
+    <tr><th>Когда</th><th>Клиент</th><th>Что просит</th><th>Статус</th><th class="opt">Заметка</th><th></th></tr>
+    {% for b in rows %}
+    <tr class="{% if b.status != 'new' %}muted{% endif %}">
+      <td class="nowrap">{{ b.wanted_on|dmy }}{% if b.status == 'new' and b.wanted_on < today %} <span class="tag">просрочена</span>{% endif %}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}<br><small class="muted">{{ b.phone }}{% if not b.tg_id %} · без Telegram{% endif %}</small></td>
+      <td>{{ booking_line(b) }}</td>
+      <td>{% if b.status == 'done' and b.rental_id %}<a href="/rentals/{{ b.rental_id }}"><span class="tag ok">{{ BOOKING_STATUSES[b.status] }}</span></a>{% else %}<span class="tag {% if b.status == 'new' %}rented{% endif %}">{{ BOOKING_STATUSES.get(b.status, b.status) }}</span>{% endif %}<br><small class="muted">{{ b.created_at|dmy }}{% if b.handled_by %} · {{ b.handled_by }}{% endif %}</small></td>
+      <td class="opt muted">{{ b.note or '' }}</td>
+      <td>
+        {% if b.status == 'new' and can_edit(staff, 'issue') %}
+        <a class="btn" href="{{ b.issue_url }}">Выдать</a>
+        <form method="post" action="/bookings/{{ b.id }}/cancel" class="inline-form" style="margin-top:6px">
+          <input name="note" placeholder="причина — уйдёт клиенту" size="18">
+          <button type="submit" class="ghost danger">Снять</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">Заявок ещё не было. Клиент подаёт её в кабинете кнопкой «Забронировать велосипед».</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Клиент выбрал в кабинете модель, срок, точку и день; свободных
+    этой модели могло и не быть — тогда это лист ожидания. «Выдать» открывает
+    мастер с готовыми полями, заявка закроется самой выдачей. Снятая заявка
+    уходит клиенту сообщением с вашей причиной.</p>
+</div>
+{% endblock %}

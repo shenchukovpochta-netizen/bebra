@@ -51,6 +51,10 @@ BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
                                   "price", "service_months", "active", "note"})
 TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
                                 "note"})
+BOOKING_FIELDS = frozenset({
+    "model", "tariff_id", "location_id", "wanted_on", "note", "status", "rental_id",
+    "handled_by", "handled_at",
+})
 PROMO_FIELDS = frozenset({
     "kind", "title", "percent", "amount", "code", "params", "starts_on", "ends_on",
     "max_uses", "once_per_client", "text", "active", "note",
@@ -3743,6 +3747,57 @@ class CrmDB:
         return _row(await self.pool.fetchrow(
             "select * from crm.bonuses where client_id = $1 and kind = $2 "
             "order by id desc limit 1", client_id, kind))
+
+    # ─────────────────── заявки на аренду ───────────────────
+
+    _BOOKING_SELECT = """
+        select b.*, c.full_name, c.phone, c.tg_id, c.contract_no,
+               t.name as tariff_name, t.period_days, t.price as tariff_price,
+               coalesce(l.public_title, l.name) as location_title
+          from crm.bookings b
+          join crm.clients c on c.id = b.client_id
+          left join crm.tariffs t on t.id = b.tariff_id
+          left join crm.locations l on l.id = b.location_id
+    """
+
+    async def create_booking(self, *, client_id: int, model: str | None,
+                             tariff_id: int | None, location_id: int | None,
+                             wanted_on: date, note: str | None = None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.bookings (client_id, model, tariff_id, location_id,
+                                      wanted_on, note)
+            values ($1, $2, $3, $4, $5, $6) returning id
+            """, client_id, model, tariff_id, location_id, wanted_on, note))
+
+    async def booking(self, booking_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._BOOKING_SELECT} where b.id = $1", booking_id))
+
+    async def open_booking_of(self, client_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._BOOKING_SELECT} where b.client_id = $1 and b.status = 'new' "
+            "order by b.id desc limit 1", client_id))
+
+    async def bookings(self, *, status: str | None = None,
+                       limit: int = 200) -> list[dict]:
+        args: list[Any] = []
+        where = ""
+        if status:
+            args.append(status)
+            where = f"where b.status = ${len(args)}"
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._BOOKING_SELECT} {where} "
+            f"order by b.status <> 'new', b.wanted_on, b.id limit ${len(args)}", *args))
+
+    async def update_booking(self, booking_id: int, **fields: Any) -> None:
+        sets, values = _set_clause(fields, BOOKING_FIELDS, 2)
+        if not sets:
+            return
+        await self.pool.execute(
+            f"update crm.bookings set {sets}, updated_at = now() where id = $1",
+            booking_id, *values)
 
     # ─────────────────────── акции ───────────────────────
     #

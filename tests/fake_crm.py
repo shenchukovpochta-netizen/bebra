@@ -59,6 +59,7 @@ class FakeCrm:
         self.pay_orders_: dict[int, dict] = {}
         self.notices_: dict[str, dict] = {}
         self.promos_: dict[int, dict] = {}
+        self.bookings_: dict[int, dict] = {}
         self.bonuses_: dict[int, dict] = {}
         self.doc_templates_: dict[int, dict] = {}
         self.marks_: dict[str, dict] = {}
@@ -2844,6 +2845,55 @@ class FakeCrm:
                          "phone": client.get("phone"),
                          "promo_title": promo.get("title")})
         return rows[:limit]
+
+    # ─────────────────── заявки на аренду ───────────────────
+
+    def _booking_row(self, b):
+        c = self.clients_.get(b["client_id"], {})
+        t = self.tariffs_.get(b["tariff_id"]) if b.get("tariff_id") else None
+        loc = self.locations_.get(b["location_id"]) if b.get("location_id") else None
+        return {**b, "full_name": c.get("full_name"), "phone": c.get("phone"),
+                "tg_id": c.get("tg_id"), "contract_no": c.get("contract_no"),
+                "tariff_name": t["name"] if t else None,
+                "period_days": t["period_days"] if t else None,
+                "tariff_price": t["price"] if t else None,
+                "location_title": ((loc.get("public_title") or loc["name"])
+                                   if loc else None)}
+
+    async def create_booking(self, *, client_id, model, tariff_id, location_id,
+                             wanted_on, note=None):
+        if any(b["client_id"] == client_id and b["status"] == "new"
+               for b in self.bookings_.values()):
+            raise UniqueError("bookings_one_open")
+        bid = self._id()
+        self.bookings_[bid] = {"id": bid, "client_id": client_id, "model": model,
+                               "tariff_id": tariff_id, "location_id": location_id,
+                               "wanted_on": wanted_on, "note": note, "status": "new",
+                               "rental_id": None, "handled_by": None,
+                               "handled_at": None, "created_at": self._now(),
+                               "updated_at": self._now()}
+        return bid
+
+    async def booking(self, booking_id):
+        b = self.bookings_.get(booking_id)
+        return self._booking_row(b) if b else None
+
+    async def open_booking_of(self, client_id):
+        for b in sorted(self.bookings_.values(), key=lambda x: -x["id"]):
+            if b["client_id"] == client_id and b["status"] == "new":
+                return self._booking_row(b)
+        return None
+
+    async def bookings(self, *, status=None, limit=200):
+        rows = [self._booking_row(b) for b in self.bookings_.values()
+                if status is None or b["status"] == status]
+        rows.sort(key=lambda b: (b["status"] != "new", b["wanted_on"], b["id"]))
+        return rows[:limit]
+
+    async def update_booking(self, booking_id, **fields):
+        b = self.bookings_[booking_id]
+        b.update(fields)
+        b["updated_at"] = self._now()
 
     # ─────────────────── акции ───────────────────
 

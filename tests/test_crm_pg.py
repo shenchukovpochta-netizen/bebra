@@ -2197,6 +2197,34 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                  applied=applied)
         self.assertEqual([a["rental_id"] for a in applied], [rid])
 
+    # ─── заявки на аренду ───
+
+    async def test_one_open_booking_per_client(self):
+        await self.seed()
+        # Точки приезжают сидом схемы: берём первую, а не заводим свою.
+        loc = (await self.crm.locations())[0]["id"]
+        first = await self.crm.create_booking(
+            client_id=self.client_id, model="Kugoo V3", tariff_id=self.tariff_id,
+            location_id=loc, wanted_on=date.today())
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_booking(
+                client_id=self.client_id, model="Kugoo V3", tariff_id=None,
+                location_id=None, wanted_on=date.today())
+        row = await self.crm.open_booking_of(self.client_id)
+        self.assertEqual(row["id"], first)
+        self.assertEqual(row["tariff_name"], "Неделя")
+        self.assertTrue(row["location_title"])
+        await self.crm.update_booking(first, status="cancelled", handled_by="t",
+                                      handled_at=datetime.now(UTC))
+        self.assertIsNone(await self.crm.open_booking_of(self.client_id))
+        second = await self.crm.create_booking(
+            client_id=self.client_id, model=None, tariff_id=None, location_id=None,
+            wanted_on=date.today() + timedelta(days=1))
+        rows = await self.crm.bookings()
+        self.assertEqual([r["id"] for r in rows], [second, first], "открытые первыми")
+        with self.assertRaises(ValueError):
+            await self.crm.update_booking(second, client_id=1)
+
 
 if __name__ == "__main__":
     unittest.main()

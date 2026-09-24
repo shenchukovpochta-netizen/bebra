@@ -116,6 +116,19 @@ async def promo_applied(bot: Any, db: Any, crm: Any, client: dict, promo: dict,
     return await _send(bot, client["tg_id"], text, kb.cabinet_entry(lang))
 
 
+async def booking_cancelled(bot: Any, db: Any, client: dict, booking: dict,
+                            note: str | None = None) -> bool:
+    """Клиенту: оператор снял заявку на аренду, и почему."""
+    if not client.get("tg_id") or bot is None:
+        return False
+    lang = await _lang(db, client["tg_id"])
+    text = i18n.t(lang, "CAB_BOOK_REMOVED").format(
+        line=bot_logic.esc(logic.booking_line(booking)),
+        note=("\n" + bot_logic.esc(note)) if note else "",
+        url=bot_logic.esc(company.support_url()))
+    return await _send(bot, client["tg_id"], text, kb.cabinet_entry(lang))
+
+
 async def referral_bonus(bot: Any, db: Any, agent: dict, friend: dict,
                          amount: Any) -> bool:
     """Агенту: друг заплатил, бонус на балансе. Деньги уже начислены -

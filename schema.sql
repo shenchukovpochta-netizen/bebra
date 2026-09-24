@@ -2200,3 +2200,31 @@ create unique index if not exists bonuses_promo_period_once
   where promo_id is not null and rental_id is not null;
 
 alter table crm.rentals add column if not exists promo_code text;
+
+-- ─────────────────────── заявки на аренду из кабинета ───────────────────────
+--
+-- Клиент в кабинете выбирает модель, срок и точку - в панели появляется
+-- заявка с готовыми полями, оператору остаётся выбрать конкретный
+-- велосипед и принять деньги. Это намерение, а не аренда: велосипед
+-- не бронируется и статус ему не меняется - иначе одна заявка «на
+-- завтра» держала бы простаивающий велосипед сутки. Одна открытая
+-- заявка на клиента (частичный уникальный индекс).
+
+create table if not exists crm.bookings (
+  id          bigserial primary key,
+  client_id   bigint      not null references crm.clients (id),
+  model       text,                              -- название из каталога
+  tariff_id   bigint      references crm.tariffs (id),
+  location_id bigint      references crm.locations (id),
+  wanted_on   date        not null default current_date,
+  note        text,
+  status      text        not null default 'new',   -- new|done|cancelled
+  rental_id   bigint      references crm.rentals (id),
+  handled_by  text,
+  handled_at  timestamptz,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create unique index if not exists bookings_one_open
+  on crm.bookings (client_id) where status = 'new';
+create index if not exists bookings_status_idx on crm.bookings (status, wanted_on, id);

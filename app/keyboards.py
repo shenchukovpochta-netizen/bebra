@@ -303,10 +303,12 @@ remove = ReplyKeyboardRemove
 # callback «cab:...» - экраны кабинета у клиента, «crmpay:<id>:ok|no» -
 # кнопки оператора на карточке заявки о зачислении (служебный чат).
 
-def cabinet(lang: str = "ru", *, active: bool = False) -> InlineKeyboardMarkup:
+def cabinet(lang: str = "ru", *, active: bool = False,
+            booking: bool = False) -> InlineKeyboardMarkup:
     """Главный экран кабинета. При идущей аренде - ещё «продлю / сдаю»:
     намерение клиента кормит прогноз освобождения, и спрашивать его
-    звонком дороже, чем двумя кнопками."""
+    звонком дороже, чем двумя кнопками. Без аренды - заявка на
+    велосипед или снятие уже поданной."""
     rows = [
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_TOPUP"), callback_data="cab:pay")],
     ]
@@ -315,6 +317,12 @@ def cabinet(lang: str = "ru", *, active: bool = False) -> InlineKeyboardMarkup:
                                           callback_data="cab:intent:renew"),
                      InlineKeyboardButton(text=i18n.t(lang, "BTN_INTENT_RETURN"),
                                           callback_data="cab:intent:return")])
+    elif booking:
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_BOOK_CANCEL"),
+                                          callback_data="cab:book:cancel")])
+    else:
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_BOOK"),
+                                          callback_data="cab:book")])
     rows += [
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_HISTORY"),
                               callback_data="cab:history"),
@@ -327,6 +335,24 @@ def cabinet(lang: str = "ru", *, active: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REFRESH"), callback_data="cab:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cab_choice(rows: list[tuple[str, str]], lang: str = "ru") -> InlineKeyboardMarkup:
+    """Список вариантов столбиком и «назад»: шаги заявки на аренду."""
+    keyboard = [[InlineKeyboardButton(text=label, callback_data=data)]
+                for label, data in rows]
+    keyboard.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"),
+                                          callback_data="cab:home")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def cab_booking(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Под поданной заявкой: снять её или назад."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_BOOK_CANCEL"),
+                              callback_data="cab:book:cancel")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"), callback_data="cab:home")],
+    ])
 
 
 def cab_pay_options(options: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:

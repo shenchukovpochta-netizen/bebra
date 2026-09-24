@@ -42,7 +42,8 @@
   <nav>
     {% if g_main %}<div class="blk"><div class="grp">Главное</div>
       {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
-      {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>{% endif %}
+      {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
+      <a href="/bookings" {% if request.url.path.startswith('/bookings') %}class="on"{% endif %}>Брони</a>{% endif %}
     </div>{% endif %}
 
     {% if g_client %}<div class="blk"><div class="grp">Клиенты</div>

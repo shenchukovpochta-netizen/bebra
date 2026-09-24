@@ -1222,6 +1222,8 @@ LEVEL_ORDER = ("", "view", "edit")
 # оказалась бы вне раздела и открытой всем.
 SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/issue", "issue"),
+    # Заявки на аренду - часть выдачи: из заявки открывается мастер.
+    ("/bookings", "issue"),
     ("/clients", "clients"),
     # Журнал подписаний - тот же раздел, что и клиенты: подписывает
     # документы тот, кто ведёт клиента. Страница /sign/<токен> в список
@@ -4388,6 +4390,17 @@ NOTICES: dict[str, dict[str, Any]] = {
         "hint": "Согласовал или отказался - техник ждёт именно этого.",
     },
     # ─ в канал ─
+    "booking_new": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Новая заявка на аренду",
+        "hint": "Клиент выбрал в кабинете модель, срок и точку. Уходит "
+                "в момент заявки.",
+    },
+    "booking_cancelled": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Заявка на аренду снята",
+        "hint": "Оператор снял заявку в панели; причина - в сообщении.",
+    },
     "free_bikes": {
         "group": "channel", "target": "channel", "hour": 10,
         "title": "Свободные велосипеды в канал",
@@ -5497,3 +5510,66 @@ def promo_totals(promos: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     total = to_money(sum((to_money(p.get("total")) for p in rows), Decimal(0)))
     return {"active": sum(1 for p in rows if p.get("active")),
             "count": len(rows), "uses": uses, "total": total}
+
+
+# ─────────────────── заявки на аренду из кабинета ───────────────────
+#
+# Заявка - намерение, а не аренда: велосипед не бронируется и статус ему
+# не меняется, иначе одна заявка «на завтра» держала бы простаивающий
+# велосипед сутки. Оператор открывает мастер выдачи из заявки с готовыми
+# полями, и заявка закрывается выдачей.
+
+BOOKING_STATUSES: dict[str, str] = {
+    "new": "Ждёт выдачи", "done": "Выдано", "cancelled": "Снята",
+}
+# На сколько дней вперёд клиент может записаться: дальше он всё равно
+# не приедет, а прогноз освобождения на неделю уже не смотрит.
+BOOKING_DAYS_AHEAD = 3
+
+
+def booking_models(models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[str, Any]],
+                   *, aliases: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """Модели каталога для выбора в кабинете, со счётом свободных сейчас.
+
+    Модель без свободных остаётся в списке: заявка на неё - это лист
+    ожидания, и оператор увидит спрос, которого не покрыл.
+    """
+    free: dict[str, int] = {}
+    for bike in bikes:
+        if bike.get("status") != "available":
+            continue
+        title = catalogue_model(bike.get("model"), aliases)
+        free[title] = free.get(title, 0) + 1
+    out = []
+    for model in models:
+        if not model.get("active", True):
+            continue
+        title = str(model.get("title") or "")
+        out.append({"id": int(model["id"]), "title": title, "free": free.get(title, 0)})
+    out.sort(key=lambda m: (-m["free"], m["title"]))
+    return out
+
+
+def booking_when(offset: Any, *, today: date) -> date | None:
+    """День выдачи по смещению кнопки: 0 - сегодня, 1 - завтра... None -
+    кнопка чужая или слишком далеко."""
+    try:
+        days = int(offset)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= days <= BOOKING_DAYS_AHEAD:
+        return None
+    return today + timedelta(days=days)
+
+
+def booking_line(booking: Mapping[str, Any]) -> str:
+    """Одна строка о заявке: модель, тариф, точка, день."""
+    parts = [str(booking.get("model") or "любая модель")]
+    if booking.get("tariff_name"):
+        parts.append(str(booking["tariff_name"]))
+    if booking.get("location_title"):
+        parts.append(str(booking["location_title"]))
+    wanted = booking.get("wanted_on")
+    if isinstance(wanted, date):
+        parts.append(wanted.strftime("%d.%m.%Y"))
+    return " · ".join(parts)

@@ -1803,3 +1803,50 @@ async def check_bike_field(crm: Any, bike: dict, field: str, *, by: str,
                                "Фотография доказывает, что человек смотрел "
                                "на технику, а не переписал номер из накладной.")
     await crm.mark_bike_checked(bike["id"], field, by=by, photo=photo)
+
+
+# ─────────────────── заявки на аренду из кабинета ───────────────────
+
+async def create_booking(crm: Any, *, client: dict, model: str | None,
+                         tariff: dict | None, location: dict | None,
+                         wanted_on: date, note: str | None = None) -> dict:
+    """Заявка из кабинета: модель, срок, точка, день. Одна открытая на
+    клиента; при идущей аренде заявка не принимается - сначала возврат."""
+    if client.get("status") != "active":
+        raise ServiceError("Клиент заблокирован или в чёрном списке.")
+    if await crm.active_rental_of(client["id"]) is not None:
+        raise ServiceError("У клиента идёт аренда - новая заявка не нужна.")
+    if await crm.open_booking_of(client["id"]) is not None:
+        raise ServiceError("Заявка уже есть - дождитесь оператора или снимите её.")
+    try:
+        booking_id = await crm.create_booking(
+            client_id=client["id"], model=model,
+            tariff_id=(tariff or {}).get("id"), location_id=(location or {}).get("id"),
+            wanted_on=wanted_on, note=note)
+    except Exception as exc:                            # noqa: BLE001
+        if "unique" in type(exc).__name__.lower():
+            raise ServiceError("Заявка уже есть - дождитесь оператора или "
+                               "снимите её.") from exc
+        raise
+    return await crm.booking(booking_id) or {"id": booking_id}
+
+
+async def cancel_booking(crm: Any, booking: dict, *, by: str,
+                         note: str | None = None) -> None:
+    if booking.get("status") != "new":
+        raise ServiceError("Заявка уже закрыта.")
+    fields: dict[str, Any] = {"status": "cancelled", "handled_by": by,
+                              "handled_at": datetime.now(UTC)}
+    if note:
+        fields["note"] = note
+    await crm.update_booking(booking["id"], **fields)
+
+
+async def close_booking(crm: Any, booking_id: int, *, rental_id: int, by: str) -> None:
+    """Выдача состоялась: заявка закрыта ссылкой на аренду. Закрытую
+    заявку не трогаем - оператор мог снять её секундой раньше."""
+    booking = await crm.booking(booking_id)
+    if booking is None or booking.get("status") != "new":
+        return
+    await crm.update_booking(booking_id, status="done", rental_id=rental_id,
+                             handled_by=by, handled_at=datetime.now(UTC))

@@ -27,6 +27,26 @@
   <p class="muted">Клиент из бота, из таблицы и заведённый руками ищется одинаково — по цифрам номера. Нового клиента можно завести здесь же.</p>
 </div>
 
+{% if bookings %}
+{# Заявки из кабинета: клиент уже выбрал модель, срок, точку и день -
+   оператору остаётся велосипед и деньги. #}
+<div class="card">
+  <h2>Заявки из кабинета <span class="muted">· {{ bookings|length }}</span></h2>
+  <table>
+    <tr><th>Когда</th><th>Клиент</th><th>Что просит</th><th></th></tr>
+    {% for b in bookings %}
+    <tr>
+      <td class="nowrap">{{ b.wanted_on|dmy }}</td>
+      <td>{{ b.full_name }}<br><small class="muted">{{ b.phone }}</small></td>
+      <td>{{ booking_line(b) }}</td>
+      <td><a class="btn" href="/issue?client={{ b.client_id }}&model={{ (b.model or '')|urlencode }}&tariff={{ b.tariff_id or '' }}&booking={{ b.id }}&started_on={{ b.wanted_on|iso }}">Выдать</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">Все заявки, включая закрытые, — на странице <a href="/bookings">«Брони»</a>.</p>
+</div>
+{% endif %}
+
 {% if new_client %}
 <div class="card narrow">
   <h2>Новый клиент</h2>
@@ -162,6 +182,7 @@
   <input type="hidden" name="client_id" value="{{ client.id }}">
   <input type="hidden" name="tariff_id" value="{{ tariff.id }}">
   <input type="hidden" name="bike_id" value="{{ bike.id }}">
+  {% if booking_id %}<input type="hidden" name="booking_id" value="{{ booking_id }}">{% endif %}
   <div class="cols">
   <section class="card">
     <h2>Сводка</h2>

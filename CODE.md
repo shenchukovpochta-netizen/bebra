@@ -758,6 +758,9 @@ service.promo_for_period(crm, *, rental, period_from, period_to, today) -> dict 
 service.preview_promo(crm, *, client, tariff, started_on, code, today) -> dict
 # service.py   выдача: аренда, позиции и первый период
 service.open_rental(crm, *, client, bike, tariff, started_on, contract_no, by, ...) -> int
+# service.py   заявка из кабинета: одна открытая на клиента, при аренде не принимается;
+#              close_booking зовёт выдача, cancel_booking - панель и сам клиент
+service.create_booking(crm, *, client, model, tariff, location, wanted_on) -> dict
 ```
 
 `add_entry` отказывает на `kind == "charge"`: начисления делает биллинг, для ручной суммы

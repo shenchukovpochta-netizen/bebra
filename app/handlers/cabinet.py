@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +101,10 @@ async def home_text(crm: Any, client: dict, lang: str, *, today: date | None = N
                 else "CAB_INTENT_LINE_RETURN")
     else:
         rental_block = i18n.t(lang, "CAB_NO_RENTAL")
+        booking = await crm.open_booking_of(client["id"])
+        if booking is not None:
+            rental_block += "\n" + i18n.t(lang, "CAB_BOOK_LINE").format(
+                line=logic.esc(crm_logic.booking_line(booking)))
     if s["due"]:
         hint = i18n.t(lang, "CAB_HINT_DEBT").format(amount=crm_logic.money(s["due"]))
     else:
@@ -111,8 +115,11 @@ async def home_text(crm: Any, client: dict, lang: str, *, today: date | None = N
 
 
 async def home_markup(crm: Any, client: dict, lang: str) -> Any:
-    """Клавиатура кабинета: с «продлю / сдаю» только при идущей аренде."""
-    return kb.cabinet(lang, active=await crm.active_rental_of(client["id"]) is not None)
+    """Клавиатура кабинета: «продлю / сдаю» при идущей аренде, иначе
+    заявка на велосипед или снятие поданной."""
+    active = await crm.active_rental_of(client["id"]) is not None
+    booking = (not active) and await crm.open_booking_of(client["id"]) is not None
+    return kb.cabinet(lang, active=active, booking=booking)
 
 
 async def show_home(send: Any, crm: Any, user: dict, client: dict | None) -> None:
@@ -619,6 +626,184 @@ async def cb_friends(callback: CallbackQuery, bot: Bot, user: dict,
         code=code, link=crm_logic.ref_link(await _bot_username(bot), code),
         bonus=crm_logic.money(settings["bonus"]), stats=stats)
     await bot.send_message(user["tg_id"], text, reply_markup=kb.cab_back(lang))
+
+
+# ─────────────────────── заявка на аренду ───────────────────────
+#
+# Мастер в четыре нажатия: модель -> срок -> точка -> день. Выбор едет
+# в callback следующего шага (cab:book:d:<модель>:<тариф>:<точка>:<день>),
+# состояния у диалога нет: клиент может отвлечься на сутки и нажать
+# старую кнопку - она отработает по свежим данным или скажет, что
+# устарела.
+
+async def _book_model(crm: Any, model_id: int) -> dict | None:
+    return next((m for m in await crm.bike_models(active_only=True)
+                 if int(m["id"]) == model_id), None)
+
+
+async def _book_tariffs(crm: Any, model: dict) -> list[dict]:
+    aliases = crm_logic.model_aliases(await crm.bike_models())
+    return crm_logic.tariff_tiles(crm_logic.tariffs_for_model(
+        await crm.tariffs(active_only=True), model["title"], aliases=aliases))
+
+
+def _when_rows(lang: str, tail: str, *, today: date) -> list[tuple[str, str]]:
+    keys = ("CAB_BOOK_TODAY", "CAB_BOOK_TOMORROW", "CAB_BOOK_DAY2")
+    return [(i18n.t(lang, key).format(date=(today + timedelta(days=n)).strftime("%d.%m")),
+             f"cab:book:d:{tail}:{n}") for n, key in enumerate(keys)]
+
+
+@router.callback_query(F.data == "cab:book")
+async def cb_book(callback: CallbackQuery, bot: Bot, user: dict,
+                  crm: Any = None) -> None:
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    if await crm.active_rental_of(client["id"]) is not None:
+        await callback.answer(i18n.t(lang, "CAB_BOOK_HAS_RENTAL"), show_alert=True)
+        return
+    await callback.answer()
+    booking = await crm.open_booking_of(client["id"])
+    if booking is not None:
+        await bot.send_message(
+            user["tg_id"],
+            i18n.t(lang, "CAB_BOOK_EXISTS").format(
+                line=logic.esc(crm_logic.booking_line(booking))),
+            reply_markup=kb.cab_booking(lang))
+        return
+    models = crm_logic.booking_models(
+        await crm.bike_models(active_only=True), await crm.bikes(limit=10000),
+        aliases=crm_logic.model_aliases(await crm.bike_models()))
+    if not models:
+        await bot.send_message(user["tg_id"],
+                               i18n.t(lang, "CAB_BOOK_NO_MODELS").format(url=_support_url()),
+                               reply_markup=kb.cab_back(lang))
+        return
+    rows = [(i18n.t(lang, "CAB_BOOK_OPT_MODEL" if m["free"] else "CAB_BOOK_OPT_MODEL_NONE")
+             .format(title=m["title"], free=m["free"]), f"cab:book:m:{m['id']}")
+            for m in models]
+    await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_MODEL"),
+                           reply_markup=kb.cab_choice(rows, lang))
+
+
+@router.callback_query(F.data.regexp(r"^cab:book:m:\d+$"))
+async def cb_book_model(callback: CallbackQuery, bot: Bot, user: dict,
+                        crm: Any = None) -> None:
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    model = await _book_model(crm, int(str(callback.data).rsplit(":", 1)[-1]))
+    if model is None:
+        await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
+        return
+    await callback.answer()
+    tariffs = await _book_tariffs(crm, model)
+    if not tariffs:
+        await bot.send_message(user["tg_id"],
+                               i18n.t(lang, "CAB_BOOK_NO_TARIFF").format(url=_support_url()),
+                               reply_markup=kb.cab_back(lang))
+        return
+    rows = [(i18n.t(lang, "CAB_BOOK_OPT_TARIFF").format(
+                name=t["name"], price=crm_logic.money(t["price"])),
+             f"cab:book:t:{model['id']}:{t['id']}") for t in tariffs]
+    await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_TARIFF"),
+                           reply_markup=kb.cab_choice(rows, lang))
+
+
+@router.callback_query(F.data.regexp(r"^cab:book:t:\d+:\d+$"))
+async def cb_book_tariff(callback: CallbackQuery, bot: Bot, user: dict,
+                         crm: Any = None) -> None:
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    _, _, _, model_id, tariff_id = str(callback.data).split(":")
+    await callback.answer()
+    locations = await crm.locations(active_only=True)
+    if len(locations) > 1:
+        rows = [(str(loc.get("public_title") or loc["name"]),
+                 f"cab:book:l:{model_id}:{tariff_id}:{loc['id']}") for loc in locations]
+        await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_POINT"),
+                               reply_markup=kb.cab_choice(rows, lang))
+        return
+    # Одна точка (или ни одной в справочнике) - выбирать нечего.
+    loc_id = locations[0]["id"] if locations else 0
+    await bot.send_message(
+        user["tg_id"], i18n.t(lang, "CAB_BOOK_WHEN"),
+        reply_markup=kb.cab_choice(
+            _when_rows(lang, f"{model_id}:{tariff_id}:{loc_id}", today=date.today()), lang))
+
+
+@router.callback_query(F.data.regexp(r"^cab:book:l:\d+:\d+:\d+$"))
+async def cb_book_point(callback: CallbackQuery, bot: Bot, user: dict,
+                        crm: Any = None) -> None:
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    tail = str(callback.data).split(":", 3)[-1]
+    await callback.answer()
+    await bot.send_message(
+        user["tg_id"], i18n.t(lang, "CAB_BOOK_WHEN"),
+        reply_markup=kb.cab_choice(_when_rows(lang, tail, today=date.today()), lang))
+
+
+@router.callback_query(F.data.regexp(r"^cab:book:d:\d+:\d+:\d+:\d+$"))
+async def cb_book_when(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
+                       crm: Any = None) -> None:
+    """Последний шаг: заявка записана, команде - карточка."""
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    _, _, _, model_id, tariff_id, loc_id, offset = str(callback.data).split(":")
+    model = await _book_model(crm, int(model_id))
+    tariff = await crm.tariff(int(tariff_id))
+    wanted = crm_logic.booking_when(offset, today=date.today())
+    if model is None or tariff is None or wanted is None:
+        await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
+        return
+    location = next((loc for loc in await crm.locations(active_only=True)
+                     if int(loc["id"]) == int(loc_id)), None)
+    try:
+        booking = await service.create_booking(
+            crm, client=client, model=model["title"], tariff=tariff,
+            location=location, wanted_on=wanted)
+    except service.ServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer()
+    line = crm_logic.booking_line(booking)
+    await bot.send_message(user["tg_id"],
+                           i18n.t(lang, "CAB_BOOK_DONE").format(line=logic.esc(line)),
+                           reply_markup=kb.cabinet_entry(lang))
+    await notices.send_team(
+        crm, bot, "booking_new",
+        texts.BOOKING_CARD.format(fio=logic.esc(client.get("full_name") or ""),
+                                  phone=logic.esc(client.get("phone") or ""),
+                                  line=logic.esc(line)),
+        cfg.contract_chat_id, client_id=client["id"])
+
+
+@router.callback_query(F.data == "cab:book:cancel")
+async def cb_book_cancel(callback: CallbackQuery, bot: Bot, user: dict,
+                         crm: Any = None) -> None:
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    booking = await crm.open_booking_of(client["id"])
+    if booking is not None:
+        try:
+            await service.cancel_booking(crm, booking, by="клиент")
+        except service.ServiceError:
+            pass
+    await callback.answer()
+    await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_CANCELLED"))
+    await bot.send_message(user["tg_id"], await home_text(crm, client, lang),
+                           reply_markup=await home_markup(crm, client, lang))
 
 
 # ─────────────────────────── операторская часть ───────────────────────────
