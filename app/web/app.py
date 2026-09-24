@@ -571,7 +571,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             await crm.money_by_day(first, span["last"]),
             plan_per_day=logic.to_money(plan["check"] * plan["rented"]),
             today=span["today"])
+        # Задачи на сегодня: один список поверх виджетов. Каждый источник
+        # читается тем же запросом, что и его раздел, - список не вправе
+        # показывать не то, что покажет раздел.
+        tasks = logic.today_tasks(
+            expiring=expiring,
+            search=logic.search_rows(rentals, settings=logic.search_settings(settings),
+                                     today=today),
+            orders=await crm.work_orders(open_only=True, limit=500),
+            claims=await crm.pending_claims(),
+            bookings=await crm.bookings(status="new"),
+            alerts=await crm.tracker_alerts(open_only=True, limit=500),
+            today=today)
         return render(request, "dashboard.html",
+                      tasks=tasks,
                       plan=plan, span=span, bot_state=await bot_health(),
                       progress=logic.plan_progress(
                           plan, month_metrics,

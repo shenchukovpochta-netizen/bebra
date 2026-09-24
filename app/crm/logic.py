@@ -5573,3 +5573,87 @@ def booking_line(booking: Mapping[str, Any]) -> str:
     if isinstance(wanted, date):
         parts.append(wanted.strftime("%d.%m.%Y"))
     return " · ".join(parts)
+
+
+# ─────────────────────── сводка: задачи на сегодня ───────────────────────
+#
+# Один список вместо семи виджетов: оператор с утра должен видеть, кому
+# звонить, кого искать, что чинить и кому выдавать, - и в каком порядке.
+# Уровень «hot» - деньги или велосипед уходят сегодня; «warn» - завтра;
+# «info» - работа есть, но не горит.
+
+TASK_LEVELS = ("hot", "warn", "info")
+
+
+def _names(rows: Iterable[Mapping[str, Any]], key: str = "full_name",
+           limit: int = 3) -> list[str]:
+    out: list[str] = []
+    for row in rows:
+        name = str(row.get(key) or "").strip()
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
+                search: Mapping[str, Any] | None = None,
+                orders: Iterable[Mapping[str, Any]] = (),
+                claims: Iterable[Mapping[str, Any]] = (),
+                bookings: Iterable[Mapping[str, Any]] = (),
+                alerts: Iterable[Mapping[str, Any]] = (),
+                today: date | None = None) -> list[dict[str, Any]]:
+    """Задачи на сегодня по данным сводки. Пустые группы не показываются.
+
+    `expiring` - строки виджета «истекает аренда» (с summary), `search` -
+    результат search_rows, `orders` - открытые наряды, `bookings` - новые
+    заявки, `alerts` - открытые тревоги. Порядок: горящее, потом
+    завтрашнее, потом остальное; внутри уровня - по числу.
+    """
+    today = today or date.today()
+    tasks: list[dict[str, Any]] = []
+
+    def add(code: str, title: str, rows: list, url: str, level: str,
+            key: str = "full_name") -> None:
+        if rows:
+            tasks.append({"code": code, "title": title, "count": len(rows),
+                          "url": url, "level": level, "names": _names(rows, key)})
+
+    expiring = list(expiring)
+    overdue = [r for r in expiring
+               if (r.get("summary") or {}).get("days_left") is not None
+               and (r.get("summary") or {}).get("days_left") <= 0]
+    soon = [r for r in expiring if r not in overdue]
+    add("overdue", "Просрочка или платёж сегодня — позвонить", overdue, "/", "hot")
+    add("soon", "Истекает на днях — напомнить", soon, "/", "warn")
+
+    search = search or {}
+    theft = [r for r in search.get("searching", []) if r.get("theft")]
+    add("theft", "Пора признавать потерю", theft, "/rentals/search", "hot")
+    add("search", "Кандидаты в розыск", list(search.get("candidates", [])),
+        "/rentals/search", "hot")
+
+    stuck = [o for o in orders if order_stuck(o, today=today)]
+    add("orders", f"Наряды стоят дольше {ORDER_STUCK_DAYS} дн.", stuck, "/service",
+        "warn", key="no")
+
+    bookings = [b for b in bookings if b.get("status", "new") == "new"]
+    due = [b for b in bookings if b.get("wanted_on") is None or b["wanted_on"] <= today]
+    later = [b for b in bookings if b not in due]
+    add("bookings", "Заявки на выдачу сегодня", due, "/bookings", "hot")
+    add("bookings_later", "Заявки на ближайшие дни", later, "/bookings", "info")
+
+    add("claims", "Заявки на зачисление — сверить с банком", list(claims), "/claims",
+        "warn")
+
+    alerts = [a for a in alerts if a.get("state", "new") == "new"]
+    urgent = [a for a in alerts if a.get("level") == "urgent"]
+    yellow = [a for a in alerts if a not in urgent]
+    add("alerts_urgent", "Срочные тревоги трекеров", urgent, "/alerts", "hot",
+        key="bike_code")
+    add("alerts", "Новые тревоги трекеров", yellow, "/alerts", "info", key="bike_code")
+
+    order = {level: i for i, level in enumerate(TASK_LEVELS)}
+    tasks.sort(key=lambda t: (order[t["level"]], -t["count"]))
+    return tasks

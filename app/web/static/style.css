@@ -83,6 +83,14 @@ h1 small{font:500 13px/1 var(--font-text);letter-spacing:0;text-transform:none}
 
 /* плитки сводки: цифры Unbounded, «горячая» — оранжевая */
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+/* Задачи на сегодня: число слева, дело справа, цвет по уровню. */
+.tasks{display:grid;gap:4px}
+.task{display:flex;gap:12px;align-items:baseline;padding:7px 10px;border-radius:10px;color:var(--text)}
+.task:hover{background:var(--chip);text-decoration:none}
+.task .n{font:700 20px/1 var(--font-head);min-width:36px;text-align:right}
+.task .t{display:flex;flex-direction:column;gap:2px;font-weight:500}
+.task .t small{font-weight:400;font-size:12px}
+.task.hot .n{color:var(--bad)}.task.warn .n{color:var(--warn)}.task.info .n{color:var(--muted)}
 /* Шаблоны акций - карточками: название, условие, кнопка «Создать». */
 .kinds{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-bottom:16px}
 .kind{display:flex;flex-direction:column;gap:5px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px}

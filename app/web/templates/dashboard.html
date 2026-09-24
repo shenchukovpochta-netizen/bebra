@@ -7,6 +7,27 @@
 <p class="flash err">Бот не отвечает: {{ bot_state.error }}. Клиенты не получают
   кабинет и напоминания, коды подписания не уходят. Проверьте контейнер bot.</p>
 {% endif %}
+{# Задачи на сегодня: горящее сверху. Разделы, закрытые профилем, в
+   список не попадают - иначе строка вела бы в «нет доступа». #}
+{% set task_ok = {'overdue': 'rentals', 'soon': 'rentals', 'theft': 'rentals', 'search': 'rentals',
+                  'orders': 'service', 'bookings': 'issue', 'bookings_later': 'issue',
+                  'claims': 'claims', 'alerts_urgent': 'trackers', 'alerts': 'trackers'} %}
+{% set visible = tasks|selectattr('code', 'in', task_ok)|list %}
+{% set my_tasks = [] %}
+{% for t in visible %}{% if can_view(staff, task_ok[t.code]) %}{% set _ = my_tasks.append(t) %}{% endif %}{% endfor %}
+<section class="card">
+  <h2>Задачи на сегодня <span class="muted">· {{ my_tasks|length }}</span></h2>
+  {% if my_tasks %}
+  <div class="tasks">
+    {% for t in my_tasks %}
+    <a class="task {{ t.level }}" href="{{ t.url }}">
+      <span class="n">{{ t.count }}</span>
+      <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}<p class="muted">Горящего нет: аренды оплачены, заявок и тревог нет, наряды идут в срок.</p>{% endif %}
+</section>
 <section class="card three">
   <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }}/день{% endif %}</span></div>
   <div class="tiles">

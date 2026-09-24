@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -49,6 +49,44 @@ class TestOperatorLogic(unittest.TestCase):
         self.assertTrue(logic.intent_state(snoozed, snoozed["summary"], today=TODAY)["snoozed"])
         expired = row(4, 0, snooze_until=TODAY)
         self.assertFalse(logic.intent_state(expired, expired["summary"], today=TODAY)["snoozed"])
+
+    def test_today_tasks_are_ranked_and_named(self):
+        expiring = [{**row(1, -2), "full_name": "Должник"},
+                    {**row(2, 0), "full_name": "Сегодня"},
+                    {**row(3, 1), "full_name": "Завтра"}]
+        search = {"candidates": [{"full_name": "Пропал"}],
+                  "searching": [{"full_name": "Украли", "theft": True},
+                                {"full_name": "Ищем", "theft": False}]}
+        orders = [{"no": "РЕМ-000001", "status": "in_work",
+                   "opened_at": datetime(2026, 9, 1, tzinfo=UTC)},
+                  {"no": "РЕМ-000002", "status": "in_work",
+                   "opened_at": datetime(2026, 9, 24, tzinfo=UTC)}]
+        bookings = [{"full_name": "Новичок", "wanted_on": TODAY, "status": "new"},
+                    {"full_name": "Позже", "wanted_on": TODAY + timedelta(days=2),
+                     "status": "new"},
+                    {"full_name": "Закрыта", "wanted_on": TODAY, "status": "done"}]
+        alerts = [{"bike_code": "B-1", "level": "urgent", "state": "new"},
+                  {"bike_code": "B-2", "level": "yellow", "state": "new"},
+                  {"bike_code": "B-3", "level": "urgent", "state": "working"}]
+        tasks = logic.today_tasks(expiring=expiring, search=search, orders=orders,
+                                  claims=[{"full_name": "Платил"}], bookings=bookings,
+                                  alerts=alerts, today=TODAY)
+        codes = [t["code"] for t in tasks]
+        self.assertEqual(codes[:6], ["overdue", "theft", "search", "bookings",
+                                     "alerts_urgent", "soon"][:6])
+        self.assertEqual([t["level"] for t in tasks][:5], ["hot"] * 5)
+        by = {t["code"]: t for t in tasks}
+        self.assertEqual(by["overdue"]["count"], 2)
+        self.assertEqual(by["overdue"]["names"], ["Должник", "Сегодня"])
+        self.assertEqual(by["soon"]["names"], ["Завтра"])
+        self.assertEqual(by["orders"]["count"], 1, "только застрявший наряд")
+        self.assertEqual(by["orders"]["names"], ["РЕМ-000001"])
+        self.assertEqual(by["bookings"]["names"], ["Новичок"])
+        self.assertEqual(by["bookings_later"]["level"], "info")
+        self.assertEqual(by["alerts_urgent"]["names"], ["B-1"])
+        self.assertEqual(by["alerts"]["count"], 1, "тревога в работе - не новая")
+        self.assertEqual(by["claims"]["level"], "warn")
+        self.assertEqual(logic.today_tasks(today=TODAY), [], "нечего - пусто")
 
     def test_expiring_filters_and_orders(self):
         rows = [row(1, 5), row(2, 1), row(3, -3), row(4, 0),
@@ -124,6 +162,21 @@ class TestExpiringWidget(tw.WebCase):
     def mark(self, intent, nxt="/"):
         return self.client.post(f"/rentals/{self.rental_id}/intent",
                                 data={"intent": intent, "next": nxt})
+
+    def test_today_tasks_card_leads_with_the_overdue(self):
+        page = self.get_ok("/")
+        self.assertIn("Задачи на сегодня", page)
+        self.assertIn("Просрочка или платёж сегодня", page)
+        self.assertIn('class="task hot" href="/"', page)
+        self.assertIn("Иванов Иван", page)
+        # заявка из кабинета на сегодня - в тот же список
+        client = tw.run(self.crm.create_client(full_name="Петров Пётр",
+                                               phone="+79990000002"))
+        tw.run(self.crm.create_booking(client_id=client, model="Kugoo V3", tariff_id=None,
+                                       location_id=None, wanted_on=date.today()))
+        page = self.get_ok("/")
+        self.assertIn("Заявки на выдачу сегодня", page)
+        self.assertIn('href="/bookings"', page)
 
     def test_widget_lists_overdue_with_phone_and_actions(self):
         page = self.get_ok("/")
