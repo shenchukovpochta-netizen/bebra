@@ -153,7 +153,8 @@ $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/files.py',
               'app/services/contract.py', 'app/services/crypto.py',
               'app/services/mrz.py', 'app/services/ocr.py',
-              'app/services/starline.py', 'app/services/tochka.py')
+              'app/services/starline.py', 'app/services/tochka.py',
+              'app/services/tochka_ca.pem')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',

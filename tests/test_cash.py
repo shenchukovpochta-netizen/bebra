@@ -356,6 +356,41 @@ class TestTochkaParsing(unittest.TestCase):
         self.assertEqual(_run(client.statement(since=date(2026, 9, 1),
                                                until=date(2026, 9, 2)))["rows"], [])
 
+    def test_bank_session_trusts_the_mintsifry_root(self):
+        # enter.tochka.com подписан НУЦ Минцифры: без этого корня любой
+        # запрос в банк падает на «self-signed certificate in chain».
+        import hashlib
+        import ssl
+        pems = tochka.CA_FILE.read_text(encoding="utf-8")
+        found = {}
+        for block in pems.split("-----BEGIN CERTIFICATE-----")[1:]:
+            pem = "-----BEGIN CERTIFICATE-----" + block.split("-----END CERTIFICATE-----")[0]
+            der = ssl.PEM_cert_to_DER_cert(pem + "-----END CERTIFICATE-----\n")
+            found[hashlib.sha256(der).hexdigest()] = True
+        # Отпечатки сверены по двум независимым источникам - подмена файла
+        # должна ронять тест, а не молча менять, кому доверяет банк-клиент.
+        self.assertIn("d26d2d0231b7c39f92cc738512ba54103519e4405d68b5bd703e9788ca8ecf31",
+                      found, "Russian Trusted Root CA")
+        self.assertIn("bbbde2103e790b999ec62bd03cf625a5a2e7c316e10afe6a490eedead8b3fd9b",
+                      found, "Russian Trusted Sub CA")
+        names = {dict(x[0] for x in c["subject"]).get("commonName")
+                 for c in tochka.ssl_context().get_ca_certs()}
+        self.assertIn("Russian Trusted Root CA", names)
+        self.assertEqual(tochka.ssl_context().verify_mode, ssl.CERT_REQUIRED)
+        # Весь процесс этому корню не доверяет: только сессии банка.
+        general = {dict(x[0] for x in c["subject"]).get("commonName")
+                   for c in ssl.create_default_context().get_ca_certs()}
+        self.assertNotIn("Russian Trusted Root CA", general)
+
+    def test_bank_session_uses_that_context(self):
+        async def connector_ssl():
+            session = tochka.TochkaClient(token="t", account_id="a")._session()
+            try:
+                return session.connector._ssl
+            finally:
+                await session.close()
+        self.assertIs(_run(connector_ssl()), tochka.ssl_context())
+
     def test_receipt_has_one_line_without_vat(self):
         items = tochka.receipt_items("Аренда велосипеда, неделя", D(3000))
         self.assertEqual(len(items), 1)

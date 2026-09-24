@@ -17,9 +17,12 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -28,6 +31,23 @@ API_URL = "https://enter.tochka.com/uapi"
 BANKING = "open-banking/v1.0"
 ACQUIRING = "acquiring/v1.0"
 TIMEOUT = 30
+# enter.tochka.com подписан НУЦ Минцифры, а этого корня нет ни в образе
+# python:slim, ни в обычном Linux: без него каждый запрос падает на
+# «self-signed certificate in certificate chain».
+CA_FILE = Path(__file__).with_name("tochka_ca.pem")
+
+
+@lru_cache(maxsize=1)
+def ssl_context() -> ssl.SSLContext:
+    """Системные корни плюс корень Минцифры - только для запросов в банк.
+
+    Весь контейнер этому корню не доверяет намеренно: тогда он годился бы
+    и для подмены api.telegram.org. Контекст собирается один раз - чтение
+    файла с диска не дело для каждого запроса в event loop.
+    """
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=str(CA_FILE))
+    return context
 # Статусы готовности выписки у банка.
 READY = ("Ready", "Complete", "Completed")
 # Статусы операции эквайринга. Банк пишет их по-разному в разных версиях
@@ -120,7 +140,9 @@ class TochkaClient:
         if self.session_factory is not None:
             return self.session_factory()
         import aiohttp
-        return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=TIMEOUT))
+        return aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=TIMEOUT),
+            connector=aiohttp.TCPConnector(ssl=ssl_context()))
 
     async def _json(self, session, method: str, path: str, **kwargs) -> Any:
         response = await session.request(
