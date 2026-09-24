@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -769,7 +768,7 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
     await inbox.record(
         crm, cfg, channel="tg", origin="bot", ext_id=user["tg_id"], direction="event",
         kind="other", text="Анкета отправлена на проверку",
-        msg_id=f"anketa:{datetime.now().date().isoformat()}",
+        msg_id=f"anketa:{callback.id}",
         name=user.get("full_name"), username=user.get("username"),
         phone=user.get("phone"), announce=False)
     lang = i18n.user_lang(user)

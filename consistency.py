@@ -60,13 +60,29 @@ if not_passed:
     problems.append(
         f"config.py читает переменные, которых compose не передаёт: {sorted(not_passed)}")
 
-# Секреты читают три процесса: бот, панель и MAX-бот. Забытый в compose
-# секрет панели молча выключает её часть (хук «Входящих» без токена).
-for extra in ("app/web/config.py", "app/max_main.py"):
-    config_secrets |= set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', read(extra)))
-for secret in sorted(config_secrets):
-    if f"{secret}_FILE" not in compose:
-        problems.append(f"секрет {secret} не пробрасывается через {secret}_FILE в compose")
+# Секреты читают три процесса: бот, панель и MAX-бот. Проверка - по блоку
+# СВОЕГО сервиса: секрет, проброшенный боту, но забытый у панели, молча
+# выключает её часть (хук «Входящих» без токена), а общий поиск по файлу
+# этого не видел.
+def service_block(name: str) -> str:
+    found = re.search(rf"(?m)^  {re.escape(name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|^[A-Za-z]|\Z)",
+                      compose, re.S)
+    return found.group(1) if found else ""
+
+
+for source, service in (("app/config.py", "bot"), ("app/web/config.py", "crm"),
+                        ("app/max_main.py", "bot-max")):
+    block = service_block(service)
+    listed = re.search(r"secrets:\s*\[([^\]]*)\]", block, re.S)
+    mounted = set(re.findall(r"[a-z0-9_]+", listed.group(1))) if listed else set()
+    for secret in sorted(set(re.findall(r'_secret\(\s*"([A-Z_][A-Z0-9_]*)"', read(source)))):
+        path = re.search(rf"(?<![A-Z0-9_]){secret}_FILE:\s*/run/secrets/([a-z0-9_]+)", block)
+        if path is None:
+            problems.append(f"секрет {secret} ({source}) не пробрасывается сервису "
+                            f"{service} через {secret}_FILE")
+        elif path.group(1) not in mounted:
+            problems.append(f"секрет {path.group(1)} не смонтирован сервису {service} "
+                            f"(нет в его secrets:)")
 
 # ── 3. состав пакета ↔ список заливки в deploy.ps1 ───────────────────────
 # Служебные каталоги в состав пакета не входят. Без исключения .git проверка

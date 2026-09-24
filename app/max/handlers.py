@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import Any
 
 from .. import logic, tasks, texts
@@ -403,7 +402,7 @@ async def cb_confirm(ctx: Ctx, user: dict, callback_id: str) -> None:
     await ctx.db.log_event(user["tg_id"], "submitted")
     await _inbox(ctx, user, direction="event", kind="other",
                  text="Анкета отправлена на проверку",
-                 msg_id=f"anketa:{datetime.now().date().isoformat()}")
+                 msg_id=f"anketa:{callback_id}")
     await ctx.cl.answer_callback(callback_id, texts.SUBMITTED_TOAST)
     await _say(ctx, user["tg_id"], texts.SUBMITTED)
     try:

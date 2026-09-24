@@ -544,24 +544,27 @@ docker compose logs -f bot-max
 Раздел панели «Входящие» (только владельцу) собирает обращения из
 Telegram и MAX сам, без настройки. Авито и WhatsApp подключаются так:
 
-1. **Ключ переписки** `secrets/inbox_key` установка создаёт сама. Если
-   бот ставился раньше этого раздела — один раз:
+1. **Ключ переписки** `secrets/inbox_key` и пустой `secrets/inbox_hook_token`
+   установка создаёт сама. Если бот ставился раньше этого раздела — один
+   раз (скрипт идемпотентен, чужих секретов не трогает):
    ```bash
-   openssl rand -base64 32 > secrets/inbox_key
+   bash bootstrap.sh
    docker compose up -d
    ```
-   Ключ положите в бэкап отдельно от базы: без него переписка не читается.
+   Без этих файлов compose не поднимет ни бота, ни панель. Ключ положите
+   в бэкап отдельно от базы: без него переписка не читается.
 2. **Авито.** В кабинете ОСНОВНОГО аккаунта компании: «Для профессионалов
    → API» → client_id и client_secret. Нужен тариф с доступом к API
    сообщений. `AVITO_CLIENT_ID` — в `.env`, секрет — в файл
-   `secrets/avito_client_secret`, затем `docker compose up -d bot`. Если
+   `secrets/avito_client_secret`, затем `docker compose up -d bot && docker compose restart bot`
+   (секрет читается при старте). Если
    опрос не работает, во «Входящих» висит красная плашка с причиной;
    «402» — тариф без API сообщений.
 3. **WhatsApp** — через шлюз (Green-API или Wazzup) или n8n. Нужен домен
    панели (`CRM_DOMAIN`, профиль https).
    ```bash
    openssl rand -hex 32 > secrets/inbox_hook_token
-   docker compose up -d crm
+   docker compose restart crm
    ```
    В шлюзе: адрес `https://<CRM_DOMAIN>/hook/inbox`, токен — содержимое
    `secrets/inbox_hook_token` (шлюз пришлёт его заголовком

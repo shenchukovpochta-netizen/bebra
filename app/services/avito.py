@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 API_URL = "https://api.avito.ru"
 TIMEOUT = 20
@@ -146,19 +147,31 @@ class AvitoClient:
             return token
 
     async def _call(self, method: str, path: str, *, retry: bool = True,
-                    **kwargs: Any) -> Any:
-        async with self._session() as session:
-            token = await self._get_token(session)
-            response = await session.request(
-                method, f"{self.api_url}/{path}",
-                headers={"Authorization": f"Bearer {token}"}, **kwargs)
-            status = getattr(response, "status", 200)
-            # Тело читается внутри сессии: после её закрытия оно недоступно.
-            data = await _json(response)
+                    allow_empty: bool = False, **kwargs: Any) -> Any:
+        try:
+            async with self._session() as session:
+                token = await self._get_token(session)
+                response = await session.request(
+                    method, f"{self.api_url}/{path}",
+                    headers={"Authorization": f"Bearer {token}"}, **kwargs)
+                status = getattr(response, "status", 200)
+                # Тело читается внутри сессии: после её закрытия оно недоступно.
+                data = await _json(response)
+        except AvitoError:
+            raise
+        except (OSError, TimeoutError, ValueError) as exc:
+            raise AvitoError(f"Авито недоступен: {type(exc).__name__}") from exc
+        except Exception as exc:                        # noqa: BLE001
+            # aiohttp.ClientError и его родня: сеть, TLS, обрыв ответа. Для
+            # опроса это та же «Авито недоступен», а не падение круга.
+            if type(exc).__module__.startswith("aiohttp"):
+                raise AvitoError(f"Авито недоступен: {type(exc).__name__}") from exc
+            raise
         if status == 403 and retry:
             # Просроченный токен у Авито - 403: новый и один повтор.
             self._token = None
-            return await self._call(method, path, retry=False, **kwargs)
+            return await self._call(method, path, retry=False, allow_empty=allow_empty,
+                                    **kwargs)
         if status == 402:
             raise AvitoError("402 — нет доступа к API сообщений: нужен тариф "
                              "Авито с Messenger API", 402)
@@ -166,6 +179,12 @@ class AvitoClient:
             raise AvitoError("429 — Авито просит реже", 429)
         if status >= 400:
             raise AvitoError(f"{path.split('?')[0]}: Авито ответил {status}", status)
+        if data is None and not allow_empty:
+            # 200 с пустым или нечитаемым телом - не «сообщений нет»: иначе
+            # опрос сдвинул бы курсор чата за непрочитанное.
+            # У отправки наоборот (allow_empty): 200 значит «ушло», и
+            # объявить его сбоем - это повтор и второе сообщение человеку.
+            raise AvitoError(f"{path.split('?')[0]}: ответ Авито не разобрать", status)
         return data
 
     async def self_id(self) -> int:
@@ -177,11 +196,12 @@ class AvitoClient:
             self._self_id = int(data["id"])
         return self._self_id
 
-    async def chats(self, *, limit: int = 100) -> list[dict]:
+    async def chats(self, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Страница чатов, свежие сверху. offset - для следующих страниц."""
         own = await self.self_id()
         data = await self._call(
             "GET", f"messenger/v2/accounts/{own}/chats",
-            params={"chat_types": "u2i,u2u", "limit": str(limit)})
+            params={"chat_types": "u2i,u2u", "limit": str(limit), "offset": str(offset)})
         raw = (data or {}).get("chats") if isinstance(data, dict) else None
         return [parse_chat(c, own) for c in raw or [] if isinstance(c, dict) and c.get("id")]
 
@@ -189,9 +209,14 @@ class AvitoClient:
         own = await self.self_id()
         # Слэш на конце - часть пути v3: без него Авито отвечает 404.
         data = await self._call(
-            "GET", f"messenger/v3/accounts/{own}/chats/{chat_id}/messages/",
+            "GET", f"messenger/v3/accounts/{own}/chats/{_chat(chat_id)}/messages/",
             params={"limit": str(limit)})
-        raw = data if isinstance(data, list) else (data or {}).get("messages") or []
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict):
+            raw = data.get("messages") or []
+        else:
+            raise AvitoError("список сообщений Авито не разобрать")
         return [parse_message(m, own) for m in raw if isinstance(m, dict) and m.get("id")]
 
     async def send_text(self, chat_id: str, text: str) -> dict:
@@ -202,9 +227,18 @@ class AvitoClient:
             raise AvitoError(f"ответ длиннее {MESSAGE_LIMIT} знаков")
         own = await self.self_id()
         data = await self._call(
-            "POST", f"messenger/v1/accounts/{own}/chats/{chat_id}/messages",
-            json={"message": {"text": text}, "type": "text"})
+            "POST", f"messenger/v1/accounts/{own}/chats/{_chat(chat_id)}/messages",
+            json={"message": {"text": text}, "type": "text"}, allow_empty=True)
         return data if isinstance(data, dict) else {}
+
+
+def _chat(chat_id: Any) -> str:
+    """Номер чата - в путь одним сегментом: «../» из чужих данных не уводит
+    запрос на другой адрес API."""
+    text = str(chat_id or "").strip()
+    if not text:
+        raise AvitoError("пустой номер чата")
+    return quote(text, safe="")
 
 
 async def _json(response: Any) -> Any:

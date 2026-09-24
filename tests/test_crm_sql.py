@@ -10,7 +10,7 @@ import asyncio
 import re
 import sys
 import unittest
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -29,6 +29,16 @@ except ImportError:                                    # pragma: no cover
     HAVE_PGLAST = False
 
 
+class Row(dict):
+    """Строка ответа: недостающая колонка читается единицей. Методы,
+    которые берут из строки своё (created у обращения, thread_id и
+    body_enc у повторяемого ответа), не падают на KeyError, а те, что
+    перебирают строку целиком (counts), видят только id, bike_id и n."""
+
+    def __missing__(self, key):
+        return 1
+
+
 class RecordingConn:
     def __init__(self, sink: list) -> None:
         self.sink = sink
@@ -44,7 +54,7 @@ class RecordingConn:
 
     async def fetchrow(self, query, *args):
         self.sink.append((query, args))
-        return {"id": 1, "bike_id": 1, "n": 1}
+        return Row(id=1, bike_id=1, n=1)
 
     async def fetchval(self, query, *args):
         self.sink.append((query, args))
@@ -118,6 +128,28 @@ class TestCrmSql(unittest.TestCase):
             self.db.pending_claim_of(1), self.db.claim_by_card(1, 2),
             self.db.set_claim_card(1, 2, 3), self.db.set_claim_receipt(1, "f", True),
             self.db.resolve_claim(1, status="confirmed", resolved_by="me", ledger_id=1),
+            # входящие обращения
+            self.db.client_by_max(1),
+            self.db.inbox_record(channel="tg", origin="bot", ext_id="7", direction="in",
+                                 msg_id="m1", body_enc="x", name="n", username="u",
+                                 phone="+7", subject="s", client_id=1),
+            self.db.inbox_record(channel="avito", origin="avito_api", ext_id="c1",
+                                 direction="out", author="me", announce=False),
+            self.db.inbox_record(channel="tg", origin="bot", ext_id="7", direction="event",
+                                 kind="other", at=datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.inbox_threads(), self.db.inbox_threads(statuses=("new", "work")),
+            self.db.inbox_threads(channel="avito"),
+            self.db.inbox_threads(statuses=["done"], channel="tg", limit=5),
+            self.db.inbox_thread(1), self.db.inbox_messages(1), self.db.inbox_open_count(),
+            self.db.update_inbox_thread(1, status="done", handled_by="me",
+                                        handled_at=None, note="x"),
+            self.db.update_inbox_thread(1, client_id=None),
+            self.db.queue_inbox_reply(1, body_enc="x", author="me"),
+            self.db.claim_inbox_out(),
+            self.db.finish_inbox_out(1, ok=True, ext_id="e1"),
+            self.db.finish_inbox_out(1, ok=False, error="boom"),
+            self.db.fail_stuck_inbox_out(), self.db.inbox_retry(1, author="me"),
+            self.db.inbox_to_announce(), self.db.purge_inbox(30),
         ]
 
     def test_placeholders_match_arguments(self):
@@ -144,9 +176,19 @@ class TestCrmSql(unittest.TestCase):
     def test_unknown_columns_rejected(self):
         for coro in (self.db.update_bike(1, evil="x"), self.db.update_client(1, evil="x"),
                      self.db.update_tariff(1, evil="x"), self.db.update_rental(1, evil="x"),
-                     self.db.create_bike(evil="x")):
+                     self.db.create_bike(evil="x"),
+                     self.db.update_inbox_thread(1, evil="x")):
             with self.assertRaises(ValueError):
                 run(coro)
+
+    def test_inbox_thread_keeps_its_identity_and_text(self):
+        """Правкой обращения не подменить собеседника, канал и переписку:
+        адрес ответа и текст пишет только приём сообщения."""
+        for col in ("channel", "origin", "ext_id", "body_enc", "phone", "id"):
+            self.sink.clear()
+            with self.assertRaises(ValueError, msg=col):
+                run(self.db.update_inbox_thread(1, **{col: "x"}))
+            self.assertEqual(self.sink, [], f"{col}: запрос ушёл в базу")
 
     def test_columns_exist_in_schema(self):
         schema = (Path(__file__).resolve().parent.parent / "schema.sql").read_text("utf-8")

@@ -3153,17 +3153,20 @@ class FakeCrm:
             thread = self.inbox_threads_[tid] = {
                 "id": tid, "channel": channel, "origin": origin, "ext_id": ext_id,
                 "name": name, "username": username, "phone": phone, "subject": subject,
-                "subject_url": subject_url, "client_id": client_id, "status": "new",
+                "subject_url": subject_url, "client_id": client_id,
+                "client_manual": False, "status": "new",
                 "note": None, "waiting_since": None, "last_in_at": None,
                 "last_out_at": None, "announced_at": None if announce else now,
                 "ext_cursor": None, "handled_by": None, "handled_at": None,
                 "created_at": now, "updated_at": now}
         else:
+            if thread["origin"] != origin:
+                return None             # чужое обращение: хук в чат опроса Авито
             for key, value in (("name", name), ("username", username), ("phone", phone),
                                ("subject", subject), ("subject_url", subject_url)):
                 if value is not None:
                     thread[key] = value
-            if thread["client_id"] is None:
+            if thread["client_id"] is None and not thread.get("client_manual"):
                 thread["client_id"] = client_id
             thread["updated_at"] = now
         if msg_id is not None and any(m["thread_id"] == thread["id"] and m["ext_id"] == msg_id
@@ -3174,19 +3177,24 @@ class FakeCrm:
             "id": mid, "thread_id": thread["id"], "direction": direction, "kind": kind,
             "ext_id": msg_id, "body_enc": body_enc, "author": author,
             "status": "sent" if direction == "out" else None, "error": None,
-            "created_at": at or now, "sent_at": now if direction == "out" else None}
+            "created_at": at or now, "sent_at": now if direction == "out" else None,
+            "claimed_at": None}
         if direction == "out":
             thread.update(last_out_at=now, waiting_since=None)
             if thread["status"] == "new":
                 thread["status"] = "work"
         else:
+            # Как в SQL: решения - по строке ДО обновления.
             moment = at or now
+            old_status, old_waiting = thread["status"], thread["waiting_since"]
             thread["last_in_at"] = max(filter(None, (thread["last_in_at"], moment)))
-            if direction == "in" and thread["waiting_since"] is None:
-                thread["waiting_since"] = moment
-            if thread["status"] == "done":
-                if announce:
-                    thread["announced_at"] = None
+            if direction == "in":
+                thread["waiting_since"] = (moment if old_status == "done"
+                                           else old_waiting or moment)
+            if announce and old_status != "spam" and (old_status == "done"
+                                                      or old_waiting is None):
+                thread["announced_at"] = None
+            if old_status == "done":
                 thread["status"] = "new"
         return {"thread_id": thread["id"], "created": created, "message_id": mid}
 
@@ -3228,14 +3236,24 @@ class FakeCrm:
                    if t["status"] in ("new", "work") and t["waiting_since"] is not None)
 
     async def update_inbox_thread(self, thread_id, **fields):
-        unknown = set(fields) - {"status", "note", "client_id", "handled_by", "handled_at",
-                                 "ext_cursor", "announced_at"}
+        unknown = set(fields) - {"status", "note", "client_id", "client_manual",
+                                 "handled_by", "handled_at", "ext_cursor", "announced_at"}
         if unknown:
             raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        if not fields:
+            return
+        # Как check и внешний ключ в схеме: заглушка не пропускает того,
+        # на чём упал бы Postgres.
+        assert fields.get("status", "new") in crm_logic.INBOX_STATUSES, fields
+        assert fields.get("client_id") is None or fields["client_id"] in self.clients_
         if thread_id in self.inbox_threads_:
-            self.inbox_threads_[thread_id].update(fields, updated_at=self._now())
+            thread = self.inbox_threads_[thread_id]
+            thread.update(fields, updated_at=self._now())
+            if fields.get("status") in ("done", "spam"):
+                thread["waiting_since"] = None
 
     async def queue_inbox_reply(self, thread_id, *, body_enc, author):
+        assert thread_id in self.inbox_threads_, "внешний ключ thread_id"
         if any(m["thread_id"] == thread_id and m["status"] in ("queued", "sending")
                for m in self.inbox_messages_.values()):
             return None
@@ -3243,7 +3261,7 @@ class FakeCrm:
         self.inbox_messages_[mid] = {
             "id": mid, "thread_id": thread_id, "direction": "out", "kind": "text",
             "ext_id": None, "body_enc": body_enc, "author": author, "status": "queued",
-            "error": None, "created_at": self._now(), "sent_at": None}
+            "error": None, "created_at": self._now(), "sent_at": None, "claimed_at": None}
         return mid
 
     async def claim_inbox_out(self):
@@ -3252,7 +3270,7 @@ class FakeCrm:
         if not queued:
             return None
         m = queued[0]
-        m["status"] = "sending"
+        m.update(status="sending", claimed_at=self._now())
         t = self.inbox_threads_[m["thread_id"]]
         return {**m, "channel": t["channel"], "origin": t["origin"],
                 "thread_ext_id": t["ext_id"], "client_id": t["client_id"],
@@ -3264,7 +3282,9 @@ class FakeCrm:
             return False
         m.update(status="sent" if ok else "failed", error=(error or "")[:500] or None,
                  sent_at=self._now())
-        if ext_id is not None:
+        taken = any(o["thread_id"] == m["thread_id"] and o["ext_id"] == ext_id
+                    and o["id"] != m["id"] for o in self.inbox_messages_.values())
+        if ext_id is not None and not taken:
             m["ext_id"] = ext_id
         if ok:
             t = self.inbox_threads_[m["thread_id"]]
@@ -3273,19 +3293,25 @@ class FakeCrm:
                 t["status"] = "work"
         return True
 
-    async def fail_stuck_inbox_out(self):
-        stuck = [m for m in self.inbox_messages_.values() if m["status"] == "sending"]
+    async def fail_stuck_inbox_out(self, *, older_minutes=None):
+        edge = (self._now() - timedelta(minutes=older_minutes)
+                if older_minutes is not None else None)
+        stuck = [m for m in self.inbox_messages_.values() if m["status"] == "sending"
+                 and (edge is None or (m.get("claimed_at") or m["created_at"]) < edge)]
         for m in stuck:
-            m.update(status="failed", error="неизвестно, ушло ли: процесс перезапускался",
+            m.update(status="failed", error="неизвестно, ушло ли: отправка прервалась",
                      sent_at=self._now())
         return len(stuck)
 
     async def inbox_retry(self, message_id, *, author):
         m = self.inbox_messages_.get(message_id)
-        if m is None or m["status"] != "failed":
+        if m is None or m["status"] != "failed" or m["body_enc"] is None:
             return None
-        return await self.queue_inbox_reply(m["thread_id"], body_enc=m["body_enc"],
-                                            author=author)
+        if any(o["thread_id"] == m["thread_id"] and o["status"] in ("queued", "sending")
+               for o in self.inbox_messages_.values()):
+            return None
+        m.update(status="queued", error=None, sent_at=None, claimed_at=None, author=author)
+        return message_id
 
     async def inbox_to_announce(self, limit=20):
         rows = sorted((dict(t) for t in self.inbox_threads_.values()

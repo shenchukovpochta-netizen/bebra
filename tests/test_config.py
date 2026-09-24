@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -143,6 +145,104 @@ class TestSecretFileErrors(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 cfg_mod._secret("BOT_TOKEN")
         self.assertIn("ls -l secrets/", str(ctx.exception))
+
+
+WEB_ENV = {"POSTGRES_PASSWORD": "pw", "CRM_SECRET": "cookie-secret"}
+
+
+def load_web(**overrides):
+    """Конфиг панели из окружения - тем же путём, что в контейнере crm."""
+    from app.web.config import WebConfig
+    env = {**WEB_ENV, **overrides}
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update({k: v for k, v in env.items() if v is not None})
+    try:
+        return WebConfig.load()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+class TestInboxSecrets(unittest.TestCase):
+    """«Входящие»: ключ переписки (INBOX_KEY) нужен и боту, и панели, токен
+    хука (INBOX_HOOK_TOKEN) - только панели. Оба - секреты: читаются из
+    файла по _FILE, как остальные ключи, и оба необязательны - без них
+    обращения пишутся без текста, а хука нет."""
+
+    KEY = base64.b64encode(bytes(range(32))).decode()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def secret_file(self, name: str, value: str) -> str:
+        path = Path(self.tmp.name) / name
+        # перевод строки в конце - как у файла, набранного руками
+        path.write_text(value + "\n", encoding="utf-8")
+        return str(path)
+
+    def test_bot_reads_inbox_key_from_file(self):
+        cfg = load(INBOX_KEY_FILE=self.secret_file("inbox_key", self.KEY))
+        self.assertEqual(cfg.inbox_key, self.KEY)
+
+    def test_bot_inbox_key_from_env_too(self):
+        self.assertEqual(load(INBOX_KEY=f"  {self.KEY} ").inbox_key, self.KEY)
+
+    def test_bot_starts_without_inbox_key(self):
+        self.assertEqual(load().inbox_key, "")
+        self.assertEqual(load(INBOX_KEY="").inbox_key, "",
+                         "compose подставляет пустую строку - это «не задан»")
+
+    def test_bot_has_no_hook_token(self):
+        """Хук принимает панель: боту токен знать незачем."""
+        self.assertNotIn("inbox_hook_token", {f.name for f in dataclasses.fields(Config)})
+
+    def test_missing_inbox_key_file_names_the_fix(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            load(INBOX_KEY_FILE=str(Path(self.tmp.name) / "нет-такого"))
+        self.assertIn("INBOX_KEY", str(ctx.exception))
+
+    def test_web_reads_both_from_files(self):
+        cfg = load_web(INBOX_KEY_FILE=self.secret_file("inbox_key", self.KEY),
+                       INBOX_HOOK_TOKEN_FILE=self.secret_file("inbox_hook_token",
+                                                              "hook-token-1"))
+        self.assertEqual(cfg.inbox_key, self.KEY)
+        self.assertEqual(cfg.inbox_hook_token, "hook-token-1")
+
+    def test_web_file_wins_over_env(self):
+        """_FILE задан - значение из окружения не читается вовсе."""
+        cfg = load_web(INBOX_HOOK_TOKEN="из-окружения",
+                       INBOX_HOOK_TOKEN_FILE=self.secret_file("tok", "из-файла"))
+        self.assertEqual(cfg.inbox_hook_token, "из-файла")
+
+    def test_web_starts_without_inbox_secrets(self):
+        cfg = load_web()
+        self.assertEqual(cfg.inbox_key, "")
+        self.assertEqual(cfg.inbox_hook_token, "", "пустой токен - хука нет")
+        cfg = load_web(INBOX_KEY="", INBOX_HOOK_TOKEN="  ")
+        self.assertEqual((cfg.inbox_key, cfg.inbox_hook_token), ("", ""))
+
+
+class TestAvitoConfig(unittest.TestCase):
+    """Чат Авито больше не пересылается в служебный чат: переписка живёт
+    во «Входящих», и настройки AVITO_CHAT_ID не осталось."""
+
+    def test_no_avito_chat_id(self):
+        fields = {f.name for f in dataclasses.fields(Config)}
+        self.assertNotIn("avito_chat_id", fields)
+        self.assertFalse(hasattr(load(), "avito_chat_id"))
+
+    def test_leftover_avito_chat_id_in_env_is_ignored(self):
+        """Старый .env со строкой AVITO_CHAT_ID не должен ронять старт."""
+        cfg = load(AVITO_CHAT_ID="-1001112223334")
+        self.assertFalse(hasattr(cfg, "avito_chat_id"))
+        self.assertNotIn("-1001112223334", repr(cfg))
+
+    def test_avito_polling_is_optional(self):
+        cfg = load()
+        self.assertEqual((cfg.avito_client_id, cfg.avito_client_secret), ("", ""))
+        self.assertEqual(cfg.avito_poll_seconds, 60)
 
 
 class TestUpdateRouting(unittest.TestCase):

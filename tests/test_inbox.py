@@ -24,9 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.crm import logic  # noqa: E402
 
 try:
+    from app import faq_i18n, texts
     from app import logic as bot_logic
-    from app import texts
-    from app.crm import inbox, service
+    from app.crm import company, inbox, service
     from app.services import avito as avito_api
     from app.services.avito import AvitoError
     from app.services.crypto import Vault, generate_key
@@ -87,6 +87,46 @@ class TestInboxBasics(unittest.TestCase):
                     "https://evil.com\\@www.avito.ru/"):
             self.assertIsNone(logic.safe_avito_url(bad), repr(bad))
 
+    def test_avito_link_whitespace_control_and_login(self):
+        # Пробел, управляющий символ или логин в адресе у ссылки на
+        # объявление не встречаются - только у подделки: браузер режет
+        # таб и перевод строки молча и увидел бы другой адрес.
+        for bad in ("https://www.avito.ru/kazan x",
+                    "https://www.avito.ru/\tkazan/x",
+                    "https://www.avito.ru/\nkazan/x",
+                    "https://www.avito.ru/kazan\x00/x",
+                    "https://www.avito.ru/kazan\x1b/x",
+                    "https://www.avito.ru/ kazan",
+                    "https://evil.com\t.avito.ru/",
+                    "https://user@www.avito.ru/kazan/x",
+                    "https://user:pass@avito.ru/kazan/x",
+                    "https://:@avito.ru/"):
+            self.assertIsNone(logic.safe_avito_url(bad), repr(bad))
+        # обычная ссылка с запросом и якорем - проходит
+        good = "https://www.avito.ru/kazan/velosipedy/monster_123?utm=1#photo"
+        self.assertEqual(logic.safe_avito_url(good), good)
+
+    def test_tme_only_for_telegram(self):
+        # Логин MAX - не логин Telegram: t.me по нему вёл бы к постороннему.
+        for channel in ("max", "avito", "wa", "??"):
+            links = logic.inbox_links({"channel": channel, "username": "ildar_h",
+                                       "phone": "+79001234567"})
+            self.assertIsNone(links["tg"], channel)
+            self.assertEqual(links["wa"], "https://wa.me/79001234567", channel)
+        for channel in ("tg", None):
+            self.assertEqual(logic.inbox_links({"channel": channel,
+                                                "username": "@ildar_h"})["tg"],
+                             "https://t.me/ildar_h", repr(channel))
+
+    def test_cut_drops_nul(self):
+        # NUL Postgres в text не принимает: одна такая строка от шлюза
+        # роняла бы всю пачку хука на каждой повторной доставке.
+        self.assertEqual(logic._cut("Иль\x00дар", 120), "Ильдар")
+        self.assertEqual(logic._cut("  \x00Ильдар\x00  ", 120), "Ильдар")
+        self.assertEqual(logic._cut("а\x00" * 5, 3), "ааа", "предел - после чистки")
+        for empty in ("\x00", " \x00 ", "", None):
+            self.assertIsNone(logic._cut(empty, 10), repr(empty))
+
     def test_links(self):
         thread = {"username": "@ildar_h", "phone": "8 (900) 123-45-67",
                   "subject_url": "https://www.avito.ru/kazan/x_1"}
@@ -144,6 +184,18 @@ class TestInboxBasics(unittest.TestCase):
                                        avito_ok=True)
         self.assertIn("бот", why)
 
+    def test_avito_reply_only_into_polled_chats(self):
+        # ext_id шлюза - не номер чата Авито: даже при живом опросе ответ
+        # через API ушёл бы в никуда.
+        for origin in ("hook", "bot", "max_bot"):
+            ok, why = logic.inbox_can_reply(
+                {"channel": "avito", "origin": origin, "status": "new"}, avito_ok=True)
+            self.assertFalse(ok, origin)
+            self.assertIn("шлюз", why, origin)
+        self.assertEqual(logic.inbox_can_reply(
+            {"channel": "avito", "origin": "avito_api", "status": "work"}, avito_ok=True),
+            (True, ""))
+
     def test_reply_limits_per_channel(self):
         self.assertEqual(logic.INBOX_REPLY_LIMITS["avito"], avito_api.MESSAGE_LIMIT,
                          "предел панели и клиента Авито - одно число")
@@ -161,6 +213,36 @@ class TestInboxBasics(unittest.TestCase):
         # пробелы по краям в предел не считаются
         self.assertTrue(logic.check_inbox_reply("avito", "  " + "я" * 1000 + "\n").ok)
 
+    def test_reply_crlf_is_one_character(self):
+        # Форма шлёт перевод строки как CRLF, а maxlength браузера считает
+        # его одним знаком: ответ, который браузер пропустил, проходит и здесь.
+        lines = ["я"] * 500
+        crlf = "\r\n".join(lines)
+        self.assertEqual(len(crlf), 1498)
+        got = logic.check_inbox_reply("avito", crlf)
+        self.assertTrue(got.ok, got.error)
+        self.assertEqual(got.value, "\n".join(lines))
+        self.assertNotIn("\r", got.value)
+        self.assertEqual(logic.check_inbox_reply("tg", "Привет\rПока").value, "Привет\nПока")
+        over = logic.check_inbox_reply("avito", "\r\n".join(["я"] * 501))
+        self.assertFalse(over.ok, "1001 знак и после нормализации - больше предела")
+        self.assertIn("1000", over.error)
+        self.assertFalse(logic.check_inbox_reply("tg", "\r\n\r\n").ok, "одни переводы - пусто")
+
+    def test_moment_naive_is_moscow_and_digits_are_ascii(self):
+        at = datetime(2026, 9, 24, 10, 0, tzinfo=UTC)
+        self.assertEqual(logic._moment("2026-09-24 13:00:00"), at, "пробел вместо T")
+        # В Москве нет перевода часов: зимой те же +3.
+        self.assertEqual(logic._moment("2026-01-15T13:00:00"),
+                         datetime(2026, 1, 15, 10, 0, tzinfo=UTC))
+        naive = logic._moment("2026-09-24T13:00:00")
+        self.assertIsNotNone(naive.tzinfo, "время без пояса не остаётся «наивным»")
+        # isdigit верит арабским, полноширинным и надстрочным цифрам - int()
+        # и время на них падать не должны.
+        for junk in ("١٢٣", "１２３", "²", "①", "1" * 5000, "٠" * 10):
+            self.assertIsNone(logic._moment(junk), repr(junk))
+        self.assertEqual(logic._moment(f"  {int(at.timestamp())}  "), at)
+
     def test_moment(self):
         at = datetime(2026, 9, 24, 10, 0, tzinfo=UTC)
         ts = int(at.timestamp())
@@ -170,9 +252,11 @@ class TestInboxBasics(unittest.TestCase):
         self.assertEqual(logic._moment("2026-09-24T10:00:00Z"), at)
         self.assertEqual(logic._moment("2026-09-24T13:00:00+03:00"), at)
         self.assertEqual(logic._moment("2026-09-24T10:00:00.000Z"), at)
-        self.assertEqual(logic._moment("2026-09-24T10:00:00"), at, "без пояса - UTC")
+        # Без пояса - московское время: система живёт в Europe/Moscow, и n8n
+        # на том же сервере шлёт местное время.
+        self.assertEqual(logic._moment("2026-09-24T13:00:00"), at, "без пояса - Москва")
         for junk in (None, "", "вчера", True, False, [ts], {"t": ts}, 10 ** 20,
-                     "9" * 30, float("nan"), float("inf")):
+                     "9" * 30, float("nan"), float("inf"), "²", "①", "1" * 5000):
             self.assertIsNone(logic._moment(junk), repr(junk))
 
 
@@ -345,6 +429,23 @@ class TestParseInbound(unittest.TestCase):
         items, skipped = logic.parse_inbound({"messages": messages})
         self.assertEqual(len(items) + skipped, len(messages))
 
+    def test_wazzup_excess_is_counted_as_skipped(self):
+        # Ответ 200 шлюз считает доставкой: сверх предела сообщения не
+        # пишутся, но и не пропадают молча - они в счёте пропущенных.
+        def message(i, **over):
+            row = {"messageId": f"w-{i}", "chatType": "whatsapp", "chatId": "79001234567",
+                   "type": "text", "text": "?"}
+            row.update(over)
+            return row
+
+        messages = [message(i) for i in range(logic.HOOK_BATCH_LIMIT + 7)]
+        messages[0]["isEcho"] = True               # наше же - тоже пропуск
+        items, skipped = logic.parse_inbound({"messages": messages})
+        self.assertEqual(len(items), logic.HOOK_BATCH_LIMIT - 1)
+        self.assertEqual(skipped, 7 + 1)
+        self.assertEqual(items[-1]["msg_id"], f"w-{logic.HOOK_BATCH_LIMIT - 1}",
+                         "пишутся первые по порядку")
+
 
 class TestInboxRows(unittest.TestCase):
     def thread(self, **over):
@@ -480,12 +581,35 @@ class TestInboxRows(unittest.TestCase):
         self.assertIn("WhatsApp", bare)
         self.assertNotIn("9001234567", bare)
 
+    def test_team_summary_has_no_personal_data(self):
+        # Сводка вместо пачки сигналов: сколько и откуда, без имён,
+        # телефонов, логинов и слов человека.
+        threads = [
+            {"id": 1, "channel": "avito", "name": "Хасанов Ильдар", "ext_id": "u2i-secret",
+             "subject": "Электровелосипед Monster", "text": "Мой паспорт 9204 123456"},
+            {"id": 2, "channel": "avito", "name": "Петров Пётр", "phone": "+79990000002"},
+            {"id": 3, "channel": "wa", "phone": "+79001234567", "ext_id": "+79001234567"},
+            {"id": 4, "channel": "tg", "username": "ildar_h", "ext_id": "5001",
+             "client_name": "Хасанов Ильдар Ринатович", "last_body_enc": "v1:AAAA"},
+            {"id": 5, "channel": "??"}]
+        text = logic.inbox_team_summary(iter(threads))       # хватает одного прохода
+        self.assertIn("Новых обращений: 5", text)
+        for part in ("Авито — 2", "WhatsApp — 1", "Telegram — 1", "?? — 1"):
+            self.assertIn(part, text)
+        self.assertIn("«Входящие»", text)
+        for secret in ("Ильдар", "Хасанов", "Петров", "ildar", "79001234567", "9001234567",
+                       "9990000002", "u2i-secret", "5001", "паспорт", "9204", "v1:"):
+            self.assertNotIn(secret, text, secret)
+
 
 # ───────────────────────────── сервис ─────────────────────────────
 
 @unittest.skipUnless(HAVE_DEPS, "нет зависимостей панели")
 class InboxCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Память неудачных сигналов - на процесс: номера обращений у
+        # FakeCrm повторяются от теста к тесту.
+        inbox._announce_fails.clear()
         self.crm = FakeCrm()
         self.vault = Vault.from_raw(KEY)
         self.ildar = await self.crm.create_client(
@@ -592,6 +716,41 @@ class TestInboxIn(InboxCase):
                                    subject_url="javascript:alert(document.cookie)")
         self.assertIsNone(thread["subject_url"])
         self.assertEqual(thread["subject"], "Велосипед")
+
+    async def test_nul_is_dropped_everywhere(self):
+        # NUL в любом поле от шлюза - не 500 на каждой повторной доставке,
+        # а то же обращение без этого знака.
+        thread = await self.thread(channel="avito", origin="hook", ext_id="u2i-\x009",
+                                   msg_id="m-\x001", name="Иль\x00дар",
+                                   username="@ildar\x00_h", subject="Вело\x00сипед",
+                                   text="Свобо\x00ден?")
+        self.assertEqual((thread["ext_id"], thread["name"], thread["username"],
+                          thread["subject"]), ("u2i-9", "Ильдар", "ildar_h", "Велосипед"))
+        [message] = self.messages(thread["id"])
+        self.assertEqual(message["ext_id"], "m-1")
+        for key, value in {**thread, **message}.items():
+            if isinstance(value, str):
+                self.assertNotIn("\x00", value, key)
+        # повтор той же доставки - тот же адрес и то же сообщение, не дубль
+        again = await service.inbox_in(self.crm, self.vault, channel="avito", origin="hook",
+                                       ext_id="u2i-9", msg_id="m-1", text="Свободен?")
+        self.assertEqual(again["thread_id"], thread["id"])
+        self.assertIsNone(again["message_id"])
+
+    async def test_time_from_the_future_is_clamped(self):
+        # Время шлюза из будущего держало бы обращение первым в списке и
+        # вне срока чистки.
+        future = datetime.now(UTC) + timedelta(days=30)
+        thread = await self.thread(channel="wa", origin="hook", ext_id="+79005550000",
+                                   at=future)
+        [message] = self.messages(thread["id"])
+        edge = datetime.now(UTC)
+        self.assertLessEqual(message["created_at"], edge)
+        self.assertLessEqual(thread["waiting_since"], edge)
+        self.assertLessEqual(thread["last_in_at"], edge)
+        past = datetime.now(UTC) - timedelta(hours=2)
+        other = await self.thread(channel="wa", origin="hook", ext_id="+79005550001", at=past)
+        self.assertEqual(other["waiting_since"], past, "прошлое время шлюза - как есть")
 
     def test_vault(self):
         self.assertIsNone(service.inbox_vault(""))
@@ -743,21 +902,296 @@ class TestInboxActions(InboxCase):
             await service.inbox_retry(self.crm, mid, by="admin")   # ещё в очереди
         await self.crm.claim_inbox_out()
         await self.crm.finish_inbox_out(mid, ok=False, error="bot was blocked")
+        body = self.crm.inbox_messages_[mid]["body_enc"]
         new_id = await service.inbox_retry(self.crm, mid, by="owner")
-        self.assertNotEqual(new_id, mid)
-        again = self.crm.inbox_messages_[new_id]
-        self.assertEqual((again["status"], again["author"]), ("queued", "owner"))
-        self.assertEqual(again["body_enc"], self.crm.inbox_messages_[mid]["body_enc"])
-        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "failed",
-                         "не ушедший остаётся в истории")
+        # Та же строка обратно в очередь, а не копия: у копии исходное «не
+        # ушло» оставалось бы с кнопкой, и второе нажатие слало бы дубль.
+        self.assertEqual(new_id, mid)
+        again = self.crm.inbox_messages_[mid]
+        self.assertEqual((again["status"], again["author"], again["error"]),
+                         ("queued", "owner", None))
+        self.assertEqual(again["body_enc"], body)
         with self.assertRaises(service.ServiceError):
-            await service.inbox_retry(self.crm, mid, by="owner")   # новый ещё в очереди
+            await service.inbox_retry(self.crm, mid, by="owner")   # уже в очереди
         await self.crm.claim_inbox_out()
-        await self.crm.finish_inbox_out(new_id, ok=True)
+        await self.crm.finish_inbox_out(mid, ok=True)
         with self.assertRaises(service.ServiceError):
-            await service.inbox_retry(self.crm, new_id, by="owner")  # ушедший не повторяем
+            await service.inbox_retry(self.crm, mid, by="owner")   # ушедший не повторяем
+        outs = [m for m in self.crm.inbox_messages_.values() if m["direction"] == "out"]
+        self.assertEqual(len(outs), 1, "одна строка - одно сообщение человеку")
         with self.assertRaises(service.ServiceError):
             await service.inbox_retry(self.crm, 999999, by="owner")
+
+    async def test_retry_waits_for_the_newer_reply(self):
+        # Не ушёл первый, администратор написал второй: повтор первого -
+        # только когда второй ушёл, иначе в очереди обращения два ответа.
+        thread = await self.thread()
+        first = await service.inbox_reply(self.crm, self.vault, thread, "Первый",
+                                          by="admin", avito_ok=False)
+        await self.crm.claim_inbox_out()
+        await self.crm.finish_inbox_out(first, ok=False, error="timeout")
+        fresh = await self.crm.inbox_thread(thread["id"])
+        second = await service.inbox_reply(self.crm, self.vault, fresh, "Второй",
+                                           by="admin", avito_ok=False)
+        with self.assertRaises(service.ServiceError):
+            await service.inbox_retry(self.crm, first, by="owner")
+        self.assertEqual(self.crm.inbox_messages_[first]["status"], "failed",
+                         "отказ строку не трогает")
+        await self.crm.claim_inbox_out()
+        with self.assertRaises(service.ServiceError):
+            await service.inbox_retry(self.crm, first, by="owner")   # второй отправляется
+        await self.crm.finish_inbox_out(second, ok=True)
+        self.assertEqual(await service.inbox_retry(self.crm, first, by="owner"), first)
+        row = self.crm.inbox_messages_[first]
+        self.assertEqual((row["status"], row["author"], row["error"], row["sent_at"],
+                          row["claimed_at"]), ("queued", "owner", None, None, None))
+
+    async def test_stuck_sweep_only_older_than(self):
+        # «Отправляется» дольше STUCK_MINUTES - итог не записался; свежую
+        # отправку круг не трогает, иначе она ушла бы и стала «не ушло».
+        now = datetime.now(UTC)
+        rows = {}
+        for ext, minutes in (("6001", inbox.STUCK_MINUTES + 1), ("6002", 1), ("6003", None)):
+            thread = await self.thread(ext_id=ext)
+            mid = await service.inbox_reply(self.crm, self.vault, thread, "Ответ",
+                                            by="admin", avito_ok=False)
+            claimed = await self.crm.claim_inbox_out()
+            self.assertEqual(claimed["id"], mid)
+            self.assertIsNotNone(self.crm.inbox_messages_[mid]["claimed_at"],
+                                 "взятие в отправку ставит время")
+            if minutes is None:
+                # строка до правки: времени взятия нет - считается от создания
+                self.crm.inbox_messages_[mid].update(
+                    claimed_at=None, created_at=now - timedelta(hours=1))
+            else:
+                self.crm.inbox_messages_[mid]["claimed_at"] = now - timedelta(minutes=minutes)
+            rows[ext] = mid
+        swept = await self.crm.fail_stuck_inbox_out(older_minutes=inbox.STUCK_MINUTES)
+        self.assertEqual(swept, 2)
+        status = {ext: self.crm.inbox_messages_[mid]["status"] for ext, mid in rows.items()}
+        self.assertEqual(status, {"6001": "failed", "6002": "sending", "6003": "failed"})
+        self.assertIn("неизвестно, ушло ли", self.crm.inbox_messages_[rows["6001"]]["error"])
+        # после перезапуска - все «отправляется», без срока
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(), 1)
+        self.assertEqual(self.crm.inbox_messages_[rows["6002"]]["status"], "failed")
+
+
+class TestThreadOrigin(InboxCase):
+    """Обращение принадлежит источнику, который его завёл."""
+
+    async def test_hook_does_not_write_into_polled_avito_chat(self):
+        # Утёкший токен хука не должен подкладывать «слова клиента» в
+        # настоящий чат Авито, куда панель отвечает через API.
+        real = await self.thread(channel="avito", origin="avito_api", ext_id="u2i-1",
+                                 name="Ильдар", subject="Электровелосипед Monster",
+                                 text="Свободен?")
+        await inbox.announce_once(FakeBot(), self.crm, cfg())
+        before = dict(self.crm.inbox_threads_[real["id"]])
+        count = len(self.crm.inbox_messages_)
+        with self.assertRaises(service.ServiceError):
+            await service.inbox_in(
+                self.crm, self.vault, channel="avito", origin="hook", ext_id="u2i-1",
+                msg_id="fake-1", name="Служба безопасности Авито", phone="+79990009999",
+                subject="Возврат предоплаты", subject_url="https://www.avito.ru/x",
+                text="Переведите предоплату на карту 2200 0000 0000 0000")
+        self.assertEqual(len(self.crm.inbox_messages_), count, "сообщения нет")
+        self.assertEqual(self.crm.inbox_threads_[real["id"]], before,
+                         "имя, телефон, тема, ожидание и сигнал - прежние")
+        self.assertEqual(len(self.crm.inbox_threads_), 1, "и второго обращения рядом нет")
+
+    async def test_poll_does_not_write_into_hook_thread(self):
+        hook = await self.thread(channel="avito", origin="hook", ext_id="u2i-1",
+                                 name="Из n8n", text="Через шлюз")
+        before = dict(self.crm.inbox_threads_[hook["id"]])
+        with self.assertRaises(service.ServiceError):
+            await service.inbox_in(self.crm, self.vault, channel="avito",
+                                   origin="avito_api", ext_id="u2i-1", name="Ильдар",
+                                   text="Из опроса")
+        self.assertEqual(self.crm.inbox_threads_[hook["id"]], before)
+        self.assertEqual(len(self.messages(hook["id"])), 1)
+
+    async def test_record_swallows_foreign_origin_without_text(self):
+        await self.thread(channel="avito", origin="avito_api", ext_id="u2i-1")
+        with self.assertLogs("app.crm.inbox", "WARNING") as logs:
+            got = await inbox.record(self.crm, cfg(), channel="avito", origin="hook",
+                                     ext_id="u2i-1", text="Мой паспорт 9204 123456")
+        self.assertIsNone(got)
+        out = "\n".join(logs.output)
+        self.assertIn("avito/u2i-1", out)
+        self.assertIn("ServiceError", out)
+        self.assertNotIn("9204", out)
+
+    async def test_same_address_in_another_channel_is_another_thread(self):
+        tg = await self.thread(channel="tg", origin="bot", ext_id="777")
+        max_thread = await self.thread(channel="max", origin="max_bot", ext_id="777")
+        self.assertNotEqual(tg["id"], max_thread["id"])
+        self.assertEqual(max_thread["client_id"], self.max_man)
+
+
+class TestManualClient(InboxCase):
+    """Ручная привязка к карточке важнее найденной по телефону."""
+
+    async def test_unlink_is_not_undone_by_next_message(self):
+        thread = await self.thread(channel="wa", origin="hook", ext_id="+79001234567",
+                                   phone="+79001234567")
+        self.assertEqual(thread["client_id"], self.ildar)
+        self.assertFalse(thread["client_manual"], "найденная по телефону - не ручная")
+        await service.inbox_link_client(self.crm, thread, "", by="admin")
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual((fresh["client_id"], fresh["client_manual"]), (None, True))
+        # Общий телефон (семья, курьерский аккаунт на двоих) вернул бы
+        # чужую карточку следующим же сообщением.
+        await self.thread(channel="wa", origin="hook", ext_id="+79001234567",
+                          phone="+79001234567", text="Ещё вопрос")
+        self.assertIsNone((await self.crm.inbox_thread(thread["id"]))["client_id"])
+
+    async def test_unlink_holds_for_telegram_id_too(self):
+        thread = await self.thread()
+        self.assertEqual(thread["client_id"], self.ildar)
+        await service.inbox_link_client(self.crm, thread, None, by="admin")
+        await self.thread(text="Алло?")
+        self.assertIsNone((await self.crm.inbox_thread(thread["id"]))["client_id"])
+
+    async def test_manual_link_is_not_replaced(self):
+        thread = await self.thread(channel="wa", origin="hook", ext_id="+79005550000")
+        self.assertIsNone(thread["client_id"])
+        await service.inbox_link_client(self.crm, thread, str(self.max_man), by="admin")
+        self.assertTrue((await self.crm.inbox_thread(thread["id"]))["client_manual"])
+        await self.thread(channel="wa", origin="hook", ext_id="+79005550000",
+                          phone="+79001234567", text="Это Ильдар, телефон жены")
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual((fresh["client_id"], fresh["client_manual"]), (self.max_man, True))
+
+    async def test_auto_link_still_works_without_manual(self):
+        # Пока руками не трогали, карточка подтягивается, как только появилась.
+        thread = await self.thread(channel="wa", origin="hook", ext_id="+79005550000")
+        self.assertIsNone(thread["client_id"])
+        newcomer = await self.crm.create_client(full_name="Новиков Никита",
+                                                phone="+79005550000")
+        await self.thread(channel="wa", origin="hook", ext_id="+79005550000",
+                          phone="+79005550000", text="Я заполнил анкету")
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual((fresh["client_id"], fresh["client_manual"]), (newcomer, False))
+
+
+class TestWaitingAndSignal(InboxCase):
+    """«Ждёт с» и сигнал в чат - от момента, когда человек начал ждать."""
+
+    async def test_done_and_spam_clear_waiting(self):
+        for status, ext in (("done", "6001"), ("spam", "6002")):
+            with self.subTest(status=status):
+                thread = await self.thread(ext_id=ext)
+                self.assertIsNotNone(thread["waiting_since"])
+                await service.inbox_set_status(self.crm, thread, status, note=None,
+                                               by="admin")
+                fresh = await self.crm.inbox_thread(thread["id"])
+                self.assertIsNone(fresh["waiting_since"])
+                # вернули в работу - прошлое ожидание не воскресает
+                await service.inbox_set_status(self.crm, fresh, "work", note=None,
+                                               by="admin")
+                self.assertIsNone((await self.crm.inbox_thread(thread["id"]))["waiting_since"])
+        self.assertEqual(await self.crm.inbox_open_count(), 0)
+
+    async def test_work_keeps_waiting(self):
+        now = datetime.now(UTC)
+        thread = await self.thread(at=now - timedelta(hours=2))
+        await service.inbox_set_status(self.crm, thread, "work", note=None, by="admin")
+        self.assertEqual((await self.crm.inbox_thread(thread["id"]))["waiting_since"],
+                         now - timedelta(hours=2), "в работе - а ответа всё ещё нет")
+
+    async def test_reopen_waits_from_the_new_message(self):
+        now = datetime.now(UTC)
+        thread = await self.thread(at=now - timedelta(days=3))
+        await service.inbox_set_status(self.crm, thread, "done", note=None, by="admin")
+        await self.thread(text="Снова я", at=now - timedelta(minutes=5))
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual(fresh["status"], "new")
+        self.assertEqual(fresh["waiting_since"], now - timedelta(minutes=5))
+
+    async def test_reopen_ignores_stale_waiting_of_old_rows(self):
+        # Разобранное до правки хранило «ждёт с» прошлого вопроса: новое
+        # сообщение не должно показывать ожидание в трое суток.
+        now = datetime.now(UTC)
+        thread = await self.thread(at=now - timedelta(days=3))
+        self.crm.inbox_threads_[thread["id"]].update(status="done")
+        self.assertIsNotNone(self.crm.inbox_threads_[thread["id"]]["waiting_since"])
+        await self.thread(text="Снова я", at=now - timedelta(minutes=5))
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual((fresh["status"], fresh["waiting_since"]),
+                         ("new", now - timedelta(minutes=5)))
+
+    async def test_second_message_keeps_first_waiting(self):
+        now = datetime.now(UTC)
+        thread = await self.thread(at=now - timedelta(hours=1))
+        await self.thread(text="Алло?", at=now - timedelta(minutes=1))
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual(fresh["waiting_since"], now - timedelta(hours=1))
+        self.assertEqual(fresh["last_in_at"], now - timedelta(minutes=1))
+
+    async def announced(self, thread_id) -> bool:
+        return (await self.crm.inbox_thread(thread_id))["announced_at"] is not None
+
+    async def test_signal_when_someone_starts_waiting(self):
+        bot = FakeBot()
+        thread = await self.thread(text="Первый вопрос")
+        self.assertFalse(await self.announced(thread["id"]), "новое обращение - сигнал")
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 1)
+        # второе «алло?» подряд - человек уже ждёт, сигнала нет
+        await self.thread(text="Алло?")
+        self.assertTrue(await self.announced(thread["id"]))
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 0)
+        # ответили - первое входящее после ответа снова сигнал
+        fresh = await self.crm.inbox_thread(thread["id"])
+        await service.inbox_reply(self.crm, self.vault, fresh, "Ответ", by="admin",
+                                  avito_ok=False)
+        await inbox.send_once(FakeBot(), self.crm, cfg())
+        self.assertIsNone((await self.crm.inbox_thread(thread["id"]))["waiting_since"])
+        await self.thread(text="Спасибо, а ещё вопрос")
+        self.assertFalse(await self.announced(thread["id"]))
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 1)
+        # разобрали - возврат из разобранных тоже сигнал
+        fresh = await self.crm.inbox_thread(thread["id"])
+        await service.inbox_set_status(self.crm, fresh, "done", note=None, by="admin")
+        await self.thread(text="Снова я")
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual(fresh["status"], "new")
+        self.assertIsNone(fresh["announced_at"])
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 1)
+        self.assertEqual(len(bot.sent), 3)
+
+    async def test_answered_elsewhere_then_new_question_signals(self):
+        thread = await self.thread()
+        await inbox.announce_once(FakeBot(), self.crm, cfg())
+        await service.inbox_answered_elsewhere(self.crm, thread, by="admin")
+        await self.thread(text="А ещё?")
+        self.assertFalse(await self.announced(thread["id"]))
+
+    async def test_spam_never_signals(self):
+        thread = await self.thread()
+        await inbox.announce_once(FakeBot(), self.crm, cfg())
+        await service.inbox_set_status(self.crm, thread, "spam", note=None, by="admin")
+        for text in ("Купите рекламу", "Скидка 90%"):
+            await self.thread(text=text)
+        fresh = await self.crm.inbox_thread(thread["id"])
+        self.assertEqual(fresh["status"], "spam")
+        self.assertIsNotNone(fresh["announced_at"])
+        bot = FakeBot()
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 0)
+        self.assertEqual(bot.sent, [])
+
+    async def test_silent_record_does_not_signal(self):
+        # announce=False (отметка анкеты, своё сообщение) - сигнала нет,
+        # даже когда человек не ждал.
+        thread = await self.thread()
+        await inbox.announce_once(FakeBot(), self.crm, cfg())
+        await service.inbox_answered_elsewhere(self.crm, thread, by="admin")
+        await inbox.record(self.crm, cfg(), channel="tg", origin="bot", ext_id=5001,
+                           direction="event", kind="other", msg_id="anketa:1",
+                           text="Анкета отправлена на проверку", announce=False)
+        self.assertTrue(await self.announced(thread["id"]))
+        await inbox.record(self.crm, cfg(), channel="tg", origin="bot", ext_id=5001,
+                           text="А когда проверят?", announce=False)
+        self.assertTrue(await self.announced(thread["id"]))
 
 
 # ─────────────────────── процесс бота: запись и отправка ───────────────────────
@@ -765,12 +1199,14 @@ class TestInboxActions(InboxCase):
 class FakeBot:
     def __init__(self, fail: Exception | None = None) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.markups: list = []
         self.fail = fail
 
     async def send_message(self, chat_id, text, reply_markup=None, **kw):
         if self.fail is not None:
             raise self.fail
         self.sent.append((chat_id, text))
+        self.markups.append(reply_markup)
 
 
 class FakeMax:
@@ -785,14 +1221,25 @@ class FakeMax:
 
 
 class FakeUsers:
-    """bot.users: отправке нужен только язык клиента."""
+    """bot.users: язык клиента и его состояние в сценарии бота."""
 
-    def __init__(self, **langs: str) -> None:
+    def __init__(self, *, state: str = "approved", **langs: str) -> None:
         self.langs = {int(k.lstrip("u")): v for k, v in langs.items()}
+        self.states = {tg_id: state for tg_id in self.langs}
+        self.patched: list[tuple[int, str, str]] = []
 
     async def get_user(self, tg_id):
         lang = self.langs.get(tg_id)
-        return {"tg_id": tg_id, "lang": lang} if lang else None
+        return ({"tg_id": tg_id, "lang": lang, "state": self.states.get(tg_id)}
+                if lang else None)
+
+    async def patch(self, tg_id, *, expected_state=None, **fields):
+        if expected_state is not None and self.states.get(tg_id) != expected_state:
+            return False
+        if "state" in fields:
+            self.patched.append((tg_id, self.states.get(tg_id), fields["state"]))
+            self.states[tg_id] = fields["state"]
+        return True
 
 
 def chat_raw(chat_id: str, last_id: str, *, updated: datetime, name: str = "Ильдар",
@@ -832,8 +1279,10 @@ class FakeAvito:
             raise self.error
         return OWN
 
-    async def chats(self):
-        return [avito_api.parse_chat(c, OWN) for c in self.raw_chats]
+    async def chats(self, *, limit=100, offset=0):
+        self.chat_pages = getattr(self, "chat_pages", []) + [offset]
+        page = self.raw_chats[offset:offset + limit]
+        return [avito_api.parse_chat(c, OWN) for c in page]
 
     async def messages(self, chat_id):
         self.message_calls.append(chat_id)
@@ -914,6 +1363,187 @@ class TestSendOnce(InboxCase):
         bot = FakeBot()
         await inbox.send_once(bot, self.crm, cfg(), db=FakeUsers(u5001="en"))
         self.assertEqual(bot.sent[0][1], "💬 Support reply:\n\nOk")
+
+    async def test_approved_client_can_answer_back(self):
+        # Ответ из панели - не тупик: клиент с договором переходит в режим
+        # вопроса, и его следующее сообщение придёт во «Входящие».
+        await self.queued("Велосипед будет завтра")
+        bot, users = FakeBot(), FakeUsers(u5001="ru")
+        await inbox.send_once(bot, self.crm, cfg(), db=users)
+        self.assertEqual(users.patched, [(5001, bot_logic.APPROVED, bot_logic.WAIT_SUPPORT)])
+        self.assertEqual(len(bot.sent), 2)
+        self.assertIn("Велосипед будет завтра", bot.sent[0][1])
+        self.assertIn("одним сообщением", bot.sent[1][1])
+
+    async def test_guest_mid_anketa_gets_contact_not_prompt(self):
+        # Посреди анкеты свободный текст бот читает как шаг анкеты: режим
+        # вопроса не включаем, а к ответу приклеиваем прямой контакт.
+        await self.queued("Приходите завтра")
+        bot = FakeBot()
+        users = FakeUsers(state=bot_logic.WAIT_BIRTH_PLACE, u5001="ru")
+        await inbox.send_once(bot, self.crm, cfg(), db=users)
+        [(_, text)] = bot.sent
+        self.assertIn("Приходите завтра", text)
+        self.assertIn("Написать нам:", text)
+        self.assertEqual(users.patched, [])
+
+    async def test_failed_send_does_not_switch_mode(self):
+        await self.queued("Ok")
+        users = FakeUsers(u5001="ru")
+        await inbox.send_once(FakeBot(fail=RuntimeError("Forbidden: bot was blocked")),
+                              self.crm, cfg(), db=users)
+        self.assertEqual(users.patched, [])
+
+    async def test_prompt_in_clients_language_with_cancel(self):
+        await self.queued("Ready")
+        bot, users = FakeBot(), FakeUsers(u5001="en")
+        await inbox.send_once(bot, self.crm, cfg(), db=users)
+        self.assertEqual([text for _, text in bot.sent],
+                         ["💬 Support reply:\n\nReady", faq_i18n.T["en"]["handoff"]])
+        self.assertEqual([chat for chat, _ in bot.sent], [5001, 5001])
+        self.assertIsNone(bot.markups[0], "у самого ответа клавиатуры нет")
+        cancel = bot.markups[1]
+        self.assertEqual([[b.text for b in row] for row in cancel.keyboard], [["Cancel"]],
+                         "передумал - кнопка отмены на его языке")
+        self.assertEqual(users.states[5001], bot_logic.WAIT_SUPPORT)
+
+    async def test_russian_prompt_and_cancel(self):
+        await self.queued("Велосипед будет завтра")
+        bot = FakeBot()
+        await inbox.send_once(bot, self.crm, cfg(), db=FakeUsers(u5001="ru"))
+        self.assertEqual(bot.sent[1][1], texts.FAQ_HANDOFF)
+        self.assertEqual([[b.text for b in row] for row in bot.markups[1].keyboard],
+                         [["Отмена"]])
+
+    async def test_already_asking_gets_plain_reply(self):
+        # Уже в режиме вопроса: ни второго приглашения, ни контакта.
+        await self.queued("Ok")
+        bot = FakeBot()
+        users = FakeUsers(state=bot_logic.WAIT_SUPPORT, u5001="ru")
+        await inbox.send_once(bot, self.crm, cfg(), db=users)
+        self.assertEqual(bot.sent, [(5001, texts.SUPPORT_REPLY_USER.format(answer="Ok"))])
+        self.assertEqual(users.patched, [])
+        self.assertEqual(users.states[5001], bot_logic.WAIT_SUPPORT)
+
+    async def test_unknown_user_gets_plain_reply(self):
+        class Broken(FakeUsers):
+            async def get_user(self, tg_id):
+                raise RuntimeError("база бота недоступна")
+
+        for users in (None, FakeUsers(), Broken(u5001="ru")):
+            with self.subTest(users=type(users).__name__):
+                self.crm = FakeCrm()
+                _, mid = await self.queued("Ok")
+                bot = FakeBot()
+                await inbox.send_once(bot, self.crm, cfg(), db=users)
+                self.assertEqual(bot.sent,
+                                 [(5001, texts.SUPPORT_REPLY_USER.format(answer="Ok"))])
+                self.assertEqual(self.crm.inbox_messages_[mid]["status"], "sent")
+                if users is not None:
+                    self.assertEqual(users.patched, [])
+
+    async def test_mid_anketa_contact_in_language_and_from_setting(self):
+        # Контакт менеджера из настройки подменяет зашитый - и в переводе.
+        company.reset()
+        self.addCleanup(company.reset)
+        company.set_snapshot({"support_contact": "https://t.me/novy_menedzher"})
+        for lang, prefix in (("ru", "Написать нам:"), ("en", "Write to us:")):
+            with self.subTest(lang=lang):
+                self.crm = FakeCrm()
+                await self.queued("<b>Ok</b>")
+                bot = FakeBot()
+                users = FakeUsers(state=bot_logic.WAIT_FIO, u5001=lang)
+                await inbox.send_once(bot, self.crm, cfg(), db=users)
+                [(_, text)] = bot.sent
+                self.assertIn("&lt;b&gt;Ok&lt;/b&gt;", text)
+                self.assertIn(f"{prefix} https://t.me/novy_menedzher", text)
+                self.assertNotIn(texts.SUPPORT_CONTACT_URL, text)
+                self.assertEqual(users.patched, [])
+
+    async def test_state_changed_meanwhile_no_prompt(self):
+        # Между чтением и правкой человек нажал другую кнопку: правка с
+        # ожидаемым состоянием не проходит, приглашения нет.
+        class Racing(FakeUsers):
+            async def get_user(self, tg_id):
+                row = await super().get_user(tg_id)
+                self.states[tg_id] = bot_logic.WAIT_FIO
+                return row
+
+        await self.queued("Ok")
+        bot, users = FakeBot(), Racing(u5001="ru")
+        await inbox.send_once(bot, self.crm, cfg(), db=users)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(users.patched, [])
+        self.assertEqual(users.states[5001], bot_logic.WAIT_FIO, "сценарий не сбит")
+
+    async def test_prompt_failure_keeps_reply_sent(self):
+        class SecondFails(FakeBot):
+            async def send_message(self, chat_id, text, reply_markup=None, **kw):
+                if self.sent:
+                    raise RuntimeError("Too Many Requests")
+                await super().send_message(chat_id, text, reply_markup=reply_markup)
+
+        _, mid = await self.queued("Ok")
+        bot, users = SecondFails(), FakeUsers(u5001="ru")
+        with self.assertLogs("app.crm.inbox", "WARNING"):
+            self.assertTrue(await inbox.send_once(bot, self.crm, cfg(), db=users))
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "sent",
+                         "ответ ушёл - сбой приглашения его не отменяет")
+
+    async def test_max_reply_does_not_touch_bot_state(self):
+        await self.queued("Ok", channel="max", origin="max_bot", ext_id="777")
+        users = FakeUsers(u777="ru")
+        await inbox.send_once(FakeBot(), self.crm, cfg(), db=users, max_client=FakeMax())
+        self.assertEqual(users.patched, [], "состояние MAX живёт в базе MAX-бота")
+
+    async def test_finish_is_retried(self):
+        _, mid = await self.queued()
+        real, calls = self.crm.finish_inbox_out, []
+
+        async def flaky(message_id, **kw):
+            calls.append(message_id)
+            if len(calls) < inbox.FINISH_TRIES:
+                raise RuntimeError("connection reset")
+            return await real(message_id, **kw)
+
+        self.crm.finish_inbox_out = flaky
+        bot = FakeBot()
+        with mock.patch.object(inbox, "FINISH_PAUSE", 0):
+            self.assertTrue(await inbox.send_once(bot, self.crm, cfg()))
+        self.assertEqual(calls, [mid] * inbox.FINISH_TRIES)
+        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "sent")
+        self.assertEqual(len(bot.sent), 1, "повторяется запись итога, а не отправка")
+
+    async def test_unwritten_result_is_swept_later(self):
+        thread, mid = await self.queued()
+        calls = []
+
+        async def broken(message_id, **kw):
+            calls.append(message_id)
+            raise RuntimeError("база недоступна")
+
+        real = self.crm.finish_inbox_out
+        self.crm.finish_inbox_out = broken
+        bot = FakeBot()
+        with mock.patch.object(inbox, "FINISH_PAUSE", 0), \
+                self.assertLogs("app.crm.inbox", "ERROR"):
+            self.assertTrue(await inbox.send_once(bot, self.crm, cfg()))
+        self.crm.finish_inbox_out = real
+        self.assertEqual(calls, [mid] * inbox.FINISH_TRIES)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "sending")
+        self.assertFalse(await inbox.send_once(bot, self.crm, cfg()), "второй раз не шлём")
+        # Через STUCK_MINUTES круг снимает строку - очередь обращения свободна.
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(
+            older_minutes=inbox.STUCK_MINUTES), 0)
+        self.crm.inbox_messages_[mid]["claimed_at"] -= timedelta(
+            minutes=inbox.STUCK_MINUTES + 1)
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(
+            older_minutes=inbox.STUCK_MINUTES), 1)
+        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "failed")
+        self.assertEqual(await service.inbox_retry(self.crm, mid, by="admin"), mid,
+                         "повторяет человек кнопкой")
 
     async def test_telegram_failure_is_recorded(self):
         thread, mid = await self.queued()
@@ -1033,14 +1663,132 @@ class TestAnnounce(InboxCase):
         self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 0)
         self.assertEqual(len(bot.sent), 2)
 
-    async def test_marked_even_when_sending_fails(self):
+    async def test_failed_signal_is_retried_then_given_up(self):
+        # Сбой отправки (лимит Telegram, сеть) - повтор следующим кругом, но
+        # не вечно: после ANNOUNCE_TRIES отметка ставится, залпа нет.
         bot = FakeBot(fail=RuntimeError("chat not found"))
         with self.assertLogs("app.crm.notices", "WARNING"):
+            for _ in range(inbox.ANNOUNCE_TRIES - 1):
+                self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 0)
+        self.assertFalse(any(t["announced_at"] for t in self.crm.inbox_threads_.values()))
+        with self.assertLogs("app.crm.inbox", "WARNING"):
             self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 2)
         self.assertTrue(all(t["announced_at"] for t in self.crm.inbox_threads_.values()))
         self.assertEqual({n["status"] for n in self.crm.notice_log_}, {"failed"})
         self.assertEqual(await inbox.announce_once(FakeBot(), self.crm, cfg()), 0,
                          "залпа после починки чата нет")
+
+    async def test_failed_signal_goes_out_next_round(self):
+        bot = FakeBot(fail=RuntimeError("Too Many Requests: retry after 30"))
+        with self.assertLogs("app.crm.notices", "WARNING"):
+            self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 0)
+        fixed = FakeBot()
+        self.assertEqual(await inbox.announce_once(fixed, self.crm, cfg()), 2)
+        self.assertEqual(len(fixed.sent), 2, "сигнал не потерян из-за лимита")
+
+    async def test_burst_goes_as_one_summary(self):
+        for i in range(inbox.ANNOUNCE_BURST + 2):
+            await self.thread(channel="wa", origin="hook", ext_id=f"+7900555{i:04d}",
+                              name=f"Клиент {i}", text="Есть свободные?")
+        bot = FakeBot()
+        total = len(self.crm.inbox_threads_)
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), total)
+        [(chat, text)] = bot.sent
+        self.assertEqual(chat, ADMIN_CHAT)
+        self.assertIn(f"Новых обращений: {total}", text)
+        self.assertIn("WhatsApp", text)
+        for secret in ("Клиент", "Ильдар", "+7900555", "Есть свободные"):
+            self.assertNotIn(secret, text)
+
+    async def add(self, count: int) -> None:
+        for i in range(count):
+            await self.thread(channel="wa", origin="hook", ext_id=f"+7900555{i:04d}",
+                              name=f"Клиент {i}", text="Есть свободные?")
+
+    async def test_exactly_burst_goes_one_by_one(self):
+        await self.add(inbox.ANNOUNCE_BURST - len(self.crm.inbox_threads_))
+        bot = FakeBot()
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()),
+                         inbox.ANNOUNCE_BURST)
+        self.assertEqual(len(bot.sent), inbox.ANNOUNCE_BURST)
+        for _, text in bot.sent:
+            self.assertIn("Новое обращение ВХ-", text)
+            self.assertNotIn("Новых обращений", text)
+
+    async def test_failed_summary_goes_out_next_round(self):
+        await self.add(inbox.ANNOUNCE_BURST)
+        total = len(self.crm.inbox_threads_)
+        with self.assertLogs("app.crm.notices", "WARNING"):
+            self.assertEqual(await inbox.announce_once(
+                FakeBot(fail=RuntimeError("Too Many Requests")), self.crm, cfg()), 0)
+        self.assertEqual(inbox._announce_fails, {0: 1}, "сбой сводки помнится под нулём")
+        self.assertFalse(any(t["announced_at"] for t in self.crm.inbox_threads_.values()))
+        bot = FakeBot()
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), total)
+        [(_, text)] = bot.sent
+        self.assertIn(f"Новых обращений: {total}", text)
+        self.assertEqual(inbox._announce_fails, {}, "удача память стирает")
+
+    async def test_failed_summary_given_up(self):
+        await self.add(inbox.ANNOUNCE_BURST)
+        total = len(self.crm.inbox_threads_)
+        bot = FakeBot(fail=RuntimeError("chat not found"))
+        with self.assertLogs("app.crm.notices", "WARNING"):
+            for _ in range(inbox.ANNOUNCE_TRIES - 1):
+                self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 0)
+        with self.assertLogs("app.crm.inbox", "WARNING") as logs:
+            self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), total)
+        self.assertIn("пачке", "\n".join(logs.output))
+        self.assertTrue(all(t["announced_at"] for t in self.crm.inbox_threads_.values()))
+        self.assertEqual(inbox._announce_fails, {})
+
+    async def test_one_failed_signal_does_not_hold_others(self):
+        first = min(self.crm.inbox_threads_)
+        bad = logic.inbox_no(first)
+
+        class Picky(FakeBot):
+            async def send_message(self, chat_id, text, reply_markup=None, **kw):
+                if bad in text:
+                    raise RuntimeError("Too Many Requests")
+                await super().send_message(chat_id, text, reply_markup=reply_markup)
+
+        bot = Picky()
+        with self.assertLogs("app.crm.notices", "WARNING"):
+            self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 1)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertNotIn(bad, bot.sent[0][1])
+        self.assertIsNone(self.crm.inbox_threads_[first]["announced_at"])
+        self.assertEqual(inbox._announce_fails, {first: 1})
+        fixed = FakeBot()
+        self.assertEqual(await inbox.announce_once(fixed, self.crm, cfg()), 1)
+        [(_, text)] = fixed.sent
+        self.assertIn(bad, text, "повтор - только не ушедшему")
+        self.assertEqual(inbox._announce_fails, {})
+
+    async def test_burst_when_switched_off_is_marked_silently(self):
+        await self.add(inbox.ANNOUNCE_BURST + 5)
+        await self.crm.set_notice("inbox_new", enabled=False, at_hour=None)
+        bot = FakeBot()
+        total = len(self.crm.inbox_threads_)
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), total)
+        self.assertEqual(bot.sent, [])
+        self.assertTrue(all(t["announced_at"] for t in self.crm.inbox_threads_.values()))
+        self.assertEqual(await inbox.announce_once(None, self.crm, cfg()), 0)
+
+    async def test_without_bot_marked_at_once(self):
+        self.assertEqual(await inbox.announce_once(None, self.crm, cfg()), 2)
+        self.assertTrue(all(t["announced_at"] for t in self.crm.inbox_threads_.values()))
+
+    async def test_round_takes_at_most_the_limit(self):
+        await self.add(inbox.ANNOUNCE_LIMIT + 3)
+        total = len(self.crm.inbox_threads_)
+        bot = FakeBot()
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()),
+                         inbox.ANNOUNCE_LIMIT)
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()),
+                         total - inbox.ANNOUNCE_LIMIT)
+        self.assertEqual(len(bot.sent), 2, "две сводки, а не полсотни сигналов")
+        self.assertIn(f"Новых обращений: {inbox.ANNOUNCE_LIMIT}", bot.sent[0][1])
 
     async def test_marked_when_switched_off_or_without_chat(self):
         await self.crm.set_notice("inbox_new", enabled=False, at_hour=None)
@@ -1060,7 +1808,9 @@ class TestAnnounce(InboxCase):
 
         with mock.patch.object(inbox.notices, "send_team", broken), \
                 self.assertLogs("app.crm.inbox", "WARNING"):
-            self.assertEqual(await inbox.announce_once(FakeBot(), self.crm, cfg()), 2)
+            for _ in range(inbox.ANNOUNCE_TRIES):
+                done = await inbox.announce_once(FakeBot(), self.crm, cfg())
+        self.assertEqual(done, 2)
         self.assertTrue(all(t["announced_at"] for t in self.crm.inbox_threads_.values()))
 
     async def test_answer_of_our_own_is_not_announced(self):
@@ -1242,6 +1992,228 @@ class TestAvitoPoll(InboxCase):
         self.assertIn("c1-m5", [m["ext_id"] for m in self.messages(thread["id"])],
                       "вопрос клиента потерян, пока он не напишет ещё раз")
 
+    # ─ начало отсчёта и срок хранения ─
+
+    async def test_since_is_set_only_by_a_successful_round(self):
+        # Ключи завели до покупки тарифа с API: неудачные круги не должны
+        # «застолбить» начало отсчёта, иначе первый удачный потянул бы
+        # переписку за все недели ожидания.
+        broken = FakeAvito(error=AvitoError("402 — нет доступа", 402))
+        with self.assertRaises(AvitoError):
+            await inbox.avito_once(self.crm, broken, cfg())
+        self.assertNotIn("inbox_avito_since", self.crm.settings_)
+
+        async def failing(chat_id):
+            raise AvitoError("500 — Авито не ответил", 500)
+
+        self.avito.messages = failing                  # сбой посреди круга
+        with self.assertRaises(AvitoError):
+            await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertNotIn("inbox_avito_since", self.crm.settings_)
+        self.assertEqual(self.crm.inbox_threads_, {})
+        del self.avito.messages
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        since = logic._moment(self.crm.settings_["inbox_avito_since"])
+        self.assertAlmostEqual(since.timestamp(),
+                               (datetime.now(UTC) - inbox.AVITO_FIRST_LOOKBACK).timestamp(),
+                               delta=60)
+
+    async def test_purged_history_does_not_come_back(self):
+        # Подключены давно, переписку старше срока удалила дневная чистка -
+        # опрос не возвращает её обратно.
+        keep = timedelta(days=logic.INBOX_KEEP_DAYS)
+        self.crm.settings_["inbox_avito_since"] = (self.now - keep * 2).isoformat()
+        avito = FakeAvito(
+            [chat_raw("u2i-1", "c1-m3", updated=self.now),
+             chat_raw("u2i-old", "old-m1", updated=self.now - keep - timedelta(days=5))],
+            {"u2i-1": [
+                msg_raw("c1-m1", "Старше срока", at=self.now - keep - timedelta(days=1)),
+                msg_raw("c1-m2", "В сроке", at=self.now - keep + timedelta(days=1)),
+                msg_raw("c1-m3", "Сегодня", at=self.now)],
+             "u2i-old": [msg_raw("old-m1", "Давно", at=self.now - keep - timedelta(days=5))]})
+        counts = await inbox.avito_once(self.crm, avito, cfg())
+        self.assertEqual(counts, {"chats": 1, "messages": 2})
+        self.assertEqual(avito.message_calls, ["u2i-1"], "старый чат даже не читается")
+        thread = await self.avito_thread()
+        self.assertEqual([m["ext_id"] for m in self.messages(thread["id"])],
+                         ["c1-m2", "c1-m3"])
+
+    # ─ чаты без обращения ─
+
+    def noise_chat(self, chat_id: str, last_id: str) -> tuple[dict, list[dict]]:
+        return (chat_raw(chat_id, last_id, updated=self.now),
+                [msg_raw(last_id, "Пользователь создал чат", at=self.now, kind="system"),
+                 msg_raw(f"{last_id}-stub", "Чтобы ответить, перейдите на подписку",
+                         at=self.now)])
+
+    async def test_noise_only_chat_is_remembered(self):
+        chat, messages = self.noise_chat("u2i-2", "c2-sys")
+        avito = FakeAvito([chat], {"u2i-2": messages})
+        self.assertEqual(await inbox.avito_once(self.crm, avito, cfg()),
+                         {"chats": 1, "messages": 0})
+        self.assertEqual(self.crm.inbox_threads_, {}, "служебное - не обращение")
+        self.assertEqual(json.loads(self.crm.settings_["inbox_avito_seen"]),
+                         {"u2i-2": "c2-sys"})
+        # чат не менялся - не качаем его каждый круг
+        self.assertEqual(await inbox.avito_once(self.crm, avito, cfg()),
+                         {"chats": 0, "messages": 0})
+        self.assertEqual(avito.message_calls, ["u2i-2"])
+        # написал человек - чат читается и обращение заводится
+        avito.raw_chats = [chat_raw("u2i-2", "c2-m1", updated=self.now)]
+        avito.raw_messages["u2i-2"].append(msg_raw("c2-m1", "Здравствуйте", at=self.now))
+        self.assertEqual(await inbox.avito_once(self.crm, avito, cfg()),
+                         {"chats": 1, "messages": 1})
+        self.assertEqual(avito.message_calls, ["u2i-2", "u2i-2"])
+        thread = await self.avito_thread()
+        self.assertEqual((thread["ext_id"], thread["ext_cursor"]), ("u2i-2", "c2-m1"))
+
+    async def test_old_only_chat_is_remembered(self):
+        # Чат ожил служебным сообщением, а слова человека - до начала отсчёта.
+        self.crm.settings_["inbox_avito_since"] = (self.now - timedelta(minutes=15)).isoformat()
+        avito = FakeAvito([chat_raw("u2i-3", "c3-m1", updated=self.now)],
+                          {"u2i-3": [msg_raw("c3-m1", "Старый вопрос",
+                                             at=self.now - timedelta(hours=1))]})
+        await inbox.avito_once(self.crm, avito, cfg())
+        await inbox.avito_once(self.crm, avito, cfg())
+        self.assertEqual(self.crm.inbox_threads_, {})
+        self.assertEqual(avito.message_calls, ["u2i-3"])
+        self.assertEqual(json.loads(self.crm.settings_["inbox_avito_seen"]),
+                         {"u2i-3": "c3-m1"})
+
+    async def test_seen_memory_is_bounded(self):
+        chats, messages = [], {}
+        for chat_id in ("u2i-a", "u2i-b", "u2i-c"):
+            chat, rows = self.noise_chat(chat_id, f"{chat_id}-sys")
+            chats.append(chat)
+            messages[chat_id] = rows
+        with mock.patch.object(inbox, "AVITO_SEEN_KEEP", 2):
+            await inbox.avito_once(self.crm, FakeAvito(chats, messages), cfg())
+        self.assertEqual(json.loads(self.crm.settings_["inbox_avito_seen"]),
+                         {"u2i-b": "u2i-b-sys", "u2i-c": "u2i-c-sys"})
+
+    async def test_broken_seen_memory_is_ignored(self):
+        for junk in ("не json", "[1, 2]", "42", "null"):
+            with self.subTest(junk=junk):
+                self.crm = FakeCrm()
+                self.crm.settings_["inbox_avito_seen"] = junk
+                chat, messages = self.noise_chat("u2i-2", "c2-sys")
+                await inbox.avito_once(self.crm, FakeAvito([chat], {"u2i-2": messages}),
+                                       cfg())
+                self.assertEqual(json.loads(self.crm.settings_["inbox_avito_seen"]),
+                                 {"u2i-2": "c2-sys"})
+
+    async def test_empty_answer_does_not_move_cursor(self):
+        # Чат изменился, а сообщений Авито не отдал - ответ неполный.
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        saved = self.avito.raw_messages["u2i-1"]
+        self.avito.raw_chats = [chat_raw("u2i-1", "c1-m5", updated=self.now)]
+        self.avito.raw_messages["u2i-1"] = []
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertEqual((await self.avito_thread())["ext_cursor"], "c1-m4")
+        self.avito.raw_messages["u2i-1"] = saved + [
+            msg_raw("c1-m5", "Когда можно забрать?", at=self.now)]
+        counts = await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertEqual(counts["messages"], 1)
+        thread = await self.avito_thread()
+        self.assertEqual(thread["ext_cursor"], "c1-m5")
+        self.assertIn("c1-m5", [m["ext_id"] for m in self.messages(thread["id"])])
+
+    async def test_empty_answer_for_new_chat_is_not_remembered(self):
+        avito = FakeAvito([chat_raw("u2i-4", "c4-m1", updated=self.now)], {})
+        await inbox.avito_once(self.crm, avito, cfg())
+        seen = json.loads(self.crm.settings_.get("inbox_avito_seen") or "{}")
+        self.assertNotIn("u2i-4", seen, "пустой ответ - не «одни служебные»")
+        avito.raw_messages["u2i-4"] = [msg_raw("c4-m1", "Свободен?", at=self.now)]
+        await inbox.avito_once(self.crm, avito, cfg())
+        self.assertEqual(avito.message_calls, ["u2i-4", "u2i-4"])
+        thread = await self.avito_thread()
+        self.assertEqual(thread["ext_cursor"], "c4-m1")
+
+    # ─ страницы списка чатов ─
+
+    def many(self, count: int) -> FakeAvito:
+        chats = [chat_raw(f"u2i-{i}", f"c{i}-m1", updated=self.now - timedelta(minutes=i))
+                 for i in range(count)]
+        messages = {f"u2i-{i}": [msg_raw(f"c{i}-m1", "Свободен?",
+                                         at=self.now - timedelta(minutes=i))]
+                    for i in range(count)}
+        return FakeAvito(chats, messages)
+
+    async def test_chats_are_read_in_pages(self):
+        avito = self.many(5)
+        with mock.patch.object(inbox, "AVITO_PAGE", 2):
+            counts = await inbox.avito_once(self.crm, avito, cfg())
+        self.assertEqual(avito.chat_pages, [0, 2, 4], "короткая страница - последняя")
+        self.assertEqual(counts, {"chats": 5, "messages": 5})
+        self.assertEqual(len(self.crm.inbox_threads_), 5)
+
+    async def test_default_page_is_asked_explicitly(self):
+        calls = []
+
+        class Recording(FakeAvito):
+            async def chats(self, **kw):
+                calls.append(kw)
+                return await super().chats(**kw)
+
+        await inbox.avito_once(self.crm, Recording(self.avito.raw_chats,
+                                                   self.avito.raw_messages), cfg())
+        self.assertEqual(calls, [{"limit": inbox.AVITO_PAGE, "offset": 0}],
+                         "страница и сдвиг - явно, а не умолчания клиента")
+
+    async def test_pages_are_capped(self):
+        avito = self.many(7)
+        with mock.patch.object(inbox, "AVITO_PAGE", 2), \
+                mock.patch.object(inbox, "AVITO_PAGES", 2):
+            counts = await inbox.avito_once(self.crm, avito, cfg())
+        self.assertEqual(avito.chat_pages, [0, 2])
+        self.assertEqual(counts["chats"], 4)
+        self.assertEqual(avito.message_calls, ["u2i-0", "u2i-1", "u2i-2", "u2i-3"])
+
+    async def test_page_without_changes_stops(self):
+        avito = self.many(4)
+        with mock.patch.object(inbox, "AVITO_PAGE", 2):
+            await inbox.avito_once(self.crm, avito, cfg())
+            self.assertEqual(avito.chat_pages, [0, 2, 4], "полная страница - смотрим дальше")
+            avito.chat_pages = []
+            counts = await inbox.avito_once(self.crm, avito, cfg())
+        self.assertEqual(avito.chat_pages, [0], "список от свежих: без изменений - дальше старое")
+        self.assertEqual(counts, {"chats": 0, "messages": 0})
+
+    # ─ сигнал ─
+
+    async def test_our_first_message_then_answer_signals(self):
+        # Написали первыми - не обращение; человек ответил - начал ждать.
+        self.avito.raw_chats = [chat_raw("u2i-2", "c2-m1", updated=self.now)]
+        self.avito.raw_messages = {"u2i-2": [
+            msg_raw("c2-m1", "Мы написали первыми", at=self.now - timedelta(minutes=5),
+                    author=OWN)]}
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertIsNotNone((await self.avito_thread())["announced_at"])
+        self.avito.raw_chats = [chat_raw("u2i-2", "c2-m2", updated=self.now)]
+        self.avito.raw_messages["u2i-2"].append(msg_raw("c2-m2", "Да, интересно",
+                                                        at=self.now))
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        thread = await self.avito_thread()
+        self.assertIsNone(thread["announced_at"])
+        self.assertIsNotNone(thread["waiting_since"])
+        bot = FakeBot()
+        self.assertEqual(await inbox.announce_once(bot, self.crm, cfg()), 1)
+        self.assertIn(logic.inbox_no(thread["id"]), bot.sent[0][1])
+
+    async def test_hook_thread_chat_is_not_reread_every_round(self):
+        # Обращение с тем же номером чата уже завёл шлюз (n8n до подключения
+        # API): опрос в него не пишет - но и не должен качать неизменный
+        # чат каждый круг с предупреждением в лог.
+        hook = await self.thread(channel="avito", origin="hook", ext_id="u2i-1",
+                                 text="Через n8n")
+        with mock.patch.object(inbox.log, "warning"):      # отказ записи - не предмет
+            await inbox.avito_once(self.crm, self.avito, cfg())
+            self.assertEqual(len(self.messages(hook["id"])), 1, "чужое обращение не тронуто")
+            self.assertEqual(self.avito.message_calls, ["u2i-1"])
+            await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertEqual(self.avito.message_calls, ["u2i-1"],
+                         "чат не менялся - перечитывать его незачем")
+
 
 class TestInboxLoop(InboxCase):
     class Stop(Exception):
@@ -1274,6 +2246,38 @@ class TestInboxLoop(InboxCase):
             await self.run_loop(None, rounds=1)
         message = self.crm.inbox_messages_[mid]
         self.assertEqual(message["status"], "failed", "повтор после таймаута - дубль человеку")
+
+    async def test_every_round_sweeps_stuck_replies(self):
+        # Итог отправки не записался и с повтором - строка «отправляется»
+        # держит очередь обращения. Круг снимает её, не дожидаясь перезапуска,
+        # но только старше STUCK_MINUTES.
+        calls = []
+        real = self.crm.fail_stuck_inbox_out
+        rows = {}
+
+        async def spy(**kw):
+            calls.append(kw)
+            got = await real(**kw)
+            if not kw:                   # после стартовой проверки - зависли два
+                now = datetime.now(UTC)
+                for ext, minutes in (("6001", inbox.STUCK_MINUTES + 1), ("6002", 1)):
+                    thread = await self.thread(ext_id=ext)
+                    mid = await service.inbox_reply(self.crm, self.vault, thread, "Ответ",
+                                                    by="admin", avito_ok=False)
+                    await self.crm.claim_inbox_out()
+                    self.crm.inbox_messages_[mid]["claimed_at"] = (
+                        now - timedelta(minutes=minutes))
+                    rows[ext] = mid
+            return got
+
+        self.crm.fail_stuck_inbox_out = spy
+        with self.assertLogs("app.crm.inbox", "WARNING"):
+            await self.run_loop(None, rounds=2)
+        self.assertEqual(calls, [{}] + [{"older_minutes": inbox.STUCK_MINUTES}] * 2,
+                         "стартовая - без срока, дальше каждый круг - со сроком")
+        self.assertEqual(self.crm.inbox_messages_[rows["6001"]]["status"], "failed")
+        self.assertEqual(self.crm.inbox_messages_[rows["6002"]]["status"], "sending",
+                         "свежая отправка идёт своим чередом")
 
     async def test_queue_is_sent_and_threads_announced(self):
         thread = await self.thread()

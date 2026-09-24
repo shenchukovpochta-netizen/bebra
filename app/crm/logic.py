@@ -32,6 +32,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from .. import logic as bot_logic
 
@@ -6529,7 +6530,9 @@ def inbox_no(thread_id: Any) -> str:
 
 
 def _cut(value: Any, limit: int) -> str | None:
-    text = str(value or "").strip()
+    # NUL Postgres в text не принимает: одна такая строка от шлюза роняла
+    # бы всю пачку хука на каждой повторной доставке.
+    text = str(value or "").replace("\x00", "").strip()
     return text[:limit] if text else None
 
 
@@ -6562,8 +6565,11 @@ def inbox_links(thread: Mapping[str, Any]) -> dict[str, str | None]:
     username = str(thread.get("username") or "").lstrip("@")
     phone = bot_logic.normalize_phone(thread.get("phone"))
     digits = re.sub(r"\D", "", phone or "")
+    # Логин MAX - не логин Telegram: t.me по нему вёл бы к постороннему.
+    is_tg = thread.get("channel") in (None, "tg")
     return {
-        "tg": f"https://t.me/{username}" if _TG_USERNAME.fullmatch(username) else None,
+        "tg": (f"https://t.me/{username}"
+               if is_tg and _TG_USERNAME.fullmatch(username) else None),
         "wa": f"https://wa.me/{digits}" if digits else None,
         "avito": safe_avito_url(thread.get("subject_url")),
     }
@@ -6602,7 +6608,9 @@ def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool) -> tuple[bool,
 
 
 def check_inbox_reply(channel: Any, raw: Any) -> Check:
-    text = str(raw or "").strip()
+    # Форма шлёт перевод строки как CRLF, а maxlength браузера считает его
+    # одним знаком: без нормализации разрешённый браузером ответ не проходил.
+    text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return Check(False, error="Напишите текст ответа.")
     limit = INBOX_REPLY_LIMITS.get(str(channel), 3500)
@@ -6611,8 +6619,15 @@ def check_inbox_reply(channel: Any, raw: Any) -> Check:
     return Check(True, text)
 
 
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+
 def _moment(value: Any) -> datetime | None:
-    """Время из чужого JSON: unix-секунды или ISO. Не разобрали - None."""
+    """Время из чужого JSON: unix-секунды или ISO. Не разобрали - None.
+
+    ISO без пояса - московское время: система живёт в Europe/Moscow, и
+    n8n на том же сервере шлёт местное время, а не UTC.
+    """
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -6620,14 +6635,15 @@ def _moment(value: Any) -> datetime | None:
             return datetime.fromtimestamp(float(value), UTC)
         except (OverflowError, OSError, ValueError):
             return None
-    text = str(value).strip()
-    if text.isdigit():
+    text = str(value).strip()[:64]
+    # isdigit верит и «²», и «①»: int() на них падает. Только ASCII-цифры.
+    if text.isascii() and text.isdigit():
         return _moment(int(text))
     try:
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+    return moment if moment.tzinfo else moment.replace(tzinfo=MOSCOW)
 
 
 def _wa_phone(raw: Any) -> str | None:
@@ -6785,6 +6801,20 @@ def inbox_team_text(thread: Mapping[str, Any]) -> str:
     if subject:
         line += f"\n{html.escape(str(subject)[:INBOX_SUBJECT_MAX], quote=False)}"
     return line + "\nОткройте раздел «Входящие» в панели."
+
+
+def inbox_team_summary(threads: Iterable[Mapping[str, Any]]) -> str:
+    """Сводка вместо пачки сигналов (первый опрос Авито, простой): сколько
+    и откуда. Тоже без имён, телефонов и текста."""
+    by_channel: dict[str, int] = {}
+    total = 0
+    for thread in threads:
+        label = INBOX_CHANNELS.get(str(thread.get("channel")), str(thread.get("channel")))
+        by_channel[label] = by_channel.get(label, 0) + 1
+        total += 1
+    parts = ", ".join(f"{label} — {n}" for label, n in sorted(by_channel.items()))
+    return (f"📨 Новых обращений: {total} ({parts}).\n"
+            "Откройте раздел «Входящие» в панели.")
 
 
 def inbox_rows(threads: Iterable[Mapping[str, Any]], *,

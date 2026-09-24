@@ -24,7 +24,7 @@ secrets:
   # Токен открытого API Точки: выписка по счёту и чек 54-ФЗ.
   tochka_token:
     file: ./secrets/tochka_token
-  # Секрет приложения API Авито: чаты Авито темами в Telegram-группе.
+  # Секрет приложения API Авито: чаты объявлений - во «Входящие» панели.
   avito_client_secret:
     file: ./secrets/avito_client_secret
   # «Входящие»: ключ шифрования переписки (генерирует bootstrap.sh, в

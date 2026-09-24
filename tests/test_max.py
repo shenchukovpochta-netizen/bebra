@@ -251,3 +251,190 @@ class TestMaxStart(unittest.IsolatedAsyncioTestCase):
     async def test_new_user_starts_over(self):
         state, _ = await self.start(self.user(state=logic.NEW, status=logic.ST_NEW))
         self.assertEqual(state, logic.WAIT_FIO)
+
+
+# Ключ переписки «Входящих» постоянный: тесты не зависят от случайности.
+INBOX_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+MAX_USER, MODERATOR = 42, 111
+
+
+class MaxInboxCase(unittest.IsolatedAsyncioTestCase):
+    """Обработчики MAX напрямую, с мостом в CRM из make_crm()."""
+
+    def make_crm(self):
+        from tests.fake_crm import FakeCrm
+        return FakeCrm()
+
+    async def asyncSetUp(self):
+        from app.max.handlers import Ctx
+        from app.services.crypto import Vault
+        from tests import test_flow as tf
+        self.tf = tf
+        self.cfg = tf.make_config(inbox_key=INBOX_KEY)
+        self.db = tf.FakeDB()
+        self.cl = _FakeMax()
+        self.crm = self.make_crm()
+        self.vault = Vault.from_raw(self.cfg.pdn_key)
+        self.ctx = Ctx(self.cl, self.db, self.cfg, self.vault, crm=self.crm)
+
+    def user(self, **over):
+        row = {"tg_id": MAX_USER, "username": "u42", "state": logic.APPROVED,
+               "status": logic.ST_APPROVED, "anketa_enc": None,
+               "full_name": "Иванов Иван", "phone": "+79991571094"}
+        row.update(over)
+        self.db.users[MAX_USER] = row
+        return dict(row)
+
+    def confirming_user(self):
+        """Анкета заполнена, документ загружен - шаг «Всё верно»."""
+        anketa = {step.field: self.tf.ANSWERS_BY_FIELD[step.field]
+                  for step in logic.anketa_steps(None)}
+        return self.user(state=logic.CONFIRM, status=logic.ST_NEW,
+                         doc_file_id="img-token", anketa_enc=self.vault.encrypt(anketa))
+
+    async def ask(self, question):
+        from app.max import handlers
+        await handlers.st_support(self.ctx, self.user(state=logic.WAIT_SUPPORT), question)
+
+    async def answer(self, text):
+        from app.max import handlers
+        mid = self.db.users[MAX_USER]["support_message_id"]
+        self.assertIsNotNone(mid, "карточка вопроса не привязана")
+        await handlers.mod_reply(self.ctx, MODERATOR, self.cfg.admin_chat_id, mid, text)
+
+    async def confirm(self):
+        from app.max import handlers
+        await handlers.cb_confirm(self.ctx, self.confirming_user(), "cb-1")
+
+    def sent_to(self, to):
+        return [m["text"] or "" for m in self.cl.sent if m["to"] == to]
+
+    def plain(self, body_enc):
+        from app.crm import service
+        return service.inbox_open(service.inbox_vault(INBOX_KEY), body_enc)
+
+    async def only_thread(self):
+        threads = await self.crm.inbox_threads()
+        self.assertEqual(len(threads), 1, threads)
+        return threads[0], await self.crm.inbox_messages(threads[0]["id"])
+
+
+class TestMaxInbox(MaxInboxCase):
+    """Вопрос в поддержку, ответ модератора и отправка анкеты в MAX попадают
+    во «Входящие» основной базы каналом max. Сигнала в чат нет: карточка
+    уже ушла туда сама."""
+
+    async def test_support_question_opens_a_waiting_thread(self):
+        client_id = await self.crm.create_client(full_name="Иванов Иван",
+                                                 phone="+79990000000")
+        await self.crm.link_client_max("+79990000000", MAX_USER)
+        await self.ask("Можно продлить аренду на неделю?")
+        self.assertEqual(self.db.users[MAX_USER]["state"], logic.APPROVED)
+        self.assertTrue(any("Можно продлить аренду на неделю?" in t
+                            for t in self.sent_to(self.cfg.admin_chat_id)))
+        thread, messages = await self.only_thread()
+        self.assertEqual((thread["channel"], thread["origin"], thread["ext_id"]),
+                         ("max", "max_bot", str(MAX_USER)))
+        self.assertEqual(thread["client_id"], client_id,
+                         "карточка найдена по аккаунту MAX, а не по телефону")
+        self.assertEqual((thread["name"], thread["username"], thread["phone"]),
+                         ("Иванов Иван", "u42", "+79991571094"))
+        self.assertEqual(thread["status"], "new")
+        self.assertIsNotNone(thread["waiting_since"])
+        self.assertIsNotNone(thread["announced_at"], "сигнал в чат - сама карточка")
+        self.assertEqual(await self.crm.inbox_to_announce(), [])
+        self.assertEqual(len(messages), 1)
+        m = messages[0]
+        self.assertEqual((m["direction"], m["kind"]), ("in", "text"))
+        self.assertEqual(self.plain(m["body_enc"]), "Можно продлить аренду на неделю?")
+        self.assertNotIn("продлить", m["body_enc"], "текст хранится зашифрованным")
+        self.assertEqual(m["ext_id"], self.db.users[MAX_USER]["support_message_id"],
+                         "mid карточки - защита от дубля")
+
+    async def test_moderator_reply_is_recorded_as_out(self):
+        await self.ask("Где зарядить аккумулятор?")
+        await self.answer("На Павлюхина, с 10 до 19")
+        self.assertTrue(any("На Павлюхина, с 10 до 19" in t
+                            for t in self.sent_to(MAX_USER)))
+        thread, messages = await self.only_thread()
+        self.assertEqual([m["direction"] for m in messages], ["in", "out"])
+        out = messages[-1]
+        self.assertEqual(self.plain(out["body_enc"]), "На Павлюхина, с 10 до 19")
+        self.assertEqual(out["status"], "sent")
+        self.assertEqual(out["author"], f"max:{MODERATOR}")
+        self.assertIsNone(thread["waiting_since"], "ответ из чата снимает ожидание")
+        self.assertEqual(thread["status"], "work")
+
+    async def test_not_admin_reply_records_nothing(self):
+        from app.max import handlers
+        await self.ask("Вопрос")
+        mid = self.db.users[MAX_USER]["support_message_id"]
+        await handlers.mod_reply(self.ctx, 999, self.cfg.admin_chat_id, mid, "чужой ответ")
+        _, messages = await self.only_thread()
+        self.assertEqual([m["direction"] for m in messages], ["in"])
+
+    async def test_anketa_submission_is_an_event(self):
+        await self.confirm()
+        row = self.db.users[MAX_USER]
+        self.assertEqual(row["state"], logic.PENDING)
+        self.assertIsNotNone(row.get("mod_message_id"), "карточка анкеты ушла")
+        thread, messages = await self.only_thread()
+        self.assertEqual((thread["channel"], thread["origin"], thread["ext_id"]),
+                         ("max", "max_bot", str(MAX_USER)))
+        self.assertEqual(len(messages), 1)
+        event = messages[0]
+        self.assertEqual((event["direction"], event["kind"]), ("event", "other"))
+        self.assertEqual(self.plain(event["body_enc"]), "Анкета отправлена на проверку")
+        self.assertTrue(str(event["ext_id"]).startswith("anketa:"))
+        self.assertIsNone(thread["waiting_since"], "отметка - не вопрос")
+        self.assertIsNotNone(thread["announced_at"])
+
+
+class _MaxFlowSurvivesInbox:
+    """Без моста в CRM или при сбое записи сценарий MAX идёт как раньше."""
+
+    async def test_support_question_still_reaches_moderators(self):
+        from app import texts
+        await self.ask("Когда можно подъехать?")
+        row = self.db.users[MAX_USER]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertIsNotNone(row["support_message_id"])
+        self.assertTrue(any("Когда можно подъехать?" in t
+                            for t in self.sent_to(self.cfg.admin_chat_id)))
+        self.assertIn(texts.SUPPORT_SENT, self.sent_to(MAX_USER))
+
+    async def test_support_reply_still_reaches_user(self):
+        from app import texts
+        await self.ask("Вопрос про тормоза")
+        await self.answer("Подтяните трос")
+        self.assertTrue(any("Подтяните трос" in t for t in self.sent_to(MAX_USER)))
+        self.assertIn(texts.SUPPORT_REPLIED, self.sent_to(self.cfg.admin_chat_id))
+
+    async def test_anketa_submission_still_goes_to_moderation(self):
+        from app import texts
+        await self.confirm()
+        row = self.db.users[MAX_USER]
+        self.assertEqual(row["state"], logic.PENDING)
+        self.assertIsNotNone(row.get("mod_message_id"))
+        self.assertIn(texts.SUBMITTED, self.sent_to(MAX_USER))
+        self.assertNotIn(texts.SUBMIT_PROBLEM, self.sent_to(MAX_USER))
+
+
+class TestMaxInboxWithoutCrm(_MaxFlowSurvivesInbox, MaxInboxCase):
+    def make_crm(self):
+        return None
+
+
+class TestMaxInboxWhenRecordFails(_MaxFlowSurvivesInbox, MaxInboxCase):
+    def make_crm(self):
+        from tests.test_flow import FailingInboxCrm
+        return FailingInboxCrm()
+
+    async def test_failure_is_logged_without_text(self):
+        with self.assertLogs("app.crm.inbox", "WARNING") as logs:
+            await self.ask("Мой адрес Баумана 1, заберите велосипед")
+        joined = "\n".join(logs.output)
+        self.assertIn(f"max/{MAX_USER}", joined)
+        for secret in ("Баумана", "Иванов", "+7999"):
+            self.assertNotIn(secret, joined)
+        self.assertEqual(await self.crm.inbox_threads(), [])

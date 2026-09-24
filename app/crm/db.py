@@ -59,8 +59,8 @@ PROMO_FIELDS = frozenset({
     "kind", "title", "percent", "amount", "code", "params", "starts_on", "ends_on",
     "max_uses", "once_per_client", "text", "active", "note",
 })
-INBOX_FIELDS = frozenset({"status", "note", "client_id", "handled_by", "handled_at",
-                          "ext_cursor", "announced_at"})
+INBOX_FIELDS = frozenset({"status", "note", "client_id", "client_manual", "handled_by",
+                          "handled_at", "ext_cursor", "announced_at"})
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
                             "alarm", "note", "blocked", "blocked_at", "blocked_by",
@@ -4213,6 +4213,14 @@ class CrmDB:
         дублей не дают. Только новое сообщение двигает обращение: входящее
         ставит «ждёт с» и возвращает разобранное в новые, ответ снимает
         ожидание.
+
+        Чужое обращение не трогается: хук с каналом «avito» не пишет в чат,
+        заведённый опросом Авито, - иначе утёкший токен подкладывал бы
+        «слова клиента» в настоящий чат. Тогда - None.
+
+        Сигнал в чат (announced_at = null) - когда человек начинает ждать:
+        новое обращение, первое входящее после ответа, возврат из
+        разобранных. Второе «алло?» подряд сигнала не даёт.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             thread = await conn.fetchrow(
@@ -4229,12 +4237,17 @@ class CrmDB:
                        subject = coalesce(excluded.subject, crm.inbox_threads.subject),
                        subject_url = coalesce(excluded.subject_url,
                                               crm.inbox_threads.subject_url),
-                       client_id = coalesce(crm.inbox_threads.client_id,
-                                            excluded.client_id),
+                       client_id = case when crm.inbox_threads.client_manual
+                                        then crm.inbox_threads.client_id
+                                        else coalesce(crm.inbox_threads.client_id,
+                                                      excluded.client_id) end,
                        updated_at = now()
+                 where crm.inbox_threads.origin = excluded.origin
                 returning id, (xmax = 0) as created
                 """, channel, origin, ext_id, name, username, phone, subject,
                 subject_url, client_id, announce)
+            if thread is None:
+                return None
             thread_id = int(thread["id"])
             status = "sent" if direction == "out" else None
             message_id = await conn.fetchval(
@@ -4258,13 +4271,19 @@ class CrmDB:
                          where id = $1
                         """, thread_id)
                 else:
+                    # В SET все выражения видят строку ДО обновления: status и
+                    # waiting_since справа - прежние значения.
                     await conn.execute(
                         """
                         update crm.inbox_threads
                            set last_in_at = greatest(coalesce(last_in_at, $2), $2),
-                               waiting_since = case when $3 = 'in'
-                                   then coalesce(waiting_since, $2) else waiting_since end,
-                               announced_at = case when $4::boolean and status = 'done'
+                               waiting_since = case
+                                   when $3 <> 'in' then waiting_since
+                                   when status = 'done' then $2
+                                   else coalesce(waiting_since, $2) end,
+                               announced_at = case
+                                   when $4::boolean and status <> 'spam'
+                                        and (status = 'done' or waiting_since is null)
                                    then null else announced_at end,
                                status = case when status = 'done' then 'new' else status end,
                                updated_at = now()
@@ -4319,7 +4338,13 @@ class CrmDB:
             "and waiting_since is not null"))
 
     async def update_inbox_thread(self, thread_id: int, **fields: Any) -> None:
+        """Правка обращения. «Разобрано» и «спам» снимают ожидание: иначе
+        следующее сообщение показало бы ожидание с прошлого вопроса."""
+        if not fields:
+            return
         sets, values = _set_clause(fields, INBOX_FIELDS, 2)
+        if fields.get("status") in ("done", "spam"):
+            sets += ", waiting_since = null"
         await self.pool.execute(
             f"update crm.inbox_threads set {sets}, updated_at = now() where id = $1",
             thread_id, *values)
@@ -4348,7 +4373,7 @@ class CrmDB:
                where status = 'queued' order by id limit 1
                for update skip locked
             )
-            update crm.inbox_messages m set status = 'sending'
+            update crm.inbox_messages m set status = 'sending', claimed_at = now()
               from next, crm.inbox_threads t
              where m.id = next.id and t.id = m.thread_id
             returning m.*, t.channel, t.origin, t.ext_id as thread_ext_id,
@@ -4360,13 +4385,21 @@ class CrmDB:
                                ext_id: str | None = None) -> bool:
         """Итог отправки. Ушло - обращение «в работе», ожидание снято."""
         async with self.pool.acquire() as conn, conn.transaction():
+            # Номер от площадки может уже лежать в обращении (опрос Авито
+            # успел записать наш же ответ): тогда номер не ставим - иначе
+            # уникальный индекс уронил бы запись итога, и ушедший ответ
+            # остался бы «отправляется», а потом «не ушло» и дублем.
             thread_id = await conn.fetchval(
                 """
-                update crm.inbox_messages
-                   set status = $2, error = $3, ext_id = coalesce($4, ext_id),
-                       sent_at = now()
-                 where id = $1 and status = 'sending'
-                returning thread_id
+                update crm.inbox_messages m
+                   set status = $2, error = $3, sent_at = now(),
+                       ext_id = case when $4::text is null or exists (
+                                    select 1 from crm.inbox_messages o
+                                     where o.thread_id = m.thread_id
+                                       and o.ext_id = $4 and o.id <> m.id)
+                                then m.ext_id else $4 end
+                 where m.id = $1 and m.status = 'sending'
+                returning m.thread_id
                 """, message_id, "sent" if ok else "failed",
                 (error or "")[:500] or None, ext_id)
             if thread_id is None:
@@ -4382,32 +4415,35 @@ class CrmDB:
                     """, thread_id)
             return True
 
-    async def fail_stuck_inbox_out(self) -> int:
-        """«Отправляется» после перезапуска: неизвестно, ушло ли. Повторять
-        нельзя - второе сообщение человеку; человек решит сам."""
+    async def fail_stuck_inbox_out(self, *, older_minutes: int | None = None) -> int:
+        """«Отправляется» после перезапуска (или дольше older_minutes - итог
+        не записался): неизвестно, ушло ли. Повторять нельзя - второе
+        сообщение человеку; человек решит сам."""
         return len(await self.pool.fetch(
             "update crm.inbox_messages set status = 'failed', "
-            "error = 'неизвестно, ушло ли: процесс перезапускался', sent_at = now() "
-            "where status = 'sending' returning id"))
+            "error = 'неизвестно, ушло ли: отправка прервалась', sent_at = now() "
+            "where status = 'sending' and ($1::int is null or coalesce(claimed_at, "
+            "created_at) < now() - make_interval(mins => $1::int)) returning id",
+            older_minutes))
 
     async def inbox_retry(self, message_id: int, *, author: str) -> int | None:
-        """Повтор не ушедшего ответа - новой строкой в очередь."""
-        async with self.pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                "select * from crm.inbox_messages where id = $1 and status = 'failed' "
-                "for update", message_id)
-            if row is None:
-                return None
-            try:
-                async with conn.transaction():
-                    return int(await conn.fetchval(
-                        """
-                        insert into crm.inbox_messages (thread_id, direction, kind,
-                                                        body_enc, author, status)
-                        values ($1, 'out', 'text', $2, $3, 'queued') returning id
-                        """, row["thread_id"], row["body_enc"], author))
-            except asyncpg.UniqueViolationError:
-                return None
+        """Повтор не ушедшего ответа - та же строка обратно в очередь.
+
+        Не копия: у копии исходное «не ушло» оставалось бы с кнопкой, и
+        второе нажатие после удачного повтора слало бы человеку дубль.
+        """
+        try:
+            value = await self.pool.fetchval(
+                """
+                update crm.inbox_messages
+                   set status = 'queued', error = null, sent_at = null,
+                       claimed_at = null, author = $2
+                 where id = $1 and status = 'failed' and body_enc is not null
+                returning id
+                """, message_id, author)
+        except asyncpg.UniqueViolationError:
+            return None
+        return int(value) if value is not None else None
 
     async def inbox_to_announce(self, limit: int = 20) -> list[dict]:
         return _rows(await self.pool.fetch(

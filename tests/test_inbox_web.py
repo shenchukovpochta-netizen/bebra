@@ -372,9 +372,9 @@ class TestInboxThread(InboxCase):
         self.assertNotIn(f'action="/inbox/{self.tg}/reply"', page)
         self.assertIn("INBOX_KEY", page)
         r = self.client.post(f"/inbox/{self.tg}/reply", data={"text": "Да", "once": "nk"})
-        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.status_code, 400)
         self.assertEqual(self.messages(self.tg, "out"), [], "открытым текстом не пишем")
-        self.assertIn("INBOX_KEY", self.get_ok(f"/inbox/{self.tg}"))
+        self.assertIn("INBOX_KEY", r.text)
         # без ключа новое сообщение пишется без текста
         tid = self.put(channel="wa", origin="hook", ext_id="+79005550000",
                        phone="+79005550000", text="секрет")["thread_id"]
@@ -440,10 +440,17 @@ class TestInboxActions(InboxCase):
         self.seed_inbox()
 
     def reply(self, thread_id, text, once="k1"):
+        """Принятый ответ - редирект на обращение. Отказ - та же страница
+        сразу (400) с причиной и набранным текстом в поле: редирект
+        потерял бы черновик. Страница отказа - в self.last."""
         data = {"text": text}
         if once is not None:
             data["once"] = once
         r = self.client.post(f"/inbox/{thread_id}/reply", data=data)
+        self.last = r
+        if r.status_code == 400:
+            self.assertIn('class="flash err"', r.text)
+            return r
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], f"/inbox/{thread_id}")
         return r
@@ -474,10 +481,12 @@ class TestInboxActions(InboxCase):
     def test_one_reply_in_queue_per_thread(self):
         self.reply(self.tg, "Первый", once="a")
         self.reply(self.tg, "Второй", once="b")
+        self.assertEqual(self.last.status_code, 400)
+        self.assertIn("Второй", self.last.text, "набранный ответ остался в поле")
         self.reply(self.tg, "Третий", once=None)
         outs = self.messages(self.tg, "out")
         self.assertEqual([self.text_of(m) for m in outs], ["Первый"])
-        self.assertIn("Предыдущий ответ ещё отправляется", self.get_ok(f"/inbox/{self.tg}"))
+        self.assertIn("Предыдущий ответ ещё отправляется", self.last.text)
 
     def test_reply_without_once_key_still_works(self):
         """Старая вкладка без ключа формы не хуже, чем была до ключа."""
@@ -486,9 +495,9 @@ class TestInboxActions(InboxCase):
 
     def test_bad_replies_are_refused(self):
         self.reply(self.tg, "   ", once="e1")
-        self.assertIn("Напишите текст ответа", self.get_ok(f"/inbox/{self.tg}"))
+        self.assertIn("Напишите текст ответа", self.last.text)
         self.reply(self.tg, "я" * 3501, once="e2")
-        self.assertIn("длиннее 3500", self.get_ok(f"/inbox/{self.tg}"))
+        self.assertIn("длиннее 3500", self.last.text)
         self.reply(self.wa, "Здравствуйте", once="e3")
         self.assertIn("WhatsApp", self.get_ok(f"/inbox/{self.wa}"))
         self.reply(self.av, "Актуально", once="e4")
@@ -498,6 +507,17 @@ class TestInboxActions(InboxCase):
         for tid in (self.tg, self.wa, self.av):
             self.assertEqual(self.messages(tid, "out"), [], tid)
         self.assertEqual(self.thread(self.wa)["status"], "new", "отказ не берёт в работу")
+
+    def test_line_breaks_count_as_the_browser_counts_them(self):
+        # Перевод строки браузер считает одним знаком, а форма шлёт CRLF:
+        # 3500 знаков с переносами по счёту браузера проходят.
+        text = "\r\n".join(["я" * 99] * 35)
+        self.assertLessEqual(len(text.replace("\r\n", "\n")), 3500)
+        self.assertGreater(len(text), 3500)
+        self.reply(self.tg, text, once="crlf")
+        self.assertEqual(self.last.status_code, 303)
+        [out] = self.messages(self.tg, "out")
+        self.assertNotIn("\r", self.text_of(out))
 
     def test_bot_only_threads_refuse_panel_reply_when_not_from_bot(self):
         """Telegram-обращение, заведённое не ботом, ответа из панели не даёт:
@@ -586,14 +606,18 @@ class TestInboxActions(InboxCase):
         self.assertIn(f'action="/inbox/{self.tg}/out/{mid}/again"', page)
         r = self.client.post(f"/inbox/{self.tg}/out/{mid}/again")
         self.assertEqual(r.status_code, 303)
-        outs = self.messages(self.tg, "out")
-        self.assertEqual([m["status"] for m in outs], ["failed", "queued"])
-        self.assertEqual(self.text_of(outs[1]), "Можно", "тот же текст")
-        self.assertEqual(outs[1]["author"], "staff:admin")
-        self.assertIn("Ответ снова в очереди.", self.get_ok(f"/inbox/{self.tg}"))
+        # Та же строка обратно в очередь: кнопки на старом «не ушло» больше
+        # нет, и повторное нажатие не отправит человеку дубль.
+        [out] = self.messages(self.tg, "out")
+        self.assertEqual((out["id"], out["status"]), (mid, "queued"))
+        self.assertEqual(self.text_of(out), "Можно", "тот же текст")
+        self.assertEqual(out["author"], "staff:admin")
+        page = self.get_ok(f"/inbox/{self.tg}")
+        self.assertIn("Ответ снова в очереди.", page)
+        self.assertNotIn(f"/out/{mid}/again", page)
         # второй повтор, пока первый в очереди, - отказ, а не второе сообщение
         self.client.post(f"/inbox/{self.tg}/out/{mid}/again")
-        self.assertEqual(len(self.messages(self.tg, "out")), 2)
+        self.assertEqual(len(self.messages(self.tg, "out")), 1)
         self.assertIn("Повторить можно только", self.get_ok(f"/inbox/{self.tg}"))
         self.assertEqual(self.bot.sent, [])
 
@@ -668,10 +692,11 @@ class TestInboxHook(InboxCase):
             self.assertEqual(r.status_code, 401, i)
         r = self.hook(green(), token="guess-last")
         self.assertEqual(r.status_code, 429)
-        r = self.hook(green())
-        self.assertEqual(r.status_code, 429, "пауза и для верного токена с того же адреса")
         self.assertNotIn("set-cookie", r.headers)
         self.assertEqual(self.threads(), [])
+        # Верный токен с того же адреса проходит: шлюзы WhatsApp шлют с
+        # общих адресов, и чужой инстанс не должен запирать наш хук.
+        self.assertEqual(self.counts(self.hook(green())), (1, 0, 0))
         # счёт неудач хука - свой: вход в панель с того же адреса открыт
         self.assertEqual(self.login().status_code, 303)
 

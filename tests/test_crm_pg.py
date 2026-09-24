@@ -9,6 +9,7 @@ Postgres во временном каталоге. Без него набор п
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,8 @@ try:
     from app.crm import logic, service
     from app.crm.db import CrmDB
     from app.db import Database, _init_connection
+    from app.services.crypto import generate_key
+    from tests.fake_crm import FakeCrm
     HAVE_PG = True
 except ImportError:                                    # pragma: no cover
     HAVE_PG = False
@@ -2348,3 +2351,1327 @@ class TestOpsAndFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.crm.save_tracker_state({"device_id": "D1", "phone": "+79005554433"})
         await self.crm.save_tracker_state({"device_id": "D1", "phone": None})
         self.assertEqual((await self.crm.tracker_by_device("D1"))["phone"], "+79005554433")
+
+
+# ─────────────────────────────── «Входящие» ───────────────────────────────
+
+async def _inbox_story(crm) -> tuple[list, dict]:
+    """Одна и та же история обращений - для базы и для FakeCrm.
+
+    Возвращает только наблюдаемое: флаги, состояния, шифротексты и метки
+    времени сценария. id и «сейчас» у двух реализаций свои, поэтому время
+    вне сценария читается как «сейчас», а обращения - по (канал, адрес).
+    """
+    t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=5)
+    t1, t2 = t0 + timedelta(hours=1), t0 + timedelta(hours=2)
+    stamps = {t0: "t0", t1: "t1", t2: "t2"}
+
+    def got(result):
+        return result["created"], result["message_id"] is not None
+
+    def stamp(value):
+        return None if value is None else stamps.get(value, "сейчас")
+
+    steps: list = []
+    renter = await crm.create_client(full_name="Сидоров Сидор", phone="+79991112233",
+                                     tg_id=7001)
+    await crm.create_rental(client_id=renter, bike_id=None, tariff_id=None,
+                            tariff_name="Неделя", period_days=7, price=D("3000"),
+                            billing="manual", started_on=date.today(), contract_no=None,
+                            created_by="t")
+    booker = await crm.create_client(full_name="Петров Пётр", phone="+79994445566")
+    await crm.create_booking(client_id=booker, model="Kugoo V3", tariff_id=None,
+                             location_id=None, wanted_on=date.today())
+    await crm.update_client(booker, max_id=8001)
+    steps.append((await crm.client_by_max(8001))["id"] == booker)
+    steps.append(await crm.client_by_max(8002))
+
+    # Авито: вопрос, повтор опроса, второе сообщение и ответ из приложения
+    avito = {"channel": "avito", "origin": "avito_api", "ext_id": "chat-1"}
+    steps.append(got(await crm.inbox_record(
+        **avito, direction="in", msg_id="a1", body_enc="e1", name="Пётр",
+        subject="Kugoo V3", subject_url="https://avito.ru/kazan/1", at=t0)))
+    steps.append(got(await crm.inbox_record(**avito, direction="in", msg_id="a1",
+                                            body_enc="e1", at=t2)))
+    steps.append(got(await crm.inbox_record(**avito, direction="in", msg_id="a2",
+                                            kind="image", subject="Другое", at=t1)))
+    steps.append(got(await crm.inbox_record(**avito, direction="out", msg_id="a3",
+                                            body_enc="e3", author="avito-app", at=t2,
+                                            announce=False)))
+    # Telegram: клиент с арендой, вопрос и событие анкеты
+    tg = await crm.inbox_record(channel="tg", origin="bot", ext_id="7001", direction="in",
+                                body_enc="e4", client_id=renter, username="sid", at=t1)
+    steps.append(got(tg))
+    steps.append(got(await crm.inbox_record(channel="tg", origin="bot", ext_id="7001",
+                                            direction="event", body_enc="ev", at=t2)))
+    # MAX: вопрос в поддержку - без сигнала, у него своя карточка в чате
+    mx = await crm.inbox_record(channel="max", origin="max_bot", ext_id="8001",
+                                direction="in", client_id=booker, announce=False, at=t0)
+    steps.append(got(mx))
+    # WhatsApp: разобранное оживает от нового вопроса, спам остаётся спамом
+    wa = {"channel": "wa", "origin": "hook", "ext_id": "+79990000009"}
+    first = await crm.inbox_record(**wa, direction="in", phone="+79990000009", at=t0)
+    await crm.update_inbox_thread(first["thread_id"], status="done",
+                                  announced_at=datetime.now(UTC))
+    steps.append(got(await crm.inbox_record(**wa, direction="in", msg_id="w2", at=t2)))
+    spam = {"channel": "wa", "origin": "hook", "ext_id": "+79990000010"}
+    first = await crm.inbox_record(**spam, direction="in", at=t1)
+    await crm.update_inbox_thread(first["thread_id"], status="spam")
+    steps.append(got(await crm.inbox_record(**spam, direction="in", at=t2)))
+
+    # Очередь ответов: двойной клик, выдача, итог, перезапуск, повтор
+    q1 = await crm.queue_inbox_reply(tg["thread_id"], body_enc="r1", author="staff:admin")
+    steps.append(await crm.queue_inbox_reply(tg["thread_id"], body_enc="r1b",
+                                             author="staff:admin"))
+    q2 = await crm.queue_inbox_reply(mx["thread_id"], body_enc="r2", author="staff:admin")
+    claimed = await crm.claim_inbox_out()
+    steps.append((claimed["id"] == q1, claimed["status"], claimed["direction"],
+                  claimed["channel"], claimed["origin"], claimed["thread_ext_id"],
+                  claimed["client_id"] == renter, claimed["thread_status"],
+                  claimed["body_enc"]))
+    steps.append(await crm.finish_inbox_out(q1, ok=True, ext_id="tg-1"))
+    steps.append(await crm.finish_inbox_out(q1, ok=True))
+    steps.append((await crm.claim_inbox_out())["id"] == q2)
+    steps.append(await crm.claim_inbox_out())
+    steps.append(await crm.fail_stuck_inbox_out())
+    again = await crm.inbox_retry(q2, author="staff:boss")
+    steps.append(again is not None)
+    steps.append(await crm.inbox_retry(q2, author="staff:boss"))
+    steps.append(await crm.inbox_retry(q1, author="staff:boss"))
+    steps.append((await crm.claim_inbox_out())["id"] == again)
+    steps.append(await crm.finish_inbox_out(again, ok=False, error="нет связи; " * 80))
+    try:
+        await crm.update_inbox_thread(tg["thread_id"], channel="wa")
+    except ValueError:
+        steps.append("ValueError")
+
+    threads = {}
+    for t in await crm.inbox_threads(limit=50):
+        threads[(t["channel"], t["ext_id"])] = {
+            "origin": t["origin"], "status": t["status"], "name": t["name"],
+            "username": t["username"], "phone": t["phone"], "subject": t["subject"],
+            "subject_url": t["subject_url"], "client": t["client_name"],
+            "client_phone": t["client_phone"], "renting": bool(t["renting"]),
+            "booking_open": bool(t["booking_open"]), "waiting": stamp(t["waiting_since"]),
+            "last_in": stamp(t["last_in_at"]), "answered": t["last_out_at"] is not None,
+            "announced": t["announced_at"] is not None,
+            "last": (t["last_direction"], t["last_kind"], t["last_body_enc"]),
+            "messages": [(m["direction"], m["kind"], m["ext_id"], m["body_enc"],
+                          m["author"], m["status"], m["error"], stamp(m["created_at"]),
+                          m["sent_at"] is not None)
+                         for m in await crm.inbox_messages(t["id"])],
+        }
+    picture = {"threads": threads, "open": await crm.inbox_open_count(),
+               "announce": [(t["channel"], t["ext_id"])
+                            for t in await crm.inbox_to_announce()]}
+    return steps, picture
+
+
+async def _inbox_purge_story(crm, age) -> tuple[int, dict]:
+    """Чистка по сроку - для базы и FakeCrm. `age(messages, threads)`
+    состаривает строки: у двух реализаций время хранится по-разному."""
+    ids = {}
+    for ext_id, status in (("done", "done"), ("spam", "spam"), ("new", "new"),
+                           ("queue", "done"), ("send", "work"), ("touched", "done")):
+        got = await crm.inbox_record(channel="wa", origin="hook", ext_id=ext_id,
+                                     direction="in")
+        await crm.update_inbox_thread(got["thread_id"], status=status)
+        ids[ext_id] = got["thread_id"]
+    sending = await crm.queue_inbox_reply(ids["send"], body_enc="s", author="staff:a")
+    await crm.claim_inbox_out()
+    queued = await crm.queue_inbox_reply(ids["queue"], body_enc="q", author="staff:a")
+    fresh = await crm.inbox_record(channel="wa", origin="hook", ext_id="done",
+                                   direction="in", msg_id="fresh")
+    everything = [m["id"] for tid in ids.values() for m in await crm.inbox_messages(tid)]
+    await age([m for m in everything if m != fresh["message_id"]] + [sending, queued],
+              [tid for key, tid in ids.items() if key != "touched"])
+    gone = await crm.purge_inbox(logic.INBOX_KEEP_DAYS)
+    left = {}
+    for t in await crm.inbox_threads(limit=50):
+        left[t["ext_id"]] = sorted((m["direction"], m["status"] or "", m["ext_id"] or "")
+                                   for m in await crm.inbox_messages(t["id"]))
+    return gone, left
+
+
+async def _inbox_rules_story(crm, age) -> tuple[list, dict]:
+    """Правила обращения - для базы и для FakeCrm: чей чат, ручная
+    карточка, ожидание после «разобрано», сигнал в чат, когда человек
+    начинает ждать, застрявшая отправка и повтор той же строкой.
+
+    `age(claimed, legacy, at)` состаривает отметку «взят в работу»: у
+    claimed она становится at, у legacy её нет вовсе (строка из версии до
+    колонки), а заведена строка в at. У двух реализаций время хранится
+    по-разному."""
+    t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=6)
+    t1, t2, t3, t4 = (t0 + timedelta(hours=n) for n in range(1, 5))
+    stamps = {t0: "t0", t1: "t1", t2: "t2", t3: "t3", t4: "t4"}
+
+    def got(result):
+        return None if result is None else (result["created"],
+                                            result["message_id"] is not None)
+
+    def stamp(value):
+        return None if value is None else stamps.get(value, "сейчас")
+
+    async def pending():
+        return sorted((t["channel"], t["ext_id"]) for t in await crm.inbox_to_announce())
+
+    async def seen():
+        # Как круг сигналов: ушло в чат - отметка.
+        for t in await crm.inbox_to_announce():
+            await crm.update_inbox_thread(t["id"], announced_at=datetime.now(UTC))
+
+    async def state(thread_id):
+        t = await crm.inbox_thread(thread_id)
+        return (t["status"], stamp(t["waiting_since"]), t["announced_at"] is None,
+                t["client_name"], t["client_manual"])
+
+    steps: list = []
+    ivan = await crm.create_client(full_name="Иванов Иван", phone="+79990000000",
+                                   tg_id=5001)
+    maria = await crm.create_client(full_name="Иванова Мария", phone="+79991230000")
+
+    # Чей чат: опрос Авито завёл - хук с тем же адресом не пишет ни вопрос,
+    # ни «ответ», и наоборот; свой источник пишет как писал.
+    avito = {"channel": "avito", "ext_id": "chat-1"}
+    first = await crm.inbox_record(**avito, origin="avito_api", direction="in",
+                                   msg_id="a1", body_enc="e1", name="Пётр", at=t0)
+    steps.append(got(first))
+    steps.append(got(await crm.inbox_record(
+        **avito, origin="hook", direction="in", msg_id="h1", body_enc="подделка",
+        name="Мошенник", phone="+79990000666", subject="Чужое", client_id=ivan, at=t1)))
+    steps.append(got(await crm.inbox_record(**avito, origin="hook", direction="out",
+                                            author="avito-app", announce=False)))
+    gateway = {"channel": "avito", "ext_id": "gw-1"}
+    steps.append(got(await crm.inbox_record(**gateway, origin="hook", direction="in",
+                                            at=t0)))
+    steps.append(got(await crm.inbox_record(**gateway, origin="avito_api", direction="in",
+                                            msg_id="a9", name="Чужой", at=t1)))
+    steps.append(got(await crm.inbox_record(**avito, origin="avito_api", direction="in",
+                                            msg_id="a2", at=t1)))
+    steps.append(await pending())
+    await seen()
+
+    # Чат начался нашим ответом из приложения Авито: сигнала нет, пока не
+    # ответит клиент; его второе сообщение подряд - снова без сигнала.
+    mine = {"channel": "avito", "origin": "avito_api", "ext_id": "chat-2"}
+    own = await crm.inbox_record(**mine, direction="out", msg_id="o1", author="avito-app",
+                                 announce=False)
+    steps.append((await state(own["thread_id"]), await pending()))
+    await crm.inbox_record(**mine, direction="in", msg_id="o2", at=t2)
+    steps.append((await state(own["thread_id"]), await pending()))
+    await seen()
+    await crm.inbox_record(**mine, direction="in", msg_id="o3", at=t3)
+    steps.append((await state(own["thread_id"]), await pending()))
+
+    # WhatsApp с общего телефона: человек перепривязал к жене - следующее
+    # сообщение Иванова не вернёт; отвязал - не привяжет снова.
+    wa = {"channel": "wa", "origin": "hook", "ext_id": "+79990000000"}
+    wid = (await crm.inbox_record(**wa, direction="in", phone="+79990000000",
+                                  client_id=ivan, at=t0))["thread_id"]
+    steps.append(await state(wid))
+    await seen()
+    await service.inbox_link_client(crm, await crm.inbox_thread(wid), str(maria),
+                                    by="staff:admin")
+    await crm.inbox_record(**wa, direction="in", msg_id="w2", client_id=ivan, at=t1)
+    steps.append((await state(wid), await pending()))
+    await service.inbox_link_client(crm, await crm.inbox_thread(wid), "", by="staff:admin")
+    await crm.inbox_record(**wa, direction="in", msg_id="w3", client_id=ivan, at=t2)
+    steps.append(await state(wid))
+
+    # «Разобрано» снимает ожидание; новый вопрос ждёт с себя, а не с t0.
+    await crm.update_inbox_thread(wid, status="done")
+    steps.append((await state(wid), await crm.inbox_open_count()))
+    await crm.inbox_record(**wa, direction="in", msg_id="w4", at=t3)
+    steps.append((await state(wid), await pending()))
+    await seen()
+    # Ответ из панели снял ожидание: первое входящее после него - сигнал.
+    reply = await crm.queue_inbox_reply(wid, body_enc="r1", author="staff:admin")
+    await crm.claim_inbox_out()
+    await crm.finish_inbox_out(reply, ok=True)
+    steps.append(await state(wid))
+    await crm.inbox_record(**wa, direction="in", msg_id="w5", at=t4)
+    steps.append((await state(wid), await pending()))
+    await seen()
+    await crm.inbox_record(**wa, direction="in", msg_id="w6")
+    steps.append(await pending())
+    # Спам снимает ожидание и сигнала не просит.
+    await crm.update_inbox_thread(wid, status="spam")
+    steps.append(await state(wid))
+    await crm.inbox_record(**wa, direction="in", msg_id="w7")
+    steps.append(await pending())
+
+    # Очередь: отметка взятия, застрявшее по сроку, повтор той же строкой.
+    tg = (await crm.inbox_record(channel="tg", origin="bot", ext_id="5001", direction="in",
+                                 client_id=ivan, at=t0))["thread_id"]
+    mx = (await crm.inbox_record(channel="max", origin="max_bot", ext_id="8001",
+                                 direction="in", announce=False, at=t0))["thread_id"]
+    old = (await crm.inbox_record(channel="wa", origin="hook", ext_id="+79990000002",
+                                  direction="in", at=t0))["thread_id"]
+    q_tg = await crm.queue_inbox_reply(tg, body_enc="r-tg", author="staff:admin")
+    q_mx = await crm.queue_inbox_reply(mx, body_enc="r-mx", author="staff:admin")
+    q_old = await crm.queue_inbox_reply(old, body_enc="r-old", author="staff:admin")
+    steps.append((await crm.inbox_messages(tg))[-1]["claimed_at"])
+    claims = [await crm.claim_inbox_out() for _ in range(3)]
+    steps.append([(c["id"] == q, c["status"], c["claimed_at"] is not None)
+                  for c, q in zip(claims, (q_tg, q_mx, q_old), strict=True)])
+    await age([q_tg], [q_old], t0)
+    steps.append(await crm.fail_stuck_inbox_out(older_minutes=10))
+    steps.append(await crm.fail_stuck_inbox_out(older_minutes=10))
+    steps.append(await crm.queue_inbox_reply(mx, body_enc="r-mx2", author="staff:admin"))
+    again = await crm.inbox_retry(q_tg, author="staff:boss")
+    steps.append(again == q_tg)
+    steps.append(await crm.queue_inbox_reply(tg, body_enc="r-tg2", author="staff:admin"))
+    steps.append((await crm.claim_inbox_out())["id"] == q_tg)
+    steps.append(await crm.finish_inbox_out(q_tg, ok=False, error="bot was blocked"))
+    blocker = await crm.queue_inbox_reply(tg, body_enc="r-tg3", author="staff:admin")
+    steps.append(blocker is not None)
+    steps.append(await crm.inbox_retry(q_tg, author="staff:boss"))
+    steps.append(await crm.inbox_retry(q_old, author="staff:boss") == q_old)
+    steps.append(await crm.fail_stuck_inbox_out())
+
+    threads = {}
+    for t in await crm.inbox_threads(limit=50):
+        threads[(t["channel"], t["ext_id"])] = {
+            "origin": t["origin"], "status": t["status"], "name": t["name"],
+            "phone": t["phone"], "subject": t["subject"], "client": t["client_name"],
+            "manual": t["client_manual"], "waiting": stamp(t["waiting_since"]),
+            "last_in": stamp(t["last_in_at"]), "announced": t["announced_at"] is not None,
+            "messages": [(m["direction"], m["ext_id"], m["body_enc"], m["author"],
+                          m["status"], m["error"], stamp(m["created_at"]),
+                          m["sent_at"] is not None, m["claimed_at"] is not None)
+                         for m in await crm.inbox_messages(t["id"])],
+        }
+    return steps, {"threads": threads, "open": await crm.inbox_open_count(),
+                   "announce": await pending()}
+
+
+@unittest.skipUnless(HAVE_PG, "pgserver или asyncpg не установлены")
+class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
+    """«Входящие» на настоящем Postgres: upsert обращения, уникальные
+    индексы ленты и очереди, проверки схемы, выборка панели с джойнами и
+    чистка по сроку - то, что FakeCrm только имитирует.
+
+    Обвязка - та же, что у TestCrmOnPostgres, но без наследования: иначе
+    все его тесты прогонялись бы второй раз."""
+
+    maxDiff = None
+    setUpClass = classmethod(TestCrmOnPostgres.setUpClass.__func__)
+    tearDownClass = classmethod(TestCrmOnPostgres.tearDownClass.__func__)
+    asyncSetUp = TestCrmOnPostgres.asyncSetUp
+    asyncTearDown = TestCrmOnPostgres.asyncTearDown
+    seed = TestCrmOnPostgres.seed
+
+    async def say(self, ext_id="+79990000001", direction="in", **fields):
+        """Сообщение из WhatsApp-хука - канал без ботов и опроса."""
+        fields.setdefault("channel", "wa")
+        fields.setdefault("origin", "hook")
+        return await self.crm.inbox_record(ext_id=ext_id, direction=direction, **fields)
+
+    async def row(self, thread_id):
+        """Строка обращения как есть - без джойнов выборки панели."""
+        return dict(await self.pool.fetchrow(
+            "select * from crm.inbox_threads where id = $1", thread_id))
+
+    async def message(self, message_id):
+        return dict(await self.pool.fetchrow(
+            "select * from crm.inbox_messages where id = $1", message_id))
+
+    async def count(self, table, where="true", *args):
+        return await self.pool.fetchval(
+            f"select count(*) from crm.{table} where {where}", *args)
+
+    async def test_thread_is_one_per_contact_and_repeats_are_ignored(self):
+        await self.seed()
+        other = await self.crm.create_client(full_name="Второй", phone="+79995555555")
+        t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=3)
+        t1, t2 = t0 + timedelta(hours=1), t0 + timedelta(hours=2)
+        first = await self.say(msg_id="m1", name="Иван", phone="+79990000001",
+                               body_enc="x1", at=t0)
+        self.assertTrue(first["created"])
+        self.assertIsNotNone(first["message_id"])
+        tid = first["thread_id"]
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"], row["last_in_at"]),
+                         ("new", t0, t0))
+        self.assertIsNone(row["announced_at"], "новое обращение ждёт сигнала в чат")
+        self.assertIsNone(row["client_id"])
+        self.assertEqual((await self.message(first["message_id"]))["created_at"], t0)
+
+        # Второе «алло?»: то же обращение, пустое дополняется, ожидание не сдвигается.
+        second = await self.say(msg_id="m2", username="ivan", client_id=self.client_id,
+                                at=t1)
+        self.assertEqual((second["thread_id"], second["created"]), (tid, False))
+        self.assertIsNotNone(second["message_id"])
+        row = await self.row(tid)
+        self.assertEqual((row["name"], row["phone"]), ("Иван", "+79990000001"),
+                         "пустое не затирает известное")
+        self.assertEqual(row["username"], "ivan")
+        self.assertEqual(row["client_id"], self.client_id)
+        self.assertEqual((row["waiting_since"], row["last_in_at"]), (t0, t1))
+
+        # Повтор доставки хука: второй строки нет, время обращения не двигается,
+        # привязанную карточку повтор не подменяет.
+        again = await self.say(msg_id="m1", client_id=other, at=t2)
+        self.assertEqual(again, {"thread_id": tid, "created": False, "message_id": None})
+        row = await self.row(tid)
+        self.assertEqual((row["waiting_since"], row["last_in_at"]), (t0, t1))
+        self.assertEqual(row["client_id"], self.client_id)
+
+        # Опоздавшее сообщение не откатывает «последнее входящее».
+        late = await self.say(msg_id="m0", at=t0 - timedelta(hours=1))
+        self.assertIsNotNone(late["message_id"])
+        row = await self.row(tid)
+        self.assertEqual((row["waiting_since"], row["last_in_at"]), (t0, t1))
+
+        # Ключ - (канал, адрес): тот же адрес в другом канале - другое
+        # обращение, и номер сообщения уникален лишь внутри своего обращения.
+        tg = await self.crm.inbox_record(channel="tg", origin="bot", ext_id="+79990000001",
+                                         direction="in", msg_id="m1")
+        self.assertTrue(tg["created"])
+        self.assertNotEqual(tg["thread_id"], tid)
+        self.assertIsNotNone(tg["message_id"])
+        # Без номера сообщения повтор не распознать - пишутся оба.
+        for _ in range(2):
+            self.assertIsNotNone((await self.say(body_enc="без номера"))["message_id"])
+        self.assertEqual(await self.count("inbox_threads"), 2)
+        self.assertEqual(await self.count("inbox_messages", "thread_id = $1", tid), 5)
+
+    async def test_reply_and_new_question_move_the_thread(self):
+        t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
+        tid = (await self.say(at=t0))["thread_id"]
+        out = await self.say(direction="out", author="staff:admin", announce=False)
+        msg = await self.message(out["message_id"])
+        self.assertEqual((msg["direction"], msg["status"], msg["author"]),
+                         ("out", "sent", "staff:admin"))
+        self.assertIsNotNone(msg["sent_at"])
+        row = await self.row(tid)
+        self.assertEqual(row["status"], "work", "ответ берёт новое в работу")
+        self.assertIsNone(row["waiting_since"])
+        self.assertIsNotNone(row["last_out_at"])
+        self.assertEqual(row["last_in_at"], t0, "ответ - не входящее")
+
+        # Событие («анкета на проверке») ожидания не ставит и последним
+        # сообщением в списке не считается.
+        await self.say(direction="event", body_enc="анкета")
+        self.assertIsNone((await self.row(tid))["waiting_since"])
+        self.assertEqual((await self.crm.inbox_thread(tid))["last_direction"], "out")
+
+        t1 = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+        await self.say(at=t1)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"]), ("work", t1))
+
+        # Ответ в разобранное его не открывает, новый вопрос - открывает
+        # и снова просит сигнала в чат.
+        await self.crm.update_inbox_thread(tid, status="done", announced_at=datetime.now(UTC))
+        await self.say(direction="out", author="staff:admin", announce=False)
+        self.assertEqual((await self.row(tid))["status"], "done")
+        await self.say()
+        row = await self.row(tid)
+        self.assertEqual(row["status"], "new")
+        self.assertIsNone(row["announced_at"])
+        self.assertIsNotNone(row["waiting_since"])
+
+        # Вопрос в поддержку (announce=False) открывает, но сигнал не повторяет.
+        await self.crm.update_inbox_thread(tid, status="done", announced_at=datetime.now(UTC))
+        await self.say(announce=False)
+        row = await self.row(tid)
+        self.assertEqual(row["status"], "new")
+        self.assertIsNotNone(row["announced_at"])
+
+        await self.crm.update_inbox_thread(tid, status="spam")
+        await self.say()
+        self.assertEqual((await self.row(tid))["status"], "spam", "спам остаётся спамом")
+
+        # Чат начался с нашего ответа из приложения Авито: сигнала нет, в работе.
+        mine = await self.crm.inbox_record(channel="avito", origin="avito_api",
+                                           ext_id="chat-9", direction="out", msg_id="a1",
+                                           author="avito-app", announce=False)
+        self.assertTrue(mine["created"])
+        row = await self.row(mine["thread_id"])
+        self.assertEqual(row["status"], "work")
+        self.assertIsNotNone(row["announced_at"])
+        self.assertIsNone(row["waiting_since"])
+        self.assertIsNone(row["last_in_at"])
+
+    async def test_schema_rejects_what_the_code_never_writes(self):
+        await self.seed()
+        tid = (await self.say())["thread_id"]
+        # Статус есть только у ответа, и только из четырёх.
+        for direction, status in (("out", None), ("in", "sent"), ("event", "queued"),
+                                  ("out", "delivered")):
+            with self.subTest(direction=direction, status=status), \
+                    self.assertRaises(asyncpg.CheckViolationError):
+                await self.pool.execute(
+                    "insert into crm.inbox_messages (thread_id, direction, status) "
+                    "values ($1, $2, $3)", tid, direction, status)
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.say(kind="sticker")
+        for bad in ({"channel": "sms"}, {"origin": "web"}, {"direction": "sideways"}):
+            with self.subTest(**bad), self.assertRaises(asyncpg.CheckViolationError):
+                await self.say(ext_id="+79990000077", **bad)
+        self.assertEqual(await self.count("inbox_threads", "ext_id = $1", "+79990000077"), 0,
+                         "обращение и сообщение - одна транзакция")
+        self.assertEqual(await self.count("inbox_messages"), 1)
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.update_inbox_thread(tid, status="closed")
+        with self.assertRaises(asyncpg.ForeignKeyViolationError):
+            await self.crm.queue_inbox_reply(tid + 1000, body_enc="x", author="staff:admin")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.pool.execute("insert into crm.inbox_threads (channel, origin, ext_id) "
+                                    "values ('wa', 'hook', '+79990000001')")
+
+        # Удалённая карточка отвязывается, а не уносит переписку; удалённое
+        # обращение уносит свою ленту.
+        gone = await self.crm.create_client(full_name="Удалим", phone="+79995555555")
+        await self.crm.update_inbox_thread(tid, client_id=gone)
+        await self.pool.execute("delete from crm.clients where id = $1", gone)
+        thread = await self.crm.inbox_thread(tid)
+        self.assertIsNone(thread["client_id"])
+        self.assertIsNone(thread["client_name"])
+        await self.pool.execute("delete from crm.inbox_threads where id = $1", tid)
+        self.assertEqual(await self.count("inbox_messages"), 0)
+
+    async def test_one_reply_in_queue_and_the_claim_carries_the_address(self):
+        await self.seed()
+        tg = (await self.crm.inbox_record(channel="tg", origin="bot", ext_id="5001",
+                                          direction="in", client_id=self.client_id)
+              )["thread_id"]
+        avito = (await self.crm.inbox_record(channel="avito", origin="avito_api",
+                                             ext_id="chat-1", direction="in", msg_id="a1")
+                 )["thread_id"]
+        self.assertIsNone(await self.crm.claim_inbox_out(), "очередь пуста")
+        q1 = await self.crm.queue_inbox_reply(tg, body_enc="enc-1", author="staff:admin")
+        self.assertIsNotNone(q1)
+        self.assertIsNone(await self.crm.queue_inbox_reply(tg, body_enc="enc-2",
+                                                           author="staff:admin"),
+                          "двойной клик не ставит второй ответ")
+        q2 = await self.crm.queue_inbox_reply(avito, body_enc="enc-3", author="staff:admin")
+        self.assertIsNotNone(q2, "очередь - одна на обращение, а не на всех")
+
+        got = await self.crm.claim_inbox_out()
+        self.assertEqual((got["id"], got["thread_id"], got["status"], got["direction"],
+                          got["kind"], got["body_enc"], got["author"], got["sent_at"]),
+                         (q1, tg, "sending", "out", "text", "enc-1", "staff:admin", None))
+        self.assertEqual((got["channel"], got["origin"], got["thread_ext_id"],
+                          got["client_id"], got["thread_status"]),
+                         ("tg", "bot", "5001", self.client_id, "new"))
+        self.assertEqual((await self.message(q1))["status"], "sending")
+        self.assertIsNone(await self.crm.queue_inbox_reply(tg, body_enc="enc-2",
+                                                           author="staff:admin"),
+                          "пока отправляется - место тоже занято")
+        got = await self.crm.claim_inbox_out()
+        self.assertEqual((got["id"], got["channel"], got["origin"], got["thread_ext_id"],
+                          got["client_id"]), (q2, "avito", "avito_api", "chat-1", None))
+        self.assertIsNone(await self.crm.claim_inbox_out())
+
+        # Ушло: ответ отправлен, обращение в работе, ожидание снято.
+        self.assertTrue(await self.crm.finish_inbox_out(q1, ok=True))
+        self.assertFalse(await self.crm.finish_inbox_out(q1, ok=False, error="поздно"),
+                         "итог пишется один раз")
+        msg = await self.message(q1)
+        self.assertEqual((msg["status"], msg["error"], msg["ext_id"]), ("sent", None, None))
+        self.assertIsNotNone(msg["sent_at"])
+        row = await self.row(tg)
+        self.assertEqual(row["status"], "work")
+        self.assertIsNone(row["waiting_since"])
+        self.assertIsNotNone(row["last_out_at"])
+
+        # Не ушло: ошибка обрезана, обращение ждёт, как ждало.
+        waiting = (await self.row(avito))["waiting_since"]
+        self.assertIsNotNone(waiting)
+        self.assertTrue(await self.crm.finish_inbox_out(q2, ok=False,
+                                                        error="Авито: " + "x" * 600))
+        msg = await self.message(q2)
+        self.assertEqual(msg["status"], "failed")
+        self.assertEqual(len(msg["error"]), 500)
+        row = await self.row(avito)
+        self.assertEqual((row["status"], row["waiting_since"], row["last_out_at"]),
+                         ("new", waiting, None))
+
+        # Авито вернул id ответа, опрос приносит его же - второй строки нет.
+        q3 = await self.crm.queue_inbox_reply(avito, body_enc="enc-4", author="staff:admin")
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], q3)
+        self.assertTrue(await self.crm.finish_inbox_out(q3, ok=True, ext_id="av-77"))
+        echo = await self.crm.inbox_record(channel="avito", origin="avito_api",
+                                           ext_id="chat-1", direction="out", msg_id="av-77",
+                                           author="avito-app", announce=False)
+        self.assertIsNone(echo["message_id"])
+        self.assertEqual(await self.count("inbox_messages", "ext_id = 'av-77'"), 1)
+        self.assertEqual((await self.row(avito))["status"], "work")
+        self.assertIsNotNone(await self.crm.queue_inbox_reply(tg, body_enc="enc-5",
+                                                              author="staff:admin"),
+                             "ушедший ответ очередь не держит")
+
+    async def test_two_workers_never_take_one_reply(self):
+        queued = []
+        for n in range(4):
+            tid = (await self.say(ext_id=f"+7999000000{n}"))["thread_id"]
+            queued.append(await self.crm.queue_inbox_reply(tid, body_enc=f"e{n}",
+                                                           author="staff:admin"))
+        got = await asyncio.gather(*(self.crm.claim_inbox_out() for _ in range(6)))
+        self.assertEqual(sorted(g["id"] for g in got if g is not None), sorted(queued))
+        self.assertEqual(sum(g is None for g in got), 2)
+        self.assertEqual(await self.count("inbox_messages", "status = 'sending'"), 4)
+
+    async def test_stuck_reply_is_failed_and_retry_requeues_the_same_row(self):
+        a = await self.say(ext_id="+79990000001")
+        b = (await self.say(ext_id="+79990000002"))["thread_id"]
+        stuck = await self.crm.queue_inbox_reply(a["thread_id"], body_enc="enc-a",
+                                                 author="staff:admin")
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], stuck)
+        queued = await self.crm.queue_inbox_reply(b, body_enc="enc-b", author="staff:admin")
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(), 1)
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(), 0)
+        msg = await self.message(stuck)
+        self.assertEqual(msg["status"], "failed")
+        self.assertIn("неизвестно, ушло ли", msg["error"])
+        self.assertIsNotNone(msg["sent_at"])
+        self.assertEqual((await self.message(queued))["status"], "queued",
+                         "очередь при перезапуске не трогается")
+        row = await self.row(a["thread_id"])
+        self.assertIsNotNone(row["waiting_since"], "неизвестно, ушло ли, - ожидание не снято")
+        self.assertIsNone(row["last_out_at"])
+
+        # Повтор - та же строка обратно в очередь, а не копия: у копии
+        # исходное «не ушло» оставалось бы с кнопкой, и второе нажатие после
+        # удачного повтора слало бы человеку дубль.
+        again = await self.crm.inbox_retry(stuck, author="staff:boss")
+        self.assertEqual(again, stuck)
+        new = await self.message(again)
+        self.assertEqual((new["thread_id"], new["direction"], new["kind"], new["body_enc"],
+                          new["author"], new["status"], new["error"], new["sent_at"],
+                          new["claimed_at"]),
+                         (a["thread_id"], "out", "text", "enc-a", "staff:boss", "queued",
+                          None, None, None))
+        self.assertEqual(await self.count("inbox_messages", "direction = 'out'"), 2,
+                         "копии не появилось")
+        self.assertIsNone(await self.crm.inbox_retry(stuck, author="staff:boss"),
+                          "повтор уже в очереди")
+        self.assertIsNone(await self.crm.inbox_retry(queued, author="staff:boss"),
+                          "повторяется только не ушедший")
+        self.assertIsNone(await self.crm.inbox_retry(a["message_id"], author="staff:boss"),
+                          "входящее не повторяется")
+        self.assertIsNone(await self.crm.inbox_retry(10 ** 9, author="staff:boss"))
+        self.assertEqual(await self.count("inbox_messages", "status = 'queued'"), 2)
+        # Очередь - по номеру строки, повтор старого ответа идёт первым;
+        # пустая ошибка - NULL, а не пустая строка.
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], again)
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], queued)
+        self.assertTrue(await self.crm.finish_inbox_out(again, ok=False, error=""))
+        self.assertIsNone((await self.message(again))["error"])
+
+    async def test_panel_list_with_and_without_a_card(self):
+        await self.seed()
+        await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
+                                     tariff_id=self.tariff_id, tariff_name="Неделя",
+                                     period_days=7, price=D("3000"), billing="manual",
+                                     started_on=date.today(), contract_no=None,
+                                     created_by="t")
+        await self.crm.create_booking(client_id=self.client_id, model="Kugoo V3",
+                                      tariff_id=self.tariff_id, location_id=None,
+                                      wanted_on=date.today())
+        quiet = await self.crm.create_client(full_name="Без аренды", phone="+79995555555")
+        t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=3)
+        stranger = (await self.say(name="Незнакомец", kind="image", body_enc="s1",
+                                   at=t0))["thread_id"]
+        await self.say(direction="event", body_enc="ev")
+        renter = (await self.crm.inbox_record(
+            channel="tg", origin="bot", ext_id="5001", direction="in", body_enc="t1",
+            client_id=self.client_id, at=t0 + timedelta(hours=1)))["thread_id"]
+        await self.crm.inbox_record(channel="tg", origin="bot", ext_id="5001",
+                                    direction="out", body_enc="r1", author="staff:admin",
+                                    announce=False)
+        other = (await self.crm.inbox_record(
+            channel="max", origin="max_bot", ext_id="9001", direction="in", body_enc="q1",
+            client_id=quiet, at=t0 + timedelta(hours=2)))["thread_id"]
+
+        rows = await self.crm.inbox_threads()
+        self.assertEqual([r["id"] for r in rows], [stranger, other, renter],
+                         "дольше ждёт - выше, отвеченные в конце")
+        by_id = {r["id"]: r for r in rows}
+        row = by_id[stranger]
+        self.assertEqual((row["name"], row["client_name"], row["client_phone"],
+                          row["renting"], row["booking_open"]),
+                         ("Незнакомец", None, None, False, False))
+        self.assertEqual((row["last_direction"], row["last_kind"], row["last_body_enc"]),
+                         ("in", "image", "s1"), "событие последним сообщением не считается")
+        row = by_id[renter]
+        self.assertEqual((row["client_name"], row["client_phone"], row["renting"],
+                          row["booking_open"]),
+                         ("Иванов Иван", "+79990000000", True, True))
+        self.assertEqual((row["last_direction"], row["last_kind"], row["last_body_enc"]),
+                         ("out", "text", "r1"))
+        row = by_id[other]
+        self.assertEqual((row["client_name"], row["renting"], row["booking_open"]),
+                         ("Без аренды", False, False))
+        for tid in (stranger, renter, other):
+            self.assertEqual(await self.crm.inbox_thread(tid), by_id[tid])
+        self.assertIsNone(await self.crm.inbox_thread(10 ** 9))
+
+        async def ids(**kw):
+            return [r["id"] for r in await self.crm.inbox_threads(**kw)]
+
+        self.assertEqual(await ids(statuses=("new",)), [stranger, other])
+        self.assertEqual(await ids(statuses=["work"]), [renter])
+        self.assertEqual(await ids(statuses=("done", "spam")), [])
+        self.assertEqual(await ids(channel="tg"), [renter])
+        self.assertEqual(await ids(channel="avito"), [])
+        self.assertEqual(await ids(statuses=("new", "work"), channel="max"), [other])
+        self.assertEqual(await ids(limit=1), [stranger])
+
+        messages = await self.crm.inbox_messages(stranger)
+        self.assertEqual([(m["direction"], m["body_enc"]) for m in messages],
+                         [("in", "s1"), ("event", "ev")])
+        self.assertEqual([m["body_enc"] for m in await self.crm.inbox_messages(stranger, 1)],
+                         ["ev"], "предел берёт последние, а не первые")
+
+        # Лента вычищена сроком - строка списка без последнего сообщения.
+        await self.pool.execute("delete from crm.inbox_messages where thread_id = $1", other)
+        row = await self.crm.inbox_thread(other)
+        self.assertEqual((row["last_direction"], row["last_kind"], row["last_body_enc"]),
+                         (None, None, None))
+
+    async def test_open_count_and_announce(self):
+        waiting_new = (await self.say(ext_id="1"))["thread_id"]
+        waiting_work = (await self.say(ext_id="2"))["thread_id"]
+        await self.crm.update_inbox_thread(waiting_work, status="work")
+        answered = (await self.say(ext_id="3"))["thread_id"]
+        await self.say(ext_id="3", direction="out", author="staff:admin", announce=False)
+        done = (await self.say(ext_id="4"))["thread_id"]
+        await self.crm.update_inbox_thread(done, status="done")
+        spam = (await self.say(ext_id="5"))["thread_id"]
+        await self.crm.update_inbox_thread(spam, status="spam")
+        support = (await self.say(ext_id="6", announce=False))["thread_id"]
+
+        self.assertEqual(await self.crm.inbox_open_count(), 3,
+                         "ждут ответа - только новые и в работе")
+        announce = [t["id"] for t in await self.crm.inbox_to_announce()]
+        self.assertEqual(announce, [waiting_new, waiting_work, answered, done, spam])
+        self.assertNotIn(support, announce)
+        self.assertEqual([t["id"] for t in await self.crm.inbox_to_announce(2)],
+                         [waiting_new, waiting_work])
+        await self.crm.update_inbox_thread(waiting_new, announced_at=datetime.now(UTC))
+        self.assertEqual([t["id"] for t in await self.crm.inbox_to_announce(1)],
+                         [waiting_work])
+
+    async def test_thread_update_is_whitelisted(self):
+        await self.seed()
+        tid = (await self.say())["thread_id"]
+        before = await self.row(tid)
+        for bad in ({"channel": "tg"}, {"ext_id": "x"}, {"origin": "bot"},
+                    {"waiting_since": None}, {"status": "done", "phone": "+7"},
+                    {"note = null; drop table crm.ledger; --": 1}):
+            with self.subTest(fields=sorted(bad)), self.assertRaises(ValueError):
+                await self.crm.update_inbox_thread(tid, **bad)
+        self.assertEqual(await self.row(tid), before, "отказ ничего не записал")
+        self.assertEqual(await self.count("ledger"), 0)
+
+        at = datetime.now(UTC).replace(microsecond=0)
+        await self.crm.update_inbox_thread(
+            tid, status="done", note="позвонил сам", client_id=self.client_id,
+            handled_by="staff:admin", handled_at=at, ext_cursor="c-9", announced_at=at)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["note"], row["client_id"], row["handled_by"],
+                          row["handled_at"], row["ext_cursor"], row["announced_at"]),
+                         ("done", "позвонил сам", self.client_id, "staff:admin", at, "c-9",
+                          at))
+        self.assertGreater(row["updated_at"], before["updated_at"])
+        await self.crm.update_inbox_thread(10 ** 9, note="нет такого")
+
+    async def test_purge_keeps_the_queue_and_drops_empty_closed_threads(self):
+        old = datetime.now(UTC) - timedelta(days=logic.INBOX_KEEP_DAYS + 1)
+        recent = datetime.now(UTC) - timedelta(days=logic.INBOX_KEEP_DAYS - 1)
+
+        async def thread(ext_id, status, at=old):
+            tid = (await self.say(ext_id=ext_id, at=at))["thread_id"]
+            await self.crm.update_inbox_thread(tid, status=status)
+            return tid
+
+        done_old = await thread("done-old", "done")
+        spam_old = await thread("spam-old", "spam")
+        new_old = await thread("new-old", "new")
+        done_touched = await thread("done-touched", "done")
+        done_fresh = await thread("done-fresh", "done", recent)
+        holds_queued = await thread("queued", "done")
+        holds_sending = await thread("sending", "work")
+        sent = (await self.say(ext_id="done-old", direction="out", author="staff:admin",
+                               announce=False))["message_id"]
+        failed = await self.crm.queue_inbox_reply(spam_old, body_enc="f", author="staff:a")
+        await self.crm.claim_inbox_out()
+        await self.crm.finish_inbox_out(failed, ok=False, error="нет")
+        sending = await self.crm.queue_inbox_reply(holds_sending, body_enc="s",
+                                                   author="staff:a")
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], sending)
+        queued = await self.crm.queue_inbox_reply(holds_queued, body_enc="q",
+                                                  author="staff:a")
+        await self.pool.execute("update crm.inbox_messages set created_at = $1 "
+                                "where id = any($2::bigint[])",
+                                old, [sent, failed, sending, queued])
+        # «Разобрали недавно» - только у одного; остальные трогали давно.
+        await self.pool.execute("update crm.inbox_threads set updated_at = $1 "
+                                "where id <> $2", old, done_touched)
+
+        # Старше срока: шесть входящих (свежее остаётся), ушедший и не ушедший ответ.
+        self.assertEqual(await self.crm.purge_inbox(logic.INBOX_KEEP_DAYS), 8)
+        left = {r["thread_id"]: r["status"] for r in await self.pool.fetch(
+            "select thread_id, status from crm.inbox_messages")}
+        self.assertEqual(left, {done_fresh: None, holds_sending: "sending",
+                                holds_queued: "queued"})
+        threads = {r["id"] for r in await self.pool.fetch("select id from crm.inbox_threads")}
+        self.assertEqual(threads, {new_old, done_touched, done_fresh, holds_queued,
+                                   holds_sending},
+                         "пустые разобранные и спам уходят, открытые и с очередью - нет")
+        self.assertNotIn(done_old, threads)
+        self.assertEqual(await self.crm.purge_inbox(logic.INBOX_KEEP_DAYS), 0)
+        self.assertEqual(await self.count("inbox_threads"), 5)
+
+    async def test_card_is_found_by_tg_max_and_phone(self):
+        await self.seed()
+        self.assertIsNone(await self.crm.client_by_max(777))
+        await self.crm.update_client(self.client_id, max_id=777)
+        self.assertEqual((await self.crm.client_by_max(777))["id"], self.client_id)
+        self.assertIsNone(await self.crm.client_by_max(778))
+        other = await self.crm.create_client(full_name="Второй", phone="+79995555555")
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.update_client(other, max_id=777)
+
+        for fields in ({"channel": "tg", "origin": "bot", "ext_id": 5001},
+                       {"channel": "max", "origin": "max_bot", "ext_id": "777"},
+                       {"channel": "wa", "origin": "hook", "ext_id": "+79990000000",
+                        "phone": "8 (999) 000-00-00"}):
+            with self.subTest(channel=fields["channel"]):
+                got = await service.inbox_in(self.crm, None, text="Здравствуйте", **fields)
+                thread = await self.crm.inbox_thread(got["thread_id"])
+                self.assertEqual((thread["client_id"], thread["client_name"]),
+                                 (self.client_id, "Иванов Иван"))
+                self.assertIsNone(thread["last_body_enc"], "без ключа текста нет")
+        got = await service.inbox_in(self.crm, None, channel="tg", origin="bot",
+                                     ext_id="6001", text="Кто вы?")
+        self.assertIsNone((await self.crm.inbox_thread(got["thread_id"]))["client_id"])
+
+    async def test_inbox_never_touches_money_or_rentals(self):
+        """Обращение - не клиент и не деньги: весь путь от вопроса до чистки
+        не пишет в журнал, не создаёт аренд и не двигает технику."""
+        await self.seed()
+        await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no="АВ-1", by="test")
+        snapshot = """
+            select (select count(*) from crm.ledger) as ledger_rows,
+                   (select coalesce(sum(amount), 0) from crm.ledger) as ledger_sum,
+                   (select string_agg(r.status || ':' || r.billed_until, ',' order by r.id)
+                      from crm.rentals r) as rentals,
+                   (select count(*) from crm.bike_status_log) as status_log,
+                   (select string_agg(b.status, ',' order by b.id) from crm.bikes b) as bikes,
+                   (select count(*) from crm.bookings) as bookings,
+                   (select count(*) from crm.clients) as clients
+        """
+        before = dict(await self.pool.fetchrow(snapshot))
+        self.assertGreater(before["ledger_rows"], 0)
+
+        vault = service.inbox_vault(generate_key())
+        got = await service.inbox_in(self.crm, vault, channel="tg", origin="bot",
+                                     ext_id="5001", text="Когда продлевать?", name="Иван")
+        thread = await self.crm.inbox_thread(got["thread_id"])
+        self.assertEqual(thread["client_id"], self.client_id)
+        self.assertTrue(thread["renting"])
+        self.assertEqual(service.inbox_open(vault, thread["last_body_enc"]),
+                         "Когда продлевать?")
+        mid = await service.inbox_reply(self.crm, vault, thread, "До пятницы",
+                                        by="staff:admin", avito_ok=False)
+        claimed = await self.crm.claim_inbox_out()
+        self.assertEqual(claimed["id"], mid)
+        self.assertEqual(service.inbox_open(vault, claimed["body_enc"]), "До пятницы")
+        await self.crm.finish_inbox_out(mid, ok=False, error="бот заблокирован")
+        await service.inbox_retry(self.crm, mid, by="staff:admin")
+        await self.crm.claim_inbox_out()
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(), 1)
+        thread = await self.crm.inbox_thread(got["thread_id"])
+        await service.inbox_answered_elsewhere(self.crm, thread, by="staff:admin")
+        await service.inbox_set_status(self.crm, thread, "done", note="продлит",
+                                       by="staff:admin")
+        await service.inbox_link_client(self.crm, thread, "", by="staff:admin")
+        await service.inbox_link_client(self.crm, thread, "+7 999 000-00-00",
+                                        by="staff:admin")
+        await service.inbox_in(self.crm, vault, channel="wa", origin="hook",
+                               ext_id="+79990000000", phone="+79990000000", text="Это Иван")
+        await self.crm.update_inbox_thread(got["thread_id"], announced_at=datetime.now(UTC))
+        await self.crm.purge_inbox(0)
+
+        self.assertEqual(dict(await self.pool.fetchrow(snapshot)), before)
+        self.assertEqual(await self.count("inbox_messages"), 0, "чистка с нулевым сроком")
+
+    async def test_fake_crm_tells_the_same_story(self):
+        """tests/fake_crm.py - опора тестов панели и бота; здесь его
+        сверяют с настоящими запросами на одной истории."""
+        fake_steps, fake_picture = await _inbox_story(FakeCrm())
+        real_steps, real_picture = await _inbox_story(self.crm)
+        self.assertEqual(fake_steps, real_steps)
+        self.assertEqual(fake_picture, real_picture)
+
+    async def test_fake_crm_purges_the_same_way(self):
+        old = datetime.now(UTC) - timedelta(days=logic.INBOX_KEEP_DAYS + 1)
+        fake = FakeCrm()
+
+        async def age_fake(messages, threads):
+            for mid in messages:
+                fake.inbox_messages_[mid]["created_at"] = old
+            for tid in threads:
+                fake.inbox_threads_[tid]["updated_at"] = old
+
+        async def age_real(messages, threads):
+            await self.pool.execute("update crm.inbox_messages set created_at = $1 "
+                                    "where id = any($2::bigint[])", old, messages)
+            await self.pool.execute("update crm.inbox_threads set updated_at = $1 "
+                                    "where id = any($2::bigint[])", old, threads)
+
+        real = await _inbox_purge_story(self.crm, age_real)
+        self.assertEqual(await _inbox_purge_story(fake, age_fake), real)
+        gone, left = real
+        self.assertEqual(gone, 6)
+        self.assertEqual(left, {"done": [("in", "", "fresh")], "new": [],
+                                "queue": [("out", "queued", "")],
+                                "send": [("out", "sending", "")], "touched": []})
+
+    # ─────────── правила после правки: чей чат, карточка, ожидание, очередь ───────────
+
+    async def test_thread_belongs_to_its_origin(self):
+        """Хук с каналом «avito» не пишет в чат, заведённый опросом Авито:
+        утёкший токен хука подкладывал бы «слова клиента» в настоящий чат.
+        Отказ - None, и ничего не тронуто: ни лента, ни имя, ни телефон."""
+        await self.seed()
+        t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=3)
+        for channel, owner, stranger in (("avito", "avito_api", "hook"),
+                                         ("avito", "hook", "avito_api"),
+                                         ("tg", "bot", "hook"),
+                                         ("max", "max_bot", "hook")):
+            with self.subTest(channel=channel, owner=owner, stranger=stranger):
+                ext = f"{channel}-{owner}"
+                mine = await self.crm.inbox_record(
+                    channel=channel, origin=owner, ext_id=ext, direction="in", msg_id="m1",
+                    body_enc="e1", name="Пётр", subject="Kugoo V3",
+                    subject_url="https://www.avito.ru/kazan/1", at=t0)
+                tid = mine["thread_id"]
+                # Разобрано и отмечено в чате: подделка вернула бы его в новые.
+                await self.crm.update_inbox_thread(tid, status="done",
+                                                   announced_at=datetime.now(UTC))
+                before = await self.row(tid)
+                messages = await self.count("inbox_messages", "thread_id = $1", tid)
+                for direction in ("in", "out", "event"):
+                    self.assertIsNone(await self.crm.inbox_record(
+                        channel=channel, origin=stranger, ext_id=ext, direction=direction,
+                        msg_id=f"x-{direction}", body_enc="подделка", author="avito-app",
+                        name="Мошенник", username="fake", phone="+79990000666",
+                        subject="Чужое", subject_url="https://www.avito.ru/kazan/666",
+                        client_id=self.client_id, at=t0 + timedelta(hours=1)))
+                self.assertEqual(await self.row(tid), before, "обращение не тронуто")
+                self.assertEqual(await self.count("inbox_messages", "thread_id = $1", tid),
+                                 messages, "в ленту ничего не легло")
+                with self.assertRaises(service.ServiceError):
+                    await service.inbox_in(self.crm, None, channel=channel, origin=stranger,
+                                           ext_id=ext, text="Подделка",
+                                           phone="+79990000000")
+                self.assertEqual(await self.row(tid), before)
+                # Свой источник пишет как писал.
+                self.assertIsNotNone((await self.crm.inbox_record(
+                    channel=channel, origin=owner, ext_id=ext, direction="in",
+                    msg_id="m2"))["message_id"])
+                self.assertEqual((await self.row(tid))["status"], "new")
+        self.assertEqual(await self.count("inbox_threads"), 4, "второго обращения нет")
+
+    async def test_manual_card_link_is_not_overwritten(self):
+        """Карточку привязал или отвязал человек: автопривязка по общему
+        телефону следующим сообщением её не переписывает."""
+        await self.seed()
+        wife = await self.crm.create_client(full_name="Иванова Мария", phone="+79991230000")
+        wa = {"channel": "wa", "origin": "hook", "ext_id": "+79990000000",
+              "phone": "+79990000000"}
+        tid = (await service.inbox_in(self.crm, None, text="Здравствуйте", **wa))["thread_id"]
+        row = await self.row(tid)
+        self.assertEqual((row["client_id"], row["client_manual"]), (self.client_id, False))
+
+        # Автопривязка и без флага не подменяет найденную раньше карточку.
+        await self.crm.inbox_record(channel="wa", origin="hook", ext_id="+79990000000",
+                                    direction="in", client_id=wife)
+        self.assertEqual((await self.row(tid))["client_id"], self.client_id)
+
+        # Пишет жена с его телефона - администратор перепривязал по номеру карточки.
+        linked = await service.inbox_link_client(self.crm, await self.crm.inbox_thread(tid),
+                                                 str(wife), by="staff:admin")
+        self.assertEqual(linked["id"], wife)
+        row = await self.row(tid)
+        self.assertEqual((row["client_id"], row["client_manual"], row["handled_by"]),
+                         (wife, True, "staff:admin"))
+        await service.inbox_in(self.crm, None, text="Это снова я", **wa)
+        self.assertEqual((await self.row(tid))["client_id"], wife)
+
+        # Отвязал - следующее сообщение с того же телефона не привязывает снова.
+        self.assertIsNone(await service.inbox_link_client(
+            self.crm, await self.crm.inbox_thread(tid), "", by="staff:admin"))
+        row = await self.row(tid)
+        self.assertEqual((row["client_id"], row["client_manual"]), (None, True))
+        await service.inbox_in(self.crm, None, text="Алло?", **wa)
+        await self.crm.inbox_record(channel="wa", origin="hook", ext_id="+79990000000",
+                                    direction="out", author="staff:admin", announce=False,
+                                    client_id=self.client_id)
+        thread = await self.crm.inbox_thread(tid)
+        self.assertEqual((thread["client_id"], thread["client_name"], thread["renting"]),
+                         (None, None, False))
+        self.assertEqual(await self.count("inbox_messages", "thread_id = $1", tid), 5)
+
+        # Вернуть карточку может только человек - телефоном.
+        linked = await service.inbox_link_client(self.crm, await self.crm.inbox_thread(tid),
+                                                 "+7 999 000-00-00", by="staff:admin")
+        self.assertEqual(linked["id"], self.client_id)
+        self.assertEqual((await self.row(tid))["client_id"], self.client_id)
+
+        # Telegram: карточка по tg_id тоже не возвращается после отвязки.
+        tg = (await service.inbox_in(self.crm, None, channel="tg", origin="bot",
+                                     ext_id="5001", text="Вопрос"))["thread_id"]
+        self.assertEqual((await self.row(tg))["client_id"], self.client_id)
+        await service.inbox_link_client(self.crm, await self.crm.inbox_thread(tg), "",
+                                        by="staff:admin")
+        await service.inbox_in(self.crm, None, channel="tg", origin="bot", ext_id="5001",
+                               text="Ещё вопрос")
+        self.assertIsNone((await self.row(tg))["client_id"])
+
+    async def test_done_and_spam_drop_waiting_and_reopen_waits_from_the_new_question(self):
+        t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=6)
+        t1, t2, t3 = t0 + timedelta(hours=1), t0 + timedelta(hours=2), t0 + timedelta(hours=3)
+        tid = (await self.say(at=t0))["thread_id"]
+        await self.crm.update_inbox_thread(tid, status="work", note="перезвоню")
+        self.assertEqual((await self.row(tid))["waiting_since"], t0,
+                         "«в работе» и заметка ожидание не снимают")
+
+        # «Разобрано» из панели - с заметкой и автором - снимает ожидание.
+        await service.inbox_set_status(self.crm, await self.crm.inbox_thread(tid), "done",
+                                       note="позвонили", by="staff:admin")
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"], row["note"]),
+                         ("done", None, "позвонили"))
+        self.assertEqual(await self.crm.inbox_open_count(), 0)
+
+        # Новый вопрос открывает обращение и ждёт с себя, а не с t0.
+        await self.say(at=t1)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"], row["last_in_at"]),
+                         ("new", t1, t1))
+        self.assertEqual([r["id"] for r in await self.crm.inbox_threads()], [tid])
+
+        # Спам - тоже.
+        await self.crm.update_inbox_thread(tid, status="spam")
+        self.assertIsNone((await self.row(tid))["waiting_since"])
+
+        # Разобранное из версии до правки хранило старое ожидание - новый
+        # вопрос всё равно ждёт с себя.
+        await self.pool.execute("update crm.inbox_threads set status = 'done', "
+                                "waiting_since = $2 where id = $1", tid, t0)
+        await self.say(at=t2)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"]), ("new", t2))
+        # Второе «алло?» ожидание не сдвигает.
+        await self.say(at=t3)
+        self.assertEqual((await self.row(tid))["waiting_since"], t2)
+
+        # Ответ в разобранное ожидания не ставит и обращение не открывает.
+        await self.crm.update_inbox_thread(tid, status="done")
+        await self.say(direction="out", author="staff:admin", announce=False)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"]), ("done", None))
+
+    async def test_team_signal_when_someone_starts_waiting(self):
+        """Сигнал в чат - когда человек начинает ждать: новое обращение,
+        первое входящее после ответа, возврат из разобранных. Второе
+        «алло?» подряд и спам сигнала не дают."""
+        tid = (await self.say())["thread_id"]
+
+        async def signal():
+            return tid in [t["id"] for t in await self.crm.inbox_to_announce()]
+
+        async def seen():
+            await self.crm.update_inbox_thread(tid, announced_at=datetime.now(UTC))
+
+        self.assertTrue(await signal(), "новое обращение")
+        await seen()
+        await self.say()
+        self.assertFalse(await signal(), "второе «алло?» подряд")
+        await self.crm.update_inbox_thread(tid, status="work")
+        await self.say()
+        self.assertFalse(await signal(), "взяли в работу, но не ответили - всё ещё ждёт")
+
+        # Ответ из панели снял ожидание - следующий вопрос снова сигналит.
+        reply = await self.crm.queue_inbox_reply(tid, body_enc="r1", author="staff:admin")
+        await self.crm.claim_inbox_out()
+        await self.crm.finish_inbox_out(reply, ok=True)
+        await self.say()
+        self.assertTrue(await signal(), "первое входящее после ответа")
+        await seen()
+
+        # Ответ не ушёл - человек ждёт, как ждал: сигнала нет.
+        failed = await self.crm.queue_inbox_reply(tid, body_enc="r2", author="staff:admin")
+        await self.crm.claim_inbox_out()
+        await self.crm.finish_inbox_out(failed, ok=False, error="bot was blocked")
+        await self.say()
+        self.assertFalse(await signal())
+
+        # «Ответил вне панели» - тоже ответ; вопрос в поддержку (announce=False)
+        # сигнала не просит, у него своя карточка в чате.
+        await service.inbox_answered_elsewhere(self.crm, await self.crm.inbox_thread(tid),
+                                               by="staff:admin")
+        await self.say(announce=False)
+        self.assertFalse(await signal())
+        await self.say()
+        self.assertFalse(await signal(), "вопрос в поддержку уже поставил ожидание")
+
+        # Событие без сигнала ожидания не ставит и сигнал не просит.
+        await self.say(direction="out", author="staff:admin", announce=False)
+        await self.say(direction="event", body_enc="анкета", announce=False)
+        self.assertFalse(await signal())
+        self.assertIsNone((await self.row(tid))["waiting_since"])
+
+        # Возврат из разобранных - сигнал.
+        await self.crm.update_inbox_thread(tid, status="done")
+        await self.say()
+        self.assertTrue(await signal(), "возврат из разобранных")
+        await seen()
+
+        # Спам: ни после ответа, ни после «разобрано» - никогда.
+        await self.say(direction="out", author="staff:admin", announce=False)
+        await self.crm.update_inbox_thread(tid, status="spam")
+        await self.say()
+        self.assertFalse(await signal())
+        self.assertEqual((await self.row(tid))["status"], "spam")
+
+    async def test_avito_chat_started_by_us_signals_when_the_client_answers(self):
+        t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
+        chat = {"channel": "avito", "origin": "avito_api", "ext_id": "chat-9"}
+        mine = await self.crm.inbox_record(**chat, direction="out", msg_id="a1",
+                                           author="avito-app", announce=False)
+        tid = mine["thread_id"]
+        self.assertEqual(await self.crm.inbox_to_announce(), [])
+        await self.crm.inbox_record(**chat, direction="in", msg_id="a2", body_enc="e2",
+                                    at=t0)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"], row["announced_at"]),
+                         ("work", t0, None))
+        self.assertEqual([t["id"] for t in await self.crm.inbox_to_announce()], [tid])
+        self.assertEqual(await self.crm.inbox_open_count(), 1)
+
+    async def test_claim_stamps_the_time_and_stuck_fails_only_after_the_limit(self):
+        tids = [(await self.say(ext_id=f"+7999000000{n}"))["thread_id"] for n in range(5)]
+        queued = [await self.crm.queue_inbox_reply(t, body_enc=f"e{n}", author="staff:admin")
+                  for n, t in enumerate(tids)]
+        self.assertIsNone((await self.message(queued[0]))["claimed_at"], "в очереди не взят")
+        got = await self.crm.claim_inbox_out()
+        now = await self.pool.fetchval("select now()")
+        self.assertEqual(got["id"], queued[0])
+        self.assertIsNotNone(got["claimed_at"])
+        self.assertLessEqual(got["claimed_at"], now)
+        self.assertGreater(got["claimed_at"], now - timedelta(minutes=1))
+        self.assertEqual((await self.message(queued[0]))["claimed_at"], got["claimed_at"])
+        for _ in range(3):
+            await self.crm.claim_inbox_out()
+        long_stuck, fresh, legacy_old, legacy_new, waiting = queued
+
+        # Взят полчаса назад; взят только что, хотя в очереди простоял час
+        # (бот лежал); «отправляется» из версии без отметки - по времени
+        # заведения; в очереди давно, но не взят - не трогается вовсе.
+        hour_ago = now - timedelta(hours=1)
+        await self.pool.execute("update crm.inbox_messages set claimed_at = $2 "
+                                "where id = $1", long_stuck, now - timedelta(minutes=30))
+        await self.pool.execute("update crm.inbox_messages set created_at = $2 "
+                                "where id = any($1::bigint[])", [fresh, waiting], hour_ago)
+        await self.pool.execute("update crm.inbox_messages set claimed_at = null, "
+                                "created_at = $2 where id = $1", legacy_old, hour_ago)
+        await self.pool.execute("update crm.inbox_messages set claimed_at = null "
+                                "where id = $1", legacy_new)
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(older_minutes=10), 2)
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(older_minutes=10), 0)
+        status = {r["id"]: r["status"] for r in await self.pool.fetch(
+            "select id, status from crm.inbox_messages where direction = 'out'")}
+        self.assertEqual(status, {long_stuck: "failed", fresh: "sending",
+                                  legacy_old: "failed", legacy_new: "sending",
+                                  waiting: "queued"})
+        msg = await self.message(long_stuck)
+        self.assertEqual(msg["error"], "неизвестно, ушло ли: отправка прервалась")
+        self.assertIsNotNone(msg["sent_at"])
+        row = await self.row(tids[0])
+        self.assertIsNotNone(row["waiting_since"], "неизвестно, ушло ли, - ожидание не снято")
+        self.assertIsNone(row["last_out_at"])
+
+        # Очередь обращения больше не стоит: новый ответ ставится, а у
+        # всё ещё отправляемого - нет.
+        self.assertIsNotNone(await self.crm.queue_inbox_reply(tids[0], body_enc="e0b",
+                                                              author="staff:admin"))
+        self.assertIsNone(await self.crm.queue_inbox_reply(tids[1], body_enc="e1b",
+                                                           author="staff:admin"))
+        # Поздний итог застрявшего не переписывает «неизвестно, ушло ли».
+        self.assertFalse(await self.crm.finish_inbox_out(long_stuck, ok=True))
+        # Без предела (перезапуск процесса) - все «отправляется».
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(), 2)
+        self.assertEqual(await self.count("inbox_messages", "status = 'sending'"), 0)
+        self.assertEqual(await self.count("inbox_messages", "status = 'queued'"), 2)
+
+    async def test_retry_waits_for_the_reply_in_flight(self):
+        tid = (await self.say())["thread_id"]
+        first = await self.crm.queue_inbox_reply(tid, body_enc="enc-1", author="staff:admin")
+        await self.crm.claim_inbox_out()
+        await self.crm.finish_inbox_out(first, ok=False, error="нет связи")
+        before = await self.message(first)
+        second = await self.crm.queue_inbox_reply(tid, body_enc="enc-2", author="staff:admin")
+        self.assertIsNotNone(second, "не ушедший очередь не держит")
+
+        # Пока в обращении есть ответ в очереди или в отправке - повтора нет,
+        # и строка не тронута.
+        self.assertIsNone(await self.crm.inbox_retry(first, author="staff:boss"))
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], second)
+        self.assertIsNone(await self.crm.inbox_retry(first, author="staff:boss"))
+        with self.assertRaises(service.ServiceError):
+            await service.inbox_retry(self.crm, first, by="staff:boss")
+        self.assertEqual(await self.message(first), before)
+
+        # Ушло - теперь повтор ставит ту же строку, с новым автором и без итога.
+        self.assertTrue(await self.crm.finish_inbox_out(second, ok=True))
+        self.assertEqual(await service.inbox_retry(self.crm, first, by="staff:boss"), first)
+        msg = await self.message(first)
+        self.assertEqual((msg["status"], msg["author"], msg["error"], msg["sent_at"],
+                          msg["claimed_at"], msg["body_enc"], msg["created_at"]),
+                         ("queued", "staff:boss", None, None, None, "enc-1",
+                          before["created_at"]))
+        claimed = await self.crm.claim_inbox_out()
+        self.assertEqual(claimed["id"], first)
+        self.assertIsNotNone(claimed["claimed_at"], "взятие ставит отметку заново")
+        self.assertEqual(await self.count("inbox_messages", "direction = 'out'"), 2)
+
+        # Не ушедший без текста повторять нечем.
+        await self.crm.finish_inbox_out(first, ok=True)
+        blank = await self.pool.fetchval(
+            "insert into crm.inbox_messages (thread_id, direction, status, error) "
+            "values ($1, 'out', 'failed', 'нет ключа') returning id", tid)
+        self.assertIsNone(await self.crm.inbox_retry(blank, author="staff:boss"))
+        self.assertEqual((await self.message(blank))["status"], "failed")
+
+    async def test_two_clicks_on_retry_queue_one_message(self):
+        # Одна строка, два нажатия - одно в очереди.
+        one = (await self.say(ext_id="+79990000001"))["thread_id"]
+        mid = await self.crm.queue_inbox_reply(one, body_enc="e", author="staff:admin")
+        await self.crm.claim_inbox_out()
+        await self.crm.finish_inbox_out(mid, ok=False, error="нет")
+        got = await asyncio.gather(*(self.crm.inbox_retry(mid, author=f"staff:{n}")
+                                     for n in range(4)))
+        self.assertEqual(sorted(got, key=lambda v: v is None), [mid, None, None, None])
+
+        self.assertEqual((await self.crm.claim_inbox_out())["id"], mid)
+        await self.crm.finish_inbox_out(mid, ok=True)
+
+        # Два разных не ушедших одного обращения - в очередь встаёт один.
+        two = (await self.say(ext_id="+79990000002"))["thread_id"]
+        failed = []
+        for n in range(2):
+            m = await self.crm.queue_inbox_reply(two, body_enc=f"e{n}", author="staff:admin")
+            await self.crm.claim_inbox_out()
+            await self.crm.finish_inbox_out(m, ok=False, error="нет")
+            failed.append(m)
+        got = await asyncio.gather(*(self.crm.inbox_retry(m, author="staff:boss")
+                                     for m in failed))
+        self.assertEqual(sum(g is not None for g in got), 1)
+        self.assertEqual(await self.count("inbox_messages",
+                                          "thread_id = $1 and status = 'queued'", two), 1)
+        self.assertEqual(await self.count("inbox_messages",
+                                          "thread_id = $1 and status = 'failed'", two), 1)
+
+    async def test_rows_from_before_the_fix_get_the_new_columns(self):
+        """Прод до правки: колонок client_manual и claimed_at нет. Схема
+        добавляет их поверх живых строк, и правила работают на старых."""
+        await self.seed()
+        await self.pool.execute("alter table crm.inbox_threads drop column client_manual; "
+                                "alter table crm.inbox_messages drop column claimed_at")
+        long_ago = datetime.now(UTC) - timedelta(hours=1)
+        tid = await self.pool.fetchval(
+            "insert into crm.inbox_threads (channel, origin, ext_id, client_id, status, "
+            "waiting_since) values ('wa', 'hook', '+79990000000', $1, 'done', $2) "
+            "returning id", self.client_id, long_ago)
+        stuck = await self.pool.fetchval(
+            "insert into crm.inbox_messages (thread_id, direction, body_enc, status, "
+            "created_at) values ($1, 'out', 'e', 'sending', $2) returning id", tid, long_ago)
+        await Database(self.pool).apply_schema(SCHEMA)
+
+        row = await self.row(tid)
+        self.assertIs(row["client_manual"], False)
+        self.assertIsNone((await self.message(stuck))["claimed_at"])
+        self.assertEqual(await self.crm.fail_stuck_inbox_out(older_minutes=10), 1)
+        at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+        await self.say(ext_id="+79990000000", at=at)
+        row = await self.row(tid)
+        self.assertEqual((row["status"], row["waiting_since"], row["client_id"]),
+                         ("new", at, self.client_id))
+        await service.inbox_link_client(self.crm, await self.crm.inbox_thread(tid), "",
+                                        by="staff:admin")
+        await self.say(ext_id="+79990000000", client_id=self.client_id)
+        self.assertIsNone((await self.row(tid))["client_id"])
+
+    async def test_fake_crm_follows_the_same_rules(self):
+        """Новые правила FakeCrm - те же, что у настоящих запросов."""
+        fake = FakeCrm()
+
+        async def age_fake(claimed, legacy, at):
+            for mid in claimed:
+                fake.inbox_messages_[mid]["claimed_at"] = at
+            for mid in legacy:
+                fake.inbox_messages_[mid].update(claimed_at=None, created_at=at)
+
+        async def age_real(claimed, legacy, at):
+            await self.pool.execute("update crm.inbox_messages set claimed_at = $2 "
+                                    "where id = any($1::bigint[])", claimed, at)
+            await self.pool.execute("update crm.inbox_messages set claimed_at = null, "
+                                    "created_at = $2 where id = any($1::bigint[])",
+                                    legacy, at)
+
+        real_steps, real_picture = await _inbox_rules_story(self.crm, age_real)
+        fake_steps, fake_picture = await _inbox_rules_story(fake, age_fake)
+        self.assertEqual(fake_steps, real_steps)
+        self.assertEqual(fake_picture, real_picture)
+
+        # И сама история - та, что задумана, а не просто одинаковая.
+        (created, forged_in, forged_out, gateway, gateway_poll, own_poll, first_pending,
+         *rest) = real_steps
+        self.assertEqual((created, forged_in, forged_out, gateway, gateway_poll, own_poll),
+                         ((True, True), None, None, (True, True), None, (False, True)))
+        self.assertEqual(first_pending, [("avito", "chat-1"), ("avito", "gw-1")])
+        (started_by_us, client_answered, answered_again, wa_new, relinked, unlinked,
+         done, reopened, replied, first_after_reply, second_after_reply, spam,
+         after_spam, never_claimed, claims, stuck, stuck_again, busy, retried,
+         busy_after_retry, reclaimed, refinished, blocker, refused, other_retried,
+         restart) = rest
+        self.assertEqual(started_by_us, (("work", None, False, None, False), []))
+        self.assertEqual(client_answered, (("work", "t2", True, None, False),
+                                           [("avito", "chat-2")]))
+        self.assertEqual(answered_again, (("work", "t2", False, None, False), []))
+        self.assertEqual(wa_new, ("new", "t0", True, "Иванов Иван", False))
+        self.assertEqual(relinked, (("new", "t0", False, "Иванова Мария", True), []))
+        self.assertEqual(unlinked, ("new", "t0", False, None, True))
+        self.assertEqual(done, (("done", None, False, None, True), 3),
+                         "ждут только два чата Авито и чат, начатый нами")
+        self.assertEqual(reopened, (("new", "t3", True, None, True),
+                                    [("wa", "+79990000000")]))
+        self.assertEqual(replied, ("work", None, False, None, True))
+        self.assertEqual(first_after_reply, (("work", "t4", True, None, True),
+                                             [("wa", "+79990000000")]))
+        self.assertEqual(second_after_reply, [])
+        self.assertEqual(spam, ("spam", None, False, None, True))
+        self.assertEqual(after_spam, [])
+        self.assertIsNone(never_claimed)
+        self.assertEqual(claims, [(True, "sending", True)] * 3)
+        self.assertEqual((stuck, stuck_again, busy, retried, busy_after_retry),
+                         (2, 0, None, True, None))
+        self.assertEqual((reclaimed, refinished, blocker, refused, other_retried, restart),
+                         (True, True, True, None, True, 1))
+        threads = real_picture["threads"]
+        self.assertEqual(threads[("avito", "chat-1")]["name"], "Пётр")
+        self.assertIsNone(threads[("avito", "chat-1")]["phone"])
+        self.assertEqual([m[1] for m in threads[("avito", "chat-1")]["messages"]],
+                         ["a1", "a2"])
+        self.assertEqual([m[1] for m in threads[("avito", "gw-1")]["messages"]], [None])

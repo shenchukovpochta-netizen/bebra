@@ -4,13 +4,13 @@
 <div class="bar"><h1>{{ t.no }} · {{ t.channel_label }}</h1>
   <a class="btn ghost" href="/inbox">← Входящие</a>
 </div>
-<div class="grid2">
+<div class="cols">
 <section class="card">
   <h2>{{ t.who }}</h2>
   <dl>
     <dt>Канал</dt><dd>{{ t.channel_label }}{% if t.origin == 'hook' %} <span class="muted">(через шлюз)</span>{% endif %}</dd>
     {% if t.name %}<dt>Имя в канале</dt><dd>{{ t.name }}</dd>{% endif %}
-    {% if t.username %}<dt>Telegram</dt><dd>{% if links.tg %}<a href="{{ links.tg }}" target="_blank" rel="noopener noreferrer">@{{ t.username }}</a>{% else %}@{{ t.username }}{% endif %}</dd>{% endif %}
+    {% if t.username %}<dt>{% if t.channel == 'tg' %}Telegram{% else %}Логин в {{ t.channel_label }}{% endif %}</dt><dd>{% if links.tg %}<a href="{{ links.tg }}" target="_blank" rel="noopener noreferrer">@{{ t.username }}</a>{% else %}@{{ t.username }}{% endif %}</dd>{% endif %}
     {% if t.phone %}<dt>Телефон</dt><dd>{{ t.phone }}{% if links.wa %} · <a href="{{ links.wa }}" target="_blank" rel="noopener noreferrer">WhatsApp</a>{% endif %}</dd>{% endif %}
     {% if t.subject %}<dt>Тема</dt><dd>{% if links.avito %}<a href="{{ links.avito }}" target="_blank" rel="noopener noreferrer">{{ t.subject }}</a>{% else %}{{ t.subject }}{% endif %}</dd>{% endif %}
     {% if bot_state %}<dt>В боте</dt><dd>{{ bot_state.label }}</dd>{% endif %}
@@ -25,10 +25,19 @@
     <input name="note" value="{{ t.note or '' }}" placeholder="заметка" maxlength="2000">
     <button type="submit">Сохранить</button>
   </form>
+  {% if can_view(staff, 'clients') %}
   <form method="post" action="/inbox/{{ t.id }}/client" class="inline-form">
-    <input name="client" placeholder="№ карточки или телефон" size="18">
+    <input name="client" placeholder="№ карточки или телефон" size="18" required>
     <button type="submit" class="ghost">Привязать к клиенту</button>
   </form>
+  {% if t.client_id %}
+  <form method="post" action="/inbox/{{ t.id }}/client" class="inline-form">
+    <input type="hidden" name="client" value="">
+    <button type="submit" class="ghost">Отвязать от карточки</button>
+  </form>
+  {% endif %}
+  {% if t.client_manual %}<p class="muted"><small>Карточку выбрали вручную — автопривязка по телефону её не меняет.</small></p>{% endif %}
+  {% endif %}
   {% if can_view(staff, 'issue') %}
   <p>{% if t.client_id %}<a class="btn" href="/issue?client={{ t.client_id }}">Оформить выдачу</a>{% elif t.phone %}<a class="btn" href="/issue?phone={{ t.phone|urlencode }}">Оформить выдачу</a>{% endif %}</p>
   {% endif %}
@@ -38,10 +47,11 @@
 <section class="card">
   <h2>Переписка</h2>
   <div class="thread">
-    {% for m in messages %}
+    {# От новых к старым: .thread рисует column-reverse, см. style.css. #}
+    {% for m in messages|reverse %}
     <div class="msg {{ m.direction }}">
       <small class="muted">{{ m.created_at|dmy }}{% if m.direction == 'out' %} · {{ m.author or '' }} · {{ INBOX_OUT_STATUSES.get(m.status, m.status) }}{% if m.error %}: {{ m.error }}{% endif %}{% endif %}</small>
-      <div>{% if m.direction == 'event' %}<i>{{ m.text or '[событие]' }}</i>{% elif m.text %}{{ m.text }}{% elif m.direction == 'out' and not m.body_enc %}<i>ответили вне панели</i>{% else %}[{{ INBOX_KINDS.get(m.kind, m.kind) }}]{% endif %}</div>
+      <div class="body">{% if m.direction == 'event' %}<i>{{ m.text or '[событие]' }}</i>{% elif m.text %}{{ m.text }}{% elif m.direction == 'out' and not m.body_enc %}<i>ответили вне панели</i>{% else %}[{{ INBOX_KINDS.get(m.kind, m.kind) }}]{% endif %}</div>
       {% if m.status == 'failed' and can_edit(staff, 'inbox') %}
       <form method="post" action="/inbox/{{ t.id }}/out/{{ m.id }}/again" class="inline-form"><button type="submit" class="ghost">Отправить ещё раз</button></form>
       {% endif %}
@@ -52,7 +62,7 @@
   {% if can_reply %}
   <form method="post" action="/inbox/{{ t.id }}/reply">
     <input type="hidden" name="once" value="{{ once() }}">
-    <textarea name="text" rows="4" maxlength="{{ reply_limit }}" required placeholder="Ответ уйдёт в {{ t.channel_label }} от имени бота"></textarea>
+    <textarea name="text" rows="4" maxlength="{{ reply_limit }}" required placeholder="Ответ уйдёт в {{ t.channel_label }} от имени бота">{{ draft or '' }}</textarea>
     <button type="submit">Ответить</button>
   </form>
   {% else %}

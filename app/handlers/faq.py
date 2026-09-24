@@ -142,13 +142,14 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
         t = faq_i18n.T.get(lang, {})
         await bot.send_message(tg_id, t.get("contact",
                                             texts.FAQ_GUEST_CONTACT))
-        # Гостю вопрос в поддержку не задать - но во «Входящих» видно,
-        # что человеку нужен человек, и ответить ему можно оттуда.
+        # Без режима вопроса (регистрация не пройдена или человек посреди
+        # сценария) вопрос в поддержку не задать - но во «Входящих» видно,
+        # что ему нужен человек, и ответить ему можно оттуда.
         # Одна отметка на тему в сутки: повторные нажатия - не новые обращения.
         sender = callback.from_user
         await inbox.record(
             crm, cfg, channel="tg", origin="bot", ext_id=tg_id, direction="event",
-            kind="other", text=f"Гость нажал тему «{intent.title}»",
+            kind="other", text=f"Нажал тему «{intent.title}» - нужен человек",
             msg_id=f"faq:{intent.code}:{datetime.now().date().isoformat()}",
             name=data.get("full_name") or (sender.full_name if sender else None),
             username=data.get("username") or (sender.username if sender else None),

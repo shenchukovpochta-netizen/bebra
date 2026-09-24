@@ -354,7 +354,12 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
              margin:8px 0;font-size:13px}
 .saved-views .inline-form{display:inline-flex;gap:4px;margin:0}
 /* Входящие: лента переписки */
-.thread{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;max-height:60vh;overflow:auto}
-.thread .msg{border:1px solid var(--line,#ddd);border-radius:8px;padding:6px 10px;max-width:85%;white-space:pre-wrap;word-break:break-word}
-.thread .msg.out{align-self:flex-end;background:var(--brand-pale)}
+/* Лента идёт в DOM от новых к старым, а column-reverse рисует её сверху
+   вниз и открывает прокрутку снизу: последнее сообщение видно сразу,
+   без скрипта. */
+.thread{display:flex;flex-direction:column-reverse;gap:8px;margin-bottom:12px;max-height:60vh;overflow:auto}
+.thread .msg{border:1px solid var(--line,#ddd);border-radius:8px;padding:6px 10px;max-width:85%;word-break:break-word}
+.thread .msg .body{white-space:pre-wrap}
+.thread .msg.out{align-self:flex-end;background:var(--brand-pale);color:#3A1A08}
+@media (prefers-color-scheme:dark){.thread .msg.out{background:#4A2412;color:#FFD0B8}}
 .thread .msg.event{align-self:center;border-style:dashed}

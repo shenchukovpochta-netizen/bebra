@@ -1914,9 +1914,14 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
     Карточка ищется по tg_id, по аккаунту MAX и по телефону - привязка
     сразу видна в списке, и администратор не гадает, клиент это или нет.
     """
-    ext = str(ext_id or "").strip()[:100]
+    ext = str(ext_id or "").replace("\x00", "").strip()[:100]
     if not ext:
         raise ServiceError("Нет адреса собеседника.")
+    # Время от шлюза - его слово: из будущего оно держало бы обращение
+    # первым в списке и вне срока чистки.
+    now = datetime.now(UTC)
+    if at is not None and at > now:
+        at = now
     client = None
     if channel == "tg" and ext.isdigit():
         client = await crm.client_by_tg(int(ext))
@@ -1925,15 +1930,18 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
     norm = bot_logic.normalize_phone(phone) if phone else None
     if client is None and norm:
         client = await crm.client_by_phone(norm)
-    return await crm.inbox_record(
+    got = await crm.inbox_record(
         channel=channel, origin=origin, ext_id=ext, direction=direction, kind=kind,
-        msg_id=str(msg_id)[:100] if msg_id is not None else None,
+        msg_id=logic._cut(msg_id, 100) if msg_id is not None else None,
         body_enc=inbox_seal(vault, (text or "")[:logic.INBOX_TEXT_MAX] or None),
-        author=author, name=(name or "").strip()[:logic.INBOX_NAME_MAX] or None,
-        username=(username or "").lstrip("@").strip()[:64] or None, phone=norm,
-        subject=(subject or "").strip()[:logic.INBOX_SUBJECT_MAX] or None,
+        author=author, name=logic._cut(name, logic.INBOX_NAME_MAX),
+        username=logic._cut(str(username or "").lstrip("@"), 64), phone=norm,
+        subject=logic._cut(subject, logic.INBOX_SUBJECT_MAX),
         subject_url=logic.safe_avito_url(subject_url),
         client_id=client["id"] if client else None, at=at, announce=announce)
+    if got is None:
+        raise ServiceError("Это обращение заведено другим источником того же канала.")
+    return got
 
 
 async def inbox_reply(crm: Any, vault: Vault | None, thread: dict, text: Any, *,
@@ -1976,9 +1984,11 @@ async def inbox_link_client(crm: Any, thread: dict, raw: Any, *, by: str) -> dic
     """Привязать обращение к карточке: номер карточки или телефон.
     Пусто - отвязать."""
     text = str(raw or "").strip()
+    # Ручная привязка и отвязка помечаются: следующее сообщение не вернёт
+    # карточку, найденную по общему телефону.
     if not text:
-        await crm.update_inbox_thread(thread["id"], client_id=None, handled_by=by,
-                                      handled_at=datetime.now(UTC))
+        await crm.update_inbox_thread(thread["id"], client_id=None, client_manual=True,
+                                      handled_by=by, handled_at=datetime.now(UTC))
         return None
     client = None
     if text.isdigit() and len(text) <= 9:
@@ -1988,8 +1998,8 @@ async def inbox_link_client(crm: Any, thread: dict, raw: Any, *, by: str) -> dic
         client = await crm.client_by_phone(phone) if phone else None
     if client is None:
         raise ServiceError("Клиента с таким номером карточки или телефоном нет.")
-    await crm.update_inbox_thread(thread["id"], client_id=client["id"], handled_by=by,
-                                  handled_at=datetime.now(UTC))
+    await crm.update_inbox_thread(thread["id"], client_id=client["id"], client_manual=True,
+                                  handled_by=by, handled_at=datetime.now(UTC))
     return client
 
 

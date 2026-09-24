@@ -2333,6 +2333,10 @@ create index if not exists inbox_threads_phone_idx
   on crm.inbox_threads (phone) where phone is not null;
 create index if not exists inbox_threads_announce_idx
   on crm.inbox_threads (id) where announced_at is null;
+-- Карточку привязал или отвязал человек: автопривязка по телефону следующим
+-- сообщением её не переписывает (общий номер у родственников).
+alter table crm.inbox_threads add column if not exists client_manual boolean
+  not null default false;
 
 -- Лента обращения: входящие, события («анкета на проверке») и ответы.
 -- Ответ из панели - это и есть очередь процесса бота. Текст - шифротекст
@@ -2368,5 +2372,9 @@ create index if not exists inbox_messages_thread_idx
   on crm.inbox_messages (thread_id, id);
 create index if not exists inbox_messages_queue_idx
   on crm.inbox_messages (id) where status = 'queued';
+-- Когда процесс бота взял ответ в работу: «отправляется» дольше нескольких
+-- минут - сбой записи итога, и очередь обращения не должна стоять до
+-- перезапуска бота.
+alter table crm.inbox_messages add column if not exists claimed_at timestamptz;
 create index if not exists inbox_messages_created_idx
   on crm.inbox_messages (created_at);

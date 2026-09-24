@@ -5,6 +5,9 @@ TestClient (обвязка из tests/test_web.py).
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import re
 import sys
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -89,6 +92,44 @@ class TestAccessLogic(unittest.TestCase):
         self.assertTrue(logic.can_edit(tech, "bikes"))
         self.assertFalse(logic.can_view(tech, "finance"), "механик денег не видит")
         self.assertFalse(logic.can_act(tech, "money_edit"))
+
+    def test_inbox_section_is_found_by_path(self):
+        """«Входящие» - свой раздел: страж берёт его по адресу, как любой
+        другой, и формы карточки обращения закрыты тем же правом."""
+        self.assertIn("inbox", logic.SECTIONS)
+        self.assertIn(("/inbox", "inbox"), logic.SECTION_PATHS)
+        for path in ("/inbox", "/inbox/7", "/inbox/7/reply", "/inbox/7/status",
+                     "/inbox/7/client", "/inbox/7/answered", "/inbox/7/out/3/again"):
+            self.assertEqual(logic.section_for(path), "inbox", path)
+        self.assertIsNone(logic.section_for("/inboxes"), "префикс не цепляет чужой адрес")
+        # Хук - не раздел панели: сотрудника у шлюза нет, защита у него своя.
+        self.assertIsNone(logic.section_for("/hook/inbox"))
+        self.assertEqual(logic.home_for(staff(inbox="view")), "/inbox")
+
+    def test_inbox_is_owner_only_by_default(self):
+        """Переписка с клиентами - ПДн: из встроенных профилей её видит
+        только «Владелец», остальным раздел открывают руками."""
+        profiles = {code: {"perms": perms}
+                    for code, _name, perms, _built in logic.BUILT_IN_PROFILES}
+        self.assertTrue(logic.can_edit(profiles["owner"], "inbox"))
+        for code in ("manager", "tech"):
+            self.assertNotIn("inbox", profiles[code]["perms"]["sections"], code)
+            self.assertFalse(logic.can_view(profiles[code], "inbox"), code)
+            self.assertNotIn("inbox", logic.visible_sections(profiles[code]), code)
+
+    def test_schema_profiles_agree_on_inbox(self):
+        """В базу встроенные профили кладёт литерал schema.sql, а не код:
+        раздел, забытый в литерале, владелец не увидел бы вовсе."""
+        schema = (Path(__file__).resolve().parent.parent / "schema.sql").read_text("utf-8")
+        found = dict(re.findall(
+            r"\('(owner|manager|tech)',\s*'[^']*',\s*'(\{.*?\})'::jsonb", schema))
+        self.assertEqual(set(found), {"owner", "manager", "tech"})
+        owner = json.loads(found["owner"])["sections"]
+        self.assertEqual(owner.get("inbox"), "edit")
+        self.assertEqual(set(owner), set(logic.SECTIONS),
+                         "у владельца в базе должны быть все разделы кода")
+        for code in ("manager", "tech"):
+            self.assertNotIn("inbox", json.loads(found[code])["sections"], code)
 
     def test_home_for_a_narrow_profile(self):
         self.assertEqual(logic.home_for(staff(dashboard="view", bikes="edit")), "/")
@@ -429,6 +470,52 @@ class TestAccessInPanel(tw.WebCase):
         self.assertEqual(admin["profile_code"], "owner")
         self.assertTrue(admin["profile_built_in"])
         self.assertEqual(logic.visible_sections(admin), list(logic.SECTIONS))
+
+
+@unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
+class TestInboxHookIsPublic(tw.WebCase):
+    """Хук «Входящих» открыт без входа в панель: у шлюза WhatsApp и n8n
+    сотрудника нет. Страж входа его не заворачивает на /login - отвечает
+    сам хук своим токеном. Сама лента при этом закрыта, как любой раздел."""
+
+    TOKEN = "hook-token-access"
+
+    def build(self, **over):
+        self.cfg = dataclasses.replace(self.cfg, **over)
+        self.app = tw.create_app(crm=self.crm, db=self.db, cfg=self.cfg, bot=self.bot)
+        self.client = tw.TestClient(self.app, follow_redirects=False)
+
+    def test_hook_prefix_is_in_public(self):
+        from app.web import app as web_app
+        self.assertTrue("/hook/inbox".startswith(web_app.PUBLIC))
+        for path in ("/inbox", "/inbox/1", "/inbox/1/reply"):
+            self.assertFalse(path.startswith(web_app.PUBLIC), path)
+
+    def test_anonymous_hook_is_answered_by_the_hook_not_the_login(self):
+        # токена нет - хука нет, но и не редирект на вход
+        r = self.client.post("/hook/inbox", json={})
+        self.assertEqual(r.status_code, 404)
+        self.assertNotIn("location", r.headers)
+        self.build(inbox_hook_token=self.TOKEN)
+        r = self.client.post("/hook/inbox", json={})
+        self.assertEqual(r.status_code, 401)
+        self.assertNotIn("location", r.headers)
+        r = self.client.post("/hook/inbox", json={},
+                             headers={"Authorization": f"Bearer {self.TOKEN}"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+        self.assertNotIn("set-cookie", r.headers, "хук сессию не заводит")
+
+    def test_inbox_pages_still_need_login(self):
+        self.build(inbox_hook_token=self.TOKEN)
+        for path in ("/inbox", "/inbox/1"):
+            r = self.client.get(path)
+            self.assertEqual(r.status_code, 303, path)
+            self.assertTrue(r.headers["location"].startswith("/login?next="), path)
+        r = self.client.post("/inbox/1/reply", data={"text": "x"},
+                             headers={"Authorization": f"Bearer {self.TOKEN}"})
+        self.assertEqual(r.status_code, 303, "токен хука - не вход в панель")
+        self.assertTrue(r.headers["location"].startswith("/login"))
 
 
 if __name__ == "__main__":

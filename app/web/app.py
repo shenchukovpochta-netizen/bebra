@@ -1911,6 +1911,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         thread = await inbox_or_404(request, thread_id)
         if thread is None:
             return render(request, "missing.html", status_code=404, what="Обращение")
+        return await inbox_card_page(request, thread)
+
+    async def inbox_card_page(request: Request, thread: dict, *, draft: str = "",
+                              status_code: int = 200) -> Response:
+        thread_id = int(thread["id"])
         messages = []
         for m in await crm.inbox_messages(thread_id):
             messages.append({**m, "text": service.inbox_open(inbox_vault, m.get("body_enc"))})
@@ -1926,8 +1931,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       inbox_vault is not None, why=why if not can_reply else (
                           "" if inbox_vault is not None else
                           "Не задан ключ INBOX_KEY - ответ негде хранить."),
-                      bot_state=bot_state, avito=avito,
-                      reply_limit=logic.INBOX_REPLY_LIMITS.get(thread["channel"], 3500))
+                      bot_state=bot_state, avito=avito, draft=draft,
+                      reply_limit=logic.INBOX_REPLY_LIMITS.get(thread["channel"], 3500),
+                      status_code=status_code)
 
     @app.post("/inbox/{thread_id}/reply")
     async def inbox_reply(request: Request, thread_id: int) -> Response:
@@ -1944,8 +1950,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                       by=who(request),
                                       avito_ok=(await inbox_avito())["live"])
         except service.ServiceError as exc:
+            # Страница сразу, а не редирект: набранный ответ остаётся в поле.
+            # В сессию его не положить - cookie не вместит 3500 знаков.
             flash(request, str(exc), "err")
-            return redirect(back)
+            return await inbox_card_page(request, thread, status_code=400,
+                                         draft=str(data.get("text") or "")[:5000])
         flash(request, "Ответ в очереди: бот отправит его в течение минуты.")
         return redirect(back)
 
@@ -1969,6 +1978,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         thread = await inbox_or_404(request, thread_id)
         if thread is None:
             return render(request, "missing.html", status_code=404, what="Обращение")
+        if not may_view(request, "clients"):
+            # Поиск по номеру карточки или телефону показывает ФИО клиента:
+            # без раздела «Клиенты» это был бы перебор базы через обращения.
+            return denied(request, "clients")
         data = await form(request)
         try:
             client = await service.inbox_link_client(crm, thread, data.get("client"),
@@ -2016,13 +2029,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         token = str(getattr(cfg, "inbox_hook_token", "") or "")
         if not token:
             return JSONResponse({"ok": False}, status_code=404)
-        ip_key = "hook:" + client_ip(request)
-        if login_throttled(ip_key, logic.HOOK_FAIL_LIMIT):
-            return JSONResponse({"ok": False, "error": "too many attempts"},
-                                status_code=429)
         header = request.headers.get("authorization") or ""
         given = header[7:].strip() if header[:7].lower() == "bearer " else ""
-        if not given or not hmac.compare_digest(given.encode(), token.encode()):
+        valid = bool(given) and hmac.compare_digest(given.encode(), token.encode())
+        if not valid:
+            # Счёт неудач - только неверным токенам: шлюзы WhatsApp шлют с
+            # общих адресов, и чужой инстанс на том же адресе не должен
+            # запирать наш хук. Подбор 64 hex-знаков всё равно не выйдет.
+            ip_key = "hook:" + client_ip(request)
+            if login_throttled(ip_key, logic.HOOK_FAIL_LIMIT):
+                return JSONResponse({"ok": False, "error": "too many attempts"},
+                                    status_code=429)
             login_failures.setdefault(ip_key, []).append(time.monotonic())
             return JSONResponse({"ok": False}, status_code=401)
         declared = request.headers.get("content-length") or ""

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import sys
 import unittest
@@ -51,11 +52,13 @@ try:
     # проверяются одной попыткой: иначе набор падает на машине без asyncpg.
     from app import faq, logic, tasks, texts
     from app.config import Config
+    from app.crm import service as crm_service
     from app.handlers import contract, menu, moderation, registration
     from app.handlers import faq as faq_handlers
     from app.middlewares import PipelineMiddleware
     from app.services import files
     from app.services.crypto import Vault, generate_key
+    from tests.fake_crm import FakeCrm
     HAVE_AIOGRAM = True
 except ImportError:                                    # pragma: no cover
     HAVE_AIOGRAM = False
@@ -63,6 +66,7 @@ except ImportError:                                    # pragma: no cover
     # на уровне модуля, и без неё импорт падал с NameError вместо пропуска -
     # весь файл не собирался, хотя пропустить его тут и предполагается.
     BaseSession = object
+    FakeCrm = object
 
 USER_ID, CHAT_ID = 5001, 5001
 ADMIN_ID, ADMIN_CHAT = 111, -1009876543210
@@ -331,7 +335,7 @@ def make_config(**overrides) -> Config:
 
 # ─────────────────────────── сборка ───────────────────────────
 
-def build(cfg: Config | None = None):
+def build(cfg: Config | None = None, crm=None):
     # Router - объект уровня модуля, и aiogram запрещает подключать его
     # ко второму Dispatcher. Перезагружаем модули, чтобы каждый тест получил
     # собственные роутеры с теми же обработчиками.
@@ -346,7 +350,9 @@ def build(cfg: Config | None = None):
     bot = Bot("123:abc", session=session)
     vault = Vault.from_raw(cfg.pdn_key)
     dp = Dispatcher()
-    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault))
+    # crm - база CRM в памяти (tests/fake_crm.py) там, где проверяются
+    # хуки бота в неё; по умолчанию бот работает без CRM, как раньше.
+    dp.update.outer_middleware(PipelineMiddleware(db, cfg, vault, crm))
     dp.include_router(moderation.router)
     dp.include_router(contract.router)
     dp.include_router(registration.router)
@@ -2786,6 +2792,272 @@ def _async(value):
     async def _inner():
         return value
     return _inner()
+
+
+# ─────────────────────────── «Входящие» ───────────────────────────
+
+# Ключ переписки постоянный: тесты не должны зависеть от случайности.
+INBOX_KEY = base64.b64encode(bytes(range(32))).decode("ascii")
+
+
+class FailingInboxCrm(FakeCrm):
+    """CRM, у которой ломается именно запись во «Входящие»: всё остальное
+    (кабинет, карточка клиента) живо. Текст ошибки нарочно с ПДн - в лог
+    он уходить не должен."""
+
+    async def inbox_record(self, **fields):
+        raise RuntimeError("строка не записана: Иванов Иван +79990000000")
+
+
+class InboxHookCase(unittest.IsolatedAsyncioTestCase):
+    """Бот с базой CRM в памяти. Какая CRM - решает make_crm()."""
+
+    def make_crm(self):
+        return FakeCrm()
+
+    async def asyncSetUp(self):
+        self.crm = self.make_crm()
+        (self.dp, self.bot, self.db, self.session, self.cfg,
+         self.vault) = build(make_config(inbox_key=INBOX_KEY), crm=self.crm)
+        self._orig = (files.download, files.store, files.remove)
+        files.download = lambda bot, file_id, max_bytes: _async(b"bytes")
+        files.store = lambda d, tg, slot, data: (
+            Path(f"/tmp/{tg}-{slot}.{files.SLOT_EXT[slot]}"), "hash")
+        files.remove = lambda path: True
+
+    async def asyncTearDown(self):
+        files.download, files.store, files.remove = self._orig
+        await self.bot.session.close()
+
+    # помощники TestFlow - те же функции, без повторного прогона его тестов
+    feed = TestFlow.feed
+    fill_anketa = TestFlow.fill_anketa
+    register_up_to_confirm = TestFlow.register_up_to_confirm
+
+    def approved_user(self, **over):
+        """Клиент в меню с подписанным договором: минимум полей bot.users."""
+        self.db.users[USER_ID] = {
+            "tg_id": USER_ID, "username": "ivan", "state": logic.APPROVED,
+            "status": logic.ST_APPROVED, "rl_count": 0, "full_name": "Иванов Иван",
+            "phone": "+79990000000", "lang": "ru", "contract_no": "АВ-2026-000001",
+            "contract_status": logic.CT_SIGNED, "contract_path": None,
+            "issue_data": None, "rent_until": None, "extend_until": None,
+            "act_in_signed_at": None, "act_out_signed_at": None, "anketa_enc": None,
+            **over,
+        }
+        return self.db.users[USER_ID]
+
+    async def ask(self, question: str):
+        """Вопрос в поддержку тем путём, что у клиента: кнопка, затем текст."""
+        await self.feed(msg("🆘 Поддержка"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_SUPPORT)
+        await self.feed(msg(question))
+
+    async def answer_as_moderator(self, text: str):
+        card_id = self.db.users[USER_ID]["support_message_id"]
+        self.assertIsNotNone(card_id, "карточка вопроса не привязана")
+        await self.feed(msg(text, chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
+                            chat_type="supergroup", reply_to=card_id))
+
+    def texts_to(self, chat_id: int) -> list[str]:
+        return [m.text or "" for m in self.session.sent_to(chat_id)
+                if isinstance(m, SendMessage)]
+
+    def plain(self, body_enc):
+        return crm_service.inbox_open(crm_service.inbox_vault(INBOX_KEY), body_enc)
+
+    async def only_thread(self) -> tuple[dict, list[dict]]:
+        threads = await self.crm.inbox_threads()
+        self.assertEqual(len(threads), 1, threads)
+        return threads[0], await self.crm.inbox_messages(threads[0]["id"])
+
+
+@unittest.skipUnless(HAVE_AIOGRAM, "aiogram не установлен")
+class TestInboxHooks(InboxHookCase):
+    """Telegram-бот пишет во «Входящие» вопрос в поддержку, ответ на него из
+    чата модерации и отметки об анкете и заявке. Сигнал в чат не нужен
+    (announce=False): туда уже ушла сама карточка."""
+
+    async def test_support_question_opens_a_waiting_thread(self):
+        client_id = await self.crm.create_client(full_name="Иванов Иван",
+                                                 phone="+79990000000", tg_id=USER_ID)
+        self.approved_user()
+        question = "Подскажите, можно поменять время встречи на вечер?"
+        await self.ask(question)
+        thread, messages = await self.only_thread()
+        self.assertEqual((thread["channel"], thread["origin"], thread["ext_id"]),
+                         ("tg", "bot", str(USER_ID)))
+        self.assertEqual((thread["name"], thread["username"], thread["phone"]),
+                         ("Иванов Иван", "ivan", "+79990000000"))
+        self.assertEqual(thread["client_id"], client_id, "карточка найдена по tg_id")
+        intent = faq.match(question)
+        self.assertEqual(thread["subject"], intent.title if intent else None)
+        self.assertEqual(thread["status"], "new")
+        self.assertIsNotNone(thread["waiting_since"], "вопрос ждёт ответа")
+        self.assertIsNotNone(thread["announced_at"], "сигнал в чат - сама карточка")
+        self.assertEqual(await self.crm.inbox_to_announce(), [])
+        self.assertEqual(len(messages), 1)
+        m = messages[0]
+        self.assertEqual((m["direction"], m["kind"]), ("in", "text"))
+        self.assertEqual(self.plain(m["body_enc"]), question)
+        self.assertNotIn("вечер", m["body_enc"], "текст хранится зашифрованным")
+        self.assertIsNotNone(m["ext_id"], "id сообщения Telegram - защита от дубля")
+        # сам сценарий не изменился: карточка в чате, человек в меню
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
+        self.assertTrue(any(question in t for t in self.texts_to(ADMIN_CHAT)))
+
+    async def test_moderator_reply_is_recorded_as_out_and_stops_waiting(self):
+        self.approved_user()
+        await self.ask("Где забрать зарядку для аккумулятора?")
+        await self.answer_as_moderator("На Павлюхина, с 10 до 19")
+        self.assertTrue(any("На Павлюхина, с 10 до 19" in t
+                            for t in self.texts_to(USER_ID)))
+        thread, messages = await self.only_thread()
+        self.assertEqual([m["direction"] for m in messages], ["in", "out"])
+        out = messages[-1]
+        self.assertEqual(self.plain(out["body_enc"]), "На Павлюхина, с 10 до 19")
+        self.assertEqual(out["status"], "sent")
+        self.assertEqual(out["author"], f"tg:{ADMIN_ID}")
+        self.assertTrue(str(out["ext_id"]).startswith(f"mod:{ADMIN_CHAT}:"))
+        self.assertIsNone(thread["waiting_since"], "ответ из чата - тоже ответ")
+        self.assertEqual(thread["status"], "work")
+        self.assertEqual(await self.crm.inbox_to_announce(), [])
+
+    async def test_second_question_goes_to_the_same_thread(self):
+        self.approved_user()
+        await self.ask("Первый вопрос про оплату картой")
+        await self.answer_as_moderator("Можно картой")
+        await self.ask("И ещё вопрос про чек")
+        thread, messages = await self.only_thread()
+        self.assertEqual([m["direction"] for m in messages], ["in", "out", "in"])
+        self.assertIsNotNone(thread["waiting_since"], "новый вопрос снова ждёт")
+
+    async def test_anketa_submission_is_an_event(self):
+        await self.register_up_to_confirm()
+        await self.feed(cb("confirm"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.PENDING)
+        self.assertIsNotNone(row["mod_message_id"], "карточка анкеты ушла модератору")
+        thread, messages = await self.only_thread()
+        self.assertEqual((thread["channel"], thread["origin"], thread["ext_id"]),
+                         ("tg", "bot", str(USER_ID)))
+        self.assertEqual(thread["name"], "Иванов Иван Иванович")
+        self.assertEqual(thread["phone"], "+79990000000")
+        self.assertEqual(len(messages), 1)
+        event = messages[0]
+        self.assertEqual((event["direction"], event["kind"]), ("event", "other"))
+        self.assertEqual(self.plain(event["body_enc"]), "Анкета отправлена на проверку")
+        self.assertTrue(str(event["ext_id"]).startswith("anketa:"))
+        self.assertIsNone(thread["waiting_since"], "отметка - не вопрос")
+        self.assertIsNotNone(thread["announced_at"])
+        # анкета во «Входящие» не попадает: её место в модерации
+        self.assertNotIn("1234 567890", self.plain(event["body_enc"]))
+
+    async def test_rent_request_is_an_event(self):
+        self.approved_user()
+        await self.feed(msg("🚲 Арендовать"))
+        self.assertIsNotNone(self.db.users[USER_ID].get("issue_message_id"))
+        thread, messages = await self.only_thread()
+        self.assertEqual([(m["direction"], m["kind"]) for m in messages],
+                         [("event", "other")])
+        self.assertTrue(str(messages[0]["ext_id"]).startswith("rent:"))
+        self.assertIsNone(thread["waiting_since"])
+        self.assertIsNotNone(thread["announced_at"])
+
+    async def test_guest_faq_handoff_is_announced(self):
+        """Гостю вопрос в поддержку не задать - поэтому отметка о теме,
+        которой нужен человек, идёт с сигналом в чат (announce=True)."""
+        intent = next(i for i in faq.MENU_TOPICS if i.handoff and not i.red)
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO)
+        await self.feed(cb(f"faq:{intent.code}"))
+        await self.feed(cb(f"faq:{intent.code}"))
+        thread, messages = await self.only_thread()
+        self.assertEqual(len(messages), 1, "повторное нажатие за сутки - не новое")
+        self.assertEqual((messages[0]["direction"], messages[0]["kind"]),
+                         ("event", "other"))
+        self.assertIn(intent.title, self.plain(messages[0]["body_enc"]))
+        self.assertEqual(thread["subject"], intent.title)
+        self.assertIsNone(thread["announced_at"])
+        self.assertEqual([t["id"] for t in await self.crm.inbox_to_announce()],
+                         [thread["id"]])
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.WAIT_FIO,
+                         "анкета гостя не тронута")
+
+    async def test_without_inbox_key_thread_is_written_without_text(self):
+        """Ключа нет - обращение видно, текста нет: открытым он не пишется."""
+        await self.bot.session.close()
+        (self.dp, self.bot, self.db, self.session, self.cfg,
+         self.vault) = build(make_config(inbox_key=""), crm=self.crm)
+        self.approved_user()
+        await self.ask("Вопрос без ключа переписки")
+        thread, messages = await self.only_thread()
+        self.assertIsNotNone(thread["waiting_since"])
+        self.assertEqual(len(messages), 1)
+        self.assertIsNone(messages[0]["body_enc"])
+
+
+class _FlowSurvivesInbox:
+    """Сценарий бота не зависит от «Входящих»: запись best-effort."""
+
+    async def test_support_question_still_reaches_moderators(self):
+        self.approved_user()
+        await self.ask("Когда можно подъехать на Адоратского?")
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        self.assertIsNotNone(row["support_message_id"])
+        self.assertTrue(any("Когда можно подъехать на Адоратского?" in t
+                            for t in self.texts_to(ADMIN_CHAT)))
+        self.assertTrue(self.texts_to(USER_ID), "человек получил ответ бота")
+        self.assertIn("support_question", [e[1] for e in self.db.events])
+
+    async def test_support_reply_still_reaches_user(self):
+        self.approved_user()
+        await self.ask("Вопрос про тормоза")
+        await self.answer_as_moderator("Подтяните трос, или приезжайте")
+        self.assertTrue(any("Подтяните трос" in t for t in self.texts_to(USER_ID)))
+        self.assertIn(texts.SUPPORT_REPLIED, self.texts_to(ADMIN_CHAT),
+                      "модератор узнал, что ответ ушёл")
+        self.assertIn("support_answered", [e[1] for e in self.db.events])
+
+    async def test_anketa_submission_still_goes_to_moderation(self):
+        await self.register_up_to_confirm()
+        await self.feed(cb("confirm"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.PENDING)
+        self.assertIsNotNone(row["mod_message_id"])
+        self.assertIn("submitted", [e[1] for e in self.db.events])
+
+    async def test_rent_request_still_goes_to_operator(self):
+        self.approved_user()
+        await self.feed(msg("🚲 Арендовать"))
+        self.assertIsNotNone(self.db.users[USER_ID].get("issue_message_id"))
+        self.assertIn("rent_requested", [e[1] for e in self.db.events])
+
+
+@unittest.skipUnless(HAVE_AIOGRAM, "aiogram не установлен")
+class TestInboxHooksWithoutCrm(_FlowSurvivesInbox, InboxHookCase):
+    def make_crm(self):
+        return None
+
+
+@unittest.skipUnless(HAVE_AIOGRAM, "aiogram не установлен")
+class TestInboxHooksWhenRecordFails(_FlowSurvivesInbox, InboxHookCase):
+    def make_crm(self):
+        return FailingInboxCrm()
+
+    async def test_failure_is_logged_without_text(self):
+        """В лог - канал и id, без текста вопроса и без текста исключения:
+        у лога нет срока хранения, который есть у переписки."""
+        self.approved_user()
+        with self.assertLogs("app.crm.inbox", "WARNING") as logs:
+            await self.ask("Мой адрес Баумана 1, заберите велосипед")
+        joined = "\n".join(logs.output)
+        self.assertIn(str(USER_ID), joined)
+        for secret in ("Баумана", "Иванов", "+79990000000"):
+            self.assertNotIn(secret, joined)
+        self.assertEqual(await self.crm.inbox_threads(), [])
 
 
 if __name__ == "__main__":
