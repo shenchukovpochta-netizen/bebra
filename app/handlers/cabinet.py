@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import company, notices, notify, service
+from ..crm import company, notices, notify, paying, service
 from ..crm import logic as crm_logic
 from ..crm import sync as crm_sync
 from ..db import Database
@@ -92,6 +92,13 @@ async def home_text(crm: Any, client: dict, lang: str, *, today: date | None = N
             bike=logic.esc(s["bike"] or "—"), tariff=logic.esc(s["tariff_name"]),
             price=crm_logic.money(s["price"]), days=s["period_days"],
             until=s["covered_until"].strftime("%d.%m.%Y"), left=left)
+        # Что клиент сказал про срок - видно и ему: иначе он нажмёт
+        # «продлю» второй раз, не понимая, услышали ли его.
+        intent = crm_logic.intent_state(rental, s, today=today or date.today())
+        if intent.get("intent") in ("renew", "return"):
+            rental_block += "\n" + i18n.t(
+                lang, "CAB_INTENT_LINE_RENEW" if intent["intent"] == "renew"
+                else "CAB_INTENT_LINE_RETURN")
     else:
         rental_block = i18n.t(lang, "CAB_NO_RENTAL")
     if s["due"]:
@@ -101,6 +108,11 @@ async def home_text(crm: Any, client: dict, lang: str, *, today: date | None = N
     return i18n.t(lang, "CAB_HOME").format(
         name=logic.esc(client.get("full_name") or ""),
         balance=crm_logic.money(balance), rental=rental_block, hint=hint)
+
+
+async def home_markup(crm: Any, client: dict, lang: str) -> Any:
+    """Клавиатура кабинета: с «продлю / сдаю» только при идущей аренде."""
+    return kb.cabinet(lang, active=await crm.active_rental_of(client["id"]) is not None)
 
 
 async def show_home(send: Any, crm: Any, user: dict, client: dict | None) -> None:
@@ -113,7 +125,8 @@ async def show_home(send: Any, crm: Any, user: dict, client: dict | None) -> Non
         await send(i18n.t(lang, "CAB_BLOCKED").format(url=_support_url()),
                    reply_markup=kb.main_menu(lang))
         return
-    await send(await home_text(crm, client, lang), reply_markup=kb.cabinet(lang))
+    await send(await home_text(crm, client, lang),
+               reply_markup=await home_markup(crm, client, lang))
 
 
 async def _open(message: Message, db: Database, crm: Any, user: dict) -> None:
@@ -225,35 +238,64 @@ async def cb_home(callback: CallbackQuery, bot: Bot, user: dict,
     # Новым сообщением, а не правкой старого: у старого сообщения Telegram
     # может отдать недоступный объект, а кабинет открывают и из напоминаний.
     await bot.send_message(user["tg_id"], await home_text(crm, client, lang),
-                           reply_markup=kb.cabinet(lang))
+                           reply_markup=await home_markup(crm, client, lang))
+
+
+def acquiring_for(cfg: Config) -> Any:
+    """Эквайринг Точки, если он настроен. Тумблер владельца в панели
+    проверяет вызывающий: он читает настройки, а этот помощник - нет."""
+    if not (cfg.tochka_token and cfg.tochka_customer_code):
+        return None
+    return tochka.TochkaClient(token=cfg.tochka_token,
+                               customer_code=cfg.tochka_customer_code,
+                               account_id=cfg.tochka_account_id)
+
+
+async def acquiring_live(cfg: Config, crm: Any) -> Any:
+    """Эквайринг, настроенный И не выключенный владельцем в панели."""
+    if not crm_logic.acquiring_enabled(await crm.settings()):
+        return None
+    return acquiring_for(cfg)
 
 
 async def pay_link(cfg: Config, client: dict, amount: Any) -> str:
-    """Ссылка на оплату: с чеком 54-ФЗ, если эквайринг Точки настроен.
+    """Ссылка на оплату без счёта: с чеком 54-ФЗ, если эквайринг настроен.
 
-    Чек пробивает банк - это его эквайринг принимает деньги. Не настроен
-    или банк не ответил - остаётся обычная ссылка СБП из настроек: без
-    оплаты клиент не уедет, а чек можно выдать и потом.
+    Остаётся для напоминаний и старого пути: сам кабинет теперь выставляет
+    счёт (см. cb_pay_option) - его оплату банк подтверждает сам.
     """
-    if not (cfg.tochka_token and cfg.tochka_customer_code) or not amount or amount <= 0:
+    acquiring = acquiring_for(cfg)
+    if acquiring is None or not amount or amount <= 0:
         return cfg.pay_url
     contract = str(client.get("contract_no") or "").strip()
     purpose = f"Аренда велосипеда{', договор ' + contract if contract else ''}"
     try:
-        got = await tochka.TochkaClient(
-            token=cfg.tochka_token, customer_code=cfg.tochka_customer_code,
-            account_id=cfg.tochka_account_id).payment_link(
-                amount=crm_logic.to_money(amount), purpose=purpose,
-                client_phone=client.get("phone"))
+        got = await acquiring.payment_link(
+            amount=crm_logic.to_money(amount), purpose=purpose,
+            client_phone=client.get("phone"))
     except Exception:                                   # noqa: BLE001
         log.warning("ссылка с чеком не получена, отдаём обычную", exc_info=True)
         return cfg.pay_url
     return got.get("link") or cfg.pay_url
 
 
+def _pay_options(summary: dict, lang: str) -> list[dict]:
+    """Кнопки сумм с подписями: логика считает, кабинет подписывает."""
+    options = crm_logic.topup_options(summary)
+    for option in options:
+        option["label_amount"] = crm_logic.money(option["amount"])
+        option["days"] = summary.get("period_days") or 0
+    return options
+
+
 @router.callback_query(F.data == "cab:pay")
 async def cb_pay(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
                  crm: Any = None) -> None:
+    """Экран пополнения: долг и периоды вперёд кнопками.
+
+    Сумму клиент выбирает, а не вписывает: аренда платится периодами,
+    и произвольная цифра лишь путала бы «оплачено до».
+    """
     client = await _client_for_callback(callback, bot, crm, user)
     if client is None:
         return
@@ -262,13 +304,135 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
     balance = await crm.client_balance(client["id"])
     rental = await crm.active_rental_of(client["id"])
     summary = crm_logic.rental_summary(rental, balance, today=date.today())
-    amount = crm_logic.topup_hint(summary)
-    url = await pay_link(cfg, client, amount)
+    options = _pay_options(summary, lang)
+    if not options:
+        await bot.send_message(user["tg_id"],
+                               i18n.t(lang, "CAB_PAY_NOTHING").format(url=_support_url()),
+                               reply_markup=kb.cab_back(lang))
+        return
+    hint = (i18n.t(lang, "CAB_HINT_DEBT").format(amount=crm_logic.money(summary["due"]))
+            if summary.get("due") else i18n.t(lang, "CAB_HINT_OK"))
+    await bot.send_message(
+        user["tg_id"],
+        i18n.t(lang, "CAB_PAY_PICK").format(balance=crm_logic.money(balance), hint=hint),
+        reply_markup=kb.cab_pay_options(options, lang))
+
+
+@router.callback_query(F.data.regexp(r"^cab:pay:(debt|p\d)$"))
+async def cb_pay_option(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
+                        crm: Any = None) -> None:
+    """Сумма выбрана: счёт эквайринга со ссылкой банка, иначе СБП.
+
+    Со счётом оплату подтверждает банк, и оператор к ней не прикасается:
+    опрос счетов зачислит деньги сам. Без эквайринга - прежний путь:
+    ссылка СБП и «я оплатил(а)», заявку разбирает оператор.
+    """
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    code = str(callback.data or "").rsplit(":", 1)[-1]
+    balance = await crm.client_balance(client["id"])
+    rental = await crm.active_rental_of(client["id"])
+    summary = crm_logic.rental_summary(rental, balance, today=date.today())
+    amount = crm_logic.topup_amount(summary, code)
+    if amount is None:
+        await callback.answer(i18n.t(lang, "CAB_PAY_STALE"), show_alert=True)
+        return
+    await callback.answer()
+    acquiring = await acquiring_live(cfg, crm)
+    if acquiring is not None:
+        order = await service.create_pay_order(
+            crm, client=client, rental=rental, amount=amount, by="кабинет",
+            acquiring=acquiring)
+        link = str(order.get("link") or "")
+        if order.get("status") == "sent" and link:
+            await bot.send_message(
+                user["tg_id"],
+                i18n.t(lang, "CAB_PAY_ORDER").format(
+                    no=logic.esc(order["no"]), amount=crm_logic.money(amount),
+                    link=logic.esc(link)),
+                reply_markup=kb.cab_pay_order(link, int(order["id"]), lang))
+            return
+        # Банк не выдал ссылку - счёт остался с текстом отказа для
+        # оператора, а клиенту нужен хоть какой-то способ заплатить.
+    url = cfg.pay_url
     await bot.send_message(
         user["tg_id"],
         i18n.t(lang, "CAB_PAY").format(
             amount=crm_logic.money(amount), pay_url=logic.esc(url)),
-        reply_markup=kb.cab_pay(url, lang))
+        reply_markup=kb.cab_pay(url, lang, code=code))
+
+
+@router.callback_query(F.data.regexp(r"^cab:paycheck:\d+$"))
+async def cb_paycheck(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
+                      user: dict, crm: Any = None) -> None:
+    """«Проверить оплату»: спросить банк сейчас, не дожидаясь опроса.
+    Клиент стоит у оператора и ждёт зелёной отметки."""
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    order = await crm.pay_order(int(str(callback.data).rsplit(":", 1)[-1]))
+    if order is None or int(order["client_id"]) != int(client["id"]):
+        await callback.answer()
+        return
+    if order["status"] in crm_logic.PAY_OPEN:
+        state = await service.check_pay_order(crm, order,
+                                              acquiring=await acquiring_live(cfg, crm))
+        if state == "paid":
+            # Тот же путь, что у минутного опроса: карточка команде, бонус
+            # агенту; зачисление клиент видит прямо здесь, ответом.
+            fresh = await crm.pay_order(order["id"]) or order
+            await paying.tell_paid(bot, db, crm, cfg, fresh)
+        order = await crm.pay_order(order["id"]) or order
+    if order["status"] == "paid":
+        await callback.answer()
+        balance = await crm.client_balance(client["id"])
+        await bot.send_message(
+            user["tg_id"],
+            i18n.t(lang, "CAB_PAY_DONE").format(
+                no=logic.esc(order["no"]), amount=crm_logic.money(order["amount"]),
+                balance=crm_logic.money(balance)),
+            reply_markup=kb.cabinet_entry(lang))
+        return
+    if order["status"] in crm_logic.PAY_OPEN:
+        await callback.answer(i18n.t(lang, "CAB_PAY_PENDING"), show_alert=True)
+        return
+    await callback.answer()
+    await bot.send_message(user["tg_id"],
+                           i18n.t(lang, "CAB_PAY_FAILED").format(no=logic.esc(order["no"])),
+                           reply_markup=kb.cab_back(lang))
+
+
+@router.callback_query(F.data.regexp(r"^cab:intent:(renew|return)$"))
+async def cb_intent(callback: CallbackQuery, bot: Bot, user: dict,
+                    crm: Any = None) -> None:
+    """«Продлю» / «Сдаю»: то же намерение, что оператор ставит в панели,
+    только сказано самим клиентом. Кормит прогноз освобождения."""
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    rental = await crm.active_rental_of(client["id"])
+    if rental is None:
+        await callback.answer(i18n.t(lang, "CAB_NO_RENTAL"), show_alert=True)
+        return
+    intent = str(callback.data).rsplit(":", 1)[-1]
+    balance = await crm.client_balance(client["id"])
+    summary = crm_logic.rental_summary(rental, balance, today=date.today())
+    await crm.update_rental(rental["id"], intent=intent,
+                            intent_until=summary.get("covered_until"),
+                            intent_by="клиент", intent_at=datetime.now(UTC),
+                            snooze_until=None)
+    await callback.answer()
+    until = summary.get("covered_until")
+    text = (i18n.t(lang, "CAB_INTENT_RENEW") if intent == "renew"
+            else i18n.t(lang, "CAB_INTENT_RETURN").format(
+                until=until.strftime("%d.%m.%Y") if until else "—"))
+    await bot.send_message(user["tg_id"], text)
+    await bot.send_message(user["tg_id"], await home_text(crm, client, lang),
+                           reply_markup=await home_markup(crm, client, lang))
 
 
 def claim_card(claim: dict, balance: Any) -> str:
@@ -279,11 +443,12 @@ def claim_card(claim: dict, balance: Any) -> str:
         amount=crm_logic.money(claim.get("amount_hint")))
 
 
-@router.callback_query(F.data == "cab:paid")
+@router.callback_query(F.data.regexp(r"^cab:paid(:(debt|p\d))?$"))
 async def cb_paid(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
                   crm: Any = None) -> None:
     """«Я оплатил(а)»: заявка оператору. Сумму называет оператор, сверив
-    поступление; клиентская кнопка - только сигнал проверить."""
+    поступление; клиентская кнопка - только сигнал проверить. Код суммы
+    в callback - подсказка, сколько ждать."""
     client = await _client_for_callback(callback, bot, crm, user)
     if client is None:
         return
@@ -294,7 +459,9 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
     balance = await crm.client_balance(client["id"])
     rental = await crm.active_rental_of(client["id"])
     summary = crm_logic.rental_summary(rental, balance, today=date.today())
-    hint = crm_logic.topup_hint(summary)
+    parts = str(callback.data or "").split(":")
+    hint = (crm_logic.topup_amount(summary, parts[2]) if len(parts) > 2 else None) \
+        or crm_logic.topup_hint(summary)
     # None - заявка уже открыта: второе нажатие пришло параллельно и
     # упёрлось в уникальный индекс. Для человека это то же самое, что
     # увидеть «заявка уже есть», а оператору вторая карточка на один

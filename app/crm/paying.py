@@ -21,7 +21,7 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-from . import logic, notices, service
+from . import logic, notices, notify, service
 
 log = logging.getLogger(__name__)
 
@@ -76,8 +76,34 @@ async def autocharge_daily(crm: Any, acquiring: Any, *, bot: Any = None,
                                          today=today)
 
 
+async def tell_paid(bot: Any, db: Any, crm: Any, cfg: Any, order: dict) -> None:
+    """Оплаченный счёт: команде карточка, клиенту зачисление, агенту бонус.
+
+    Клиенту говорим только про аренду: счёт за ремонт в журнал не идёт,
+    и «на балансе» про него - неправда. Бонус за друга - только за
+    настоящий платёж в журнале, по той же причине.
+    """
+    await report_paid(bot, crm, cfg, order)
+    if order.get("work_order_id") is not None or order.get("ledger_id") is None:
+        return
+    client = await crm.client(order["client_id"])
+    if client is None:
+        return
+    await notices.send_client(
+        crm, "pay_credited", client["id"],
+        lambda: notify.payment_credited(bot, db, crm, client, order["amount"]))
+    try:
+        bonus = await service.ref_paid(crm, client, logic.to_money(order["amount"]),
+                                       by="эквайринг")
+    except Exception:                                    # noqa: BLE001
+        log.exception("реферальный бонус за счёт %s не начислен", order.get("no"))
+        return
+    if bonus:
+        await notify.referral_bonus(bot, db, bonus["agent"], client, bonus["bonus"])
+
+
 async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
-                      interval: int = POLL_SECONDS) -> None:
+                      interval: int = POLL_SECONDS, db: Any = None) -> None:
     """Фоновый опрос счетов. Сбой круга не останавливает следующие."""
     if acquiring is None or not getattr(acquiring, "token", ""):
         log.info("эквайринг Точки не настроен, счета не опрашиваются")
@@ -87,7 +113,10 @@ async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
         try:
             result = await poll_once(crm, acquiring)
             for order in result["paid"]:
-                await report_paid(bot, crm, cfg, order)
+                # Свежая строка: в ней уже есть ledger_id, по нему видно,
+                # платёж это или счёт за ремонт.
+                fresh = await crm.pay_order(order["id"]) or order
+                await tell_paid(bot, db, crm, cfg, fresh)
             today = date.today()
             hour = logic.pay_settings(await crm.settings())["autocharge_hour"]
             if charged_on != today and datetime.now().hour >= hour:

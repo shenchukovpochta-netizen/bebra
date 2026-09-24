@@ -118,7 +118,7 @@ async def run() -> None:
     # Счета эквайринга - своим кругом, коротким: оператор ждёт отметки
     # «оплачено», чтобы выдать велосипед, и полчаса ожидания на точке -
     # это очередь. Здесь же суточное автосписание.
-    paying_task = asyncio.create_task(paying.paying_loop(bot, crm, cfg, tochka))
+    paying_task = asyncio.create_task(paying.paying_loop(bot, crm, cfg, tochka, db=db))
     # Рассылки: тот же текст уходит в Telegram и, если подключён бот MAX,
     # в MAX. Токен MAX здесь необязателен - без него MAX-клиентам
     # сообщения помечаются пропущенными, а не теряются молча.

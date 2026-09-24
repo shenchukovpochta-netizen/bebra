@@ -303,9 +303,19 @@ remove = ReplyKeyboardRemove
 # callback «cab:...» - экраны кабинета у клиента, «crmpay:<id>:ok|no» -
 # кнопки оператора на карточке заявки о зачислении (служебный чат).
 
-def cabinet(lang: str = "ru") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def cabinet(lang: str = "ru", *, active: bool = False) -> InlineKeyboardMarkup:
+    """Главный экран кабинета. При идущей аренде - ещё «продлю / сдаю»:
+    намерение клиента кормит прогноз освобождения, и спрашивать его
+    звонком дороже, чем двумя кнопками."""
+    rows = [
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_TOPUP"), callback_data="cab:pay")],
+    ]
+    if active:
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_INTENT_RENEW"),
+                                          callback_data="cab:intent:renew"),
+                     InlineKeyboardButton(text=i18n.t(lang, "BTN_INTENT_RETURN"),
+                                          callback_data="cab:intent:return")])
+    rows += [
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_HISTORY"),
                               callback_data="cab:history"),
          InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_CONTRACT"),
@@ -315,20 +325,52 @@ def cabinet(lang: str = "ru") -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REVIEW"),
                               callback_data="cab:review")],
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_REFRESH"), callback_data="cab:home")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def cab_pay(pay_url: str = "", lang: str = "ru") -> InlineKeyboardMarkup:
-    """Экран пополнения: ссылка на оплату, «я оплатил», назад.
+def cab_pay_options(options: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+    """Выбор суммы: долг и периоды вперёд. В callback - код кнопки, сумма
+    пересчитается при нажатии."""
+    rows = []
+    for option in options:
+        if option["code"] == "debt":
+            label = i18n.t(lang, "CAB_OPT_DEBT").format(amount=option["label_amount"])
+        else:
+            label = i18n.t(lang, "CAB_OPT_PERIOD").format(
+                n=option["periods"], days=option["days"], amount=option["label_amount"])
+        rows.append([InlineKeyboardButton(text=label,
+                                          callback_data=f"cab:pay:{option['code']}")])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"),
+                                      callback_data="cab:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cab_pay(pay_url: str = "", lang: str = "ru", *, code: str = "") -> InlineKeyboardMarkup:
+    """Пополнение без эквайринга: ссылка СБП, «я оплатил», назад.
 
     Кнопка-ссылка только при похожем на URL значении: Telegram отвергает
-    сообщение целиком из-за кнопки с битым url (см. paid()).
+    сообщение целиком из-за кнопки с битым url (см. paid()). Код суммы
+    едет в «я оплатил(а)»: заявка оператору подскажет, сколько ждать.
     """
     rows = []
     if pay_url.startswith(("http://", "https://")):
         rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAY"), url=pay_url)])
     rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAID"),
-                                      callback_data="cab:paid")])
+                                      callback_data=f"cab:paid:{code}" if code else "cab:paid")])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"),
+                                      callback_data="cab:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cab_pay_order(link: str, order_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
+    """Счёт эквайринга: оплатить по ссылке банка, проверить оплату, назад.
+    «Я оплатил(а)» здесь не нужна: оплату подтверждает банк, а не оператор."""
+    rows = []
+    if link.startswith(("http://", "https://")):
+        rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAY"), url=link)])
+    rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_PAY_CHECK"),
+                                      callback_data=f"cab:paycheck:{order_id}")])
     rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"),
                                       callback_data="cab:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

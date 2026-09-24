@@ -275,17 +275,125 @@ class TestCabinetScreens(CabinetCase):
         self.assertIn("My cabinet", text)
         self.assertIn("No active rental", text)
 
-    async def test_pay_screen_suggests_amount_and_link(self):
+    def labels(self):
+        markup = self.session.last_markup()
+        return [b.text for row in markup.inline_keyboard for b in row]
+
+    def callbacks(self):
+        markup = self.session.last_markup()
+        return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    async def test_pay_screen_offers_periods_ahead(self):
         await self.crm_rental(self.client)
         await self.feed(cb("cab:pay"))
         text = self.last_text()
-        self.assertIn("Рекомендуемая сумма: <b>3 000 ₽</b>", text)
+        self.assertIn("Выберите сумму", text)
+        self.assertIn(texts.CAB_HINT_OK, text)
+        self.assertEqual(self.labels()[:3], ["1 × 7 дн. — 3 000 ₽", "2 × 7 дн. — 6 000 ₽",
+                                             "4 × 7 дн. — 12 000 ₽"])
+        self.assertEqual(self.callbacks()[:3], ["cab:pay:p1", "cab:pay:p2", "cab:pay:p4"])
+
+    async def test_pay_screen_puts_the_debt_first(self):
+        await self.crm_rental(self.client, billed_offset=-3)
+        await self.feed(cb("cab:pay"))
+        labels = self.labels()
+        self.assertEqual(labels[0], "Долг — 3 000 ₽")
+        self.assertNotIn("1 × 7 дн. — 3 000 ₽", labels, "долг равен периоду - не дублируем")
+        self.assertIn("2 × 7 дн. — 6 000 ₽", labels)
+
+    async def test_pay_screen_without_rental_or_debt(self):
+        await self.feed(cb("cab:pay"))
+        self.assertIn("пополнять нечего", self.last_text())
+
+    async def test_amount_without_acquiring_falls_back_to_sbp_and_claim(self):
+        await self.crm_rental(self.client)
+        await self.feed(cb("cab:pay:p2"))
+        text = self.last_text()
+        self.assertIn("Рекомендуемая сумма: <b>6 000 ₽</b>", text)
         # ссылка экранирована для HTML: & -> &amp;, как и в PAY_PROMPT
         self.assertIn(logic.esc(self.cfg.pay_url), text)
-        markup = self.session.last_markup()
-        labels = [b.text for row in markup.inline_keyboard for b in row]
-        self.assertIn("💳 Оплатить", labels)
-        self.assertIn("✅ Я оплатил(а)", labels)
+        self.assertIn("💳 Оплатить", self.labels())
+        self.assertIn("cab:paid:p2", self.callbacks())
+        self.assertEqual(await self.crm.pay_orders(), [], "без эквайринга счёт не заводится")
+        await self.feed(cb("cab:paid:p2"))
+        claims = await self.crm.pending_claims()
+        self.assertEqual(claims[0]["amount_hint"], D(6000), "заявка помнит выбранную сумму")
+
+    async def test_stale_amount_is_refused(self):
+        await self.feed(cb("cab:pay:p1"))
+        self.assertEqual(await self.crm.pay_orders(), [])
+        self.assertFalse([t for t in self.texts_to(USER_ID) if "Рекомендуемая" in t])
+
+    async def test_amount_with_acquiring_makes_an_invoice_the_bank_confirms(self):
+        from test_paying import FakeAcquiring
+        acq = FakeAcquiring(link="https://pay.example/9", operation_id="op-9",
+                            answers=[{"state": "pending"},
+                                     {"state": "paid", "status": "APPROVED", "card": {}}])
+        orig = cabinet.acquiring_for
+        cabinet.acquiring_for = lambda cfg: acq
+        try:
+            await self.crm_rental(self.client)
+            await self.feed(cb("cab:pay:p1"))
+            orders = await self.crm.pay_orders()
+            self.assertEqual(len(orders), 1)
+            self.assertEqual(orders[0]["status"], "sent")
+            self.assertEqual(orders[0]["amount"], D(3000))
+            self.assertEqual(orders[0]["created_by"], "кабинет")
+            text = self.last_text()
+            self.assertIn(f"Счёт {orders[0]['no']} на <b>3 000 ₽</b>", text)
+            labels = self.labels()
+            self.assertIn("💳 Оплатить", labels)
+            self.assertIn("🔄 Проверить оплату", labels)
+            self.assertNotIn("✅ Я оплатил(а)", labels, "оплату подтверждает банк")
+            check = f"cab:paycheck:{orders[0]['id']}"
+            self.assertIn(check, self.callbacks())
+            # первый ответ банка - ещё ждём: денег нет, сообщения нет
+            await self.feed(cb(check))
+            self.assertEqual(await self.crm.client_balance(self.client["id"]), D(0))
+            # второй - оплачено: платёж в журнале, клиенту и команде сказано
+            await self.feed(cb(check))
+            self.assertEqual(await self.crm.client_balance(self.client["id"]), D(3000))
+            self.assertIn("оплачен: 3 000 ₽", self.last_text())
+            self.assertTrue([t for t in self.texts_to(ADMIN_CHAT) if "Оплачен счёт" in t])
+            self.assertEqual((await self.crm.pay_order(orders[0]["id"]))["status"], "paid")
+            # повторная проверка не удваивает платёж
+            await self.feed(cb(check))
+            self.assertEqual(await self.crm.client_balance(self.client["id"]), D(3000))
+        finally:
+            cabinet.acquiring_for = orig
+
+    async def test_owner_switch_off_keeps_the_sbp_path(self):
+        from test_paying import FakeAcquiring
+        orig = cabinet.acquiring_for
+        cabinet.acquiring_for = lambda cfg: FakeAcquiring()
+        await self.crm.set_setting("acquiring_enabled", "0", by="t")
+        try:
+            await self.crm_rental(self.client)
+            await self.feed(cb("cab:pay:p1"))
+            self.assertEqual(await self.crm.pay_orders(), [])
+            self.assertIn("Рекомендуемая сумма", self.last_text())
+        finally:
+            cabinet.acquiring_for = orig
+
+    async def test_intent_buttons_only_with_a_rental(self):
+        await self.feed(msg("/cabinet"))
+        self.assertNotIn("✅ Продлю", self.labels())
+        rental = await self.crm_rental(self.client, billed_offset=2)
+        await self.feed(msg("/cabinet"))
+        self.assertIn("✅ Продлю", self.labels())
+        self.assertIn("↩️ Сдаю", self.labels())
+        await self.feed(cb("cab:intent:renew"))
+        fresh = await self.crm.rental(rental["id"])
+        self.assertEqual(fresh["intent"], "renew")
+        self.assertEqual(fresh["intent_by"], "клиент")
+        self.assertEqual(fresh["intent_until"], date.today() + timedelta(days=2))
+        self.assertIn(texts.CAB_INTENT_RENEW, self.texts_to(USER_ID))
+        self.assertIn("Вы сказали: продлеваете", self.last_text())
+        await self.feed(cb("cab:intent:return"))
+        fresh = await self.crm.rental(rental["id"])
+        self.assertEqual(fresh["intent"], "return")
+        until = (date.today() + timedelta(days=2)).strftime("%d.%m.%Y")
+        self.assertIn(f"сдаёте {until}", " ".join(self.texts_to(USER_ID)))
 
     async def test_history_lists_operations(self):
         await self.crm_rental(self.client)

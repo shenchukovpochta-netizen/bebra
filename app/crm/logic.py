@@ -516,6 +516,42 @@ def topup_hint(summary: dict) -> Decimal:
     return to_money(summary.get("price") or 0)
 
 
+# Кнопки пополнения в кабинете: долг, если он есть, и вперёд на 1, 2 и 4
+# периода. Четыре недели - это «месяц» у недельного тарифа; дальше
+# вперёд курьеры не платят.
+TOPUP_MULTIPLES = (1, 2, 4)
+
+
+def topup_options(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Суммы к оплате для кнопок кабинета.
+
+    Код кнопки, а не сумма, уходит в callback: сумма пересчитывается
+    в момент нажатия по свежему состоянию, и подделанный callback не
+    выставит счёт на чужую цифру. Долг равный периоду не дублируется.
+    """
+    out: list[dict[str, Any]] = []
+    due = to_money(summary.get("due") or 0)
+    if due > 0:
+        out.append({"code": "debt", "amount": due, "periods": 0})
+    price = to_money(summary.get("price") or 0)
+    if summary.get("active") and price > 0:
+        for n in TOPUP_MULTIPLES:
+            amount = to_money(price * n)
+            if n == 1 and amount == due:
+                continue
+            out.append({"code": f"p{n}", "amount": amount, "periods": n})
+    return out
+
+
+def topup_amount(summary: Mapping[str, Any], code: Any) -> Decimal | None:
+    """Сумма по коду кнопки; None - кнопка устарела (долг закрыт, аренда
+    закончилась)."""
+    for option in topup_options(summary):
+        if option["code"] == str(code or ""):
+            return option["amount"]
+    return None
+
+
 # ─────────────────────────── синхронизация с ботом ───────────────────────────
 
 def first_amount(text: Any) -> Decimal | None:

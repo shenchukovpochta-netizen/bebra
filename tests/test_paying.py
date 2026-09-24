@@ -355,6 +355,36 @@ class TestPayFlow(tw.WebCase):
                                           amount=D(0), by="оператор",
                                           acquiring=FakeAcquiring()))
 
+    def test_paid_invoice_tells_the_client_and_pays_the_agent(self):
+        """Опрос счетов - тот же путь, что и «проверить оплату» в кабинете:
+        клиенту зачисление, команде карточка, агенту бонус за друга."""
+        self.db.users[5001] = {"tg_id": 5001, "lang": "ru"}
+        _run(self.crm.set_setting("ref_enabled", "1", by="t"))
+        _run(self.crm.set_setting("ref_bonus", "500", by="t"))
+        _run(self.crm.set_setting("ref_new_only", "0", by="t"))
+        agent = _run(self.crm.create_client(full_name="Агент Агентов",
+                                            phone="+79990000009", tg_id=5009))
+        _run(self.crm.set_ref_code(agent, "AGENT1"))
+        ref = _run(self.crm.add_referral(agent_id=agent, tg_id=5001))
+        _run(self.crm.update_referral(ref, client_id=self.client_id, status="rented"))
+        acq = FakeAcquiring(answers=[{"state": "paid", "status": "APPROVED", "card": {}}])
+        order = self.order(acquiring=acq)
+        result = _run(paying.poll_once(self.crm, acq))
+        self.assertEqual([o["id"] for o in result["paid"]], [order["id"]])
+        fresh = _run(self.crm.pay_order(order["id"]))
+        self.bot.sent.clear()
+        _run(paying.tell_paid(self.bot, self.db, self.crm, self.cfg, fresh))
+        texts_to = {chat: t for chat, t in self.bot.sent}
+        self.assertIn(5001, texts_to)
+        self.assertIn("зачислен", texts_to[5001])
+        self.assertIn(5009, texts_to, "агенту - бонус за друга")
+        self.assertEqual(_run(self.crm.client_balance(agent)), D(500))
+        # счёт за ремонт клиенту как «на балансе» не показывается
+        self.bot.sent.clear()
+        repair = dict(fresh, work_order_id=7, ledger_id=None)
+        _run(paying.tell_paid(self.bot, self.db, self.crm, self.cfg, repair))
+        self.assertFalse([t for chat, t in self.bot.sent if chat == 5001])
+
     def test_poll_closes_stale_links(self):
         acq = FakeAcquiring()
         order = self.order(acquiring=acq)
