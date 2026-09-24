@@ -3263,9 +3263,17 @@ def distance_km(lat1: float | None, lon1: float | None,
     return round(2 * EARTH_KM * math.asin(min(1.0, math.sqrt(h))), 3)
 
 
+def has_fix(lat: Any, lon: Any) -> bool:
+    """Есть ли у точки координаты. «0, 0» - не Гвинейский залив, а трекер
+    без спутников: такие записи остались от опросов до исправления."""
+    if lat is None or lon is None:
+        return False
+    return not (abs(float(lat)) < 1e-6 and abs(float(lon)) < 1e-6)
+
+
 def map_url(lat: float | None, lon: float | None) -> str | None:
     """Ссылка на карту с точкой. Яндекс: им пользуются на точках."""
-    if lat is None or lon is None:
+    if not has_fix(lat, lon):
         return None
     return f"https://yandex.ru/maps/?pt={lon:.6f},{lat:.6f}&z=17&l=map"
 
@@ -3437,7 +3445,7 @@ def map_points(rows: Iterable[dict]) -> list[dict]:
     """Точки для карты: только те, у кого есть координаты."""
     points = []
     for row in rows:
-        if row.get("lat") is None or row.get("lon") is None:
+        if not has_fix(row.get("lat"), row.get("lon")):
             continue
         if row.get("alarm"):
             state = "alarm"
@@ -3528,11 +3536,8 @@ def track_line(positions: Iterable[Mapping[str, Any]]) -> list[list[float]]:
     line: list[list[float]] = []
     for point in points:
         lat, lon = point.get("lat"), point.get("lon")
-        if lat is None or lon is None:
-            continue
-        # «0, 0» - трекер без спутников, а не Гвинейский залив: такая
-        # точка в начале периода обрезала бы весь настоящий трек как скачок.
-        if abs(float(lat)) < 1e-6 and abs(float(lon)) < 1e-6:
+        # «0, 0» в начале периода обрезала бы весь настоящий трек как скачок.
+        if not has_fix(lat, lon):
             continue
         if line:
             step = distance_km(line[-1][0], line[-1][1], lat, lon)
@@ -3549,7 +3554,10 @@ def track_distance(positions: Iterable[Mapping[str, Any]]) -> float:
     углы теряются. Для вопроса «он вообще ездит?» этого достаточно, а
     накат за аренду по-прежнему считается по пробегу с дисплея.
     """
-    points = sorted(positions, key=lambda p: p["recorded_at"])
+    # Точка без спутников выкидывается до подсчёта: иначе оба отрезка к
+    # ней и от неё - «скачки», и с ними пропадал настоящий участок.
+    points = sorted((p for p in positions if has_fix(p.get("lat"), p.get("lon"))),
+                    key=lambda p: p["recorded_at"])
     total = 0.0
     for before, after in zip(points, points[1:], strict=False):
         step = distance_km(before["lat"], before["lon"], after["lat"], after["lon"])
@@ -3686,13 +3694,14 @@ BANK_STATUSES: dict[str, str] = {
 MATCH_SURE = "contract"
 MATCH_REASONS: dict[str, str] = {
     "contract": "номер договора в назначении",
-    "contract_short": "короткий номер договора — сверьте",
+    "contract_other": "номер договора не нашего вида — сверьте",
     "phone": "телефон в назначении",
     "name": "ФИО плательщика",
 }
-# Сколько цифр должно быть в номере договора без букв, чтобы он не
-# путался с номером велосипеда, датой или суммой в назначении.
-CONTRACT_SURE_DIGITS = 6
+# Номер договора, который выдаёт сама система: АВ-2026-000042 (у бота MAX
+# свой префикс). Только такой номер отличим от номера велосипеда, даты и
+# слов в назначении; всё, что набрано в карточке руками, - подсказка.
+OUR_CONTRACT = re.compile(r"([^\W\d_]{1,6})-(\d{4})-(\d{6})")
 
 
 def bank_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -3708,70 +3717,76 @@ def match_payment(txn: Mapping[str, Any],
                   clients: Iterable[Mapping[str, Any]]) -> dict[str, Any] | None:
     """Кому из клиентов принадлежит поступление.
 
-    Три признака по убыванию надёжности: номер договора в назначении,
-    телефон там же, ФИО плательщика. Совпадение ФИО - именно догадка:
-    однофамильцы среди курьеров не редкость, и зачислять по ней без
-    человека нельзя.
+    Признаки по убыванию надёжности: номер договора нашего вида
+    (АВ-2026-000042) в назначении, телефон там же, номер договора, набранный
+    в карточке руками, ФИО плательщика. Зачислять без человека можно только
+    по первому: «15», «N15», «б/н» или «01.09.2026» в назначении - это и
+    номер велосипеда, и дата, и «счёт б/н», и договор соседа.
 
-    Признак ищется по всем клиентам, а не до первого попавшегося: список
-    идёт по алфавиту, и «первый» - случайность. Из договоров берётся самый
-    длинный номер: «АВ-2026-000150» в назначении важнее чужого «15»,
-    который там же оказался номером велосипеда или датой. Короткий номер
-    без букв - только подсказка человеку, два клиента с одним номером -
-    не угадываем вовсе.
+    Каждый признак ищется по всем клиентам, а не до первого попавшегося:
+    список идёт по алфавиту, и «первый» - случайность. Признак, который
+    указывает на двух разных клиентов, не угадывает никого.
     """
     if txn.get("direction") != "credit":
         return None
     purpose = str(txn.get("purpose") or "")
     upper = purpose.upper()
-    flat = upper.replace(" ", "")
     phones = {digits(p) for p in re.findall(r"[\d\-()+ ]{10,}", purpose)}
     payer = normalize_name(txn.get("payer_name"))
-    by_contract: list[tuple[int, str, Mapping[str, Any]]] = []
-    by_phone = by_name = None
+    ours: dict[int, Mapping[str, Any]] = {}
+    other: dict[int, Mapping[str, Any]] = {}
+    by_phone: dict[int, Mapping[str, Any]] = {}
+    by_name: dict[int, Mapping[str, Any]] = {}
     for client in clients:
+        key = id(client) if client.get("id") is None else int(client["id"])
         contract = str(client.get("contract_no") or "").strip()
-        if contract and contract_in(contract, upper, flat):
-            key = contract.upper().replace(" ", "")
-            by_contract.append((len(key), key, client))
+        if contract:
+            if our_contract_in(contract, upper):
+                ours[key] = client
+            elif other_contract_in(contract, upper):
+                other[key] = client
         phone = digits(client.get("phone"))
-        if (by_phone is None and phone
-                and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10)):
-            by_phone = {"client": client, "reason": "phone"}
-        if payer and by_name is None and normalize_name(client.get("full_name")) == payer:
-            by_name = {"client": client, "reason": "name"}
-    if by_contract:
-        longest = max(size for size, _, _ in by_contract)
-        top = [(key, client) for size, key, client in by_contract if size == longest]
-        if len({id(client) for _, client in top}) == 1:
-            key, client = top[0]
-            return {"client": client,
-                    "reason": "contract" if contract_is_sure(key) else "contract_short"}
-    return by_phone or by_name
+        if phone and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10):
+            by_phone[key] = client
+        if payer and normalize_name(client.get("full_name")) == payer:
+            by_name[key] = client
+    for found, reason in ((ours, "contract"), (by_phone, "phone"),
+                          (other, "contract_other"), (by_name, "name")):
+        if len(found) == 1:
+            return {"client": next(iter(found.values())), "reason": reason}
+    return None
 
 
-def contract_is_sure(key: str) -> bool:
-    """Номер, по которому можно зачислять без человека: с буквами или
-    длинный. «15» в назначении - это и велосипед № 15, и «с 15.09»."""
-    if re.search(r"[^\W\d_]", key):
-        return True
-    return len(digits(key)) >= CONTRACT_SURE_DIGITS
+def our_contract_in(contract: str, upper: str) -> bool:
+    """Номер договора нашего вида стоит в назначении.
 
-
-def contract_in(contract: str, upper: str, flat: str) -> bool:
-    """Номер договора стоит в назначении отдельным номером, а не куском.
-
-    Подстрока ловила чужое: договор «15», набранный в панели руками,
-    совпадал с «АВ-2026-000150», и автозачисление клало деньги первому
-    по списку. Граница - только по цифрам: пробелы банк расставляет как
-    хочет, и в «ДОГОВОРУАВ-…» буква перед номером - норма. Подстрока
-    остаётся дешёвым предфильтром: разбор идёт по всем клиентам.
+    Разделители банк и клиент пишут как хотят: «АВ-2026-000042»,
+    «АВ 2026 000042», «АВ2026-000042». Границы - буква перед префиксом и
+    цифра после номера: «АВ» не находится внутри «АВМ-…» у бота MAX, а
+    «…000042» - внутри «…0000421».
     """
-    key = contract.upper().replace(" ", "")
-    if not key or key not in flat:
+    m = OUR_CONTRACT.fullmatch(contract.upper().replace(" ", ""))
+    if m is None:
         return False
-    pattern = r"\s*".join(re.escape(ch) for ch in key)
-    return re.search(rf"(?<!\d){pattern}(?!\d)", upper) is not None
+    prefix, year, seq = m.groups()
+    if seq not in upper:
+        return False                     # дешёвый предфильтр: клиентов тысячи
+    sep = r"[\s\-–—/№#]*"
+    pattern = rf"(?<![^\W_]){re.escape(prefix)}{sep}{year}{sep}{seq}(?!\d)"
+    return re.search(pattern, upper) is not None
+
+
+def other_contract_in(contract: str, upper: str) -> bool:
+    """Номер, набранный в карточке руками, стоит в назначении целым словом.
+
+    Только подсказка: границы - любые буква или цифра рядом, иначе «нет»
+    находилось бы в «интернет», а «15» - в «АВ-2026-000150».
+    """
+    key = " ".join(contract.upper().split())
+    if not key or key.replace(" ", "") not in upper.replace(" ", ""):
+        return False
+    pattern = r"\s*".join(re.escape(ch) for ch in key.replace(" ", ""))
+    return re.search(rf"(?<![^\W_]){pattern}(?![^\W_])", upper) is not None
 
 
 def normalize_name(raw: Any) -> str:

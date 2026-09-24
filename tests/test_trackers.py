@@ -111,6 +111,20 @@ class TestStarlineParsing(unittest.TestCase):
         self.assertEqual(len(line), 3)
         self.assertAlmostEqual(line[0][0], 55.79)
 
+    def test_zero_point_left_from_before_is_ignored_everywhere(self):
+        # Записи 0/0 от опросов до исправления: ни на карту, ни в ссылку,
+        # ни в пробег - и настоящий участок вокруг неё не теряется.
+        base = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
+        track = [{"lat": 55.79, "lon": 49.12, "recorded_at": base},
+                 {"lat": 0.0, "lon": 0.0, "recorded_at": base + timedelta(minutes=5)},
+                 {"lat": 55.80, "lon": 49.12, "recorded_at": base + timedelta(minutes=10)}]
+        self.assertAlmostEqual(logic.track_distance(track), 1.1, places=1)
+        self.assertIsNone(logic.map_url(0.0, 0.0))
+        self.assertEqual(logic.map_points([{**tracker(), "lat": 0.0, "lon": 0.0,
+                                            "offline": False}]), [])
+        self.assertFalse(logic.has_fix(0.0, 0.0))
+        self.assertTrue(logic.has_fix(55.79, 49.12))
+
     def test_status_two_is_offline(self):
         self.assertFalse(starline.parse_device({"device_id": "1", "status": 2})["online"])
         self.assertIsNone(starline.parse_device({"device_id": "1"})["online"])

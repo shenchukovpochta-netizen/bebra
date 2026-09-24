@@ -103,11 +103,12 @@ class TestBankLogic(unittest.TestCase):
         self.assertIsNone(got)
         got = logic.match_payment(self.txn(purpose="договор 15 от 12.09"), clients)
         self.assertEqual(got["client"]["id"], 3)
-        self.assertEqual(got["reason"], "contract_short",
-                         "короткий номер без букв - подсказка, а не зачисление")
-        # Пробелы банк ставит как хочет - номер всё равно находится.
-        for purpose in ("Оплата по договоруАВ-2026-000042", "АВ-2026 -000042 аренда",
-                        "по договору АВ-2026-000042 12.09.2026"):
+        self.assertEqual(got["reason"], "contract_other",
+                         "номер не нашего вида - подсказка, а не зачисление")
+        # Разделители банк и клиент ставят как хотят - номер всё равно находится.
+        for purpose in ("АВ 2026 000042 аренда", "АВ-2026 -000042 аренда",
+                        "по договору АВ-2026-000042 12.09.2026",
+                        "договор №АВ2026-000042"):
             got = logic.match_payment(self.txn(purpose=purpose), self.clients())
             self.assertEqual((got or {}).get("reason"), "contract", purpose)
 
@@ -130,6 +131,62 @@ class TestBankLogic(unittest.TestCase):
                                          payer_name="")], [short, full])
         self.assertEqual(rows[0]["guess"]["client"]["id"], 5)
         self.assertFalse(rows[0]["sure"])
+
+    def test_hand_typed_contracts_are_never_sure(self):
+        # Всё, что набрано в карточке руками, совпадает с чужим назначением:
+        # номер велосипеда, «счёт б/н», дата. Зачислять по нему без
+        # человека нельзя, а целым словом - обязательно.
+        cases = [("N15", "Аренда велосипеда N15"),
+                 ("б/н", "Оплата по счету б/н от 12.09.2026"),
+                 ("2026-15", "Аренда с 01.09.2026-15.09.2026"),
+                 ("15.09.26", "Оплата аренды с 15.09.26"),
+                 ("01.09.2026", "Оплата по договору 01.09.2026")]
+        for contract, purpose in cases:
+            client = {"id": 3, "full_name": "Сидоров", "phone": None,
+                      "contract_no": contract, "status": "active"}
+            rows = logic.bank_rows([self.txn(purpose=purpose, payer_name="")], [client])
+            self.assertEqual(rows[0]["guess"]["reason"], "contract_other", contract)
+            self.assertFalse(rows[0]["sure"], contract)
+        # «нет» в карточке не находится внутри «интернет»
+        no = {"id": 4, "full_name": "Сидоров", "phone": None,
+              "contract_no": "нет", "status": "active"}
+        self.assertIsNone(logic.match_payment(
+            self.txn(purpose="Оплата за интернет", payer_name=""), [no]))
+
+    def test_phone_beats_a_hand_typed_contract(self):
+        # «15» - номер велосипеда, телефон - целиком: подсказывать надо по
+        # телефону, иначе одно нажатие «Зачислить» отдаст деньги не тому.
+        phone = {"id": 1, "full_name": "Абрамов", "phone": "+79990000002",
+                 "contract_no": None, "status": "active"}
+        short = {"id": 2, "full_name": "Борисов", "phone": None,
+                 "contract_no": "15", "status": "active"}
+        got = logic.match_payment(self.txn(
+            purpose="Аренда велосипеда № 15, тел +7 999 000-00-02", payer_name=""),
+            [phone, short])
+        self.assertEqual((got["client"]["id"], got["reason"]), (1, "phone"))
+
+    def test_two_hand_typed_hits_guess_nobody(self):
+        # Свой договор «15» и чужой «01.09.2026» в одном назначении: какой
+        # из них имел в виду плательщик, решает человек.
+        own = {"id": 8, "full_name": "Алексеев", "phone": None,
+               "contract_no": "15", "status": "active"}
+        dated = {"id": 9, "full_name": "Борисов", "phone": None,
+                 "contract_no": "01.09.2026", "status": "active"}
+        self.assertIsNone(logic.match_payment(
+            self.txn(purpose="Оплата по договору 15 от 01.09.2026", payer_name=""),
+            [own, dated]))
+
+    def test_max_prefix_is_a_different_contract(self):
+        tg = {"id": 1, "full_name": "А", "phone": None,
+              "contract_no": "АВ-2026-000042", "status": "active"}
+        mx = {"id": 2, "full_name": "Б", "phone": None,
+              "contract_no": "АВМ-2026-000042", "status": "active"}
+        got = logic.match_payment(
+            self.txn(purpose="договор АВМ-2026-000042", payer_name=""), [tg, mx])
+        self.assertEqual((got["client"]["id"], got["reason"]), (2, "contract"))
+        got = logic.match_payment(
+            self.txn(purpose="договор АВ-2026-000042", payer_name=""), [tg, mx])
+        self.assertEqual((got["client"]["id"], got["reason"]), (1, "contract"))
 
     def test_same_contract_twice_is_not_guessed(self):
         twins = [{"id": 7, "full_name": "А", "phone": None,

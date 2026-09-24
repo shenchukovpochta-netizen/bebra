@@ -802,6 +802,27 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logic.amortization_total(bikes, batteries), D("2950.00"),
                          "две карточки по 600 вместо счётчика на 1200")
 
+    async def test_zero_points_from_before_are_cleaned_once(self):
+        # Точки «0, 0» от опросов до исправления разбора: схема вычищает их
+        # один раз и помечает это в настройках.
+        tid = await self.crm.create_tracker(device_id="ZERO-1", alias="Z")
+        await self.pool.execute(
+            "update crm.trackers set lat = 0, lon = 0 where id = $1", tid)
+        await self.pool.execute(
+            "insert into crm.tracker_positions (tracker_id, lat, lon, recorded_at) "
+            "values ($1, 0, 0, now()), ($1, 55.79, 49.12, now() - interval '5 minutes')",
+            tid)
+        await self.pool.execute(
+            "delete from crm.settings where key = 'tracker_zero_fix_cleaned'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        row = await self.pool.fetchrow("select lat, lon from crm.trackers where id = $1", tid)
+        self.assertIsNone(row["lat"])
+        self.assertIsNone(row["lon"])
+        left = await self.pool.fetch(
+            "select lat from crm.tracker_positions where tracker_id = $1", tid)
+        self.assertEqual([r["lat"] for r in left], [55.79], "настоящая точка осталась")
+        self.assertEqual((await self.crm.settings()).get("tracker_zero_fix_cleaned"), "1")
+
     async def test_trackers_on_postgres(self):
         """Трекеры на живой базе: апсерт по устройству, журнал позиций
         без дублей, одна открытая тревога на вид."""

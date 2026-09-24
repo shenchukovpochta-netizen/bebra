@@ -2228,3 +2228,23 @@ create table if not exists crm.bookings (
 create unique index if not exists bookings_one_open
   on crm.bookings (client_id) where status = 'new';
 create index if not exists bookings_status_idx on crm.bookings (status, wanted_on, id);
+
+-- ─────────────────── трекеры: точки «без спутников» ───────────────────
+--
+-- Без спутников StarLine отдаёт координаты «00.000000». До исправления
+-- разбора они писались как настоящая точка: велосипед стоял в Гвинейском
+-- заливе, карта отъезжала туда же, а трек обрезался. Новые такие точки
+-- больше не пишутся; старые вычищаются один раз - отметкой в настройках,
+-- чтобы не сканировать журнал позиций на каждом старте.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'tracker_zero_fix_cleaned') then
+    update crm.trackers set lat = null, lon = null
+     where abs(lat) < 1e-6 and abs(lon) < 1e-6;
+    delete from crm.tracker_positions
+     where abs(lat) < 1e-6 and abs(lon) < 1e-6;
+    insert into crm.settings (key, value, updated_by)
+    values ('tracker_zero_fix_cleaned', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
