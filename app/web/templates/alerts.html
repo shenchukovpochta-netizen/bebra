@@ -92,6 +92,29 @@
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
 </div>
 
+{% if can_edit(staff, 'trackers') %}
+<div class="card">
+  <h2>Пороги тревог</h2>
+  <form method="post" action="/alerts/settings" class="grid2">
+    <label>«Не выходит на связь», если молчит дольше, ч
+      <input name="tracker_offline_hours" value="{{ limits.offline_hours }}" inputmode="numeric" size="4"></label>
+    <label>«Питание трекера», если ниже, В (0 — не следить)
+      <input name="tracker_low_volts" value="{{ limits.low_volts }}" inputmode="decimal" size="4"></label>
+    <label>«Едет», если быстрее, км/ч
+      <input name="tracker_moving_speed" value="{{ limits.moving_speed }}" inputmode="decimal" size="4"></label>
+    <label>«Не двигается при аренде», если стоит дольше, сут.
+      <input name="tracker_idle_days" value="{{ limits.idle_days }}" inputmode="numeric" size="4"></label>
+    <button type="submit">Сохранить</button>
+  </form>
+  <p class="muted">M13 и M13 ECO питаются от батареи велосипеда: в «питании»
+    видно её напряжение, а сняли аккумулятор — трекер замолчал. Поэтому
+    «молчит» здесь — ещё и «батарею унесли»; порог питания для батареи
+    48 В разумно ставить около 40 В, для 36 В — около 30 В, или 0, если
+    разряд батареи курьера тревогой считать не нужно. Новые пороги
+    действуют со следующего круга опроса.</p>
+</div>
+{% endif %}
+
 <div class="card">
   <p class="muted"><b>Взять</b> — вы занимаетесь этим сейчас, остальные видят,
     что тревога не брошена. <b>Отложить</b> — вернуть её в список через

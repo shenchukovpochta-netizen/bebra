@@ -3205,7 +3205,9 @@ TRACKER_OFFLINE_HOURS = 12
 # Скорость, с которой «стоит» превращается в «едет». 5 км/ч - это уже
 # не дрейф GPS у стены дома.
 TRACKER_MOVING_SPEED = Decimal(5)
-# Питание трекера: ниже этого он скоро замолчит совсем.
+# Питание трекера: ниже этого он скоро замолчит совсем. 11,5 В - для
+# трекера на 12-вольтовом питании. M13 на электровелосипеде питается от
+# тяговой батареи (36-60 В), и там порог свой - или 0, «не следить».
 TRACKER_LOW_VOLTS = Decimal("11.5")
 # Сколько суток оплаченный велосипед может стоять, прежде чем это станет
 # вопросом. Трое суток - это уже не выходные: курьер либо бросил работу,
@@ -3217,22 +3219,60 @@ EARTH_KM = 6371.0088
 
 
 def tracker_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Пороги тревог: из настроек, иначе значения по умолчанию."""
+    """Пороги тревог: из настроек, иначе значения по умолчанию.
+
+    Питание - единственный порог, у которого ноль что-то значит: «не
+    следить». У трекера на тяговой батарее напряжение - это заряд батареи
+    курьера, и тревога на каждый разряд была бы шумом.
+    """
     settings = settings or {}
 
-    def number(key: str, default: Decimal | int) -> Decimal:
+    def number(key: str, default: Decimal | int, *, zero: bool = False) -> Decimal:
         raw = str(settings.get(key) or "").strip().replace(",", ".")
         try:
             value = Decimal(raw)
         except (InvalidOperation, ValueError):
             return Decimal(default)
-        return value if value > 0 else Decimal(default)
+        if not value.is_finite() or value < 0 or (value == 0 and not zero):
+            return Decimal(default)
+        return value
 
     return {"offline_hours": int(number("tracker_offline_hours",
                                         TRACKER_OFFLINE_HOURS)),
             "moving_speed": number("tracker_moving_speed", TRACKER_MOVING_SPEED),
-            "low_volts": number("tracker_low_volts", TRACKER_LOW_VOLTS),
+            "low_volts": number("tracker_low_volts", TRACKER_LOW_VOLTS, zero=True),
             "idle_days": int(number("tracker_idle_days", TRACKER_IDLE_DAYS))}
+
+
+# Пороги тревог из формы: ключ настройки, подпись, пределы, целое ли.
+TRACKER_LIMITS: tuple[tuple[str, str, Decimal, Decimal, bool], ...] = (
+    ("tracker_offline_hours", "Молчит дольше, ч", Decimal(1), Decimal(168), True),
+    ("tracker_low_volts", "Питание ниже, В", Decimal(0), Decimal(100), False),
+    ("tracker_moving_speed", "Едет быстрее, км/ч", Decimal(1), Decimal(60), False),
+    ("tracker_idle_days", "Стоит при аренде дольше, сут.", Decimal(1), Decimal(30), True),
+)
+
+
+def check_tracker_limits(form: Mapping[str, Any]) -> tuple[dict[str, str], str | None]:
+    """Пороги тревог из формы панели: значения для настроек или ошибка.
+
+    Ошибка по первому неверному полю - и не сохраняется ничего: половина
+    порогов новых, половина старых - это то, чего никто не вводил.
+    """
+    out: dict[str, str] = {}
+    for key, label, low, high, whole in TRACKER_LIMITS:
+        raw = str(form.get(key) or "").strip().replace(",", ".")
+        try:
+            value = Decimal(raw)
+        except (InvalidOperation, ValueError):
+            value = None
+        if (value is None or not value.is_finite() or not low <= value <= high
+                or (whole and value != value.to_integral_value())):
+            kind = "целое число" if whole else "число"
+            return {}, f"{label}: {kind} от {low} до {high}."
+        # format «f», а не str(normalize()): иначе 60 записалось бы как «6E+1».
+        out[key] = str(int(value)) if whole else format(value.normalize(), "f")
+    return out, None
 
 
 def tracker_seen_at(device: Mapping[str, Any]) -> datetime | None:
@@ -3307,6 +3347,7 @@ def tracker_rows(trackers: Iterable[dict], *, now: datetime | None = None,
                          tracker.get("rental_id") and not offline
                          and still is not None and still >= limits["idle_days"]),
                      "low_power": (tracker.get("voltage") is not None
+                                   and limits["low_volts"] > 0
                                    and to_money(tracker["voltage"]) <= limits["low_volts"]),
                      "map": map_url(tracker.get("lat"), tracker.get("lon"))})
     # Сначала то, что требует внимания: тревога, движение, молчание.

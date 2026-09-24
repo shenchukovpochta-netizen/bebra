@@ -5366,9 +5366,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         tools = list_tools(request, rows, allowed=ALERT_SORTS)
         return render(request, "alerts.html", rows=tools["rows"], tools=tools,
                       view=view, level=level, kind=kind, q=q,
+                      limits=logic.tracker_settings(await crm.settings()),
                       summary=logic.alert_summary(
                           logic.alert_rows(await crm.tracker_alerts(open_only=False,
                                                                     limit=2000))))
+
+    @app.post("/alerts/settings")
+    async def alerts_settings(request: Request) -> Response:
+        """Пороги тревог трекеров. Опрос читает их на каждом круге, так что
+        новые пороги действуют со следующего круга, без перезапуска."""
+        if not may_edit(request, "trackers"):
+            return denied(request, "trackers")
+        values, error = logic.check_tracker_limits(await form(request))
+        if error:
+            flash(request, error, "err")
+            return redirect("/alerts")
+        for key, value in values.items():
+            await crm.set_setting(key, value, by=who(request))
+        flash(request, "Пороги тревог сохранены: действуют со следующего круга опроса.")
+        return redirect("/alerts")
 
     ALERT_SORTS = {"level": "level", "title": "title", "bike": "bike_code",
                    "client": "client_name", "created": "created_at",

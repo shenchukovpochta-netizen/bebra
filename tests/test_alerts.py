@@ -169,6 +169,59 @@ class TestDigest(unittest.TestCase):
         self.assertIn("🔴", lines[1])
 
 
+class TestTrackerLimits(unittest.TestCase):
+    """Пороги тревог из панели. M13 на электровелосипеде питается от
+    тяговой батареи: порог «питания» для машины (11,5 В) у него не
+    сработает никогда, а ноль должен значить «не следить»."""
+
+    def form(self, **over):
+        data = {"tracker_offline_hours": "12", "tracker_low_volts": "40",
+                "tracker_moving_speed": "5", "tracker_idle_days": "3"}
+        data.update(over)
+        return data
+
+    def test_form_values_are_checked(self):
+        values, error = logic.check_tracker_limits(self.form(tracker_low_volts="42,5"))
+        self.assertIsNone(error)
+        self.assertEqual(values["tracker_low_volts"], "42.5")
+        self.assertEqual(values["tracker_offline_hours"], "12")
+        # 60 - это «60», а не «6E+1», которое потом не прочтёт никто
+        values, _ = logic.check_tracker_limits(self.form(tracker_moving_speed="60"))
+        self.assertEqual(values["tracker_moving_speed"], "60")
+        for bad in ({"tracker_offline_hours": "0"}, {"tracker_offline_hours": "1.5"},
+                    {"tracker_offline_hours": "500"}, {"tracker_low_volts": "-1"},
+                    {"tracker_low_volts": "abc"}, {"tracker_moving_speed": "0"},
+                    {"tracker_idle_days": ""}, {"tracker_low_volts": "NaN"}):
+            values, error = logic.check_tracker_limits(self.form(**bad))
+            self.assertEqual(values, {}, bad)
+            self.assertIsNotNone(error, bad)
+
+    def test_zero_volts_means_do_not_watch(self):
+        limits = logic.tracker_settings({"tracker_low_volts": "0"})
+        self.assertEqual(limits["low_volts"], D(0))
+        row = {"id": 1, "device_id": "1", "voltage": D("30.5"),
+               "last_seen": NOW - timedelta(minutes=5), "speed": D(0)}
+        watched = logic.tracker_rows([row], now=NOW,
+                                     settings={"tracker_low_volts": "40"})[0]
+        self.assertTrue(watched["low_power"])
+        off = logic.tracker_rows([row], now=NOW,
+                                 settings={"tracker_low_volts": "0"})[0]
+        self.assertFalse(off["low_power"])
+        self.assertNotIn("low_power",
+                         [a["kind"] for a in logic.detect_alerts(
+                             off, settings={"tracker_low_volts": "0"})])
+        # ноль у остальных порогов бессмыслен - берётся умолчание
+        self.assertEqual(logic.tracker_settings({"tracker_offline_hours": "0"})
+                         ["offline_hours"], logic.TRACKER_OFFLINE_HOURS)
+
+    def test_offline_threshold_follows_the_setting(self):
+        row = {"id": 1, "device_id": "1", "last_seen": NOW - timedelta(hours=20),
+               "speed": D(0)}
+        self.assertTrue(logic.tracker_rows([row], now=NOW)[0]["offline"])
+        self.assertFalse(logic.tracker_rows(
+            [row], now=NOW, settings={"tracker_offline_hours": "24"})[0]["offline"])
+
+
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
 class TestAlertsPage(tw.WebCase):
     def setUp(self):
@@ -198,6 +251,43 @@ class TestAlertsPage(tw.WebCase):
 
     def test_page_shows_the_alert(self):
         self.assertIn(str(self.alert_id), self.listed("/alerts"))
+
+    def test_thresholds_are_saved_from_the_page(self):
+        page = self.get_ok("/alerts")
+        self.assertIn("Пороги тревог", page)
+        self.assertIn('name="tracker_low_volts" value="11.5"', page)
+        r = self.client.post("/alerts/settings", data={
+            "tracker_offline_hours": "24", "tracker_low_volts": "0",
+            "tracker_moving_speed": "7", "tracker_idle_days": "2"})
+        self.assertEqual(r.status_code, 303)
+        settings = _run(self.crm.settings())
+        self.assertEqual((settings["tracker_offline_hours"], settings["tracker_low_volts"],
+                          settings["tracker_moving_speed"], settings["tracker_idle_days"]),
+                         ("24", "0", "7", "2"))
+        page = self.get_ok("/alerts")
+        self.assertIn("Пороги тревог сохранены", page)
+        self.assertIn('name="tracker_offline_hours" value="24"', page)
+
+    def test_bad_threshold_saves_nothing(self):
+        self.client.post("/alerts/settings", data={
+            "tracker_offline_hours": "24", "tracker_low_volts": "сорок",
+            "tracker_moving_speed": "7", "tracker_idle_days": "2"})
+        self.assertIn("Питание ниже, В", self.get_ok("/alerts"))
+        self.assertNotIn("tracker_offline_hours", _run(self.crm.settings()),
+                         "половину порогов не сохраняем")
+
+    def test_manager_sees_alerts_but_not_thresholds(self):
+        manager = _run(self.crm.access_profile_by_code("manager"))
+        _run(self.crm.create_staff("olga", logic.hash_password("password-1"), "Ольга",
+                                   "manager", profile_id=manager["id"]))
+        self.client.post("/logout")
+        self.assertEqual(self.login("olga", "password-1").status_code, 303)
+        self.assertNotIn("Пороги тревог", self.get_ok("/alerts"))
+        r = self.client.post("/alerts/settings", data={
+            "tracker_offline_hours": "1", "tracker_low_volts": "0",
+            "tracker_moving_speed": "7", "tracker_idle_days": "2"})
+        self.assertEqual(r.status_code, 403)
+        self.assertNotIn("tracker_offline_hours", _run(self.crm.settings()))
         self.assertIn("30 км/ч", self.get_ok("/alerts"))
 
     def test_take_it(self):
