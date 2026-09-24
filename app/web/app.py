@@ -704,14 +704,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if sort in allowed else list(rows)
         page = logic.page_of(ordered, logic.check_list_size(p.get("rows")),
                              p.get("page"))
+        # Ссылки заголовков и подвала собираются из адреса БЕЗ своего же
+        # параметра: иначе каждый клик дописывал бы ещё один sort=…&dir=…,
+        # адрес рос без конца, и «Мои фильтры» сохраняли бы весь этот хвост.
         return {**page, "all_rows": ordered, "sort": sort, "dir": direction,
-                "query": clean_query(request, drop=("page",))}
+                "query": clean_query(request, drop=("page",)),
+                "q_sort": clean_query(request, drop=("page", "sort", "dir")),
+                "q_rows": clean_query(request, drop=("page", "rows"))}
 
     def clean_query(request: Request, *, drop: tuple[str, ...] = ()) -> str:
         """Строка запроса без указанных параметров - для ссылок сортировки."""
-        keep = [(k, v) for k, v in request.query_params.multi_items()
-                if k not in drop]
-        return "&".join(f"{k}={quote(str(v), safe='')}" for k, v in keep if v != "")
+        # Повтор ключа (старые ссылки с хвостом sort=…&sort=…) схлопывается
+        # до последнего значения - его же читает и сервер.
+        keep = {k: v for k, v in request.query_params.multi_items() if k not in drop}
+        return "&".join(f"{k}={quote(str(v), safe='')}" for k, v in keep.items() if v != "")
 
     async def views_of(request: Request, section: str) -> list[dict]:
         """Свои фильтры этого списка. Чужие не показываются."""
@@ -1108,7 +1114,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # именем поля из адреса: имя поля из запроса - это чужая строка.
     BIKE_SORTS = {"code": "code", "model": "model", "status": "status",
                   "location": "location", "mileage": "mileage_km",
-                  "client": "full_name", "idle": "idle_days"}
+                  "client": "full_name", "idle": "idle_days",
+                  "frame": "frame_no", "motor": "motor_no"}
 
     @app.get("/bikes")
     async def bikes(request: Request) -> Response:
@@ -1141,7 +1148,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                limit=10000)
         money_ok = may_view(request, "finance")
         header = ["Номер", "Модель", "Статус", "Точка", "Госномер", "Пробег, км",
-                  "Номер рамы", "Клиент", "Заведён"]
+                  "Номер рамы", "VIN мотора", "Клиент", "Заведён"]
         if money_ok:
             header.insert(6, "Цена покупки")
         out = []
@@ -1149,7 +1156,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             line = [b["code"], b["model"],
                     logic.BIKE_STATUSES.get(b["status"], b["status"]),
                     b.get("location"), b.get("plate_no"), b.get("mileage_km"),
-                    b.get("frame_no"), b.get("full_name"), b.get("created_at")]
+                    b.get("frame_no"), b.get("motor_no"), b.get("full_name"),
+                    b.get("created_at")]
             if money_ok:
                 line.insert(6, logic.to_money(b.get("purchase_price") or 0))
             out.append(line)

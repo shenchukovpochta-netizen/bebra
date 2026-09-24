@@ -57,7 +57,10 @@ ALL_FIELDS: dict[str, str] = {**COMPANY_FIELDS, **CONTACT_FIELDS}
 TTL_SECONDS = 300
 
 _snapshot: dict[str, str] = {}
-_loaded_at = 0.0
+# None - снимка ещё не было. Не 0.0: time.monotonic() считает от загрузки
+# системы, и первые пять минут после перезагрузки сервера «загружено в 0»
+# выглядело бы свежим - договор ушёл бы с прочерками вместо реквизитов.
+_loaded_at: float | None = None
 
 
 def context(values: dict[str, Any] | None = None) -> dict[str, str]:
@@ -100,11 +103,13 @@ def reset() -> None:
     """Забыть снимок: следующий refresh обязательно сходит в базу."""
     global _snapshot, _loaded_at
     _snapshot = {}
-    _loaded_at = 0.0
+    _loaded_at = None
 
 
 def is_fresh(*, now: float | None = None) -> bool:
-    return (now or time.monotonic()) - _loaded_at < TTL_SECONDS
+    if _loaded_at is None:
+        return False
+    return (now if now is not None else time.monotonic()) - _loaded_at < TTL_SECONDS
 
 
 async def refresh(crm: Any, *, force: bool = False) -> dict[str, str]:

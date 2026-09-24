@@ -2269,6 +2269,26 @@ class TestOpsAndFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = TestCrmOnPostgres.asyncTearDown
     seed = TestCrmOnPostgres.seed
 
+    async def test_bike_list_search_finds_motor_vin(self):
+        """Поиск «Парка» по VIN мотора и раме - как набрано и нормализованным
+        (кириллица-двойник, пробелы, дефисы) - и так же на заглушке."""
+        from tests.fake_crm import FakeCrm
+
+        fake = FakeCrm()
+        for crm in (self.crm, fake):
+            await crm.create_bike(code="102", model="Truck+", frame_no="264022503700124",
+                                  motor_no="60V24DW0512", plate_no="1234АВ16")
+            await crm.create_bike(code="103", model="Truck+", frame_no="ZQV202483465360",
+                                  motor_no="48V23XX0007")
+        cases = {"60V24DW": ["102"], "60в 24-dw": ["102"], "0512": ["102"],
+                 "2640 2250": ["102"], "zqv2024": ["103"], "1234АВ": ["102"],
+                 "Truck": ["102", "103"], "нет такого": []}
+        for query, want in cases.items():
+            with self.subTest(query=query):
+                pg = [b["code"] for b in await self.crm.bikes(q=query)]
+                self.assertEqual(pg, want)
+                self.assertEqual([b["code"] for b in await fake.bikes(q=query)], pg)
+
     async def test_bike_by_vin_normalises_like_logic(self):
         await self.seed()
         await self.crm.update_bike(self.bike_id, motor_no="60V240W 2305-001")

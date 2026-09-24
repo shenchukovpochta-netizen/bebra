@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,6 +67,16 @@ class TestCompanyLogic(unittest.TestCase):
         self.assertEqual(len(calls), 1, "снимок живёт TTL, а не читается каждый раз")
         tw.run(company.refresh(crm, force=True))
         self.assertEqual(len(calls), 2)
+
+    def test_empty_snapshot_is_stale_right_after_boot(self):
+        # time.monotonic() считает от загрузки системы: через минуту после
+        # перезагрузки сервера он около 60. Ненаполненный снимок не должен
+        # выглядеть свежим - иначе договор ушёл бы с прочерками.
+        with mock.patch.object(company.time, "monotonic", return_value=60.0):
+            self.assertFalse(company.is_fresh())
+            company.set_snapshot({"company_inn": "1660"})
+            self.assertTrue(company.is_fresh())
+        self.assertFalse(company.is_fresh(now=60.0 + company.TTL_SECONDS))
 
     def test_broken_database_keeps_the_old_snapshot(self):
         if not HAVE_WEB:                                # pragma: no cover

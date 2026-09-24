@@ -18,6 +18,7 @@ import unittest
 import zipfile
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -136,6 +137,21 @@ class TestListsInThePanel(tw.WebCase):
         text = self.get_ok("/bikes?sort=code&dir=asc")
         self.assertIn("sort=code&dir=desc", text,
                       "повторный клик переворачивает порядок")
+
+    def test_sort_links_do_not_grow_the_address(self):
+        # Каждый клик по заголовку дописывал ещё один sort=…&dir=…: адрес
+        # рос без конца, и «Мои фильтры» сохраняли весь хвост.
+        import re
+        text = self.get_ok("/bikes?rows=300&sort=code&dir=asc&sort=code&dir=desc"
+                           "&sort=code&dir=asc&q=B")
+        for href in re.findall(r'href="\?([^"]*sort=[^"]*dir=(?:asc|desc))"', text):
+            query = href.replace("&amp;", "&")
+            self.assertEqual(query.count("sort="), 1, query)
+            self.assertEqual(query.count("dir="), 1, query)
+            self.assertIn("rows=300", query, "размер страницы остаётся")
+            self.assertIn("q=B", query, "поиск остаётся")
+        for href in re.findall(r'href="\?([^"]*rows=[^"]*)"', text):
+            self.assertEqual(href.replace("&amp;", "&").count("rows="), 1, href)
 
     def test_unknown_sort_is_ignored(self):
         self.assertEqual(self.client.get("/bikes?sort=password").status_code, 200)
@@ -272,3 +288,40 @@ class TestExcelExport(tw.WebCase):
 
 if __name__ == "__main__":                              # pragma: no cover
     unittest.main()
+
+
+class TestBikeVin(tw.WebCase):
+    """В «Парке» видны и рама, и VIN мотора (в таблице владельца - «ВИН
+    мотора» / «ВИН колеса»), и по обоим ищется, как в группе точек."""
+
+    def setUp(self):
+        super().setUp()
+        self.login()
+        _run(self.crm.create_bike(code="102", model="Truck+", frame_no="264022503700124",
+                                  motor_no="60V24DW0512"))
+        _run(self.crm.create_bike(code="103", model="Truck+", frame_no="ZQV202483465360",
+                                  motor_no="48V23XX0007"))
+
+    def test_vin_column_is_shown_and_sortable(self):
+        text = self.get_ok("/bikes")
+        self.assertIn("VIN мотора", text)
+        self.assertIn("60V24DW0512", text)
+        self.assertIn("sort=motor", text)
+        desc = self.get_ok("/bikes?sort=motor&dir=desc")
+        self.assertLess(desc.index("60V24DW0512"), desc.index("48V23XX0007"))
+
+    def test_search_by_vin_as_typed_and_normalized(self):
+        # «60В 24-dw» с телефона: кириллица-двойник, пробел и дефис.
+        for query in ("60V24DW", "60в 24-dw", "0512"):
+            with self.subTest(query=query):
+                text = self.get_ok("/bikes?q=" + quote(query))
+                self.assertIn("60V24DW0512", text)
+                self.assertNotIn("48V23XX0007", text)
+        self.assertIn("264022503700124", self.get_ok("/bikes?q=2640 2250"))
+
+    def test_export_has_the_vin(self):
+        r = self.client.get("/bikes.csv")
+        self.assertEqual(r.status_code, 200)
+        head, *lines = r.text.splitlines()
+        self.assertIn("VIN мотора", head)
+        self.assertTrue(any("60V24DW0512" in line for line in lines))

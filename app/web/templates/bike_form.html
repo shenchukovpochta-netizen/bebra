@@ -6,7 +6,7 @@
   <label>Инвентарный номер <input name="code" placeholder="B-012" required></label>
   <label>Модель <input name="model" placeholder="Kugoo V3 Pro" required></label>
   <label>Номер рамы <input name="frame_no"></label>
-  <label>Номер мотора <input name="motor_no"></label>
+  <label>VIN мотора (номер колеса) <input name="motor_no"></label>
   <label>АКБ, шт. <input name="battery_count" type="number" min="0" max="10" value="2"></label>
   <label>Пробег, км <input name="mileage_km" inputmode="numeric" placeholder="0"></label>
   <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>

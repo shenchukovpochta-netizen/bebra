@@ -27,7 +27,7 @@
     <label>Инвентарный номер <input name="code" value="{{ bike.code }}" required></label>
     <label>Модель <input name="model" value="{{ bike.model }}" required></label>
     <label>Номер рамы <input name="frame_no" value="{{ bike.frame_no or '' }}"></label>
-    <label>Номер мотора <input name="motor_no" value="{{ bike.motor_no or '' }}"></label>
+    <label>VIN мотора (номер колеса) <input name="motor_no" value="{{ bike.motor_no or '' }}"></label>
     <label>Госномер <input name="plate_no" value="{{ bike.plate_no or '' }}" placeholder="если выдан"></label>
     <label class="check"><input type="checkbox" name="plate_ok" value="1" {% if bike.plate_ok %}checked{% endif %}> Госномер установлен</label>
     <label class="check"><input type="checkbox" name="tracker_ok" value="1" {% if bike.tracker_ok %}checked{% endif %}> Трекер установлен</label>

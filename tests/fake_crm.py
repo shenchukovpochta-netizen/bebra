@@ -280,9 +280,21 @@ class FakeCrm:
                 if (not status or b["status"] == status)
                 and (not location or (b.get("location") is None if location == "none"
                                       else b.get("location") == location))
-                and (not q or q.lower()
-                     in f"{b['code']} {b['model']} {b.get('frame_no') or ''}".lower())]
+                and (not q or self._bike_matches(b, q))]
         return sorted(rows, key=lambda b: b["code"])[:limit]
+
+    @staticmethod
+    def _bike_matches(b, q):
+        """Как db.bikes: номер, модель, рама, VIN мотора, госномер - как
+        набрано; рама и мотор - ещё и нормализованными (logic.vin_key)."""
+        text = q.strip().lower()
+        fields = (b["code"], b["model"], b.get("frame_no"), b.get("motor_no"),
+                  b.get("plate_no"))
+        if any(text in str(f or "").lower() for f in fields):
+            return True
+        key = crm_logic.vin_key(q)
+        return len(key) >= crm_logic.VIN_MIN and any(
+            key in crm_logic.vin_key(b.get(f)) for f in ("frame_no", "motor_no"))
 
     def _log_status(self, bike_id, from_status, to_status, by=None):
         """Аналог триггера crm.log_bike_status - вместе с пробегом."""

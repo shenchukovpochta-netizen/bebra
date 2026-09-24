@@ -8,7 +8,7 @@
 {% set active = tools.sort == key %}
 {% set nxt = 'desc' if active and tools.dir != 'desc' else 'asc' %}
 <th class="{{ cls }}{% if active %} sorted{% endif %}">
-  <a href="?{{ tools.query }}{% if tools.query %}&{% endif %}sort={{ key }}&dir={{ nxt }}">{{ label }}{% if active %}<span class="caret">{{ '▾' if tools.dir == 'desc' else '▴' }}</span>{% endif %}</a>
+  <a href="?{{ tools.q_sort }}{% if tools.q_sort %}&{% endif %}sort={{ key }}&dir={{ nxt }}">{{ label }}{% if active %}<span class="caret">{{ '▾' if tools.dir == 'desc' else '▴' }}</span>{% endif %}</a>
 </th>
 {% endmacro %}
 
@@ -22,7 +22,7 @@
     {% if extra %}· {{ extra }}{% endif %}
     <span class="spacer"></span>
     строк:
-    {% for size in LIST_SIZES %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}
+    {% for size in LIST_SIZES %}<a href="?{{ tools.q_rows }}{% if tools.q_rows %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}
     {% if tools.pages > 1 %}
     <span class="spacer"></span>
     {% if tools.page > 1 %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}page={{ tools.page - 1 }}">←</a>{% endif %}

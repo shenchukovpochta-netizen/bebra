@@ -110,7 +110,9 @@ TTL_SECONDS = 300
 
 _snapshot: dict[str, dict] = {}
 _marks: dict[str, bytes] = {}
-_loaded_at = 0.0
+# None - снимка ещё не было (см. company._loaded_at: 0.0 в первые минуты
+# после загрузки сервера выглядело бы свежим, и свой шаблон не подхватился бы).
+_loaded_at: float | None = None
 
 
 def snapshot() -> dict[str, dict]:
@@ -133,11 +135,13 @@ def set_snapshot(rows: Any = None, marks: dict[str, bytes] | None = None) -> Non
 
 def reset() -> None:
     global _snapshot, _marks, _loaded_at
-    _snapshot, _marks, _loaded_at = {}, {}, 0.0
+    _snapshot, _marks, _loaded_at = {}, {}, None
 
 
 def is_fresh(*, now: float | None = None) -> bool:
-    return (now or time.monotonic()) - _loaded_at < TTL_SECONDS
+    if _loaded_at is None:
+        return False
+    return (now if now is not None else time.monotonic()) - _loaded_at < TTL_SECONDS
 
 
 async def refresh(crm: Any, folder: Path | None, *, force: bool = False) -> None:

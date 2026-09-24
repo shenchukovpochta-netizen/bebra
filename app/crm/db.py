@@ -268,9 +268,20 @@ class CrmDB:
             args.append(location)
             conds.append(f"b.location = ${len(args)}")
         if q:
+            # Номер, модель, госномер - как набрано; рама и VIN мотора -
+            # ещё и нормализованными, как в группе точек: «60В» с телефона
+            # и «60v 24-0w» из накладной - один и тот же номер.
             args.append(f"%{q.strip()}%")
-            conds.append(f"(b.code ilike ${len(args)} or b.model ilike ${len(args)} "
-                         f"or b.frame_no ilike ${len(args)})")
+            like = f"${len(args)}"
+            match = [f"b.code ilike {like}", f"b.model ilike {like}",
+                     f"b.frame_no ilike {like}", f"b.motor_no ilike {like}",
+                     f"b.plate_no ilike {like}"]
+            key = logic.vin_key(q)
+            if len(key) >= logic.VIN_MIN:
+                args.append(f"%{key}%")
+                match += [f"{_vin_sql('b.frame_no')} like ${len(args)}",
+                          f"{_vin_sql('b.motor_no')} like ${len(args)}"]
+            conds.append("(" + " or ".join(match) + ")")
         where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)
         return _rows(await self.pool.fetch(

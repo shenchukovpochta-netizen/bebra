@@ -4,7 +4,7 @@
 <div class="bar">
   <h1>Парк</h1>
   <form method="get" class="search">
-    <input name="q" value="{{ q }}" placeholder="номер, модель, рама">
+    <input name="q" value="{{ q }}" placeholder="номер, модель, рама, VIN, госномер">
     <select name="status"><option value="">все</option>
       {% for code, label in BIKE_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }} ({{ counts.get(code, 0) }})</option>{% endfor %}
     </select>
@@ -26,7 +26,9 @@
   <tr>
     {{ list.th('№', 'code', tools) }}
     {{ list.th('Модель', 'model', tools) }}
-    <th class="opt">Рама</th><th class="opt">АКБ</th>
+    {{ list.th('Рама', 'frame', tools, 'opt') }}
+    {{ list.th('VIN мотора', 'motor', tools, 'opt') }}
+    <th class="opt">АКБ</th>
     {{ list.th('Пробег', 'mileage', tools, 'num') }}
     {{ list.th('Точка', 'location', tools) }}
     {{ list.th('Статус', 'status', tools) }}
@@ -38,6 +40,7 @@
     <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
     <td>{{ b.model }}</td>
     <td class="muted opt">{{ b.frame_no or '' }}</td>
+    <td class="muted opt">{{ b.motor_no or '' }}</td>
     <td class="opt">{{ b.battery_count }}</td>
     <td class="num muted">{{ '{:,}'.format(b.mileage_km or 0).replace(',', '\u00a0') }} км</td>
     <td class="muted">{{ b.location or '' }}{% if b.spare %} · подменный{% endif %}</td>
@@ -45,8 +48,8 @@
     <td class="num opt {% if b.idle_days and b.idle_days > 7 %}bad{% endif %}">{% if b.idle_days is none %}—{% else %}{{ b.idle_days }} сут.{% endif %}</td>
     <td>{% if b.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="9" class="muted">Пусто.</td></tr>{% endfor %}
-  {{ list.footer(tools, '/bikes', 9) }}
+  {% else %}<tr><td colspan="10" class="muted">Пусто.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/bikes', 10) }}
 </table>
 </div>
 <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>

@@ -14,6 +14,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -109,6 +110,14 @@ class TestSnapshot(unittest.TestCase):
         doctemplates.reset()
         self.addCleanup(doctemplates.reset)
         self.dir = Path(tempfile.mkdtemp())
+
+    def test_empty_snapshot_is_stale_right_after_boot(self):
+        # Первые пять минут после загрузки сервера time.monotonic() меньше
+        # TTL: ненаполненный снимок всё равно должен читаться из базы.
+        with mock.patch.object(doctemplates.time, "monotonic", return_value=30.0):
+            self.assertFalse(doctemplates.is_fresh())
+            doctemplates.set_snapshot([])
+            self.assertTrue(doctemplates.is_fresh())
 
     def test_without_snapshot_ours_is_used(self):
         self.assertEqual(doctemplates.path_for("contract", OURS, None), OURS)
