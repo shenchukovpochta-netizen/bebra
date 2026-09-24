@@ -290,6 +290,10 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
                 known = threads.get(chat["id"])
                 if not last or (known and known.get("ext_cursor") == last):
                     continue
+                if known and known.get("origin") != "avito_api":
+                    # Этот чат завёл шлюз (n8n, Wazzup): обращение его, и
+                    # опрос в него не пишет - а значит, и качать нечего.
+                    continue
                 if not known and seen.get(chat["id"]) == last:
                     continue
                 if chat.get("updated") and chat["updated"] < cutoff:

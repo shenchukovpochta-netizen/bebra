@@ -2069,7 +2069,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     msg_id=item["msg_id"], name=item["name"], phone=item["phone"],
                     subject=item["subject"], subject_url=item["subject_url"],
                     at=item["at"], announce=True)
-            except service.ServiceError:
+            except (service.ServiceError, UnicodeError, ValueError):
+                # Негодное сообщение - в пропущенные, пачка идёт дальше.
+                # Сбой базы - наоборот 500: шлюз повторит доставку, а уже
+                # записанное отсечёт номер сообщения.
                 skipped += 1
                 continue
             if got["message_id"] is None:

@@ -137,11 +137,15 @@ class AvitoClient:
                 data={"grant_type": "client_credentials", "client_id": self.client_id,
                       "client_secret": self.client_secret})
             data = await _json(response)
+            data = data if isinstance(data, dict) else {}
             status = getattr(response, "status", 200)
-            token = str((data or {}).get("access_token") or "")
+            token = str(data.get("access_token") or "")
             if status >= 400 or not token:
                 raise AvitoError(f"токен не выдан: Авито ответил {status}", status)
-            lifetime = int((data or {}).get("expires_in") or 3600)
+            try:
+                lifetime = int(data.get("expires_in") or 3600)
+            except (TypeError, ValueError):
+                lifetime = 3600
             self._token = token
             self._token_until = time.monotonic() + max(lifetime - TOKEN_MARGIN, 60)
             return token
@@ -236,8 +240,10 @@ def _chat(chat_id: Any) -> str:
     """Номер чата - в путь одним сегментом: «../» из чужих данных не уводит
     запрос на другой адрес API."""
     text = str(chat_id or "").strip()
-    if not text:
-        raise AvitoError("пустой номер чата")
+    # «.» и «..» кодировать бесполезно: библиотека адресов схлопывает их и
+    # в виде %2E, и запрос ушёл бы мимо chats/<id>. У Авито таких номеров нет.
+    if not text or text.strip(".") == "":
+        raise AvitoError("негодный номер чата")
     return quote(text, safe="")
 
 

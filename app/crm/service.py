@@ -1933,7 +1933,7 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
     got = await crm.inbox_record(
         channel=channel, origin=origin, ext_id=ext, direction=direction, kind=kind,
         msg_id=logic._cut(msg_id, 100) if msg_id is not None else None,
-        body_enc=inbox_seal(vault, (text or "")[:logic.INBOX_TEXT_MAX] or None),
+        body_enc=inbox_seal(vault, logic.clean_text(text)[:logic.INBOX_TEXT_MAX] or None),
         author=author, name=logic._cut(name, logic.INBOX_NAME_MAX),
         username=logic._cut(str(username or "").lstrip("@"), 64), phone=norm,
         subject=logic._cut(subject, logic.INBOX_SUBJECT_MAX),

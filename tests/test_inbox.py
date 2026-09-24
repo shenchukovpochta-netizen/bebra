@@ -338,6 +338,26 @@ class TestParseInbound(unittest.TestCase):
                 "senderData": {"chatId": chat, "sender": chat, "senderName": "Ильдар"},
                 "messageData": {"typeMessage": type_message, **data}}
 
+    def test_green_service_events_are_not_messages(self):
+        # Реакция 👍 на наш ответ, правка и удаление - не новое обращение:
+        # как сообщение они переоткрывали бы разобранное и слали сигнал.
+        for kind in ("reactionMessage", "editedMessage", "deletedMessage",
+                     "pollUpdateMessage"):
+            with self.subTest(kind):
+                self.assertEqual(logic.parse_inbound(self.green(kind)), ([], 1))
+
+    def test_lone_surrogate_is_cleaned(self):
+        # Шлюз обрезал эмодзи посередине: одиночный суррогат ронял бы и
+        # шифр, и кодек базы - а с ними всю пачку хука на каждом повторе.
+        items, _ = logic.parse_inbound(self.green(
+            textMessageData={"textMessage": "Свободен? \ud83d"},
+            ).__or__({"senderData": {"chatId": "79001234567@c.us",
+                                     "senderName": "Иль\ud83dдар"}}))
+        [item] = items
+        item["text"].encode("utf-8")
+        item["name"].encode("utf-8")
+        self.assertTrue(item["text"].startswith("Свободен?"))
+
     def test_green_text(self):
         items, skipped = logic.parse_inbound(self.green(
             textMessageData={"textMessage": "Сколько стоит неделя?"}))
@@ -633,6 +653,14 @@ class InboxCase(unittest.IsolatedAsyncioTestCase):
 
 
 class TestInboxIn(InboxCase):
+    async def test_lone_surrogate_text_is_stored_encrypted(self):
+        got = await service.inbox_in(self.crm, self.vault, channel="wa", origin="hook",
+                                     ext_id="+79005550001", text="Привет \ud83d",
+                                     name="Азиз \udc00")
+        [message] = self.messages(got["thread_id"])
+        self.assertTrue(service.inbox_open(self.vault, message["body_enc"])
+                        .startswith("Привет"))
+
     async def test_client_by_telegram(self):
         thread = await self.thread(username="@ildar_h", name="  Ильдар ")
         self.assertEqual(thread["client_id"], self.ildar)
@@ -2206,13 +2234,13 @@ class TestAvitoPoll(InboxCase):
         # чат каждый круг с предупреждением в лог.
         hook = await self.thread(channel="avito", origin="hook", ext_id="u2i-1",
                                  text="Через n8n")
-        with mock.patch.object(inbox.log, "warning"):      # отказ записи - не предмет
-            await inbox.avito_once(self.crm, self.avito, cfg())
-            self.assertEqual(len(self.messages(hook["id"])), 1, "чужое обращение не тронуто")
-            self.assertEqual(self.avito.message_calls, ["u2i-1"])
-            await inbox.avito_once(self.crm, self.avito, cfg())
-        self.assertEqual(self.avito.message_calls, ["u2i-1"],
-                         "чат не менялся - перечитывать его незачем")
+        # Чат принадлежит шлюзу: опрос его не качает вовсе - ни первым
+        # кругом, ни следующими.
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertEqual(len(self.messages(hook["id"])), 1, "чужое обращение не тронуто")
+        await inbox.avito_once(self.crm, self.avito, cfg())
+        self.assertEqual(self.avito.message_calls, [],
+                         "чат шлюза опрос не перечитывает")
 
 
 class TestInboxLoop(InboxCase):

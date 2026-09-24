@@ -4,13 +4,17 @@
 пишет каждый запрос и отвечает по пути. Главное, что здесь проверяется:
 ключ не уходит в адрес (адреса попадают в логи), просроченный токен
 лечится ровно одним повтором, отказ по тарифу и «реже» не повторяются
-вслепую, а текст длиннее предела отсекается до сети. Разбор чата и
-сообщения проверяется отдельно, без запросов.
+вслепую, а текст длиннее предела отсекается до сети. Сбой сети, TLS и
+таймаут - AvitoError, а не падение круга опроса; пустой ответ на чтение -
+ошибка, а на отправку - «ушло». Разбор чата и сообщения проверяется
+отдельно, без запросов.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ssl
 import sys
 import unittest
 from datetime import UTC, datetime
@@ -22,6 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.services import avito  # noqa: E402
 from app.services.avito import AvitoClient, AvitoError  # noqa: E402
+
+try:
+    import aiohttp
+except ImportError:                                     # pragma: no cover
+    aiohttp = None
 
 OWN = 777                     # id нашего аккаунта у Авито
 SECRET = "s3cr3t-ключ"
@@ -71,7 +80,11 @@ class FakeSession:
 
 
 class FakeAvito:
-    """Авито в памяти. Ответы на путь - очередь: последний повторяется."""
+    """Авито в памяти. Ответы на путь - очередь: последний повторяется.
+
+    Ответ - пара (код, тело) или исключение: его бросает сам запрос, как
+    aiohttp при обрыве, таймауте или отказе TLS - ответа нет вовсе.
+    """
 
     def __init__(self, *, expires_in: int = 86400):
         self.calls: list[dict] = []
@@ -80,11 +93,12 @@ class FakeAvito:
         self.read_outside = 0
         self.issued = 0
         self.expires_in = expires_in
-        self.token_reply: tuple[int, object] | None = None
-        self.routes: dict[tuple[str, str], list[tuple[int, object]]] = {
+        self.token_reply: tuple[int, object] | BaseException | None = None
+        self.routes: dict[tuple[str, str], list[tuple[int, object] | BaseException]] = {
             ("GET", SELF_PATH): [(200, {"id": OWN, "name": "МАЙБАЙК"})]}
 
-    def reply(self, method: str, path: str, *answers: tuple[int, object]) -> None:
+    def reply(self, method: str, path: str,
+              *answers: tuple[int, object] | BaseException) -> None:
         self.routes[(method, path)] = list(answers)
 
     def factory(self) -> FakeSession:
@@ -96,6 +110,8 @@ class FakeAvito:
         path = url[len(base):]
         self.calls.append({"method": method, "url": url, "path": path, **kwargs})
         if path == "token/":
+            if isinstance(self.token_reply, BaseException):
+                raise self.token_reply
             if self.token_reply is not None:
                 return FakeResponse(self, *self.token_reply)
             self.issued += 1
@@ -105,7 +121,10 @@ class FakeAvito:
         answers = self.routes.get((method, path))
         if not answers:
             return FakeResponse(self, 404, {"error": {"code": 404}})
-        status, payload = answers.pop(0) if len(answers) > 1 else answers[0]
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(answer, BaseException):
+            raise answer
+        status, payload = answer
         return FakeResponse(self, status, payload)
 
     def token_calls(self) -> list[dict]:
@@ -125,6 +144,17 @@ def make(**over) -> tuple[AvitoClient, FakeAvito]:
 
 def bearer(call: dict) -> str | None:
     return (call.get("headers") or {}).get("Authorization")
+
+
+def aiohttp_like(name: str, module: str = "aiohttp.client_exceptions") -> type[Exception]:
+    """Двойник исключения aiohttp: тот же модуль, без самой библиотеки.
+    Родитель - голый Exception, чтобы сработало именно правило модуля, а
+    не OSError/TimeoutError, от которых наследуются некоторые настоящие."""
+    return type(name, (Exception,), {"__module__": module})
+
+
+def messenger_calls(server: FakeAvito) -> list[dict]:
+    return [c for c in server.api_calls() if c["path"].startswith("messenger/")]
 
 
 class TestReady(unittest.TestCase):
@@ -304,6 +334,221 @@ class TestErrors(unittest.IsolatedAsyncioTestCase):
         self.assertIn("не разобрать", str(err.exception))
 
 
+class TestNetwork(unittest.IsolatedAsyncioTestCase):
+    """Сбой сети - AvitoError «Авито недоступен»: круг опроса ловит только
+    его, всё прочее уронило бы круг мимо плашки в панели."""
+
+    async def assert_unavailable(self, exc: BaseException) -> AvitoError:
+        client, server = make()
+        server.reply("GET", CHATS_PATH, exc)
+        with self.assertRaises(AvitoError) as err:
+            await client.chats()
+        self.assertTrue(str(err.exception).startswith("Авито недоступен: "),
+                        str(err.exception))
+        self.assertIn(type(exc).__name__, str(err.exception))
+        self.assertIsNone(err.exception.status, "ответа не было - и кода нет")
+        self.assertIs(err.exception.__cause__, exc, "исходная причина - для журнала")
+        self.assertEqual(server.open, 0, "сессия закрыта и после сбоя")
+        self.assertEqual(len(server.api_calls(CHATS_PATH)), 1,
+                         "без повтора: повторит следующий круг опроса")
+        return err.exception
+
+    async def test_os_and_timeout_errors(self):
+        # asyncio.TimeoutError с 3.11 - тот же TimeoutError.
+        for exc in (OSError(101, "Network is unreachable"), ConnectionResetError(),
+                    ConnectionRefusedError(), TimeoutError(),
+                    ssl.SSLError("certificate verify failed"),
+                    ssl.SSLCertVerificationError("self-signed certificate")):
+            with self.subTest(exc=type(exc).__name__):
+                await self.assert_unavailable(exc)
+
+    async def test_aiohttp_errors_by_module(self):
+        # ClientError и родня наследуются от Exception, не от OSError:
+        # узнаются по модулю aiohttp.
+        for name, module in (("ServerDisconnectedError", "aiohttp.client_exceptions"),
+                             ("ClientPayloadError", "aiohttp.client_exceptions"),
+                             ("ClientConnectionError", "aiohttp.client_exceptions"),
+                             ("BadHttpMessage", "aiohttp.http_exceptions")):
+            with self.subTest(name=name):
+                await self.assert_unavailable(aiohttp_like(name, module)("обрыв"))
+
+    @unittest.skipUnless(aiohttp is not None, "aiohttp не установлен")
+    async def test_real_aiohttp_errors(self):
+        for exc in (aiohttp.ServerDisconnectedError(), aiohttp.ClientPayloadError("обрыв"),
+                    aiohttp.ClientConnectionError("сброс"),
+                    aiohttp.ServerTimeoutError("таймаут"), aiohttp.InvalidURL("x")):
+            with self.subTest(exc=type(exc).__name__):
+                await self.assert_unavailable(exc)
+
+    async def test_error_text_is_the_type_not_the_message(self):
+        # Текст исключения aiohttp несёт адрес и хвост запроса - в плашку
+        # панели и журнал идёт только имя типа.
+        leak = f"Cannot connect to host api.avito.ru:443 ?client_secret={SECRET}"
+        for exc in (OSError(leak), aiohttp_like("ClientConnectorError")(leak)):
+            with self.subTest(exc=type(exc).__name__):
+                err = await self.assert_unavailable(exc)
+                self.assertNotIn(SECRET, str(err))
+                self.assertNotIn("api.avito.ru", str(err))
+
+    async def test_foreign_errors_are_not_disguised(self):
+        # Ошибка не сети и не aiohttp - это ошибка кода: «Авито недоступен»
+        # спрятал бы её за вечной плашкой.
+        for exc in (RuntimeError("баг"), KeyError("id"), AttributeError("get")):
+            with self.subTest(exc=type(exc).__name__):
+                client, server = make()
+                server.reply("GET", CHATS_PATH, exc)
+                with self.assertRaises(type(exc)) as err:
+                    await client.chats()
+                self.assertNotIsInstance(err.exception, AvitoError)
+                self.assertEqual(server.open, 0)
+
+    async def test_cancel_is_not_swallowed(self):
+        # Остановка бота отменяет круг: отмена не становится «Авито недоступен».
+        client, server = make()
+        server.reply("GET", CHATS_PATH, asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await client.chats()
+        self.assertEqual(server.open, 0)
+
+    async def test_token_network_error_then_recovers(self):
+        client, server = make()
+        server.token_reply = ConnectionResetError()
+        with self.assertRaises(AvitoError) as err:
+            await client.self_id()
+        self.assertIn("Авито недоступен", str(err.exception))
+        self.assertIsNone(client._token)
+        self.assertEqual(server.api_calls(), [], "без токена в API не ходим")
+        self.assertFalse(client._lock.locked(), "замок токена отпущен")
+        server.token_reply = None
+        self.assertEqual(await client.self_id(), OWN, "следующий круг - как обычно")
+        self.assertEqual(bearer(server.api_calls(SELF_PATH)[0]), "Bearer tok-1")
+
+    async def test_network_error_after_403_is_unavailable(self):
+        # Повтор после 403 упал по сети - та же AvitoError, а не 403.
+        client, server = make()
+        server.reply("GET", CHATS_PATH, (403, {}), TimeoutError())
+        with self.assertRaises(AvitoError) as err:
+            await client.chats()
+        self.assertIn("Авито недоступен", str(err.exception))
+        self.assertIsNone(err.exception.status)
+        self.assertEqual(len(server.api_calls(CHATS_PATH)), 2)
+
+    async def test_send_network_error_is_an_error(self):
+        # Не «ушло»: ответа не было, и оператор видит «не ушло» с причиной.
+        for exc in (TimeoutError(), aiohttp_like("ServerDisconnectedError")()):
+            with self.subTest(exc=type(exc).__name__):
+                client, server = make()
+                server.reply("POST", send_path("c1"), exc)
+                with self.assertRaises(AvitoError) as err:
+                    await client.send_text("c1", "Здравствуйте")
+                self.assertIn("Авито недоступен", str(err.exception))
+                self.assertEqual(len(server.api_calls(send_path("c1"))), 1,
+                                 "без повтора: второй раз - дубль человеку")
+
+    async def test_body_cut_mid_read(self):
+        # Обрыв при чтении тела: у чтения - ошибка, у отправки - «ушло»
+        # (код 200 уже пришёл, повтор был бы вторым сообщением).
+        cut = aiohttp_like("ClientPayloadError")("Response payload is not completed")
+        client, server = make()
+        server.reply("GET", CHATS_PATH, (200, cut))
+        with self.assertRaises(AvitoError) as err:
+            await client.chats()
+        self.assertIn("не разобрать", str(err.exception))
+        server.reply("POST", send_path("c1"), (200, cut))
+        self.assertEqual(await client.send_text("c1", "ок"), {})
+
+
+class TestEmptyBody(unittest.IsolatedAsyncioTestCase):
+    """2xx с пустым или нечитаемым телом: у чтения - AvitoError (иначе опрос
+    сдвинул бы курсор за непрочитанное), у отправки - «ушло»."""
+
+    EMPTY = (None, ValueError("<html>"))
+
+    async def test_reads_refuse_empty_2xx(self):
+        for status in (200, 204):
+            for payload in self.EMPTY:
+                with self.subTest(status=status, payload=payload):
+                    client, server = make()
+                    server.reply("GET", CHATS_PATH, (status, payload))
+                    server.reply("GET", msg_path("c1"), (status, payload))
+                    with self.assertRaises(AvitoError) as err:
+                        await client.chats()
+                    self.assertIn("не разобрать", str(err.exception))
+                    with self.assertRaises(AvitoError) as err:
+                        await client.messages("c1")
+                    self.assertIn("не разобрать", str(err.exception))
+
+    async def test_self_id_refuses_empty(self):
+        client, server = make()
+        server.reply("GET", SELF_PATH, (200, None), (200, {"id": OWN}))
+        with self.assertRaises(AvitoError):
+            await client.self_id()
+        self.assertEqual(server.api_calls(CHATS_PATH), [], "без id дальше не идём")
+        self.assertEqual(await client.self_id(), OWN)
+
+    async def test_error_text_has_no_query(self):
+        client, server = make()
+        server.reply("GET", "x/y", (200, None))
+        with self.assertRaises(AvitoError) as err:
+            await client._call("GET", "x/y?client_secret=zzz")
+        self.assertNotIn("zzz", str(err.exception))
+
+    async def test_error_status_wins_over_empty_body(self):
+        # Пустое тело при 4xx/5xx - всё равно код ответа, а не «не разобрать».
+        for status in (402, 429, 500, 502):
+            with self.subTest(status=status):
+                client, server = make()
+                server.reply("GET", CHATS_PATH, (status, None))
+                with self.assertRaises(AvitoError) as err:
+                    await client.chats()
+                self.assertEqual(err.exception.status, status)
+                self.assertNotIn("не разобрать", str(err.exception))
+
+    async def test_read_after_403_still_refuses_empty(self):
+        client, server = make()
+        server.reply("GET", msg_path("c1"), (403, {}), (200, None))
+        with self.assertRaises(AvitoError):
+            await client.messages("c1")
+        self.assertEqual(len(server.api_calls(msg_path("c1"))), 2)
+
+    async def test_send_empty_2xx_is_sent(self):
+        for status in (200, 201, 204):
+            for payload in self.EMPTY:
+                with self.subTest(status=status, payload=payload):
+                    client, server = make()
+                    server.reply("POST", send_path("c1"), (status, payload))
+                    self.assertEqual(await client.send_text("c1", "Здравствуйте"), {})
+                    self.assertEqual(len(server.api_calls(send_path("c1"))), 1,
+                                     "ушло один раз - без повтора")
+
+    async def test_send_empty_after_403_is_sent(self):
+        # Повтор после 403 помнит, что это отправка: пустой 200 - «ушло».
+        client, server = make()
+        server.reply("POST", send_path("c1"), (403, None), (200, None))
+        self.assertEqual(await client.send_text("c1", "Здравствуйте"), {})
+        self.assertEqual(len(server.api_calls(send_path("c1"))), 2)
+
+    async def test_send_error_status_with_empty_body_is_an_error(self):
+        client, server = make()
+        server.reply("POST", send_path("c1"), (500, None))
+        with self.assertRaises(AvitoError) as err:
+            await client.send_text("c1", "Здравствуйте")
+        self.assertEqual(err.exception.status, 500)
+
+    async def test_token_body_not_an_object(self):
+        # Ответ токена ни объектом (строка, список, число) - та же AvitoError,
+        # а не AttributeError мимо `except AvitoError` в круге опроса.
+        for status, payload in ((200, None), (200, "ok"), (200, ["tok"]), (200, 42),
+                                (503, "Service Unavailable"), (503, [])):
+            with self.subTest(status=status, payload=payload):
+                client, server = make()
+                server.token_reply = (status, payload)
+                with self.assertRaises(AvitoError):
+                    await client.self_id()
+                self.assertEqual(server.api_calls(), [])
+                self.assertIsNone(client._token)
+
+
 class TestSelfId(unittest.IsolatedAsyncioTestCase):
     async def test_self_id_asked_once(self):
         client, server = make()
@@ -439,6 +684,47 @@ class TestMessages(unittest.IsolatedAsyncioTestCase):
         (call,) = server.api_calls(msg_path("..%2F..%2Fcore%2Fv1%2Faccounts%2Fself"))
         self.assertNotIn("/../", call["url"])
 
+    async def test_chat_id_is_percent_encoded(self):
+        # Номер чата - один сегмент: «?», «#», «/», пробел и «%» кодируются,
+        # уже закодированное кодируется ещё раз и не раскрывается в «/».
+        cases = {
+            "u2i-Abc_1.2~3": "u2i-Abc_1.2~3",            # обычный номер как есть
+            " u2i-1 ": "u2i-1",                           # пробелы по краям срезаны
+            "a?limit=1#x": "a%3Flimit%3D1%23x",
+            "a/b": "a%2Fb",
+            "a b": "a%20b",
+            "..%2F": "..%252F",
+            "чат": "%D1%87%D0%B0%D1%82",
+        }
+        for chat_id, segment in cases.items():
+            with self.subTest(chat_id=chat_id):
+                client, server = make()
+                server.reply("GET", msg_path(segment), (200, []))
+                self.assertEqual(await client.messages(chat_id), [])
+                (call,) = messenger_calls(server)
+                self.assertEqual(call["path"], msg_path(segment))
+
+    async def test_empty_chat_id_refused(self):
+        for chat_id in ("", "   ", None):
+            with self.subTest(chat_id=chat_id):
+                client, server = make()
+                with self.assertRaises(AvitoError):
+                    await client.messages(chat_id)
+                self.assertEqual(messenger_calls(server), [], "в сообщения не ходим")
+
+    async def test_dot_chat_id_does_not_climb(self):
+        # «.» и «..» quote не трогает (точка - незарезервированный знак), а
+        # клиент по RFC 3986 схлопывает такие сегменты: chats/../messages/
+        # ушёл бы на accounts/777/messages/. Такой номер - не один сегмент.
+        for chat_id in (".", "..", " .. "):
+            with self.subTest(chat_id=chat_id):
+                client, server = make()
+                with contextlib.suppress(AvitoError):
+                    await client.messages(chat_id)
+                for call in messenger_calls(server):
+                    self.assertTrue({".", ".."}.isdisjoint(call["path"].split("/")),
+                                    call["path"])
+
 
 class TestSendText(unittest.IsolatedAsyncioTestCase):
     async def test_send_path_v1_and_body(self):
@@ -453,6 +739,34 @@ class TestSendText(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["json"], {"message": {"text": "Велосипед свободен"},
                                         "type": "text"})
         self.assertEqual(bearer(call), "Bearer tok-1")
+
+    async def test_send_chat_id_is_one_path_segment(self):
+        client, server = make()
+        segment = "..%2F..%2Fcore%2Fv1%2Faccounts%2Fself"
+        server.reply("POST", send_path(segment), (200, {"id": "m-1"}))
+        self.assertEqual(await client.send_text("../../core/v1/accounts/self", "ок"),
+                         {"id": "m-1"})
+        (call,) = messenger_calls(server)
+        self.assertEqual(call["path"], send_path(segment))
+        self.assertNotIn("/../", call["url"])
+
+    async def test_send_empty_chat_id_refused(self):
+        for chat_id in ("", "  ", None):
+            with self.subTest(chat_id=chat_id):
+                client, server = make()
+                with self.assertRaises(AvitoError):
+                    await client.send_text(chat_id, "ок")
+                self.assertEqual(messenger_calls(server), [], "ответ никуда не ушёл")
+
+    async def test_send_dot_chat_id_does_not_climb(self):
+        for chat_id in (".", ".."):
+            with self.subTest(chat_id=chat_id):
+                client, server = make()
+                with contextlib.suppress(AvitoError):
+                    await client.send_text(chat_id, "ок")
+                for call in messenger_calls(server):
+                    self.assertTrue({".", ".."}.isdisjoint(call["path"].split("/")),
+                                    call["path"])
 
     async def test_send_answer_not_dict(self):
         client, server = make()

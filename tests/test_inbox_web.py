@@ -209,6 +209,77 @@ class TestInboxAccess(InboxCase):
         self.assertIn("Каримов Азиз", page)
         self.assertNotIn(f'href="/clients/{cid}"', page)
 
+    def spy_client_lookups(self):
+        """Счётчик поисков карточки: номер или телефон. Поиск показывает
+        ФИО, поэтому без раздела «Клиенты» он не должен случиться вовсе."""
+        calls = []
+        by_id, by_phone = self.crm.client, self.crm.client_by_phone
+
+        async def client(client_id):
+            calls.append(("client", client_id))
+            return await by_id(client_id)
+
+        async def client_by_phone(phone):
+            calls.append(("phone", phone))
+            return await by_phone(phone)
+
+        self.crm.client, self.crm.client_by_phone = client, client_by_phone
+        return calls
+
+    def test_link_to_client_needs_clients_section(self):
+        """Правка «Входящих» без раздела «Клиенты»: обращению можно
+        ответить и сменить состояние, но привязка к карточке - это поиск
+        по базе клиентов, и он закрыт отказом без единого запроса."""
+        cid = run(self.crm.create_client(full_name="Каримов Азиз", phone="+79001112233"))
+        pid = run(self.crm.create_access_profile(
+            "Входящие без клиентов", {"sections": {"inbox": "edit"}, "actions": {}}))
+        self.as_("inboxer", pid)
+        page = self.get_ok(f"/inbox/{self.wa}")
+        self.assertIn(f'action="/inbox/{self.wa}/status"', page, "правка раздела есть")
+        self.assertIn(f'action="/inbox/{self.wa}/answered"', page)
+        self.assertNotIn(f'action="/inbox/{self.wa}/client"', page,
+                         "формы привязки без раздела «Клиенты» нет")
+        self.assertNotIn("Привязать к клиенту", page)
+        self.assertIn(f'action="/inbox/{self.tg}/reply"', self.get_ok(f"/inbox/{self.tg}"))
+        calls = self.spy_client_lookups()
+        for raw in (str(cid), "+79001112233", "8 900 111-22-33", "999999"):
+            with self.subTest(client=raw):
+                r = self.client.post(f"/inbox/{self.wa}/client", data={"client": raw})
+                self.assertEqual(r.status_code, 403)
+                self.assertIn("Нет доступа", r.text, "отказ страницей, а не голым 403")
+                self.assertIn(logic.SECTIONS["clients"], r.text,
+                              "отказ называет недостающий раздел")
+                self.assertNotIn("Каримов Азиз", r.text, "ФИО из поиска не утекло")
+        self.assertEqual(calls, [], "карточку даже не искали")
+        t = self.thread(self.wa)
+        self.assertEqual((t["client_id"], t["client_manual"], t["handled_by"]),
+                         (None, False, None))
+        # и отвязать уже привязанное тоже нельзя
+        run(self.crm.update_inbox_thread(self.wa, client_id=cid))
+        page = self.get_ok(f"/inbox/{self.wa}")
+        self.assertIn("Каримов Азиз", page)
+        self.assertNotIn("Отвязать от карточки", page)
+        r = self.client.post(f"/inbox/{self.wa}/client", data={"client": ""})
+        self.assertEqual(r.status_code, 403)
+        t = self.thread(self.wa)
+        self.assertEqual((t["client_id"], t["client_manual"]), (cid, False))
+        self.assertEqual(calls, [])
+
+    def test_link_to_client_with_clients_view_is_allowed(self):
+        """Смотреть «Клиентов» достаточно: привязка карточки не меняет."""
+        cid = run(self.crm.create_client(full_name="Каримов Азиз", phone="+79001112233"))
+        pid = run(self.crm.create_access_profile(
+            "Входящие и клиенты", {"sections": {"inbox": "edit", "clients": "view"},
+                                   "actions": {}}))
+        self.as_("linker", pid)
+        page = self.get_ok(f"/inbox/{self.wa}")
+        self.assertIn(f'action="/inbox/{self.wa}/client"', page)
+        r = self.client.post(f"/inbox/{self.wa}/client", data={"client": "8 900 111-22-33"})
+        self.assertEqual(r.status_code, 303)
+        t = self.thread(self.wa)
+        self.assertEqual((t["client_id"], t["client_manual"], t["handled_by"]),
+                         (cid, True, "staff:linker"))
+
     def test_anonymous_is_sent_to_login(self):
         for path in ("/inbox", f"/inbox/{self.tg}"):
             r = self.client.get(path)
@@ -353,6 +424,20 @@ class TestInboxThread(InboxCase):
         self.assertIn(f'action="/inbox/{self.av}/reply"', page)
         self.assertIn('maxlength="1000"', page)
 
+    def test_max_login_is_not_a_telegram_link(self):
+        """Логин MAX - не логин Telegram: t.me по нему открыл бы чужого
+        человека. Подпись называет канал, ссылки нет."""
+        tid = self.put(channel="max", origin="max_bot", ext_id="8002", name="Пётр Макс",
+                       username="petr_max", text="Здравствуйте")["thread_id"]
+        page = self.get_ok(f"/inbox/{tid}")
+        self.assertIn("<dt>Логин в MAX</dt><dd>@petr_max</dd>", page)
+        self.assertNotIn("t.me/", page)
+        self.assertNotIn("<dt>Telegram</dt>", page)
+        # у Telegram подпись и ссылка прежние
+        page = self.get_ok(f"/inbox/{self.tg}")
+        self.assertIn('<dt>Telegram</dt><dd><a href="https://t.me/ivan_kur"', page)
+        self.assertNotIn("Логин в", page)
+
     def test_missing_thread_is_404(self):
         self.assertEqual(self.client.get("/inbox/999999").status_code, 404)
         for action in ("reply", "status", "client", "answered"):
@@ -487,6 +572,41 @@ class TestInboxActions(InboxCase):
         outs = self.messages(self.tg, "out")
         self.assertEqual([self.text_of(m) for m in outs], ["Первый"])
         self.assertIn("Предыдущий ответ ещё отправляется", self.last.text)
+
+    def test_refused_reply_is_the_thread_page_with_the_draft(self):
+        """Отказ - не редирект, а та же карточка с кодом 400: причина во
+        флеше, набранный текст в поле ответа (экранированным), переписка
+        на месте. Флеш показан один раз - следующая загрузка чистая."""
+        self.reply(self.tg, "Первый", once="a")
+        draft = 'Второй & <b>жирный</b></textarea><script>alert(1)</script>'
+        r = self.reply(self.tg, draft, once="b")
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("location", r.headers, "не редирект: черновик потерялся бы")
+        self.assertIn("Предыдущий ответ ещё отправляется", r.text)
+        self.assertIn("Когда можно забрать велосипед?", r.text, "это карточка обращения")
+        self.assertIn(f'action="/inbox/{self.tg}/reply"', r.text)
+        self.assertIn('name="once"', r.text, "новый ключ формы для следующей попытки")
+        escaped = ("Второй &amp; &lt;b&gt;жирный&lt;/b&gt;&lt;/textarea&gt;"
+                   "&lt;script&gt;alert(1)&lt;/script&gt;")
+        self.assertIn(f'от имени бота">{escaped}</textarea>', r.text,
+                      "набранный текст - в поле ответа")
+        self.assertNotIn("<script>alert(1)", r.text)
+        self.assertNotIn("<b>жирный</b>", r.text)
+        self.assertEqual([self.text_of(m) for m in self.messages(self.tg, "out")],
+                         ["Первый"], "в очередь ничего не добавилось")
+        page = self.get_ok(f"/inbox/{self.tg}")
+        self.assertNotIn("Предыдущий ответ ещё отправляется", page, "флеш уже показан")
+        self.assertIn('от имени бота"></textarea>', page, "черновик только в ответе на отказ")
+
+    def test_too_long_reply_keeps_the_whole_draft(self):
+        """Длинный ответ возвращается в поле целиком: сократить его должен
+        человек, а не панель молча."""
+        long_text = "я" * 3501
+        r = self.reply(self.tg, long_text, once="long")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("длиннее 3500", r.text)
+        self.assertIn(f'от имени бота">{long_text}</textarea>', r.text)
+        self.assertEqual(self.messages(self.tg, "out"), [])
 
     def test_reply_without_once_key_still_works(self):
         """Старая вкладка без ключа формы не хуже, чем была до ключа."""
@@ -700,6 +820,24 @@ class TestInboxHook(InboxCase):
         # счёт неудач хука - свой: вход в панель с того же адреса открыт
         self.assertEqual(self.login().status_code, 303)
 
+    def test_valid_token_is_neither_counted_nor_throttled(self):
+        """Токен проверяется раньше счёта неудач: верные запросы в счёт не
+        идут и паузой не запираются, а неверные с того же адреса остаются
+        под паузой - удачный запрос счёт не обнуляет."""
+        for i in range(logic.HOOK_FAIL_LIMIT + 5):
+            self.assertEqual(self.counts(self.hook(green(msg_id=f"OK{i}"))), (1, 0, 0), i)
+        self.assertEqual(self.hook(green(), token="guess-first").status_code, 401,
+                         "верные запросы неудачами не считались")
+        for i in range(logic.HOOK_FAIL_LIMIT - 1):
+            self.assertEqual(self.hook(green(), token=f"guess-{i}").status_code, 401, i)
+        self.assertEqual(self.hook(green(), token="guess-last").status_code, 429)
+        for i in range(3):
+            self.assertEqual(self.counts(self.hook(green(msg_id=f"LATE{i}"))), (1, 0, 0), i)
+        self.assertEqual(self.hook(green(), token="guess-again").status_code, 429,
+                         "удачный запрос паузу для подбора не снимает")
+        [t] = self.threads()
+        self.assertEqual(len(self.messages(t["id"])), logic.HOOK_FAIL_LIMIT + 5 + 3)
+
     def test_below_the_limit_is_not_throttled(self):
         for i in range(logic.HOOK_FAIL_LIMIT - 1):
             self.assertEqual(self.hook(green(), token=f"guess-{i}").status_code, 401)
@@ -774,6 +912,59 @@ class TestInboxHook(InboxCase):
                 r = self.hook(payload, client=client)
                 self.assertEqual(r.status_code, 200, f"{label}: {r.status_code}")
                 self.assertEqual(r.json()["saved"] + r.json()["skipped"], 1)
+
+    def nul_guard(self):
+        """Как Postgres: NUL в строковом поле роняет запись ошибкой базы
+        (CharacterNotInRepertoireError, не ValueError). Заглушка его
+        пропустила бы молча, а в проде это 500 на каждой повторной
+        доставке пачки."""
+        record = self.crm.inbox_record
+
+        class DatabaseError(Exception):
+            pass
+
+        async def guarded(**kw):
+            for key, value in kw.items():
+                if isinstance(value, str) and "\x00" in value:
+                    raise DatabaseError(f"invalid byte sequence 0x00 в поле {key}")
+            return await record(**kw)
+
+        self.crm.inbox_record = guarded
+
+    def test_nul_in_text_fields_is_dropped_not_500(self):
+        self.nul_guard()
+        client = self.quiet_client()
+        n8n = {"channel": "avito", "ext_id": "chat\x00-9", "msg_id": "m\x001",
+               "name": "Ол\x00ег", "text": "При\x00вет", "subject": "Kugoo\x00 V3",
+               "subject_url": "https://www.avito.ru/kazan/x\x00_1"}
+        r = self.hook(n8n, client=client)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.counts(r), (1, 0, 0))
+        wa = green(name="Аз\x00из", text="Сколько\x00 стоит?", msg_id="NUL\x00-1")
+        self.assertEqual(self.counts(self.hook(wa, client=client)), (1, 0, 0))
+        wazzup = {"messages": [{"messageId": "wz\x00-1", "chatType": "whatsapp",
+                                "chatId": "79005554433", "type": "text",
+                                "text": "Добрый\x00 день", "contact": {"name": "Рус\x00там"}}]}
+        self.assertEqual(self.counts(self.hook(wazzup, client=client)), (1, 0, 0))
+        by_channel = {}
+        for t in self.threads():
+            by_channel.setdefault(t["channel"], []).append(t)
+        [avito] = by_channel["avito"]
+        self.assertEqual((avito["ext_id"], avito["name"], avito["subject"]),
+                         ("chat-9", "Олег", "Kugoo V3"))
+        self.assertIsNone(avito["subject_url"], "ссылка с управляющим знаком - подделка")
+        [m] = self.messages(avito["id"])
+        self.assertEqual((m["ext_id"], self.text_of(m)), ("m1", "Привет"))
+        names = sorted(t["name"] for t in by_channel["wa"])
+        self.assertEqual(names, ["Азиз", "Рустам"])
+        texts = sorted(self.text_of(m) for t in by_channel["wa"]
+                       for m in self.messages(t["id"]))
+        self.assertEqual(texts, ["Добрый день", "Сколько стоит?"])
+        for t in self.threads():
+            for m in self.messages(t["id"]):
+                self.assertNotIn("\x00", m["ext_id"] or "")
+        # повторная доставка той же пачки - повтор, а не новая строка
+        self.assertEqual(self.counts(self.hook(n8n, client=client)), (0, 1, 0))
 
     def test_deeply_nested_json_is_400_not_500(self):
         """Разбор такого тела упирается в предел рекурсии: это «не JSON»
@@ -927,6 +1118,55 @@ class TestInboxHook(InboxCase):
         [t] = self.threads()
         self.assertEqual(t["client_id"], cid)
         self.assertEqual(t["client_name"], "Абдуллаев Азиз")
+
+    def test_unlink_by_hand_holds_against_the_next_message(self):
+        """Карточка, найденная по телефону, отвязывается кнопкой - и
+        следующее сообщение с того же номера её не возвращает. Кнопка
+        «Отвязать» есть только у привязанного обращения."""
+        cid = run(self.crm.create_client(full_name="Абдуллаев Азиз", phone="+79001234567"))
+        self.counts(self.hook(green()))
+        [t] = self.threads()
+        tid = t["id"]
+        self.assertEqual((t["client_id"], t["client_manual"]), (cid, False))
+        self.login()
+        page = self.get_ok(f"/inbox/{tid}")
+        self.assertIn("Отвязать от карточки", page)
+        self.assertIn('<input type="hidden" name="client" value="">', page)
+        self.assertNotIn("Карточку выбрали вручную", page)
+        r = self.client.post(f"/inbox/{tid}/client", data={"client": ""})
+        self.assertEqual(r.status_code, 303)
+        t = self.thread(tid)
+        self.assertEqual((t["client_id"], t["client_manual"]), (None, True))
+        page = self.get_ok(f"/inbox/{tid}")
+        self.assertIn("Обращение отвязано от карточки.", page)
+        self.assertNotIn("Отвязать от карточки", page, "отвязывать нечего")
+        self.assertIn(f'action="/inbox/{tid}/client"', page, "привязать можно снова")
+        self.assertIn("Карточку выбрали вручную", page)
+        self.assertEqual(self.counts(self.hook(green(msg_id="AFTER", text="Алло?"))),
+                         (1, 0, 0))
+        t = self.thread(tid)
+        self.assertEqual((t["client_id"], t["client_manual"]), (None, True),
+                         "телефон карточку не вернул")
+        self.assertEqual(len(self.messages(tid)), 2)
+        self.assertNotIn("Абдуллаев Азиз", self.get_ok(f"/inbox/{tid}"))
+        # ручная привязка к другой карточке тоже держится
+        other = run(self.crm.create_client(full_name="Сабиров Рустам", phone="+79005550001"))
+        self.client.post(f"/inbox/{tid}/client", data={"client": str(other)})
+        self.counts(self.hook(green(msg_id="AFTER2", text="Жду")))
+        t = self.thread(tid)
+        self.assertEqual((t["client_id"], t["client_manual"]), (other, True))
+        self.assertIn("Отвязать от карточки", self.get_ok(f"/inbox/{tid}"))
+
+    def test_unlinked_thread_has_no_unlink_button(self):
+        self.counts(self.hook(green()))
+        [t] = self.threads()
+        self.assertIsNone(t["client_id"])
+        self.login()
+        page = self.get_ok(f"/inbox/{t['id']}")
+        self.assertIn(f'action="/inbox/{t["id"]}/client"', page)
+        self.assertIn("Привязать к клиенту", page)
+        self.assertNotIn("Отвязать от карточки", page)
+        self.assertNotIn("Карточку выбрали вручную", page)
 
     def test_spam_stays_spam(self):
         self.counts(self.hook(green()))

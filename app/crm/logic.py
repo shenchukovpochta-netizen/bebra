@@ -6529,10 +6529,19 @@ def inbox_no(thread_id: Any) -> str:
     return f"ВХ-{int(thread_id or 0):06d}"
 
 
+def clean_text(value: Any) -> str:
+    """Строка из чужого JSON - в то, что примут шифр и Postgres.
+
+    NUL Postgres в text не принимает, а одиночный суррогат UTF-16 (эмодзи,
+    обрезанный шлюзом посередине) роняет и шифрование, и кодек базы. Без
+    чистки такая строка роняла бы пачку хука на каждой повторной доставке.
+    """
+    text = str(value or "").replace("\x00", "")
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def _cut(value: Any, limit: int) -> str | None:
-    # NUL Postgres в text не принимает: одна такая строка от шлюза роняла
-    # бы всю пачку хука на каждой повторной доставке.
-    text = str(value or "").replace("\x00", "").strip()
+    text = clean_text(value).strip()
     return text[:limit] if text else None
 
 
@@ -6673,6 +6682,11 @@ def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = 
     }
 
 
+# Реакция, правка, удаление, голос в опросе - события к уже записанному
+# сообщению, а не новое обращение: как сообщение они переоткрывали бы
+# разобранное и слали сигнал в чат из-за 👍 на наш ответ.
+_GREEN_SKIP = frozenset({"reactionMessage", "editedMessage", "deletedMessage",
+                         "pollUpdateMessage"})
 _GREEN_KINDS = {"textMessage": "text", "extendedTextMessage": "text",
                 "quotedMessage": "text", "imageMessage": "image",
                 "audioMessage": "voice", "documentMessage": "file",
@@ -6707,6 +6721,8 @@ def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
     # n8n - это сообщение без текста, а не падение хука.
     data = _dict(payload.get("messageData"))
     type_message = str(data.get("typeMessage") or "")
+    if type_message in _GREEN_SKIP:
+        return [], 1
     text = (_dict(data.get("textMessageData")).get("textMessage")
             or _dict(data.get("extendedTextMessageData")).get("text")
             or _dict(data.get("fileMessageData")).get("caption"))
