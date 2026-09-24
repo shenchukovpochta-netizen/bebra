@@ -2668,6 +2668,37 @@ class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
         fields.setdefault("origin", "hook")
         return await self.crm.inbox_record(ext_id=ext_id, direction=direction, **fields)
 
+    async def test_event_signal_is_limited_to_one_per_12_hours(self):
+        """«Нужен человек» (событие с сигналом) ожидания не ставит: без предела
+        каждая новая тема кнопки давала бы новый сигнал в чат. Не чаще раза
+        в 12 часов, пока человек не ждёт; и так же на заглушке."""
+        from tests.fake_crm import FakeCrm
+
+        async def story(crm, age_hours):
+            got = await crm.inbox_record(channel="tg", origin="bot", ext_id="7001",
+                                         direction="event", msg_id="anketa:1",
+                                         announce=False)
+            tid = got["thread_id"]
+            await crm.inbox_record(channel="tg", origin="bot", ext_id="7001",
+                                   direction="event", msg_id="faq:a", announce=True)
+            first = [t["id"] for t in await crm.inbox_to_announce()]
+            when = datetime.now(UTC) - timedelta(hours=age_hours)
+            await crm.update_inbox_thread(tid, announced_at=when)
+            await crm.inbox_record(channel="tg", origin="bot", ext_id="7001",
+                                   direction="event", msg_id="faq:b", announce=True)
+            second = [t["id"] for t in await crm.inbox_to_announce()]
+            return first, second, tid
+
+        for age, expect in ((1, False), (13, True)):
+            with self.subTest(age=age):
+                await self.pool.execute("delete from crm.inbox_threads")
+                pg = await story(self.crm, age)
+                fake = await story(FakeCrm(), age)
+                for first, second, tid in (pg, fake):
+                    self.assertEqual(first, [],
+                                     "обращение уже отмечено анкетой - тема в пределах суток")
+                    self.assertEqual(second == [tid], expect, (age, second))
+
     async def row(self, thread_id):
         """Строка обращения как есть - без джойнов выборки панели."""
         return dict(await self.pool.fetchrow(

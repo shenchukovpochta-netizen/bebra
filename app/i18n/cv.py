@@ -504,6 +504,7 @@ T: dict[str, str] = {
     "BTN_BOOK_CANCEL": '❌ Заявкăна пăрахăçлас',
     "BTN_INTENT_RENEW": '✅ Тăсатăп',
     "BTN_INTENT_RETURN": '↩️ Паратăп',
+    "BTN_INBOX_ANSWER": "✍️ Хуравлас",
 }
 
 ERRORS: dict[str, str] = {

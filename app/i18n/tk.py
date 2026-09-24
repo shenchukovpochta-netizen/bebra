@@ -498,6 +498,7 @@ T: dict[str, str] = {
     "BTN_BOOK_CANCEL": '❌ Arzany aýyrmak',
     "BTN_INTENT_RENEW": '✅ Uzaldaryn',
     "BTN_INTENT_RETURN": '↩️ Tabşyraryn',
+    "BTN_INBOX_ANSWER": "✍️ Jogap bermek",
 }
 
 ERRORS: dict[str, str] = {

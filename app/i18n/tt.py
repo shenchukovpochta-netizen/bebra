@@ -534,6 +534,7 @@ T: dict[str, str] = {
     "BTN_BOOK_CANCEL": '❌ Гаризаны алу',
     "BTN_INTENT_RENEW": '✅ Озайтам',
     "BTN_INTENT_RETURN": '↩️ Тапшырам',
+    "BTN_INBOX_ANSWER": "✍️ Җавап бирү",
 }
 
 ERRORS: dict[str, str] = {

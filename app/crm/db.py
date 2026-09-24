@@ -4282,9 +4282,16 @@ class CrmDB:
                                    when status = 'done' then $2
                                    else coalesce(waiting_since, $2) end,
                                announced_at = case
-                                   when $4::boolean and status <> 'spam'
-                                        and (status = 'done' or waiting_since is null)
-                                   then null else announced_at end,
+                                   when not $4::boolean or status = 'spam'
+                                   then announced_at
+                                   when status = 'done' then null
+                                   when $3 = 'in' and waiting_since is null then null
+                                   -- событие («нужен человек») ожидания не ставит:
+                                   -- без предела каждая новая тема давала бы сигнал
+                                   when $3 = 'event' and waiting_since is null
+                                        and announced_at < now() - interval '12 hours'
+                                   then null
+                                   else announced_at end,
                                status = case when status = 'done' then 'new' else status end,
                                updated_at = now()
                          where id = $1

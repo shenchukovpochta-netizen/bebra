@@ -516,6 +516,7 @@ T: dict[str, str] = {
     "BTN_BOOK_CANCEL": '❌ Withdraw the request',
     "BTN_INTENT_RENEW": '✅ I will extend',
     "BTN_INTENT_RETURN": '↩️ I will return',
+    "BTN_INBOX_ANSWER": "✍️ Reply",
 }
 
 # Ошибки валидации: русский текст из logic.py -> перевод.

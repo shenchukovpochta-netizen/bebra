@@ -489,6 +489,7 @@ T: dict[str, str] = {
     "BTN_BOOK_CANCEL": '❌ لغو درخواست',
     "BTN_INTENT_RENEW": '✅ تمدید می‌کنم',
     "BTN_INTENT_RETURN": '↩️ تحویل می‌دهم',
+    "BTN_INBOX_ANSWER": "✍️ پاسخ",
 }
 
 ERRORS: dict[str, str] = {

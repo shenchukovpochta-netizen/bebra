@@ -38,6 +38,15 @@ from ..services import contract as contract_service
 from ..services import tochka
 from .config import WebConfig
 
+# Ошибка данных базы (строка, которую не принял кодек) - это негодное
+# сообщение хука, а не сбой базы. У панели asyncpg есть всегда, у тестов
+# на заглушке его может не быть.
+try:
+    from asyncpg.exceptions import DataError
+except ImportError:                             # pragma: no cover
+    class DataError(Exception):                 # type: ignore[no-redef]
+        pass
+
 log = logging.getLogger(__name__)
 
 # Снимок сверки техники: телефонное фото столько и весит, а всё,
@@ -464,6 +473,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return False
         used_once[key] = now
         return True
+
+    def form_once_release(data: dict) -> None:
+        """Форму отклонили - её ключ снова годен: F5 на странице отказа
+        повторяет POST с тем же ключом, и без этого неотправленный ответ
+        назывался бы «уже отправлен»."""
+        used_once.pop(str(data.get("once") or "")[:64], None)
 
     def client_ip(request: Request) -> str:
         return request.client.host if request.client else "?"
@@ -1952,6 +1967,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             # Страница сразу, а не редирект: набранный ответ остаётся в поле.
             # В сессию его не положить - cookie не вместит 3500 знаков.
+            form_once_release(data)
             flash(request, str(exc), "err")
             return await inbox_card_page(request, thread, status_code=400,
                                          draft=str(data.get("text") or "")[:5000])
@@ -2069,7 +2085,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     msg_id=item["msg_id"], name=item["name"], phone=item["phone"],
                     subject=item["subject"], subject_url=item["subject_url"],
                     at=item["at"], announce=True)
-            except (service.ServiceError, UnicodeError, ValueError):
+            except (service.ServiceError, UnicodeError, ValueError, DataError):
                 # Негодное сообщение - в пропущенные, пачка идёт дальше.
                 # Сбой базы - наоборот 500: шлюз повторит доставку, а уже
                 # записанное отсечёт номер сообщения.

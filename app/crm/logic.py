@@ -6549,7 +6549,9 @@ def safe_avito_url(url: Any) -> str | None:
     """Ссылка на объявление - только https на домен Авито. Чужой адрес
     или «javascript:» в карточку обращения не попадает."""
     text = str(url or "").strip()
-    if not text:
+    # Адрес объявления Авито - ASCII (кириллица в нём уже %-кодирована):
+    # остальное - подделка или мусор, который уронил бы кодек базы.
+    if not text or not text.isascii():
         return None
     # Обратную косую браузер читает как «/»: у «https://evil.com\.avito.ru»
     # urlsplit видит хост на avito.ru, а браузер уходит на evil.com.
@@ -6641,7 +6643,7 @@ def _moment(value: Any) -> datetime | None:
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
-            return datetime.fromtimestamp(float(value), UTC)
+            return _plausible(datetime.fromtimestamp(float(value), UTC))
         except (OverflowError, OSError, ValueError):
             return None
     text = str(value).strip()[:64]
@@ -6650,9 +6652,17 @@ def _moment(value: Any) -> datetime | None:
         return _moment(int(text))
     try:
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
+        if not moment.tzinfo:
+            moment = moment.replace(tzinfo=MOSCOW)
+        return _plausible(moment.astimezone(UTC))
+    except (ValueError, OverflowError):
         return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=MOSCOW)
+
+
+def _plausible(moment: datetime) -> datetime | None:
+    """«0001-01-01» (пустая дата .NET) и прочие века - не время сообщения:
+    такое переполняется при переводе в UTC и роняло бы пачку хука."""
+    return moment if 2000 <= moment.year <= 2100 else None
 
 
 def _wa_phone(raw: Any) -> str | None:

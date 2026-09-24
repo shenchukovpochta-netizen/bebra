@@ -232,6 +232,14 @@ def sign_return(lang: str = "ru") -> InlineKeyboardMarkup:
     ])
 
 
+def inbox_answer(lang: str = "ru") -> InlineKeyboardMarkup:
+    """Под ответом из панели: ответить на него - по нажатию, а не само.
+    Само состояние вопроса ломало бы сценарии, ждущие обычного меню
+    (чек к заявке «я оплатил», акт выкупа)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=i18n.t(lang, "BTN_INBOX_ANSWER"), callback_data="inbox_answer")]])
+
+
 def support_cancel(lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=i18n.t(lang, "BTN_CANCEL"))]],

@@ -563,6 +563,23 @@ class TestInboxActions(InboxCase):
         self.assertIn("повторное нажатие пропущено", self.get_ok(f"/inbox/{self.tg}"))
         self.assertEqual(self.bot.sent, [])
 
+    def test_refused_form_can_be_resubmitted(self):
+        # Отказ пришёл страницей на POST: F5 повторяет форму с тем же ключом.
+        # Ключ отказанной формы освобождён - иначе неотправленный ответ
+        # назывался бы «уже отправлен».
+        self.reply(self.tg, "Первый", once="p1")
+        self.reply(self.tg, "Второй", once="p2")
+        self.assertEqual(self.last.status_code, 400)
+        run(self.crm.claim_inbox_out())
+        run(self.crm.finish_inbox_out(self.messages(self.tg, "out")[0]["id"], ok=True))
+        self.reply(self.tg, "Второй", once="p2")
+        self.assertEqual(self.last.status_code, 303)
+        self.assertEqual([self.text_of(m) for m in self.messages(self.tg, "out")],
+                         ["Первый", "Второй"])
+        # а принятая форма по-прежнему не повторяется
+        self.reply(self.tg, "Второй", once="p2")
+        self.assertEqual(len(self.messages(self.tg, "out")), 2)
+
     def test_one_reply_in_queue_per_thread(self):
         self.reply(self.tg, "Первый", once="a")
         self.reply(self.tg, "Второй", once="b")

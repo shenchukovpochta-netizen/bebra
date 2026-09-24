@@ -480,6 +480,7 @@ T: dict[str, str] = {
     "BTN_BOOK_CANCEL": '❌ سحب الطلب',
     "BTN_INTENT_RENEW": '✅ سأمدد',
     "BTN_INTENT_RETURN": '↩️ سأعيد',
+    "BTN_INBOX_ANSWER": "✍️ رد",
 }
 
 ERRORS: dict[str, str] = {

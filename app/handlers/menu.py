@@ -10,10 +10,10 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
 
-from .. import faq, i18n, logic, texts
+from .. import faq, faq_i18n, i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import inbox
+from ..crm import company, inbox
 from ..db import Database, utcnow
 from ..filters import StateIs
 from .faq import home, reply_for
@@ -221,6 +221,33 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
         username=user.get("username"), phone=user.get("phone"), announce=False)
     await message.answer(i18n.t(lang, "RENT_REQUEST_SENT"),
                          reply_markup=kb.main_menu(lang))
+
+
+# ─────────────── «Ответить» под ответом из «Входящих» ───────────────
+
+@router.callback_query(F.data == "inbox_answer")
+async def cb_inbox_answer(callback: CallbackQuery, bot: Bot, db: Database,
+                          user: dict | None = None) -> None:
+    """Клиент сам решил ответить на сообщение из панели: режим вопроса, и
+    следующее его сообщение придёт во «Входящие».
+
+    Посреди сценария (анкета, договор, сдача) режим не включается: там
+    свободный текст - шаг сценария. Тогда - прямой контакт менеджера.
+    """
+    await callback.answer()
+    if user is None:
+        return
+    tg_id = user["tg_id"]
+    lang = i18n.user_lang(user)
+    row = await db.get_user(tg_id)
+    state = (dict(row) if row else user).get("state")
+    if state == logic.WAIT_SUPPORT or await db.patch(
+            tg_id, expected_state=logic.APPROVED, state=logic.WAIT_SUPPORT):
+        await bot.send_message(tg_id, i18n.t(lang, "SUPPORT_PROMPT"),
+                               reply_markup=kb.support_cancel(lang))
+        return
+    contact = faq_i18n.T.get(lang, {}).get("contact", texts.FAQ_GUEST_CONTACT)
+    await bot.send_message(tg_id, company.with_contact(contact))
 
 
 # ─────────────────── продление аренды по запросу клиента ───────────────────

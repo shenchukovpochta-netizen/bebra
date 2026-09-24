@@ -37,10 +37,11 @@ AVITO_PAUSE_ON_402 = 3600
 # Первый опрос Авито не тянет всю историю: обращения - это то, что пришло
 # после подключения, а не архив переписки за годы.
 AVITO_FIRST_LOOKBACK = timedelta(hours=24)
-# Список чатов Авито - страницами по 100; дальше пяти страниц за круг не
-# идём: столько чатов за минуту не меняется даже после простоя.
+# Список чатов Авито - страницами по 100, не дальше десяти за круг: столько
+# чатов не меняется даже за долгий простой. Не хватило - круг не полный,
+# отметка не двигается, и следующий пройдёт те же страницы снова.
 AVITO_PAGE = 100
-AVITO_PAGES = 5
+AVITO_PAGES = 10
 # Сколько чатов без обращения помнить (одни служебные сообщения).
 AVITO_SEEN_KEEP = 500
 # Итог отправки: попыток записи и пауза между ними, секунд.
@@ -98,24 +99,6 @@ async def _finish(crm: Any, message_id: int, **fields: Any) -> None:
             await asyncio.sleep(FINISH_PAUSE * (attempt + 1))
 
 
-async def _after_tg_reply(bot: Any, db: Any, user: dict | None, lang: str) -> None:
-    """Ответ из панели - не тупик. Клиента с договором бот переводит в режим
-    вопроса, как кнопка частых вопросов: его следующее сообщение придёт
-    во «Входящие», а не в ловушку меню."""
-    if db is None or not user or user.get("state") != bot_logic.APPROVED:
-        return
-    tg_id = int(user["tg_id"])
-    try:
-        if not await db.patch(tg_id, expected_state=bot_logic.APPROVED,
-                              state=bot_logic.WAIT_SUPPORT):
-            return
-        prompt = faq_i18n.T.get(lang, {}).get("handoff", texts.FAQ_HANDOFF)
-        await bot.send_message(tg_id, company.with_contact(prompt),
-                               reply_markup=kb.support_cancel(i18n.norm(lang)))
-    except Exception:                                   # noqa: BLE001
-        log.warning("входящие: режим вопроса для %s не включён", tg_id)
-
-
 def _tg_body(text: str, user: dict | None, lang: str) -> str:
     """Текст ответа в Telegram. Человеку посреди анкеты или договора
     свободный текст бот читает как шаг сценария - поэтому к ответу
@@ -149,8 +132,15 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
     elif channel == "tg" and origin == "bot" and ext.isdigit():
         tg_user = await _bot_user(db, int(ext))
         lang = i18n.user_lang(tg_user) if tg_user else "ru"
+        # Ответ из панели - не тупик: у клиента с договором под ним кнопка
+        # «Ответить», и его ответ придёт сюда же. Именно кнопка, а не смена
+        # состояния сразу: режим вопроса без спроса перехватывал бы чек к
+        # заявке «я оплатил» и останавливал бы акт выкупа.
+        markup = (kb.inbox_answer(lang)
+                  if tg_user and tg_user.get("state") == bot_logic.APPROVED else None)
         status, error = await mailing.send_one(bot, None, {"channel": "tg", "tg_id": ext},
-                                               _tg_body(text, tg_user, lang))
+                                               _tg_body(text, tg_user, lang),
+                                               reply_markup=markup)
     elif channel == "max" and origin == "max_bot" and ext.isdigit():
         # Состояние человека в MAX живёт в базе MAX-бота: режим вопроса
         # отсюда не включить. Ответить он может кнопкой «Поддержка».
@@ -172,8 +162,6 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
         status = "failed"
     await _finish(crm, message["id"], ok=status == "sent", error=error or None,
                   ext_id=sent_id)
-    if status == "sent" and tg_user is not None:
-        await _after_tg_reply(bot, db, tg_user, lang)
     return True
 
 
@@ -275,17 +263,25 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
     if first:
         since = now - AVITO_FIRST_LOOKBACK
     cutoff = max(since, now - timedelta(days=logic.INBOX_KEEP_DAYS))
+    # До какого места дочитал прошлый ПОЛНЫЙ круг: страницы листаются, пока
+    # не пойдут чаты старше этой отметки. Круг, оборванный ошибкой на
+    # второй странице, её не двигает - иначе хвост не прочитался бы никогда.
+    mark = logic._moment(settings.get("inbox_avito_mark")) or cutoff
+    newest: datetime | None = None
+    complete = False
     seen = _load_seen(settings.get("inbox_avito_seen"))
     seen_before = dict(seen)
     counts = {"chats": 0, "messages": 0}
+    lost_any = False
     try:
         own = await avito.self_id()
         threads = {t["ext_id"]: t for t in await crm.inbox_threads(channel="avito",
                                                                    limit=5000)}
         for page in range(AVITO_PAGES):
             chats = await avito.chats(limit=AVITO_PAGE, offset=page * AVITO_PAGE)
-            changed = False
             for chat in chats:
+                if chat.get("updated") and (newest is None or chat["updated"] > newest):
+                    newest = chat["updated"]
                 last = chat.get("last_id")
                 known = threads.get(chat["id"])
                 if not last or (known and known.get("ext_cursor") == last):
@@ -298,7 +294,6 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
                     continue
                 if chat.get("updated") and chat["updated"] < cutoff:
                     continue
-                changed = True
                 counts["chats"] += 1
                 fetched = await avito.messages(chat["id"])
                 # Чат изменился, а сообщений нет - ответ неполный: курсор
@@ -328,19 +323,27 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
                 # иначе чат пропускался бы, пока клиент не напишет ещё раз.
                 # Повторное чтение безопасно - дубли отсекает номер сообщения.
                 if lost:
+                    lost_any = True
                     continue
                 if thread_id is not None:
                     await crm.update_inbox_thread(thread_id, ext_cursor=last)
                 else:
                     seen.pop(chat["id"], None)
                     seen[chat["id"]] = last
-            # Список идёт от свежих к старым: страница без изменений или
-            # последняя страница - дальше смотреть нечего.
-            if not changed or len(chats) < AVITO_PAGE:
+            # Список идёт от свежих к старым: последняя страница или чаты
+            # старше отметки прошлого полного круга - дальше всё прочитано.
+            oldest = min((c["updated"] for c in chats if c.get("updated")), default=None)
+            if len(chats) < AVITO_PAGE or (oldest is not None and oldest < mark):
+                complete = True
                 break
+        else:
+            log.warning("Авито: за круг прочитано %s страниц чатов, остальное - "
+                        "следующим кругом", AVITO_PAGES)
     except AvitoError as exc:
         await _avito_state(crm, ok=False, error=str(exc), every=_poll_every(cfg))
         raise
+    if complete and not lost_any and newest is not None:
+        await crm.set_setting("inbox_avito_mark", newest.isoformat(), by="avito")
     if seen != seen_before:
         keep = dict(list(seen.items())[-AVITO_SEEN_KEEP:])
         await crm.set_setting("inbox_avito_seen", json.dumps(keep), by="avito")

@@ -28,8 +28,10 @@ POLL_SECONDS = 20
 BATCH = 50
 
 
-async def send_one(bot: Any, max_client: Any, send: dict, text: str) -> tuple[str, str]:
-    """Одно сообщение. Возвращает (статус, ошибка)."""
+async def send_one(bot: Any, max_client: Any, send: dict, text: str, *,
+                   reply_markup: Any = None) -> tuple[str, str]:
+    """Одно сообщение. Возвращает (статус, ошибка). reply_markup - только
+    для Telegram: у MAX своя разметка кнопок."""
     if send["channel"] == "max":
         if max_client is None:
             return "skipped", "MAX-бот не подключён"
@@ -38,14 +40,15 @@ async def send_one(bot: Any, max_client: Any, send: dict, text: str) -> tuple[st
         except Exception as exc:                        # noqa: BLE001
             return "failed", str(exc)[:200]
         return "sent", ""
+    extra = {"reply_markup": reply_markup} if reply_markup is not None else {}
     try:
-        await bot.send_message(int(send["tg_id"]), text)
+        await bot.send_message(int(send["tg_id"]), text, **extra)
     except TelegramRetryAfter as exc:
         # Телеграм сам говорит, сколько ждать: это не ошибка доставки,
         # а просьба притормозить.
         await asyncio.sleep(float(getattr(exc, "retry_after", 1)) + 1)
         try:
-            await bot.send_message(int(send["tg_id"]), text)
+            await bot.send_message(int(send["tg_id"]), text, **extra)
         except TelegramAPIError as retry_exc:
             return "failed", str(retry_exc)[:200]
         return "sent", ""

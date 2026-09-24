@@ -24,8 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.crm import logic  # noqa: E402
 
 try:
-    from app import faq_i18n, texts
     from app import logic as bot_logic
+    from app import texts
     from app.crm import company, inbox, service
     from app.services import avito as avito_api
     from app.services.avito import AvitoError
@@ -126,6 +126,21 @@ class TestInboxBasics(unittest.TestCase):
         self.assertEqual(logic._cut("а\x00" * 5, 3), "ааа", "предел - после чистки")
         for empty in ("\x00", " \x00 ", "", None):
             self.assertIsNone(logic._cut(empty, 10), repr(empty))
+
+    def test_avito_link_must_be_ascii(self):
+        # Кириллица в адресе объявления уже %-кодирована; одиночный
+        # суррогат уронил бы кодек базы и с ним всю пачку хука.
+        for bad in ("https://www.avito.ru/kazan/\ud83d", "https://www.avito.ru/казань/x"):
+            self.assertIsNone(logic.safe_avito_url(bad), repr(bad))
+        self.assertEqual(logic.safe_avito_url("https://www.avito.ru/kazan/x_%D0%B1"),
+                         "https://www.avito.ru/kazan/x_%D0%B1")
+
+    def test_moment_only_plausible_years(self):
+        # «0001-01-01T00:00:00» - пустая дата .NET: без пояса она
+        # переполнялась при переводе в UTC и роняла пачку хука.
+        for junk in ("0001-01-01T00:00:00", "1970-01-01T00:00:00Z", 0, "2200-01-01T00:00:00"):
+            self.assertIsNone(logic._moment(junk), repr(junk))
+        self.assertEqual(logic._moment("2026-09-24T13:00:00").tzinfo, UTC)
 
     def test_links(self):
         thread = {"username": "@ildar_h", "phone": "8 (900) 123-45-67",
@@ -1392,16 +1407,19 @@ class TestSendOnce(InboxCase):
         await inbox.send_once(bot, self.crm, cfg(), db=FakeUsers(u5001="en"))
         self.assertEqual(bot.sent[0][1], "💬 Support reply:\n\nOk")
 
-    async def test_approved_client_can_answer_back(self):
-        # Ответ из панели - не тупик: клиент с договором переходит в режим
-        # вопроса, и его следующее сообщение придёт во «Входящие».
+    async def test_approved_client_gets_a_reply_button_not_a_mode(self):
+        # Ответ из панели - не тупик: у клиента с договором под ответом
+        # кнопка «Ответить». Режим вопроса сам не включается: он перехватил
+        # бы чек к заявке «я оплатил» и остановил бы акт выкупа.
         await self.queued("Велосипед будет завтра")
         bot, users = FakeBot(), FakeUsers(u5001="ru")
         await inbox.send_once(bot, self.crm, cfg(), db=users)
-        self.assertEqual(users.patched, [(5001, bot_logic.APPROVED, bot_logic.WAIT_SUPPORT)])
-        self.assertEqual(len(bot.sent), 2)
-        self.assertIn("Велосипед будет завтра", bot.sent[0][1])
-        self.assertIn("одним сообщением", bot.sent[1][1])
+        [(chat, text)] = bot.sent
+        self.assertIn("Велосипед будет завтра", text)
+        [[button]] = bot.markups[0].inline_keyboard
+        self.assertEqual((button.text, button.callback_data), ("✍️ Ответить", "inbox_answer"))
+        self.assertEqual(users.patched, [])
+        self.assertEqual(users.states[5001], bot_logic.APPROVED)
 
     async def test_guest_mid_anketa_gets_contact_not_prompt(self):
         # Посреди анкеты свободный текст бот читает как шаг анкеты: режим
@@ -1422,26 +1440,13 @@ class TestSendOnce(InboxCase):
                               self.crm, cfg(), db=users)
         self.assertEqual(users.patched, [])
 
-    async def test_prompt_in_clients_language_with_cancel(self):
+    async def test_reply_button_in_clients_language(self):
         await self.queued("Ready")
         bot, users = FakeBot(), FakeUsers(u5001="en")
         await inbox.send_once(bot, self.crm, cfg(), db=users)
-        self.assertEqual([text for _, text in bot.sent],
-                         ["💬 Support reply:\n\nReady", faq_i18n.T["en"]["handoff"]])
-        self.assertEqual([chat for chat, _ in bot.sent], [5001, 5001])
-        self.assertIsNone(bot.markups[0], "у самого ответа клавиатуры нет")
-        cancel = bot.markups[1]
-        self.assertEqual([[b.text for b in row] for row in cancel.keyboard], [["Cancel"]],
-                         "передумал - кнопка отмены на его языке")
-        self.assertEqual(users.states[5001], bot_logic.WAIT_SUPPORT)
-
-    async def test_russian_prompt_and_cancel(self):
-        await self.queued("Велосипед будет завтра")
-        bot = FakeBot()
-        await inbox.send_once(bot, self.crm, cfg(), db=FakeUsers(u5001="ru"))
-        self.assertEqual(bot.sent[1][1], texts.FAQ_HANDOFF)
-        self.assertEqual([[b.text for b in row] for row in bot.markups[1].keyboard],
-                         [["Отмена"]])
+        self.assertEqual(bot.sent, [(5001, "💬 Support reply:\n\nReady")])
+        [[button]] = bot.markups[0].inline_keyboard
+        self.assertEqual(button.text, "✍️ Reply")
 
     async def test_already_asking_gets_plain_reply(self):
         # Уже в режиме вопроса: ни второго приглашения, ни контакта.
@@ -1504,20 +1509,16 @@ class TestSendOnce(InboxCase):
         self.assertEqual(users.patched, [])
         self.assertEqual(users.states[5001], bot_logic.WAIT_FIO, "сценарий не сбит")
 
-    async def test_prompt_failure_keeps_reply_sent(self):
-        class SecondFails(FakeBot):
-            async def send_message(self, chat_id, text, reply_markup=None, **kw):
-                if self.sent:
-                    raise RuntimeError("Too Many Requests")
-                await super().send_message(chat_id, text, reply_markup=reply_markup)
-
-        _, mid = await self.queued("Ok")
-        bot, users = SecondFails(), FakeUsers(u5001="ru")
-        with self.assertLogs("app.crm.inbox", "WARNING"):
-            self.assertTrue(await inbox.send_once(bot, self.crm, cfg(), db=users))
-        self.assertEqual(len(bot.sent), 1)
-        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "sent",
-                         "ответ ушёл - сбой приглашения его не отменяет")
+    async def test_no_button_outside_the_menu(self):
+        # Уже в режиме вопроса - просто пишет; посреди сценария - контакт.
+        for state in (bot_logic.WAIT_SUPPORT, bot_logic.WAIT_FIO):
+            with self.subTest(state=state):
+                self.crm = FakeCrm()
+                await self.queued("Ok")
+                bot = FakeBot()
+                await inbox.send_once(bot, self.crm, cfg(),
+                                      db=FakeUsers(state=state, u5001="ru"))
+                self.assertEqual(bot.markups, [None])
 
     async def test_max_reply_does_not_touch_bot_state(self):
         await self.queued("Ok", channel="max", origin="max_bot", ext_id="777")
@@ -2207,6 +2208,31 @@ class TestAvitoPoll(InboxCase):
         self.assertEqual(avito.chat_pages, [0], "список от свежих: без изменений - дальше старое")
         self.assertEqual(counts, {"chats": 0, "messages": 0})
 
+    async def test_interrupted_round_reads_the_tail_next_time(self):
+        # Круг оборвался на второй странице (429): отметка полного круга не
+        # сдвинулась, и следующий круг дочитывает хвост, хотя первая
+        # страница уже без изменений.
+        avito = self.many(5)
+
+        class Flaky(FakeAvito):
+            fail_offset = 2
+
+            async def chats(self, *, limit=100, offset=0):
+                if offset == self.fail_offset:
+                    self.fail_offset = None
+                    raise AvitoError("429 — Авито просит реже", 429)
+                return await super().chats(limit=limit, offset=offset)
+
+        flaky = Flaky(avito.raw_chats, avito.raw_messages)
+        with mock.patch.object(inbox, "AVITO_PAGE", 2):
+            with self.assertRaises(AvitoError):
+                await inbox.avito_once(self.crm, flaky, cfg())
+            self.assertEqual(len(self.crm.inbox_threads_), 2)
+            self.assertNotIn("inbox_avito_mark", self.crm.settings_)
+            await inbox.avito_once(self.crm, flaky, cfg())
+        self.assertEqual(len(self.crm.inbox_threads_), 5, "хвост дочитан")
+        self.assertIn("inbox_avito_mark", self.crm.settings_)
+
     # ─ сигнал ─
 
     async def test_our_first_message_then_answer_signals(self):
@@ -2349,3 +2375,49 @@ class TestInboxLoop(InboxCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─────────────── кнопка «Ответить» под ответом из панели ───────────────
+
+class FakeCallback:
+    def __init__(self) -> None:
+        self.answered = 0
+
+    async def answer(self, *args, **kwargs):
+        self.answered += 1
+
+
+class TestInboxAnswerButton(unittest.IsolatedAsyncioTestCase):
+    async def press(self, state, lang="ru"):
+        from app.handlers import menu
+        bot, users, cb = FakeBot(), FakeUsers(state=state, u5001=lang), FakeCallback()
+        await menu.cb_inbox_answer(cb, bot, users,
+                                   user={"tg_id": 5001, "lang": lang, "state": state})
+        self.assertEqual(cb.answered, 1, "часики на кнопке снимаются всегда")
+        return bot, users
+
+    async def test_from_menu_turns_question_mode_on(self):
+        bot, users = await self.press(bot_logic.APPROVED)
+        self.assertEqual(users.patched, [(5001, bot_logic.APPROVED, bot_logic.WAIT_SUPPORT)])
+        [(chat, text)] = bot.sent
+        self.assertEqual(text, texts.SUPPORT_PROMPT)
+        self.assertEqual([[b.text for b in row] for row in bot.markups[0].keyboard],
+                         [["Отмена"]])
+
+    async def test_already_asking_just_prompts(self):
+        bot, users = await self.press(bot_logic.WAIT_SUPPORT, lang="en")
+        self.assertEqual(users.patched, [])
+        self.assertEqual(len(bot.sent), 1)
+
+    async def test_mid_scenario_gets_contact_and_keeps_state(self):
+        bot, users = await self.press(bot_logic.WAIT_CLOSE_REASON)
+        self.assertEqual(users.patched, [])
+        self.assertEqual(users.states[5001], bot_logic.WAIT_CLOSE_REASON)
+        [(_, text)] = bot.sent
+        self.assertIn("Написать нам:", text)
+
+    async def test_without_user_nothing_happens(self):
+        from app.handlers import menu
+        bot, cb = FakeBot(), FakeCallback()
+        await menu.cb_inbox_answer(cb, bot, FakeUsers(), user=None)
+        self.assertEqual((cb.answered, bot.sent), (1, []))

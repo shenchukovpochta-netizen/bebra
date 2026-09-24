@@ -3191,8 +3191,13 @@ class FakeCrm:
             if direction == "in":
                 thread["waiting_since"] = (moment if old_status == "done"
                                            else old_waiting or moment)
-            if announce and old_status != "spam" and (old_status == "done"
-                                                      or old_waiting is None):
+            old_signal = thread["announced_at"]
+            if announce and old_status != "spam" and (
+                    old_status == "done"
+                    or (direction == "in" and old_waiting is None)
+                    or (direction == "event" and old_waiting is None
+                        and old_signal is not None
+                        and old_signal < now - timedelta(hours=12))):
                 thread["announced_at"] = None
             if old_status == "done":
                 thread["status"] = "new"
