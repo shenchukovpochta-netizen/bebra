@@ -91,14 +91,20 @@ def parse_device(raw: dict) -> dict:
     else:
         lat, lon = position.get("x"), position.get("y")
     status = _int(raw.get("status"))
+    lat, lon = _float(lat), _float(lon)
+    fixed = not (lat is not None and lon is not None
+                 and abs(lat) < NO_FIX and abs(lon) < NO_FIX)
     return {
         "device_id": str(raw.get("device_id") or raw.get("id") or "").strip(),
         "alias": (raw.get("alias") or raw.get("name") or "").strip() or None,
-        "lat": _float(lat),
-        "lon": _float(lon),
-        "speed": _float(position.get("s")),
-        "course": _int(position.get("dir")),
-        "recorded_at": _moment(recorded),
+        # Без спутников StarLine отдаёт «00.000000»: это не точка в
+        # Гвинейском заливе, а её отсутствие. Такая точка не пишется ни в
+        # карточку, ни в журнал - на карте остаётся последняя настоящая.
+        "lat": lat if fixed else None,
+        "lon": lon if fixed else None,
+        "speed": _float(position.get("s")) if fixed else None,
+        "course": _int(position.get("dir")) if fixed else None,
+        "recorded_at": _moment(recorded) if fixed else None,
         # Когда устройство последний раз выходило на связь - не то же,
         # что последняя точка: в подвале связь есть, спутников нет.
         "active_at": _moment(raw.get("ts_activity") or raw.get("activity_ts")
@@ -109,6 +115,10 @@ def parse_device(raw: dict) -> dict:
         # У StarLine 1 - на связи, 2 - нет; bool(2) выдал бы «на связи».
         "online": status == 1 if status is not None else None,
     }
+
+
+# Координаты ближе к нулю - не место, а «спутников нет».
+NO_FIX = 1e-6
 
 
 # Не тревоги: метка времени среди флагов (v3) и «антиограбление» - это

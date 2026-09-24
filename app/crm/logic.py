@@ -3530,6 +3530,10 @@ def track_line(positions: Iterable[Mapping[str, Any]]) -> list[list[float]]:
         lat, lon = point.get("lat"), point.get("lon")
         if lat is None or lon is None:
             continue
+        # «0, 0» - трекер без спутников, а не Гвинейский залив: такая
+        # точка в начале периода обрезала бы весь настоящий трек как скачок.
+        if abs(float(lat)) < 1e-6 and abs(float(lon)) < 1e-6:
+            continue
         if line:
             step = distance_km(line[-1][0], line[-1][1], lat, lon)
             if step is not None and step >= 5:
@@ -3682,9 +3686,13 @@ BANK_STATUSES: dict[str, str] = {
 MATCH_SURE = "contract"
 MATCH_REASONS: dict[str, str] = {
     "contract": "номер договора в назначении",
+    "contract_short": "короткий номер договора — сверьте",
     "phone": "телефон в назначении",
     "name": "ФИО плательщика",
 }
+# Сколько цифр должно быть в номере договора без букв, чтобы он не
+# путался с номером велосипеда, датой или суммой в назначении.
+CONTRACT_SURE_DIGITS = 6
 
 
 def bank_settings(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -3704,6 +3712,13 @@ def match_payment(txn: Mapping[str, Any],
     телефон там же, ФИО плательщика. Совпадение ФИО - именно догадка:
     однофамильцы среди курьеров не редкость, и зачислять по ней без
     человека нельзя.
+
+    Признак ищется по всем клиентам, а не до первого попавшегося: список
+    идёт по алфавиту, и «первый» - случайность. Из договоров берётся самый
+    длинный номер: «АВ-2026-000150» в назначении важнее чужого «15»,
+    который там же оказался номером велосипеда или датой. Короткий номер
+    без букв - только подсказка человеку, два клиента с одним номером -
+    не угадываем вовсе.
     """
     if txn.get("direction") != "credit":
         return None
@@ -3712,17 +3727,35 @@ def match_payment(txn: Mapping[str, Any],
     flat = upper.replace(" ", "")
     phones = {digits(p) for p in re.findall(r"[\d\-()+ ]{10,}", purpose)}
     payer = normalize_name(txn.get("payer_name"))
-    by_name = None
+    by_contract: list[tuple[int, str, Mapping[str, Any]]] = []
+    by_phone = by_name = None
     for client in clients:
         contract = str(client.get("contract_no") or "").strip()
         if contract and contract_in(contract, upper, flat):
-            return {"client": client, "reason": "contract"}
+            key = contract.upper().replace(" ", "")
+            by_contract.append((len(key), key, client))
         phone = digits(client.get("phone"))
-        if phone and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10):
-            return {"client": client, "reason": "phone"}
+        if (by_phone is None and phone
+                and any(phone[-10:] == p[-10:] for p in phones if len(p) >= 10)):
+            by_phone = {"client": client, "reason": "phone"}
         if payer and by_name is None and normalize_name(client.get("full_name")) == payer:
             by_name = {"client": client, "reason": "name"}
-    return by_name
+    if by_contract:
+        longest = max(size for size, _, _ in by_contract)
+        top = [(key, client) for size, key, client in by_contract if size == longest]
+        if len({id(client) for _, client in top}) == 1:
+            key, client = top[0]
+            return {"client": client,
+                    "reason": "contract" if contract_is_sure(key) else "contract_short"}
+    return by_phone or by_name
+
+
+def contract_is_sure(key: str) -> bool:
+    """Номер, по которому можно зачислять без человека: с буквами или
+    длинный. «15» в назначении - это и велосипед № 15, и «с 15.09»."""
+    if re.search(r"[^\W\d_]", key):
+        return True
+    return len(digits(key)) >= CONTRACT_SURE_DIGITS
 
 
 def contract_in(contract: str, upper: str, flat: str) -> bool:

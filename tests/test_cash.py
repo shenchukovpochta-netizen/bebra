@@ -103,11 +103,50 @@ class TestBankLogic(unittest.TestCase):
         self.assertIsNone(got)
         got = logic.match_payment(self.txn(purpose="договор 15 от 12.09"), clients)
         self.assertEqual(got["client"]["id"], 3)
+        self.assertEqual(got["reason"], "contract_short",
+                         "короткий номер без букв - подсказка, а не зачисление")
         # Пробелы банк ставит как хочет - номер всё равно находится.
         for purpose in ("Оплата по договоруАВ-2026-000042", "АВ-2026 -000042 аренда",
                         "по договору АВ-2026-000042 12.09.2026"):
             got = logic.match_payment(self.txn(purpose=purpose), self.clients())
             self.assertEqual((got or {}).get("reason"), "contract", purpose)
+
+    def test_longest_contract_wins_over_a_short_one(self):
+        # «15» у Алексеева - это и велосипед № 15, и «с 15.09» в назначении
+        # Борисова. Список идёт по алфавиту, первым был бы Алексеев.
+        short = {"id": 5, "full_name": "Алексеев", "phone": None,
+                 "contract_no": "15", "status": "active"}
+        full = {"id": 6, "full_name": "Борисов", "phone": None,
+                "contract_no": "АВ-2026-000150", "status": "active"}
+        purposes = [logic.pay_purpose(full, {"bike_code": "15"}),
+                    "Оплата с 15.09 по 22.09 по договору АВ-2026-000150"]
+        for purpose in purposes:
+            got = logic.match_payment(self.txn(purpose=purpose, payer_name=""),
+                                      [short, full])
+            self.assertEqual((got["client"]["id"], got["reason"]), (6, "contract"),
+                             purpose)
+        # только номер велосипеда - подсказка, автозачисление мимо
+        rows = logic.bank_rows([self.txn(purpose="Аренда велосипеда № 15",
+                                         payer_name="")], [short, full])
+        self.assertEqual(rows[0]["guess"]["client"]["id"], 5)
+        self.assertFalse(rows[0]["sure"])
+
+    def test_same_contract_twice_is_not_guessed(self):
+        twins = [{"id": 7, "full_name": "А", "phone": None,
+                  "contract_no": "АВ-2026-000042", "status": "active"},
+                 {"id": 8, "full_name": "Б", "phone": None,
+                  "contract_no": "АВ-2026-000042", "status": "active"}]
+        self.assertIsNone(logic.match_payment(
+            self.txn(purpose="договор АВ-2026-000042", payer_name=""), twins))
+
+    def test_contract_beats_an_earlier_clients_phone(self):
+        # Раньше первый по списку клиент с телефоном в назначении
+        # перебивал договор клиента ниже по алфавиту.
+        clients = [{"id": 9, "full_name": "Аа", "phone": "+79990000009",
+                    "contract_no": None, "status": "active"}, *self.clients()]
+        got = logic.match_payment(self.txn(
+            purpose="договор АВ-2026-000042, тел 89990000009"), clients)
+        self.assertEqual((got["client"]["id"], got["reason"]), (1, "contract"))
 
     def test_phone_then_name(self):
         by_phone = logic.match_payment(

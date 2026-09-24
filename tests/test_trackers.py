@@ -92,6 +92,25 @@ class TestStarlineParsing(unittest.TestCase):
                                car_state={"hijack": True, "alarm": False}))
         self.assertFalse(alarm(alarm_state={"hijack": 1, "ts": 1789000000}))
 
+    def test_zero_coordinates_mean_no_fix(self):
+        # Без спутников StarLine отдаёт «00.000000»: это не точка, а её нет.
+        got = starline.parse_device({
+            "device_id": "1", "status": 1, "ts_activity": 1789000300,
+            "position": {"x": "00.000000", "y": "00.000000", "s": 0,
+                         "ts": 1789000000}})
+        self.assertIsNone(got["lat"])
+        self.assertIsNone(got["lon"])
+        self.assertIsNone(got["recorded_at"], "в журнал позиций не пишется")
+        self.assertIsNotNone(got["active_at"], "на связи он при этом есть")
+        # и старая такая точка в журнале не обрезает настоящий трек
+        base = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
+        line = logic.track_line(
+            [{"lat": 0.0, "lon": 0.0, "recorded_at": base}]
+            + [{"lat": 55.79 + i / 1000, "lon": 49.12, "recorded_at":
+                base + timedelta(minutes=5 * (i + 1))} for i in range(3)])
+        self.assertEqual(len(line), 3)
+        self.assertAlmostEqual(line[0][0], 55.79)
+
     def test_status_two_is_offline(self):
         self.assertFalse(starline.parse_device({"device_id": "1", "status": 2})["online"])
         self.assertIsNone(starline.parse_device({"device_id": "1"})["online"])
