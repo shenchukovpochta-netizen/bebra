@@ -2207,15 +2207,27 @@ ssh -L 8080:127.0.0.1:8080 root@ВАШ_IP
 # затем в браузере http://localhost:8080
 ```
 
-**Домен с HTTPS** (для телефона и второго сотрудника). Нужна A-запись
-домена на IP сервера. В `.env`: `CRM_DOMAIN="crm.example.ru"`, затем:
+**Домен с HTTPS** (для телефона и второго сотрудника): панель живёт на
+`https://crm.mybike-kzn.ru`, основной `mybike-kzn.ru` остаётся под сайт.
 
-```bash
-ufw allow 80/tcp && ufw allow 443/tcp
-docker compose --profile https up -d
-```
+1. Beget → «Домены и поддомены» → добавить `crm.mybike-kzn.ru` →
+   «Направить на сайт или VPS» → этот VPS. Проверка с компьютера:
+   `nslookup crm.mybike-kzn.ru` показывает IP сервера (от минут до пары
+   часов после добавления).
+2. В `.env` (новая установка пишет их сама):
+   ```
+   CRM_DOMAIN="crm.mybike-kzn.ru"
+   COMPOSE_PROFILES="https"
+   ```
+   `COMPOSE_PROFILES` поднимает Caddy при каждом `docker compose up -d` -
+   без него после обновления HTTPS молча пропадал бы. С ботом MAX -
+   `"https,max"`.
+3. `bash bootstrap.sh` - откроет 80/443 в ufw (открывает, когда задан
+   `CRM_DOMAIN`) и поднимет всё вместе с Caddy.
+4. `https://crm.mybike-kzn.ru/healthz` отвечает `{"ok": true}`.
 
-Caddy получит сертификат Let's Encrypt сам и будет продлевать его.
+Caddy получит сертификат Let's Encrypt сам и будет продлевать его: порт
+80 для этого должен оставаться открытым.
 `CRM_BIND` при этом остаётся `127.0.0.1`: наружу смотрит только Caddy.
 Открывать `CRM_BIND="0.0.0.0"` — панель по голому http всему интернету —
 не надо.

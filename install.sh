@@ -228,6 +228,18 @@ ask PURGE_REJECTED_DAYS "Хранить после отказа, дней:" '^[0
 
 # ─── Запись .env ────────────────────────────────────────────────────────────
 bold "Записываю .env"
+# Домен панели и профиль https идут парой: с доменом Caddy обязан
+# подниматься при каждом `docker compose up -d`, иначе после обновления
+# панель по адресу молча пропадала бы. Профили из прежнего .env (max)
+# сохраняются.
+CRM_DOMAIN="${CRM_DOMAIN:-crm.mybike-kzn.ru}"
+COMPOSE_PROFILES="${COMPOSE_PROFILES:-}"
+if [ -n "$CRM_DOMAIN" ]; then
+  case ",$COMPOSE_PROFILES," in
+    *,https,*) ;;
+    *) COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}https" ;;
+  esac
+fi
 umask 077
 # Значения пишутся в кавычках. Это не украшение: bootstrap.sh читает .env
 # через `. ./.env`, и строка ADMINS=111 222 без кавычек означает для shell
@@ -269,7 +281,8 @@ CRM_BIND="${CRM_BIND:-127.0.0.1}"
 CRM_PORT="${CRM_PORT:-8080}"
 CRM_ADMIN_LOGIN="${CRM_ADMIN_LOGIN:-admin}"
 CRM_TITLE="${CRM_TITLE:-МАЙБАЙК}"
-CRM_DOMAIN="${CRM_DOMAIN:-}"
+CRM_DOMAIN="${CRM_DOMAIN}"
+COMPOSE_PROFILES="${COMPOSE_PROFILES}"
 
 MAX_CHANNEL_ID="${MAX_CHANNEL_ID:-}"
 MAX_CHANNEL_URL="${MAX_CHANNEL_URL:-}"
@@ -361,7 +374,8 @@ cat <<EOF
       затем в браузере http://localhost:8080
       логин: admin, пароль: $(cat secrets/crm_admin_password 2>/dev/null)
     Смените пароль после первого входа (раздел «Сотрудники»).
-    Доступ по домену с HTTPS - в CRM.md.
+    По домену: https://${CRM_DOMAIN:-<CRM_DOMAIN не задан>} - когда A-запись
+    поддомена смотрит на этот сервер (Caddy получит сертификат сам).
 
     Отправьте боту /start и пройдите сценарий целиком:
     подписка → ФИО → оферта → контакт → анкета → фото документа

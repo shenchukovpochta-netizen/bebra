@@ -35,7 +35,8 @@ if missing_in_env:
         f"compose подставляет ${{}} для переменных, которых нет в .env.example: "
         f"{sorted(missing_in_env)} -> контейнер получит пустую строку")
 
-unused_in_compose = env_vars - compose_vars - {"POSTGRES_PASSWORD"}
+# COMPOSE_PROFILES читает сам docker compose из .env, в контейнеры он не идёт.
+unused_in_compose = env_vars - compose_vars - {"POSTGRES_PASSWORD", "COMPOSE_PROFILES"}
 if unused_in_compose:
     problems.append(
         f".env.example объявляет переменные, которые compose не передаёт в контейнер: "
