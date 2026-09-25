@@ -15,6 +15,7 @@
 <body class="sign-body">
 <main class="sign-main">
   <a class="sign-logo" href="#">{% include "_logo.html" %}</a>
+  {% if demo %}{% include "_demo_banner.html" %}{% endif %}
   {% for kind, text in flash %}<div class="flash {{ kind }}">{{ text }}</div>{% endfor %}
   {% block content %}{% endblock %}
 </main>

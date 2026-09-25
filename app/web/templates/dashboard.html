@@ -165,9 +165,10 @@
 </section>
 {% endif %}
 
-<div class="cols">
 {% if can_view(staff, 'rentals') %}
-<section class="card">
+{# Во всю ширину: у строки четыре кнопки, в половине экрана они
+   обрезались. #}
+<section class="card" id="expiring">
   <h2>Истекает аренда <small class="muted">· просрочка и ближайшие {{ before_days }} дн.</small></h2>
   {# Прогноз считается по «оплачено до» каждой идущей аренды, а сказавшие
      «продлю» из него выпадают: их велосипед не вернётся. #}
@@ -188,6 +189,7 @@
     </tr>
     {% endfor %}
   </table>
+  {% if expiring_total > expiring|length %}<p><a href="/?expiring=all#expiring">Показать все {{ expiring_total }}</a> <span class="muted">· здесь {{ expiring|length }} самых срочных</span></p>{% endif %}
   {% else %}<p class="muted">Все аренды оплачены, платежей на ближайшие дни нет.</p>{% endif %}
 </section>
 {% endif %}
@@ -211,7 +213,6 @@
   {% else %}<p class="muted">Открытых заявок нет.</p>{% endif %}
 </section>
 {% endif %}
-</div>
 
 <div class="cols">
 <section class="card">

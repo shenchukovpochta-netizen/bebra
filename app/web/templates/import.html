@@ -4,11 +4,18 @@
 <div class="cols">
 <section class="card narrow">
   <h2>Учётная таблица (.xlsx)</h2>
+  {% if demo %}
+  <p class="demo-banner">В демо-версии импорт выключен: в демо живут только
+    вымышленные клиенты, а загруженная таблица с настоящими людьми стала бы
+    видна всем посетителям. В своей панели здесь загружается учётная
+    таблица проката.</p>
+  {% else %}
   <form method="post" action="/import" enctype="multipart/form-data">
     <label>Файл <input name="file" type="file" accept=".xlsx" required></label>
     <label class="check"><input name="apply" type="checkbox" value="1"> Записать в базу (без галочки - только отчёт)</label>
     <button type="submit">Загрузить</button>
   </form>
+  {% endif %}
   <p class="muted">Первая строка - заголовки (№, Модель, ВИН рамы, ФИО, телефон, тариф, цена,
     оплачено, долг, до какого оплачена, статус…), дальше по строке на велосипед. Порядок
     колонок неважен. Велосипеды с известным VIN или номером, клиенты с известным телефоном

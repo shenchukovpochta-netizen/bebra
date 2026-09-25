@@ -11,6 +11,7 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 
@@ -46,13 +47,10 @@ async def build():
     return create_app(crm=crm, db=db, cfg=cfg, bot=bot), cfg, db, bot
 
 
-async def run() -> None:
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-                        stream=sys.stdout)
-    app, cfg, db, bot = await build()
-    log.info("панель CRM слушает порт %s", cfg.port)
-    server = uvicorn.Server(uvicorn.Config(
+def make_server(app: Any, cfg: WebConfig) -> uvicorn.Server:
+    """uvicorn панели. Общий с демо-стендом (app.demo): доверие к прокси
+    у них должно быть одинаковым, а не переписанным дважды."""
+    return uvicorn.Server(uvicorn.Config(
         app, host="0.0.0.0", port=cfg.port, log_level="info", proxy_headers=True,
         # Без этого uvicorn верит заголовкам только от 127.0.0.1, а Caddy
         # приходит из сети compose - адрес клиента терялся бы. Но и «верить
@@ -61,6 +59,19 @@ async def run() -> None:
         # заголовок, подставил бы в протокол подписи выдуманный адрес.
         # Поэтому доверяем сетям, из которых приходит прокси, а не всем.
         forwarded_allow_ips=cfg.trusted_proxies if cfg.trust_proxy else None))
+
+
+def setup_logging() -> None:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+                        stream=sys.stdout)
+
+
+async def run() -> None:
+    setup_logging()
+    app, cfg, db, bot = await build()
+    log.info("панель CRM слушает порт %s", cfg.port)
+    server = make_server(app, cfg)
     try:
         await server.serve()
     finally:

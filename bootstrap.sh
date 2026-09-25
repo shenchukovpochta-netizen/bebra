@@ -21,6 +21,22 @@ set -a; . ./.env; set +a
 : "${CHANNEL_ID:?не задан в .env}" "${ADMIN_CHAT_ID:?не задан в .env}" "${ADMINS:?не задан в .env}"
 if [ "$CHANNEL_ID" = "-1001234567890" ]; then die "CHANNEL_ID в .env остался примером"; fi
 if [ "$ADMINS" = "111111111" ]; then die "ADMINS в .env остался примером"; fi
+# Демо-стенд не должен отнимать у панели ни адрес, ни порт. Одинаковый
+# домен Caddy не примет вовсе (демо он пропустит сам, но это ошибка в
+# .env), одинаковый порт на одном адресе получит тот контейнер, что
+# поднимется первым, - после перезагрузки это может быть демо, а не
+# панель. install.sh зовёт этот скрипт, так что проверка общая.
+lower() { printf %s "$1" | tr '[:upper:]' '[:lower:]'; }
+if [ -n "${DEMO_DOMAIN:-}" ] && [ "$(lower "$DEMO_DOMAIN")" = "$(lower "${CRM_DOMAIN:-}")" ]; then
+  die "DEMO_DOMAIN совпадает с CRM_DOMAIN ($CRM_DOMAIN): демо нужен свой поддомен, например demo.${CRM_DOMAIN#*.}"
+fi
+if [ "${DEMO_PORT:-8081}" = "${CRM_PORT:-8080}" ]; then
+  demo_bind="${DEMO_BIND:-127.0.0.1}" crm_bind="${CRM_BIND:-127.0.0.1}"
+  if [ "${demo_bind}" = "${crm_bind}" ] || [ "${demo_bind}" = 0.0.0.0 ] \
+      || [ "${crm_bind}" = 0.0.0.0 ]; then
+    die "DEMO_PORT совпадает с CRM_PORT (${CRM_PORT:-8080}): панель и демо не поднимутся на одном порту - поставьте DEMO_PORT=8081"
+  fi
+fi
 
 # ─── 1. Docker ───────────────────────────────────────────────────────────────
 if ! command -v docker >/dev/null 2>&1; then
@@ -57,13 +73,15 @@ if command -v ufw >/dev/null 2>&1; then
     ufw allow "$p/tcp" >/dev/null
     printf '    открыт %s/tcp — по нему вы сейчас и подключены\n' "$p"
   done
-  # Домен панели задан - Caddy нужны 80 (выпуск и продление сертификата
-  # Let's Encrypt) и 443 (сама панель). Без домена наружу по-прежнему
-  # только SSH.
-  if [ -n "${CRM_DOMAIN:-}" ]; then
+  # Домен панели или демо-стенда задан - Caddy нужны 80 (выпуск и
+  # продление сертификата Let's Encrypt) и 443 (сами сайты). Без домена
+  # наружу по-прежнему только SSH.
+  if [ -n "${CRM_DOMAIN:-}" ] || [ -n "${DEMO_DOMAIN:-}" ]; then
     ufw allow 80/tcp >/dev/null
     ufw allow 443/tcp >/dev/null
-    printf '    открыты 80 и 443/tcp — панель по адресу https://%s\n' "$CRM_DOMAIN"
+    printf '    открыты 80 и 443/tcp\n'
+    [ -z "${CRM_DOMAIN:-}" ] || printf '    панель: https://%s\n' "$CRM_DOMAIN"
+    [ -z "${DEMO_DOMAIN:-}" ] || printf '    демо-стенд: https://%s\n' "$DEMO_DOMAIN"
   fi
   ufw --force enable >/dev/null
   ufw status | sed 's/^/    /'
@@ -99,6 +117,17 @@ if [ ! -s secrets/crm_admin_password ]; then
   openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-16 | tr -d '\n' \
     > secrets/crm_admin_password
   say "сгенерирован пароль панели CRM: secrets/crm_admin_password"
+fi
+# Демо-стенд: пароль его базы и ключ его cookie - свои, не боевые (логин
+# демо публичен). Генерируются и без DEMO_DOMAIN: compose объявляет
+# секреты на уровне файла, и без файлов не поднялся бы вовсе.
+if [ ! -s secrets/demo_db_password ]; then
+  openssl rand -hex 32 | tr -d '\n' > secrets/demo_db_password
+  say "сгенерирован secrets/demo_db_password"
+fi
+if [ ! -s secrets/crm_demo_secret ]; then
+  openssl rand -hex 32 | tr -d '\n' > secrets/crm_demo_secret
+  say "сгенерирован secrets/crm_demo_secret"
 fi
 # Пустой файл-заглушка: compose объявляет секрет max_bot_token на уровне
 # файла, и отсутствие файла ломало бы запуск даже тем, кто MAX не включал.

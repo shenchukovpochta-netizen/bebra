@@ -14,6 +14,7 @@ import unittest
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -224,6 +225,24 @@ class TestRead(unittest.TestCase):
             ix.read_rows(b"not a workbook")
         with self.assertRaises(ix.ImportError_):
             ix.read_rows(sheet([{"a": 1}], headers=["a", "b"]))
+
+    def test_zip_bomb_is_refused_before_openpyxl(self):
+        """xlsx - это zip: сжатый мегабайт одной повторяющейся строки
+        распаковывается в гигабайты, и openpyxl читает общий список строк
+        целиком. Отказ - по оглавлению архива, до разбора."""
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr("xl/sharedStrings.xml",
+                             "<sst><si><t>" + "я" * (ix.UNPACKED_MAX // 2 + 1) + "</t></si></sst>")
+        self.assertLess(len(buf.getvalue()), 1024 * 1024)
+        with mock.patch("openpyxl.load_workbook") as opened, \
+                self.assertRaisesRegex(ix.ImportError_, "распаковывается"):
+            ix.read_rows(buf.getvalue())
+        opened.assert_not_called()
+        # Обычная таблица под пределом читается как раньше.
+        self.assertTrue(ix.read_rows(sheet(ROWS)))
 
 
 @unittest.skipUnless(HAVE_XLSX, "openpyxl не установлен")

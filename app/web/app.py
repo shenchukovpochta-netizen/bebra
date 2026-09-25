@@ -16,18 +16,27 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -72,6 +81,260 @@ LOGIN_LIMIT, LOGIN_IP_LIMIT, LOGIN_WINDOW = 10, 100, 15 * 60
 LOGIN_KEYS_SWEEP = 500
 # Учётная таблица проката - сотни строк, единицы мегабайт.
 IMPORT_MAX_BYTES = 20 * 1024 * 1024
+# Предел тела любого запроса - до разбора формы и до входа. Starlette
+# файловые части формы не ограничивает: каждая копится в памяти до
+# мегабайта и дальше пишется во временный файл, частей до тысячи. Без
+# предела чужая загрузка на /login (он открыт без входа) заполняла бы
+# диск, общий с базой, ещё до проверки пароля. Самая тяжёлая законная
+# форма - импорт таблицы; мегабайт сверху - разметка multipart.
+BODY_MAX = max(IMPORT_MAX_BYTES, BIKE_PHOTO_MAX, logic.DOC_MAX_BYTES) + 1024 * 1024
+TOO_LARGE_PAGE = (
+    '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    '<title>Слишком большой запрос</title></head>'
+    '<body style="font:16px/1.5 system-ui,sans-serif;max-width:28em;'
+    'margin:15vh auto;padding:0 16px;text-align:center">'
+    '<h1 style="font-size:22px">Слишком большой запрос</h1>'
+    '<p>Файл или форма больше, чем принимает панель. '
+    '<a href="javascript:history.back()">Вернуться</a></p></body></html>')
+
+# ─── демо-стенд (cfg.demo, python -m app.demo) ───
+# Логин демо публичен. Всё, что меняет доступ к самому стенду, пишет
+# чужие файлы или пускает в базу чужие данные, закрыто здесь одним
+# списком, а не проверкой в каждом обработчике: новый маршрут под тем же
+# префиксом закрыт сам.
+# Сколько истекающих аренд показывает сводка; остальные - по ссылке.
+EXPIRING_SHOWN = 12
+DEMO_BLOCKED_PATHS = frozenset({
+    "/me/password",           # сменённый пароль запер бы демо для всех
+    "/payments/acquiring",    # проверка эквайринга - запрос в банк
+    # Импорт таблицы: тысячи строк одним запросом перекосили бы три числа
+    # до ночи, а таблица покупателя с его настоящими клиентами (ФИО,
+    # телефоны, адреса в заметке) стала бы видна каждому посетителю.
+    # Заодно закрыт и разбор xlsx - самый тяжёлый запрос панели.
+    "/import",
+})
+DEMO_BLOCKED_PREFIXES = ("/staff", "/profiles", "/documents")
+DEMO_BLOCKED_TEXT = "В демо-версии это недоступно."
+DEMO_PHOTO_TEXT = "Снимки в демо не хранятся: файл не сохранён."
+# Фото номера при сверке в демо не требуется: снимки не хранятся, и
+# включённое требование заперло бы ввод техники для всех посетителей.
+DEMO_NO_PHOTO_TEXT = "Фото номера в демо не требуется: снимки не хранятся."
+# В демо загрузок нет (импорт, шаблоны, печати закрыты, снимки не
+# хранятся): форма - килобайты, мегабайта хватает с запасом.
+DEMO_BODY_MAX = 1024 * 1024
+# Посетитель с циклом curl не должен занимать единственный процесс
+# панели: логин демо известен всем, и на сводке, выгрузках и входе
+# (scrypt) сотня запросов в секунду с одного адреса заморозила бы демо
+# остальным. Предел - на адрес клиента: сколько запросов сразу и какой
+# темп в среднем, с запасом на всплеск - человек открывает вкладки
+# подряд. Статика и /healthz не считаются.
+DEMO_INFLIGHT = 4
+DEMO_RATE = 3.0
+DEMO_BURST = 40
+DEMO_BUSY_TEXT = "Слишком много запросов с вашего адреса — подождите немного"
+# Выгрузка демо помечена внутри файла, а не только плашкой страницы:
+# скачанную таблицу пересылают без страницы, и без пометки она выглядела
+# бы настоящей базой клиентов или настоящими цифрами точек.
+DEMO_EXPORT_NOTE = ("Демо-версия МАЙБАЙК CRM: все люди, велосипеды и деньги "
+                    "вымышленные.")
+# Строк в выгрузке демо - с запасом на любую честную (клиентов ~500,
+# платежей за месяц ~1500); «с 2000 года» построчно в xlsx - это секунды
+# процессора на запрос.
+DEMO_EXPORT_ROWS = 3000
+# Показанные на входе. Должны совпадать с app.demo.seed.STAFF (тест
+# test_demo_mode сверяет): панель пакет демо не импортирует.
+DEMO_LOGINS = (("demo", "demo", "Владелец — видит всё"),
+               ("operator", "demo", "Оператор точки"),
+               ("mechanic", "demo", "Механик"))
+# Демо не должно попадать в поиск: вымышленные люди с телефонами под
+# брендом проката выглядели бы как утечка.
+DEMO_PUBLIC = ("/robots.txt",)
+ROBOTS_TAG = "noindex, nofollow"
+ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
+MAINTENANCE_TEXT = "Демо обновляется, минуту"
+MAINTENANCE_PAGE = (
+    '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    '<meta name="color-scheme" content="light dark">'
+    '<meta http-equiv="refresh" content="30">'
+    '<title>Демо обновляется</title></head>'
+    '<body style="font:16px/1.5 system-ui,sans-serif;max-width:28em;'
+    'margin:15vh auto;padding:0 16px;text-align:center">'
+    f'<h1 style="font-size:22px">{MAINTENANCE_TEXT}</h1>'
+    '<p>Данные возвращаются к исходным. Страница обновится сама.</p>'
+    '</body></html>')
+
+
+def demo_blocked(method: str, path: str) -> bool:
+    """Закрыт ли этот запрос в демо. Чтение открыто всегда."""
+    if method in ("GET", "HEAD"):
+        return False
+    return path in DEMO_BLOCKED_PATHS or any(
+        path == prefix or path.startswith(prefix + "/")
+        for prefix in DEMO_BLOCKED_PREFIXES)
+
+
+class BodyTooLarge(Exception):
+    """Тело запроса перешло предел BodyLimit посреди чтения."""
+
+
+class BodyLimit:
+    """Предел тела запроса для всей панели - внешний слой, до сессии и входа.
+
+    Заявленная длина больше предела - 413 сразу, тело не читается вовсе.
+    Тело без длины (chunked) считается по мере чтения: перешло предел -
+    чтение обрывается, и если ответ ещё не начат, уходит тот же 413.
+    """
+
+    def __init__(self, app: Any, *, limit: int) -> None:
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length" and value.isdigit() and int(value) > self.limit:
+                await self.refuse(scope, receive, send)
+                return
+        state = {"read": 0, "over": False, "started": False}
+
+        async def counted() -> Any:
+            message = await receive()
+            if message["type"] == "http.request":
+                state["read"] += len(message.get("body") or b"")
+                if state["read"] > self.limit:
+                    state["over"] = True
+                    raise BodyTooLarge
+            return message
+
+        async def watched(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                state["started"] = True
+            await send(message)
+
+        try:
+            await self.app(scope, counted, watched)
+        except Exception:
+            # Прерванное чтение приходит сюда как есть или обёрнутым в
+            # группу исключений слоя входа: решает флаг, а не тип.
+            if not state["over"] or state["started"]:
+                raise
+            await self.refuse(scope, receive, send)
+
+    @staticmethod
+    async def refuse(scope: Any, receive: Any, send: Any) -> None:
+        page = HTMLResponse(TOO_LARGE_PAGE, status_code=413,
+                            headers={"Connection": "close", "Cache-Control": "no-store"})
+        await page(scope, receive, send)
+
+
+class DemoLimits:
+    """Предел запросов с одного адреса в демо: сколько сразу и какой темп.
+
+    Темп - ведро жетонов: DEMO_BURST подряд, дальше DEMO_RATE в секунду.
+    Память процесса, без базы: процесс демо один, а рестарт, обнуляющий
+    счётчики, атакующему ничего не даёт.
+    """
+
+    def __init__(self, *, inflight: int = DEMO_INFLIGHT, rate: float = DEMO_RATE,
+                 burst: float = DEMO_BURST, clock: Any = time.monotonic) -> None:
+        self.most, self.rate, self.burst, self.clock = inflight, rate, burst, clock
+        self.busy: dict[str, int] = {}
+        self.buckets: dict[str, tuple[float, float]] = {}
+
+    def enter(self, ip: str) -> bool:
+        now = self.clock()
+        if len(self.buckets) > LOGIN_KEYS_SWEEP:
+            # Адреса выбирает посетитель: без чистки словарь рос бы
+            # бесконечно. Полное ведро и хранить незачем.
+            for key in [k for k, (tokens, at) in self.buckets.items()
+                        if tokens + (now - at) * self.rate >= self.burst]:
+                self.buckets.pop(key, None)
+        tokens, at = self.buckets.get(ip, (self.burst, now))
+        tokens = min(self.burst, tokens + (now - at) * self.rate)
+        if tokens < 1 or self.busy.get(ip, 0) >= self.most:
+            self.buckets[ip] = (tokens, now)
+            return False
+        self.buckets[ip] = (tokens - 1, now)
+        self.busy[ip] = self.busy.get(ip, 0) + 1
+        return True
+
+    def leave(self, ip: str) -> None:
+        left = self.busy.get(ip, 1) - 1
+        if left > 0:
+            self.busy[ip] = left
+        else:
+            self.busy.pop(ip, None)
+
+
+_DISPOSITION = re.compile(r"""(filename\*=[\w-]*''|filename=")(?!demo-)""", re.I)
+
+
+def demo_disposition(value: str) -> str:
+    """Имя скачанного файла демо начинается с «demo-»: clients.xlsx из
+    демо в папке загрузок не спутать с настоящей выгрузкой."""
+    return _DISPOSITION.sub(r"\1demo-", value)
+
+
+class DemoGate:
+    """Внешний слой демо: noindex на каждом ответе, 503 на время сброса,
+    предел запросов с адреса и пометка «demo-» в имени скачанного файла.
+
+    Стоит снаружи сессии и входа намеренно: сброс держит схему под замком
+    одной транзакцией, и запрос, дошедший до базы, висел бы до коммита
+    вместо честного «минуту». /healthz отвечает всегда - это процесс жив,
+    а не данные готовы. Флаг - app.state.maintenance, его ставит app.demo;
+    предел - app.state.demo_limits (None - без предела).
+    """
+
+    def __init__(self, app: Any, *, state: Any) -> None:
+        self.app = app
+        self.state = state
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        if getattr(self.state, "maintenance", False) and path != "/healthz":
+            page = HTMLResponse(MAINTENANCE_PAGE, status_code=503,
+                                headers={"Retry-After": "60", "Cache-Control": "no-store",
+                                         "X-Robots-Tag": ROBOTS_TAG})
+            await page(scope, receive, send)
+            return
+
+        async def tagged(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Robots-Tag"] = ROBOTS_TAG
+                disposition = headers.get("content-disposition")
+                if disposition and disposition.lower().startswith("attachment"):
+                    headers["Content-Disposition"] = demo_disposition(disposition)
+            await send(message)
+
+        limits = getattr(self.state, "demo_limits", None)
+        if limits is None or path == "/healthz" or path.startswith("/static/"):
+            await self.app(scope, receive, tagged)
+            return
+        ip = (scope.get("client") or ("?",))[0]
+        if not limits.enter(ip):
+            page = HTMLResponse(
+                f'<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+                f'<title>Подождите</title></head><body style="font:16px/1.5 '
+                f'system-ui,sans-serif;max-width:28em;margin:15vh auto;padding:0 16px;'
+                f'text-align:center"><h1 style="font-size:22px">{DEMO_BUSY_TEXT}</h1>'
+                f'</body></html>', status_code=429,
+                headers={"Retry-After": "5", "Cache-Control": "no-store",
+                         "X-Robots-Tag": ROBOTS_TAG})
+            await page(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, tagged)
+        finally:
+            limits.leave(ip)
 
 
 def _local(value: datetime) -> datetime:
@@ -94,11 +357,17 @@ def _file_exists(path: str) -> bool:
     return os.path.exists(path)
 
 
-def _csv(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
-    """CSV для Excel: BOM, точка с запятой, десятичная запятая."""
+def _csv(filename: str, header: list[str], rows: list[list[Any]], *,
+         note: str | None = None) -> Response:
+    """CSV для Excel: BOM, точка с запятой, десятичная запятая.
+
+    `note` - строка над шапкой (пометка демо): её видно в любой программе,
+    которой откроют файл."""
     buf = io.StringIO()
     buf.write("\ufeff")
     writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+    if note:
+        writer.writerow([note])
     writer.writerow(header)
     for row in rows:
         writer.writerow([_cell(v) for v in row])
@@ -128,7 +397,8 @@ def _cell(value: Any) -> str:
     return text
 
 
-def _xlsx(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
+def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
+          note: str | None = None) -> Response:
     """Тот же набор строк, но настоящей таблицей Excel.
 
     CSV Excel открывает по-разному в зависимости от настроек локали, и
@@ -139,6 +409,9 @@ def _xlsx(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
     Защиты от формул тут не нужно: значение уезжает ячейкой своего типа,
     и строка, начинающаяся с «=», лежит строкой - openpyxl не делает из
     неё формулу.
+
+    `note` (пометка демо) - первой строкой над шапкой, именем листа и в
+    свойствах файла: таблицу пересылают без страницы, с которой скачали.
     """
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font
@@ -146,22 +419,31 @@ def _xlsx(filename: str, header: list[str], rows: list[list[Any]]) -> Response:
 
     book = Workbook()
     sheet = book.active
-    sheet.title = "Выгрузка"
+    sheet.title = "Демо" if note else "Выгрузка"
+    top = 1
+    if note:
+        sheet.append([note])
+        sheet["A1"].font = Font(bold=True, color="1F4E8C")
+        if len(header) > 1:
+            sheet.merge_cells(start_row=1, start_column=1, end_row=1,
+                              end_column=len(header))
+        book.properties.title = book.properties.subject = note
+        top = 2
     sheet.append(list(header))
-    for cell in sheet[1]:
+    for cell in sheet[top]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(vertical="center", wrap_text=True)
     for row in rows:
         sheet.append([_xlsx_cell(v) for v in row])
     # Шапка не уезжает при прокрутке: в выгрузке парка 190 строк.
-    sheet.freeze_panes = "A2"
+    sheet.freeze_panes = f"A{top + 1}"
     widths = [len(str(h)) for h in header]
     for row in rows:
         for i, value in enumerate(row[:len(widths)]):
             widths[i] = max(widths[i], len(_cell(value)))
     for i, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(i)].width = min(max(width + 2, 9), 42)
-    for column in sheet.iter_cols(min_row=2):
+    for column in sheet.iter_cols(min_row=top + 1):
         for cell in column:
             if isinstance(cell.value, (int, float)):
                 cell.number_format = "# ##0.00" if isinstance(cell.value, float) \
@@ -205,17 +487,24 @@ def _xlsx_cell(value: Any) -> Any:
 EXPORT_FORMATS = ("xlsx", "csv")
 
 
-def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]]) -> Response:
+def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
+           note: str | None = None, limit: int | None = None) -> Response:
     """Одна выгрузка в двух видах. Неизвестное расширение - 404.
 
     Молча отдать csv на запрос `.pdf` значит соврать в имени файла, и
     оператор откроет его один раз, а потом перестанет доверять выгрузке.
+
+    `note` - пометка над шапкой (демо), `limit` - сколько строк отдать
+    (демо); обрезанная выгрузка говорит об этом в той же пометке.
     """
     if fmt not in EXPORT_FORMATS:
         raise HTTPException(status_code=404)
+    if limit is not None and len(rows) > limit:
+        rows = rows[:limit]
+        note = f"{note or ''} Показаны первые {limit} строк.".strip()
     if fmt == "xlsx":
-        return _xlsx(f"{stem}.xlsx", header, rows)
-    return _csv(f"{stem}.csv", header, rows)
+        return _xlsx(f"{stem}.xlsx", header, rows, note=note)
+    return _csv(f"{stem}.csv", header, rows, note=note)
 
 
 def _iso(value: Any) -> str:
@@ -353,6 +642,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         can_act=logic.can_act, visible_sections=logic.visible_sections,
         home_for=logic.home_for,
         today=date.today, bot_enabled=bot is not None,
+        demo=cfg.demo, DEMO_LOGINS=DEMO_LOGINS,
         # Одноразовый ключ денежной формы: двойной клик по «Принять»
         # записывал два платежа и слал клиенту два «зачислено».
         once=lambda: secrets.token_urlsafe(12),
@@ -383,6 +673,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     def redirect(url: str) -> RedirectResponse:
         return RedirectResponse(url, status_code=303)
 
+    async def table(fmt: str, stem: str, header: list[str],
+                    rows: list[list[Any]]) -> Response:
+        """Выгрузка (_table) в потоке: openpyxl на тысячах строк - секунды
+        процессора, и в цикле событий они заморозили бы панель всем
+        остальным. В демо файл помечен и строк в нём не больше
+        DEMO_EXPORT_ROWS."""
+        return await asyncio.to_thread(
+            _table, fmt, stem, header, rows,
+            note=DEMO_EXPORT_NOTE if cfg.demo else None,
+            limit=DEMO_EXPORT_ROWS if cfg.demo else None)
+
     def who(request: Request) -> str:
         staff = getattr(request.state, "staff", None)
         return f"staff:{staff['login']}" if staff else "staff:?"
@@ -399,6 +700,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "denied.html", status_code=403,
                       what=logic.SECTIONS.get(code) or logic.ACTIONS.get(code, code))
 
+    public = PUBLIC + DEMO_PUBLIC if cfg.demo else PUBLIC
+
     async def auth(request: Request, call_next: Any) -> Response:
         request.state.staff = None
         staff_id = request.session.get("staff_id")
@@ -410,9 +713,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     == logic.session_mark(staff.get("password_hash"))):
                 request.state.staff = staff
         path = request.url.path
-        if request.state.staff is None and not path.startswith(PUBLIC):
+        if request.state.staff is None and not path.startswith(public):
             target = path + (f"?{request.url.query}" if request.url.query else "")
             return secured(redirect("/login?next=" + quote(target, safe="")))
+        if cfg.demo and demo_blocked(request.method, path):
+            flash(request, DEMO_BLOCKED_TEXT, "err")
+            return secured(redirect(same_origin_back(request)))
         # Один страж на все маршруты раздела: забыть его в новом обработчике
         # нельзя, поэтому дыры вида «страницу закрыли, а POST оставили» не
         # появляются. Свой пароль и выход открыты всегда.
@@ -442,6 +748,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
+    def same_origin_back(request: Request) -> str:
+        """Куда вернуть после отказа демо: страница, с которой пришли, если
+        она своя, иначе сводка. Чужой Referer - не адрес для редиректа."""
+        ref = urlsplit(request.headers.get("referer") or "")
+        if not ref.netloc or ref.netloc != request.url.netloc:
+            return "/"
+        return logic.safe_next(ref.path + (f"?{ref.query}" if ref.query else ""), "/")
+
     # Порядок важен: последний add_middleware - внешний. Сессия должна быть
     # распакована ДО проверки входа, поэтому SessionMiddleware добавляется
     # после auth.
@@ -450,9 +764,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # и адрес панели, набранный без схемы, отправил бы cookie сессии
     # открытым текстом ещё до редиректа. Без домена (панель по адресу
     # сервера, по http) флаг Secure сделал бы вход невозможным.
-    app.add_middleware(SessionMiddleware, secret_key=cfg.secret, session_cookie="crm_session",
+    # У демо своё имя cookie: cookie не различают порты, и боевая панель и
+    # демо через SSH-туннель (localhost:8080 и :8081) выбивали бы друг друга.
+    app.add_middleware(SessionMiddleware, secret_key=cfg.secret,
+                       session_cookie="crm_demo" if cfg.demo else "crm_session",
                        same_site="strict", https_only=bool(cfg.trust_proxy),
                        max_age=SESSION_DAYS * 24 * 3600)
+    # Флаг сброса демо: его переключает app.demo, читает DemoGate. Там же
+    # предел запросов с адреса - тесты, которым он мешает, снимают его.
+    app.state.maintenance = False
+    app.state.demo_limits = DemoLimits() if cfg.demo else None
+    if cfg.demo:
+        app.add_middleware(DemoGate, state=app.state)
+    # Самый внешний слой: слишком большое тело отсекается раньше всего.
+    app.add_middleware(BodyLimit, limit=DEMO_BODY_MAX if cfg.demo else BODY_MAX)
 
     login_failures: dict[str, list[float]] = {}
     # Использованные ключи денежных форм. Процесс панели один, и проверка
@@ -567,6 +892,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def healthz() -> dict:
         return {"ok": True}
 
+    if cfg.demo:
+        @app.get("/robots.txt")
+        async def robots() -> Response:
+            return PlainTextResponse(ROBOTS_TXT)
+
     @app.get("/login")
     async def login_form(request: Request) -> Response:
         if request.state.staff is not None:
@@ -578,16 +908,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         login_key = "login:" + (data.get("login") or "").strip().lower()[:64]
         ip_key = "ip:" + client_ip(request)
-        if login_throttled(login_key, LOGIN_LIMIT) or login_throttled(ip_key, LOGIN_IP_LIMIT):
+        # В демо логин общий на всех: десять чужих ошибок заперли бы его
+        # каждому посетителю. Остаётся предел на адрес - против перебора.
+        login_limited = not cfg.demo and login_throttled(login_key, LOGIN_LIMIT)
+        if login_limited or login_throttled(ip_key, LOGIN_IP_LIMIT):
             return render(request, "login.html", status_code=429,
                           error="Слишком много попыток входа. Подождите 15 минут.",
                           next=data.get("next") or "/")
         login_check = logic.check_login(data.get("login"))
         staff = await crm.staff_by_login(login_check.value) if login_check.ok else None
+        # scrypt - десятки миллисекунд процессора: в потоке, иначе поток
+        # входов (в демо пароль известен всем) останавливал бы панель.
         if (staff is None or not staff.get("active")
-                or not logic.verify_password(data.get("password") or "",
-                                             staff.get("password_hash"))):
-            for key in (login_key, ip_key):
+                or not await asyncio.to_thread(logic.verify_password,
+                                               data.get("password") or "",
+                                               staff.get("password_hash"))):
+            for key in (ip_key,) if cfg.demo else (login_key, ip_key):
                 login_failures.setdefault(key, []).append(time.monotonic())
             return render(request, "login.html", status_code=401,
                           error="Неверный логин или пароль.",
@@ -617,14 +953,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def my_password(request: Request) -> Response:
         data = await form(request)
         staff = request.state.staff
-        if not logic.verify_password(data.get("old") or "", staff.get("password_hash")):
+        if not await asyncio.to_thread(logic.verify_password, data.get("old") or "",
+                                       staff.get("password_hash")):
             flash(request, "Текущий пароль неверный.", "err")
             return redirect("/me")
         check = logic.check_password(data.get("new"))
         if not check.ok:
             flash(request, check.error, "err")
             return redirect("/me")
-        new_hash = logic.hash_password(check.value)
+        new_hash = await asyncio.to_thread(logic.hash_password, check.value)
         await crm.set_staff_password(staff["id"], new_hash)
         # Свои прочие сессии (чужой ноутбук, забытый вход) выбиты, эта - нет.
         request.session["pw"] = logic.session_mark(new_hash)
@@ -721,7 +1058,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                               if sum(1 for p in places if p.get("active")) > 1
                               else None),
                       claims=await crm.pending_claims(), rentals=rows,
-                      expiring=expiring, before_days=cfg.remind_before_days,
+                      # Сводка - самые срочные: при полутора сотнях аренд на
+                      # «ближайшие два дня» приходится десятки строк, и блок
+                      # уезжал на весь экран. Весь список - по ссылке.
+                      expiring=(expiring if request.query_params.get("expiring") == "all"
+                                else expiring[:EXPIRING_SHOWN]),
+                      expiring_total=len(expiring), before_days=cfg.remind_before_days,
                       forecast=logic.forecast_summary(bikes_by.get("available", 0), soon),
                       debtors=await crm.debtors(10),
                       month=month_totals, chart=chart,
@@ -976,7 +1318,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                          logic.to_money(c.get("balance", 0)), c.get("bike_code"),
                          c.get("tariff_name"), s.get("covered_until"),
                          c.get("contract_no"), c.get("created_at")])
-        return _table(ext, "clients",
+        return await table(ext, "clients",
                     ["ФИО", "Телефон", "Статус", "Telegram", "Баланс", "Велосипед",
                      "Тариф", "Оплачено до", "Договор", "Добавлен"], rows)
 
@@ -1224,7 +1566,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if money_ok:
                 line.insert(6, logic.to_money(b.get("purchase_price") or 0))
             out.append(line)
-        return _table(ext, "bikes", header, out)
+        return await table(ext, "bikes", header, out)
 
     @app.get("/bikes/new")
     async def bike_new(request: Request) -> Response:
@@ -1376,7 +1718,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, f"{logic.BIKE_PASSPORT[field]}: сверка снята.")
             else:
                 field = str(data.get("field") or "")
-                photo = await save_check_photo("bike", bike, field,
+                photo = await save_check_photo(request, "bike", bike, field,
                                                data.get("photo"))
                 await service.check_bike_field(crm, bike, field,
                                                by=who(request), photo=photo)
@@ -1385,7 +1727,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, str(exc), "err")
         return redirect(back)
 
-    async def save_check_photo(prefix: str, row: dict, field: str,
+    async def save_check_photo(request: Request, prefix: str, row: dict, field: str,
                                upload: Any) -> str | None:
         """Снимок сверки на диск. Возвращает имя или None, если не прислали.
 
@@ -1396,6 +1738,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """
         filename = getattr(upload, "filename", "") or ""
         if not filename:
+            return None
+        if cfg.demo:
+            # Демо публично: файлы посетителей на диск не пишем. Сюда
+            # доходит только собранный руками запрос - поле снимка в демо
+            # не показывается (фото не требуется, см. intake_save).
+            await upload.close()
+            flash(request, DEMO_PHOTO_TEXT)
             return None
         raw = await upload.read()
         if not raw:
@@ -2391,7 +2740,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if money_ok:
                 line.insert(9, logic.to_money(r.get("balance") or 0))
             out.append(line)
-        return _table(ext, "rentals", header, out)
+        return await table(ext, "rentals", header, out)
 
     @app.get("/rentals/new")
     async def rental_new(request: Request) -> Response:
@@ -2953,7 +3302,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 for x in await crm.ledger(since=since.value, until=until.value,
                                           kind=kind or None, limit=100000)]
         name = f"finance-{since.value:%Y%m%d}-{until.value:%Y%m%d}"
-        return _table(ext, name, ["Дата", "Клиент", "Вид", "Сумма", "Период", "Способ",
+        return await table(ext, name, ["Дата", "Клиент", "Вид", "Сумма", "Период", "Способ",
                            "Заметка", "Кто"], rows)
 
     @app.get("/claims")
@@ -3079,7 +3428,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                      total["repair_cost"], total["works"], total["amortization"],
                      total["margin"], total["margin_percent"]])
         name = f"payback-{data['since']:%Y%m%d}-{data['until']:%Y%m%d}"
-        return _table(ext, name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
+        return await table(ext, name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
 
@@ -3176,7 +3525,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         out = [["ИТОГО" if r["total"] else r["title"], *(get(r) for _, get, _ in columns)]
                for r in (*report["rows"], report["total"])]
         span = data["span"]
-        return _table(ext, f"points-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
+        return await table(ext, f"points-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
                       ["Точка", *(title for title, _, _ in columns)], out)
 
     @app.get("/reports/points/{key}")
@@ -3238,7 +3587,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data.append(["ИТОГО", total["orders"], total["client_orders"], "",
                      total["total"], total["cost"], total["works"],
                      total["avg_total"]])
-        return _table(ext, f"techs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
+        return await table(ext, f"techs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
                     ["Техник", "Нарядов", "Из них клиентских", "Средн. суток",
                      "Сумма", "Запчасти", "Работы", "Средний наряд"], data)
 
@@ -3274,7 +3623,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = [[r["title"], r["node_title"], r["qty"], r["unit"], r["orders"],
                  r["cost"]] for r in rows]
         data.append(["ИТОГО", "", total["qty"], "", "", total["cost"]])
-        return _table(ext, f"spend-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
+        return await table(ext, f"spend-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
                     ["Позиция", "Узел", "Ушло", "Ед.", "Нарядов", "Себестоимость"],
                     data)
 
@@ -3328,7 +3677,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 for r in data["rows"]]
         rows.append(["ИТОГО", *(data["totals"].get(c, 0) for c in data["columns"]),
                      data["total"]])
-        return _table(ext, "channels", header, rows)
+        return await table(ext, "channels", header, rows)
 
     @app.get("/reports/referrals")
     async def referrals_report(request: Request) -> Response:
@@ -3747,7 +4096,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 line[4:4] = [r["lost"]]
                 line.append(r["estimate"])
             out.append(line)
-        return _table(ext, "service", header, out)
+        return await table(ext, "service", header, out)
 
     @app.get("/orders")
     async def orders_page(request: Request) -> Response:
@@ -3809,7 +4158,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 line.insert(8, logic.to_money(
                     o.get("total") if o["status"] == "done" else o.get("estimate")))
             out.append(line)
-        return _table(ext, "orders", header, out)
+        return await table(ext, "orders", header, out)
 
     @app.get("/orders/new")
     async def order_new(request: Request) -> Response:
@@ -4203,7 +4552,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         def cell(value: Any) -> Any:
             return "" if value is None else logic.to_money(value)
 
-        return _table(ext, "work-types",
+        return await table(ext, "work-types",
                       ["Наименование", "Категория", "Узел", "Время, мин",
                        "Арендатору: работа", "Арендатору: запчасть", "Арендатору: итого",
                        "Стороннему: работа", "Стороннему: запчасть", "Стороннему: итого",
@@ -4801,7 +5150,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, f"{logic.BATTERY_PASSPORT[field]}: сверка снята.")
             else:
                 field = str(data.get("field") or "")
-                photo = await save_check_photo("akb", battery, field,
+                photo = await save_check_photo(request, "akb", battery, field,
                                                data.get("photo"))
                 await service.check_battery_field(crm, battery, field,
                                                   by=who(request), photo=photo)
@@ -5574,6 +5923,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     }
 
     def our_template(kind: str) -> Path | None:
+        # В демо наших шаблонов нет: в них реквизиты настоящего ИП (ФИО,
+        # ИНН, счёт, телефоны), а демо публично и живёт на вымышленных.
+        # Страница тогда не показывает «Скачать наш», адрес отвечает 404.
+        if cfg.demo:
+            return None
         path = OUR_TEMPLATES.get(kind)
         if path is None:
             return None
@@ -5756,8 +6110,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         by = who(request)
         await crm.set_setting("bike_check_required",
                               "1" if data.get("required") else "0", by=by)
+        # В демо снимки не хранятся, и требование фото заперло бы ввод
+        # техники всем посетителям: оно всегда выключено.
+        if cfg.demo and data.get("photo"):
+            flash(request, DEMO_NO_PHOTO_TEXT)
         await crm.set_setting("bike_photo_required",
-                              "1" if data.get("photo") else "0", by=by)
+                              "1" if data.get("photo") and not cfg.demo else "0", by=by)
         for key, what in (("search_after_days", "Розыск"),
                           ("theft_after_days", "Кража")):
             got = count_field(data, key, what=what, default="0", limit=365)
@@ -6087,7 +6445,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = logic.rows_search(
             logic.tracker_rows(await crm.trackers(), settings=await crm.settings()),
             request.query_params.get("q") or "", TRACKER_SEARCH)
-        return _table(ext, "map",
+        return await table(ext, "map",
                       ["Велосипед", "Модель", "Трекер", "Состояние", "Скорость",
                        "Связь, ч назад", "У кого", "Широта", "Долгота"],
                       [[r.get("bike_code"), r.get("bike_model"),
@@ -6147,7 +6505,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_view(request, "trackers"):
             return denied(request, "trackers")
         rows, *_ = await alert_list(request)
-        return _table(ext, "alerts",
+        return await table(ext, "alerts",
                       ["Уровень", "Что случилось", "Подробности", "Велосипед",
                        "Клиент", "Когда", "Состояние", "Кто взял", "Закрыта"],
                       [[logic.ALERT_LEVELS.get(r["level"], r["level"]), r["title"],
@@ -6505,7 +6863,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 line += [logic.to_money(r.get("cost") or 0), r["cost_total"],
                          logic.to_money(r.get("price") or 0), r["price_total"]]
             out.append(line)
-        return _table(ext, "parts", header, out)
+        return await table(ext, "parts", header, out)
 
     @app.get("/parts/new")
     async def part_new(request: Request) -> Response:
@@ -6834,7 +7192,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.get("/stock-takes.{ext}")
     async def stock_takes_csv(request: Request, ext: str) -> Response:
         rows, _ = await take_rows(request)
-        return _table(ext, "stock-takes",
+        return await table(ext, "stock-takes",
                       ["№", "Дата", "Что считали", "Состояние", "Ожидалось",
                        "Найдено", "Не нашли", "Лишние", "Кто провёл", "Комментарий"],
                       [[r["no"], r.get("started_at"), r["title"],

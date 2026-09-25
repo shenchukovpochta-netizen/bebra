@@ -133,7 +133,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/sign_base.html',
                   'app/web/templates/sign.html',
                   'app/web/templates/sign_agreement.html',
-                  'app/web/templates/sign_missing.html')
+                  'app/web/templates/sign_missing.html',
+                  'app/web/templates/_demo_banner.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
@@ -162,6 +163,11 @@ $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/tochka_ca.pem')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
+# Демо-стенд для франшизы: генератор вымышленных данных и процесс
+# crm-demo (python -m app.demo). Своим списком по той же причине, что i18n.
+$demo = @('app/demo/__init__.py', 'app/demo/__main__.py', 'app/demo/runtime.py',
+          'app/demo/seed.py', 'app/demo/core.py', 'app/demo/world.py',
+          'app/demo/people.py', 'app/demo/seed_service.py', 'app/demo/seed_extras.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
           'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
@@ -184,15 +190,18 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_pricing.py', 'tests/test_inbox.py', 'tests/test_inbox_web.py',
           'tests/test_avito.py', 'tests/test_points_pg.py',
           'tests/test_point_analytics.py', 'tests/test_points_ops.py',
-          'tests/test_points_web.py', 'tests/test_faq_points.py')
+          'tests/test_points_web.py', 'tests/test_faq_points.py',
+          'tests/test_demo_seed.py', 'tests/test_demo_service.py',
+          'tests/test_demo_extras.py', 'tests/test_demo_mode.py',
+          'tests/test_demo_crawl.py')
 
-foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
+foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static/fonts' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/demo' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static/fonts' '$Path/tests'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -208,6 +217,8 @@ scp $services  "${Server}:${Path}/app/services/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (services) не удался' }
 scp $max       "${Server}:${Path}/app/max/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (max) не удался' }
+scp $demo      "${Server}:${Path}/app/demo/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (demo) не удался' }
 scp $crm       "${Server}:${Path}/app/crm/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (crm) не удался' }
 scp $web       "${Server}:${Path}/app/web/"

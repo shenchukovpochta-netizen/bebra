@@ -194,6 +194,30 @@ class TestExpiringWidget(tw.WebCase):
         self.assertIn("теряем ≈", page)
         self.assertIn("потеряно на простое", page)
 
+    def test_long_list_shows_the_most_urgent_and_links_to_all(self):
+        """Полторы сотни аренд - это десятки строк «на ближайшие дни»:
+        сводка показывает самые срочные, остальное - по ссылке."""
+        from app.web import app as web
+        tariff = tw.run(self.crm.tariff(self.tariff_id))
+        for n in range(web.EXPIRING_SHOWN + 2):
+            cid = tw.run(self.crm.create_client(full_name=f"Клиент {n:02d}",
+                                                phone=f"+7999100{n:04d}"))
+            bid = tw.run(self.crm.create_bike(code=f"X-{n:02d}", model="Kugoo V3"))
+            tw.run(service.open_rental(
+                self.crm, client=tw.run(self.crm.client(cid)), bike=tw.run(self.crm.bike(bid)),
+                tariff=tariff, started_on=date.today() - timedelta(days=6),
+                contract_no=None, by="t"))
+        total = web.EXPIRING_SHOWN + 3
+        page = self.get_ok("/")
+        self.assertIn(f"Показать все {total}", page)
+        self.assertIn('href="/?expiring=all#expiring"', page)
+        self.assertEqual(page.count("↩ сдаёт"), web.EXPIRING_SHOWN)
+        # первой - просрочка недельной давности, а не свежие платежи
+        self.assertIn('href="tel:+79990000000"', page)
+        page = self.get_ok("/?expiring=all")
+        self.assertEqual(page.count("↩ сдаёт"), total)
+        self.assertNotIn("Показать все", page)
+
     def test_intent_is_shown_and_takes_renewals_out_of_the_forecast(self):
         r = self.mark("return")
         self.assertEqual(r.status_code, 303)

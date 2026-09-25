@@ -374,3 +374,15 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
 .thread .msg.out{align-self:flex-end;background:var(--brand-pale);color:#3A1A08}
 @media (prefers-color-scheme:dark){.thread .msg.out{background:#4A2412;color:#FFD0B8}}
 .thread .msg.event{align-self:center;border-style:dashed}
+
+/* Демо-стенд: плашка на каждой странице и входы под ролями. Голубая, а
+   не оранжевая: это пояснение, а не ошибка, и с flash её путать нельзя. */
+.demo-banner{padding:9px 14px;border-radius:10px;margin-bottom:14px;font-size:14px;
+  background:#E8F4FF;color:#0B4A6E;border-left:4px solid var(--blue)}
+@media (prefers-color-scheme:dark){.demo-banner{background:#11303F;color:#CDEBFF}}
+.demo-logins{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+.demo-logins p{margin:0 0 8px}
+.demo-logins form{margin:0 0 6px}
+.login-box .demo-logins button{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;
+  justify-content:space-between;text-align:left;padding:8px 12px;font-weight:500}
+.demo-logins code{font-size:13px}

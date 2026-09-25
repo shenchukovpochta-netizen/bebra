@@ -27,6 +27,7 @@ import asyncio
 import io
 import re
 import sys
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -36,6 +37,12 @@ from .. import logic as bot_logic
 from . import logic
 
 MAX_ROWS = 5000
+# Сколько таблица весит распакованной. xlsx - это zip, и 20 МБ на входе
+# ничего не говорят о памяти: openpyxl читает общий список строк листа
+# целиком даже в режиме read_only, и мегабайтный файл из одной
+# повторяющейся строки распаковывается в гигабайты. Учётная таблица
+# проката - единицы мегабайт и распакованной.
+UNPACKED_MAX = 64 * 1024 * 1024
 
 
 class ImportError_(Exception):
@@ -260,6 +267,28 @@ class Row:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+def _check_unpacked(source: str | io.BytesIO) -> None:
+    """Отказ до openpyxl, если архив распаковывается больше UNPACKED_MAX.
+
+    Размеры берутся из оглавления архива; соврать в нём не выйдет:
+    zipfile читает член не дальше заявленного размера и сверяет CRC, так
+    что «маленький» в оглавлении член с большим телом не прочитается.
+    Не zip - не наше дело: openpyxl скажет «не читается как xlsx»."""
+    try:
+        with zipfile.ZipFile(source) as archive:
+            unpacked = sum(item.file_size for item in archive.infolist())
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return
+    finally:
+        if hasattr(source, "seek"):
+            source.seek(0)
+    if unpacked > UNPACKED_MAX:
+        raise ImportError_(
+            f"Таблица распаковывается в {unpacked // (1024 * 1024)} МБ - больше "
+            f"{UNPACKED_MAX // (1024 * 1024)} МБ. Учётная таблица столько не весит: "
+            f"сохраните в xlsx только нужный лист.")
+
+
 def read_rows(source: str | bytes | io.BytesIO, *, today: date | None = None) -> list[Row]:
     """Строки таблицы: первая строка - заголовки, дальше по одной на велосипед."""
     import openpyxl
@@ -268,6 +297,7 @@ def read_rows(source: str | bytes | io.BytesIO, *, today: date | None = None) ->
 
     if isinstance(source, bytes):
         source = io.BytesIO(source)
+    _check_unpacked(source)
     try:
         wb = openpyxl.load_workbook(source, data_only=True, read_only=True)
     except Exception as e:                       # noqa: BLE001 - zip/xml, любой формат

@@ -65,6 +65,10 @@ class WebConfig:
     # /hook/inbox для шлюзов WhatsApp и n8n. Пустой токен - хука нет.
     inbox_key: str = ""
     inbox_hook_token: str = ""
+    # Демо-стенд для франшизы (python -m app.demo): плашка, подсказка
+    # логинов, запрет опасных POST. Из окружения не читается намеренно -
+    # включает его только свой вход, у которого нет боевых секретов.
+    demo: bool = False
 
     @classmethod
     def load(cls) -> WebConfig:

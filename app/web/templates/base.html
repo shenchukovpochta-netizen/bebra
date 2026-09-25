@@ -89,6 +89,7 @@
 </aside>
 {% endif %}
 <main>
+{% if demo %}{% include "_demo_banner.html" %}{% endif %}
 {% for kind, text in flash %}
   <div class="flash {{ kind }}">{{ text }}</div>
 {% endfor %}

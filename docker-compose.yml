@@ -40,6 +40,13 @@ secrets:
     file: ./secrets/crm_secret
   crm_admin_password:
     file: ./secrets/crm_admin_password
+  # Демо-стенд (профиль demo): пароль его базы и ключ подписи его cookie.
+  # Свои, а не боевые: логин демо публичен. Оба генерирует bootstrap.sh -
+  # и без профиля demo, иначе compose не поднимется вовсе.
+  demo_db_password:
+    file: ./secrets/demo_db_password
+  crm_demo_secret:
+    file: ./secrets/crm_demo_secret
 
 services:
   postgres:
@@ -274,17 +281,131 @@ services:
   # HTTPS для панели по домену: docker compose --profile https up -d
   # Caddy сам получает и продлевает сертификат Let's Encrypt. Нужны
   # A-запись CRM_DOMAIN на IP сервера и открытые порты 80/443 в ufw.
+  # Второй сайт - демо-стенд на DEMO_DOMAIN, только когда тот задан:
+  # `caddy reverse-proxy` умеет один адрес, поэтому Caddyfile собирается
+  # при старте. crm-demo нет в depends_on намеренно: без профиля demo
+  # compose не поднял бы и Caddy, а так выключенное демо просто отвечает
+  # 502 на своём адресе.
+  # Демо не может уронить панель: сначала пишется сайт панели, демо
+  # дописывается, только если его адрес не совпал с адресом панели и
+  # Caddy принял файл целиком (`caddy adapt`); иначе - предупреждение
+  # в лог и одна панель. Пределы тела - как у самой панели (BODY_MAX,
+  # DEMO_BODY_MAX в app/web/app.py), а таймауты чтения не дают держать
+  # недокачанную загрузку открытой часами.
   caddy:
     image: caddy:2-alpine
     profiles: [https]
     restart: unless-stopped
     depends_on: [crm]
-    command: ["caddy", "reverse-proxy", "--from", "${CRM_DOMAIN}", "--to", "crm:8080"]
+    environment:
+      CRM_DOMAIN: ${CRM_DOMAIN:-}
+      DEMO_DOMAIN: ${DEMO_DOMAIN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        site() {
+          printf '%s {\n\trequest_body {\n\t\tmax_size %s\n\t}\n\treverse_proxy %s\n}\n' "$$1" "$$3" "$$2"
+        }
+        {
+          printf '{\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 120s\n\t\t}\n\t}\n}\n'
+          if [ -n "$${CRM_DOMAIN}" ]; then site "$${CRM_DOMAIN}" crm:8080 22MB; fi
+        } > /tmp/Caddyfile
+        if [ -n "$${DEMO_DOMAIN}" ]; then
+          crm=$$(printf %s "$${CRM_DOMAIN}" | tr A-Z a-z)
+          demo=$$(printf %s "$${DEMO_DOMAIN}" | tr A-Z a-z)
+          if [ "$$demo" = "$$crm" ]; then
+            echo "DEMO_DOMAIN совпадает с CRM_DOMAIN: демо не поднимаю, панель работает" >&2
+          else
+            cp /tmp/Caddyfile /tmp/Caddyfile.all
+            site "$${DEMO_DOMAIN}" crm-demo:8080 1MB >> /tmp/Caddyfile.all
+            if caddy adapt --config /tmp/Caddyfile.all --adapter caddyfile >/dev/null; then
+              mv /tmp/Caddyfile.all /tmp/Caddyfile
+            else
+              echo "DEMO_DOMAIN=$${DEMO_DOMAIN} Caddy не принял: демо не поднимаю, панель работает" >&2
+            fi
+          fi
+        fi
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - caddydata:/data
+    # Обе сети: боевая - до crm, своя демо - до crm-demo. Одна из
+    # немногих точек, где они встречаются, и она ничего не хранит.
+    networks: [default, demo]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  # Демо-стенд для франшизы: та же панель на вымышленных данных.
+  #   docker compose --profile demo up -d --build
+  # (или demo в COMPOSE_PROFILES - install.sh ставит его сам при DEMO_DOMAIN).
+  # Своя база и свои секреты; боевых ключей, томов и бота у демо нет
+  # намеренно: логин публичен, и дыра в демо не должна доставать ни до
+  # настоящих клиентов (152-ФЗ), ни до Telegram и банка. consistency.py
+  # проверяет, что сюда не попал ни боевой секрет, ни боевой том.
+  # Данные пересеиваются при старте и каждую ночь в 04:00 по Москве.
+  # Сеть у демо своя (demo): из неё не видно ни postgres, ни crm, ни бота,
+  # так что даже дыра с выполнением кода в демо упирается в сеть, а не
+  # только в отсутствие паролей. consistency.py проверяет и это.
+  postgres-demo:
+    image: postgres:16-alpine
+    profiles: [demo]
+    restart: unless-stopped
+    networks: [demo]
+    secrets: [demo_db_password]
+    environment:
+      POSTGRES_USER: mybike_demo
+      POSTGRES_PASSWORD_FILE: /run/secrets/demo_db_password
+      POSTGRES_DB: mybike_demo
+      TZ: ${TZ:-Europe/Moscow}
+    # Свой том: бэкап его не берёт - демо пересеивается каждую ночь.
+    volumes:
+      - pgdata_demo:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mybike_demo -d mybike_demo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+
+  crm-demo:
+    build: .
+    profiles: [demo]
+    restart: unless-stopped
+    command: ["python", "-m", "app.demo"]
+    depends_on:
+      postgres-demo:
+        condition: service_healthy
+    networks: [demo]
+    # Демо открыто всем: тяжёлый запрос должен упереться в свой
+    # контейнер, а не в память и диск сервера, общие с боевой базой.
+    # /tmp - в памяти и маленький: временные файлы форм не пишутся на
+    # тот же диск, где лежит pgdata.
+    mem_limit: 768m
+    pids_limit: 128
+    tmpfs:
+      - /tmp:size=64m
+    secrets: [demo_db_password, crm_demo_secret]
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/demo_db_password
+      CRM_SECRET_FILE: /run/secrets/crm_demo_secret
+      POSTGRES_HOST: postgres-demo
+      POSTGRES_USER: mybike_demo
+      POSTGRES_DB: mybike_demo
+      # Непустой домен = демо за Caddy: Secure cookie, HSTS и адрес
+      # клиента из X-Forwarded-For - как у боевой панели.
+      CRM_DOMAIN: ${DEMO_DOMAIN:-}
+      CRM_TRUSTED_PROXIES: ${CRM_TRUSTED_PROXIES:-}
+      CRM_PORT: "8080"
+      TZ: ${TZ:-Europe/Moscow}
+    # Для SSH-туннеля, пока нет домена; снаружи по-прежнему только Caddy.
+    ports:
+      - "${DEMO_BIND:-127.0.0.1}:${DEMO_PORT:-8081}:8080"
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -362,3 +483,12 @@ volumes:
   # печать. Панель пишет, бот читает: том общий, права разные.
   doctemplates:
   caddydata:
+  # База демо-стенда. Отдельно от pgdata: демо сносит свои схемы каждую ночь.
+  pgdata_demo:
+
+# default - боевые сервисы; demo - только демо-стенд и Caddy перед ним.
+# Сеть demo не internal: порт crm-demo для SSH-туннеля иначе не
+# опубликовать.
+networks:
+  default: {}
+  demo: {}

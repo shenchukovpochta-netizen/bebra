@@ -13,7 +13,23 @@
       <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
       <button type="submit">Войти</button>
     </form>
+    {% if demo %}
+    {# Каждая строка - своя форма входа с этой парой: один клик и без
+       скрипта. Логин и пароль видны текстом - их можно и набрать. #}
+    <div class="demo-logins">
+      <p class="muted">Войти в демо под ролью:</p>
+      {% for login, password, role in DEMO_LOGINS %}
+      <form method="post" action="/login">
+        <input type="hidden" name="next" value="{{ next }}">
+        <input type="hidden" name="login" value="{{ login }}">
+        <input type="hidden" name="password" value="{{ password }}">
+        <button type="submit" class="ghost"><span>{{ role }}</span> <span><code>{{ login }}</code> / <code>{{ password }}</code></span></button>
+      </form>
+      {% endfor %}
+    </div>
+    {% else %}
     <p class="muted">Клиенты, парк, аренды и деньги проката. Доступ выдаёт администратор.</p>
+    {% endif %}
   </div>
 </div>
 {% endblock %}

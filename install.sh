@@ -231,15 +231,19 @@ bold "Записываю .env"
 # Домен панели и профиль https идут парой: с доменом Caddy обязан
 # подниматься при каждом `docker compose up -d`, иначе после обновления
 # панель по адресу молча пропадала бы. Профили из прежнего .env (max)
-# сохраняются.
+# сохраняются. Домен демо-стенда - так же: профиль demo, и https тоже -
+# демо открывается только через Caddy.
 CRM_DOMAIN="${CRM_DOMAIN:-crm.mybike-kzn.ru}"
+DEMO_DOMAIN="${DEMO_DOMAIN:-}"
 COMPOSE_PROFILES="${COMPOSE_PROFILES:-}"
-if [ -n "$CRM_DOMAIN" ]; then
+add_profile() {
   case ",$COMPOSE_PROFILES," in
-    *,https,*) ;;
-    *) COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}https" ;;
+    *,"$1",*) ;;
+    *) COMPOSE_PROFILES="${COMPOSE_PROFILES:+$COMPOSE_PROFILES,}$1" ;;
   esac
-fi
+}
+if [ -n "$CRM_DOMAIN" ] || [ -n "$DEMO_DOMAIN" ]; then add_profile https; fi
+if [ -n "$DEMO_DOMAIN" ]; then add_profile demo; fi
 umask 077
 # Значения пишутся в кавычках. Это не украшение: bootstrap.sh читает .env
 # через `. ./.env`, и строка ADMINS=111 222 без кавычек означает для shell
@@ -283,6 +287,11 @@ CRM_ADMIN_LOGIN="${CRM_ADMIN_LOGIN:-admin}"
 CRM_TITLE="${CRM_TITLE:-МАЙБАЙК}"
 CRM_DOMAIN="${CRM_DOMAIN}"
 COMPOSE_PROFILES="${COMPOSE_PROFILES}"
+
+# Демо-стенд для франшизы: пусто - демо нет.
+DEMO_DOMAIN="${DEMO_DOMAIN:-}"
+DEMO_BIND="${DEMO_BIND:-127.0.0.1}"
+DEMO_PORT="${DEMO_PORT:-8081}"
 
 MAX_CHANNEL_ID="${MAX_CHANNEL_ID:-}"
 MAX_CHANNEL_URL="${MAX_CHANNEL_URL:-}"
@@ -361,6 +370,12 @@ if [ ! -s app/contract_template.docx ]; then
 EOF
 fi
 
+if [ -n "${DEMO_DOMAIN:-}" ]; then
+  DEMO_LINE="Демо-стенд: https://${DEMO_DOMAIN} (вход demo / demo), сброс каждую ночь."
+else
+  DEMO_LINE="Демо-стенд выключен: DEMO_DOMAIN в .env пуст."
+fi
+
 bold "Готово"
 cat <<EOF
     Логи:      docker compose logs -f bot
@@ -376,6 +391,7 @@ cat <<EOF
     Смените пароль после первого входа (раздел «Сотрудники»).
     По домену: https://${CRM_DOMAIN:-<CRM_DOMAIN не задан>} - когда A-запись
     поддомена смотрит на этот сервер (Caddy получит сертификат сам).
+    ${DEMO_LINE}
 
     Отправьте боту /start и пройдите сценарий целиком:
     подписка → ФИО → оферта → контакт → анкета → фото документа

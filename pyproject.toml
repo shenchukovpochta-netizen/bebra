@@ -16,7 +16,7 @@ dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools]
 packages = ["app", "app.handlers", "app.services", "app.i18n", "app.max",
-            "app.crm", "app.web"]
+            "app.crm", "app.web", "app.demo"]
 
 [tool.setuptools.package-data]
 "app.web" = ["templates/*.html", "static/*.css", "static/fonts/*.woff2"]

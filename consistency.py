@@ -85,6 +85,122 @@ for source, service in (("app/config.py", "bot"), ("app/web/config.py", "crm"),
             problems.append(f"секрет {path.group(1)} не смонтирован сервису {service} "
                             f"(нет в его secrets:)")
 
+# ── 2а. демо-стенд изолирован от боевых данных ───────────────────────────
+# Логин демо публичен, а его сброс сносит схемы crm и bot целиком. Боевой
+# секрет или том, скопированный в блок демо вместе с соседним сервисом,
+# отдал бы всем посетителям настоящих клиентов (152-ФЗ) или бота, а
+# база postgres вместо postgres-demo стёрлась бы первым же сбросом.
+# Проверка - белым списком, а не поиском запрещённых имён: `extends: crm`,
+# `<<: *crm`, `volumes_from`, `env_file` или файл секрета, переписанный на
+# боевой в общем разделе secrets:, имён боевых секретов в блоке демо не
+# содержат, а боевое приносят.
+DEMO_FORBIDDEN = ("db_password", "bot_token", "crm_secret", "crm_admin_password",
+                  "tochka_token", "inbox_key", "inbox_hook_token", "pdn_key",
+                  "avito_client_secret", "max_bot_token", r"starline_\w+",
+                  # тома боевой панели и базы
+                  "kycfiles", "bikefiles", "doctemplates", "pgdata")
+DEMO_SECRETS = {"demo_db_password": "./secrets/demo_db_password",
+                "crm_demo_secret": "./secrets/crm_demo_secret"}
+DEMO_VOLUMES = {"pgdata_demo"}
+# Ключи, из которых собран блок демо. Всё прочее - повод посмотреть
+# глазами: extends, volumes_from, env_file, network_mode, privileged,
+# cap_add, devices, pid, ipc и слияние YAML (<<) тянут чужое целиком.
+DEMO_KEYS = {"image", "build", "profiles", "restart", "command", "depends_on",
+             "networks", "secrets", "environment", "healthcheck", "ports", "volumes",
+             "logging", "mem_limit", "pids_limit", "tmpfs", "stop_grace_period"}
+
+
+def service_items(block: str, key: str) -> list[str] | None:
+    """Значения ключа сервиса: `[a, b]` в строку или «- a» столбиком
+    (длинная запись тома - по его `source:`). None - ключа нет."""
+    found = re.search(rf"(?m)^    {re.escape(key)}:[ \t]*(.*)$", block)
+    if found is None:
+        return None
+    inline = found.group(1).strip()
+    if inline.startswith("["):
+        return [x.strip().strip("'\"") for x in inline.strip("[]").split(",") if x.strip()]
+    if inline:
+        return [inline.strip("'\"")]
+    items = []
+    for line in block[found.end():].split("\n")[1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= 4:
+            break
+        item = re.match(r"\s+(?:-\s*)?source:\s*(\S+)", line) \
+            or re.match(r"\s+-\s*(?!type:)(\S.*?)\s*$", line)
+        if item:
+            items.append(item.group(1).strip("'\""))
+    return items
+
+
+def top_section(name: str) -> str:
+    found = re.search(rf"(?m)^{name}:\n(.*?)(?=^\S|\Z)", compose, re.S)
+    return found.group(1) if found else ""
+
+
+def uncommented(text: str) -> str:
+    # Комментарии - не конфигурация: «не монтировать kycfiles» в пояснении
+    # проверку ронять не должно.
+    return re.sub(r"(?m)(^|\s)#.*$", r"\1", text)
+
+
+for service in ("crm-demo", "postgres-demo"):
+    block = uncommented(service_block(service))
+    if not block.strip():
+        problems.append(f"в docker-compose.yml нет сервиса {service}: проверка "
+                        f"изоляции демо-стенда не может его найти")
+        continue
+    where = f"демо-стенд ({service})"
+    leaked = sorted({m.group() for name in DEMO_FORBIDDEN
+                     for m in re.finditer(rf"(?<![\w-]){name}(?![\w-])", block)})
+    if "./secrets" in block:
+        leaked.append("./secrets")
+    if leaked:
+        problems.append(f"{where} получает боевое: {leaked} -> логин демо "
+                        f"публичен, это отдало бы их всем. Демо - только "
+                        f"demo_db_password, crm_demo_secret и свой том")
+    keys = re.findall(r"(?m)^    (<<|[A-Za-z_][\w-]*)\s*:", block)
+    odd = sorted(set(keys) - DEMO_KEYS)
+    if odd:
+        problems.append(f"{where}: ключи {odd} вне белого списка -> extends, <<, "
+                        f"volumes_from, env_file и им подобные приносят чужие секреты "
+                        f"и тома целиком. Разрешены: {sorted(DEMO_KEYS)}")
+    stranger = sorted((set(service_items(block, "secrets") or [])
+                       | set(re.findall(r"/run/secrets/([\w.-]+)", block)))
+                      - set(DEMO_SECRETS))
+    if stranger:
+        problems.append(f"{where}: секреты {stranger} не демо -> разрешены только "
+                        f"{sorted(DEMO_SECRETS)}")
+    for item in service_items(block, "volumes") or []:
+        source = item.split(":", 1)[0].strip()
+        if source.startswith((".", "/", "~", "$")) or source not in DEMO_VOLUMES:
+            problems.append(f"{where}: том «{item}» -> каталог сервера или чужой том "
+                            f"(бэкапы, docker.sock) достался бы посетителям; "
+                            f"можно только {sorted(DEMO_VOLUMES)}")
+    nets = service_items(block, "networks")
+    if not nets or set(nets) != {"demo"}:
+        problems.append(f"{where}: сети {nets} -> демо живёт только в сети demo, "
+                        f"иначе из него видны postgres и crm боевого стека")
+crm_demo = uncommented(service_block("crm-demo"))
+host = re.search(r"""(?m)^\s+-?\s*["']?POSTGRES_HOST["']?\s*[:=]\s*["']?([^"'\s]+)["']?\s*$""",
+                 crm_demo)
+if crm_demo.strip() and (host is None or host.group(1) != "postgres-demo"):
+    problems.append("crm-demo ходит не в postgres-demo -> ночной сброс демо снёс бы "
+                    "схемы crm и bot чужой базы")
+# Файлы секретов демо - свои: имя в блоке демо верное, а путь в общем
+# разделе secrets:, переписанный на боевой, отдал бы демо боевой пароль.
+declared = uncommented(top_section("secrets"))
+for name, path in DEMO_SECRETS.items():
+    found = re.search(rf"(?m)^  {name}:\n((?:^    .*\n?)*)", declared)
+    body = found.group(1) if found else ""
+    source = re.search(r"(?m)^    file:\s*[\"']?([^\"'\s]+)", body)
+    if source is None or source.group(1) != path or re.search(r"(?m)^    (?!file:)", body):
+        problems.append(f"секрет {name} в разделе secrets: должен быть ровно "
+                        f"file: {path} -> иначе демо получает чужой файл")
+caddy_nets = service_items(uncommented(service_block("caddy")), "networks") or []
+if service_block("crm-demo") and not {"default", "demo"} <= set(caddy_nets):
+    problems.append(f"caddy в сетях {caddy_nets} -> ему нужны обе, default и demo: "
+                    f"иначе он не достанет до crm или до crm-demo")
+
 # ── 3. состав пакета ↔ список заливки в deploy.ps1 ───────────────────────
 # Служебные каталоги в состав пакета не входят. Без исключения .git проверка
 # требовала заливать на сервер всю историю репозитория и выдавала полсотни
