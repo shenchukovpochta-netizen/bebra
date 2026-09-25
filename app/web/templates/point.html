@@ -15,6 +15,7 @@
   <dl>
     {% if place.public_title %}<dt>Для курьеров</dt><dd>{{ place.public_title }}</dd>{% endif %}
     <dt>Адрес</dt><dd>{{ place.address or '—' }}{% if map_url(place.lat, place.lon) %} · <a href="{{ map_url(place.lat, place.lon) }}" target="_blank" rel="noopener">на карте</a>{% endif %}</dd>
+    {% if place.directions %}<dt>Как найти</dt><dd>{{ place.directions }}</dd>{% endif %}
     <dt>Телефон</dt><dd>{% if place.phone %}<a href="tel:{{ place.phone }}">{{ place.phone }}</a>{% else %}—{% endif %}</dd>
     <dt>Режим</dt><dd>{{ place.hours or '—' }}</dd>
     {% if place.city %}<dt>Город</dt><dd>{{ place.city }}</dd>{% endif %}

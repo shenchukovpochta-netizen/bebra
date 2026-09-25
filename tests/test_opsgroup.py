@@ -354,6 +354,47 @@ class TestSwap(OpsCase):
         self.assertEqual(out.reaction, "👍")
         self.assertIsNone(out.reply)
 
+    def issued_at(self, point):
+        """Аренда выдана с `point`, в справочнике две точки."""
+        for name in ("Павлюхина", "Адоратского"):
+            run(self.crm.create_location(name=name, city="Казань", address=None,
+                                         note=None))
+        self.crm.rentals_[self.rental_id]["location"] = point
+        run(self.crm.update_bike(self.bike_id, location=point))
+
+    def test_removed_bike_stays_where_the_form_says(self):
+        """«откуда: Павлюхина» - это «где меняли»: снятый остаётся там, а
+        не на точке аренды, как и при замене из панели."""
+        self.issued_at("Адоратского")
+        out = self.handle("fix", SWAP, swap_allowed=True, by="tg:55")
+        self.assertEqual(out.reaction, "👍", out.reply)
+        old = run(self.crm.bike(self.bike_id))
+        self.assertEqual((old["status"], old["location"]), ("repair", "Павлюхина"))
+        self.assertEqual(run(self.crm.bike(self.new_id))["location"], "Адоратского",
+                         "новый - на точке аренды")
+        self.assertIn("на точке Павлюхина", out.reply, "точку видно в чате")
+
+    def test_unknown_swap_point_is_not_guessed(self):
+        self.issued_at("Адоратского")
+        out = self.handle("fix", SWAP.replace("откуда: Павлюхина", "откуда: у метро"),
+                          swap_allowed=True, by="tg:55")
+        self.assertEqual(out.reaction, "👍", out.reply)
+        self.assertEqual(run(self.crm.bike(self.bike_id))["location"], "Адоратского",
+                         "не сопоставилось - точка аренды")
+        self.assertNotIn("на точке", out.reply)
+
+    def test_directory_failure_does_not_stop_the_swap(self):
+        self.issued_at("Адоратского")
+
+        async def broken(**kwargs):
+            raise RuntimeError("нет связи")
+
+        self.crm.locations = broken
+        with self.assertLogs("app.crm.opsgroup", level="ERROR"):
+            out = self.handle("fix", SWAP, swap_allowed=True, by="tg:55")
+        self.assertEqual(out.reaction, "👍", out.reply)
+        self.assertEqual(run(self.crm.bike(self.bike_id))["location"], "Адоратского")
+
     def test_new_bike_must_be_free(self):
         run(self.crm.update_bike(self.new_id, status="repair"))
         out = self.handle("fix", SWAP, swap_allowed=True, by="tg:55")

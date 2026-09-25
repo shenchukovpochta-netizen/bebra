@@ -22,7 +22,7 @@
     <td><b>{{ r.name }}</b>{% if not r.active %} <span class="tag">закрыта</span>{% endif %}{% if r.public_title %}<br><small class="muted">{{ r.public_title }}</small>{% endif %}
       {% if can_view(staff, 'reports') %}<br><small><a href="/reports/points/{{ r.id }}">Аналитика точки</a></small>{% endif %}</td>
     <td class="num">{% if can_view(staff, 'bikes') %}<a href="/bikes?location={{ r.name|urlencode }}">{{ b.fleet or 0 }}</a>{% else %}{{ b.fleet or 0 }}{% endif %}{% if b.rented %}<br><small class="muted">в аренде {{ b.rented }}</small>{% endif %}</td>
-    <td class="opt">{{ r.address or '—' }}{% if r.hours %}<br><small class="muted">{{ r.hours }}</small>{% endif %}</td>
+    <td class="opt">{{ r.address or '—' }}{% if r.directions %}<br><small class="muted">{{ r.directions }}</small>{% endif %}{% if r.hours %}<br><small class="muted">{{ r.hours }}</small>{% endif %}</td>
     <td class="opt">{% if r.phone %}<a href="tel:{{ r.phone }}">{{ r.phone }}</a>{% else %}—{% endif %}</td>
     <td class="opt">{% if r.lat and r.lon %}<a href="{{ map_url(r.lat, r.lon) }}" target="_blank" rel="noopener">{{ '%.4f'|format(r.lat) }}, {{ '%.4f'|format(r.lon) }}</a>{% else %}<span class="muted">нет координат</span>{% endif %}</td>
     <td>{% if can_edit(staff, 'settings') %}<form method="post" action="/locations/{{ r.id }}/toggle"><button type="submit" class="ghost">{{ 'Закрыть' if r.active else 'Открыть' }}</button></form>{% else %}{{ 'да' if r.active else 'нет' }}{% endif %}</td>
@@ -34,6 +34,7 @@
         <label>Город <input name="city" value="{{ r.city or '' }}"></label>
         <label>Название для курьеров <input name="public_title" value="{{ r.public_title or '' }}" placeholder="Май Байк — сервис и аренда, Павлюхина"></label>
         <label class="wide">Адрес <input name="address" value="{{ r.address or '' }}"></label>
+        <label class="wide">Как найти (видит клиент в боте) <input name="directions" value="{{ r.directions or '' }}" placeholder="Заезд в ГСК «Сокол», 9-й бокс"></label>
         <label>Телефон <input name="phone" value="{{ r.phone or '' }}"></label>
         <label>Режим работы <input name="hours" value="{{ r.hours or '' }}" placeholder="пн-вс: 10:00-19:00"></label>
         <label>Широта <input name="lat" value="{{ r.lat or '' }}" placeholder="55.766900"></label>
@@ -51,10 +52,12 @@
       </form>
       <p class="muted small">Новое имя переедет разом во всё, где стоит
         точка: велосипеды{% if b.cards %} (карточек на ней {{ b.cards }}){% endif %},
-        батареи, аренды, наряды, кассовые смены, пересчёты, сотрудники и
-        история перемещений. Велосипеды никуда не едут — меняется подпись,
-        отчёт по точке остаётся одной строкой. Бот назовёт точку по-новому
-        в течение нескольких минут.</p>
+        батареи, аренды, наряды, кассовые смены, пересчёты, сотрудники,
+        история перемещений и сохранённые фильтры списков. Велосипеды никуда
+        не едут — меняется подпись, отчёт по точке остаётся одной строкой.
+        Бот назовёт точку по-новому в течение нескольких минут. Имя, которое
+        уже стоит в записях вне справочника, не принимается: переименование
+        навсегда смешало бы их с этой точкой.</p>
     </td>
   </tr>
   {% endif %}
@@ -86,6 +89,7 @@
     <label>Город <input name="city" value="Казань"></label>
     <label class="wide">Название для курьеров <input name="public_title" placeholder="Май Байк — сервис и аренда, Восстания"></label>
     <label class="wide">Адрес <input name="address"></label>
+    <label class="wide">Как найти (видит клиент в боте) <input name="directions" placeholder="Вход со двора, синие ворота"></label>
     <label>Телефон <input name="phone" placeholder="+7 (904) 676-49-26"></label>
     <label>Режим работы <input name="hours" placeholder="пн-вс: 10:00-19:00"></label>
     <label>Широта <input name="lat" placeholder="55.766900"></label>

@@ -480,9 +480,35 @@ class TestPointsFromDirectory(unittest.TestCase):
         self.assertEqual(block, "г. Казань, ул. Адоратского, 11А")
 
     def test_short_list_is_one_line_per_point(self):
+        """Адрес и режим - одной строкой: «привозите в часы работы» без
+        часов - вопрос, с которым клиент вернётся."""
         text = self.ask("LEAD")
         lines = [line for line in text.split("\n") if line.startswith("📍")]
-        self.assertEqual(lines, ["📍 " + a for a in ADDRESSES])
+        self.assertEqual(lines, ["📍 г. Казань, ул. Павлюхина, 97А · 🕙 пн-вс: 10:00-19:00",
+                                 "📍 г. Казань, ул. Адоратского, 11А",
+                                 "📍 г. Казань, ул. Восстания, 100 · 🕙 пн-пт: 09:00-21:00"])
+
+    def test_every_answer_listing_points_names_each_points_hours(self):
+        """Каждый ответ со списком точек - с режимом каждой, на всех языках."""
+        for lang in i18n.LANGS:
+            for code in faq.POINT_ANSWERS:
+                text = self.ask(code, lang)
+                self.assertIn("пн-вс: 10:00-19:00", text, f"{lang}/{code}")
+                self.assertIn("пн-пт: 09:00-21:00", text, f"{lang}/{code}")
+
+    def test_directions_reach_every_list(self):
+        """«Как найти» (ГСК, бокс) - в полном списке строкой под адресом, в
+        коротком - под строкой адреса: без него курьер приедет к воротам
+        кооператива, а не к боксу."""
+        way = "Заезд в ГСК «Сокол», ищите 9-й бокс — если не найдёте, напишите, встретим"
+        pts = [{**THREE_POINTS[0], "directions": way}, *THREE_POINTS[1:]]
+        for lang in i18n.LANGS:
+            for code in faq.POINT_ANSWERS:
+                text = self.ask(code, lang, pts=pts)
+                self.assertIn("🧭 " + way, text, f"{lang}/{code}")
+                self.assertEqual(text.count("🧭"), 1, f"{lang}/{code}")
+        full = self.ask("ADDR", pts=pts)
+        self.assertIn("г. Казань, ул. Павлюхина, 97А\n🧭 " + way, full)
 
     def test_values_from_the_panel_are_escaped(self):
         """«&» или «<» в адресе - сообщение, которое Telegram не разберёт."""
@@ -510,10 +536,25 @@ class TestPointsFromDirectory(unittest.TestCase):
                     self.assertEqual(value.count(faq.POINTS_FIELD), 1,
                                      f"{lang}/{key}")
 
-    def test_after_hours_note_still_applies(self):
-        text = self.ask("ADDR", now=NIGHT)
-        self.assertIn(faq.AFTER_HOURS, text)
-        self.assertNotIn(faq.AFTER_HOURS, self.ask("ADDR"))
+    def test_fixed_hours_never_meet_directory_points(self):
+        """«Сейчас закрыто, работаем 10–19 без выходных» рядом с точкой
+        «пн-пт: 09:00-21:00» - сообщение спорит само с собой и в 19:30
+        отправляет клиента от открытой точки. Со справочником режим - у
+        каждой точки в списке, общих часов нет ни в одном ответе, ни в
+        приписке, ни на одном языке."""
+        evening = DAY.replace(hour=19, minute=30)
+        for lang in i18n.LANGS:
+            t = i18n.T.get(lang, {})
+            fixed = [faq.AFTER_HOURS, faq.WORKING_HOURS, "10:00–19:00",
+                     t.get("after_hours") or faq.AFTER_HOURS]
+            for intent in faq.INTENTS:
+                for now in (DAY, evening, NIGHT):
+                    text = faq.answer(intent, now=now, lang=lang, points=THREE_POINTS)
+                    for phrase in fixed:
+                        self.assertNotIn(phrase, text, f"{lang}/{intent.code}/{now:%H:%M}")
+        # Без справочника - прежняя приписка вне графика.
+        self.assertIn(faq.AFTER_HOURS, self.ask("ADDR", now=NIGHT, pts=None))
+        self.assertNotIn(faq.AFTER_HOURS, self.ask("ADDR", pts=None))
 
     def test_handoff_answers_still_ask_the_client_to_reply(self):
         for intent in faq.MENU_TOPICS:

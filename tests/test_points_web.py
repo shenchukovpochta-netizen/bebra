@@ -82,6 +82,39 @@ class TestPeriod(unittest.TestCase):
         self.assertEqual(logic.report_period({"month": "2099-01"}, now=self.NOW)["key"],
                          "2026-09", "будущий месяц - текущий")
 
+    def test_edge_years_fall_back_instead_of_overflowing(self):
+        """Год 1 и год 9999 strptime читает, а «минус 29 дней» и «плюс
+        сутки» на них - OverflowError: страница отчёта падала 500."""
+        for junk in ({"until": "9999-12-31"}, {"until": "31.12.9999"},
+                     {"since": "9999-12-31"}, {"until": "0001-01-05"},
+                     {"since": "0001-01-01"}, {"since": "0001-01-01", "until": "0001-01-02"},
+                     {"month": "0001-01"}, {"month": "0001-02"}, {"month": "1999-12"}):
+            span = logic.report_period(junk, now=self.NOW)
+            self.assertGreaterEqual(span["since"], logic.REPORT_FLOOR, junk)
+            self.assertLessEqual(span["until"], self.NOW.date(), junk)
+            # То, что считает страница точки: график не длиннее 62 дней.
+            span["until"] - timedelta(days=logic.POINT_CHART_DAYS - 1)
+        self.assertEqual(logic.report_period({"month": "0001-01"}, now=self.NOW)["key"],
+                         "2026-09")
+        self.assertEqual(logic.report_period({"until": "0001-01-05"}, now=self.NOW)["kind"],
+                         "days", "до 2000 года - мусор, окно по умолчанию")
+        future = logic.report_period({"since": "2026-09-20", "until": "9999-12-31"},
+                                     now=self.NOW)
+        self.assertEqual((future["since"], future["until"]),
+                         (date(2026, 9, 20), date(2026, 9, 25)), "будущее - по сегодня")
+
+    def test_report_day(self):
+        today = date(2026, 9, 25)
+        self.assertEqual(logic.report_day("", today=today, default=today).value, today)
+        self.assertFalse(logic.report_day("", today=today).ok)
+        self.assertFalse(logic.report_day("0001-01-01", today=today).ok)
+        self.assertFalse(logic.report_day("вчера", today=today).ok)
+        self.assertEqual(logic.report_day("9999-12-31", today=today).value, today)
+        self.assertEqual(logic.report_day("01.09.2026", today=today).value,
+                         date(2026, 9, 1))
+        self.assertEqual(logic.month_from("0001-01", today=today), date(2026, 9, 1))
+        self.assertEqual(logic.month_from("2000-01", today=today), date(2000, 1, 1))
+
     def test_month_windows(self):
         months = logic.month_windows(self.NOW, 3)
         self.assertEqual([m["month"] for m in months],
@@ -102,6 +135,24 @@ class TestPointHelpers(unittest.TestCase):
                          (PAV, 0, D(0), True))
         self.assertIsNone(card["metrics"]["idle_percent"])
         self.assertEqual(logic.point_card(report, None)["title"], logic.NO_POINT_TITLE)
+
+    def test_query_with_renamed(self):
+        pav, new = quote(PAV, safe=""), quote("Павлюхина 97А", safe="")
+        rename = logic.query_with_renamed
+        self.assertEqual(rename(f"status=active&location={pav}&sort=days", "location",
+                                PAV, "Павлюхина 97А"),
+                         f"status=active&location={new}&sort=days")
+        self.assertEqual(rename("location=%D0%9F%D0%B0%D0%B2%D0%BB%D1%8E%D1%85%D0%B8"
+                                "%D0%BD%D0%B0+&q=a+b", "location", PAV + " ", "Х"),
+                         f"location={quote('Х')}&q=a+b", "«+» - пробел, остальное как было")
+        for query in (f"q={pav}", "location=none", "", None, f"location={pav}x"):
+            self.assertIsNone(rename(query, "location", PAV, "Х"), query)
+
+    def test_parse_id_takes_ascii_digits_only(self):
+        for raw, want in (("12", 12), (" 7 ", 7), (12, 12), ("0002", 2),
+                          ("²", None), ("٢", None), ("①", None), ("-1", None),
+                          ("1.5", None), ("", None), (None, None), ("9" * 19, None)):
+            self.assertEqual(logic.parse_id(raw), want, repr(raw))
 
     def test_bikes_by_point(self):
         counts = logic.bikes_by_point([
@@ -273,6 +324,11 @@ class TestPointsReport(PointsWebCase):
         self.assertIn("№ N-1", none)
         self.assertEqual(self.client.get("/reports/points/99999").status_code, 404)
         self.assertEqual(self.client.get("/reports/points/abc").status_code, 404)
+        # «²» для isdigit - цифра, а int() на ней падал: 500 вместо 404.
+        # «٢» int() читал как 2 - чужой адрес той же точки.
+        for key in ("%C2%B2", quote("٢"), "1" * 40, "-1"):
+            self.assertEqual(self.client.get(f"/reports/points/{key}").status_code,
+                             404, key)
 
     def test_closed_point_page_opens_with_zeros(self):
         tw.run(self.crm.update_location(self.ado, active=False))
@@ -294,6 +350,22 @@ class TestPointsReport(PointsWebCase):
         page = self.get_ok("/reports/points?since=2026-01-01&until=2026-01-31")
         self.assertIn("01.01.2026 — 31.01.2026", page)
         self.assertIn("since=2026-01-01&amp;until=2026-01-31", page)
+
+    def test_edge_dates_in_the_address_are_not_a_500(self):
+        """Мусор в адресе - окно по умолчанию, а не падение: и у отчёта по
+        точкам, и у старых страниц на том же разборе дат и месяца."""
+        self.story()
+        for path in ("/reports/points?month=0001-01", "/reports/points?until=0001-01-01",
+                     "/reports/points?since=9999-12-31", "/reports/points.csv?month=0001-01",
+                     "/reports/points.xlsx?since=9999-12-31",
+                     f"/reports/points/{self.pav}?until=0001-01-01",
+                     f"/reports/points/{self.pav}?month=0001-02",
+                     "/reports/points/none?since=0001-01-01&until=0001-01-02",
+                     "/?month=0001-01", "/service?month=0001-01",
+                     "/reports/techs?until=9999-12-31", "/reports/spend?until=9999-12-31",
+                     "/reports/model-parts?until=31.12.9999",
+                     "/reports/techs.csv?since=0001-01-01&until=9999-12-31"):
+            self.assertEqual(self.client.get(path).status_code, 200, path)
 
     def test_history_note_is_one_honest_line(self):
         self.story()
@@ -363,6 +435,53 @@ class TestLocationsPage(PointsWebCase):
         self.assertIn("Декабристов 1", rows)
         self.assertNotIn(DEK, rows)
 
+    def test_directions_are_edited_in_the_panel(self):
+        """«Как найти» - поле точки для клиента: правится в панели, видно в
+        списке точек и на странице точки, пустое поле - стёрто."""
+        way = "Заезд в ГСК «Сокол», 9-й бокс"
+        self.client.post(f"/locations/{self.pav}", data={
+            "city": "Казань", "address": "ул. Павлюхина, 97А", "directions": way,
+            "sort": "10"})
+        place = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)
+        self.assertEqual(place["directions"], way)
+        self.assertIn(html.escape(way, quote=False), self.get_ok("/locations"))
+        self.assertIn(html.escape(way, quote=False),
+                      self.get_ok(f"/reports/points/{self.pav}"))
+        self.client.post(f"/locations/{self.pav}", data={
+            "city": "Казань", "address": "ул. Павлюхина, 97А", "directions": "",
+            "sort": "10"})
+        place = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)
+        self.assertIsNone(place["directions"])
+        self.client.post("/locations", data={"name": "Горки", "city": "Казань",
+                                             "directions": "вход со двора"})
+        self.assertEqual(next(p for p in tw.run(self.crm.locations())
+                              if p["name"] == "Горки")["directions"], "вход со двора")
+
+    def test_rename_keeps_saved_filters(self):
+        """Фильтр «?location=Декабристов» после переименования показывает те
+        же аренды, а не пустой список со старым именем в выпадающем."""
+        self.story()
+        self.client.post("/views", data={"section": "/rentals", "name": "Декабристов",
+                                          "query": f"location={quote(DEK, safe='')}"})
+        self.client.post(f"/locations/{self.dek}/rename", data={"name": "Декабристов 1"})
+        [view] = self.crm.views_.values()
+        self.assertEqual(view["query"], f"location={quote('Декабристов 1', safe='')}")
+        page = self.get_ok("/rentals?" + view["query"])
+        self.assertIn("Денисов Дмитрий", page)
+        self.assertNotIn(f'<option value="{DEK}"', page, "старое имя не вернулось")
+
+    def test_rename_refuses_a_name_used_outside_the_directory(self):
+        """«Склад» есть у велосипеда, но не в справочнике: переименование в
+        него склеило бы чужие записи с точкой навсегда."""
+        self.story()
+        orphan = self.bike("O-1", "Склад")
+        r = self.client.post(f"/locations/{self.dek}/rename", data={"name": "Склад"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("вне справочника", self.get_ok("/locations"))
+        self.assertEqual(tw.run(self.crm.bike(self.d1))["location"], DEK)
+        self.assertEqual(tw.run(self.crm.bike(orphan))["location"], "Склад")
+        self.assertIn(DEK, [p["name"] for p in tw.run(self.crm.locations())])
+
     def test_rename_refuses_a_taken_name(self):
         self.story()
         self.client.post(f"/locations/{self.dek}/rename", data={"name": PAV})
@@ -386,8 +505,12 @@ class TestLocationsPage(PointsWebCase):
         form = self.get_ok("/bikes/new")
         self.assertLess(form.index(f'value="{DEK}"'), form.index(f'value="{PAV}"'),
                         "порядок справочника - порядок выпадающих списков")
-        self.client.post(f"/locations/{self.dek}", data={"sort": "много"})
-        self.assertEqual(tw.run(self.crm.locations())[0]["sort"], 5)
+        # «²» и «٢» - «цифры» для isdigit: int() на первой ронял форму 500,
+        # вторую читал как 2.
+        for junk in ("много", "²", "٢"):
+            r = self.client.post(f"/locations/{self.dek}", data={"sort": junk})
+            self.assertEqual(r.status_code, 303, junk)
+            self.assertEqual(tw.run(self.crm.locations())[0]["sort"], 5, junk)
 
     def test_closed_point_keeps_its_bikes(self):
         self.story()

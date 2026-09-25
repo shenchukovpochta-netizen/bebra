@@ -583,19 +583,27 @@ async def finish_stock_take(crm: Any, take: dict, *, by: str,
                 await crm.update_battery(battery_id, status="lost", by=by)
                 lost += 1
     if return_found:
+        # Найденный возвращается туда, где его нашли: ведомость по точке -
+        # на её точку, тем же обновлением, что и статус (оба журнала пишут
+        # одно now()). Иначе его простой считался бы на точке, где его
+        # потеряли. Пересчёт всего парка точки не знает - её не трогаем:
+        # location=None стёр бы известное место.
+        where = take.get("location") if take.get("scope") == "location" else None
+        place = {"location": where} if where else {}
         for item in items:
             if item.get("state") != "extra":
                 continue
             if item.get("bike_id"):
                 bike = await crm.bike(int(item["bike_id"]))
                 if bike and bike.get("status") == "lost":
-                    await crm.update_bike(int(bike["id"]), status="available", by=by)
+                    await crm.update_bike(int(bike["id"]), status="available", by=by,
+                                          **place)
                     returned += 1
             elif item.get("battery_id"):
                 battery = await crm.battery(int(item["battery_id"]))
                 if battery and battery.get("status") == "lost":
                     await crm.update_battery(int(battery["id"]), status="available",
-                                             by=by)
+                                             by=by, **place)
                     returned += 1
     return {**counts, "lost": lost, "returned": returned}
 

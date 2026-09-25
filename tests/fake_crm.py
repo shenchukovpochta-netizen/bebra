@@ -448,15 +448,24 @@ class FakeCrm:
         self._log_location(bid, None, self.bikes_[bid]["location"], by, at)
         return bid
 
-    async def update_bike(self, bike_id, *, by=None, **fields):
+    async def update_bike(self, bike_id, *, by=None, keep_rented_location=False,
+                          **fields):
+        if bike_id not in self.bikes_:
+            return None
         before = self.bikes_[bike_id]["status"]
         place = self.bikes_[bike_id].get("location")
+        if keep_rented_location and before == "rented":
+            # Как CASE в UPDATE базы: точку велосипеда в аренде карточка не
+            # пишет, остальные поля - да.
+            fields = {k: v for k, v in fields.items() if k != "location"}
         self.bikes_[bike_id].update(fields)
         at = self._now()
         if "status" in fields and fields["status"] != before:
             self._log_status(bike_id, before, fields["status"], by, at)
         if "location" in fields and fields["location"] != place:
             self._log_location(bike_id, place, fields["location"], by, at)
+        bike = self.bikes_[bike_id]
+        return {"status": bike["status"], "location": bike.get("location")}
 
     async def bike_counts(self):
         out: dict[str, int] = {}
@@ -1942,11 +1951,14 @@ class FakeCrm:
         at = self._now()
         if before != "rented":
             self._log_status(new_bike_id, before, "rented", by, at)
-        if rental.get("location") is not None:
-            self._place_bike(new_bike_id, rental["location"], by, at)
+        # Как в базе: у аренды был велосипед - новый встаёт на её точку,
+        # «не на точке» включительно; точку аренде дописывает только
+        # выдача без велосипеда.
+        if old_bike_id is not None or rental.get("location") is not None:
+            self._place_bike(new_bike_id, rental.get("location"), by, at)
         rental.update(bike_id=new_bike_id, mileage_start=mileage_new or 0,
                       mileage_end=None)
-        if rental.get("location") is None:
+        if old_bike_id is None and rental.get("location") is None:
             rental["location"] = new_bike.get("location")
         return True
 
@@ -2022,6 +2034,7 @@ class FakeCrm:
                                    "address": address, "note": note, "active": True,
                                    "sort": 100, "public_title": None, "phone": None,
                                    "hours": None, "lat": None, "lon": None,
+                                   "directions": None,
                                    "created_at": self._now(), **extra}
         return loc_id
 
@@ -2040,20 +2053,22 @@ class FakeCrm:
             return None
         old = loc["name"]
         if old == new_name:
-            return True
+            return "ok"
         if any(x["name"] == new_name and x["id"] != location_id
                for x in self.locations_.values()):
-            return False
-        # cash_shifts_one_open: открытая смена под новым именем уже есть.
-        open_at = {(x.get("location") or "") for x in self.shifts_.values()
-                   if x["status"] == "open"}
-        if old in open_at and new_name in open_at:
-            return False
+            return "taken"
+        tables = (self.bikes_.values(), self.batteries_.values(),
+                  self.shifts_.values(), self.takes_.values(),
+                  self.rentals_.values(), self.orders_.values(),
+                  self.staff.values())
+        # Имя уже стоит в записях вне справочника - склеивать с ними точку
+        # нельзя, как и в базе (там же и открытая смена под этим именем).
+        if any(row.get("location") == new_name for rows in tables for row in rows) \
+                or any(new_name in (row["from_location"], row["to_location"])
+                       for row in self.location_log_):
+            return "orphan"
         loc["name"] = new_name
-        for rows in (self.bikes_.values(), self.batteries_.values(),
-                     self.shifts_.values(), self.takes_.values(),
-                     self.rentals_.values(), self.orders_.values(),
-                     self.staff.values()):
+        for rows in tables:
             for row in rows:
                 if row.get("location") == old:
                     row["location"] = new_name
@@ -2061,7 +2076,11 @@ class FakeCrm:
             for col in ("from_location", "to_location"):
                 if row[col] == old:
                     row[col] = new_name
-        return True
+        for view in self.views_.values():
+            query = crm_logic.query_with_renamed(view["query"], "location", old, new_name)
+            if query is not None:
+                view["query"] = query
+        return "ok"
 
     async def bike_models(self, *, active_only=False):
         rows = []

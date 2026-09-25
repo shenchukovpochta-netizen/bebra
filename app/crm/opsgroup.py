@@ -170,18 +170,35 @@ async def swap(crm: Any, text: str, meta: dict, *, allowed: bool, by: str) -> Ou
                            bike=old, rental=rental,
                            reply=(f"Велосипед {_esc(old['code'])} в CRM у другого клиента: "
                                   f"{_esc(rental.get('full_name'))}."))
+    place = await _swap_point(crm, data.get("from_location"))
     try:
         result = await service.swap_bike(
             crm, rental, new, reason=data["reason"], mileage_old=data["mileage_old"],
-            mileage_new=data["mileage_new"], by=by)
+            mileage_new=data["mileage_new"], by=by, swap_location=place)
     except service.ServiceError as exc:
         return await _fail(crm, meta, "swap", data, str(exc).rstrip("."), bike=old,
                            rental=rental, reply=f"Замена не проведена: {_esc(exc)}")
     await _save(crm, meta, "swap", data, ok=True, bike=new, rental=rental)
     status = logic.BIKE_STATUSES.get(result["old_status"], result["old_status"])
+    # Точку называем: неверно сопоставленная «откуда» видна в чате сразу.
+    where = f" на точке {_esc(place)}" if place else ""
     return Outcome(OK, (f"Замена проведена в CRM: {_esc(old['code'])} → {_esc(new['code'])}"
                         f" ({logic.SWAP_REASONS[data['reason']].lower()}). "
-                        f"Снятый велосипед - «{status}»."))
+                        f"Снятый велосипед - «{status}»{where}."))
+
+
+async def _swap_point(crm: Any, said: Any) -> str | None:
+    """Где меняли - строка «откуда» формы замены, как «где меняли» в панели:
+    там остаётся снятый велосипед. Не сопоставилась со справочником или
+    справочник недоступен - None, и снятый встаёт на точку аренды: точку
+    не угадываем, а замену сбой справочника не срывает."""
+    if not str(said or "").strip():
+        return None
+    try:
+        return logic.match_location(said, await crm.locations())
+    except Exception:                                    # noqa: BLE001
+        log.exception("рабочая группа: точка замены не определена")
+        return None
 
 
 async def handover(crm: Any, text: str, meta: dict, *, today: date) -> Outcome:

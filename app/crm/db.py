@@ -42,7 +42,8 @@ BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location
 # Имени здесь нет намеренно: на него текстом ссылаются парк, касса, аренды
 # и журнал мест, и переименование идёт только каскадом (rename_location).
 LOCATION_FIELDS = frozenset({"city", "address", "note", "active", "sort",
-                            "public_title", "phone", "hours", "lat", "lon"})
+                            "public_title", "phone", "hours", "lat", "lon",
+                            "directions"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note",
                                "weight_kg", "speed_kmh", "range_km",
@@ -401,15 +402,29 @@ class CrmDB:
                 f"returning id", *[fields[c] for c in cols]))
 
     async def update_bike(self, bike_id: int, *, by: str | None = None,
-                          **fields: Any) -> None:
+                          keep_rented_location: bool = False,
+                          **fields: Any) -> dict | None:
         """by - кто меняет: триггер журнала статусов читает его из
-        set_config('crm.actor') в той же транзакции."""
-        sets, values = _set_clause(fields, BIKE_FIELDS, 2)
+        set_config('crm.actor') в той же транзакции.
+
+        keep_rented_location - правка карточки: точку велосипеда в аренде
+        ставят выдача, возврат и замена. Условие стоит в самом UPDATE, а не
+        проверкой перед ним: выдача, закоммиченная между чтением карточки и
+        записью, иначе увела бы велосипед в аренде с точки аренды. UPDATE
+        ждёт замка строки и перечитывает её, так что status в CASE - уже
+        после выдачи. Возвращает статус и точку после записи: вызывающий
+        видит, что точку не записали.
+        """
+        _, values = _set_clause(fields, BIKE_FIELDS, 2)
+        sets = ", ".join(
+            f"{col} = case when status = 'rented' then {col} else ${i} end"
+            if col == "location" and keep_rented_location else f"{col} = ${i}"
+            for i, col in enumerate(fields, start=2))
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
-            await conn.execute(
-                f"update crm.bikes set {sets}, updated_at = now() where id = $1",
-                bike_id, *values)
+            return _row(await conn.fetchrow(
+                f"update crm.bikes set {sets}, updated_at = now() where id = $1 "
+                "returning status, location", bike_id, *values))
 
     async def bike_status_log(self, bike_id: int, limit: int = 30) -> list[dict]:
         return _rows(await self.pool.fetch(
@@ -2700,9 +2715,13 @@ class CrmDB:
 
         Точка аренды - снимок выдачи, замена её не трогает. Снятый
         велосипед остаётся там, где меняли (`swap_location`, иначе на
-        точке аренды), новый встаёт на точку аренды. У аренды без точки
-        (выдана без велосипеда) ею становится точка нового - первая
-        настоящая выдача случилась здесь.
+        точке аренды), новый встаёт на точку аренды - и когда её нет
+        (велосипед был «не на точке»): иначе его дни в аренде ушли бы на
+        его прежнюю точку, а деньги аренды остались «без точки». Только у
+        аренды, выданной вовсе без велосипеда, точкой становится точка
+        нового - первая настоящая выдача случилась здесь. Аренде с
+        велосипедом без точки точку задним числом не дописываем: её
+        прошлые платежи переехали бы на чужую точку в закрытых месяцах.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
@@ -2745,17 +2764,20 @@ class CrmDB:
                                               mileage_start, reason, created_by)
                 values ($1, $2, $3, $4, $5, $6)
                 """, rental_id, new_bike_id, today, mileage_new, reason, by)
+            # $4 - у аренды был велосипед: новый встаёт ровно на её точку,
+            # «не на точке» включительно. Без велосипеда - на свою.
             place = await conn.fetchval(
                 "update crm.bikes set status = 'rented', "
-                "location = coalesce($3, location), "
+                "location = case when $4 then $3 else coalesce($3, location) end, "
                 "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
                 "updated_at = now() where id = $1 returning location",
-                new_bike_id, mileage_new, rental["location"])
+                new_bike_id, mileage_new, rental["location"], old_bike_id is not None)
             await conn.execute(
                 "update crm.rentals set bike_id = $2, mileage_start = coalesce($3, 0), "
-                "mileage_end = null, location = coalesce(location, $4), "
+                "mileage_end = null, "
+                "location = case when $5 then location else coalesce(location, $4) end, "
                 "updated_at = now() where id = $1",
-                rental_id, new_bike_id, mileage_new, place)
+                rental_id, new_bike_id, mileage_new, place, old_bike_id is not None)
             return True
 
     # ─────────────────── закупки основных средств ───────────────────
@@ -2869,14 +2891,24 @@ class CrmDB:
                       ("staff", "location"), ("bike_location_log", "from_location"),
                       ("bike_location_log", "to_location"))
 
-    async def rename_location(self, location_id: int, new_name: str) -> bool | None:
+    async def rename_location(self, location_id: int, new_name: str) -> str | None:
         """Переименовать точку каскадом по всем ссылкам - одной транзакцией.
 
-        None - точки нет; False - имя занято (другой точкой справочника или
-        открытой сменой кассы под этим именем), и не изменилось ничего.
-        Журнал мест при этом переезда не пишет: отметка crm.location_rename
+        None - точки нет; "ok" - переименована (или имя то же); "taken" -
+        имя у другой точки справочника; "orphan" - имя уже стоит в записях
+        вне справочника (парк, касса, аренды, журнал мест - строка «нет в
+        справочнике» отчёта по точкам). В обоих отказах не меняется ничего.
+
+        Чужие записи под новым именем склеились бы с этой точкой навсегда:
+        каскад переписывает строки со старым именем, а строки с новым уже
+        неотличимы от них, и обратное переименование увело бы обе стопки.
+        Взять такие записи в справочник - завести точку с их именем.
+
+        Журнал мест переезда не пишет: отметка crm.location_rename
         выключает триггер, а свои строки журнал переименовывает здесь же -
-        история остаётся историей той же точки под новым именем.
+        история остаётся историей той же точки под новым именем. Сохранённые
+        фильтры списков (`?location=старое`) переписываются той же
+        транзакцией: иначе они молча показывали бы пустой список.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -2885,12 +2917,18 @@ class CrmDB:
                 return None
             old = row["name"]
             if old == new_name:
-                return True
+                return "ok"
             taken = await conn.fetchval(
                 "select 1 from crm.locations where name = $1 and id <> $2",
                 new_name, location_id)
             if taken:
-                return False
+                return "taken"
+            used = await conn.fetchval(
+                "select " + " or ".join(
+                    f"exists (select 1 from crm.{table} where {col} = $1)"
+                    for table, col in self._LOCATION_REFS), new_name)
+            if used:
+                return "orphan"
             await conn.execute("select set_config('crm.location_rename', 'on', true)")
             try:
                 async with conn.transaction():
@@ -2901,9 +2939,20 @@ class CrmDB:
                         await conn.execute(
                             f"update crm.{table} set {col} = $2 where {col} = $1",
                             old, new_name)
+                    views = await conn.fetch(
+                        "select id, query from crm.saved_views "
+                        "where query like '%location=%' for update")
+                    for view in views:
+                        query = logic.query_with_renamed(view["query"], "location",
+                                                         old, new_name)
+                        if query is not None:
+                            await conn.execute(
+                                "update crm.saved_views set query = $2 where id = $1",
+                                view["id"], query)
             except asyncpg.UniqueViolationError:
-                return False
-            return True
+                # Страховка: занятое имя, успевшее появиться после проверок.
+                return "taken"
+            return "ok"
 
     async def bike_models(self, *, active_only: bool = False) -> list[dict]:
         where = "where m.active" if active_only else ""

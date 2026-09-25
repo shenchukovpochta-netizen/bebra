@@ -359,12 +359,12 @@ for _code in ("BRK_EL", "BRK_WHEEL", "BRK_MECH"):
 # перечисляют КАЖДУЮ открытую точку так, как она записана в панели; нет -
 # работают зашитые ответы выше. Числа точек здесь нет нигде: «две», «обе»
 # и «на обеих» были правдой, пока точек было две, а третья, заведённая
-# в панели, сделала бы их ложью в тот же день. Часов тоже нет - у каждой
-# точки свой режим, и его называет полный список (FULL_POINTS).
+# в панели, сделала бы их ложью в тот же день. Часов в тексте тоже нет -
+# у каждой точки свой режим, и его называет сам список (points_text).
 POINTS_FIELD = "{points}"
-# Полный список (название, адрес, режим, телефон) - там, где спросили
-# именно об этом. В остальных ответах точки - подсказка «куда ехать»,
-# и хватит адреса строкой.
+# Полный список (название, адрес, как найти, режим, телефон) - там, где
+# спросили именно об этом. В остальных ответах точки - подсказка «куда
+# ехать»: адрес с режимом строкой и «как найти», если он записан.
 FULL_POINTS = frozenset({"ADDR", "HOURS"})
 
 POINT_ANSWERS: dict[str, str] = {
@@ -388,6 +388,15 @@ POINT_ANSWERS: dict[str, str] = {
         "Мастер проведёт диагностику и назовёт точную стоимость до начала "
         "работ — без вашего согласия ничего не делаем.\n"
         "Опишите коротко, что с техникой, и приложите фото — передам мастеру."
+    ),
+    # Зашитый ответ обещает «в любой день, 10–19, на любой точке» - с
+    # точкой пн-пт из справочника это неправда. Здесь режим - у точки.
+    "RETURN": (
+        "Принять велосипед можем на любой точке в часы её работы — напишите "
+        f"заранее, когда подъедете:\n{POINTS_FIELD}\n"
+        "Один момент по деньгам: велосипед закреплён за вами на весь "
+        "оплаченный срок, поэтому перерасчёт за неотъезженные дни мы "
+        "не делаем и на следующий период их не переносим."
     ),
     # Лид и поломка называют точки отдельной строкой - список встаёт на её
     # место, и правка остального текста не требует второй копии.
@@ -430,8 +439,10 @@ def answer(intent: Intent, *, now: datetime | None = None,
     if intent.red:
         return RED_LINE_REPLY
     t = i18n.T.get(lang, {})
+    # Справочник есть - если в нём хоть одна точка, которую можно назвать.
+    directory = bool(points) and bool(points_text(points, full=False))
     listed = (points_text(points, full=intent.code in FULL_POINTS)
-              if points and intent.code in POINT_ANSWERS else "")
+              if directory and intent.code in POINT_ANSWERS else "")
     if intent.code == "PRICE":
         text = (_price_i18n(t, renter=renter, plan=plan) if t
                 else _price_answer(renter=renter, plan=plan))
@@ -439,7 +450,11 @@ def answer(intent: Intent, *, now: datetime | None = None,
         text = t.get("p_" + intent.code) or POINT_ANSWERS[intent.code]
     else:
         text = t.get("a_" + intent.code) or ANSWERS.get(intent.code, FALLBACK)
-    if intent.visit and now is not None and not is_open(now):
+    # Приписка «закрыто, работаем 10–19 без выходных» - только к зашитым
+    # ответам. У точек справочника режим свой и стоит в списке у каждой:
+    # общие часы спорили бы с ним в том же сообщении («сейчас закрыто»
+    # в 19:30 при точке до 21:00).
+    if intent.visit and now is not None and not is_open(now) and not directory:
         text += "\n" + t.get("after_hours", AFTER_HOURS)
     text = company.with_contact(with_pay_url(text, pay_url))
     # Список - последним: адрес из панели - данные, и ни одна подстановка
@@ -450,10 +465,15 @@ def answer(intent: Intent, *, now: datetime | None = None,
 def points_text(points: Sequence[Mapping[str, Any]], *, full: bool) -> str:
     """Точки справочника для ответа: каждая открытая, пустое поле пропущено.
 
-    full - название, адрес, режим и телефон блоком на точку; иначе адрес
-    строкой. Значения из панели экранируются: адрес с «&» или «<» - это
+    full - название, адрес, как найти, режим и телефон блоком на точку;
+    иначе адрес с режимом строкой и «как найти» под ней. Режим есть в
+    обоих видах: общих часов у точек нет, и «привозите в часы работы»
+    без часов - это вопрос, с которым клиент вернётся. «Как найти» - тоже:
+    адрес ГСК без номера бокса не приводит к воротам.
+    Значения из панели экранируются: адрес с «&» или «<» - это
     сообщение, которое Telegram не разберёт, то есть вопрос без ответа.
-    Адрес не переводится: по-русски его понимают карты и таксист.
+    Адрес и «как найти» не переводятся: это данные из панели, по-русски
+    их понимают карты, таксист и сторож.
     """
     blocks = []
     for point in points:
@@ -461,14 +481,18 @@ def points_text(points: Sequence[Mapping[str, Any]], *, full: bool) -> str:
         address = str(point.get("address") or "").strip()
         if not (title or address):
             continue
+        hours, way, phone = (str(point.get(key) or "").strip()
+                             for key in ("hours", "directions", "phone"))
         if not full:
-            blocks.append("📍 " + esc(address or title))
+            line = "📍 " + esc(address or title)
+            if hours:
+                line += f" · 🕙 {esc(hours)}"
+            blocks.append(line + (f"\n🧭 {esc(way)}" if way else ""))
             continue
         lines = ["📍 " + esc(title or address)]
         if title and address:
             lines.append(esc(address))
-        for mark, key in (("🕙", "hours"), ("📞", "phone")):
-            value = str(point.get(key) or "").strip()
+        for mark, value in (("🧭", way), ("🕙", hours), ("📞", phone)):
             if value:
                 lines.append(f"{mark} {esc(value)}")
         blocks.append("\n".join(lines))

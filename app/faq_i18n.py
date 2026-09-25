@@ -170,6 +170,10 @@ T: dict[str, dict[str, str]] = {
                  "The mechanic will run diagnostics and name the exact price "
                  "before starting — nothing is done without your consent. "
                  "Describe briefly what is wrong and attach a photo.",
+    "p_RETURN": "We take the bike back at any point during its working hours — "
+                "just tell us in advance when you'll come:\n{points}\nAbout money: "
+                "the bike is reserved for you for the whole paid term, so we do "
+                "not recalculate unused days and do not carry them over.",
     "p_BRK_MECH": "Got it, we'll sort it out. Please record a short video of how "
                   "the bike behaves (what does not work, what is on the display) "
                   "and tell me which point is closer:\n"
@@ -302,6 +306,11 @@ T: dict[str, dict[str, str]] = {
                  "Usta diagnostika qilib, ishni boshlashdan oldin aniq narxni "
                  "aytadi — roziligingizsiz hech narsa qilinmaydi. Muammoni "
                  "qisqacha yozing va foto qoʻshing.",
+    "p_RETURN": "Velosipedni istalgan punktda uning ish vaqtida qabul qilamiz — "
+                "qachon kelishingizni oldindan yozing:\n{points}\nPul haqida: "
+                "velosiped butun toʻlangan muddatga siz uchun band, shuning uchun "
+                "foydalanilmagan kunlar uchun qayta hisob-kitob qilmaymiz va "
+                "ularni keyingi davrga oʻtkazmaymiz.",
     "p_BRK_MECH": "Tushunarli, hal qilamiz. Velosiped oʻzini qanday tutayotgani "
                   "haqida qisqa video yozing (nima ishlamayapti, displeyda nima "
                   "bor) va qaysi punkt yaqinligini ayting:\n"
@@ -432,6 +441,11 @@ T: dict[str, dict[str, str]] = {
                  "Ussa diagnostika geçirip, işe başlamazdan öň takyk bahany aýdar "
                  "— razylygyňyzsyz hiç zat edilmeýär. Meseläni gysgaça ýazyň we "
                  "surat goşuň.",
+    "p_RETURN": "Welosipedi islendik nokatda onuň iş wagtynda kabul edýäris — "
+                "haçan geljekdigiňizi öňünden ýazyň:\n{points}\nPul barada: "
+                "welosiped tölenen möhletiň dowamynda siziň üçin bellenen, şonuň "
+                "üçin ulanylmadyk günler üçin gaýtadan hasaplamaýarys we olary "
+                "indiki döwre geçirmeýäris.",
     "p_BRK_MECH": "Düşnükli, çözeris. Welosipediň özüni nähili alyp barýandygy "
                   "barada gysga wideo ýazyň (näme işlemeýär, displeýde näme bar) "
                   "we haýsy nokat ýakyndygyny aýdyň:\n"
@@ -554,6 +568,10 @@ T: dict[str, dict[str, str]] = {
                  "{points}\n"
                  "سيفحصها الفني ويحدد السعر الدقيق قبل بدء العمل — لا شيء يُنفَّذ "
                  "دون موافقتك. صف المشكلة باختصار وأرفق صورة.",
+    "p_RETURN": "نستلم الدراجة في أي نقطة في مواعيد عملها — فقط أخبرنا مسبقًا متى "
+                "ستأتي:\n{points}\nبخصوص المال: الدراجة محجوزة لك طوال المدة "
+                "المدفوعة، لذلك لا نعيد حساب الأيام غير المستخدمة ولا ننقلها إلى "
+                "فترة قادمة.",
     "p_BRK_MECH": "فهمت، سنحل الأمر. صوِّر فيديو قصيرًا يوضح حالة الدراجة (ما الذي "
                   "لا يعمل وما يظهر على الشاشة) وأخبرنا أي نقطة أقرب إليك:\n"
                   "{points}\n"
@@ -680,6 +698,10 @@ T: dict[str, dict[str, str]] = {
                  "تعمیرکار عیب‌یابی می‌کند و قیمت دقیق را قبل از شروع کار می‌گوید "
                  "— بدون رضایت شما کاری انجام نمی‌شود. مشکل را کوتاه بنویسید و "
                  "عکس پیوست کنید.",
+    "p_RETURN": "دوچرخه را در هر شعبه در ساعت کاری آن تحویل می\u200cگیریم — فقط از قبل "
+                "بگویید کی می\u200cآیید:\n{points}\nدرباره پول: دوچرخه در تمام مدت "
+                "پرداخت\u200cشده برای شماست، بنابراین روزهای استفاده\u200cنشده را محاسبه "
+                "مجدد نمی\u200cکنیم و به دوره بعد منتقل نمی\u200cکنیم.",
     "p_BRK_MECH": "متوجه شدم، حلش می‌کنیم. یک ویدیوی کوتاه بگیرید که دوچرخه چطور "
                   "رفتار می‌کند (چه چیزی کار نمی‌کند، روی نمایشگر چیست) و بگویید "
                   "کدام شعبه نزدیک‌تر است:\n"
@@ -809,6 +831,10 @@ T: dict[str, dict[str, str]] = {
                  "मिस्त्री जाँच करके काम शुरू करने से पहले सटीक दाम बताएगा — आपकी "
                  "सहमति के बिना कुछ नहीं होता। समस्या संक्षेप में लिखें और फ़ोटो "
                  "जोड़ें।",
+    "p_RETURN": "साइकिल किसी भी पॉइंट पर उसके काम के घंटों में वापस ले लेते हैं — "
+                "बस पहले बता दें कब आएँगे:\n{points}\nपैसे के बारे में: साइकिल पूरी "
+                "चुकाई गई अवधि के लिए आपकी है, इसलिए बिना इस्तेमाल के दिनों का "
+                "पुनर्गणना नहीं करते और उन्हें आगे नहीं बढ़ाते।",
     "p_BRK_MECH": "समझ गया, हल करेंगे। एक छोटा वीडियो बनाइए कि साइकिल कैसा बर्ताव "
                   "कर रही है (क्या काम नहीं करता, डिस्प्ले पर क्या है) और बताइए "
                   "कौन सा पॉइंट नज़दीक है:\n"
@@ -868,6 +894,11 @@ T: dict[str, dict[str, str]] = {
     "p_BATT_SWAP": "АКБ алыштыруны һәр пунктыбызда башкарабыз:\n{points}\nКорылган АКБ барлыгын пункт администраторыннан ачыклыйм — кайсы пунктка барачагыгызны языгыз, җавап белән кайтам.",
     "p_LEAD": "Әйе, курьерлар өчен электровелосипедлар бар — Truck+ һәм Kugoo V3 Pro, барысы да 2 АКБ, корылма һәм телефон тоткычы белән. Залог юк, паспорт буенча рәсмиләштерәбез.\nПунктлар:\n{points}\nӘйтегез әле: ничә вакытка планлаштырасыз һәм кайсы пунктка килү уңайлырак?",
     "p_EXT_REP": "Әйе, без үз техникабызны гына түгел ремонтлыйбыз: электровелосипед, электросамокат, трицикл, электромотоцикл һәм аккумуляторлар.\nТеләсә кайсы пунктка аның эш вакытында китерегез:\n{points}\nОста диагностика ясый һәм эш башланганчы төгәл бәяне әйтә — сезнең ризалыгыгыздан башка бернәрсә дә эшләмибез.\nТехника белән нәрсә булганын кыскача языгыз һәм фото беркетегез — остага тапшырам.",
+    "p_RETURN": "Велосипедны теләсә кайсы пунктта аның эш вакытында кабул итә "
+                "алабыз — кайчан килүегез турында алдан хәбәр "
+                "итегез:\n{points}\nАкча ягыннан бер мәсьәлә: велосипед сезгә "
+                "түләнгән бөтен вакытка беркетелә, шуңа күрә йөрелмәгән көннәр "
+                "өчен исәпләү ясалмый һәм алар киләсе чорга күчерелми.",
     "p_BRK_MECH": "Аңладым, хәл итәрбез. Зинһар, кыска видео төшерегез — велосипед үзен ничек тота, нәрсә эшләми һәм дисплейда нәрсә яна. Һәм кайсы пунктка килү якынрак икәнен әйтегез:\n{points}\nАрендаторлар өчен ремонт чиратсыз, ә эш бер көннән артыкка сузылса — алмаш велосипед бирәбез.",
 },
 
@@ -994,6 +1025,11 @@ T: dict[str, dict[str, str]] = {
                  "Мастер диагностика тӑвать те ӗҫ пуҫличчен тӗрӗс хакне калать — "
                  "сирӗн килӗшӳсӗр нимӗн те тумастпӑр. Мӗн пулнине кӗскен ҫырӑр, "
                  "фото хушӑр.",
+    "p_RETURN": "Велосипеда кирек хӑш пунктра унӑн ӗҫ вӑхӑтӗнче йышӑнатпӑр — "
+                "хӑҫан килессине маларах ҫырӑр:\n{points}\nУкҫа пирки: велосипед "
+                "тӳленӗ пӗтӗм срок валли сирӗншӗн ҫирӗплетнӗ, ҫавӑнпа усӑ курман "
+                "кунсемшӗн укҫа каялла шутламастпӑр, вӗсене тепӗр тапхӑра "
+                "куҫармастпӑр.",
     "p_BRK_MECH": "Ӑнлантӑм, йӗркелетпӗр. Велосипед хӑйне мӗнле тытнине кӗске "
                   "видео ӳкерӗр (мӗн ӗҫлемест, дисплей ҫинче мӗн курӑнать) тата "
                   "хӑш пункт ҫывӑхраххине ҫырӑр:\n"

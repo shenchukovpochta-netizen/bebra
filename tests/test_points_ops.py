@@ -358,6 +358,52 @@ class TestBikeCardPoint(PointsCase):
         self.edit(location=PAV, note="ещё раз")
         self.assertEqual(self.bike()["note"], "ещё раз")
 
+    def test_stale_card_of_a_returned_bike_keeps_its_point(self):
+        """Карточку открыли, пока велосипед был в аренде (поля точки в ней
+        нет), его сдали на Адоратского, карточку сохранили: «поля нет» - не
+        «не на точке»."""
+        self.open_rental()
+        self.assertNotIn('name="location"', self.get_ok(f"/bikes/{self.bike_id}"))
+        tw.run(service.close_rental(self.crm, self.rental(), closed_on=date.today(),
+                                    note=None, by="bot", return_location=ADO))
+        self.assertEqual(self.bike()["location"], ADO)
+        r = self.edit(note="после сдачи")
+        self.assertEqual(r.status_code, 303)
+        bike = self.bike()
+        self.assertEqual((bike["location"], bike["note"]), (ADO, "после сдачи"))
+        self.assertEqual(tw.run(self.crm.bike_location_log(self.bike_id))[0]["to_location"],
+                         ADO, "переезда «в никуда» в журнале нет")
+        # Выбор «не на точке» в свежей форме - пустое значение, и он работает.
+        self.edit(location="")
+        self.assertIsNone(self.bike()["location"])
+
+    def test_issue_between_reading_and_saving_the_card_keeps_the_rental_point(self):
+        """Карточку свободного велосипеда сохраняют, а между её чтением и
+        записью другой оператор выдаёт его с Адоратского. Проверка «не в
+        аренде» уже пройдена - точку не пускает условие в самом UPDATE."""
+        crm, issued = self.crm, []
+        real = crm.bike_by_code
+
+        async def racy(code):
+            if not issued:
+                issued.append(code)
+                await service.open_rental(
+                    crm, client=await crm.client(self.client_id),
+                    bike=await crm.bike(self.bike_id),
+                    tariff=await crm.tariff(self.tariff_id), started_on=date.today(),
+                    contract_no=None, by="staff:op2", location=ADO)
+            return await real(code)
+
+        crm.bike_by_code = racy
+        r = self.edit(location=DEK, note="смотрел")
+        self.assertEqual(r.status_code, 303)
+        bike = self.bike()
+        self.assertEqual((bike["status"], bike["location"], bike["note"]),
+                         ("rented", ADO, "смотрел"), "остальное сохранено, точка - нет")
+        self.assertEqual(self.rental()["location"], ADO)
+        page = self.get_ok(f"/bikes/{self.bike_id}")
+        self.assertIn("кроме точки", page)
+
 
 class TestBotPoint(PointsCase):
     USER = {"tg_id": 5001, "phone": "+79990000000", "contract_no": "АВ-1"}

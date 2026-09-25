@@ -525,10 +525,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         это не «бесплатно», это опечатка.
         """
         raw = (data.get(name) or "").strip() or default
-        if not raw.isdigit() or not least <= int(raw) <= limit:
+        # parse_id: isdigit пропускал «²», и int() ронял форму 500.
+        value = logic.parse_id(raw)
+        if value is None or not least <= value <= limit:
             return logic.Check(False,
                                error=f"{what}: целое число от {least} до {limit}.")
-        return logic.Check(True, int(raw))
+        return logic.Check(True, value)
 
     def summarize(rental: dict | None, balance: Any) -> dict:
         return logic.rental_summary(rental, balance, today=date.today())
@@ -1440,12 +1442,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         fields = _bike_fields(request, data, await location_names(bike.get("location")))
         if fields is None:
             return redirect(f"/bikes/{bike_id}")
-        if logic.bike_on_rent(bike):
+        if "location" not in data:
+            # Поля нет - точку не трогаем, а не стираем. Карточку велосипеда
+            # в аренде рисуют без него, и та же карточка, открытая до
+            # возврата, сохраняется уже после: «нет поля» стало бы «не на
+            # точке». Выбор «не на точке» браузер шлёт пустой строкой.
+            fields.pop("location")
+        elif logic.bike_on_rent(bike):
             # Точку велосипеда в аренде ставят выдача, возврат и замена - как
             # и сам статус «в аренде». Правка карточки увела бы его с точки
             # аренды, и дни точки разошлись бы с её деньгами. Форма такому
             # велосипеду поля не шлёт; прислали - значит, форма устарела.
-            if "location" in data and fields["location"] != (bike.get("location") or None):
+            if fields["location"] != (bike.get("location") or None):
                 flash(request, "Велосипед в аренде: его точку меняют возврат и "
                                "замена, а не карточка.", "err")
                 return redirect(f"/bikes/{bike_id}")
@@ -1460,7 +1468,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, "Велосипед с таким номером рамы уже есть.", "err")
                 return redirect(f"/bikes/{bike_id}")
         # Автор - в журнал мест: переезд между точками тоже чья-то правка.
-        await crm.update_bike(bike_id, by=who(request), **fields)
+        # Проверка «не в аренде» выше - по снимку; выдачу, успевшую между
+        # ним и записью, ловит условие в самом UPDATE (keep_rented_location).
+        saved = await crm.update_bike(bike_id, by=who(request),
+                                      keep_rented_location=True, **fields)
+        if "location" in fields and saved \
+                and (saved.get("location") or None) != fields["location"]:
+            flash(request, "Сохранено всё, кроме точки: велосипед успели выдать, "
+                           "пока карточка была открыта, а в аренде его точку ставит "
+                           "аренда.", "err")
+            return redirect(f"/bikes/{bike_id}")
         flash(request, "Сохранено.")
         return redirect(f"/bikes/{bike_id}")
 
@@ -1641,7 +1658,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             ctx["bookings"] = [{**b, "issue_url": booking_issue_url(b)}
                                for b in await crm.bookings(status="new")]
             return render(request, "issue.html", **ctx)
-        ctx["booking_id"] = int(p["booking"]) if (p.get("booking") or "").isdigit() else None
+        ctx["booking_id"] = logic.parse_id(p.get("booking"))
         # Заявка и день из неё едут через все шаги мастера: без них выдача
         # по заявке оставляла её открытой (и клиент не мог подать новую),
         # а день начала сбрасывался на сегодня.
@@ -1830,8 +1847,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                       current=bike.get("mileage_km"))
         # Точка выдачи - из справочника; точка велосипеда и точка заявки
         # допустимы, даже если их закрыли: выдача по ним уже идёт.
-        booking = (await crm.booking(int(data["booking_id"]))
-                   if (data.get("booking_id") or "").isdigit() else None)
+        booking_id = logic.parse_id(data.get("booking_id"))
+        booking = await crm.booking(booking_id) if booking_id is not None else None
         place = logic.check_location(data.get("location"), await location_names(
             bike.get("location"), (booking or {}).get("location_name")))
         for check in (started, pay, contract, mileage, place):
@@ -1912,10 +1929,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                     method=method, note=f"При выдаче № {bike['code']}",
                                     by=who(request), rental_id=rental_id)
             await referral_bonus(client, pay.value, who(request))
-        if (data.get("booking_id") or "").isdigit():
+        if booking_id is not None:
             # Заявка из кабинета закрывается выдачей: ссылка на аренду
             # остаётся, чтобы видеть, во что заявка превратилась.
-            await service.close_booking(crm, int(data["booking_id"]),
+            await service.close_booking(crm, booking_id,
                                         rental_id=rental_id, by=who(request))
         rental = await crm.rental(rental_id)
         await notify.rental_opened(bot, db, crm, client, rental)
@@ -3066,10 +3083,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     async def period_of(request: Request) -> dict:
         """Период отчёта: как в финансах - с начала месяца по сегодня."""
-        since = logic.check_date(request.query_params.get("since"),
-                                 default=date.today().replace(day=1))
-        until = logic.check_date(request.query_params.get("until"),
-                                 default=date.today())
+        # report_day: год 1 и 9999 - тоже даты, и «плюс сутки» на них
+        # роняли отчёт 500; такие границы - мусор, будущее - сегодня.
+        today = date.today()
+        since = logic.report_day(request.query_params.get("since"), today=today,
+                                 default=today.replace(day=1))
+        until = logic.report_day(request.query_params.get("until"), today=today,
+                                 default=today)
         if not since.ok or not until.ok:
             since = logic.Check(True, date.today().replace(day=1))
             until = logic.Check(True, date.today())
@@ -3165,9 +3185,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await points_data(request)
         place = None
         if key != "none":
-            place = next((p for p in data["places"]
-                          if key.isdigit() and len(key) < 12 and p["id"] == int(key)),
-                         None)
+            # parse_id, а не isdigit: «²» - «цифра», на которой int() падал 500.
+            point_id = logic.parse_id(key)
+            place = next((p for p in data["places"] if p["id"] == point_id), None)
             if place is None:
                 return render(request, "missing.html", status_code=404, what="Точка")
         name = place["name"] if place else None
@@ -4362,9 +4382,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 return None
             return value if value is not None and -180 <= value <= 180 else None
 
+        # «Как найти» - для клиента: бот называет его под адресом («заезд
+        # в ГСК, 9-й бокс»). Описание (note) остаётся для своих.
         return {"public_title": (data.get("public_title") or "").strip() or None,
                 "phone": (data.get("phone") or "").strip() or None,
                 "hours": (data.get("hours") or "").strip() or None,
+                "directions": (data.get("directions") or "").strip() or None,
                 "lat": coord("lat"), "lon": coord("lon")}
 
     @app.post("/locations")
@@ -4441,12 +4464,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         done = await crm.rename_location(location_id, name.value)
         if done is None:
             return render(request, "missing.html", status_code=404, what="Точка")
-        if not done:
+        if done == "taken":
             flash(request, f"Точка «{name.value}» уже есть — имя должно быть "
                            "своим.", "err")
             return redirect("/locations")
+        if done == "orphan":
+            # Склейка необратима: строки с новым именем после каскада не
+            # отличить от строк точки, и обратное переименование увело бы обе.
+            flash(request, f"Имя «{name.value}» уже стоит в записях вне справочника "
+                           "(в отчёте «По точкам» — строка «нет в справочнике»). "
+                           "Переименование навсегда смешало бы их с этой точкой. "
+                           "Чтобы взять эти записи в справочник, добавьте точку "
+                           "с таким названием.", "err")
+            return redirect("/locations")
         flash(request, f"Точка переименована в «{name.value}»: карточки, аренды, "
-                       "наряды, кассы и история перенесены на новое имя.")
+                       "наряды, кассы, история и сохранённые фильтры перенесены "
+                       "на новое имя.")
         return redirect("/locations")
 
     @app.post("/locations/{location_id}/toggle")

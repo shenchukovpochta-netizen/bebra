@@ -153,6 +153,9 @@ class TestCrmSql(unittest.TestCase):
             # точки: журнал мест, точка аренды и наряда, каскад, касса
             self.db.create_staff("b", "h", "n", "manager", location="Павлюхина"),
             self.db.set_staff_location(1, "Павлюхина"), self.db.bike_location_log(1),
+            # правка карточки: точку велосипеда в аренде UPDATE не пишет
+            self.db.update_bike(1, note="x", location="Павлюхина", spare=True,
+                                keep_rented_location=True, by="me"),
             self.db.rentals(location="Павлюхина"),
             self.db.rentals(status="active", location="none"),
             self.db.create_rental(client_id=1, bike_id=None, tariff_id=None,

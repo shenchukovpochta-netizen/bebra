@@ -257,6 +257,23 @@ class TestMatchLocation(unittest.TestCase):
                      "Адоратского/Павлюхина", "Адоратск", "Баумана 1"):
             self.assertIsNone(logic.match_location(text, DIRECTORY), text)
 
+    def test_point_is_found_by_its_own_address_next_to_a_street_named_point(self):
+        """Вторая точка на той же улице: «Адоратского 52» - это её адрес,
+        а не «где-то на Адоратского». Раньше подходили обе точки, и
+        велосипед оставался на точке аренды."""
+        places = [*DIRECTORY, {"name": "Адоратского-2", "city": "Казань", "active": True,
+                               "address": "г. Казань, ул. Адоратского, 52"}]
+        for text, want in (("Адоратского 52", "Адоратского-2"),
+                           ("ул. Адоратского, 52", "Адоратского-2"),
+                           ("Адоратского, 52", "Адоратского-2"),
+                           ("г. Казань, ул. Адоратского, 52", "Адоратского-2"),
+                           ("Адоратского 15", ADO), ("Адоратского 11А", ADO),
+                           ("ул. Адоратского", ADO), ("Адоратского-2", "Адоратского-2")):
+            self.assertEqual(logic.match_location(text, places), want, text)
+        # Не угадываем: две точки в тексте - None, как и раньше.
+        for text in ("Адоратского/Павлюхина 97А", "Адоратского 52 или Павлюхина"):
+            self.assertIsNone(logic.match_location(text, places), text)
+
     def test_exact_name_beats_a_looser_match(self):
         places = [{"name": "Центр", "active": True},
                   {"name": "Центр 2", "active": True}]

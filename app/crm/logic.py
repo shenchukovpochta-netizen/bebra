@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote_plus, urlsplit
 from zoneinfo import ZoneInfo
 
 from .. import logic as bot_logic
@@ -438,6 +438,18 @@ def check_date(raw: Any, *, default: date | None = None) -> Check:
         except ValueError:
             continue
     return Check(False, error="Дата: в виде ДД.ММ.ГГГГ.")
+
+
+def parse_id(raw: Any) -> int | None:
+    """Номер записи из адреса или формы: только ASCII-цифры, в bigint.
+
+    str.isdigit верит «²» и «٢»: int() на первой падает (страница 500
+    вместо 404), вторую молча читает как 2. Не номер - None.
+    """
+    text = str(raw or "").strip()
+    if not (text.isascii() and text.isdigit()) or len(text) > 18:
+        return None
+    return int(text)
 
 
 def check_choice(raw: Any, choices: dict[str, str] | Iterable[str],
@@ -2739,6 +2751,28 @@ def repair_chart(by_day: Mapping[date, Any], norm: int = 0) -> dict[str, Any]:
             "peak": max((d["value"] for d in days), default=0)}
 
 
+# Раньше этого дня отчётам нечего показать: проката не было. Граница
+# нужна не данным, а арифметике: «0001-01-01 минус сутки» - OverflowError.
+REPORT_FLOOR = date(2000, 1, 1)
+
+
+def report_day(raw: Any, *, today: date, default: date | None = None) -> Check:
+    """Граница периода отчёта из адреса: ГГГГ-ММ-ДД или ДД.ММ.ГГГГ.
+
+    Пусто - `default` (без него - не ok). Раньше REPORT_FLOOR - мусор, как
+    и нечитаемая дата. Будущее - сегодня: дней там нет, а «9999-12-31
+    плюс сутки» роняли страницу 500 вместо отчёта.
+    """
+    if not str(raw or "").strip() and default is not None:
+        return Check(True, default)
+    check = check_date(raw)
+    if not check.ok:
+        return check
+    if check.value < REPORT_FLOOR:
+        return Check(False, error="Дата: слишком давно.")
+    return Check(True, min(check.value, today))
+
+
 def month_from(raw: Any, *, today: date | None = None) -> date:
     """Первое число месяца из «ГГГГ-ММ» в адресе. Мусор или будущее -
     текущий месяц: листать вперёд некуда, там ещё ничего не произошло."""
@@ -2748,6 +2782,10 @@ def month_from(raw: Any, *, today: date | None = None) -> date:
     try:
         first = date(int(text[:4]), int(text[5:7]), 1) if len(text) == 7 else current
     except ValueError:
+        return current
+    # «0001-01» - тоже мусор: соседний месяц у него до нашей эры, и
+    # month_bounds падал бы OverflowError, то есть страница - 500.
+    if first < REPORT_FLOOR:
         return current
     return first if first <= current else current
 
@@ -5587,6 +5625,23 @@ def point_months(months: Iterable[Mapping[str, Any]], key: str | None) -> list[d
     return out
 
 
+def query_with_renamed(query: Any, key: str, old: str, new: str) -> str | None:
+    """Сохранённый фильтр (строка запроса) после переименования точки:
+    пара `key=old` становится `key=new`. None - такой пары нет.
+
+    Значение в строке %-кодировано («location=%D0%9F…», пробел бывает и
+    «+»), поэтому сравнивается разобранное, а не текст. Остальные пары
+    остаются байт в байт: сортировка и страница фильтра - его дело.
+    """
+    parts, changed = [], False
+    for part in str(query or "").split("&"):
+        name, sep, value = part.partition("=")
+        if sep and unquote_plus(name) == key and unquote_plus(value) == old:
+            part, changed = f"{name}={quote(new, safe='')}", True
+        parts.append(part)
+    return "&".join(parts) if changed else None
+
+
 # Слова адреса, которые ничего не различают: «ул.» и «д.» есть в каждом
 # адресе, и «ул. Адоратского» от «Адоратского» не отличается ничем.
 _PLACE_NOISE = frozenset({
@@ -5610,11 +5665,15 @@ def match_location(text: Any, locations: Iterable[Mapping[str, Any]]) -> str | N
 
     Сравниваются имя, вывеска (public_title) и адрес: без регистра, ё=е,
     без знаков препинания, без слов вроде «ул.» и без названия города -
-    они есть в каждом адресе. Сперва точное совпадение, затем «всё
-    значимое из имени или адреса есть в тексте» или «весь текст - часть
-    имени или адреса». Две точки подошли одинаково или ни одной - None:
-    точку возврата не угадывают, её лучше не тронуть. Закрытые точки не
-    рассматриваются - вернуть велосипед туда нельзя.
+    они есть в каждом адресе. Сперва точное совпадение - того же текста
+    или тех же значимых слов («Адоратского 52» и «г. Казань, ул.
+    Адоратского, 52» - одно), затем «всё значимое из имени или адреса
+    есть в тексте» или «весь текст - часть имени или адреса». Точное
+    выигрывает у нестрогого: иначе точка «Адоратского» мешала бы найти
+    по её же адресу соседнюю «Адоратского-2». Две точки подошли одинаково
+    или ни одной - None: точку возврата не угадывают, её лучше не
+    тронуть. Закрытые точки не рассматриваются - вернуть велосипед туда
+    нельзя.
     """
     said_words = _place_words(text)
     if not said_words:
@@ -5635,9 +5694,11 @@ def match_location(text: Any, locations: Iterable[Mapping[str, Any]]) -> str | N
             words = _place_words(place.get(field))
             if not words:
                 continue
-            if words == said_words:
-                exact.add(place["name"])
             own = meaning(words)
+            # Сырые слова несут «г. Казань, ул.»: без сравнения значимых
+            # слов точка не находилась по собственному адресу без города.
+            if words == said_words or (own and own == said):
+                exact.add(place["name"])
             if own and said and (own <= said or said <= own):
                 loose.add(place["name"])
     for found in (exact, loose):
@@ -5681,8 +5742,10 @@ def report_period(params: Mapping[str, Any], *, now: datetime) -> dict[str, Any]
                 "query": f"month={span['key']}", "label": first.strftime("%m.%Y")}
     raw_since = str(params.get("since") or "").strip()
     raw_until = str(params.get("until") or "").strip()
-    since = check_date(raw_since) if raw_since else None
-    until = check_date(raw_until) if raw_until else None
+    # report_day, а не check_date: год 1 или 9999 читается датой, но
+    # «минус 29 дней» и «плюс сутки» на нём - OverflowError и 500.
+    since = report_day(raw_since, today=today) if raw_since else None
+    until = report_day(raw_until, today=today) if raw_until else None
     if (since or until) and (since is None or since.ok) and (until is None or until.ok):
         last = until.value if until else today
         first = since.value if since else last - timedelta(days=POINTS_PERIOD_DAYS - 1)

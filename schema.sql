@@ -2429,21 +2429,6 @@ create trigger bikes_location_log
   after insert or update of location on crm.bikes
   for each row execute function crm.log_bike_location();
 
--- Прошлое: история места начинается там же, где история статуса, иначе
--- при пересечении двух журналов пропало бы её начало. Точка до внедрения -
--- та, что стояла в карточке в день внедрения (точнее не узнать), и отчёт
--- говорит об этом одной строкой от points_history_since.
-insert into crm.bike_location_log (bike_id, from_location, to_location, changed_at)
-select b.id, null, b.location,
-       coalesce((select min(l.changed_at) from crm.bike_status_log l
-                  where l.bike_id = b.id), b.created_at)
-  from crm.bikes b
- where not exists (select 1 from crm.bike_location_log x where x.bike_id = b.id);
-
-insert into crm.settings (key, value, updated_by)
-values ('points_history_since', date_trunc('second', now())::text, 'schema')
-on conflict (key) do nothing;
-
 -- Точка ВЫДАЧИ аренды - снимок: замена велосипеда её не меняет. По ней
 -- деньги аренды ложатся на точку (платёж - к аренде, аренда - к точке),
 -- а пока аренда идёт, велосипед стоит на её точке (выдача, возврат и
@@ -2455,7 +2440,17 @@ create index if not exists rentals_location_idx on crm.rentals (location);
 -- Старые аренды - один раз, под отметкой: точка заявки, если выдача
 -- была из неё, иначе точка велосипеда аренды (первый выданный, иначе
 -- текущий). Велосипед идущей аренды тут же встаёт на её точку - тот же
--- инвариант, что держит выдача; переезд пишется в журнал от «schema».
+-- инвариант, что держит выдача.
+--
+-- Блок стоит ДО заполнения журнала мест, и переезд велосипеда без
+-- истории мест журнал не пишет (отметка crm.location_rename): его первая
+-- строка ниже возьмёт уже точку аренды и протянется в прошлое. Иначе дни
+-- идущей аренды до внедрения остались бы на точке из карточки, а её
+-- платежи - на точке аренды, и чек обеих точек врал бы весь месяц
+-- внедрения. Велосипед, у которого история мест уже есть (отметку сняли
+-- руками), переезжает честной строкой журнала от «schema».
+-- Отметку сбрасываем сразу: файл применяется одной транзакцией, и
+-- оставленная «on» заглушила бы триггер до его конца.
 do $$
 begin
   if not exists (select 1 from crm.settings where key = 'rentals_location_filled') then
@@ -2469,6 +2464,14 @@ begin
                where rb.rental_id = r.id order by rb.id limit 1),
              (select b.location from crm.bikes b where b.id = r.bike_id))
      where r.location is null;
+    perform set_config('crm.location_rename', 'on', true);
+    update crm.bikes b
+       set location = r.location
+      from crm.rentals r
+     where r.status = 'active' and r.bike_id = b.id and b.status = 'rented'
+       and r.location is not null and b.location is distinct from r.location
+       and not exists (select 1 from crm.bike_location_log x where x.bike_id = b.id);
+    perform set_config('crm.location_rename', '', true);
     perform set_config('crm.actor', 'schema', true);
     update crm.bikes b
        set location = r.location
@@ -2481,6 +2484,24 @@ begin
     on conflict (key) do nothing;
   end if;
 end $$;
+
+-- Прошлое: история места начинается там же, где история статуса, иначе
+-- при пересечении двух журналов пропало бы её начало. Точка до внедрения -
+-- та, что стояла в карточке в день внедрения (точнее не узнать; у
+-- велосипеда идущей аренды это уже точка аренды - блок выше), и отчёт
+-- говорит об этом одной строкой от points_history_since. На базе, где
+-- журнал уже заполнен, `not exists` не трогает ни строки: историю не
+-- переписываем.
+insert into crm.bike_location_log (bike_id, from_location, to_location, changed_at)
+select b.id, null, b.location,
+       coalesce((select min(l.changed_at) from crm.bike_status_log l
+                  where l.bike_id = b.id), b.created_at)
+  from crm.bikes b
+ where not exists (select 1 from crm.bike_location_log x where x.bike_id = b.id);
+
+insert into crm.settings (key, value, updated_by)
+values ('points_history_since', date_trunc('second', now())::text, 'schema')
+on conflict (key) do nothing;
 
 -- Где идёт ремонт. У чужой техники это единственный источник точки,
 -- у своего велосипеда - его точка на момент открытия наряда.
@@ -2507,3 +2528,27 @@ end $$;
 -- человеком без своей открытой смены, ложатся в смену его точки, а не в
 -- самую раннюю - при трёх открытых кассах та почти всегда чужая.
 alter table crm.staff add column if not exists location text;
+
+-- «Как найти» точку - для клиента, отдельно от адреса и от описания
+-- («описание» пишут для своих, в бота оно не едет). До справочника бот
+-- говорил про Павлюхина «заезд в ГСК «Сокол», ищите 9-й бокс»; ответ из
+-- справочника без этого поля привёл бы курьера к воротам кооператива, а
+-- не к боксу. Сид - один раз под отметкой, а не coalesce на каждом старте:
+-- форма сохраняет пустое поле как null, и стёртое владельцем вернулось бы
+-- при следующем деплое. Если владелец уже вписал ГСК в адрес - не дублируем.
+alter table crm.locations add column if not exists directions text;
+
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'locations_directions_seeded') then
+    update crm.locations
+       set directions =
+             'Заезд в ГСК «Сокол», ищите 9-й бокс — если не найдёте, напишите, встретим'
+     where name = 'Павлюхина' and directions is null
+       -- Регистр - классом символов: ilike в локали C кириллицу не сводит.
+       and coalesce(address, '') !~ '[Сс][Оо][Кк][Оо][Лл]';
+    insert into crm.settings (key, value, updated_by)
+    values ('locations_directions_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;

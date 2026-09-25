@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -23,7 +25,8 @@ try:
     import asyncpg
     import pgserver
 
-    from app.crm import logic, service
+    from app import faq
+    from app.crm import logic, points, service
     from app.crm.db import CrmDB
     from app.db import Database, _init_connection
     from tests.fake_crm import FakeCrm
@@ -181,7 +184,9 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         since = datetime.fromisoformat(settings["points_history_since"])
         self.assertLess(abs((datetime.now(since.tzinfo) - since).total_seconds()), 120)
 
-        for bike, place in ((b1, "Павлюхина"), (b2, "Адоратского"), (b3, None),
+        # b1 - в идущей аренде из заявки на Адоратского: его история
+        # начинается уже с точки аренды, а не с карточки.
+        for bike, place in ((b1, "Адоратского"), (b2, "Адоратского"), (b3, None),
                             (b4, "Павлюхина")):
             first = (await self.crm.bike_location_log(bike))[-1]
             self.assertEqual((first["from_location"], first["to_location"]),
@@ -189,14 +194,23 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["changed_at"], began[bike],
                              "история места начинается с истории статуса")
         # Точка аренды: заявки, иначе велосипеда. Велосипед идущей аренды
-        # из заявки встаёт на её точку - строкой журнала от schema.
+        # из заявки встаёт на её точку - и так с начала истории мест, а не
+        # переездом в минуту внедрения.
         self.assertEqual((await self.crm.rental(r1))["location"], "Адоратского")
         self.assertEqual((await self.crm.rental(r2))["location"], "Адоратского")
         self.assertEqual((await self.crm.rental(r3))["location"], "Павлюхина")
         self.assertEqual((await self.crm.bike(b1))["location"], "Адоратского")
         self.assertEqual(moves(await self.crm.bike_location_log(b1)),
-                         [(None, "Павлюхина", None),
-                          ("Павлюхина", "Адоратского", "schema")])
+                         [(None, "Адоратского", None)])
+        # Дни аренды до внедрения - на той же точке, что её деньги: иначе
+        # в месяц внедрения у Адоратского были бы платежи без дней, а у
+        # Павлюхина - дни без платежей.
+        now = datetime.now().astimezone()
+        days = await self.crm.bike_days_by_location(now - timedelta(days=39),
+                                                    now - timedelta(days=1))
+        self.assertAlmostEqual(float(days["Адоратского"]["rented"]), 38, delta=0.01)
+        self.assertAlmostEqual(float(days["Павлюхина"]["rented"]), 38, delta=0.01,
+                               msg="только b4 - своя аренда Павлюхина")
         self.assertEqual([(await self.crm.work_order(o))["location"] for o in (o1, o2, o3)],
                          [None, "Адоратского", None], "чужая техника без точки")
         self.assertEqual(await self.pool.fetchval(
@@ -205,7 +219,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
 
         # Второй старт ничего не меняет: ни строк журнала, ни ручных правок.
         logged = await self.count("bike_location_log")
-        self.assertEqual(logged, 5)
+        self.assertEqual(logged, 4)
         await self.pool.execute("update crm.rentals set location = null where id = $1", r2)
         await self.pool.execute("update crm.work_orders set location = null where id = $1",
                                 o2)
@@ -215,6 +229,17 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await self.crm.work_order(o2))["location"])
         self.assertEqual((await self.crm.settings())["points_history_since"],
                          settings["points_history_since"])
+        # База, где точки уже внедрены, но отметку аренд сняли руками: у
+        # велосипеда есть история мест, и её начало не переписывается -
+        # переезд на точку аренды пишется честной строкой от «schema».
+        await self.pool.execute("update crm.bikes set location = 'Павлюхина' where id = $1",
+                                b1)
+        await self.pool.execute("delete from crm.settings where key = 'rentals_location_filled'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual(moves(await self.crm.bike_location_log(b1)),
+                         [(None, "Адоратского", None), ("Адоратского", "Павлюхина", None),
+                          ("Павлюхина", "Адоратского", "schema")],
+                         "строка есть - отметка «переименование» сброшена сразу")
 
     # ─── точка аренды: выдача, возврат, замена ───
 
@@ -347,6 +372,161 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.rental(bare))["location"], "Павлюхина")
         self.assertEqual((await self.crm.bike(spare))["location"], "Павлюхина")
 
+    async def test_swap_does_not_move_past_money_of_a_pointless_rental(self):
+        """Аренда на велосипеде «не на точке» (бот, импорт, старая база)
+        меняет велосипед на стоящий на Павлюхина. Точку аренде задним
+        числом не дописываем: её прошлые платежи и выдача переехали бы на
+        Павлюхина в закрытом месяце. Новый встаёт «не на точку» - туда же,
+        где деньги аренды."""
+        await self.seed()
+        old = await self.crm.create_bike(code="OLD", model="M")
+        new = await self.crm.create_bike(code="NEW", model="M", location="Павлюхина")
+        cid = await self.client(1)
+        rid = await self.rent(cid, old)
+        self.assertIsNone((await self.crm.rental(rid))["location"])
+        await self.crm.add_ledger(client_id=cid, kind="payment", amount=D(3000),
+                                  rental_id=rid, method="sbp", created_by="staff:op")
+        await self.shift_back(20)
+        now = datetime.now().astimezone()
+        since, until = now - timedelta(days=25), now - timedelta(days=10)
+        money = await self.crm.money_by_location(since, until)
+        issued = await self.crm.rentals_by_location(since, until)
+        self.assertEqual(money[None]["paid"], D(3000))
+
+        await service.swap_bike(self.crm, await self.crm.rental(rid),
+                                await self.crm.bike(new), reason="repair", by="staff:sw")
+        self.assertIsNone((await self.crm.rental(rid))["location"],
+                          "точка аренды - снимок выдачи")
+        self.assertEqual(await self.crm.money_by_location(since, until), money,
+                         "прошлый месяц не переписан")
+        self.assertEqual(await self.crm.rentals_by_location(since, until), issued)
+        self.assertIsNone((await self.crm.bike(new))["location"],
+                          "в аренде велосипед стоит на точке аренды")
+        self.assertEqual(moves(await self.crm.bike_location_log(new))[-1],
+                         ("Павлюхина", None, "staff:sw"))
+
+        fake = FakeCrm()
+        tariff = await fake.tariff(await fake.create_tariff("Неделя", 7, D("3000"), None))
+        f_old = await fake.create_bike(code="OLD", model="M")
+        f_new = await fake.create_bike(code="NEW", model="M", location="Павлюхина")
+        f_cid = await fake.create_client(full_name="Клиент", phone="+79990000001")
+        f_rid = await service.open_rental(
+            fake, client=await fake.client(f_cid), bike=await fake.bike(f_old),
+            tariff=tariff, started_on=date.today(), contract_no=None, by="staff:op",
+            billing="manual")
+        await service.swap_bike(fake, await fake.rental(f_rid), await fake.bike(f_new),
+                                reason="repair", by="staff:sw")
+        self.assertEqual(((await fake.rental(f_rid))["location"],
+                          (await fake.bike(f_new))["location"]), (None, None),
+                         "заглушка рассказывает то же")
+
+    async def test_card_edit_cannot_move_a_bike_issued_meanwhile(self):
+        """Карточку сохраняют, пока выдача держит строку велосипеда. UPDATE
+        карточки ждёт замка и перечитывает строку: велосипед уже в аренде,
+        его точка остаётся точкой аренды, остальные поля пишутся."""
+        bike = await self.crm.create_bike(code="B-1", model="M", location="Павлюхина",
+                                          status="available")
+        issue = await self.pool.acquire()
+        try:
+            tx = issue.transaction()
+            await tx.start()
+            await issue.execute("update crm.bikes set status = 'rented', "
+                                "location = 'Адоратского' where id = $1", bike)
+            edit = asyncio.ensure_future(self.crm.update_bike(
+                bike, note="смотрел", location="Павлюхина", keep_rented_location=True,
+                by="staff:card"))
+            await asyncio.sleep(0.3)
+            self.assertFalse(edit.done(), "карточка ждёт замка строки")
+            await tx.commit()
+        finally:
+            await self.pool.release(issue)
+        self.assertEqual(await edit, {"status": "rented", "location": "Адоратского"})
+        saved = await self.crm.bike(bike)
+        self.assertEqual((saved["location"], saved["note"]), ("Адоратского", "смотрел"))
+        self.assertNotIn("staff:card",
+                         [x["changed_by"] for x in await self.crm.bike_location_log(bike)])
+
+        free = await self.crm.create_bike(code="B-2", model="M", location="Павлюхина",
+                                          status="available")
+        self.assertEqual(await self.crm.update_bike(free, location="Адоратского",
+                                                    keep_rented_location=True, by="x"),
+                         {"status": "available", "location": "Адоратского"},
+                         "свободный велосипед карточка двигает")
+
+    async def test_found_lost_bike_comes_back_where_the_take_found_it(self):
+        """Потерян на Павлюхина, найден пересчётом Адоратского - возвращается
+        на Адоратского: строка журнала мест в тот же миг, что и статус.
+        Пересчёт всего парка точки не знает и точку не стирает."""
+        lost = await self.crm.create_bike(code="L-1", model="M", location="Павлюхина",
+                                          status="available")
+        other = await self.crm.create_bike(code="L-2", model="M", location="Павлюхина",
+                                           status="available")
+        await self.crm.create_bike(code="C-1", model="M", location="Адоратского",
+                                   status="available")
+        cell = await self.crm.create_battery(code="9510001", status="available",
+                                             location="Павлюхина")
+        for bike in (lost, other):
+            await self.crm.update_bike(bike, status="lost", by="staff:t")
+        await self.crm.update_battery(cell, status="lost", by="staff:t")
+
+        take_id = await service.start_stock_take(
+            self.crm, scope="location", location="Адоратского", note=None, what="all",
+            by="staff:t")
+        for code in ("L-1", "9510001"):
+            got = await service.take_add_found(
+                self.crm, await self.crm.stock_take(take_id), code)
+            self.assertEqual(got["state"], "extra", code)
+        result = await service.finish_stock_take(
+            self.crm, await self.crm.stock_take(take_id), by="staff:take")
+        self.assertEqual(result["returned"], 2)
+        bike = await self.crm.bike(lost)
+        self.assertEqual((bike["status"], bike["location"]), ("available", "Адоратского"))
+        log, status = (await self.crm.bike_location_log(lost),
+                       await self.crm.bike_status_log(lost))
+        self.assertEqual(moves(log)[-1], ("Павлюхина", "Адоратского", "staff:take"))
+        self.assertEqual(log[0]["changed_at"], status[0]["changed_at"],
+                         "точка и статус - одним обновлением")
+        battery = await self.crm.battery(cell)
+        self.assertEqual((battery["status"], battery["location"]),
+                         ("available", "Адоратского"))
+
+        take_id = await service.start_stock_take(
+            self.crm, scope="all", location=None, note=None, what="bikes", by="staff:t")
+        await service.take_add_found(self.crm, await self.crm.stock_take(take_id), "L-2")
+        await service.finish_stock_take(self.crm, await self.crm.stock_take(take_id),
+                                        by="staff:take")
+        bike = await self.crm.bike(other)
+        self.assertEqual((bike["status"], bike["location"]), ("available", "Павлюхина"),
+                         "пересчёт всего парка место не стирает")
+
+    async def test_bot_keeps_the_gsk_directions_after_deploy(self):
+        """До справочника бот говорил «Павлюхина, 97А — ГСК «Сокол», 9-й
+        бокс». После внедрения ответ собирается из справочника, и без поля
+        «как найти» курьер приехал бы к воротам кооператива, а не к боксу.
+        Сид - один раз: стёртое владельцем поле не возвращается."""
+        points.reset()
+        try:
+            await points.refresh(self.crm, force=True)
+            for code in ("ADDR", "LEAD", "RETURN", "BRK_EL"):
+                text = faq.answer(faq.BY_CODE[code], points=points.snapshot())
+                self.assertIn("ГСК «Сокол», ищите 9-й бокс", text, code)
+                self.assertIn("напишите, встретим", text, code)
+        finally:
+            points.reset()
+        pav = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
+        await self.crm.update_location(pav["id"], directions=None)
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIsNone(next(x for x in await self.crm.locations()
+                               if x["name"] == "Павлюхина")["directions"],
+                          "владелец стёр - сид не возвращает")
+        # База, где владелец уже вписал ГСК в адрес: второй раз не пишем.
+        await self.pool.execute(
+            "delete from crm.settings where key = 'locations_directions_seeded'")
+        await self.crm.update_location(pav["id"], address="ул. Павлюхина, 97А, гск сокол")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIsNone(next(x for x in await self.crm.locations()
+                               if x["name"] == "Павлюхина")["directions"])
+
     # ─── наряд и сотрудник ───
 
     async def test_work_order_and_staff_point(self):
@@ -406,14 +586,15 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         logged = await self.count("bike_location_log")
 
         self.assertIsNone(await self.crm.rename_location(10 ** 9, "Х"))
-        self.assertFalse(await self.crm.rename_location(point["id"], "Адоратского"),
-                         "имя занято другой точкой")
-        self.assertTrue(await self.crm.rename_location(point["id"], "Павлюхина"))
+        self.assertEqual(await self.crm.rename_location(point["id"], "Адоратского"),
+                         "taken", "имя занято другой точкой")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Павлюхина"), "ok")
         self.assertEqual(await where("Павлюхина"), before, "отказ ничего не тронул")
         with self.assertRaises(ValueError):
             await self.crm.update_location(point["id"], name="Х")
 
-        self.assertTrue(await self.crm.rename_location(point["id"], "Павлюхина 97А"))
+        self.assertEqual(await self.crm.rename_location(point["id"], "Павлюхина 97А"),
+                         "ok")
         self.assertEqual(await where("Павлюхина 97А"), before)
         self.assertFalse(any((await where("Павлюхина")).values()))
         self.assertEqual(await self.count("bike_location_log"), logged,
@@ -425,11 +606,77 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.count("bike_location_log"), logged + 1)
 
         # Открытая смена под новым именем (точки такой нет, смена есть) -
-        # индекс кассы не пускает, и откатывается весь каскад.
+        # это записи вне справочника, склеивать их с точкой нельзя.
         await self.crm.create_shift(location="Марс", opening=D(0), note=None, by="x")
-        self.assertFalse(await self.crm.rename_location(point["id"], "Марс"))
+        self.assertEqual(await self.crm.rename_location(point["id"], "Марс"), "orphan")
         self.assertEqual((await self.crm.bike(bike))["location"], "Павлюхина 97А")
         self.assertIn("Павлюхина 97А", await self.crm.location_names())
+
+    async def test_rename_refuses_a_name_that_orphan_rows_use(self):
+        """Велосипед на «Склад» (имени нет в справочнике - строка «нет в
+        справочнике» отчёта). Переименование Павлюхина в «Склад» склеило бы
+        их навсегда: обратное переименование увело бы оба велосипеда.
+        Отказ, и ничего не тронуто - ни у точки, ни у сирот."""
+        point = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
+        orphan = await self.crm.create_bike(code="O-1", model="M", location="Склад")
+        own = await self.crm.create_bike(code="P-1", model="M", location="Павлюхина")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Склад"), "orphan")
+        self.assertEqual([(await self.crm.bike(b))["location"] for b in (orphan, own)],
+                         ["Склад", "Павлюхина"])
+        self.assertIn("Павлюхина", await self.crm.location_names())
+        # Имя только в журнале мест (велосипед со «Склада» давно уехал) - то же.
+        await self.crm.update_bike(orphan, location="Адоратского", by="x")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Склад"), "orphan")
+        # Открытая смена под чужим именем, у самой точки смены нет.
+        ado = next(x for x in await self.crm.locations() if x["name"] == "Адоратского")
+        await self.crm.create_shift(location="Марс", opening=D(0), note=None, by="x")
+        self.assertEqual(await self.crm.rename_location(ado["id"], "Марс"), "orphan")
+        self.assertEqual((await self.crm.cash_shift_for("x"))["location"], "Марс")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Сокол"), "ok")
+
+        fake = FakeCrm()
+        f_point = await fake.create_location(name="Павлюхина", city="Казань",
+                                             address=None, note=None)
+        await fake.create_bike(code="O-1", model="M", location="Склад")
+        self.assertEqual(await fake.rename_location(f_point, "Склад"), "orphan",
+                         "заглушка отказывает так же")
+
+    async def test_rename_rewrites_saved_filters(self):
+        """Сохранённый фильтр «Аренды Павлюхиной» (?location=Павлюхина)
+        после переименования показывает те же аренды, а не пустой список.
+        Чужая точка и остальные параметры фильтра не тронуты."""
+        await self.seed()
+        point = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
+        staff = await self.crm.create_staff("op", "h", "Оператор", "manager")
+        pav = quote("Павлюхина", safe="")
+        mine = await self.crm.save_view(staff_id=staff, section="/rentals",
+                                        name="Аренды Павлюхиной",
+                                        query=f"status=active&location={pav}&sort=days")
+        plus = await self.crm.save_view(staff_id=staff, section="/bikes", name="Плюсом",
+                                        query="location=%D0%9F%D0%B0%D0%B2%D0%BB%D1%8E"
+                                              "%D1%85%D0%B8%D0%BD%D0%B0&q=a+b")
+        other = await self.crm.save_view(staff_id=staff, section="/orders",
+                                         name="Адоратского",
+                                         query=f"location={quote('Адоратского')}")
+        near = await self.crm.save_view(staff_id=staff, section="/bikes", name="Похожее",
+                                        query=f"q={pav}&location=none")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Павлюхина 97А"), "ok")
+        new = quote("Павлюхина 97А", safe="")
+        queries = {v: (await self.crm.saved_view(v))["query"]
+                   for v in (mine, plus, other, near)}
+        self.assertEqual(queries[mine], f"status=active&location={new}&sort=days")
+        self.assertEqual(queries[plus], f"location={new}&q=a+b")
+        self.assertEqual(queries[other], f"location={quote('Адоратского')}")
+        self.assertEqual(queries[near], f"q={pav}&location=none",
+                         "совпадение не в параметре точки - не фильтр точки")
+        fake = FakeCrm()
+        f_point = await fake.create_location(name="Павлюхина", city="Казань",
+                                             address=None, note=None)
+        f_view = await fake.save_view(staff_id=1, section="/rentals", name="x",
+                                      query=f"status=active&location={pav}&sort=days")
+        await fake.rename_location(f_point, "Павлюхина 97А")
+        self.assertEqual((await fake.saved_view(f_view))["query"],
+                         f"status=active&location={new}&sort=days")
 
     # ─── касса ───
 
@@ -476,7 +723,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(real["log"]["B"], [(None, "Павлюхина", "staff:op"),
                                             ("Павлюхина", "Горький", "staff:op"),
                                             ("Горький", "Павлюхина", "staff:op")])
-        self.assertEqual(real["renamed"], (None, False, True))
+        self.assertEqual(real["renamed"], (None, "taken", "ok"))
         self.assertEqual(real["shifts"], ["Горький", "Адоратского", "Горький"])
 
     # ─── аналитика по точкам ───
@@ -624,6 +871,13 @@ async def _points_story(crm):
     переименование точки и касса - только методами CrmDB, общими для
     базы и заглушки. Ключи - номера и имена: id у них разные."""
     tariff = await crm.tariff(await crm.create_tariff("Неделя", 7, D("3000"), None))
+    # Справочник один на обе стороны: в базе две точки из сида, у заглушки -
+    # ничего. Без этого «имя занято точкой» и «имя у записей вне
+    # справочника» различались бы данными, а не поведением.
+    known = {x["name"] for x in await crm.locations()}
+    for name in ("Павлюхина", "Адоратского"):
+        if name not in known:
+            await crm.create_location(name=name, city="Казань", address=None, note=None)
     gorky = await crm.create_location(name="Горького", city="Казань", address=None,
                                       note=None)
     bikes = {}
