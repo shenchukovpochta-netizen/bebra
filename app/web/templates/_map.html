@@ -12,10 +12,16 @@
 <script>
 (function () {
   /* tojson, а не json.dumps|safe: Jinja экранирует < > & и апостроф,
-     поэтому кличка трекера с «</script>» внутри остаётся строкой, а не
-     закрывает скрипт. Кличка приходит и из формы панели, и из имени
-     устройства в кабинете StarLine - оба источника чужие. */
+     поэтому кличка трекера с закрывающим тегом скрипта внутри остаётся
+     строкой, а не закрывает скрипт. Кличка приходит и из формы панели, и
+     из имени устройства в кабинете StarLine - оба источника чужие.
+     Сам тег в этом комментарии писать нельзя: HTML закрывает скрипт на
+     нём даже внутри комментария JS, и карта не рисовалась вовсе. */
   var points = {{ points|tojson }};
+  /* Точки выдачи из справочника - квадратной меткой с подписью: кружок
+     уже занят велосипедом, и спутать пункт с велосипедом значит поехать
+     не туда. */
+  var places = {{ (places or [])|tojson }};
   var node = document.getElementById('map');
   if (!node) { return; }
   if (!window.L) {
@@ -54,6 +60,29 @@
       /* Подпись собирается узлами, а не склейкой HTML: в кличке может
          быть что угодно, и innerHTML сделал бы из неё разметку. */
       .addTo(map).bindPopup(popup(p));
+    bounds.push([p.lat, p.lon]);
+  });
+  function placePopup(p) {
+    var box = document.createElement('div');
+    var name = document.createElement('b');
+    name.textContent = p.title || p.name || '';
+    box.appendChild(name);
+    if (p.address) {
+      box.appendChild(document.createElement('br'));
+      box.appendChild(document.createTextNode(p.address));
+    }
+    return box;
+  }
+  places.forEach(function (p) {
+    /* Подпись - узлом с textContent, как и у велосипедов: имя точки
+       набирают в панели, и innerHTML сделал бы из него разметку. */
+    var label = document.createElement('span');
+    label.className = 'map-place';
+    label.textContent = p.name || '';
+    L.marker([p.lat, p.lon], {
+      icon: L.divIcon({className: 'map-place-icon', html: label, iconSize: null}),
+      title: p.title || p.name || '', zIndexOffset: 1000
+    }).addTo(map).bindPopup(placePopup(p));
     bounds.push([p.lat, p.lon]);
   });
   if (bounds.length) { map.fitBounds(bounds, {padding: [30, 30], maxZoom: 15}); }

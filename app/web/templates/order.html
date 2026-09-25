@@ -15,6 +15,7 @@
   <dl>
     <dt>Объект</dt><dd>{% if order.bike_id %}<a href="/bikes/{{ order.bike_id }}">№ {{ order.bike_code }}</a> {{ order.bike_model }}{% else %}{{ order.object_note or '—' }}{% endif %}</dd>
     <dt>Плательщик</dt><dd>{{ PAYERS[order.payer] }}{% if order.payer == 'client' %} · {% if order.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ order.client_id }}">{{ order.client_name }}</a>{% else %}{{ order.client_name or order.object_note or '—' }}{% endif %}{% endif %}</dd>
+    <dt>Точка</dt><dd>{{ order.location or '—' }}</dd>
     <dt>Жалоба</dt><dd>{{ order.complaint or '—' }}</dd>
     <dt>Открыт</dt><dd>{{ order.opened_at|dmy }} · {{ order.created_by or '' }}</dd>
     <dt>Суток в работе</dt><dd class="{% if open_now and days >= ORDER_STUCK_DAYS %}bad{% endif %}"><b>{{ days }}</b>{% if open_now and days >= ORDER_STUCK_DAYS %} — велосипед копит простой{% endif %}</dd>
@@ -37,6 +38,7 @@
     <label>Плательщик <select name="payer" {% if payer_locked %}disabled title="смета отправлена или счёт выставлен"{% endif %}>{% for code, label in PAYERS.items() %}<option value="{{ code }}" {% if order.payer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <label>Клиент по телефону <input name="client_phone" inputmode="tel" placeholder="{% if order.client_id %}{{ order.client_name }}{% else %}+7 …{% endif %}"></label>
     <label>Смета, ₽ <input name="estimate" inputmode="decimal" value="{{ order.estimate }}"></label>
+    <label>Где чиним <select name="location"><option value="">без точки</option>{% for loc in places %}<option value="{{ loc }}" {% if order.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <label>Заметка <input name="note" value="{{ order.note or '' }}"></label>
     <button type="submit">Сохранить</button>
   </form>

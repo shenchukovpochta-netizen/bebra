@@ -31,7 +31,7 @@
       <select name="scope">{% for code, label in TAKE_SCOPES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
     </label>
     <label>Точка
-      <select name="location"><option value="">—</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select>
+      <select name="location"><option value="">—</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select>
     </label>
     <label class="wide">Комментарий<input type="text" name="note" placeholder="Плановый пересчёт парка"></label>
     <button type="submit">Начать пересчёт</button>

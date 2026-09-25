@@ -2,6 +2,7 @@
    упираться в «нет доступа» там, где для него ничего нет. #}
 <nav class="tabs">
   <a href="/reports" {% if active == 'reports' %}class="on"{% endif %}>Отчёты</a>
+  <a href="/reports/points" {% if active == 'points' %}class="on"{% endif %}>По точкам</a>
   {% if can_view(staff, 'finance') %}
   <a href="/reports/payback" {% if active == 'payback' %}class="on"{% endif %}>Окупаемость</a>
   <a href="/reports/referrals" {% if active == 'referrals' %}class="on"{% endif %}>Приглашения</a>

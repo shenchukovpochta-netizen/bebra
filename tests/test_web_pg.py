@@ -33,7 +33,11 @@ SCHEMA = Path(__file__).resolve().parent.parent / "schema.sql"
 PAGES = ("/", "/clients", "/clients.csv", "/bikes", "/bikes?location=none",
          "/bikes?location=Павлюхина&status=repair", "/rentals", "/rentals/new", "/claims",
          "/finance", "/finance.csv", "/tariffs", "/reports", "/staff", "/import", "/bikes/new",
-         "/clients/new")
+         "/clients/new", "/reports/points", "/reports/points?month=2026-01",
+         "/reports/points?since=2026-01-01&until=2026-01-31", "/reports/points/none",
+         "/reports/points.csv", "/reports/points.xlsx", "/locations", "/map",
+         "/rentals?location=none", "/rentals.csv?location=Павлюхина",
+         "/orders?location=Павлюхина", "/orders.csv?location=none")
 
 
 @unittest.skipUnless(HAVE_ALL, "pgserver, asyncpg или httpx не установлены")
@@ -141,6 +145,57 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
                          "staff:admin")
         page = await self.get_ok("/")
         self.assertIn("Списан: <b>1</b>", page)
+
+    async def test_points_report_on_postgres(self):
+        """Третья точка через панель, выдача с неё, отчёт и страница точки,
+        переименование каскадом - на настоящем SQL, а не на заглушке."""
+        loc = await self.post("/locations", name="Декабристов", city="Казань",
+                              address="ул. Декабристов, 1", lat="55.81", lon="49.11")
+        self.assertEqual(loc, "/locations")
+        dek = next(p for p in await self.crm.locations() if p["name"] == "Декабристов")
+        loc = await self.post("/bikes", code="D-1", model="Kugoo V3", location="Декабристов")
+        bike_id = int(loc.rsplit("/", 1)[1])
+        await self.crm.commission_bike(bike_id, by="staff:admin")
+        loc = await self.post("/clients", full_name="Денисов Дмитрий",
+                              phone="+7 999 000-00-03")
+        client_id = int(loc.rsplit("/", 1)[1])
+        await self.post("/tariffs", name="Неделя", period_days="7", price="3000")
+        tariff = (await self.crm.tariffs())[0]
+        loc = await self.post("/rentals", client_id=str(client_id), bike_id=str(bike_id),
+                              tariff_id=str(tariff["id"]),
+                              started_on=date.today().isoformat())
+        rental_id = int(loc.rsplit("/", 1)[1])
+        self.assertEqual((await self.crm.rental(rental_id))["location"], "Декабристов")
+        await self.crm.add_ledger(client_id=client_id, kind="payment", amount=D(12000),
+                                  rental_id=rental_id, method="card")
+
+        page = await self.get_ok("/reports/points")
+        for name in ("Павлюхина", "Адоратского", "Декабристов", "Итого"):
+            self.assertIn(name, page)
+        self.assertIn("История мест ведётся", page,
+                      "окно начинается раньше внедрения журнала мест")
+        r = await self.client.get("/reports/points.csv")
+        rows = {line.split(";")[0]: line.split(";")
+                for line in r.text.lstrip("\ufeff").splitlines()}
+        head = rows["Точка"]
+        self.assertEqual(rows["Декабристов"][head.index("Выручка")], "12000,00")
+        self.assertEqual(rows["ИТОГО"][head.index("Выручка")], "12000,00")
+        self.assertEqual(rows["Декабристов"][head.index("Идёт аренд")], "1")
+        point = await self.get_ok(f"/reports/points/{dek['id']}")
+        self.assertIn("ул. Декабристов, 1", point)
+        self.assertIn("Денисов Дмитрий", await self.get_ok(
+            "/rentals?location=%D0%94%D0%B5%D0%BA%D0%B0%D0%B1%D1%80%D0%B8%D1%81%D1%82%D0%BE%D0%B2"))
+        self.assertIn("По точкам за 30 дней", await self.get_ok("/"))
+        self.assertIn("map-place", await self.get_ok("/map"))
+
+        await self.post(f"/locations/{dek['id']}/rename", name="Декабристов 1")
+        self.assertEqual((await self.crm.bike(bike_id))["location"], "Декабристов 1")
+        self.assertEqual((await self.crm.rental(rental_id))["location"], "Декабристов 1")
+        page = await self.get_ok("/reports/points")
+        self.assertIn("Декабристов 1", page)
+        await self.post(f"/locations/{dek['id']}/rename", name="Павлюхина")
+        self.assertEqual((await self.crm.bike(bike_id))["location"], "Декабристов 1",
+                         "занятое имя - отказ, и не изменилось ничего")
 
     async def test_import_on_postgres_is_idempotent(self):
         data = sheet(ROWS)

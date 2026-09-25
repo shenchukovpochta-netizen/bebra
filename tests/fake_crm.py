@@ -25,6 +25,7 @@ class FakeCrm:
         self.claims_: dict[int, dict] = {}
         self.bike_log_: list[dict] = []
         self.status_log_: list[dict] = []
+        self.location_log_: list[dict] = []
         self.repair_items_: list[dict] = []
         self.work_types_: dict[int, dict] = {}
         self.orders_: dict[int, dict] = {}
@@ -81,6 +82,9 @@ class FakeCrm:
         # иначе каталог съедал бы первые id, и клиент из seed() перестал бы
         # быть первым.
         self._work_type_seq = 0
+        # Журнал мест тоже отдельно: он пишется при каждом заведении
+        # велосипеда, и общий счётчик сдвинул бы id всего, что после.
+        self._location_log_seq = 0
         self._seed_profiles()
         self._seed_work_types()
 
@@ -144,7 +148,8 @@ class FakeCrm:
         rows = sorted(self.staff.values(), key=lambda s: (not s["active"], s["id"]))
         return [self._staff_row(s) for s in rows]
 
-    async def create_staff(self, login, password_hash, name, role, profile_id=None):
+    async def create_staff(self, login, password_hash, name, role, profile_id=None,
+                           location=None):
         if any(s["login"] == login for s in self.staff.values()):
             raise UniqueError("login")
         sid = self._id()
@@ -152,7 +157,7 @@ class FakeCrm:
                            "name": name, "role": role, "active": True,
                            "profile_id": profile_id, "tg_id": None,
                            "tg_username": None, "link_code": None, "linked_at": None,
-                           "created_at": self._now()}
+                           "location": location, "created_at": self._now()}
         return sid
 
     async def staff_by_tg(self, tg_id):
@@ -183,6 +188,9 @@ class FakeCrm:
 
     async def set_staff_profile(self, staff_id, profile_id):
         self.staff[staff_id]["profile_id"] = profile_id
+
+    async def set_staff_location(self, staff_id, location):
+        self.staff[staff_id]["location"] = location
 
     async def set_staff_password(self, staff_id, password_hash):
         self.staff[staff_id]["password_hash"] = password_hash
@@ -296,13 +304,37 @@ class FakeCrm:
         return len(key) >= crm_logic.VIN_MIN and any(
             key in crm_logic.vin_key(b.get(f)) for f in ("frame_no", "motor_no"))
 
-    def _log_status(self, bike_id, from_status, to_status, by=None):
-        """Аналог триггера crm.log_bike_status - вместе с пробегом."""
+    def _log_status(self, bike_id, from_status, to_status, by=None, at=None):
+        """Аналог триггера crm.log_bike_status - вместе с пробегом.
+        `at` - общее время с журналом мест: в базе оба триггера одного
+        UPDATE пишут одно now()."""
         bike = self.bikes_.get(bike_id) or {}
         self.status_log_.append({"id": self._id(), "bike_id": bike_id,
                                  "from_status": from_status, "to_status": to_status,
-                                 "changed_at": self._now(), "changed_by": by or None,
+                                 "changed_at": at or self._now(), "changed_by": by or None,
                                  "mileage_km": bike.get("mileage_km")})
+
+    def _log_location(self, bike_id, from_location, to_location, by=None, at=None):
+        """Аналог триггера crm.log_bike_location."""
+        self._location_log_seq += 1
+        self.location_log_.append({"id": self._location_log_seq, "bike_id": bike_id,
+                                   "from_location": from_location,
+                                   "to_location": to_location,
+                                   "changed_at": at or self._now(),
+                                   "changed_by": by or None})
+
+    def _place_bike(self, bike_id, location, by=None, at=None):
+        """Поставить велосипед на точку - со строкой журнала, если это
+        переезд, как UPDATE location в базе."""
+        bike = self.bikes_[bike_id]
+        before = bike.get("location")
+        bike["location"] = location
+        if before != location:
+            self._log_location(bike_id, before, location, by, at)
+
+    async def bike_location_log(self, bike_id, limit=30):
+        rows = [dict(x) for x in self.location_log_ if x["bike_id"] == bike_id]
+        return sorted(rows, key=lambda x: (x["changed_at"], x["id"]), reverse=True)[:limit]
 
     async def bike_status_log(self, bike_id, limit=30):
         rows = [dict(x) for x in self.status_log_ if x["bike_id"] == bike_id]
@@ -411,14 +443,20 @@ class FakeCrm:
                             "commissioned_at": None, "commissioned_by": None,
                             "created_at": self._now(), "updated_at": self._now(),
                             **fields}
-        self._log_status(bid, None, self.bikes_[bid]["status"], by)
+        at = self._now()
+        self._log_status(bid, None, self.bikes_[bid]["status"], by, at)
+        self._log_location(bid, None, self.bikes_[bid]["location"], by, at)
         return bid
 
     async def update_bike(self, bike_id, *, by=None, **fields):
         before = self.bikes_[bike_id]["status"]
+        place = self.bikes_[bike_id].get("location")
         self.bikes_[bike_id].update(fields)
+        at = self._now()
         if "status" in fields and fields["status"] != before:
-            self._log_status(bike_id, before, fields["status"], by)
+            self._log_status(bike_id, before, fields["status"], by, at)
+        if "location" in fields and fields["location"] != place:
+            self._log_location(bike_id, place, fields["location"], by, at)
 
     async def bike_counts(self):
         out: dict[str, int] = {}
@@ -582,9 +620,11 @@ class FakeCrm:
                 "bike_model": b["model"] if b else None,
                 "balance": self._balance(r["client_id"])}
 
-    async def rentals(self, *, status=None, limit=500):
+    async def rentals(self, *, status=None, location=None, limit=500):
         rows = [self._rental_row(r) for r in self.rentals_.values()
-                if not status or r["status"] == status]
+                if (not status or r["status"] == status)
+                and (not location or (r.get("location") is None if location == "none"
+                                      else r.get("location") == location))]
         return sorted(rows, key=lambda r: (r["status"] != "active", -r["id"]))[:limit]
 
     async def rental(self, rental_id):
@@ -615,12 +655,15 @@ class FakeCrm:
     async def create_rental(self, *, client_id, bike_id, tariff_id, tariff_name,
                             period_days, price, billing, started_on, contract_no,
                             created_by, mileage_start=None, base_price=None,
-                            promo_code=None):
+                            promo_code=None, location=None):
         if self._active(client_id) is not None:
             raise UniqueError("rentals_active_client_idx")
         if bike_id is not None and any(r["bike_id"] == bike_id and r["status"] == "active"
                                        for r in self.rentals_.values()):
             raise UniqueError("rentals_active_bike_idx")
+        # Точка выдачи - выбранная, иначе точка велосипеда (coalesce в базе).
+        if location is None and bike_id is not None:
+            location = self.bikes_[bike_id].get("location")
         rid = self._id()
         self.rentals_[rid] = {"id": rid, "client_id": client_id, "bike_id": bike_id,
                               "tariff_id": tariff_id, "tariff_name": tariff_name,
@@ -634,12 +677,15 @@ class FakeCrm:
                               "intent": None, "intent_until": None, "intent_by": None,
                               "intent_at": None, "snooze_until": None,
                               "mileage_start": mileage_start, "mileage_end": None,
-                              "promo_code": promo_code,
+                              "promo_code": promo_code, "location": location,
                               "created_by": created_by, "created_at": self._now(),
                               "updated_at": self._now()}
         if bike_id is not None:
-            self._log_status(bike_id, self.bikes_[bike_id]["status"], "rented", created_by)
+            at = self._now()
+            self._log_status(bike_id, self.bikes_[bike_id]["status"], "rented",
+                             created_by, at)
             self.bikes_[bike_id]["status"] = "rented"
+            self._place_bike(bike_id, location, created_by, at)
             if mileage_start is not None:
                 self.bikes_[bike_id]["mileage_km"] = max(
                     self.bikes_[bike_id].get("mileage_km") or 0, int(mileage_start))
@@ -647,13 +693,14 @@ class FakeCrm:
 
     async def start_rental_charged(self, *, client_id, bike_id, tariff_name,
                                    period_days, price, billing, started_on,
-                                   period_to, contract_no, note, created_by):
+                                   period_to, contract_no, note, created_by,
+                                   location=None):
         """Аренда и первое начисление одной транзакцией - как в базе."""
         rid = await self.create_rental(
             client_id=client_id, bike_id=bike_id, tariff_id=None,
             tariff_name=tariff_name, period_days=period_days, price=price,
             billing=billing, started_on=started_on, contract_no=contract_no,
-            created_by=created_by)
+            created_by=created_by, location=location)
         await self.charge_period(rid, client_id, period_from=started_on,
                                  period_to=period_to, amount=-Decimal(price),
                                  note=note, created_by=created_by)
@@ -676,7 +723,7 @@ class FakeCrm:
         self.rentals_[rental_id].update(fields)
 
     async def close_rental(self, rental_id, *, closed_on, note, bike_status="available",
-                           closed_by=None, mileage_end=None):
+                           closed_by=None, mileage_end=None, return_location=None):
         r = self.rentals_.get(rental_id)
         if r is None or r["status"] != "active":
             return False
@@ -684,8 +731,14 @@ class FakeCrm:
         if mileage_end is not None:
             r["mileage_end"] = int(mileage_end)
         if r["bike_id"] is not None and self.bikes_[r["bike_id"]]["status"] == "rented":
-            self._log_status(r["bike_id"], "rented", bike_status, closed_by)
-            self.bikes_[r["bike_id"]]["status"] = bike_status
+            at = self._now()
+            bike = self.bikes_[r["bike_id"]]
+            if bike_status != "rented":
+                self._log_status(r["bike_id"], "rented", bike_status, closed_by, at)
+            bike["status"] = bike_status
+            place = next((x for x in (return_location, r.get("location"))
+                          if x is not None), bike.get("location"))
+            self._place_bike(r["bike_id"], place, closed_by, at)
             if mileage_end is not None:
                 self.bikes_[r["bike_id"]]["mileage_km"] = max(
                     self.bikes_[r["bike_id"]].get("mileage_km") or 0, int(mileage_end))
@@ -813,11 +866,20 @@ class FakeCrm:
                 row["repairs"] += x["cost"]
         return sorted(out.values(), key=lambda r: r["month"], reverse=True)
 
-    async def debtors(self, limit=50):
-        rows = [{"id": c["id"], "full_name": c["full_name"], "phone": c["phone"],
-                 "status": c["status"], "balance": self._balance(c["id"])}
-                for c in self.clients_.values() if self._balance(c["id"]) < 0]
-        return sorted(rows, key=lambda r: r["balance"])[:limit]
+    async def debtors(self, limit=50, *, location=None):
+        rows = []
+        for c in self.clients_.values():
+            if self._balance(c["id"]) >= 0:
+                continue
+            point = self._last_rental_point(c["id"])
+            if location == "none" and point is not None:
+                continue
+            if location and location != "none" and point != location:
+                continue
+            rows.append({"id": c["id"], "full_name": c["full_name"], "phone": c["phone"],
+                         "status": c["status"], "balance": self._balance(c["id"]),
+                         "location": point})
+        return sorted(rows, key=lambda r: (r["balance"], r["id"]))[:limit]
 
     async def counts(self):
         return {"clients": len(self.clients_),
@@ -931,9 +993,12 @@ class FakeCrm:
                 "tech_login": tech.get("login")}
 
     async def work_orders(self, *, status=None, payer=None, tech_id=None,
-                          bike_id=None, open_only=False, limit=300):
+                          bike_id=None, open_only=False, location=None, limit=300):
         rows = []
         for o in self.orders_.values():
+            if location and (o.get("location") is not None if location == "none"
+                             else o.get("location") != location):
+                continue
             if status and o["status"] != status:
                 continue
             if payer and o["payer"] != payer:
@@ -966,7 +1031,8 @@ class FakeCrm:
         return out
 
     async def create_work_order(self, *, bike_id, payer, client_id, complaint,
-                                object_note, tech_id, estimate, created_by):
+                                object_note, tech_id, estimate, created_by,
+                                location=None):
         if bike_id and any(o.get("bike_id") == bike_id
                            and o["status"] in crm_logic.ORDER_OPEN
                            for o in self.orders_.values()):
@@ -980,7 +1046,10 @@ class FakeCrm:
             "estimate": Decimal(str(estimate or 0)), "total": Decimal(0),
             "cost": Decimal(0), "paid_at": None, "note": None,
             "created_by": created_by, "opened_at": self._now(),
-            "closed_at": None, "log_id": None}
+            "closed_at": None, "log_id": None,
+            # Точка ремонта не выбрана - точка велосипеда (coalesce в базе).
+            "location": (location if location is not None
+                         else (self.bikes_.get(bike_id) or {}).get("location"))}
         return oid
 
     async def update_work_order(self, order_id, **fields):
@@ -1286,22 +1355,7 @@ class FakeCrm:
         for entry in self.ledger_:
             if not since <= entry["created_at"] < until:
                 continue
-            rental = self.rentals_.get(entry.get("rental_id"))
-            if rental is None:
-                # Платёж без аренды (зачисление по заявке): берём аренду
-                # клиента, шедшую в день платежа, а если её не было -
-                # ближайшую по времени. Как и SQL.
-                day = entry["created_at"].date()
-                own = [r for r in self.rentals_.values()
-                       if r["client_id"] == entry["client_id"]]
-                covering = [r for r in own
-                            if r["started_on"] <= day
-                            and (r.get("closed_on") is None or r["closed_on"] >= day)]
-                if covering:
-                    rental = covering[-1]
-                elif own:
-                    rental = min(own, key=lambda r: (abs((r["started_on"] - day).days),
-                                                     r["id"]))
+            rental = self._entry_rental(entry)
             if rental is None:
                 continue
             model = model_of(rental.get("bike_id"))
@@ -1338,6 +1392,177 @@ class FakeCrm:
         out: dict[int, list[dict]] = {}
         for row in self.status_log_:
             out.setdefault(row["bike_id"], []).append(row)
+        return out
+
+    # ─────────────────────── аналитика по точкам ───────────────────────
+
+    def _entry_rental(self, entry):
+        """Аренда записи журнала - то же правило, что CTE attr в базе
+        (_ledger_rentals): своя, иначе шедшая в день записи (последняя
+        по id), иначе ближайшая по дате начала."""
+        rental = self.rentals_.get(entry.get("rental_id"))
+        if rental is not None:
+            return rental
+        day = entry["created_at"].date()
+        own = [r for r in self.rentals_.values() if r["client_id"] == entry["client_id"]]
+        covering = [r for r in own
+                    if r["started_on"] <= day
+                    and (r.get("closed_on") is None or r["closed_on"] >= day)]
+        if covering:
+            return max(covering, key=lambda r: r["id"])
+        if own:
+            return min(own, key=lambda r: (abs((r["started_on"] - day).days), r["id"]))
+        return None
+
+    def _entry_point(self, entry):
+        return (self._entry_rental(entry) or {}).get("location") or None
+
+    def _last_rental_point(self, client_id):
+        """Точка последней аренды клиента: идущая первой, затем по id."""
+        own = [r for r in self.rentals_.values() if r["client_id"] == client_id]
+        if not own:
+            return None
+        return max(own, key=lambda r: (r["status"] == "active", r["id"])).get(
+            "location") or None
+
+    def _location_at(self, bike_id, at):
+        """Точка велосипеда в момент `at` по журналу мест; раньше первой
+        строки - точка первой строки, как в базе."""
+        rows = sorted((x for x in self.location_log_ if x["bike_id"] == bike_id),
+                      key=lambda x: (x["changed_at"], x["id"]))
+        if not rows:
+            return None
+        before = [x for x in rows if x["changed_at"] <= at]
+        return (before[-1] if before else rows[0]).get("to_location") or None
+
+    async def bike_days_by_location(self, since, until):
+        until = min(until, self._now())
+        return crm_logic.days_by_status_location(self.status_log_, self.location_log_,
+                                                 since, until)
+
+    async def money_by_location(self, since, until):
+        keys = ("paid", "charged", "charged_fines", "bonus", "refunded")
+        out: dict = {}
+        for entry in self.ledger_:
+            if not since <= entry["created_at"] < until:
+                continue
+            cell = out.setdefault(self._entry_point(entry), {k: Decimal(0) for k in keys})
+            amount, kind = Decimal(entry["amount"]), entry["kind"]
+            if kind == "payment":
+                cell["paid"] += amount
+            elif kind == "charge":
+                cell["charged"] -= amount
+                cell["charged_fines"] -= amount
+            elif kind == "fine":
+                cell["charged_fines"] -= amount
+            elif kind == "bonus":
+                cell["bonus"] += amount
+            elif kind == "refund":
+                cell["refunded"] -= amount
+        return out
+
+    async def location_money_by_day(self, location, since, until):
+        out = []
+        day = since
+        while day <= until:
+            own = [x for x in self.ledger_ if x["created_at"].date() == day
+                   and self._entry_point(x) == (location or None)]
+            out.append({"day": day,
+                        "paid": sum((Decimal(x["amount"]) for x in own
+                                     if x["kind"] == "payment"), Decimal(0)),
+                        "charged": -sum((Decimal(x["amount"]) for x in own
+                                         if x["kind"] == "charge"), Decimal(0))})
+            day += timedelta(days=1)
+        return out
+
+    async def debt_by_location(self):
+        out: dict = {}
+        for client_id in {x["client_id"] for x in self.ledger_}:
+            balance = self._balance(client_id)
+            if balance >= 0:
+                continue
+            cell = out.setdefault(self._last_rental_point(client_id),
+                                  {"clients": 0, "debt": Decimal(0)})
+            cell["clients"] += 1
+            cell["debt"] -= balance
+        return out
+
+    async def rentals_by_location(self, since, until):
+        from datetime import time as _time
+        out: dict = {}
+
+        def cell(key):
+            return out.setdefault(key, {"issued": 0, "first_periods": 0,
+                                        "renewals": 0, "active": 0})
+
+        for r in self.rentals_.values():
+            key = r.get("location") or None
+            start = datetime.combine(r["started_on"], _time.min, tzinfo=since.tzinfo)
+            if since <= start < until:
+                cell(key)["issued"] += 1
+            if r["status"] == "active":
+                cell(key)["active"] += 1
+        for x in self.ledger_:
+            if x["kind"] != "charge" or not since <= x["created_at"] < until:
+                continue
+            r = self.rentals_.get(x.get("rental_id"))
+            if r is None:
+                continue
+            row = cell(r.get("location") or None)
+            if x.get("period_from") is not None:
+                if x["period_from"] == r["started_on"]:
+                    row["first_periods"] += 1
+                elif x["period_from"] > r["started_on"]:
+                    row["renewals"] += 1
+        return out
+
+    async def service_by_location(self, since, until):
+        out: dict = {}
+
+        def cell(key):
+            return out.setdefault(key, {"orders": 0, "client_orders": 0,
+                                        "revenue": Decimal(0), "cost": Decimal(0),
+                                        "parts_cost": Decimal(0), "repairs": 0,
+                                        "repair_cost": Decimal(0)})
+
+        for o in self.orders_.values():
+            if (o["status"] != "done" or not o.get("closed_at")
+                    or not since <= o["closed_at"] < until):
+                continue
+            row = cell(o.get("location") or None)
+            row["orders"] += 1
+            if o["payer"] == "client":
+                row["client_orders"] += 1
+                if o.get("paid_at") is not None:
+                    row["revenue"] += Decimal(o["total"])
+            row["cost"] += Decimal(o["cost"])
+            row["parts_cost"] += sum((Decimal(i["parts_cost"]) * crm_logic.item_qty(i)
+                                      for i in self.order_items_
+                                      if i["order_id"] == o["id"]), Decimal(0))
+        by_order = {o.get("log_id") for o in self.orders_.values() if o.get("log_id")}
+        for x in self.bike_log_:
+            if (x["kind"] != "repair" or x["id"] in by_order
+                    or not since <= x["created_at"] < until):
+                continue
+            row = cell(self._location_at(x["bike_id"], x["created_at"]))
+            row["repairs"] += 1
+            row["repair_cost"] += Decimal(str(x.get("cost") or 0))
+        return out
+
+    async def cash_by_location(self, since, until):
+        out: dict = {}
+        for x in self.ledger_:
+            if (x["kind"] not in ("payment", "refund") or x.get("method") != "cash"
+                    or not since <= x["created_at"] < until):
+                continue
+            if x.get("shift_id") is not None:
+                key = (self.shifts_.get(x["shift_id"]) or {}).get("location") or None
+            else:
+                then = [s for s in self.shifts_.values()
+                        if s["opened_at"] <= x["created_at"]
+                        < (s.get("closed_at") or self._now())]
+                key = (then[0].get("location") or None) if len(then) == 1 else None
+            out[key] = out.get(key, Decimal(0)) + Decimal(x["amount"])
         return out
 
     # ─────────────────────── настройки и приглашения ───────────────────────
@@ -1676,7 +1901,8 @@ class FakeCrm:
         return row_id
 
     async def swap_rental_bike(self, rental_id, *, old_bike_id, new_bike_id,
-                               old_status, mileage_old, mileage_new, reason, today, by):
+                               old_status, mileage_old, mileage_new, reason, today, by,
+                               swap_location=None):
         rental = self.rentals_.get(rental_id)
         if rental is None or rental["status"] != "active":
             return False
@@ -1698,8 +1924,12 @@ class FakeCrm:
             bike["status"] = old_status
             if mileage_old is not None:
                 bike["mileage_km"] = max(bike.get("mileage_km") or 0, int(mileage_old))
+            at = self._now()
             if before != old_status:
-                self._log_status(old_bike_id, before, old_status, by)
+                self._log_status(old_bike_id, before, old_status, by, at)
+            place = next((x for x in (swap_location, rental.get("location"))
+                          if x is not None), bike.get("location"))
+            self._place_bike(old_bike_id, place, by, at)
         await self.add_rental_bike(rental_id, bike_id=new_bike_id, issued_on=today,
                                    mileage_start=mileage_new, reason=reason,
                                    created_by=by)
@@ -1709,10 +1939,15 @@ class FakeCrm:
         if mileage_new is not None:
             new_bike["mileage_km"] = max(new_bike.get("mileage_km") or 0,
                                          int(mileage_new))
+        at = self._now()
         if before != "rented":
-            self._log_status(new_bike_id, before, "rented", by)
+            self._log_status(new_bike_id, before, "rented", by, at)
+        if rental.get("location") is not None:
+            self._place_bike(new_bike_id, rental["location"], by, at)
         rental.update(bike_id=new_bike_id, mileage_start=mileage_new or 0,
                       mileage_end=None)
+        if rental.get("location") is None:
+            rental["location"] = new_bike.get("location")
         return True
 
     # ─────────────────── закупки основных средств ───────────────────
@@ -1791,8 +2026,42 @@ class FakeCrm:
         return loc_id
 
     async def update_location(self, location_id, **fields):
+        if "name" in fields:
+            # Как LOCATION_FIELDS в базе: имя - только каскадом.
+            raise ValueError("недопустимые колонки: ['name']")
         if location_id in self.locations_:
             self.locations_[location_id].update(fields)
+
+    async def rename_location(self, location_id, new_name):
+        """Каскад по всем текстовым ссылкам, как db.rename_location; журнал
+        мест переезда не пишет, свои строки переименовывает."""
+        loc = self.locations_.get(location_id)
+        if loc is None:
+            return None
+        old = loc["name"]
+        if old == new_name:
+            return True
+        if any(x["name"] == new_name and x["id"] != location_id
+               for x in self.locations_.values()):
+            return False
+        # cash_shifts_one_open: открытая смена под новым именем уже есть.
+        open_at = {(x.get("location") or "") for x in self.shifts_.values()
+                   if x["status"] == "open"}
+        if old in open_at and new_name in open_at:
+            return False
+        loc["name"] = new_name
+        for rows in (self.bikes_.values(), self.batteries_.values(),
+                     self.shifts_.values(), self.takes_.values(),
+                     self.rentals_.values(), self.orders_.values(),
+                     self.staff.values()):
+            for row in rows:
+                if row.get("location") == old:
+                    row["location"] = new_name
+        for row in self.location_log_:
+            for col in ("from_location", "to_location"):
+                if row[col] == old:
+                    row[col] = new_name
+        return True
 
     async def bike_models(self, *, active_only=False):
         rows = []
@@ -2308,11 +2577,22 @@ class FakeCrm:
         return sorted(rows, key=lambda s: s["opened_at"])[0] if rows else None
 
     async def cash_shift_for(self, by):
+        """Своя смена, иначе смена своей точки, иначе самая ранняя."""
         if by:
             mine = [dict(x) for x in self.shifts_.values()
                     if x["status"] == "open" and x.get("opened_by") == by]
             if mine:
-                return sorted(mine, key=lambda s: s["opened_at"])[0]
+                return sorted(mine, key=lambda s: (s["opened_at"], s["id"]))[0]
+            person = sorted((s for s in self.staff.values()
+                             if f"staff:{s['login']}" == by
+                             or (s.get("tg_id") is not None and f"tg:{s['tg_id']}" == by)),
+                            key=lambda s: (not s["active"], s["id"]))
+            home = person[0].get("location") if person else None
+            if home is not None:
+                at_home = [dict(x) for x in self.shifts_.values()
+                           if x["status"] == "open" and x.get("location") == home]
+                if at_home:
+                    return sorted(at_home, key=lambda s: (s["opened_at"], s["id"]))[0]
         return await self.open_shift()
 
     async def open_shift_at(self, location):
@@ -2916,7 +3196,8 @@ class FakeCrm:
                 "period_days": t["period_days"] if t else None,
                 "tariff_price": t["price"] if t else None,
                 "location_title": ((loc.get("public_title") or loc["name"])
-                                   if loc else None)}
+                                   if loc else None),
+                "location_name": loc["name"] if loc else None}
 
     async def create_booking(self, *, client_id, model, tariff_id, location_id,
                              wanted_on, note=None):

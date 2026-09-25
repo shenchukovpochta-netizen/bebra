@@ -41,8 +41,16 @@
   <p class="muted"><span class="dot rented"></span> в аренде ·
     <span class="dot parked"></span> на точке ·
     <span class="dot offline"></span> молчит ·
-    <span class="dot alarm"></span> тревога.
+    <span class="dot alarm"></span> тревога{% if places %} ·
+    <span class="map-place-dot"></span> точка выдачи{% endif %}.
     Данные обновляет опрос StarLine в процессе бота; панель в интернет не ходит.</p>
+  {# Точки списком со ссылками: без подложки карты (нет сети, нет JS) их
+     координаты остаются под рукой. #}
+  {% if places %}
+  <ul class="inline">
+    {% for p in places %}<li><a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.name }}</a>{% if p.address %} <small class="muted">{{ p.address }}</small>{% endif %}</li>{% endfor %}
+  </ul>
+  {% endif %}
 </section>
 
 <section class="card">

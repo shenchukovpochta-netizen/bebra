@@ -39,7 +39,7 @@
       <td class="nowrap">{{ b.wanted_on|dmy }}</td>
       <td>{{ b.full_name }}<br><small class="muted">{{ b.phone }}</small></td>
       <td>{{ booking_line(b) }}</td>
-      <td><a class="btn" href="/issue?client={{ b.client_id }}&model={{ (b.model or '')|urlencode }}&tariff={{ b.tariff_id or '' }}&booking={{ b.id }}&started_on={{ b.wanted_on|iso }}">Выдать</a></td>
+      <td><a class="btn" href="{{ b.issue_url }}">Выдать</a></td>
     </tr>
     {% endfor %}
   </table>
@@ -95,8 +95,10 @@
   {% if bike %}<input type="hidden" name="bike" value="{{ bike.id }}">{% endif %}
   {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
   {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
+  {% if point %}<input type="hidden" name="location" value="{{ point }}">{% endif %}
   <div class="card">
     <h2>Модель <small class="muted">(свободные сейчас; от неё зависит цена)</small></h2>
+    {% if point %}<p class="muted">Точка выдачи — <b>{{ point }}</b>{% if booking_id %}, её выбрал клиент в заявке{% endif %}: на шаге велосипеда покажем свободные на ней.</p>{% endif %}
     {% if bike %}
       <p>Выбран велосипед <b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}. <a href="/issue?client={{ client.id }}">Выбрать другой</a></p>
     {% elif models %}
@@ -152,6 +154,7 @@
     {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
 
     <label style="margin:0;flex:1 1 200px">Поиск по номеру <input name="q" value="{{ q or '' }}" placeholder="B-03"></label>
+    <label style="margin:0;flex:0 1 220px">Точка выдачи <select name="location" onchange="this.form.submit()"><option value="">все точки</option>{% for loc in places %}<option value="{{ loc }}" {% if loc == point %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <button type="submit" class="ghost">Найти</button>
   </form>
   <form method="get" action="/issue">
@@ -159,6 +162,7 @@
     <input type="hidden" name="tariff" value="{{ tariff.id }}">
     {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
     {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
+    {% if point %}<input type="hidden" name="location" value="{{ point }}">{% endif %}
     {% if bikes %}
     <p class="muted">Первым стоит тот, что простаивает дольше всех: выдавайте его — это и есть снижение простоя.</p>
     <div class="choices">
@@ -171,13 +175,14 @@
       </label>
       {% endfor %}
     </div>
+    {% if elsewhere %}<p class="muted">На других точках свободных этой модели ещё {{ elsewhere }} — выберите «все точки», если клиенту удобно забрать там.</p>{% endif %}
     <div class="issue-bar">
-      <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}">← Назад</a>
+      <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}{% if point %}&location={{ point|urlencode }}{% endif %}">← Назад</a>
       <span class="spacer"></span>
       <button type="submit">Далее →</button>
     </div>
     {% else %}
-    <p class="flash err">{% if q %}Ничего не найдено по «{{ q }}».{% else %}Свободных велосипедов этой модели нет.{% endif %} <a href="/issue?client={{ client.id }}&tariff={{ tariff.id }}">Выбрать другую модель</a></p>
+    <p class="flash err">{% if q %}Ничего не найдено по «{{ q }}».{% elif point %}На точке «{{ point }}» свободных этой модели нет{% if elsewhere %}, на других точках — {{ elsewhere }}: выберите «все точки»{% endif %}.{% else %}Свободных велосипедов этой модели нет.{% endif %} <a href="/issue?client={{ client.id }}&tariff={{ tariff.id }}{% if point %}&location={{ point|urlencode }}{% endif %}">Выбрать другую модель</a></p>
     {% endif %}
   </form>
 </div>
@@ -196,6 +201,10 @@
     <dl>
       <dt>Клиент</dt><dd>{{ client.full_name }} · {{ client.phone }}</dd>
       <dt>Велосипед</dt><dd><b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}</dd>
+      {# Точка аренды - снимок выдачи: по ней считаются выручка и чек точки,
+         и велосипед числится на ней, пока аренда идёт. #}
+      <dt>Точка выдачи</dt><dd><select name="location" style="max-width:260px">{% if not point %}<option value="">не указана</option>{% endif %}{% for loc in issue_places %}<option value="{{ loc }}" {% if loc == point %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select>
+        <span class="muted">по ней считаются выручка и чек точки</span></dd>
       <dt>Тариф</dt><dd>{{ tariff.name }} — {{ money(tariff.price) }} / {{ tariff.period_days }} дн. <span class="muted">({{ money(per_day) }} в день)</span></dd>
       <dt>Итого за период</dt><dd><b id="period-total" data-base="{{ tariff.price }}">{{ money(tariff.price) }}</b>
         <span class="muted">велосипед плюс отмеченные доп. аккумуляторы</span></dd>
@@ -260,7 +269,7 @@
   {% endif %}
   </div>
   <div class="issue-bar">
-    <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}&model={{ bike.model|urlencode }}">← Назад</a>
+    <a class="btn ghost" href="/issue?client={{ client.id }}&tariff={{ tariff.id }}&model={{ bike.model|urlencode }}{% if point %}&location={{ point|urlencode }}{% endif %}">← Назад</a>
     <span class="spacer"></span>
     <button type="submit">✓ Оформить выдачу</button>
   </div>
@@ -274,6 +283,7 @@
   <input type="hidden" name="bike" value="{{ bike.id }}">
   <input type="hidden" name="started_on" value="{{ started_on|iso }}">
   {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
+  {% if point %}<input type="hidden" name="location" value="{{ point }}">{% endif %}
   <label style="margin:0">Проверить промокод <input name="promo" value="{{ promo_code }}" placeholder="ВЕСНА" style="text-transform:uppercase"></label>
   <button type="submit" class="ghost">Проверить</button>
   <span class="muted">Действующие акции без кода подставляются сами.</span>

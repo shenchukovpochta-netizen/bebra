@@ -12,7 +12,7 @@ import asyncio
 import logging
 
 from .. import logic, texts
-from ..crm import company
+from ..crm import company, points
 from . import handlers, parse
 from . import keyboards as kb
 from .client import MaxAPIError
@@ -111,6 +111,10 @@ async def _dispatch_dialog(ctx: Ctx, update: dict, info: dict) -> None:
     # настройка владельца тут не работала вовсе. TTL бережёт базу от
     # запроса на каждый апдейт.
     await company.refresh(ctx.crm)
+    # Точки выдачи - тем же снимком, что и в Telegram. Ветки частых вопросов
+    # в MAX пока нет, но снимок и здесь не должен оставаться пустым: первый
+    # же ответ про адрес назвал бы зашитые точки вместо справочника.
+    await points.refresh(ctx.crm)
     row = await ctx.db.upsert_user(user_id, info.get("username"))
     user = dict(row)
 

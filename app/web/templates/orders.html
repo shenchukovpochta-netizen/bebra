@@ -7,10 +7,14 @@
   <form method="get" class="search">
     <select name="status"><option value="">все статусы</option>{% for code, label in ORDER_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
     <select name="payer"><option value="">любой плательщик</option>{% for code, label in PAYERS.items() %}<option value="{{ code }}" {% if payer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <select name="location" aria-label="Точка ремонта"><option value="">любая точка</option>
+      {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+      <option value="none" {% if location == 'none' %}selected{% endif %}>{{ NO_POINT_TITLE }}</option>
+    </select>
     <button type="submit">Показать</button>
   </form>
   {% if can_edit(staff, 'service') %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
-  {% set bike_q = '&bike=' ~ bike_filter.id if bike_filter else '' %}
+  {% set bike_q = ('&bike=' ~ bike_filter.id if bike_filter else '') ~ (('&location=' ~ (location|urlencode)) if location else '') %}
   <a class="btn ghost" href="/orders.xlsx?status={{ status }}&payer={{ payer }}{{ bike_q }}">Excel</a>
   <a class="btn ghost" href="/orders.csv?status={{ status }}&payer={{ payer }}{{ bike_q }}">CSV</a>
 </div>
@@ -34,6 +38,7 @@
     {{ list.th('№', 'no', tools) }}
     {{ list.th('Открыт', 'opened', tools) }}
     {{ list.th('Объект', 'bike', tools) }}
+    {{ list.th('Точка', 'location', tools, 'opt') }}
     {{ list.th('Статус', 'status', tools) }}
     {{ list.th('Плательщик', 'payer', tools) }}
     {{ list.th('Клиент', 'client', tools) }}
@@ -46,6 +51,7 @@
     <td><a href="/orders/{{ r.id }}">{{ r.no }}</a></td>
     <td>{{ r.opened_at|dmy }}</td>
     <td>{% if r.bike_id %}№ {{ r.bike_code }} {{ r.bike_model }}{% else %}{{ r.object_note or '—' }}{% endif %}</td>
+    <td class="opt">{{ r.location or '—' }}</td>
     <td><span class="tag order-{{ r.status }}">{{ ORDER_STATUSES[r.status] }}</span></td>
     <td>{{ PAYERS[r.payer] }}</td>
     <td>{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.client_name }}</a>{% else %}{{ r.client_name or '' }}{% endif %}</td>
@@ -53,12 +59,12 @@
     <td class="num">{{ r.days }}</td>
     {% if money_ok %}<td class="num">{{ money(r.total if r.status == 'done' else r.estimate) }}</td>{% endif %}
   </tr>
-  {% else %}<tr><td colspan="9" class="muted">Нарядов нет.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="10" class="muted">Нарядов нет.</td></tr>{% endfor %}
   {% if money_ok and unpaid.count %}
-  <tr class="total"><td colspan="8">Закрыто, но не оплачено клиентами · {{ unpaid.count }}</td>
+  <tr class="total"><td colspan="9">Закрыто, но не оплачено клиентами · {{ unpaid.count }}</td>
     <td class="num bad">{{ money(unpaid.sum) }}</td></tr>
   {% endif %}
-  {{ list.footer(tools, '/orders', 9,
+  {{ list.footer(tools, '/orders', 10,
                  ('на сумму ' ~ money(total)) if money_ok and total else '') }}
 </table>
 </div>

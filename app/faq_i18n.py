@@ -41,6 +41,10 @@ CONTACT = "https://t.me/arenda_velo_kazan"
 # Ключи: pick/menu/contact/change/after_hours/handoff/your_rate,
 # week/weeks2/month + price_* - для составного ответа о тарифах,
 # t_<КОД> - заголовок темы в меню, a_<КОД> - ответ по теме.
+# p_<КОД> - тот же ответ, собранный из справочника точек: {points} - их
+# список, его подставляет faq.answer(). Ни числа точек, ни часов в тексте
+# нет: список приходит из панели, и режим у каждой точки в нём свой
+# (см. faq.POINT_ANSWERS).
 
 T: dict[str, dict[str, str]] = {
 
@@ -101,7 +105,7 @@ T: dict[str, dict[str, str]] = {
     "a_BATT_3": "A third battery is rented in addition to your plan — I'll "
                 "check the current price with the manager. Write for how "
                 "long you need it.",
-    "a_RETURN": "We take the bike back any day 10:00–19:00 at either point "
+    "a_RETURN": "We take the bike back any day 10:00–19:00 at any point "
                 "— just tell us in advance when you'll come. About money: "
                 "the bike is reserved for you for the whole paid term, so "
                 "we do not recalculate unused days and do not carry them "
@@ -143,6 +147,35 @@ T: dict[str, dict[str, str]] = {
                 "(50 000 ₽ total) or 4 months at 3 500 ₽/week (55 000 ₽ "
                 "total). Pay like rent; after the last payment the bike is "
                 "yours. I'll pass it to the manager.",
+    "p_ADDR": "Our points:\n\n"
+              "{points}\n\n"
+              "Which point is more convenient for you?",
+    "p_HOURS": "Working hours of our points:\n\n"
+               "{points}\n\n"
+               "Come during working hours — we'll be waiting for you.",
+    "p_BATT_SWAP": "We swap batteries at each of our points:\n"
+                   "{points}\n"
+                   "Tell me which point you are going to — I'll check with the "
+                   "admin whether charged ones are available.",
+    "p_LEAD": "Yes, we have e-bikes for couriers — Truck+ and Kugoo V3 Pro, "
+              "all with 2 batteries, a charger and a phone holder. No deposit, "
+              "registration by passport.\n"
+              "Our points:\n"
+              "{points}\n"
+              "What term do you plan and which point is more convenient?",
+    "p_EXT_REP": "Yes, we repair not only our own vehicles: e-bikes, e-scooters, "
+                 "trikes, e-motorcycles and batteries. Bring it to any point "
+                 "during its working hours:\n"
+                 "{points}\n"
+                 "The mechanic will run diagnostics and name the exact price "
+                 "before starting — nothing is done without your consent. "
+                 "Describe briefly what is wrong and attach a photo.",
+    "p_BRK_MECH": "Got it, we'll sort it out. Please record a short video of how "
+                  "the bike behaves (what does not work, what is on the display) "
+                  "and tell me which point is closer:\n"
+                  "{points}\n"
+                  "Repair is priority for renters; if it takes more than a day, we "
+                  "give a replacement bike.",
 },
 
 "uz": {
@@ -246,6 +279,35 @@ T: dict[str, dict[str, str]] = {
                 "haftasiga 6 250 ₽ (jami 50 000 ₽) yoki 4 oy — haftasiga "
                 "3 500 ₽ (jami 55 000 ₽). Ijara kabi toʻlaysiz, oxirgi "
                 "toʻlovdan soʻng velosiped sizniki. Menejerga yetkazaman.",
+    "p_ADDR": "Bizning punktlarimiz:\n\n"
+              "{points}\n\n"
+              "Qaysi punkt sizga qulay?",
+    "p_HOURS": "Punktlarimizning ish vaqti:\n\n"
+               "{points}\n\n"
+               "Ish vaqtida keling — sizni kutamiz.",
+    "p_BATT_SWAP": "AKB almashtirishni har bir punktimizda qilamiz:\n"
+                   "{points}\n"
+                   "Qaysi punktga borishingizni yozing — zaryadlanganlari "
+                   "bor-yoʻqligini administratordan aniqlayman.",
+    "p_LEAD": "Ha, kuryerlar uchun elektrovelosipedlar bor — Truck+ va Kugoo "
+              "V3 Pro, hammasi 2 ta AKB, zaryadlovchi va telefon ushlagichi "
+              "bilan. Garov yoʻq, rasmiylashtirish pasport boʻyicha.\n"
+              "Punktlarimiz:\n"
+              "{points}\n"
+              "Qancha muddatga va qaysi punkt qulay?",
+    "p_EXT_REP": "Ha, faqat oʻzimiznikini emas: elektrovelosiped, elektrosamokat, "
+                 "trisikl, elektromototsikl va AKBlarni taʼmirlaymiz. Istalgan "
+                 "punktga uning ish vaqtida olib keling:\n"
+                 "{points}\n"
+                 "Usta diagnostika qilib, ishni boshlashdan oldin aniq narxni "
+                 "aytadi — roziligingizsiz hech narsa qilinmaydi. Muammoni "
+                 "qisqacha yozing va foto qoʻshing.",
+    "p_BRK_MECH": "Tushunarli, hal qilamiz. Velosiped oʻzini qanday tutayotgani "
+                  "haqida qisqa video yozing (nima ishlamayapti, displeyda nima "
+                  "bor) va qaysi punkt yaqinligini ayting:\n"
+                  "{points}\n"
+                  "Ijarachilar uchun taʼmirlash ustuvor; ish bir kundan uzoq davom "
+                  "etsa, almashtirish velosiped beramiz.",
 },
 
 "tk": {
@@ -347,6 +409,35 @@ T: dict[str, dict[str, str]] = {
                 "(jemi 50 000 ₽) ýa-da 4 aý — hepdede 3 500 ₽ (jemi "
                 "55 000 ₽). Kärende ýaly töleýärsiňiz, soňky tölegden "
                 "soň welosiped siziňki. Menejere gowşuraryn.",
+    "p_ADDR": "Biziň nokatlarymyz:\n\n"
+              "{points}\n\n"
+              "Haýsy nokat size amatly?",
+    "p_HOURS": "Nokatlarymyzyň iş wagty:\n\n"
+               "{points}\n\n"
+               "Iş wagtynda geliň — size garaşýarys.",
+    "p_BATT_SWAP": "AKB çalyşmagy her nokadymyzda edýäris:\n"
+                   "{points}\n"
+                   "Haýsy nokada barjagyňyzy ýazyň — zarýadly AKB barmy-ýokmy, "
+                   "administratordan anyklaryn.",
+    "p_LEAD": "Hawa, kurýerler üçin elektrowelosipedler bar — Truck+ we Kugoo "
+              "V3 Pro, hemmesi 2 AKB, zarýad beriji we telefon saklaýjy bilen. "
+              "Girew ýok, resmileşdirme pasport boýunça.\n"
+              "Nokatlarymyz:\n"
+              "{points}\n"
+              "Näçe möhlete we haýsy nokat amatly?",
+    "p_EXT_REP": "Hawa, diňe özümiziňkini däl: elektrowelosiped, elektrosamokat, "
+                 "trisikl, elektromotosikl we AKB-lary abatlaýarys. Islendik "
+                 "nokada onuň iş wagtynda getiriň:\n"
+                 "{points}\n"
+                 "Ussa diagnostika geçirip, işe başlamazdan öň takyk bahany aýdar "
+                 "— razylygyňyzsyz hiç zat edilmeýär. Meseläni gysgaça ýazyň we "
+                 "surat goşuň.",
+    "p_BRK_MECH": "Düşnükli, çözeris. Welosipediň özüni nähili alyp barýandygy "
+                  "barada gysga wideo ýazyň (näme işlemeýär, displeýde näme bar) "
+                  "we haýsy nokat ýakyndygyny aýdyň:\n"
+                  "{points}\n"
+                  "Kärendeçiler üçin abatlaýyş ileri tutulýar; iş bir günden uzaga "
+                  "çekse, çalşyk welosiped bereris.",
 },
 
 "ar": {
@@ -441,6 +532,33 @@ T: dict[str, dict[str, str]] = {
                 "50 000) أو 4 أشهر بـ 3 500 روبل أسبوعيًا (الإجمالي "
                 "55 000). تدفع كما تدفع الإيجار، وبعد آخر دفعة تصبح "
                 "الدراجة ملكك. سأنقل الطلب إلى المدير.",
+    "p_ADDR": "نقاطنا:\n\n"
+              "{points}\n\n"
+              "أي نقطة أنسب لك؟",
+    "p_HOURS": "مواعيد عمل نقاطنا:\n\n"
+               "{points}\n\n"
+               "تعال في مواعيد العمل — ننتظرك.",
+    "p_BATT_SWAP": "نبدل البطاريات في كل نقطة من نقاطنا:\n"
+                   "{points}\n"
+                   "اكتب إلى أي نقطة ستذهب — سأتأكد من المشرف إن كانت هناك بطاريات "
+                   "مشحونة.",
+    "p_LEAD": "نعم، لدينا دراجات كهربائية للمندوبين — Truck+ وKugoo V3 Pro، "
+              "كلها ببطاريتين وشاحن وحامل هاتف. لا يوجد تأمين، والتسجيل بجواز "
+              "السفر.\n"
+              "نقاطنا:\n"
+              "{points}\n"
+              "ما المدة التي تخطط لها وأي نقطة أنسب؟",
+    "p_EXT_REP": "نعم، نصلح ليس فقط دراجاتنا: الدراجات الكهربائية والسكوترات "
+                 "والدراجات ثلاثية العجلات والدراجات النارية الكهربائية "
+                 "والبطاريات. أحضرها إلى أي نقطة في مواعيد عملها:\n"
+                 "{points}\n"
+                 "سيفحصها الفني ويحدد السعر الدقيق قبل بدء العمل — لا شيء يُنفَّذ "
+                 "دون موافقتك. صف المشكلة باختصار وأرفق صورة.",
+    "p_BRK_MECH": "فهمت، سنحل الأمر. صوِّر فيديو قصيرًا يوضح حالة الدراجة (ما الذي "
+                  "لا يعمل وما يظهر على الشاشة) وأخبرنا أي نقطة أقرب إليك:\n"
+                  "{points}\n"
+                  "الإصلاح للمستأجرين له أولوية؛ وإذا استغرق أكثر من يوم نعطيك "
+                  "دراجة بديلة.",
 },
 
 "fa": {
@@ -539,6 +657,35 @@ T: dict[str, dict[str, str]] = {
                 "(جمعاً 50 000) یا چهار ماه هفته‌ای 3 500 روبل (جمعاً "
                 "55 000). مثل اجاره پرداخت می‌کنید؛ بعد از آخرین قسط "
                 "دوچرخه مال شماست. به مدیر منتقل می‌کنم.",
+    "p_ADDR": "شعبه‌های ما:\n\n"
+              "{points}\n\n"
+              "کدام شعبه برایتان راحت‌تر است؟",
+    "p_HOURS": "ساعت کاری شعبه‌های ما:\n\n"
+               "{points}\n\n"
+               "در ساعت کاری بیایید — منتظرتان هستیم.",
+    "p_BATT_SWAP": "تعویض باتری در همه شعبه‌های ما انجام می‌شود:\n"
+                   "{points}\n"
+                   "بنویسید به کدام شعبه می‌روید — از مسئول شعبه می‌پرسم باتری "
+                   "شارژشده موجود است یا نه.",
+    "p_LEAD": "بله، دوچرخه برقی برای پیک‌ها داریم — Truck+ و Kugoo V3 Pro، همه "
+              "با دو باتری، شارژر و نگهدارنده گوشی. ودیعه ندارد، ثبت با "
+              "پاسپورت.\n"
+              "شعبه‌های ما:\n"
+              "{points}\n"
+              "برای چه مدتی می‌خواهید و کدام شعبه نزدیک‌تر است؟",
+    "p_EXT_REP": "بله، فقط مال خودمان را تعمیر نمی‌کنیم: دوچرخه برقی، اسکوتر "
+                 "برقی، سه‌چرخه، موتور برقی و باتری. در ساعت کاری به هر شعبه "
+                 "بیاورید:\n"
+                 "{points}\n"
+                 "تعمیرکار عیب‌یابی می‌کند و قیمت دقیق را قبل از شروع کار می‌گوید "
+                 "— بدون رضایت شما کاری انجام نمی‌شود. مشکل را کوتاه بنویسید و "
+                 "عکس پیوست کنید.",
+    "p_BRK_MECH": "متوجه شدم، حلش می‌کنیم. یک ویدیوی کوتاه بگیرید که دوچرخه چطور "
+                  "رفتار می‌کند (چه چیزی کار نمی‌کند، روی نمایشگر چیست) و بگویید "
+                  "کدام شعبه نزدیک‌تر است:\n"
+                  "{points}\n"
+                  "تعمیر برای مستأجران اولویت دارد؛ اگر بیش از یک روز طول بکشد، "
+                  "دوچرخه جایگزین می‌دهیم.",
 },
 
 "hi": {
@@ -639,6 +786,35 @@ T: dict[str, dict[str, str]] = {
                 "50 000 ₽) या 4 महीने 3 500 ₽/सप्ताह (कुल 55 000 ₽)। "
                 "किराये की तरह चुकाएँ; आख़िरी किस्त के बाद साइकिल आपकी। "
                 "मैनेजर तक पहुँचा दूँगा।",
+    "p_ADDR": "हमारे पॉइंट:\n\n"
+              "{points}\n\n"
+              "आपके लिए कौन सा पॉइंट सुविधाजनक है?",
+    "p_HOURS": "हमारे पॉइंट के काम के घंटे:\n\n"
+               "{points}\n\n"
+               "काम के घंटों में आइए — हम आपका इंतज़ार करेंगे।",
+    "p_BATT_SWAP": "बैटरी बदलना हमारे हर पॉइंट पर होता है:\n"
+                   "{points}\n"
+                   "लिखें किस पॉइंट पर जाएँगे — एडमिन से पता करूँगा कि चार्ज "
+                   "बैटरियाँ हैं या नहीं।",
+    "p_LEAD": "हाँ, कूरियर के लिए ई-बाइक हैं — Truck+ और Kugoo V3 Pro, सभी 2 "
+              "बैटरी, चार्जर और फ़ोन होल्डर के साथ। कोई जमानत नहीं, पासपोर्ट "
+              "से पंजीकरण।\n"
+              "हमारे पॉइंट:\n"
+              "{points}\n"
+              "कितने समय के लिए चाहिए और कौन सा पॉइंट सुविधाजनक है?",
+    "p_EXT_REP": "हाँ, सिर्फ़ अपनी नहीं: ई-बाइक, ई-स्कूटर, ट्राइक, ई-मोटरसाइकिल "
+                 "और बैटरियाँ भी सुधारते हैं। किसी भी पॉइंट पर उसके काम के घंटों "
+                 "में लाइए:\n"
+                 "{points}\n"
+                 "मिस्त्री जाँच करके काम शुरू करने से पहले सटीक दाम बताएगा — आपकी "
+                 "सहमति के बिना कुछ नहीं होता। समस्या संक्षेप में लिखें और फ़ोटो "
+                 "जोड़ें।",
+    "p_BRK_MECH": "समझ गया, हल करेंगे। एक छोटा वीडियो बनाइए कि साइकिल कैसा बर्ताव "
+                  "कर रही है (क्या काम नहीं करता, डिस्प्ले पर क्या है) और बताइए "
+                  "कौन सा पॉइंट नज़दीक है:\n"
+                  "{points}\n"
+                  "किरायेदारों की मरम्मत प्राथमिकता से होती है; एक दिन से ज़्यादा "
+                  "लगे तो बदली साइकिल देंगे।",
 },
 
 "tt": {
@@ -687,6 +863,12 @@ T: dict[str, dict[str, str]] = {
     "a_EXT_REP": "Әйе, без үз техникабызны гына түгел ремонтлыйбыз: электровелосипед, электросамокат, трицикл, электромотоцикл һәм аккумуляторлар.\nТеләсә кайсы пунктка китерегез, көн саен 10:00–19:00, ялсыз:\n📍 Адоратский урамы, 11А\n📍 Павлюхин урамы, 97А — «Сокол» ГСК, 9 нчы бокс\nОста диагностика ясый һәм эш башланганчы төгәл бәяне әйтә — сезнең ризалыгыгыздан башка бернәрсә дә эшләмибез.\nТехника белән нәрсә булганын кыскача языгыз һәм фото беркетегез — остага тапшырам.",
     "a_REP_STATUS": "Велосипедыгыз кайсы этапта икәнен остадан ачыклыйм.\nЗинһар, нинди велосипед һәм кайчан ремонтка тапшырганыгызны языгыз — шулай тизрәк табам.",
     "a_BUYOUT": "🚲 Велосипедны сатып алып була:\n— шунда ук: 1 АКБ белән — 35 000 ₽, 2 АКБ белән — 45 000 ₽;\n— банксыз һәм беренче кертемсез бүлеп түләүгә (2 АКБ белән): 2 ай атнасына 6 250 ₽ (барлыгы 50 000 ₽) яки 4 ай атнасына 3 500 ₽ (барлыгы 55 000 ₽).\nАренда кебек түлисез, соңгы түләүне керткәч — велосипед сезнеке. Менеджерга тапшырам, ул рәсмиләштерә.",
+    "p_ADDR": "Безнең пунктлар:\n\n{points}\n\nСезгә кайсы пункт уңайлырак?",
+    "p_HOURS": "Пунктларыбызның эш вакыты:\n\n{points}\n\nЭш вакытында килегез — сезне көтәбез.",
+    "p_BATT_SWAP": "АКБ алыштыруны һәр пунктыбызда башкарабыз:\n{points}\nКорылган АКБ барлыгын пункт администраторыннан ачыклыйм — кайсы пунктка барачагыгызны языгыз, җавап белән кайтам.",
+    "p_LEAD": "Әйе, курьерлар өчен электровелосипедлар бар — Truck+ һәм Kugoo V3 Pro, барысы да 2 АКБ, корылма һәм телефон тоткычы белән. Залог юк, паспорт буенча рәсмиләштерәбез.\nПунктлар:\n{points}\nӘйтегез әле: ничә вакытка планлаштырасыз һәм кайсы пунктка килү уңайлырак?",
+    "p_EXT_REP": "Әйе, без үз техникабызны гына түгел ремонтлыйбыз: электровелосипед, электросамокат, трицикл, электромотоцикл һәм аккумуляторлар.\nТеләсә кайсы пунктка аның эш вакытында китерегез:\n{points}\nОста диагностика ясый һәм эш башланганчы төгәл бәяне әйтә — сезнең ризалыгыгыздан башка бернәрсә дә эшләмибез.\nТехника белән нәрсә булганын кыскача языгыз һәм фото беркетегез — остага тапшырам.",
+    "p_BRK_MECH": "Аңладым, хәл итәрбез. Зинһар, кыска видео төшерегез — велосипед үзен ничек тота, нәрсә эшләми һәм дисплейда нәрсә яна. Һәм кайсы пунктка килү якынрак икәнен әйтегез:\n{points}\nАрендаторлар өчен ремонт чиратсыз, ә эш бер көннән артыкка сузылса — алмаш велосипед бирәбез.",
 },
 
 "cv": {
@@ -789,6 +971,35 @@ T: dict[str, dict[str, str]] = {
                 "50 000 ₽) е 4 уйӑх — эрнере 3 500 ₽ (пӗтӗмпе 55 000 ₽). "
                 "Аренда пек тӳлетӗр, юлашки тӳлев хыҫҫӑн велосипед "
                 "сирӗн. Менеджера паратӑп.",
+    "p_ADDR": "Пирӗн пунктсем:\n\n"
+              "{points}\n\n"
+              "Сире хӑш пункт меллӗрех?",
+    "p_HOURS": "Пирӗн пунктсен ӗҫ вӑхӑчӗ:\n\n"
+               "{points}\n\n"
+               "Ӗҫ вӑхӑтӗнче килӗр — сире кӗтетпӗр.",
+    "p_BATT_SWAP": "АКБ улӑштарассине пирӗн кашни пунктра тӑватпӑр:\n"
+                   "{points}\n"
+                   "Хӑш пункта каяссине ҫырӑр — зарядка тунӑ АКБ пуррине "
+                   "администраторран ыйтса пӗлетӗп.",
+    "p_LEAD": "Ҫапла, курьерсем валли электровелосипедсем пур — Truck+ тата "
+              "Kugoo V3 Pro, пурте 2 АКБ-па, зарядкӑпа тата телефон "
+              "тытмаллипе. Залог ҫук, паспортпа ҫырӑнатӑр.\n"
+              "Пирӗн пунктсем:\n"
+              "{points}\n"
+              "Мӗн чухлӗ вӑхӑта тата хӑш пункт меллӗрех?",
+    "p_EXT_REP": "Ҫапла, хамӑрӑнне ҫеҫ мар юсатпӑр: электровелосипед, "
+                 "электросамокат, трицикл, электромотоцикл тата АКБ. Кирек хӑш "
+                 "пункта унӑн ӗҫ вӑхӑтӗнче илсе килӗр:\n"
+                 "{points}\n"
+                 "Мастер диагностика тӑвать те ӗҫ пуҫличчен тӗрӗс хакне калать — "
+                 "сирӗн килӗшӳсӗр нимӗн те тумастпӑр. Мӗн пулнине кӗскен ҫырӑр, "
+                 "фото хушӑр.",
+    "p_BRK_MECH": "Ӑнлантӑм, йӗркелетпӗр. Велосипед хӑйне мӗнле тытнине кӗске "
+                  "видео ӳкерӗр (мӗн ӗҫлемест, дисплей ҫинче мӗн курӑнать) тата "
+                  "хӑш пункт ҫывӑхраххине ҫырӑр:\n"
+                  "{points}\n"
+                  "Тара илекенсемшӗн юсав васкавлӑ; ӗҫ пӗр кунран вӑрӑмрах пулсан, "
+                  "улӑштармалли велосипед паратпӑр.",
 },
 
 }

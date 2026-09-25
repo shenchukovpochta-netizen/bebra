@@ -25,7 +25,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import faq, faq_i18n, i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import inbox
+from ..crm import inbox, points
 from ..db import Database
 from ..filters import StateIs
 
@@ -60,9 +60,15 @@ def home(user: dict) -> tuple[str, object]:
 
 def reply_for(intent: faq.Intent, data: dict, cfg: Config,
               lang: str = "ru") -> str:
-    """Ответ по теме с учётом того, кто спрашивает и который час."""
+    """Ответ по теме с учётом того, кто спрашивает и который час.
+
+    Точки - снимком справочника (обновляет конвейер, middlewares.py):
+    третья точка, заведённая в панели, попадает в ответ «где вы» без
+    правки кода. Снимка нет - зашитые адреса из app/faq.py.
+    """
     return faq.answer(intent, now=datetime.now(), renter=faq.is_renter(data),
-                      plan=faq.plan_of(data), pay_url=cfg.pay_url, lang=lang)
+                      plan=faq.plan_of(data), pay_url=cfg.pay_url, lang=lang,
+                      points=points.snapshot())
 
 
 # Кнопка меню видна только зарегистрированным (у остальных нет клавиатуры

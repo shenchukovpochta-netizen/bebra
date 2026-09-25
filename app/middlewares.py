@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 from . import i18n, logic
 from . import keyboards as kb
 from .config import Config
-from .crm import company, doctemplates
+from .crm import company, doctemplates, points
 from .db import Database
 from .filters import is_service_chat, ops_topic
 from .services.crypto import Vault
@@ -165,6 +165,9 @@ class PipelineMiddleware(BaseMiddleware):
         # Свои шаблоны документов и печать - тем же снимком и по той же
         # причине: панель их загружает, бот собирает по ним документы.
         await doctemplates.refresh(self.crm, getattr(self.cfg, "doc_dir", None))
+        # Точки выдачи - тоже: их заводят в панели, а бот называет их в
+        # ответах «где вы» и «до скольки работаете» (handlers/faq.py).
+        await points.refresh(self.crm)
 
         # Модерация идёт мимо всего пользовательского конвейера: у админа нет
         # анкеты, рейт-лимит и подписка к нему не относятся.

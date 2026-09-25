@@ -62,7 +62,8 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/sync.py', 'app/crm/import_xlsx.py', 'app/crm/tracking.py',
          'app/crm/banking.py', 'app/crm/mailing.py', 'app/crm/esign.py',
          'app/crm/paying.py', 'app/crm/notices.py',
-         'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py')
+         'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py',
+         'app/crm/points.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -91,6 +92,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/channels.html',
                   'app/web/templates/integrity.html',
                   'app/web/templates/_report_tabs.html',
+                  'app/web/templates/points.html', 'app/web/templates/point.html',
+                  'app/web/templates/_points_period.html',
                   'app/web/templates/_parts_tabs.html',
                   'app/web/templates/parts.html', 'app/web/templates/part.html',
                   'app/web/templates/part_form.html',
@@ -179,7 +182,9 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_intake.py', 'tests/test_documents.py', 'tests/test_lists.py',
           'tests/test_extras.py', 'tests/test_battery_intake.py', 'tests/test_battery_search.py', 'tests/test_alerts.py', 'tests/test_service_reports.py', 'tests/test_norms.py', 'tests/test_idle_money.py', 'tests/test_money_chart.py', 'tests/test_list_tools.py', 'tests/test_list_more.py', 'tests/test_bike_card.py', 'tests/test_client_card.py', 'tests/test_prices.py', 'tests/test_block.py', 'tests/test_schedule.py', 'tests/test_audit.py', 'tests/test_promos.py', 'tests/test_bookings.py',
           'tests/test_pricing.py', 'tests/test_inbox.py', 'tests/test_inbox_web.py',
-          'tests/test_avito.py')
+          'tests/test_avito.py', 'tests/test_points_pg.py',
+          'tests/test_point_analytics.py', 'tests/test_points_ops.py',
+          'tests/test_points_web.py', 'tests/test_faq_points.py')
 
 foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

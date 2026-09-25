@@ -10,12 +10,13 @@
     </select></label>
     <label>Плательщик <select name="payer">{% for code, label in PAYERS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
     <label class="wide">Что за объект <input name="object_note" placeholder="если техника не наша: самокат Kugoo, АКБ 60 Ач"></label>
+    <label>Где чиним <select name="location"><option value="">как у велосипеда{% if bike and bike.location %} ({{ bike.location }}){% endif %}</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
     <label>Техник <select name="tech_id"><option value="">не назначен</option>{% for t in techs %}<option value="{{ t.id }}">{{ t.name or t.login }}</option>{% endfor %}</select></label>
     <label>Смета, ₽ <input name="estimate" inputmode="decimal" placeholder="0"></label>
     <label class="wide">Жалоба <input name="complaint" placeholder="с чем обратились: не едет, не заряжается"></label>
     <button type="submit">Открыть наряд</button>
   </form>
   <p class="muted">Свой велосипед уходит в ремонт сразу: наряд открыт, а велосипед числится свободным — это тот самый рассинхрон, из-за которого его выдают клиенту прямо из мастерской. Велосипед в аренде статус не меняет: там его судьбу решает возврат.</p>
-  <p class="muted">Чужая техника — второе направление: выберите плательщика «Клиент» и опишите объект. Её выручка идёт по наряду и в журнал аренды не попадает.</p>
+  <p class="muted">Чужая техника — второе направление: выберите плательщика «Клиент» и опишите объект. Её выручка идёт по наряду и в журнал аренды не попадает. Точку для неё выберите сами: у чужой техники своей точки нет, и без выбора наряд уйдёт в отчёте в «без точки».</p>
 </section>
 {% endblock %}

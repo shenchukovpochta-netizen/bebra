@@ -73,7 +73,7 @@
     <label>АКБ в комплекте <input name="battery_count" value="2" size="4"></label>
     <label>Цена АКБ <input name="battery_price"></label>
     <label>Срок службы АКБ, мес. <input name="battery_service_months" value="15" size="4"></label>
-    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in LOCATIONS %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
     <label class="wide">Комментарий <input name="note"></label>
     <button type="submit">Завести партию</button>
   </form>

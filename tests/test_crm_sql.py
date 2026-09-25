@@ -150,6 +150,54 @@ class TestCrmSql(unittest.TestCase):
             self.db.finish_inbox_out(1, ok=False, error="boom"),
             self.db.fail_stuck_inbox_out(), self.db.inbox_retry(1, author="me"),
             self.db.inbox_to_announce(), self.db.purge_inbox(30),
+            # точки: журнал мест, точка аренды и наряда, каскад, касса
+            self.db.create_staff("b", "h", "n", "manager", location="Павлюхина"),
+            self.db.set_staff_location(1, "Павлюхина"), self.db.bike_location_log(1),
+            self.db.rentals(location="Павлюхина"),
+            self.db.rentals(status="active", location="none"),
+            self.db.create_rental(client_id=1, bike_id=None, tariff_id=None,
+                                  tariff_name="t", period_days=7, price=d,
+                                  billing="manual", started_on=today, contract_no=None,
+                                  created_by="me", location="Павлюхина"),
+            self.db.start_rental_charged(client_id=1, bike_id=1, tariff_name="t",
+                                         period_days=7, price=d, billing="manual",
+                                         started_on=today, period_to=today,
+                                         contract_no=None, note="x", created_by="bot",
+                                         location="Павлюхина"),
+            self.db.close_rental(1, closed_on=today, note=None, closed_by="me",
+                                 return_location="Адоратского"),
+            self.db.swap_rental_bike(1, old_bike_id=1, new_bike_id=2,
+                                     old_status="repair", mileage_old=10,
+                                     mileage_new=20, reason="Поломка", today=today,
+                                     by="me", swap_location="Адоратского"),
+            self.db.work_orders(location="Павлюхина", status="new"),
+            self.db.work_orders(location="none", open_only=True),
+            self.db.create_work_order(bike_id=None, payer="client", client_id=1,
+                                      complaint="x", object_note="самокат", tech_id=None,
+                                      estimate=d, created_by="me", location="Павлюхина"),
+            self.db.update_work_order(1, location="Адоратского"),
+            self.db.update_location(1, city="Казань", sort=10),
+            self.db.rename_location(1, "Новая"),
+            self.db.cash_shift_for("staff:a"), self.db.cash_shift_for(None),
+            # заявка отдаёт мастеру выдачи имя своей точки, а не только вывеску
+            self.db.booking(1), self.db.bookings(status="new"), self.db.open_booking_of(1),
+            # аналитика по точкам: одно правило денег на окупаемость и точки
+            self.db.model_money(datetime(2026, 9, 1, tzinfo=UTC),
+                                datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.bike_days_by_location(datetime(2026, 9, 1, tzinfo=UTC),
+                                          datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.money_by_location(datetime(2026, 9, 1, tzinfo=UTC),
+                                      datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.location_money_by_day("Павлюхина", today, today),
+            self.db.location_money_by_day(None, today, today),
+            self.db.debt_by_location(),
+            self.db.rentals_by_location(datetime(2026, 9, 1, tzinfo=UTC),
+                                        datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.service_by_location(datetime(2026, 9, 1, tzinfo=UTC),
+                                        datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.cash_by_location(datetime(2026, 9, 1, tzinfo=UTC),
+                                     datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.debtors(10, location="Павлюхина"), self.db.debtors(location="none"),
         ]
 
     def test_placeholders_match_arguments(self):
@@ -177,7 +225,9 @@ class TestCrmSql(unittest.TestCase):
         for coro in (self.db.update_bike(1, evil="x"), self.db.update_client(1, evil="x"),
                      self.db.update_tariff(1, evil="x"), self.db.update_rental(1, evil="x"),
                      self.db.create_bike(evil="x"),
-                     self.db.update_inbox_thread(1, evil="x")):
+                     self.db.update_inbox_thread(1, evil="x"),
+                     # имя точки - только каскадом rename_location
+                     self.db.update_location(1, name="x")):
             with self.assertRaises(ValueError):
                 run(coro)
 

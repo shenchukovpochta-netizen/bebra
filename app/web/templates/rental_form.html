@@ -9,7 +9,11 @@
   </select></label>
   <label>Велосипед <select name="bike_id">
     <option value="">— без велосипеда (записать позже) —</option>
-    {% for b in bikes %}<option value="{{ b.id }}" {% if b.id == bike_id %}selected{% endif %}>{{ b.code }} · {{ b.model }}</option>{% endfor %}
+    {% for b in bikes %}<option value="{{ b.id }}" {% if b.id == bike_id %}selected{% endif %}>{{ b.code }} · {{ b.model }}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}
+  </select></label>
+  <label>Точка выдачи <select name="location">
+    <option value="">как у велосипеда</option>
+    {% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}
   </select></label>
   <label>Тариф <select name="tariff_id" required>
     {% for t in tariffs %}<option value="{{ t.id }}">{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}
@@ -23,6 +27,7 @@
   <button type="submit">Оформить</button>
 </form>
 <p class="muted">Первый период начисляется сразу: на балансе клиента появится долг в размере тарифа, который закроет платёж. Если клиент уже внёс деньги — сначала запишите платёж в карточке, потом оформляйте.</p>
+<p class="muted">Точка выдачи остаётся за арендой навсегда: по ней считаются выручка и чек точки, а велосипед числится на ней, пока аренда идёт.</p>
 {% if not tariffs %}<p class="flash err">Нет активных тарифов — <a href="/tariffs">добавьте хотя бы один</a>.</p>{% endif %}
 </div>
 {% endblock %}

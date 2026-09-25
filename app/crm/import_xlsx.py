@@ -194,11 +194,17 @@ def _phones(value: Any) -> tuple[str | None, list[str]]:
     return main, [p for p in found if p != main]
 
 
-def _location(text: str) -> str | None:
-    """Точка выдачи из текста статуса: «Ремонт (Павлюхина)» -> Павлюхина."""
-    low = (text or "").lower()
-    for loc in logic.LOCATIONS:
-        if loc.lower() in low:
+def _location(text: str, names: list[str] | None = None) -> str | None:
+    """Точка выдачи из текста статуса: «Ремонт (Павлюхина)» -> Павлюхина.
+
+    names - точки справочника (logic.point_choices): третья точка обязана
+    узнаваться так же, как две первые. Длинное имя проверяется раньше
+    короткого: «Павлюхина 2» не должна прочитаться как «Павлюхина».
+    """
+    low = (text or "").lower().replace("ё", "е")
+    for loc in sorted(logic.point_choices([]) if names is None else names,
+                      key=len, reverse=True):
+        if loc.lower().replace("ё", "е") in low:
             return loc
     return None
 
@@ -409,6 +415,8 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
     clients_with_rental: set[str] = set()
     bikes_taken: set[int] = set()               # существующие, уже отданные в плане
     no_model: list[int] = []
+    # Точки - из справочника: таблица знает и третью точку, если её завели.
+    places = logic.point_choices(await crm.locations())
 
     for row in rows:
         warn = lambda msg, r=row: plan.warnings.append(f"строка {r.line}: {msg}")  # noqa: E731
@@ -449,7 +457,7 @@ async def build_plan(crm: Any, rows: list[Row], *, today: date | None = None) ->
                         "frame_no": row.frame, "motor_no": row.motor,
                         "status": ("rented" if status == "rented" and not row.fio
                                    else status if status != "rented" else "available"),
-                        "location": _location(place or row.status),
+                        "location": _location(place or row.status, places),
                         "note": _bike_note(row, place), "line": row.line,
                         "wants_rented": status == "rented"}
             if not row.model:

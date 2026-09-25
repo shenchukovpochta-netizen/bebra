@@ -70,7 +70,10 @@ body.with-side{display:grid;grid-template-columns:232px minmax(0,1fr);min-height
   .nav-toggle:checked ~ .side .side-me{display:block;margin-top:10px}
 }
 
-main{max-width:1200px;margin:0 auto;padding:20px}
+/* width:100% - main стоит в сетке рядом с меню с полями auto, и без явной
+   ширины её задаёт самая широкая таблица: обёртка .table-wrap так и не
+   начинает прокрутку, и вбок уезжает вся страница, а не одна таблица. */
+main{width:100%;max-width:1200px;margin:0 auto;padding:20px}
 h1{font:700 22px/1.2 var(--font-head);margin:0 0 14px;letter-spacing:-.01em}
 h2{font:600 13px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 12px}
 h1 small{font:500 13px/1 var(--font-text);letter-spacing:0;text-transform:none}
@@ -290,6 +293,14 @@ tr.total td{border-top:2px solid var(--line);font-weight:600}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 2px}
 .dot.rented{background:#FF5907}.dot.parked{background:#2e7d32}
 .dot.offline{background:#777}.dot.alarm{background:#d32f2f}
+/* Точка выдачи: подпись в тёмной плашке над местом, а не кружок - кружки
+   на карте означают велосипеды. Легенда рисует ту же плашку квадратом. */
+.map-place-icon{background:none;border:0}
+.map-place{display:inline-block;white-space:nowrap;transform:translate(-50%,-100%);
+  margin-top:-4px;padding:3px 8px;border-radius:6px;background:var(--ink);color:#fff;
+  font:600 12px/1.2 var(--font-text);box-shadow:0 1px 4px rgba(0,0,0,.35)}
+.map-place-dot{display:inline-block;width:10px;height:10px;border-radius:2px;
+  background:var(--ink);margin:0 2px;vertical-align:-1px}
 
 /* Предпросмотр рассылки: показываем ровно то, что уйдёт клиенту,
    поэтому переносы строк сохраняются как есть. */

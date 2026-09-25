@@ -1,27 +1,34 @@
 {% extends "base.html" %}
 {% import "_list.html" as list %}
 {% block content %}
+{# Точка едет через вкладки и выгрузку: «аренды Адоратского» не должны
+   молча превращаться во все аренды при переходе на «Закрытые». #}
+{% set lq = ('&location=' ~ (location|urlencode)) if location else '' %}
 <div class="bar">
   <h1>Аренды</h1>
   <nav class="tabs">
-    <a href="/rentals?status=active" {% if status == 'active' %}class="on"{% endif %}>Идут</a>
-    <a href="/rentals?status=closed" {% if status == 'closed' %}class="on"{% endif %}>Закрытые</a>
-    <a href="/rentals?status=all" {% if status == 'all' %}class="on"{% endif %}>Все</a>
+    <a href="/rentals?status=active{{ lq }}" {% if status == 'active' %}class="on"{% endif %}>Идут</a>
+    <a href="/rentals?status=closed{{ lq }}" {% if status == 'closed' %}class="on"{% endif %}>Закрытые</a>
+    <a href="/rentals?status=all{{ lq }}" {% if status == 'all' %}class="on"{% endif %}>Все</a>
     <a href="/rentals/search">Розыск</a>
   </nav>
   <form method="get" class="search">
     <input type="hidden" name="status" value="{{ status }}">
     {% if view %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
     <input name="q" value="{{ q }}" placeholder="клиент, телефон, № велосипеда, договор">
+    <select name="location" aria-label="Точка выдачи"><option value="">любая точка</option>
+      {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+      <option value="none" {% if location == 'none' %}selected{% endif %}>{{ NO_POINT_TITLE }}</option>
+    </select>
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Форма</a>{% endif %}
-  <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}&q={{ q|urlencode }}">Excel</a>
-  <a class="btn ghost" href="/rentals.csv?status={{ status }}&view={{ view }}&q={{ q|urlencode }}">CSV</a>
+  <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}&q={{ q|urlencode }}{{ lq }}">Excel</a>
+  <a class="btn ghost" href="/rentals.csv?status={{ status }}&view={{ view }}&q={{ q|urlencode }}{{ lq }}">CSV</a>
 </div>
 {# Состояния поверх статуса: «без техники» - не статус, а положение дел,
    когда аренда идёт, а велосипеда на руках нет. #}
-{% set qs = '&q=' ~ (q|urlencode) if q else '' %}
+{% set qs = ('&q=' ~ (q|urlencode) if q else '') ~ lq %}
 <nav class="tabs">
   <a href="/rentals?status={{ status }}{{ qs }}" class="{% if not view %}on{% endif %}">Все</a>
   <a href="/rentals?status={{ status }}&view=debt{{ qs }}" class="{% if view == 'debt' %}on{% endif %}">Долг{% if counts.debt %} · {{ counts.debt }}{% endif %}</a>
@@ -39,6 +46,7 @@
     {{ list.th('#', 'no', tools) }}
     {{ list.th('Клиент', 'client', tools) }}
     {{ list.th('Велосипед', 'bike', tools) }}
+    {{ list.th('Точка', 'location', tools, 'opt') }}
     {{ list.th('Тариф', 'tariff', tools) }}
     {{ list.th('С', 'started', tools) }}
     {{ list.th('Идёт', 'days', tools, 'num') }}
@@ -52,6 +60,7 @@
     <td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td>
     <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
     <td>{{ r.bike_code or '—' }} <span class="muted">{{ r.bike_model or '' }}</span></td>
+    <td class="opt">{{ r.location or '—' }}</td>
     <td>{{ r.tariff_name }}{% if money_ok %} · {{ money(r.price) }}/{% else %} · {% endif %}{{ r.period_days }} дн. <small class="muted">{{ BILLING[r.billing] }}</small></td>
     <td>{{ r.started_on|dmy }}{% if r.closed_on %} — {{ r.closed_on|dmy }}{% endif %}</td>
     <td class="num">{{ r.days_running }}{% if r.in_repair %} <span class="tag repair" title="на велосипеде открыт наряд">ремонт</span>{% endif %}</td>
@@ -60,8 +69,8 @@
     {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
     <td class="actions nowrap">{% if r.status == 'active' and r.tg_id and can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/remind" class="inline-form"><input type="hidden" name="next" value="/rentals?status={{ status }}&view={{ view }}{{ qs }}"><button type="submit" class="ghost" title="напомнить клиенту сейчас">🔔</button></form>{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="10" class="muted">Пусто.</td></tr>{% endfor %}
-  {{ list.footer(tools, '/rentals', 10,
+  {% else %}<tr><td colspan="11" class="muted">Пусто.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/rentals', 11,
                  ((('долг ' ~ money(-debt_total)) if money_ok and debt_total else '')
                   ~ (' · ' if money_ok and debt_total and overdue_total else '')
                   ~ (('просрочено ' ~ overdue_total) if overdue_total else ''))) }}

@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -18,6 +20,7 @@ from app import (
     texts,  # noqa: E402
 )
 from app import faq_i18n as i18n  # noqa: E402
+from app.crm import points  # noqa: E402
 
 DAY = datetime(2026, 8, 10, 12, 0)      # рабочее время
 NIGHT = datetime(2026, 8, 10, 23, 0)    # вне графика
@@ -268,7 +271,11 @@ class TestI18n(unittest.TestCase):
         answer_keys = {"a_" + i.code for i in faq.MENU_TOPICS
                        if i.code != "PRICE"}
         title_keys = {"t_" + i.code for i in faq.MENU_TOPICS}
-        need = set(i18n.REQUIRED_KEYS) | answer_keys | title_keys
+        # Ответ по справочнику точек без перевода ушёл бы русским списком
+        # посреди диалога на другом языке.
+        point_keys = {"p_" + i.code for i in faq.MENU_TOPICS
+                      if i.code in faq.POINT_ANSWERS}
+        need = set(i18n.REQUIRED_KEYS) | answer_keys | title_keys | point_keys
         for code in self.FOREIGN:
             missing = need - set(i18n.T[code])
             self.assertFalse(missing, f"{code}: нет ключей {sorted(missing)}")
@@ -363,6 +370,262 @@ class TestI18n(unittest.TestCase):
             self.assertIn("3000 qr", text, code)
             self.assertIn("qr.nspk.ru", text, code)
             self.assertNotIn("Truck+", text, code)
+
+
+# Три точки, как их отдаёт справочник панели: третья заведена владельцем,
+# у второй не заполнены режим и телефон, у третьей нет названия для курьеров.
+THREE_POINTS = (
+    {"name": "Павлюхина", "public_title": "Май Байк — Павлюхина",
+     "address": "г. Казань, ул. Павлюхина, 97А", "hours": "пн-вс: 10:00-19:00",
+     "phone": "+7 (904) 676-49-26"},
+    {"name": "Адоратского", "public_title": "Май Байк — Адоратского",
+     "address": "г. Казань, ул. Адоратского, 11А", "hours": None, "phone": ""},
+    {"name": "Восстания", "public_title": None,
+     "address": "г. Казань, ул. Восстания, 100", "hours": "пн-пт: 09:00-21:00",
+     "phone": "+7 (900) 000-00-03"},
+)
+ADDRESSES = tuple(p["address"] for p in THREE_POINTS)
+
+# «Две», «обе», «на обеих» на каждом языке: с третьей точкой в справочнике
+# любое из них - ложь. Фразы узкие намеренно: «два АКБ» и «2 batteries»
+# правдивы и должны остаться.
+NUMBER_CLAIMS = {
+    "ru": ("две точки", "обе ", "обеих", "двух точ"),
+    "en": ("two points", "both", "either"),
+    "uz": ("ikkita punkt", "ikkala"),
+    "tk": ("iki nokat", "ikisi"),
+    "ar": ("نقطتان", "نقطتين"),
+    "fa": ("دو شعبه", "هر دو"),
+    "hi": ("दो पॉइंट", "दोनों"),
+    "tt": ("ике пункт", "икесе"),
+    "cv": ("икӗ пункт", "иккӗшӗ"),
+}
+
+
+class TestPointsFromDirectory(unittest.TestCase):
+    """Ответы по справочнику точек: каждая открытая точка, на каждом языке,
+    и прежний зашитый текст, пока справочника нет."""
+
+    def ask(self, code, lang="ru", now=DAY, pts=THREE_POINTS):
+        return faq.answer(faq.BY_CODE[code], now=now, lang=lang, points=pts)
+
+    def test_three_points_are_listed_in_russian(self):
+        for code in ("ADDR", "HOURS"):
+            text = self.ask(code)
+            for point in THREE_POINTS:
+                self.assertIn(point["address"], text, code)
+            self.assertIn("Май Байк — Павлюхина", text, "название для курьеров")
+            self.assertIn("Восстания", text, "нет названия - служебное имя")
+            self.assertIn("пн-пт: 09:00-21:00", text, "режим у точки свой")
+            self.assertIn("+7 (904) 676-49-26", text)
+            self.assertNotIn("ГСК «Сокол»", text, "зашитый текст не подмешан")
+            self.assertNotIn(faq.POINTS_FIELD, text)
+
+    def test_three_points_are_listed_in_every_language(self):
+        """Адрес - данные: на любом языке он такой, как записан в панели."""
+        for lang in i18n.LANGS:
+            for code in ("ADDR", "HOURS"):
+                text = self.ask(code, lang)
+                for address in ADDRESSES:
+                    self.assertIn(address, text, f"{lang}/{code}")
+                self.assertNotIn(faq.POINTS_FIELD, text, f"{lang}/{code}")
+                self.assertNotEqual(text, faq.answer(faq.BY_CODE[code], now=DAY,
+                                                     lang=lang), f"{lang}/{code}")
+
+    def test_headers_around_the_list_are_translated(self):
+        ru = self.ask("ADDR").split("\n")[0]
+        for lang in i18n.LANGS:
+            if lang == "ru":
+                continue
+            for code in ("ADDR", "HOURS"):
+                head = self.ask(code, lang).split("\n")[0]
+                self.assertNotEqual(head, ru, f"{lang}/{code}: шапка русская")
+
+    def test_no_answer_claims_a_number_of_points(self):
+        for lang, claims in NUMBER_CLAIMS.items():
+            for intent in faq.INTENTS:
+                text = faq.answer(intent, now=NIGHT, lang=lang,
+                                  points=THREE_POINTS).lower()
+                for claim in claims:
+                    self.assertNotIn(claim, text, f"{lang}/{intent.code}")
+
+    def test_every_point_mentioning_answer_lists_all_points(self):
+        """Лид, поломка, АКБ и чужая техника тоже зовут на точку - с третьей
+        точкой в справочнике ни один из них не может назвать только две."""
+        for lang in i18n.LANGS:
+            for code in faq.POINT_ANSWERS:
+                text = self.ask(code, lang)
+                for address in ADDRESSES:
+                    self.assertIn(address, text, f"{lang}/{code}")
+
+    def test_answers_without_points_are_unchanged(self):
+        """Бот без базы и пустой справочник - прежние зашитые ответы."""
+        for lang in i18n.LANGS:
+            for intent in faq.INTENTS:
+                base = faq.answer(intent, now=DAY, lang=lang)
+                for empty in (None, [], [{"name": "", "address": None}]):
+                    self.assertEqual(
+                        faq.answer(intent, now=DAY, lang=lang, points=empty),
+                        base, f"{lang}/{intent.code}: {empty!r}")
+        text = self.ask("ADDR", pts=None)
+        self.assertIn("11А", text)
+        self.assertIn("97А", text)
+
+    def test_empty_fields_are_skipped(self):
+        text = self.ask("HOURS")
+        self.assertEqual(text.count("🕙"), 2, "у Адоратского режима нет")
+        self.assertEqual(text.count("📞"), 2, "у Адоратского телефона нет")
+        self.assertNotIn("None", text)
+        block = text.split("📍 Май Байк — Адоратского\n", 1)[1].split("\n\n")[0]
+        self.assertEqual(block, "г. Казань, ул. Адоратского, 11А")
+
+    def test_short_list_is_one_line_per_point(self):
+        text = self.ask("LEAD")
+        lines = [line for line in text.split("\n") if line.startswith("📍")]
+        self.assertEqual(lines, ["📍 " + a for a in ADDRESSES])
+
+    def test_values_from_the_panel_are_escaped(self):
+        """«&» или «<» в адресе - сообщение, которое Telegram не разберёт."""
+        odd = [{"name": "Склад", "address": "ул. Правды, 1 <корп. 2> & двор"}]
+        for code in faq.POINT_ANSWERS:
+            text = self.ask(code, pts=odd)
+            self.assertIn("ул. Правды, 1 &lt;корп. 2&gt; &amp; двор", text, code)
+            self.assertNotIn("<корп", text, code)
+
+    def test_point_data_is_not_substituted_again(self):
+        """Список ставится последним: подстановка оплаты по адресу не ходит."""
+        odd = [{"name": "Склад", "address": "двор {pay_url}"}]
+        text = self.ask("ADDR", pts=odd)
+        self.assertIn("двор {pay_url}", text)
+        self.assertNotIn("qr.nspk.ru", text)
+
+    def test_every_points_template_has_the_list_once(self):
+        """Лид и поломка собраны заменой зашитой строки точек: правка текста,
+        потерявшая эту строку, потеряла бы и список."""
+        for code, text in faq.POINT_ANSWERS.items():
+            self.assertEqual(text.count(faq.POINTS_FIELD), 1, code)
+        for lang in i18n.LANGS[1:]:
+            for key, value in i18n.T[lang].items():
+                if key.startswith("p_"):
+                    self.assertEqual(value.count(faq.POINTS_FIELD), 1,
+                                     f"{lang}/{key}")
+
+    def test_after_hours_note_still_applies(self):
+        text = self.ask("ADDR", now=NIGHT)
+        self.assertIn(faq.AFTER_HOURS, text)
+        self.assertNotIn(faq.AFTER_HOURS, self.ask("ADDR"))
+
+    def test_handoff_answers_still_ask_the_client_to_reply(self):
+        for intent in faq.MENU_TOPICS:
+            if not intent.handoff or intent.code not in faq.POINT_ANSWERS:
+                continue
+            text = self.ask(intent.code).lower()
+            self.assertTrue(
+                any(w in text for w in ("напишите", "подскажите", "скажите",
+                                        "опишите", "передам")), intent.code)
+
+    def test_bot_never_names_repair_price_with_points_either(self):
+        for code in ("BRK_EL", "BRK_WHEEL", "BRK_MECH", "EXT_REP"):
+            text = self.ask(code)
+            self.assertNotIn("₽", text, code)
+            self.assertNotIn("рубл", text.lower(), code)
+
+
+class _Directory:
+    """Справочник точек как его видит бот: только чтение открытых."""
+
+    def __init__(self, rows):
+        self.rows, self.calls = list(rows), []
+
+    async def locations(self, *, active_only=False):
+        self.calls.append(active_only)
+        return [dict(r) for r in self.rows
+                if not active_only or r.get("active", True)]
+
+
+class TestPointsSnapshot(unittest.TestCase):
+    """Снимок справочника в процессе бота - по образцу реквизитов."""
+
+    def setUp(self):
+        points.reset()
+
+    def tearDown(self):
+        # Снимок общий на процесс: оставленный здесь список подменил бы
+        # адреса в тестах бота, которые идут следом.
+        points.reset()
+
+    def test_snapshot_is_stale_right_after_boot(self):
+        # time.monotonic() считает от загрузки системы: через минуту после
+        # перезагрузки сервера он около 60. Ненаполненный снимок не должен
+        # выглядеть свежим - иначе бот пять минут отвечал бы зашитыми адресами.
+        with mock.patch.object(points.time, "monotonic", return_value=60.0):
+            self.assertFalse(points.is_fresh())
+            points.set_snapshot(THREE_POINTS)
+            self.assertTrue(points.is_fresh())
+        self.assertFalse(points.is_fresh(now=60.0 + points.TTL_SECONDS))
+
+    def test_refresh_reads_once_and_then_uses_the_snapshot(self):
+        crm = _Directory(THREE_POINTS)
+        rows = asyncio.run(points.refresh(crm))
+        self.assertEqual([r["address"] for r in rows], list(ADDRESSES))
+        asyncio.run(points.refresh(crm))
+        self.assertEqual(crm.calls, [True], "снимок живёт TTL, а не читается "
+                                            "на каждый апдейт; только открытые")
+        asyncio.run(points.refresh(crm, force=True))
+        self.assertEqual(len(crm.calls), 2)
+
+    def test_empty_directory_is_a_snapshot_too(self):
+        crm = _Directory([])
+        self.assertEqual(asyncio.run(points.refresh(crm)), [])
+        asyncio.run(points.refresh(crm))
+        self.assertEqual(len(crm.calls), 1)
+        self.assertTrue(points.is_fresh())
+
+    def test_closed_points_and_internal_fields_stay_out(self):
+        points.set_snapshot([
+            {**THREE_POINTS[0], "active": True, "note": "ключ у охраны",
+             "lat": 55.7, "lon": 49.1, "id": 1},
+            {**THREE_POINTS[1], "active": False},
+        ])
+        snap = points.snapshot()
+        self.assertEqual(len(snap), 1, "на закрытую точку клиента не зовут")
+        self.assertEqual(set(snap[0]), set(points.FIELDS))
+        self.assertEqual(snap[0]["hours"], "пн-вс: 10:00-19:00")
+
+    def test_empty_fields_become_empty_strings(self):
+        points.set_snapshot([THREE_POINTS[1]])
+        self.assertEqual(points.snapshot()[0]["hours"], "")
+        self.assertEqual(points.snapshot()[0]["phone"], "")
+
+    def test_snapshot_is_a_copy(self):
+        points.set_snapshot(THREE_POINTS)
+        points.snapshot()[0]["address"] = "испорчено"
+        points.snapshot().clear()
+        self.assertEqual(points.snapshot()[0]["address"], ADDRESSES[0])
+
+    def test_broken_database_keeps_the_old_snapshot(self):
+        points.set_snapshot(THREE_POINTS)
+
+        class Broken:
+            async def locations(self, *, active_only=False):
+                raise RuntimeError("база недоступна")
+
+        with self.assertLogs("app.crm.points", "ERROR"):
+            rows = asyncio.run(points.refresh(Broken(), force=True))
+        self.assertEqual(len(rows), 3, "вчерашний список лучше зашитого")
+
+    def test_bot_without_crm_forgets_the_snapshot(self):
+        """Без CRM справочника нет: ответ - зашитый, а не остаток снимка."""
+        points.set_snapshot(THREE_POINTS)
+        self.assertEqual(asyncio.run(points.refresh(None)), [])
+        self.assertEqual(points.snapshot(), [])
+        self.assertFalse(points.is_fresh())
+
+    def test_snapshot_feeds_the_answer(self):
+        asyncio.run(points.refresh(_Directory(THREE_POINTS)))
+        text = faq.answer(faq.BY_CODE["ADDR"], now=DAY, points=points.snapshot())
+        for address in ADDRESSES:
+            self.assertIn(address, text)
 
 
 class TestRenterDetection(unittest.TestCase):

@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}{{ row.title }} — {{ app_title }}{% endblock %}
+{% block content %}
+{% set money_ok = can_view(staff, 'finance') %}
+{% set q = ('?' ~ span.query) if span.query else '' %}
+{# Фильтр списков по этой точке; «none» - строки без точки. #}
+{% set loc_q = (place.name|urlencode) if place else 'none' %}
+{% set m = row.metrics %}
+<div class="bar"><h1>{% if place %}{{ place.name }}{% else %}Без точки{% endif %} <small class="muted">· {{ span.label }}</small></h1>
+  {% with active = 'points' %}{% include "_report_tabs.html" %}{% endwith %}
+</div>
+<p><a href="/reports/points{{ q }}">← все точки</a></p>
+{% if place %}
+<div class="card">
+  <dl>
+    {% if place.public_title %}<dt>Для курьеров</dt><dd>{{ place.public_title }}</dd>{% endif %}
+    <dt>Адрес</dt><dd>{{ place.address or '—' }}{% if map_url(place.lat, place.lon) %} · <a href="{{ map_url(place.lat, place.lon) }}" target="_blank" rel="noopener">на карте</a>{% endif %}</dd>
+    <dt>Телефон</dt><dd>{% if place.phone %}<a href="tel:{{ place.phone }}">{{ place.phone }}</a>{% else %}—{% endif %}</dd>
+    <dt>Режим</dt><dd>{{ place.hours or '—' }}</dd>
+    {% if place.city %}<dt>Город</dt><dd>{{ place.city }}</dd>{% endif %}
+    {% if not place.active %}<dt>Точка</dt><dd><span class="tag">закрыта</span> — её история остаётся в отчёте</dd>{% endif %}
+  </dl>
+</div>
+{% else %}
+<p class="muted">Здесь то, что к точке не привязать: велосипеды, не
+  поставленные ни на одну точку,{% if money_ok %} платежи клиентов без
+  аренд,{% endif %} наряды на чужую технику без точки. Без этой строки
+  сумма по точкам не сошлась бы с общими числами.</p>
+{% endif %}
+<div class="bar">
+  {% with base = '/reports/points/' ~ key %}{% include "_points_period.html" %}{% endwith %}
+</div>
+{% if history_from %}
+<p class="muted">История мест ведётся с {{ history_from|dmy }}: раньше этого
+  велосипед считается на той точке, где стоял в тот день, — точнее данных нет.</p>
+{% endif %}
+
+<div class="tiles">
+  {% set parts = [] %}{% for code in OPERATIONAL_STATUSES %}{% if row.counts.get(code) %}{% set _ = parts.append(BIKE_STATUSES[code]|lower ~ ' ' ~ row.counts[code]) %}{% endif %}{% endfor %}
+  {% if can_view(staff, 'bikes') %}<a class="tile" href="/bikes?location={{ loc_q }}">{% else %}<div class="tile">{% endif %}
+    <b>{{ row.fleet }}</b><span>операционный парк сейчас<br><small class="muted">{{ parts|join(' · ') if parts else 'велосипедов нет' }}</small></span>
+  {% if can_view(staff, 'bikes') %}</a>{% else %}</div>{% endif %}
+  <div class="tile {% if m.idle_percent is none %}{% elif m.idle_ok %}good{% else %}warn{% endif %}">
+    <b>{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</b>
+    <span>простой<br><small class="muted">{% if m.operational_days %}свободны {{ m.idle_breakdown.available|round(0)|int }} · ремонт {{ m.idle_breakdown.repair|round(0)|int }} · ТО {{ m.idle_breakdown.maintenance|round(0)|int }} велосипеде-дней{% else %}дней парка за период нет{% endif %}</small></span>
+  </div>
+  {% if money_ok %}
+  <div class="tile {% if m.avg_check is none %}{% elif m.check_ok %}good{% else %}warn{% endif %}">
+    <b>{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</b>
+    <span>средний чек в день<br><small class="muted">{% if m.rented_days %}на {{ m.rented_days|round(0)|int }} велосипеде-дней аренды{% else %}аренд за период не было{% endif %}</small></span>
+  </div>
+  <div class="tile"><b>{{ money(row.paid) }}</b><span>выручка за период<br><small class="muted">начислено {{ money(row.charged) }}</small></span></div>
+  <div class="tile {% if row.debt %}warn{% endif %}"><b>{{ money(row.debt) }}</b><span>долг клиентов сейчас<br><small class="muted">{% if row.debtors %}должников {{ row.debtors }}{% else %}долгов нет{% endif %}</small></span></div>
+  {% endif %}
+  {% if can_view(staff, 'rentals') %}<a class="tile" href="/rentals?location={{ loc_q }}">{% else %}<div class="tile">{% endif %}
+    <b>{{ row.active }}</b><span>аренд идёт<br><small class="muted">выдано {{ row.issued }} · продлений {{ row.renewals }} за период</small></span>
+  {% if can_view(staff, 'rentals') %}</a>{% else %}</div>{% endif %}
+  <div class="tile"><b>{{ row.orders }}</b><span>нарядов закрыто<br><small class="muted">{% if money_ok %}сервис {{ money(row.service_revenue) }}{% if row.cash %} · наличными в кассе {{ money(row.cash) }}{% endif %}{% else %}за период{% endif %}</small></span></div>
+</div>
+{% if row.counts %}
+<ul class="inline">
+  {% for code, label in BIKE_STATUSES.items() %}{% if row.counts.get(code) %}
+  <li>{% if can_view(staff, 'bikes') %}<a href="/bikes?location={{ loc_q }}&status={{ code }}">{{ label }}: <b>{{ row.counts[code] }}</b></a>{% else %}{{ label }}: <b>{{ row.counts[code] }}</b>{% endif %}</li>
+  {% endif %}{% endfor %}
+</ul>
+{% endif %}
+
+{% if money_ok %}
+<section class="card">
+  <h2>Деньги по дням <span class="muted">· {{ chart_since|dmy }} — {{ span.until|dmy }}</span></h2>
+  <div class="bars" role="img" aria-label="Деньги точки по дням">
+    {% for d in chart.days %}
+    <div class="bar-col" title="{{ d.day|dmy }}: пришло {{ money(d.paid) }}{% if d.debt %}, долг {{ money(d.debt) }}{% endif %}">
+      <div class="bar-val" style="height:{{ d.height }}%"></div>
+      {% if d.debt %}<div class="bar-dot" style="bottom:{{ d.debt_height }}%" aria-hidden="true"></div>{% endif %}
+      <div class="bar-day muted">{{ d.day.day }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted">Пришло <b>{{ money(chart.paid) }}</b> за {{ chart.days_passed }} дн. ·
+    в среднем {{ money(chart.avg) }}/день{% if chart.best and chart.best.paid %} ·
+    лучший день {{ chart.best.day|dmy }} — {{ money(chart.best.paid) }}{% endif %}.
+    Столбики — по календарным дням, поэтому на краях периода сумма может
+    немного отличаться от плитки выручки. Точки под столбиками —
+    накопленный долг точки: начислено минус пришло.</p>
+</section>
+{% endif %}
+
+<div class="cols">
+<section class="card">
+  <h2>Три числа по месяцам</h2>
+  <table>
+    <tr><th>Месяц</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th>{% endif %}<th class="num opt">Дней аренды</th><th class="num opt">Дней парка</th></tr>
+    {% for c in months %}
+    <tr><td>{{ c.month.strftime('%m.%Y') }}</td>
+      <td class="num {% if c.idle_percent is none %}muted{% elif c.idle_ok %}ok{% else %}bad{% endif %}">{% if c.idle_percent is none %}—{% else %}{{ c.idle_percent }} %{% endif %}</td>
+      {% if money_ok %}<td class="num {% if c.avg_check is none %}muted{% elif c.check_ok %}ok{% else %}bad{% endif %}">{% if c.avg_check is none %}—{% else %}{{ money(c.avg_check) }}{% endif %}</td>{% endif %}
+      <td class="num opt">{{ c.rented_days|round(0)|int }}</td><td class="num opt">{{ c.operational_days|round(0)|int }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+<section class="card">
+  <h2>Стоят дольше всех</h2>
+  {% if standing %}
+  <table>
+    <tr><th>Велосипед</th><th>Статус</th><th class="num">Суток</th>{% if money_ok %}<th class="num">Потеряно</th>{% endif %}</tr>
+    {% for b in standing %}
+    <tr>
+      <td>{% if can_view(staff, 'bikes') %}<a href="/bikes/{{ b.id }}">№ {{ b.code }}</a>{% else %}№ {{ b.code }}{% endif %} <span class="muted">{{ b.model }}</span></td>
+      <td>{{ BIKE_STATUSES[b.status] }}</td>
+      <td class="num">{{ b.idle_days }}</td>
+      {% if money_ok %}<td class="num bad">−{{ money(b.lost) }}</td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Простаивающих велосипедов на точке нет.</p>{% endif %}
+</section>
+</div>
+
+<div class="cols">
+{% if money_ok %}
+<section class="card">
+  <h2>Должники точки</h2>
+  {% if debtors %}
+  <table>
+    <tr><th>Клиент</th><th>Телефон</th><th class="num">Долг</th></tr>
+    {% for d in debtors %}
+    <tr><td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ d.id }}">{{ d.full_name }}</a>{% else %}{{ d.full_name }}{% endif %}</td>
+      <td class="nowrap">{{ d.phone or '' }}</td><td class="num bad">{{ money(d.balance) }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Долгов нет.</p>{% endif %}
+  <p class="muted">Клиент — на точке своей последней аренды: баланс
+    между точками не делится.</p>
+</section>
+{% endif %}
+<section class="card">
+  <h2>Наряды в работе</h2>
+  {% if orders %}
+  <table>
+    <tr><th>№</th><th>Объект</th><th>Статус</th><th class="num">Суток</th></tr>
+    {% for o in orders %}
+    <tr><td>{% if can_view(staff, 'service') %}<a href="/orders/{{ o.id }}">{{ o.no }}</a>{% else %}{{ o.no }}{% endif %}</td>
+      <td>{% if o.bike_id %}№ {{ o.bike_code }} <span class="muted">{{ o.bike_model }}</span>{% else %}{{ o.object_note or '—' }}{% endif %}</td>
+      <td><span class="tag order-{{ o.status }}">{{ ORDER_STATUSES[o.status] }}</span></td>
+      <td class="num">{{ o.days }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Открытых нарядов на точке нет.</p>{% endif %}
+  {% if can_view(staff, 'service') %}<p><a href="/orders?location={{ loc_q }}">Все наряды точки</a></p>{% endif %}
+</section>
+</div>
+{% endblock %}

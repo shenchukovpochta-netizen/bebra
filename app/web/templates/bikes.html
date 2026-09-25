@@ -9,7 +9,7 @@
       {% for code, label in BIKE_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }} ({{ counts.get(code, 0) }})</option>{% endfor %}
     </select>
     <select name="location"><option value="">любая точка</option>
-      {% for loc in LOCATIONS %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+      {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
       <option value="none" {% if location == 'none' %}selected{% endif %}>не на точке</option>
     </select>
     <button type="submit">Найти</button>

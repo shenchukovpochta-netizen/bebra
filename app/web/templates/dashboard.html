@@ -55,6 +55,28 @@
     {% for l in idle_by_location %}<li><a href="/bikes?location={{ l.location|urlencode if l.location != 'не на точке' else 'none' }}&status=available">{{ l.location }}: свободных <b>{{ l.free }}</b>, в ремонте и на ТО <b>{{ l.repair }}</b></a></li>{% endfor %}
   </ul>
   {% endif %}
+  {# Те же три числа по точкам и за то же окно: сумма строк - плитки выше.
+     Блок есть, только когда точек больше одной, - иначе он их повторял бы. #}
+  {% if points %}
+  {% set rep_ok = can_view(staff, 'reports') %}
+  <h3>По точкам за 30 дней{% if rep_ok %} <small class="muted">· <a href="/reports/points">отчёт по точкам</a></small>{% endif %}</h3>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Точка</th><th class="num">Парк</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th><th class="num">Выручка</th>{% endif %}</tr>
+    {% for r in points.rows %}{% set m = r.metrics %}
+    <tr>
+      <td>{% if rep_ok and not r.orphan %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}</td>
+      <td class="num">{{ r.fleet }}</td>
+      <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+      {% if money_ok %}
+      <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
+      <td class="num">{{ money(r.paid) }}</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% endif %}
 </section>
 
 <div class="tiles">

@@ -1,0 +1,18 @@
+{# Период отчёта по точкам: 30 дней до этой минуты (окно трёх чисел на
+   сводке, поэтому «Итого» совпадает с ними), календарный месяц или свой
+   интервал. Страница точки берёт тот же период: переход из отчёта не
+   вправе показать другие числа. #}
+<nav class="tabs">
+  <a href="{{ base }}" {% if span.kind == 'days' %}class="on"{% endif %}>30 дней</a>
+  {% if span.kind == 'month' %}
+  <a href="{{ base }}?month={{ span.prev_key }}" title="прошлый месяц">‹</a><a href="{{ base }}?month={{ span.key }}" class="on">{{ span.label }}</a>{% if span.next_key %}<a href="{{ base }}?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}
+  {% else %}
+  <a href="{{ base }}?month={{ span.key }}">Этот месяц</a>
+  <a href="{{ base }}?month={{ span.prev_key }}">Прошлый</a>
+  {% endif %}
+</nav>
+<form method="get" action="{{ base }}" class="search">
+  <input type="date" name="since" value="{{ span.since|iso }}" aria-label="с">
+  <input type="date" name="until" value="{{ span.until|iso }}" aria-label="по">
+  <button type="submit">Показать</button>
+</form>

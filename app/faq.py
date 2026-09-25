@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from . import faq_i18n as i18n
 from . import texts
@@ -31,6 +33,9 @@ from .logic import esc
 # Меняются вместе с реальностью проката. Всё, что бот говорит про адреса,
 # график, оплату и цены, собирается из этих значений.
 
+# Два адреса ниже - запасной вариант. Рабочий список точек бот берёт из
+# справочника панели (answer(points=...), см. POINT_ANSWERS), а эти строки
+# отвечают, пока его нет: бот без базы, пустой справочник, тесты.
 POINT_1 = "Адоратского, 11А"
 POINT_2 = "Павлюхина, 97А — ГСК «Сокол», 9-й бокс"
 OPEN_HOUR, CLOSE_HOUR = 10, 19
@@ -348,6 +353,49 @@ BREAKDOWN = (
 for _code in ("BRK_EL", "BRK_WHEEL", "BRK_MECH"):
     ANSWERS[_code] = BREAKDOWN
 
+# ─────────────────────── ответы по справочнику точек ───────────────────────
+# Точки заводят в панели (crm.locations), бот читает их снимком
+# (app/crm/points.py) и передаёт в answer(). Есть точки - эти ответы
+# перечисляют КАЖДУЮ открытую точку так, как она записана в панели; нет -
+# работают зашитые ответы выше. Числа точек здесь нет нигде: «две», «обе»
+# и «на обеих» были правдой, пока точек было две, а третья, заведённая
+# в панели, сделала бы их ложью в тот же день. Часов тоже нет - у каждой
+# точки свой режим, и его называет полный список (FULL_POINTS).
+POINTS_FIELD = "{points}"
+# Полный список (название, адрес, режим, телефон) - там, где спросили
+# именно об этом. В остальных ответах точки - подсказка «куда ехать»,
+# и хватит адреса строкой.
+FULL_POINTS = frozenset({"ADDR", "HOURS"})
+
+POINT_ANSWERS: dict[str, str] = {
+    "ADDR": (
+        f"Наши точки:\n\n{POINTS_FIELD}\n\n"
+        "Какая точка вам удобнее?"
+    ),
+    "HOURS": (
+        f"Режим работы наших точек:\n\n{POINTS_FIELD}\n\n"
+        "Приезжайте в часы работы — ждём вас."
+    ),
+    "BATT_SWAP": (
+        f"Обмен АКБ делаем на каждой нашей точке:\n{POINTS_FIELD}\n"
+        "Наличие заряженных уточняю у администратора точки — напишите, "
+        "на какую точку поедете, и вернусь с ответом."
+    ),
+    "EXT_REP": (
+        "Да, ремонтируем не только свою технику: электровелосипеды, "
+        "электросамокаты, трициклы, электромотоциклы и аккумуляторы.\n"
+        f"Привозите на любую точку в часы её работы:\n{POINTS_FIELD}\n"
+        "Мастер проведёт диагностику и назовёт точную стоимость до начала "
+        "работ — без вашего согласия ничего не делаем.\n"
+        "Опишите коротко, что с техникой, и приложите фото — передам мастеру."
+    ),
+    # Лид и поломка называют точки отдельной строкой - список встаёт на её
+    # место, и правка остального текста не требует второй копии.
+    "LEAD": ANSWERS["LEAD"].replace(POINTS_LINE, POINTS_FIELD),
+}
+for _code in ("BRK_EL", "BRK_WHEEL", "BRK_MECH"):
+    POINT_ANSWERS[_code] = BREAKDOWN.replace(POINTS_LINE, POINTS_FIELD)
+
 # Ответ действующему арендатору на вопрос про цену: для него «сколько стоит»
 # - это про продление, а не про тарифы для новых.
 RENEWAL_HINT = (
@@ -367,7 +415,8 @@ FALLBACK = (
 
 def answer(intent: Intent, *, now: datetime | None = None,
            renter: bool = False, plan: str = "",
-           pay_url: str = PAY_URL, lang: str = "ru") -> str:
+           pay_url: str = PAY_URL, lang: str = "ru",
+           points: Sequence[Mapping[str, Any]] | None = None) -> str:
     """Готовый ответ по теме.
 
     renter - действующий арендатор: ему «сколько стоит» отвечается
@@ -375,18 +424,55 @@ def answer(intent: Intent, *, now: datetime | None = None,
     из данных выдачи, если известен. pay_url - рабочая ссылка на оплату
     из настроек. lang - язык ветки кнопок; нет перевода - молча
     по-русски: пропущенный ключ не должен оставлять клиента без ответа.
+    points - открытые точки справочника (снимок app/crm/points.py): есть -
+    ответы про точки собираются из них, нет - зашитый текст.
     """
     if intent.red:
         return RED_LINE_REPLY
     t = i18n.T.get(lang, {})
+    listed = (points_text(points, full=intent.code in FULL_POINTS)
+              if points and intent.code in POINT_ANSWERS else "")
     if intent.code == "PRICE":
         text = (_price_i18n(t, renter=renter, plan=plan) if t
                 else _price_answer(renter=renter, plan=plan))
+    elif listed:
+        text = t.get("p_" + intent.code) or POINT_ANSWERS[intent.code]
     else:
         text = t.get("a_" + intent.code) or ANSWERS.get(intent.code, FALLBACK)
     if intent.visit and now is not None and not is_open(now):
         text += "\n" + t.get("after_hours", AFTER_HOURS)
-    return company.with_contact(with_pay_url(text, pay_url))
+    text = company.with_contact(with_pay_url(text, pay_url))
+    # Список - последним: адрес из панели - данные, и ни одна подстановка
+    # выше не должна по нему пройтись.
+    return text.replace(POINTS_FIELD, listed) if listed else text
+
+
+def points_text(points: Sequence[Mapping[str, Any]], *, full: bool) -> str:
+    """Точки справочника для ответа: каждая открытая, пустое поле пропущено.
+
+    full - название, адрес, режим и телефон блоком на точку; иначе адрес
+    строкой. Значения из панели экранируются: адрес с «&» или «<» - это
+    сообщение, которое Telegram не разберёт, то есть вопрос без ответа.
+    Адрес не переводится: по-русски его понимают карты и таксист.
+    """
+    blocks = []
+    for point in points:
+        title = str(point.get("public_title") or point.get("name") or "").strip()
+        address = str(point.get("address") or "").strip()
+        if not (title or address):
+            continue
+        if not full:
+            blocks.append("📍 " + esc(address or title))
+            continue
+        lines = ["📍 " + esc(title or address)]
+        if title and address:
+            lines.append(esc(address))
+        for mark, key in (("🕙", "hours"), ("📞", "phone")):
+            value = str(point.get(key) or "").strip()
+            if value:
+                lines.append(f"{mark} {esc(value)}")
+        blocks.append("\n".join(lines))
+    return ("\n\n" if full else "\n").join(blocks)
 
 
 def _price_i18n(t: dict[str, str], *, renter: bool, plan: str) -> str:

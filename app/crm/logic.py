@@ -75,7 +75,9 @@ BIKE_MANUAL_STATUSES = ("available", "repair", "maintenance", "reserved", "lost"
 OPERATIONAL_STATUSES = ("available", "rented", "repair", "maintenance", "reserved")
 # Простой: велосипед в парке, но не в аренде.
 IDLE_STATUSES = ("available", "reserved", "repair", "maintenance")
-# Точки выдачи. Пусто у велосипеда - «не на точке» (у клиента, в пути).
+# Точки выдачи живут в справочнике crm.locations; это - запасной список на
+# пустой справочник (тестовая заглушка), и читает его только point_choices.
+# Пусто у велосипеда - «не на точке»: в аренде он стоит на точке аренды.
 LOCATIONS = ("Павлюхина", "Адоратского")
 # Цели: простой меньше десятой части парка, чек 500 ₽ в день на велосипед.
 IDLE_TARGET_PERCENT = 10
@@ -3049,10 +3051,51 @@ def check_location(raw: Any, names: Iterable[str] | None = None) -> Check:
     value = str(raw or "").strip()
     if not value:
         return Check(True, None)
-    allowed = set(names) if names is not None else set(LOCATIONS)
+    # Без списка - тот же запасной, что у форм: константа читается только
+    # в point_choices, иначе у проверки и выпадающего списка было бы два
+    # разных источника.
+    allowed = set(names) if names is not None else set(point_choices([]))
     if value not in allowed:
         return Check(False, error="Точка: недопустимое значение.")
     return Check(True, value)
+
+
+def point_choices(places: Iterable[Mapping[str, Any]], *current: Any) -> list[str]:
+    """Точки для выпадающего списка и проверки формы - одни на всю панель.
+
+    Действующие точки справочника в его порядке (sort, name), плюс текущие
+    значения карточки, которых среди действующих нет: закрытая точка
+    остаётся в карточке, а список без неё молча стёр бы её при первом же
+    сохранении. Справочник пуст - константа LOCATIONS: пустая база не
+    должна ломать формы.
+    """
+    rows = [p for p in places if p.get("name")]
+    names = ([p["name"] for p in rows if p.get("active", True) is not False]
+             if rows else list(LOCATIONS))
+    for value in current:
+        value = str(value or "").strip()
+        if value and value not in names:
+            names.append(value)
+    return names
+
+
+def bike_on_rent(bike: Mapping[str, Any]) -> bool:
+    """Велосипед у клиента. Его точку, как и статус «в аренде», ставят
+    выдача, возврат и замена, а не карточка: в аренде он стоит на точке
+    аренды, иначе чек точки не сошёлся бы с её днями."""
+    return bike.get("status") == "rented" or bool(bike.get("rental_id"))
+
+
+def issue_point(chosen: Any, *, booking: Mapping[str, Any] | None = None,
+                bike: Mapping[str, Any] | None = None) -> str | None:
+    """Точка выдачи: выбранная оператором, иначе точка заявки - клиент сам
+    назвал, куда придёт, - иначе точка велосипеда. None - не известна."""
+    for value in (chosen, (booking or {}).get("location_name"),
+                  (bike or {}).get("location")):
+        value = str(value or "").strip()
+        if value:
+            return value
+    return None
 
 
 def battery_rows(batteries: Iterable[dict], *, today: date | None = None,
@@ -5336,6 +5379,386 @@ def by_city(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
              "open": sum(1 for r in groups[city] if r.get("active")),
              "total": len(groups[city])}
             for city in sorted(groups)]
+
+
+# ─────────────────────── аналитика по точкам ───────────────────────
+#
+# По точке - те же три числа и те же формулы (fleet_metrics), только
+# ограниченные точкой: дни парка - по журналу мест, деньги - по точке
+# аренды записи журнала. Ключ - имя точки, None - «без точки»: у этой
+# корзины своя строка, иначе сумма по точкам не сошлась бы с общим
+# числом панели, и отчёту перестали бы верить.
+
+NO_POINT_TITLE = "без точки"
+
+# Числа строки отчёта, которые складываются в «Итого». Штуки - целые,
+# остальное - деньги.
+POINT_COUNTS = ("issued", "first_periods", "renewals", "active", "debtors",
+                "orders", "client_orders", "repairs")
+POINT_MONEY = ("paid", "charged", "charged_fines", "bonus", "refunded", "debt",
+               "cash", "service_revenue", "service_cost", "parts_cost", "repair_cost")
+
+
+def _span_days(delta: timedelta) -> Decimal:
+    """Сутки интервала точно, через микросекунды: куски по точкам обязаны
+    складываться в целое, а float терял бы на каждом доли секунды."""
+    micro = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return Decimal(micro) / Decimal(86_400_000_000)
+
+
+def days_by_status_location(status_log: Iterable[Mapping[str, Any]],
+                            location_log: Iterable[Mapping[str, Any]],
+                            since: datetime, until: datetime
+                            ) -> dict[str | None, dict[str, Decimal]]:
+    """Велосипеде-дни по точке и статусу за [since, until) - пересечение
+    журнала статусов с журналом мест. Зеркало CrmDB.bike_days_by_location.
+
+    Точка - та, где велосипед стоял в каждый момент интервала статуса:
+    переезд свободного велосипеда без смены статуса делит его простой
+    между точками. Первая строка журнала мест тянется в прошлое - статусы
+    бывают старше истории мест, а точка до её начала та, что стояла в
+    карточке. Велосипед без журнала мест целиком «без точки» (None).
+    Сумма по точкам равна days_by_status при любом журнале.
+    """
+    places: dict[Any, list[Mapping[str, Any]]] = {}
+    for row in location_log:
+        places.setdefault(row["bike_id"], []).append(row)
+    spans: dict[Any, list[tuple]] = {}
+    for bike_id, rows in places.items():
+        rows.sort(key=lambda r: (r["changed_at"], r.get("id") or 0))
+        # (с, по, точка); None в «с» - с начала времён, в «по» - доныне.
+        spans[bike_id] = [
+            (None if i == 0 else row["changed_at"],
+             rows[i + 1]["changed_at"] if i + 1 < len(rows) else None,
+             row.get("to_location") or None)
+            for i, row in enumerate(rows)]
+    by_bike: dict[Any, list[Mapping[str, Any]]] = {}
+    for row in status_log:
+        by_bike.setdefault(row["bike_id"], []).append(row)
+    out: dict[str | None, dict[str, Decimal]] = {}
+    for bike_id, rows in by_bike.items():
+        rows.sort(key=lambda r: (r["changed_at"], r.get("id") or 0))
+        where = spans.get(bike_id) or [(None, None, None)]
+        for i, row in enumerate(rows):
+            start = max(row["changed_at"], since)
+            end = min(rows[i + 1]["changed_at"] if i + 1 < len(rows) else until, until)
+            for began, ended, location in where:
+                lo = start if began is None else max(start, began)
+                hi = end if ended is None else min(end, ended)
+                if hi <= lo:
+                    continue
+                cell = out.setdefault(location, {})
+                cell[row["to_status"]] = (cell.get(row["to_status"], Decimal(0))
+                                          + _span_days(hi - lo))
+    return out
+
+
+def _point_row(key: str | None, place: Mapping[str, Any] | None, *,
+               counts: Mapping[str, int], days: Mapping[str, Any],
+               money: Mapping[str, Any], rentals: Mapping[str, Any],
+               debt: Mapping[str, Any], cash: Any,
+               service: Mapping[str, Any]) -> dict[str, Any]:
+    paid = to_money(money.get("paid") or 0)
+    row: dict[str, Any] = {
+        "key": key, "id": place.get("id") if place else None, "total": False,
+        "title": key if key is not None else NO_POINT_TITLE,
+        "place": dict(place) if place else None,
+        # Закрытая точка справочника: видна, пока у неё есть история.
+        "closed": bool(place) and place.get("active", True) is False,
+        # Имя в данных, которого нет в справочнике: старая запись или
+        # точка, заведённая до справочника. Своей страницы у неё нет.
+        "orphan": key is not None and place is None,
+        "counts": dict(counts),
+        "fleet": sum(int(counts.get(s, 0)) for s in OPERATIONAL_STATUSES),
+        "days": {s: Decimal(str(v)) for s, v in days.items()},
+        "metrics": fleet_metrics(days, paid),
+    }
+    for k in ("paid", "charged", "charged_fines", "bonus", "refunded"):
+        row[k] = to_money(money.get(k) or 0)
+    for k in ("issued", "first_periods", "renewals", "active"):
+        row[k] = int(rentals.get(k) or 0)
+    row["debtors"] = int(debt.get("clients") or 0)
+    row["debt"] = to_money(debt.get("debt") or 0)
+    row["cash"] = to_money(cash or 0)
+    for k in ("orders", "client_orders", "repairs"):
+        row[k] = int(service.get(k) or 0)
+    row["service_revenue"] = to_money(service.get("revenue") or 0)
+    row["service_cost"] = to_money(service.get("cost") or 0)
+    row["parts_cost"] = to_money(service.get("parts_cost") or 0)
+    row["repair_cost"] = to_money(service.get("repair_cost") or 0)
+    return row
+
+
+def _point_empty(row: Mapping[str, Any]) -> bool:
+    return (not any(row["counts"].values()) and not any(row["days"].values())
+            and not any(row[k] for k in POINT_COUNTS + POINT_MONEY))
+
+
+def points_rows(locations: Iterable[Mapping[str, Any]], *,
+                bikes: Iterable[Mapping[str, Any]],
+                days: Mapping[str | None, Mapping[str, Any]],
+                money: Mapping[str | None, Mapping[str, Any]],
+                rentals: Mapping[str | None, Mapping[str, Any]] | None = None,
+                debt: Mapping[str | None, Mapping[str, Any]] | None = None,
+                cash: Mapping[str | None, Any] | None = None,
+                service: Mapping[str | None, Mapping[str, Any]] | None = None
+                ) -> dict[str, Any]:
+    """Сравнение точек за период: строка на точку и «Итого».
+
+    locations - справочник в его порядке (sort, name); bikes - парк
+    сейчас (N и статусы по текущей точке); остальное - ответы
+    CrmDB.*_by_location вида {точка или None: числа}. Три числа точки -
+    та же fleet_metrics от её дней и её платежей.
+
+    Точка справочника видна всегда, закрытая - только с данными: её
+    история остаётся историей. Имя из данных, которого нет в справочнике,
+    - своей строкой: терять его деньги нельзя. «Без точки» - последней и
+    только если в ней что-то есть. «Итого» - сумма всех строк, то есть
+    ровно общие числа панели: те же дни и те же платежи, только сложенные.
+    """
+    rentals, debt, cash, service = rentals or {}, debt or {}, cash or {}, service or {}
+    counts: dict[str | None, dict[str, int]] = {}
+    for b in bikes:
+        cell = counts.setdefault(b.get("location") or None, {})
+        cell[b["status"]] = cell.get(b["status"], 0) + 1
+    directory = [dict(p) for p in locations if p.get("name")]
+    known = {p["name"] for p in directory}
+    found: set[str | None] = set()
+    for source in (counts, days, money, rentals, debt, cash, service):
+        found.update(source)
+    orphans = sorted(k for k in found if k is not None and k not in known)
+
+    def build(key: str | None, place: Mapping[str, Any] | None) -> dict[str, Any]:
+        return _point_row(key, place, counts=counts.get(key) or {},
+                          days=days.get(key) or {}, money=money.get(key) or {},
+                          rentals=rentals.get(key) or {}, debt=debt.get(key) or {},
+                          cash=cash.get(key), service=service.get(key) or {})
+
+    rows = []
+    for place in directory:
+        row = build(place["name"], place)
+        if place.get("active", True) or not _point_empty(row):
+            rows.append(row)
+    rows += [row for row in (build(k, None) for k in orphans) if not _point_empty(row)]
+    none = build(None, None)
+    if not _point_empty(none):
+        rows.append(none)
+
+    total_counts: dict[str, int] = {}
+    total_days: dict[str, Decimal] = {}
+    for row in rows:
+        for s, n in row["counts"].items():
+            total_counts[s] = total_counts.get(s, 0) + n
+        for s, d in row["days"].items():
+            total_days[s] = total_days.get(s, Decimal(0)) + d
+    total: dict[str, Any] = {
+        "key": None, "id": None, "total": True, "title": "Итого", "place": None,
+        "closed": False, "orphan": False, "counts": total_counts,
+        "fleet": sum(r["fleet"] for r in rows), "days": total_days}
+    for k in POINT_COUNTS:
+        total[k] = sum(r[k] for r in rows)
+    for k in POINT_MONEY:
+        total[k] = to_money(sum((r[k] for r in rows), Decimal(0)))
+    total["metrics"] = fleet_metrics(total_days, total["paid"])
+    return {"rows": rows, "total": total}
+
+
+def points_history_from(settings: Mapping[str, Any], since: datetime) -> datetime | None:
+    """Момент, с которого история мест настоящая, - если период отчёта
+    начался раньше него. До внедрения точка велосипеда - та, что стояла
+    в карточке в день внедрения, и отчёт обязан сказать об этом одной
+    строкой, а не выдавать догадку за историю. None - сказать нечего."""
+    try:
+        start = datetime.fromisoformat(str(settings.get("points_history_since") or ""))
+        return start if since < start else None
+    except (TypeError, ValueError):
+        return None
+
+
+def point_months(months: Iterable[Mapping[str, Any]], key: str | None) -> list[dict]:
+    """Три числа одной точки по месяцам. months - [{"month", "days",
+    "money"}] с ответами bike_days_by_location и money_by_location за
+    месяц: запрос на месяц один на все точки, а не по запросу на точку."""
+    out = []
+    for m in months:
+        days = (m.get("days") or {}).get(key) or {}
+        paid = ((m.get("money") or {}).get(key) or {}).get("paid") or 0
+        out.append({"month": m["month"], **fleet_metrics(days, paid)})
+    return out
+
+
+# Слова адреса, которые ничего не различают: «ул.» и «д.» есть в каждом
+# адресе, и «ул. Адоратского» от «Адоратского» не отличается ничем.
+_PLACE_NOISE = frozenset({
+    "г", "гор", "город", "ул", "улица", "д", "дом", "пр", "просп", "проспект",
+    "пер", "переулок", "бульвар", "ш", "шоссе", "пл", "площадь", "наб",
+    "набережная", "к", "корп", "корпус", "стр", "строение", "в", "на", "у", "и",
+    "по", "рф", "россия", "точка", "пункт"})
+
+
+def _place_words(raw: Any) -> list[str]:
+    """Слова адреса без регистра, ё=е и знаков препинания; буква дома
+    прилипает к номеру: «11 А» и «11А» - один дом."""
+    text = str(raw or "").lower().replace("ё", "е")
+    text = re.sub(r"(\d)\s+([^\W\d_])(?![^\W\d_])", r"\1\2", text)
+    return re.findall(r"[^\W_]+", text)
+
+
+def match_location(text: Any, locations: Iterable[Mapping[str, Any]]) -> str | None:
+    """Точка справочника по свободному тексту - строке «адрес» формы сдачи:
+    «Адоратского 15», «ул. Павлюхина, 97А».
+
+    Сравниваются имя, вывеска (public_title) и адрес: без регистра, ё=е,
+    без знаков препинания, без слов вроде «ул.» и без названия города -
+    они есть в каждом адресе. Сперва точное совпадение, затем «всё
+    значимое из имени или адреса есть в тексте» или «весь текст - часть
+    имени или адреса». Две точки подошли одинаково или ни одной - None:
+    точку возврата не угадывают, её лучше не тронуть. Закрытые точки не
+    рассматриваются - вернуть велосипед туда нельзя.
+    """
+    said_words = _place_words(text)
+    if not said_words:
+        return None
+    places = [p for p in locations
+              if p.get("name") and p.get("active", True) is not False]
+    noise = _PLACE_NOISE | {w for p in places for w in _place_words(p.get("city"))}
+
+    def meaning(words: list[str]) -> frozenset[str]:
+        return frozenset(w for w in words
+                         if w not in noise and not (len(w) == 1 and w.isalpha()))
+
+    said = meaning(said_words)
+    exact: set[str] = set()
+    loose: set[str] = set()
+    for place in places:
+        for field in ("name", "public_title", "address"):
+            words = _place_words(place.get(field))
+            if not words:
+                continue
+            if words == said_words:
+                exact.add(place["name"])
+            own = meaning(words)
+            if own and said and (own <= said or said <= own):
+                loose.add(place["name"])
+    for found in (exact, loose):
+        if found:
+            return next(iter(found)) if len(found) == 1 else None
+    return None
+
+
+# Период отчёта по точкам по умолчанию - те же 30 дней до этой минуты,
+# что у трёх чисел на сводке: «Итого» отчёта обязано совпасть с ними, а
+# при другом окне совпадение было бы случайным.
+POINTS_PERIOD_DAYS = 30
+# Длиннее графику по дням нечего сказать: столбики сливаются, а картину
+# по месяцам даёт таблица трёх чисел ниже.
+POINT_CHART_DAYS = 62
+
+
+def report_period(params: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+    """Период отчёта по точкам: [start, end).
+
+    По умолчанию - последние 30 дней до этой минуты. `month=ГГГГ-ММ` -
+    календарный месяц (текущий - по эту минуту), `since`/`until` - свой
+    интервал по дням включительно. Мусор в адресе - умолчание, а не
+    ошибка: отчёт открывают по ссылке, и страница отказа ничего не даёт.
+    `query` - хвост адреса, которым период едет в выгрузку и на страницу
+    точки: там обязаны быть те же числа.
+    """
+    tz, today = now.tzinfo, now.date()
+
+    def midnight(day: date) -> datetime:
+        return datetime.combine(day, datetime.min.time(), tzinfo=tz)
+
+    month = str(params.get("month") or "").strip()
+    if month:
+        first = month_from(month, today=today)
+        span = month_bounds(first, today=today)
+        return {"kind": "month", "start": midnight(first),
+                "end": min(midnight(span["next"]), now),
+                "since": first, "until": span["today"], "key": span["key"],
+                "prev_key": span["prev_key"], "next_key": span["next_key"],
+                "query": f"month={span['key']}", "label": first.strftime("%m.%Y")}
+    raw_since = str(params.get("since") or "").strip()
+    raw_until = str(params.get("until") or "").strip()
+    since = check_date(raw_since) if raw_since else None
+    until = check_date(raw_until) if raw_until else None
+    if (since or until) and (since is None or since.ok) and (until is None or until.ok):
+        last = until.value if until else today
+        first = since.value if since else last - timedelta(days=POINTS_PERIOD_DAYS - 1)
+        first, last = min(first, last), max(first, last)
+        return {"kind": "custom", "start": midnight(first),
+                "end": midnight(last + timedelta(days=1)), "since": first, "until": last,
+                "key": today.strftime("%Y-%m"),
+                "prev_key": (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m"),
+                "next_key": None,
+                "query": f"since={first.isoformat()}&until={last.isoformat()}",
+                "label": f"{first:%d.%m.%Y} — {last:%d.%m.%Y}"}
+    start = now - timedelta(days=POINTS_PERIOD_DAYS)
+    return {"kind": "days", "start": start, "end": now, "since": start.date(),
+            "until": today, "key": today.strftime("%Y-%m"),
+            "prev_key": (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m"),
+            "next_key": None, "query": "",
+            "label": f"последние {POINTS_PERIOD_DAYS} дней"}
+
+
+def month_windows(now: datetime, count: int = 6) -> list[dict[str, Any]]:
+    """Последние `count` календарных месяцев, текущий первым и по эту
+    минуту - тем же шагом, что таблица трёх чисел в отчётах."""
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    for _ in range(count):
+        following = (first + timedelta(days=32)).replace(day=1)
+        out.append({"month": first.date(), "since": first,
+                    "until": min(following, now)})
+        first = (first - timedelta(days=1)).replace(day=1)
+    return out
+
+
+def point_card(report: Mapping[str, Any], key: str | None,
+               place: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Строка одной точки из отчёта points_rows. Закрытой точки без данных
+    и пустой корзины «без точки» среди строк нет - тогда строка с нулями:
+    страница точки открывается и так, пустой отчёт - тоже ответ."""
+    for row in report.get("rows") or ():
+        if row["key"] == key:
+            return row
+    return _point_row(key, place, counts={}, days={}, money={}, rentals={},
+                      debt={}, cash=0, service={})
+
+
+def bikes_by_point(bikes: Iterable[Mapping[str, Any]]) -> dict[str | None, dict[str, int]]:
+    """Сколько велосипедов числится на точке сейчас: операционный парк,
+    из него в аренде (он стоит на точке аренды), и все карточки вместе с
+    потерянными и проданными - столько строк тронет переименование."""
+    out: dict[str | None, dict[str, int]] = {}
+    for bike in bikes:
+        cell = out.setdefault(bike.get("location") or None,
+                              {"fleet": 0, "rented": 0, "cards": 0})
+        cell["cards"] += 1
+        if bike.get("status") in OPERATIONAL_STATUSES:
+            cell["fleet"] += 1
+        if bike.get("status") == "rented":
+            cell["rented"] += 1
+    return out
+
+
+def map_places(locations: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Точки выдачи на карте: действующие и с координатами. Своим слоем,
+    а не ещё одной точкой трекера: по ним видно, далеко ли велосипед от
+    точки, а спутать пункт с велосипедом значит поехать не туда."""
+    out = []
+    for place in locations:
+        if place.get("active", True) is False or not place.get("name"):
+            continue
+        if not has_fix(place.get("lat"), place.get("lon")):
+            continue
+        lat, lon = float(place["lat"]), float(place["lon"])
+        out.append({"lat": lat, "lon": lon, "name": str(place["name"]),
+                    "title": str(place.get("public_title") or place["name"]),
+                    "address": str(place.get("address") or ""),
+                    "url": map_url(lat, lon)})
+    return out
 
 
 # ─────────────────────── стоимость склада по месяцам ───────────────────────

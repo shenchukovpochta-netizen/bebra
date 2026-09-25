@@ -209,6 +209,24 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
         log.exception("CRM: продление по договору %s не записано", user.get("contract_no"))
 
 
+async def _return_point(crm: Any, user: dict) -> str | None:
+    """Точка возврата по строке «адрес» формы сдачи («Адоратского 15»).
+
+    Не сопоставилась со справочником или справочник недоступен - None:
+    точку не угадываем, велосипед остаётся на точке аренды. Сбой здесь
+    не вправе сорвать закрытие аренды - оно важнее точки.
+    """
+    data = user.get("return_data")
+    address = data.get("return_address") if isinstance(data, dict) else None
+    if not address:
+        return None
+    try:
+        return logic.match_location(address, await crm.locations())
+    except Exception:                                    # noqa: BLE001
+        log.exception("CRM: точка возврата по адресу не определена")
+        return None
+
+
 async def on_rental_closed(crm: Any, user: dict, *, today: date) -> None:
     try:
         client = await crm.client_by_tg(user["tg_id"])
@@ -224,7 +242,8 @@ async def on_rental_closed(crm: Any, user: dict, *, today: date) -> None:
         bought = bool(user.get("buyout_signed_at"))
         await service.close_rental(crm, rental, closed_on=today, by="bot",
                                    bike_status="sold" if bought else "available",
-                                   note="Акт возврата подписан в боте")
+                                   note="Акт возврата подписан в боте",
+                                   return_location=await _return_point(crm, user))
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не закрыта", user.get("contract_no"))
 

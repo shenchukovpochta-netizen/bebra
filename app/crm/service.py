@@ -28,10 +28,11 @@ class ServiceError(Exception):
 async def cash_shift_id(crm: Any, method: str | None, by: str | None) -> int | None:
     """Смена, в которую лягут эти наличные. Безнал в ящик не попадает.
 
-    Точек две, и смены на них открыты одновременно: по одному окну
+    Точек несколько, и смены на них открыты одновременно: по одному окну
     времени наличный платёж попадал в обе смены сразу, и на второй
     точке закрытие писало недостачу на ту же сумму как факт. Смену
-    выбираем по тому, кто принял деньги, - и запоминаем в записи.
+    выбираем по тому, кто принял деньги (его смена, иначе смена его
+    точки), - и запоминаем в записи.
     """
     if method != "cash":
         return None
@@ -75,7 +76,9 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
                       billing: str = "auto", mileage: int | None = None,
                       extras: Sequence[Mapping[str, Any]] = (),
                       promo_code: str | None = None,
-                      applied: list[dict] | None = None) -> int:
+                      applied: list[dict] | None = None,
+                      location: str | None = None,
+                      booking: Mapping[str, Any] | None = None) -> int:
     """Оформить аренду и начислить первый период.
 
     Аренда с датой начала в будущем не начисляется заранее: первый период
@@ -90,6 +93,10 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
     `promo_code` ложится на аренду: у выдачи с датой в будущем первый
     период начислит дневной проход, и код обязан дожить до него.
     Сработавшие акции собираются в `applied` - для уведомления клиенту.
+
+    `location` - точка выдачи; не выбрана - точка заявки `booking` (клиент
+    сам назвал, куда придёт), иначе точка велосипеда: её решает база в той
+    же транзакции, где велосипед уходит в аренду.
     """
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
@@ -108,7 +115,8 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             period_days=int(tariff["period_days"]), price=price, base_price=base,
             billing=billing, started_on=started_on, contract_no=contract_no,
             created_by=by, mileage_start=mileage,
-            promo_code=logic.clean_promo_code(promo_code) or None)
+            promo_code=logic.clean_promo_code(promo_code) or None,
+            location=logic.issue_point(location, booking=booking))
     except Exception as exc:                            # noqa: BLE001
         # Уникальные индексы на активную аренду: гонка двух операторов.
         if "unique" in type(exc).__name__.lower():
@@ -331,12 +339,15 @@ async def check_promo_code(crm: Any, code: Any, *, today: date,
 async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | None,
                        bike_status: str = "available", by: str | None = None,
                        mileage: int | None = None,
-                       battery_status: str = "available") -> None:
+                       battery_status: str = "available",
+                       return_location: str | None = None) -> None:
+    """`return_location` - где сдали; не указана - точка аренды."""
     if bike_status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус велосипеда.")
     if not await crm.close_rental(rental["id"], closed_on=closed_on, note=note,
                                   bike_status=bike_status, closed_by=by,
-                                  mileage_end=mileage):
+                                  mileage_end=mileage,
+                                  return_location=return_location or None):
         raise ServiceError("Аренда уже закрыта.")
     # Батареи возвращаются вместе с велосипедом: оставить их «у клиента»
     # значит потерять две штуки на каждой закрытой аренде.
@@ -372,7 +383,8 @@ async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -
 async def open_order(crm: Any, *, bike: dict | None, payer: str,
                      client: dict | None, complaint: str | None,
                      object_note: str | None, tech_id: int | None,
-                     estimate: Decimal, by: str) -> int:
+                     estimate: Decimal, by: str,
+                     location: str | None = None) -> int:
     """Открыть наряд и увести велосипед в ремонт.
 
     Статус велосипеда меняется здесь же: наряд открыт, а велосипед числится
@@ -392,7 +404,8 @@ async def open_order(crm: Any, *, bike: dict | None, payer: str,
             bike_id=bike["id"] if bike else None, payer=payer,
             client_id=client["id"] if client else None, complaint=complaint,
             object_note=object_note, tech_id=tech_id,
-            estimate=logic.to_money(estimate), created_by=by)
+            estimate=logic.to_money(estimate), created_by=by,
+            location=location or None)
     except Exception as exc:                            # noqa: BLE001
         # Уникальный индекс на открытый наряд:два оператора нажали разом.
         if "unique" in type(exc).__name__.lower():
@@ -920,12 +933,14 @@ async def orders_waiting_for(crm: Any, items: Iterable[dict]) -> list[dict]:
 
 async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
                     mileage_old: int | None = None, mileage_new: int | None = None,
-                    old_status: str | None = None, by: str) -> dict:
+                    old_status: str | None = None, by: str,
+                    swap_location: str | None = None) -> dict:
     """Заменить велосипед внутри аренды.
 
     Деньги, даты и договор остаются те же - меняется только то, что у
     клиента на руках. До замены приходилось закрывать аренду и открывать
     новую, и тогда расходились и оплаченный период, и номер договора.
+    `swap_location` - где меняли: там остаётся снятый велосипед.
     """
     if rental.get("status") != "active":
         raise ServiceError("Аренда закрыта - менять в ней нечего.")
@@ -946,7 +961,8 @@ async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
     ok = await crm.swap_rental_bike(
         rental["id"], old_bike_id=old_id, new_bike_id=new_bike["id"],
         old_status=status, mileage_old=mileage_old, mileage_new=mileage_new,
-        reason=logic.SWAP_REASONS[reason], today=date.today(), by=by)
+        reason=logic.SWAP_REASONS[reason], today=date.today(), by=by,
+        swap_location=swap_location or None)
     if not ok:
         raise ServiceError("Аренда изменилась, пока вы заполняли форму. "
                            "Откройте её заново.")

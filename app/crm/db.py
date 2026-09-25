@@ -39,7 +39,9 @@ BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location
                             "bike_id", "rental_id", "cycles", "purchase_price",
                             "purchased_on", "service_months", "note",
                             "volts", "amp_hours"})
-LOCATION_FIELDS = frozenset({"city", "name", "address", "note", "active", "sort",
+# Имени здесь нет намеренно: на него текстом ссылаются парк, касса, аренды
+# и журнал мест, и переименование идёт только каскадом (rename_location).
+LOCATION_FIELDS = frozenset({"city", "address", "note", "active", "sort",
                             "public_title", "phone", "hours", "lat", "lon"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note",
@@ -77,7 +79,7 @@ TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
-    "estimate_sent_at", "approved_at", "approved_by", "declined_at",
+    "estimate_sent_at", "approved_at", "approved_by", "declined_at", "location",
 })
 RENTAL_FIELDS = frozenset({
     "search_at", "search_by", "search_note",
@@ -127,6 +129,45 @@ def _vin_sql(column: str) -> str:
             "'[^0-9A-Z]', '', 'g')")
 
 
+def _ledger_rentals(where: str) -> str:
+    """CTE `attr`: записи журнала вместе с арендой, к которой они относятся.
+
+    Своя аренда записи, иначе аренда клиента, шедшая в день записи
+    (последняя по id), иначе ближайшая по дате начала. У части платежей
+    rental_id пуст - заявка из бота, выписка банка, - и без этого правила
+    деньги потеряли бы самый частый способ оплаты. Правило одно на
+    окупаемость по моделям и на отчёты по точкам: разойдись они - выручка
+    модели и выручка точки за один период перестали бы сходиться.
+    `where` - условие на crm.ledger l с параметрами вызывающего.
+    """
+    return f"""
+        attr as (
+          select l.id, l.client_id, l.kind, l.amount, l.method, l.shift_id,
+                 l.period_from, l.created_at,
+                 coalesce(l.rental_id, (
+                   select r.id from crm.rentals r
+                    where r.client_id = l.client_id
+                      and r.started_on <= l.created_at::date
+                      and (r.closed_on is null or r.closed_on >= l.created_at::date)
+                    order by r.id desc limit 1), (
+                   select r.id from crm.rentals r
+                    where r.client_id = l.client_id
+                    order by abs(r.started_on - l.created_at::date), r.id
+                    limit 1)) as rental_id
+            from crm.ledger l
+           where {where})"""
+
+
+# Точка клиента для долга - точка его последней аренды: идущая первой,
+# затем последняя по id. Одна и та же в отчёте «По точкам» и в списке
+# должников, иначе фильтр списка не сошёлся бы с числом в отчёте.
+_LAST_RENTAL_POINT = """
+    last as (
+      select distinct on (client_id) client_id, nullif(location, '') as location
+        from crm.rentals
+       order by client_id, (status = 'active') desc, id desc)"""
+
+
 class CrmDB:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
@@ -159,15 +200,22 @@ class CrmDB:
             f"{self._STAFF_SELECT} order by s.active desc, s.id"))
 
     async def create_staff(self, login: str, password_hash: str, name: str,
-                           role: str, profile_id: int | None = None) -> int:
+                           role: str, profile_id: int | None = None,
+                           location: str | None = None) -> int:
         return int(await self.pool.fetchval(
-            "insert into crm.staff (login, password_hash, name, role, profile_id) "
-            "values ($1, $2, $3, $4, $5) returning id",
-            login, password_hash, name, role, profile_id))
+            "insert into crm.staff (login, password_hash, name, role, profile_id, "
+            "location) values ($1, $2, $3, $4, $5, $6) returning id",
+            login, password_hash, name, role, profile_id, location))
 
     async def set_staff_profile(self, staff_id: int, profile_id: int | None) -> None:
         await self.pool.execute(
             "update crm.staff set profile_id = $2 where id = $1", staff_id, profile_id)
+
+    async def set_staff_location(self, staff_id: int, location: str | None) -> None:
+        """Своя точка сотрудника: по ней касса выбирает смену, если он
+        принял наличные, не открыв своей."""
+        await self.pool.execute(
+            "update crm.staff set location = $2 where id = $1", staff_id, location)
 
     # ─────────────────────── профили доступа ───────────────────────
 
@@ -366,6 +414,13 @@ class CrmDB:
     async def bike_status_log(self, bike_id: int, limit: int = 30) -> list[dict]:
         return _rows(await self.pool.fetch(
             "select * from crm.bike_status_log where bike_id = $1 "
+            "order by changed_at desc, id desc limit $2", bike_id, limit))
+
+    async def bike_location_log(self, bike_id: int, limit: int = 30) -> list[dict]:
+        """Переезды велосипеда между точками - журнал пишет триггер
+        crm.log_bike_location, как статусы пишет crm.log_bike_status."""
+        return _rows(await self.pool.fetch(
+            "select * from crm.bike_location_log where bike_id = $1 "
             "order by changed_at desc, id desc limit $2", bike_id, limit))
 
     async def bike_status_since(self) -> dict[int, datetime]:
@@ -647,12 +702,20 @@ class CrmDB:
                    from crm.ledger group by client_id) l on l.client_id = c.id
     """
 
-    async def rentals(self, *, status: str | None = None, limit: int = 500) -> list[dict]:
+    async def rentals(self, *, status: str | None = None, location: str | None = None,
+                      limit: int = 500) -> list[dict]:
+        """location - точка выдачи аренды; "none" - аренды без точки."""
         args: list[Any] = []
-        where = ""
+        conds: list[str] = []
         if status:
             args.append(status)
-            where = f"where r.status = ${len(args)}"
+            conds.append(f"r.status = ${len(args)}")
+        if location == "none":
+            conds.append("r.location is null")
+        elif location:
+            args.append(location)
+            conds.append(f"r.location = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)
         return _rows(await self.pool.fetch(
             f"{self._RENTAL_SELECT} {where} order by r.status = 'active' desc, "
@@ -697,43 +760,51 @@ class CrmDB:
                             created_by: str | None,
                             mileage_start: int | None = None,
                             base_price: Decimal | None = None,
-                            promo_code: str | None = None) -> int:
+                            promo_code: str | None = None,
+                            location: str | None = None) -> int:
         """Аренда и статус велосипеда - одной транзакцией.
 
         `price` - цена периода целиком, вместе с позициями; `base_price` -
         цена одного велосипеда. По первой идёт начисление, по второй
         пересчёт, когда позицию снимают.
 
+        `location` - точка выдачи; не выбрана - точка велосипеда. Велосипед
+        встаёт на неё тем же UPDATE, что и в «rented»: пока аренда идёт, он
+        числится на её точке, иначе чек точки не сошёлся бы с днями.
+
         Уникальные индексы на активную аренду клиента и велосипеда бросают
         UniqueViolationError; вызывающий переводит его в понятное сообщение.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", created_by or "")
-            rental_id = int(await conn.fetchval(
+            row = await conn.fetchrow(
                 """
                 insert into crm.rentals
                   (client_id, bike_id, tariff_id, tariff_name, period_days, price,
                    base_price, billing, started_on, billed_until, contract_no,
-                   created_by, mileage_start, promo_code)
-                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11, $13)
-                returning id
+                   created_by, mileage_start, promo_code, location)
+                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11, $13,
+                        coalesce($14, (select location from crm.bikes where id = $2)))
+                returning id, location
                 """, client_id, bike_id, tariff_id, tariff_name, period_days,
                 price, billing, started_on, contract_no, created_by, mileage_start,
-                base_price if base_price is not None else price, promo_code))
+                base_price if base_price is not None else price, promo_code, location)
             if bike_id is not None:
                 # greatest: пробег велосипеда не уменьшается никогда, даже
                 # если аренду задним числом оформили с меньшим числом.
                 await conn.execute(
-                    "update crm.bikes set status = 'rented', "
+                    "update crm.bikes set status = 'rented', location = $3, "
                     "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
-                    "updated_at = now() where id = $1", bike_id, mileage_start)
-            return rental_id
+                    "updated_at = now() where id = $1",
+                    bike_id, mileage_start, row["location"])
+            return int(row["id"])
 
     async def start_rental_charged(self, *, client_id: int, bike_id: int | None,
                                    tariff_name: str, period_days: int, price: Decimal,
                                    billing: str, started_on: date, period_to: date,
                                    contract_no: str | None, note: str,
-                                   created_by: str | None) -> int:
+                                   created_by: str | None,
+                                   location: str | None = None) -> int:
         """Аренда и её первое начисление - одной транзакцией.
 
         Так аренду заводит бот по подписанному акту. Двумя запросами сбой
@@ -741,19 +812,24 @@ class CrmDB:
         начисляются по событиям, а не по календарю, и догонять их некому -
         баланс клиента оказывался завышен ровно на один период, а выглядел
         правдоподобно, потому что «оплачено до» считается от баланса.
+
+        Точка - как у create_rental: в форме бота её нет, и выдача идёт с
+        точки велосипеда.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)",
                                created_by or "")
-            rental_id = int(await conn.fetchval(
+            row = await conn.fetchrow(
                 """
                 insert into crm.rentals
                   (client_id, bike_id, tariff_name, period_days, price, base_price,
-                   billing, started_on, billed_until, contract_no, created_by)
-                values ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
-                returning id
+                   billing, started_on, billed_until, contract_no, created_by, location)
+                values ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10,
+                        coalesce($11, (select location from crm.bikes where id = $2)))
+                returning id, location
                 """, client_id, bike_id, tariff_name, period_days, price, billing,
-                started_on, period_to, contract_no, created_by))
+                started_on, period_to, contract_no, created_by, location)
+            rental_id = int(row["id"])
             await conn.execute(
                 """
                 insert into crm.ledger
@@ -764,8 +840,8 @@ class CrmDB:
                 created_by)
             if bike_id is not None:
                 await conn.execute(
-                    "update crm.bikes set status = 'rented', updated_at = now() "
-                    "where id = $1", bike_id)
+                    "update crm.bikes set status = 'rented', location = $2, "
+                    "updated_at = now() where id = $1", bike_id, row["location"])
             return rental_id
 
     async def extend_rental_paid(self, rental_id: int, client_id: int, *,
@@ -806,12 +882,17 @@ class CrmDB:
     async def close_rental(self, rental_id: int, *, closed_on: date,
                            note: str | None, bike_status: str = "available",
                            closed_by: str | None = None,
-                           mileage_end: int | None = None) -> bool:
+                           mileage_end: int | None = None,
+                           return_location: str | None = None) -> bool:
         """Закрыть аренду и освободить велосипед. False - уже закрыта.
 
         Пробег возврата пишется в ту же транзакцию, что и статус велосипеда:
         иначе одометр парка и «накатал» у аренды разъезжались бы при сбое
         между двумя запросами.
+
+        Точка возврата - тем же UPDATE, что и статус: сданный на другой
+        точке велосипед иначе числился бы там, где его выдали, и простой
+        после возврата ушёл бы чужой точке. Не указана - точка аренды.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", closed_by or "")
@@ -821,16 +902,18 @@ class CrmDB:
                    set status = 'closed', closed_on = $2, close_note = $3,
                        mileage_end = coalesce($4, mileage_end), updated_at = now()
                  where id = $1 and status = 'active'
-                returning bike_id
+                returning bike_id, location
                 """, rental_id, closed_on, note, mileage_end)
             if row is None:
                 return False
             if row["bike_id"] is not None:
                 await conn.execute(
                     "update crm.bikes set status = $2, "
+                    "location = coalesce($4, $5, location), "
                     "mileage_km = greatest(mileage_km, coalesce($3, mileage_km)), "
                     "updated_at = now() where id = $1 and status = 'rented'",
-                    row["bike_id"], bike_status, mileage_end)
+                    row["bike_id"], bike_status, mileage_end, return_location,
+                    row["location"])
             # Позиции закрываются вместе с арендой: доп. аккумулятор
             # вернулся на склад, и висеть действующим ему незачем.
             await conn.execute(
@@ -1041,14 +1124,29 @@ class CrmDB:
             order by 1 desc
             """, str(months)))
 
-    async def debtors(self, limit: int = 50) -> list[dict]:
+    async def debtors(self, limit: int = 50, *, location: str | None = None) -> list[dict]:
+        """Должники, самый большой долг первым, с точкой последней аренды.
+        location - только должники этой точки (как в debt_by_location);
+        "none" - без точки: аренд не было или у аренды точки нет."""
+        args: list[Any] = [limit]
+        where = ""
+        if location == "none":
+            where = "where last.location is null"
+        elif location:
+            args.append(location)
+            where = "where last.location = $2"
         return _rows(await self.pool.fetch(
-            """
-            select c.id, c.full_name, c.phone, c.status, sum(l.amount) as balance
-            from crm.ledger l join crm.clients c on c.id = l.client_id
-            group by c.id having sum(l.amount) < 0
-            order by sum(l.amount) limit $1
-            """, limit))
+            f"""
+            with {_LAST_RENTAL_POINT}
+            select c.id, c.full_name, c.phone, c.status, sum(l.amount) as balance,
+                   last.location
+              from crm.ledger l
+              join crm.clients c on c.id = l.client_id
+              left join last on last.client_id = c.id
+             {where}
+             group by c.id, last.location having sum(l.amount) < 0
+             order by sum(l.amount), c.id limit $1
+            """, *args))
 
     async def counts(self) -> dict[str, int]:
         row = await self.pool.fetchrow(
@@ -1209,8 +1307,15 @@ class CrmDB:
 
     async def work_orders(self, *, status: str | None = None, payer: str | None = None,
                           tech_id: int | None = None, bike_id: int | None = None,
-                          open_only: bool = False, limit: int = 300) -> list[dict]:
+                          open_only: bool = False, location: str | None = None,
+                          limit: int = 300) -> list[dict]:
+        """location - где идёт ремонт; "none" - наряды без точки."""
         where, values = [], []
+        if location == "none":
+            where.append("o.location is null")
+        elif location:
+            values.append(location)
+            where.append(f"o.location = ${len(values)}")
         if status:
             values.append(status)
             where.append(f"o.status = ${len(values)}")
@@ -1251,10 +1356,14 @@ class CrmDB:
     async def create_work_order(self, *, bike_id: int | None, payer: str,
                                 client_id: int | None, complaint: str | None,
                                 object_note: str | None, tech_id: int | None,
-                                estimate: Decimal, created_by: str) -> int:
+                                estimate: Decimal, created_by: str,
+                                location: str | None = None) -> int:
         """Наряд с человекочитаемым номером. Номер берётся из счётчика
         самой таблицы в той же транзакции: две одновременные кнопки
-        «открыть наряд» не должны получить один и тот же РЕМ-."""
+        «открыть наряд» не должны получить один и тот же РЕМ-.
+
+        Точка ремонта не выбрана - точка велосипеда; у чужой техники без
+        выбора её нет."""
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("lock table crm.work_orders in share row exclusive mode")
             next_no = int(await conn.fetchval(
@@ -1264,10 +1373,12 @@ class CrmDB:
                 """
                 insert into crm.work_orders
                     (no, bike_id, payer, client_id, complaint, object_note,
-                     tech_id, estimate, created_by)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id
+                     tech_id, estimate, created_by, location)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                        coalesce($10, (select location from crm.bikes where id = $2)))
+                returning id
                 """, logic.order_no(next_no), bike_id, payer, client_id, complaint,
-                object_note, tech_id, estimate, created_by))
+                object_note, tech_id, estimate, created_by, location))
 
     async def update_work_order(self, order_id: int, **fields: Any) -> None:
         if not fields:
@@ -1650,23 +1761,10 @@ class CrmDB:
         ещё не выдали, или доплата после возврата, - берётся ближайшая
         по времени аренда того же клиента.
         """
+        attr = _ledger_rentals("l.created_at >= $1 and l.created_at < $2")
         money = _rows(await self.pool.fetch(
-            """
-            with attr as (
-              select l.kind, l.amount,
-                     coalesce(l.rental_id, (
-                       select r.id from crm.rentals r
-                       where r.client_id = l.client_id
-                         and r.started_on <= l.created_at::date
-                         and (r.closed_on is null or r.closed_on >= l.created_at::date)
-                       order by r.id desc limit 1), (
-                       select r.id from crm.rentals r
-                       where r.client_id = l.client_id
-                       order by abs(r.started_on - l.created_at::date), r.id
-                       limit 1)) as rental_id
-              from crm.ledger l
-              where l.created_at >= $1 and l.created_at < $2
-            )
+            f"""
+            with {attr}
             select b.model,
                    coalesce(sum(a.amount) filter (where a.kind = 'payment'), 0) as paid,
                    coalesce(-sum(a.amount) filter (where a.kind in ('charge', 'fine')), 0)
@@ -1717,6 +1815,257 @@ class CrmDB:
                 for key in keys:
                     cell[key] = row[key]
         return out
+
+    # ─────────────────────── аналитика по точкам ───────────────────────
+    #
+    # Ключ - текст crm.locations.name, None - «без точки». Корзину None
+    # отдаёт каждый метод: без неё сумма по точкам не сошлась бы с общим
+    # числом панели, а отчёт, который не сходится, перестают читать.
+
+    async def bike_days_by_location(self, since: datetime, until: datetime
+                                    ) -> dict[str | None, dict[str, Decimal]]:
+        """Велосипеде-дни по точке и статусу за [since, until) - пересечение
+        журнала статусов с журналом мест. Та же арифметика, что
+        logic.days_by_status_location; сумма по точкам - ровно
+        bike_days_by_status, поэтому три числа точки считает та же
+        fleet_metrics.
+
+        Первая строка журнала мест тянется в прошлое: статусы бывают
+        старше истории мест, а точка до её начала - та, что стояла в
+        карточке. Последняя - в будущее: где кончается интервал, решает
+        журнал статусов, как и в общем числе. Велосипед без журнала мест
+        целиком «без точки».
+        """
+        rows = await self.pool.fetch(
+            """
+            with s as (
+              select bike_id, to_status, changed_at as a,
+                     coalesce(lead(changed_at) over w, now()) as b
+                from crm.bike_status_log
+              window w as (partition by bike_id order by changed_at, id)
+            ), p as (
+              select bike_id, nullif(to_location, '') as location,
+                     case when lag(id) over w is null then '-infinity'::timestamptz
+                          else changed_at end as a,
+                     coalesce(lead(changed_at) over w, 'infinity'::timestamptz) as b
+                from crm.bike_location_log
+              window w as (partition by bike_id order by changed_at, id)
+            ), x as (
+              select p.location, s.to_status as status,
+                     greatest(s.a, coalesce(p.a, s.a), $1::timestamptz) as a,
+                     least(s.b, coalesce(p.b, s.b), $2::timestamptz) as b
+                from s
+                left join p on p.bike_id = s.bike_id and p.a < s.b and p.b > s.a
+               where s.a < $2::timestamptz and s.b > $1::timestamptz
+            )
+            select location, status, sum(extract(epoch from (b - a))) / 86400 as days
+              from x
+             where b > a
+             group by location, status
+            """, since, until)
+        out: dict[str | None, dict[str, Decimal]] = {}
+        for r in rows:
+            if r["days"] and r["days"] > 0:
+                out.setdefault(r["location"], {})[r["status"]] = Decimal(str(r["days"]))
+        return out
+
+    async def money_by_location(self, since: datetime, until: datetime
+                                ) -> dict[str | None, dict[str, Decimal]]:
+        """Деньги журнала за [since, until) по точке аренды записи - правило
+        «чья запись журнала» (_ledger_rentals), то же, что у окупаемости,
+        но без потерь: запись клиента, у которого аренд не было, ложится
+        «без точки», и сумма paid по точкам равна rental_revenue.
+
+        paid - платежи, charged - начисления периодов, charged_fines - они
+        же со штрафами, bonus - баллы, refunded - возвраты (положительные).
+        """
+        attr = _ledger_rentals("l.created_at >= $1 and l.created_at < $2")
+        rows = await self.pool.fetch(
+            f"""
+            with {attr}
+            select nullif(r.location, '') as location,
+                   coalesce(sum(a.amount) filter (where a.kind = 'payment'), 0) as paid,
+                   coalesce(-sum(a.amount) filter (where a.kind = 'charge'), 0)
+                     as charged,
+                   coalesce(-sum(a.amount) filter (where a.kind in ('charge', 'fine')), 0)
+                     as charged_fines,
+                   coalesce(sum(a.amount) filter (where a.kind = 'bonus'), 0) as bonus,
+                   coalesce(-sum(a.amount) filter (where a.kind = 'refund'), 0)
+                     as refunded
+              from attr a
+              left join crm.rentals r on r.id = a.rental_id
+             group by 1
+            """, since, until)
+        keys = ("paid", "charged", "charged_fines", "bonus", "refunded")
+        return {r["location"]: {k: Decimal(r[k] or 0) for k in keys} for r in rows}
+
+    async def location_money_by_day(self, location: str | None, since: date,
+                                    until: date) -> list[dict]:
+        """money_by_day одной точки: те же поля и те же нулевые дни, чтобы
+        logic.money_chart рисовал точку без правок. Запись журнала - на
+        точке своей аренды (_ledger_rentals); location None - «без точки»."""
+        attr = _ledger_rentals("l.created_at >= $2::date::timestamptz "
+                               "and l.created_at < ($3::date + 1)::timestamptz")
+        rows = await self.pool.fetch(
+            f"""
+            with days as (
+              select generate_series($2::date, $3::date, interval '1 day')::date as day
+            ), {attr},
+            own as (
+              select a.kind, a.amount, a.created_at
+                from attr a
+                left join crm.rentals r on r.id = a.rental_id
+               where nullif(r.location, '') is not distinct from nullif($1::text, '')
+            )
+            select d.day,
+                   coalesce(sum(o.amount) filter (where o.kind = 'payment'), 0) as paid,
+                   coalesce(-sum(o.amount) filter (where o.kind = 'charge'), 0)
+                     as charged
+              from days d
+              left join own o
+                     on o.created_at >= d.day::timestamptz
+                    and o.created_at < (d.day + 1)::timestamptz
+             group by d.day
+             order by d.day
+            """, location, since, until)
+        return [{"day": r["day"], "paid": Decimal(r["paid"] or 0),
+                 "charged": Decimal(r["charged"] or 0)} for r in rows]
+
+    async def debt_by_location(self) -> dict[str | None, dict[str, Any]]:
+        """Долг клиентов по точке: минусовый баланс клиента - целиком на
+        точке его последней аренды. Делить баланс между точками нельзя:
+        вышло бы +X на одной и -X на другой. Без аренд - «без точки»."""
+        rows = await self.pool.fetch(
+            f"""
+            with bal as (
+              select client_id, sum(amount) as balance from crm.ledger
+               group by client_id having sum(amount) < 0
+            ), {_LAST_RENTAL_POINT}
+            select last.location, count(*) as clients, -sum(bal.balance) as debt
+              from bal
+              left join last on last.client_id = bal.client_id
+             group by last.location
+            """)
+        return {r["location"]: {"clients": int(r["clients"]),
+                                "debt": Decimal(r["debt"] or 0)} for r in rows}
+
+    async def rentals_by_location(self, since: datetime, until: datetime
+                                  ) -> dict[str | None, dict[str, int]]:
+        """Аренды по точке выдачи. issued - выдано в периоде (день начала
+        попадает в него своей полуночью), first_periods и renewals -
+        начисления первого периода и продлений (period_from равен началу
+        аренды или позже него), по дате записи, как деньги; active - идёт
+        сейчас. Продления - две трети выручки, и по точке видно только так,
+        держит ли она клиентов."""
+        rows = await self.pool.fetch(
+            """
+            select location, sum(issued) as issued, sum(first_periods) as first_periods,
+                   sum(renewals) as renewals, sum(active) as active
+              from (
+                select nullif(location, '') as location, 1 as issued,
+                       0 as first_periods, 0 as renewals, 0 as active
+                  from crm.rentals
+                 where started_on::timestamptz >= $1 and started_on::timestamptz < $2
+                union all
+                select nullif(r.location, ''), 0,
+                       case when l.period_from = r.started_on then 1 else 0 end,
+                       case when l.period_from > r.started_on then 1 else 0 end, 0
+                  from crm.ledger l
+                  join crm.rentals r on r.id = l.rental_id
+                 where l.kind = 'charge' and l.created_at >= $1 and l.created_at < $2
+                union all
+                select nullif(location, ''), 0, 0, 0, 1
+                  from crm.rentals
+                 where status = 'active'
+              ) u
+             group by location
+            """, since, until)
+        keys = ("issued", "first_periods", "renewals", "active")
+        return {r["location"]: {k: int(r[k] or 0) for k in keys} for r in rows}
+
+    async def service_by_location(self, since: datetime, until: datetime
+                                  ) -> dict[str | None, dict[str, Any]]:
+        """Сервис по точке за период.
+
+        Наряды - по своей точке ремонта, закрытые в периоде: сколько, из
+        них клиентских, выручка - только оплаченные клиентские (счёт за
+        ремонт в журнал не идёт, деньги наряда - это его paid_at),
+        себестоимость наряда и отдельно запчастей по его строкам.
+        Ремонт журналом велосипеда без наряда - по точке велосипеда на
+        момент записи (журнал мест, первая строка тянется в прошлое, как
+        в днях парка). Ремонт закрытого наряда туда не входит: он уже
+        посчитан нарядом.
+        """
+        rows = await self.pool.fetch(
+            """
+            select location, sum(orders) as orders, sum(client_orders) as client_orders,
+                   sum(revenue) as revenue, sum(cost) as cost,
+                   sum(parts_cost) as parts_cost,
+                   sum(repairs) as repairs, sum(repair_cost) as repair_cost
+              from (
+                select nullif(o.location, '') as location, 1 as orders,
+                       case when o.payer = 'client' then 1 else 0 end as client_orders,
+                       case when o.payer = 'client' and o.paid_at is not null
+                            then o.total else 0 end as revenue,
+                       o.cost,
+                       coalesce((select sum(i.parts_cost * i.qty)
+                                   from crm.work_order_items i
+                                  where i.order_id = o.id), 0) as parts_cost,
+                       0 as repairs, 0 as repair_cost
+                  from crm.work_orders o
+                 where o.status = 'done' and o.closed_at >= $1 and o.closed_at < $2
+                union all
+                select (select nullif(x.to_location, '')
+                          from crm.bike_location_log x
+                         where x.bike_id = l.bike_id
+                         order by (x.changed_at <= l.created_at) desc,
+                                  case when x.changed_at <= l.created_at
+                                       then x.changed_at end desc,
+                                  case when x.changed_at <= l.created_at
+                                       then x.id end desc,
+                                  x.changed_at, x.id
+                         limit 1),
+                       0, 0, 0, 0, 0, 1, coalesce(l.cost, 0)
+                  from crm.bike_log l
+                 where l.kind = 'repair' and l.created_at >= $1 and l.created_at < $2
+                   and not exists (select 1 from crm.work_orders o where o.log_id = l.id)
+              ) u
+             group by location
+            """, since, until)
+        return {r["location"]: {
+            "orders": int(r["orders"] or 0), "client_orders": int(r["client_orders"] or 0),
+            "revenue": Decimal(r["revenue"] or 0), "cost": Decimal(r["cost"] or 0),
+            "parts_cost": Decimal(r["parts_cost"] or 0), "repairs": int(r["repairs"] or 0),
+            "repair_cost": Decimal(r["repair_cost"] or 0)} for r in rows}
+
+    async def cash_by_location(self, since: datetime, until: datetime
+                               ) -> dict[str | None, Decimal]:
+        """Наличные за период по точке кассы. Платёж - в смене, куда его
+        записали (ledger.shift_id); старая запись без отметки - в
+        единственной смене, открытой в тот момент, как в shift_payments.
+        Возврат наличными - с минусом: это деньги того же ящика. Без смены
+        - «без точки»."""
+        rows = await self.pool.fetch(
+            """
+            select location, sum(amount) as cash
+              from (
+                select nullif(case
+                         when l.shift_id is not null
+                         then (select s.location from crm.cash_shifts s
+                                where s.id = l.shift_id)
+                         else (select min(o.location) from crm.cash_shifts o
+                                where o.opened_at <= l.created_at
+                                  and coalesce(o.closed_at, now()) > l.created_at
+                               having count(*) = 1)
+                       end, '') as location,
+                       l.amount
+                  from crm.ledger l
+                 where l.kind in ('payment', 'refund') and l.method = 'cash'
+                   and l.created_at >= $1 and l.created_at < $2
+              ) u
+             group by location
+            """, since, until)
+        return {r["location"]: Decimal(r["cash"] or 0) for r in rows}
 
     # ─────────────────────── настройки ───────────────────────
 
@@ -2341,18 +2690,25 @@ class CrmDB:
     async def swap_rental_bike(self, rental_id: int, *, old_bike_id: int | None,
                                new_bike_id: int, old_status: str,
                                mileage_old: int | None, mileage_new: int | None,
-                               reason: str, today: date, by: str) -> bool:
+                               reason: str, today: date, by: str,
+                               swap_location: str | None = None) -> bool:
         """Замена велосипеда внутри аренды - одной транзакцией.
 
         Снять старый, выдать новый и переписать аренду по отдельности
         нельзя: сбой между запросами оставил бы клиента без велосипеда
         либо с двумя, а деньги аренды - на снятом.
+
+        Точка аренды - снимок выдачи, замена её не трогает. Снятый
+        велосипед остаётся там, где меняли (`swap_location`, иначе на
+        точке аренды), новый встаёт на точку аренды. У аренды без точки
+        (выдана без велосипеда) ею становится точка нового - первая
+        настоящая выдача случилась здесь.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
             rental = await conn.fetchrow(
-                "select bike_id, started_on, mileage_start, status from crm.rentals "
-                "where id = $1 for update", rental_id)
+                "select bike_id, started_on, mileage_start, status, location "
+                "from crm.rentals where id = $1 for update", rental_id)
             if rental is None or rental["status"] != "active":
                 return False
             if rental["bike_id"] != old_bike_id:
@@ -2378,23 +2734,28 @@ class CrmDB:
                     """, rental_id, today, mileage_old)
                 await conn.execute(
                     "update crm.bikes set status = $2, "
+                    "location = coalesce($4, $5, location), "
                     "mileage_km = greatest(mileage_km, coalesce($3, mileage_km)), "
                     "updated_at = now() where id = $1",
-                    old_bike_id, old_status, mileage_old)
+                    old_bike_id, old_status, mileage_old, swap_location,
+                    rental["location"])
             await conn.execute(
                 """
                 insert into crm.rental_bikes (rental_id, bike_id, issued_on,
                                               mileage_start, reason, created_by)
                 values ($1, $2, $3, $4, $5, $6)
                 """, rental_id, new_bike_id, today, mileage_new, reason, by)
-            await conn.execute(
+            place = await conn.fetchval(
                 "update crm.bikes set status = 'rented', "
+                "location = coalesce($3, location), "
                 "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
-                "updated_at = now() where id = $1", new_bike_id, mileage_new)
+                "updated_at = now() where id = $1 returning location",
+                new_bike_id, mileage_new, rental["location"])
             await conn.execute(
                 "update crm.rentals set bike_id = $2, mileage_start = coalesce($3, 0), "
-                "mileage_end = null, updated_at = now() where id = $1",
-                rental_id, new_bike_id, mileage_new)
+                "mileage_end = null, location = coalesce(location, $4), "
+                "updated_at = now() where id = $1",
+                rental_id, new_bike_id, mileage_new, place)
             return True
 
     # ─────────────────── закупки основных средств ───────────────────
@@ -2499,6 +2860,50 @@ class CrmDB:
         sets, values = _set_clause(fields, LOCATION_FIELDS, 2)
         await self.pool.execute(
             f"update crm.locations set {sets} where id = $1", location_id, *values)
+
+    # Всё, что ссылается на точку её именем. Новая текстовая ссылка на
+    # точку обязана попасть сюда, иначе переименование её осиротит.
+    _LOCATION_REFS = (("bikes", "location"), ("batteries", "location"),
+                      ("cash_shifts", "location"), ("stock_takes", "location"),
+                      ("rentals", "location"), ("work_orders", "location"),
+                      ("staff", "location"), ("bike_location_log", "from_location"),
+                      ("bike_location_log", "to_location"))
+
+    async def rename_location(self, location_id: int, new_name: str) -> bool | None:
+        """Переименовать точку каскадом по всем ссылкам - одной транзакцией.
+
+        None - точки нет; False - имя занято (другой точкой справочника или
+        открытой сменой кассы под этим именем), и не изменилось ничего.
+        Журнал мест при этом переезда не пишет: отметка crm.location_rename
+        выключает триггер, а свои строки журнал переименовывает здесь же -
+        история остаётся историей той же точки под новым именем.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select name from crm.locations where id = $1 for update", location_id)
+            if row is None:
+                return None
+            old = row["name"]
+            if old == new_name:
+                return True
+            taken = await conn.fetchval(
+                "select 1 from crm.locations where name = $1 and id <> $2",
+                new_name, location_id)
+            if taken:
+                return False
+            await conn.execute("select set_config('crm.location_rename', 'on', true)")
+            try:
+                async with conn.transaction():
+                    await conn.execute(
+                        "update crm.locations set name = $2 where id = $1",
+                        location_id, new_name)
+                    for table, col in self._LOCATION_REFS:
+                        await conn.execute(
+                            f"update crm.{table} set {col} = $2 where {col} = $1",
+                            old, new_name)
+            except asyncpg.UniqueViolationError:
+                return False
+            return True
 
     async def bike_models(self, *, active_only: bool = False) -> list[dict]:
         where = "where m.active" if active_only else ""
@@ -3071,17 +3476,24 @@ class CrmDB:
         """В чью смену легут наличные, принятые этим человеком.
 
         Сперва - смена, которую он сам и открыл: оператор работает на
-        своей точке. Нет такой - единственная открытая; открыты обе и
-        человек ни одной не открывал - самая ранняя, лишь бы деньги
-        попали ровно в одну кассу, а не в обе.
+        своей точке. Нет такой - открытая смена его точки (staff.location):
+        при нескольких точках самая ранняя почти всегда чужая. Нет и её -
+        самая ранняя, лишь бы деньги попали ровно в одну кассу, а не в две.
+        Автор - как его пишет журнал: staff:логин из панели, tg:id из бота.
         """
-        if by:
-            mine = _row(await self.pool.fetchrow(
-                "select * from crm.cash_shifts where status = 'open' "
-                "and opened_by = $1 order by opened_at limit 1", by))
-            if mine is not None:
-                return mine
-        return await self.open_shift()
+        return _row(await self.pool.fetchrow(
+            """
+            select s.* from crm.cash_shifts s
+             where s.status = 'open'
+             order by (s.opened_by = $1) desc nulls last,
+                      (s.location = (select st.location from crm.staff st
+                                      where 'staff:' || st.login = $1
+                                         or 'tg:' || st.tg_id::text = $1
+                                      order by st.active desc, st.id limit 1))
+                        desc nulls last,
+                      s.opened_at, s.id
+             limit 1
+            """, by))
 
     async def create_shift(self, *, location: str | None, opening: Decimal,
                            note: str | None, by: str) -> int:
@@ -3851,7 +4263,8 @@ class CrmDB:
     _BOOKING_SELECT = """
         select b.*, c.full_name, c.phone, c.tg_id, c.contract_no,
                t.name as tariff_name, t.period_days, t.price as tariff_price,
-               coalesce(l.public_title, l.name) as location_title
+               coalesce(l.public_title, l.name) as location_title,
+               l.name as location_name
           from crm.bookings b
           join crm.clients c on c.id = b.client_id
           left join crm.tariffs t on t.id = b.tariff_id

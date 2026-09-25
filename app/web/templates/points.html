@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}По точкам — {{ app_title }}{% endblock %}
+{% block content %}
+{# Деньги - только с доступом к финансам, как на остальных вкладках
+   отчётов: простой по точкам нужен и тому, кому рубли не показывают. #}
+{% set money_ok = can_view(staff, 'finance') %}
+{% set q = ('?' ~ span.query) if span.query else '' %}
+<div class="bar"><h1>По точкам <small class="muted">· {{ span.label }}</small></h1>
+  {% with active = 'points' %}{% include "_report_tabs.html" %}{% endwith %}
+</div>
+<div class="bar">
+  {% with base = '/reports/points' %}{% include "_points_period.html" %}{% endwith %}
+  <a class="btn ghost" href="/reports/points.xlsx{{ q }}">Excel</a>
+  <a class="btn ghost" href="/reports/points.csv{{ q }}">CSV</a>
+</div>
+{% if history_from %}
+<p class="muted">История мест ведётся с {{ history_from|dmy }}: раньше этого
+  велосипед считается на той точке, где стоял в тот день, — точнее данных нет.</p>
+{% endif %}
+
+<div class="card">
+<div class="table-wrap">
+<table>
+  {# Перенос в двухсловных заголовках: числовой th не переносится сам, а
+     двенадцать колонок на ноутбуке иначе уходят в прокрутку. #}
+  <tr><th>Точка</th><th class="num">Парк<br>сейчас</th><th class="num">Простой</th>
+    {% if money_ok %}<th class="num">Чек/день</th><th class="num">Выручка</th>{% endif %}
+    <th class="num">Выдачи</th><th class="num">Продления</th><th class="num">Идёт<br>аренд</th>
+    {% if money_ok %}<th class="num">Долг</th><th class="num">Наличные</th>{% endif %}
+    <th class="num">Нарядов</th>{% if money_ok %}<th class="num">Сервис</th>{% endif %}</tr>
+  {% for r in report.rows + [report.total] %}{% set m = r.metrics %}
+  <tr {% if r.total %}class="total"{% endif %}>
+    <td>{% if r.total %}Итого{% elif r.orphan %}{{ r.title }} <span class="tag" title="имени нет в справочнике: запись старше справочника">нет в справочнике</span>{% else %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}{{ q }}">{{ r.title }}</a>{% if r.closed %} <span class="tag">закрыта</span>{% endif %}{% endif %}</td>
+    <td class="num">{{ r.fleet }}</td>
+    <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+    {% if money_ok %}
+    <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
+    <td class="num">{{ money(r.paid) }}</td>
+    {% endif %}
+    <td class="num">{{ r.issued }}</td>
+    <td class="num">{{ r.renewals }}</td>
+    <td class="num">{{ r.active }}</td>
+    {% if money_ok %}
+    <td class="num {% if r.debt %}bad{% endif %}">{{ money(r.debt) }}{% if r.debtors %} <small class="muted">· {{ r.debtors }}</small>{% endif %}</td>
+    <td class="num">{{ money(r.cash) }}</td>
+    {% endif %}
+    <td class="num">{{ r.orders }}</td>
+    {% if money_ok %}<td class="num">{{ money(r.service_revenue) }}</td>{% endif %}
+  </tr>
+  {% endfor %}
+</table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
+{% if not report.rows %}
+<p class="muted">Точек пока нет — их заводят в настройках, раздел «Точки».</p>
+{% endif %}
+<p class="muted">Простой и чек — те же формулы, что на сводке, только
+  ограниченные точкой (цели: простой меньше {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }} в день{% endif %}).
+  Дни — по журналу мест: где велосипед стоял в каждый момент, там и его
+  день{% if money_ok %}; деньги — по точке аренды, к которой относится
+  запись журнала: своя аренда, иначе аренда клиента в тот день, иначе
+  ближайшая — как в окупаемости{% endif %}. Пока велосипед в аренде, он
+  числится на точке аренды, поэтому дни и деньги точки считают одни и те
+  же велосипеды. «Итого» — сумма строк и совпадает с тремя числами сводки
+  за тот же период.</p>
+<p class="muted">«{{ NO_POINT_TITLE }}» — то, что к точке не привязать:
+  велосипед, не поставленный ни на одну точку,{% if money_ok %} платёж
+  клиента, у которого не было аренд,{% endif %} наряд на чужую технику
+  без точки. Без этой строки сумма по точкам не сошлась бы с общей.</p>
+<p class="muted">Выдачи — аренды, начатые за период; продления — периоды
+  после первого, начисленные за период. Идёт аренд и парк — сейчас,
+  а не за период{% if money_ok %}; долг — тоже сейчас: минус клиента
+  целиком на точке его последней аренды, делить баланс между точками
+  нельзя. Наличные — по кассовым сменам точки{% endif %}. Наряды —
+  закрытые за период, по точке ремонта{% if money_ok %}; сервис —
+  оплаченные клиентские наряды, в выручку аренды они не входят{% endif %}.</p>
+</div>
+
+{% if report.rows %}
+<section class="card">
+  <h2>Три числа по месяцам</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th rowspan="2">Месяц</th>{% for r in report.rows %}<th colspan="{{ 2 if money_ok else 1 }}">{{ r.title }}</th>{% endfor %}</tr>
+    <tr>{% for r in report.rows %}<th class="num">Простой</th>{% if money_ok %}<th class="num">Чек</th>{% endif %}{% endfor %}</tr>
+    {% for mr in month_rows %}
+    <tr><td>{{ mr.month.strftime('%m.%Y') }}</td>
+      {% for c in mr.cells %}
+      <td class="num {% if c.idle_percent is none %}muted{% elif c.idle_ok %}ok{% else %}bad{% endif %}">{% if c.idle_percent is none %}—{% else %}{{ c.idle_percent }} %{% endif %}</td>
+      {% if money_ok %}<td class="num {% if c.avg_check is none %}muted{% elif c.check_ok %}ok{% else %}bad{% endif %}">{% if c.avg_check is none %}—{% else %}{{ money(c.avg_check) }}{% endif %}</td>{% endif %}
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
+  <p class="muted">Текущий месяц — по сегодняшний день. Прочерк — в месяце
+    не было ни одного дня парка{% if money_ok %} или ни одного полного дня аренды{% endif %}.</p>
+</section>
+{% endif %}
+{% endblock %}

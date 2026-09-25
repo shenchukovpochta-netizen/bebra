@@ -346,6 +346,20 @@ class TestPlanApply(unittest.TestCase):
         self.assertEqual(r["bike_id"], bike_id)
         self.assertEqual(run(self.crm.bike(bike_id))["status"], "rented")
 
+    def test_rental_takes_the_point_of_its_bike(self):
+        """Точки в форме импорта нет: аренда встаёт на точку велосипеда из
+        статуса таблицы, и велосипед туда не «переезжает» второй строкой."""
+        rows = [dict(ROWS[0], статус="В аренде (Адоратского)")]
+        run(ix.run(self.crm, sheet(rows), apply=True, by="import:test"))
+        c = run(self.crm.client_by_phone("+79600547202"))
+        r = run(self.crm.active_rental_of(c["id"]))
+        self.assertEqual(r["location"], "Адоратского")
+        bike = run(self.crm.bike(r["bike_id"]))
+        self.assertEqual((bike["status"], bike["location"]), ("rented", "Адоратского"))
+        self.assertEqual([(x["from_location"], x["to_location"])
+                          for x in run(self.crm.bike_location_log(bike["id"]))],
+                         [(None, "Адоратского")])
+
     def test_started_without_year_is_not_in_the_future(self):
         rows = [dict(ROWS[0], **{"когда брал": "28.12", "До какого оплачена аренда?": "до 04.01"})]
         parsed = ix.read_rows(sheet(rows), today=date(2026, 1, 10))

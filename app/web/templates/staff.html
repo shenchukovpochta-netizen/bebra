@@ -5,7 +5,7 @@
   <a class="btn ghost" href="/profiles">Профили доступа</a></div>
 <section class="card">
   <table>
-    <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Доступ</th><th>Telegram</th><th>Новый пароль</th><th></th></tr>
+    <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Своя точка</th><th>Доступ</th><th>Telegram</th><th>Новый пароль</th><th></th></tr>
     {% for s in rows %}
     <tr class="{% if not s.active %}muted{% endif %}">
       <td>{{ s.login }}</td><td>{{ s.name }}</td>
@@ -18,6 +18,15 @@
         {% else %}
         <a href="/profiles/{{ s.profile_id }}">{{ s.profile_name or 'без профиля' }}</a>{% if s.id == staff.id %} <small class="muted">(вы)</small>{% endif %}
         {% endif %}
+      </td>
+      <td>
+        {% if can_manage %}
+        <form method="post" action="/staff/{{ s.id }}/location" class="inline-form">
+          {# Закрытая точка остаётся в строке: список без неё сбросил бы её при первом сохранении. #}
+          <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location }}</option>{% endif %}</select>
+          <button type="submit" class="ghost">Задать</button>
+        </form>
+        {% else %}{{ s.location or '—' }}{% endif %}
       </td>
       <td>{{ 'да' if s.active else 'нет' }}</td>
       <td>{{ staff_tg_label(s) }}
@@ -35,7 +44,8 @@
   </table>
   <p class="muted">Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале статусов и в записях по деньгам.
     Telegram нужен технику, чтобы наряды приходили ему в бот: нажмите «Код»
-    и передайте его сотруднику — он отправит боту «/staff КОД».</p>
+    и передайте его сотруднику — он отправит боту «/staff КОД».
+    Своя точка нужна кассе: наличные, принятые без своей открытой смены, ложатся в смену его точки, а не в самую раннюю.</p>
 </section>
 {% if can_manage %}
 <section class="card narrow">
@@ -45,6 +55,7 @@
     <label>Имя <input name="name"></label>
     <label>Пароль <input name="password" type="password" autocomplete="new-password" required></label>
     <label>Профиль доступа <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {% if p.code == 'manager' %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select></label>
+    <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
     <button type="submit">Добавить</button>
   </form>
   <p class="muted">Профиль решает, какие разделы человек увидит. Свой профиль сменить нельзя — чтобы не остаться без доступа к этой странице.</p>

@@ -2378,3 +2378,132 @@ create index if not exists inbox_messages_queue_idx
 alter table crm.inbox_messages add column if not exists claimed_at timestamptz;
 create index if not exists inbox_messages_created_idx
   on crm.inbox_messages (created_at);
+
+-- ─────────────────── точки: история места и привязка ───────────────────
+--
+-- Аналитика по точке - те же три числа, ограниченные точкой. Для этого
+-- простою нужна история места: bikes.location - только «где сейчас», и
+-- переезд свободного велосипеда без смены статуса не видел никто.
+-- Журнал точек отдельный, а не колонка в bike_status_log: там «одна
+-- строка - одна смена статуса», и на этом стоит «сколько стоит»
+-- (bike_status_since) - строка на каждый переезд сбрасывала бы простой.
+-- Ключ точки остаётся текстом crm.locations.name, как у батарей и касс:
+-- переход на id переписал бы живую историю. Поэтому переименование -
+-- каскад одной транзакцией по всем текстовым ссылкам (db.rename_location).
+create table if not exists crm.bike_location_log (
+  id             bigserial primary key,
+  bike_id        bigint      not null references crm.bikes (id),
+  from_location  text,
+  to_location    text,                     -- null - «не на точке»
+  changed_at     timestamptz not null default now(),
+  changed_by     text
+);
+create index if not exists bike_location_log_idx
+  on crm.bike_location_log (bike_id, changed_at);
+
+-- Тот же приём, что у журнала статусов: пишет база, а не код, - иначе
+-- первый же новый путь, двигающий велосипед, забудет строку журнала.
+-- На одном UPDATE со статусом оба триггера пишут одно now(): интервалы
+-- статуса и места совпадают до микросекунды. Переименование точки - не
+-- переезд: каскад ставит отметку crm.location_rename в своей транзакции
+-- и строки журнала переименовывает сам.
+create or replace function crm.log_bike_location() returns trigger
+language plpgsql as $$
+begin
+  if coalesce(current_setting('crm.location_rename', true), '') = 'on' then
+    return new;
+  end if;
+  if tg_op = 'INSERT' or old.location is distinct from new.location then
+    insert into crm.bike_location_log (bike_id, from_location, to_location,
+                                       changed_at, changed_by)
+    values (new.id,
+            case when tg_op = 'INSERT' then null else old.location end,
+            new.location, now(),
+            nullif(current_setting('crm.actor', true), ''));
+  end if;
+  return new;
+end
+$$;
+drop trigger if exists bikes_location_log on crm.bikes;
+create trigger bikes_location_log
+  after insert or update of location on crm.bikes
+  for each row execute function crm.log_bike_location();
+
+-- Прошлое: история места начинается там же, где история статуса, иначе
+-- при пересечении двух журналов пропало бы её начало. Точка до внедрения -
+-- та, что стояла в карточке в день внедрения (точнее не узнать), и отчёт
+-- говорит об этом одной строкой от points_history_since.
+insert into crm.bike_location_log (bike_id, from_location, to_location, changed_at)
+select b.id, null, b.location,
+       coalesce((select min(l.changed_at) from crm.bike_status_log l
+                  where l.bike_id = b.id), b.created_at)
+  from crm.bikes b
+ where not exists (select 1 from crm.bike_location_log x where x.bike_id = b.id);
+
+insert into crm.settings (key, value, updated_by)
+values ('points_history_since', date_trunc('second', now())::text, 'schema')
+on conflict (key) do nothing;
+
+-- Точка ВЫДАЧИ аренды - снимок: замена велосипеда её не меняет. По ней
+-- деньги аренды ложатся на точку (платёж - к аренде, аренда - к точке),
+-- а пока аренда идёт, велосипед стоит на её точке (выдача, возврат и
+-- замена ставят bikes.location тем же UPDATE, что и статус): иначе
+-- числитель чека точки и дни в аренде по журналу мест разъехались бы.
+alter table crm.rentals add column if not exists location text;
+create index if not exists rentals_location_idx on crm.rentals (location);
+
+-- Старые аренды - один раз, под отметкой: точка заявки, если выдача
+-- была из неё, иначе точка велосипеда аренды (первый выданный, иначе
+-- текущий). Велосипед идущей аренды тут же встаёт на её точку - тот же
+-- инвариант, что держит выдача; переезд пишется в журнал от «schema».
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'rentals_location_filled') then
+    update crm.rentals r
+       set location = coalesce(
+             (select l.name from crm.bookings bk
+                join crm.locations l on l.id = bk.location_id
+               where bk.rental_id = r.id order by bk.id limit 1),
+             (select b.location from crm.rental_bikes rb
+                join crm.bikes b on b.id = rb.bike_id
+               where rb.rental_id = r.id order by rb.id limit 1),
+             (select b.location from crm.bikes b where b.id = r.bike_id))
+     where r.location is null;
+    perform set_config('crm.actor', 'schema', true);
+    update crm.bikes b
+       set location = r.location
+      from crm.rentals r
+     where r.status = 'active' and r.bike_id = b.id and b.status = 'rented'
+       and r.location is not null and b.location is distinct from r.location;
+    perform set_config('crm.actor', '', true);
+    insert into crm.settings (key, value, updated_by)
+    values ('rentals_location_filled', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
+
+-- Где идёт ремонт. У чужой техники это единственный источник точки,
+-- у своего велосипеда - его точка на момент открытия наряда.
+alter table crm.work_orders add column if not exists location text;
+create index if not exists work_orders_location_idx
+  on crm.work_orders (location, closed_at) where location is not null;
+
+-- Старые наряды на свой велосипед - один раз: текущая точка велосипеда.
+-- Чужая техника остаётся без точки: угадывать её не из чего.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'work_orders_location_filled') then
+    update crm.work_orders o
+       set location = b.location
+      from crm.bikes b
+     where b.id = o.bike_id and o.location is null and b.location is not null;
+    insert into crm.settings (key, value, updated_by)
+    values ('work_orders_location_filled', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
+
+-- «Своя» точка сотрудника, необязательно. Нужна кассе: наличные, принятые
+-- человеком без своей открытой смены, ложатся в смену его точки, а не в
+-- самую раннюю - при трёх открытых кассах та почти всегда чужая.
+alter table crm.staff add column if not exists location text;

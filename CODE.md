@@ -156,6 +156,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/crm/notices.py` | ворота уведомлений: включено ли, пора ли, что из этого вышло |
 | `app/crm/banking.py`, `paying.py`, `tracking.py`, `mailing.py` | фоновые циклы выписки, счетов, трекеров, рассылок |
 | `app/crm/company.py`, `doctemplates.py`, `esign.py` | реквизиты снимком, выбор шаблона документа, текст соглашения об ЭП |
+| `app/crm/points.py` | открытые точки справочника снимком для процесса бота (ответы «где вы» и «часы работы»), TTL 300 с |
 | `app/crm/import_xlsx.py` | импорт рабочей таблицы «ДЕЙСТВУЮЩИЕ АРЕНДАТОРЫ» |
 | `app/crm/opsgroup.py` | рабочая группа точек: сверка форм из тем с базой, ответы про долг и трекер (бывший n8n) |
 | `app/crm/inbox.py` | «Входящие»: запись обращений из ботов, отправка ответов из очереди, опрос чатов Авито |
@@ -181,7 +182,10 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | Что меняю | Куда идти |
 |---|---|
 | текст, который видит клиент | `app/texts.py`, переводы `app/i18n/*.py` |
-| адреса, график, ответ на частый вопрос | `app/faq.py`, переводы `app/faq_i18n.py` |
+| адреса, режим и телефоны точек | справочник в панели (Настройки → «Точки»); бот читает его снимком `app/crm/points.py`, зашитый текст в `app/faq.py` - запасной |
+| ответ на частый вопрос | `app/faq.py`, переводы `app/faq_i18n.py` |
+| число по точке, отчёт «По точкам» | `days_by_status_location`, `points_rows` в `app/crm/logic.py`; `*_by_location` и общее правило денег `_ledger_rentals` в `app/crm/db.py`; `points_report` в `app/web/app.py` |
+| новую колонку с именем точки | кортеж `CrmDB._LOCATION_REFS` в `app/crm/db.py` и `rename_location` в `tests/fake_crm.py`, иначе переименование оставит её со старым именем |
 | шаг анкеты или валидацию | `app/logic.py`, функция `anketa_steps` |
 | поведение бота в Telegram | `app/handlers/*.py` и порядок роутеров в `app/main.py` |
 | то же в MAX | `app/max/handlers.py`, чистые разборы в `app/max/parse.py` |
@@ -401,14 +405,14 @@ python3 consistency.py
 | «Подписываю» | `cb_sign` | `wait_sign` → `wait_payment` | `contract_status='signed'`, `contract_signed_at`, пересобранные файлы. **CRM:** `sync.on_contract_signed` → `client_from_bot` заводит `crm.clients` или привязывает `tg_id` к карточке, найденной по телефону |
 | Показ суммы клиенту | `start_payment` | состояние ставит вызывающий | `pay_chat_id`, `pay_message_id` |
 | «Оплата получена» | `cb_pay` | `wait_payment` → `wait_act_sign` | `pay_confirmed_at`. **CRM:** `sync.on_payment_confirmed` → `crm.add_ledger` вида `payment`, затем `service.ref_paid` |
-| Подпись Акта приёма | `cb_act_sign` | `wait_act_sign` → `approved` | `act_in_signed_at`, `act_in_path`, `act_in_sha256`, приглашение возврата. **CRM:** `sync.on_rental_started` → `crm.start_rental_charged`: `crm.rentals`, первое начисление в `crm.ledger` и `bikes.status='rented'` одной транзакцией; `service.ref_rented` |
+| Подпись Акта приёма | `cb_act_sign` | `wait_act_sign` → `approved` | `act_in_signed_at`, `act_in_path`, `act_in_sha256`, приглашение возврата. **CRM:** `sync.on_rental_started` → `crm.start_rental_charged`: `crm.rentals` (точка аренды - точка велосипеда), первое начисление в `crm.ledger` и `bikes.status='rented'` одной транзакцией; `service.ref_rented` |
 | Оператор принял продление | `_extend_reply` | `approved` → `wait_payment` | `extend_until`, новая цена в `issue_data` |
 | Продление оплачено | `cb_pay` → `_apply_extension` | `wait_payment` → `approved` | `rent_until`, сброс `remind_*_at`. **CRM:** `sync.on_rental_extended` → `crm.extend_rental_paid`: платёж и начисление за новый срок одной транзакцией |
 | «Я оплатил(а)» в кабинете | `cabinet.cb_paid` (`app/handlers/cabinet.py`) | не меняется | строка `crm.payment_claims` (частичный уникальный индекс на открытую заявку), карточка оператору |
 | Оператор зачислил заявку | `cb_claim`, `claim_amount_reply` → `cabinet.credit` | не меняется | `service.credit_claim` → `crm.credit_claim`: заявка `confirmed` и `crm.ledger` вида `payment` одной транзакцией |
 | Клиент просит закрыть аренду | `menu.start_close`, `st_close_reason` | `approved` → `wait_close_reason` → `approved` | `close_reason`, `close_requested_at`, `return_chat_id`, `return_message_id` |
 | Форма закрытия от оператора | `_return_reply` → `contract.send_act_out` | → `wait_return_sign` | `return_data` |
-| Подпись Акта возврата | `cb_return_sign` | `wait_return_sign` → `approved` | `act_out_signed_at`, `act_out_path`, `act_out_sha256`, событие `rental_closed`. **CRM:** `sync.on_rental_closed` → `crm.close_rental`: аренда `closed`, велосипед `available`, позиции `rental_extras` сняты |
+| Подпись Акта возврата | `cb_return_sign` | `wait_return_sign` → `approved` | `act_out_signed_at`, `act_out_path`, `act_out_sha256`, событие `rental_closed`. **CRM:** `sync.on_rental_closed` → `crm.close_rental`: аренда `closed`, велосипед `available` на точке возврата (строка «адрес» формы через `logic.match_location`; не узнали - точка аренды), позиции `rental_extras` сняты |
 
 ### Начисления идут по двум разным правилам
 
@@ -520,7 +524,7 @@ exists`, то есть «уже есть» считается по строке 
 |---|---|---|
 | Бот | `bot.users`, `bot.updates_log`, `bot.events` | анкета и документы, клейм апдейтов `processing -> done`, события |
 | Люди | `crm.clients`, `crm.staff`, `crm.access_profiles`, `crm.referrals` | арендаторы, сотрудники с профилем прав, приглашения |
-| Парк | `crm.bikes`, `crm.batteries`, `crm.bike_status_log`, `crm.battery_status_log`, `crm.purchases` | техника, журналы статусов, партии закупки |
+| Парк | `crm.bikes`, `crm.batteries`, `crm.bike_status_log`, `crm.battery_status_log`, `crm.bike_location_log`, `crm.purchases` | техника, журналы статусов, журнал мест велосипеда, партии закупки |
 | Аренда | `crm.rentals`, `crm.rental_bikes`, `crm.rental_extras`, `crm.tariffs` | аренда, выданная техника, позиции сверх велосипеда, цены |
 | Деньги | `crm.ledger`, `crm.pay_orders`, `crm.payment_claims`, `crm.card_tokens`, `crm.cash_shifts`, `crm.cash_moves`, `crm.bank_txns` | журнал, счета, заявки на зачисление, касса, выписка |
 | Сервис | `crm.work_orders`, `crm.work_order_items`, `crm.work_types`, `crm.bike_log`, `crm.repair_items`, `crm.repair_nodes` | наряды, два прайса, шапка ремонта и позиции по узлам |
@@ -565,6 +569,14 @@ exists`, то есть «уже есть» считается по строке 
 (`app/crm/db.py`).
 - Пробег триггер снимает со строки велосипеда (`new.mileage_km`), поэтому его пишут ТЕМ ЖЕ
   обновлением, что и статус: отдельный апдейт записал бы вчерашнее число (`app/web/app.py`).
+
+Журнал мест держит триггер `crm.log_bike_location` (`after insert or update of location`),
+автор тот же `crm.actor`. Отдельный журнал, а не строки в `bike_status_log`: там строка это
+смена статуса, и на ней стоит «сколько стоит». Каскад переименования ставит в своей
+транзакции `crm.location_rename = 'on'`, и триггер молчит: переименование не переезд. Точку
+велосипеда в аренде ставят выдача, возврат и замена (`create_rental`, `start_rental_charged`,
+`close_rental`, `swap_rental_bike`) тем же UPDATE, что и статус: оба триггера пишут одно
+`now()`, и дни в аренде по журналу мест совпадают с точкой аренды до микросекунды.
 
 ### Как добавить колонку
 
@@ -1422,8 +1434,8 @@ EMU), картинка идёт inline; вместе с ней правятся 
 ## Тесты и проверки
 
 Набор на стандартном `unittest`, без pytest: pytest не значится ни в `requirements.txt`, ни
-в `pyproject.toml`, и прогон не должен требовать ничего, кроме Python. 67 файлов
-`tests/test_*.py`, 1659 тестов, полный прогон около шести минут.
+в `pyproject.toml`, и прогон не должен требовать ничего, кроме Python. 78 файлов
+`tests/test_*.py`, 2385 тестов, полный прогон около шести минут.
 
 ### Как устроена обвязка
 
@@ -1437,7 +1449,7 @@ EMU), картинка идёт inline; вместе с ней правятся 
 | чистая логика | `tests/test_logic.py`, `tests/test_crm_logic.py`, `tests/test_i18n.py`, `tests/test_config.py` | только stdlib |
 | SQL без базы | `tests/test_sql.py`, `tests/test_crm_sql.py` | записывающий пул, `pglast` |
 | панель и бот на заглушке | `tests/test_web.py` и ещё около сорока файлов | `tests/fake_crm.py`, фейковый бот |
-| живой Postgres | `tests/test_crm_pg.py`, `tests/test_web_pg.py` | `pgserver`, `asyncpg`, `httpx` |
+| живой Postgres | `tests/test_crm_pg.py`, `tests/test_web_pg.py`, `tests/test_points_pg.py` | `pgserver`, `asyncpg`, `httpx` |
 | скрипты установки | `tests/test_scripts.py` | `bash`, `openssl` |
 
 Общая обвязка панели лежит в `tests/test_web.py`: классы `WebCase`, `FakeBotDB`, `FakeBot`.
@@ -1450,7 +1462,7 @@ discover). Имена модулей при этом разные, то есть
 
 ### Фейковая база и почему её держат в синхроне
 
-`tests/fake_crm.py` повторяет контракт `app/crm/db.py`: 305 публичных методов там, 305
+`tests/fake_crm.py` повторяет контракт `app/crm/db.py`: 349 публичных методов там, 349
 здесь, имена совпадают ровно. Живого Postgres большинству тестов не нужно, а подъём базы на
 каждый тест стоил бы минут прогона.
 
@@ -1487,6 +1499,7 @@ pgserver, поэтому новый метод `CrmDB` требует трёх �
 | повторное применение схемы | `test_estimate_columns_survive_reapply`, `test_mileage_column_survives_reapply` |
 | сид владельца при повторном старте | `test_disabled_tariff_is_not_resurrected_by_the_seed`, `test_work_price_seed_on_postgres` |
 | сутки и месяцы по часовому поясу | `test_bikes_in_status_by_day_on_postgres`, `test_money_by_day_on_postgres` |
+| сумма по точкам равна общим числам, паритет с заглушкой | `test_points_add_up_to_the_panel_numbers`, `test_fake_crm_counts_points_the_same` (`tests/test_points_pg.py`) |
 
 Пул открывается с `init=_init_connection` из `app/db.py`: он ставит кодек json/jsonb (без
 него asyncpg отдаёт строку, а код ждёт `dict`) и часовой пояс из `TZ`. Тест, который
@@ -1702,4 +1715,6 @@ python3 consistency.py                        # расхождения межд�
 | Выключенная владельцем строка справочника возвращается после перезапуска | сид зашёл через `on conflict do nothing`, а уникальный индекс частичный (`where active`) |
 | Клиент вернул велосипед, а батареи числятся у него | закрытие прошло мимо `service.close_rental`: возврат батарей живёт там |
 | Наличные сошлись на одной точке и дали недостачу на другой | платёж записан без `shift_id`, а смены на двух точках открыты одновременно |
+| «Итого» отчёта по точкам не совпало с тремя числами сводки | деньги отнесли к точке мимо `_ledger_rentals`, потеряли строку «без точки» или сдвинули велосипед в аренде с точки аренды |
+| После переименования точки часть записей осталась со старым именем | новую текстовую ссылку на точку не добавили в `CrmDB._LOCATION_REFS` |
 | MAX-бот падает с `KeyError` на живом клиенте | поле добавили в шаблон `texts.py` и подставили только в Telegram. `consistency.py` разбирает каждый `texts.X.format()` статически, поэтому прогоняйте его до деплоя |
