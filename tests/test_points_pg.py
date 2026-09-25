@@ -526,6 +526,15 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         await Database(self.pool).apply_schema(SCHEMA)
         self.assertIsNone(next(x for x in await self.crm.locations()
                                if x["name"] == "Павлюхина")["directions"])
+        # Точку переименовали раньше, чем приехало поле: находим её по
+        # адресу, иначе флаг закрыл бы сид навсегда без подсказки.
+        await self.pool.execute(
+            "delete from crm.settings where key = 'locations_directions_seeded'")
+        await self.crm.update_location(pav["id"], address="ул. Павлюхина, 97А")
+        self.assertEqual(await self.crm.rename_location(pav["id"], "Главная"), "ok")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIn("ГСК «Сокол»", next(x for x in await self.crm.locations()
+                                         if x["id"] == pav["id"])["directions"])
 
     # ─── наряд и сотрудник ───
 

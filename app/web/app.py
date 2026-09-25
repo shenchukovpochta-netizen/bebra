@@ -3037,10 +3037,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def payback_data(request: Request) -> dict:
         """Окупаемость по моделям за период. Период - как в финансах:
         с начала месяца по сегодня, если не задан другой."""
-        since = logic.check_date(request.query_params.get("since"),
-                                 default=date.today().replace(day=1))
-        until = logic.check_date(request.query_params.get("until"),
-                                 default=date.today())
+        # report_day, как в period_of: год 9999 плюс сутки - это 500.
+        today = date.today()
+        since = logic.report_day(request.query_params.get("since"), today=today,
+                                 default=today.replace(day=1))
+        until = logic.report_day(request.query_params.get("until"), today=today,
+                                 default=today)
         if not since.ok or not until.ok:
             since = logic.Check(True, date.today().replace(day=1))
             until = logic.Check(True, date.today())
@@ -3332,10 +3334,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def referrals_report(request: Request) -> Response:
         if not may_view(request, "finance"):
             return denied(request, "finance")
-        since = logic.check_date(request.query_params.get("since"),
-                                 default=date.today().replace(day=1))
-        until = logic.check_date(request.query_params.get("until"),
-                                 default=date.today())
+        # report_day, как в period_of: год 9999 плюс сутки - это 500.
+        today = date.today()
+        since = logic.report_day(request.query_params.get("since"), today=today,
+                                 default=today.replace(day=1))
+        until = logic.report_day(request.query_params.get("until"), today=today,
+                                 default=today)
         if not since.ok or not until.ok:
             since = logic.Check(True, date.today().replace(day=1))
             until = logic.Check(True, date.today())
@@ -4440,7 +4444,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 return redirect("/locations")
         await crm.update_location(
             location_id, address=(data.get("address") or "").strip() or None,
-            note=note.value, city=city.value, sort=sort.value, **location_extra(data))
+            note=note.value, city=city.value, sort=sort.value,
+            # Только поля, что пришли в форме: форма, открытая до выката
+            # нового поля («Как найти»), иначе стёрла бы его значение.
+            **{k: v for k, v in location_extra(data).items() if k in data})
         flash(request, "Точка сохранена.")
         return redirect("/locations")
 

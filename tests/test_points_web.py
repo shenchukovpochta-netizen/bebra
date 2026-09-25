@@ -364,7 +364,9 @@ class TestPointsReport(PointsWebCase):
                      "/?month=0001-01", "/service?month=0001-01",
                      "/reports/techs?until=9999-12-31", "/reports/spend?until=9999-12-31",
                      "/reports/model-parts?until=31.12.9999",
-                     "/reports/techs.csv?since=0001-01-01&until=9999-12-31"):
+                     "/reports/techs.csv?since=0001-01-01&until=9999-12-31",
+                     "/reports/payback?until=9999-12-31", "/reports/payback.csv?since=0001-01-01",
+                     "/reports/referrals?until=9999-12-31"):
             self.assertEqual(self.client.get(path).status_code, 200, path)
 
     def test_history_note_is_one_honest_line(self):
@@ -456,6 +458,18 @@ class TestLocationsPage(PointsWebCase):
                                              "directions": "вход со двора"})
         self.assertEqual(next(p for p in tw.run(self.crm.locations())
                               if p["name"] == "Горки")["directions"], "вход со двора")
+
+    def test_form_without_new_field_keeps_its_value(self):
+        """Форма точки, открытая до выката поля «Как найти», поля не несёт -
+        сохранение не должно стирать подсказку, которую схема положила
+        один раз."""
+        way = "Заезд в ГСК «Сокол», 9-й бокс"
+        tw.run(self.crm.update_location(self.pav, directions=way))
+        self.client.post(f"/locations/{self.pav}", data={
+            "city": "Казань", "address": "ул. Павлюхина, 97А", "sort": "10"})
+        place = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)
+        self.assertEqual(place["directions"], way)
+        self.assertEqual(place["address"], "ул. Павлюхина, 97А")
 
     def test_rename_keeps_saved_filters(self):
         """Фильтр «?location=Декабристов» после переименования показывает те

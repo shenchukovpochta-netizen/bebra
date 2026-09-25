@@ -2544,7 +2544,10 @@ begin
     update crm.locations
        set directions =
              'Заезд в ГСК «Сокол», ищите 9-й бокс — если не найдёте, напишите, встретим'
-     where name = 'Павлюхина' and directions is null
+     -- По имени или по адресу: точку могли переименовать раньше, чем
+     -- приехало это поле, а флаг ниже второго шанса не даёт.
+     where (name = 'Павлюхина' or coalesce(address, '') ~ '[Пп]авлюхина')
+       and directions is null
        -- Регистр - классом символов: ilike в локали C кириллицу не сводит.
        and coalesce(address, '') !~ '[Сс][Оо][Кк][Оо][Лл]';
     insert into crm.settings (key, value, updated_by)
