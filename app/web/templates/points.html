@@ -23,7 +23,7 @@
 
 <div class="card">
 <div class="table-wrap">
-<table>
+<table class="cards">
   {# Перенос в двухсловных заголовках: числовой th не переносится сам, а
      двенадцать колонок на ноутбуке иначе уходят в прокрутку. #}
   <tr><th>Точка</th><th class="num">Парк<br>сейчас</th><th class="num">Простой</th>
@@ -34,26 +34,26 @@
     <th class="num">Нарядов</th>{% if money_ok %}<th class="num">Сервис</th>{% endif %}</tr>
   {% for r in report.rows + [report.total] %}{% set m = r.metrics %}
   <tr {% if r.total %}class="total"{% endif %}>
-    <td>{% if r.total %}Итого{% elif r.orphan %}{{ r.title }} <span class="tag" title="имени нет в справочнике: запись старше справочника">нет в справочнике</span>{% else %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}{{ q }}">{{ r.title }}</a>{% if r.closed %} <span class="tag">закрыта</span>{% endif %}{% endif %}</td>
-    <td class="num">{{ r.fleet }}</td>
-    <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+    <td data-label="Точка">{% if r.total %}Итого{% elif r.orphan %}{{ r.title }} <span class="tag" title="имени нет в справочнике: запись старше справочника">нет в справочнике</span>{% else %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}{{ q }}">{{ r.title }}</a>{% if r.closed %} <span class="tag">закрыта</span>{% endif %}{% endif %}</td>
+    <td class="num" data-label="Парк сейчас">{{ r.fleet }}</td>
+    <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}" data-label="Простой">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
     {% if money_ok %}
-    <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
-    <td class="num">{{ money(r.paid) }}</td>
+    <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}" data-label="Чек/день">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
+    <td class="num" data-label="Выручка">{{ money(r.paid) }}</td>
     {% endif %}
     {% if planned %}{% set p = r.plan %}
-    <td class="num {% if not p %}muted{% endif %}">{% if p %}{{ money(p.target) }}{% else %}—{% endif %}</td>
-    <td class="num {% if not p or p.percent is none %}muted{% elif p.ahead %}ok{% else %}bad{% endif %}"{% if p %} title="ровным темпом {{ money(p.pace) }}"{% endif %}>{% if p and p.percent is not none %}{{ p.percent }} %{% else %}—{% endif %}</td>
+    <td class="num {% if not p %}muted{% endif %}" data-label="План">{% if p %}{{ money(p.target) }}{% else %}—{% endif %}</td>
+    <td class="num {% if not p or p.percent is none %}muted{% elif p.ahead %}ok{% else %}bad{% endif %}"{% if p %} title="ровным темпом {{ money(p.pace) }}"{% endif %} data-label="Выполнено">{% if p and p.percent is not none %}{{ p.percent }} %{% else %}—{% endif %}</td>
     {% endif %}
-    <td class="num">{{ r.issued }}</td>
-    <td class="num">{{ r.renewals }}</td>
-    <td class="num">{{ r.active }}</td>
+    <td class="num" data-label="Выдачи">{{ r.issued }}</td>
+    <td class="num" data-label="Продления">{{ r.renewals }}</td>
+    <td class="num" data-label="Идёт аренд">{{ r.active }}</td>
     {% if money_ok %}
-    <td class="num {% if r.debt %}bad{% endif %}">{{ money(r.debt) }}{% if r.debtors %} <small class="muted">· {{ r.debtors }}</small>{% endif %}</td>
-    <td class="num">{{ money(r.cash) }}</td>
+    <td class="num {% if r.debt %}bad{% endif %}" data-label="Долг">{{ money(r.debt) }}{% if r.debtors %} <small class="muted">· {{ r.debtors }}</small>{% endif %}</td>
+    <td class="num" data-label="Наличные">{{ money(r.cash) }}</td>
     {% endif %}
-    <td class="num">{{ r.orders }}</td>
-    {% if money_ok %}<td class="num">{{ money(r.service_revenue) }}</td>{% endif %}
+    <td class="num" data-label="Нарядов">{{ r.orders }}</td>
+    {% if money_ok %}<td class="num" data-label="Сервис">{{ money(r.service_revenue) }}</td>{% endif %}
   </tr>
   {% endfor %}
 </table>
@@ -95,16 +95,16 @@
 <section class="card">
   <h2>Три числа по месяцам</h2>
   <div class="table-wrap">
-  <table>
+  <table class="cards">
     <tr><th rowspan="2">Месяц</th>{% for r in report.rows %}<th colspan="{{ 2 if money_ok else 1 }}">{{ r.title }}</th>{% endfor %}</tr>
     <tr>{% for r in report.rows %}<th class="num">Простой</th>{% if money_ok %}<th class="num">Чек</th>{% endif %}{% endfor %}</tr>
     {% for mr in month_rows %}
-    <tr><td>{{ mr.month.strftime('%m.%Y') }}{{ coverage.mark(mr.coverage) }}</td>
-      {% for c in mr.cells %}
+    <tr><td data-label="Месяц">{{ mr.month.strftime('%m.%Y') }}{{ coverage.mark(mr.coverage) }}</td>
+      {% for c in mr.cells %}{% set point = report.rows[loop.index0].title %}
       {# Своя пометка у ячейки - когда история точки началась внутри
          месяца (открылась); «идёт месяц» уже сказано в строке месяца. #}
-      <td class="num {% if c.idle_percent is none %}muted{% elif c.idle_ok %}ok{% else %}bad{% endif %}">{% if c.idle_percent is none %}—{% else %}{{ c.idle_percent }} %{% endif %}{% if c.coverage and c.coverage.from %}{{ coverage.mark(c.coverage) }}{% endif %}</td>
-      {% if money_ok %}<td class="num {% if c.avg_check is none %}muted{% elif c.check_ok %}ok{% else %}bad{% endif %}">{% if c.avg_check is none %}—{% else %}{{ money(c.avg_check) }}{% endif %}</td>{% endif %}
+      <td class="num {% if c.idle_percent is none %}muted{% elif c.idle_ok %}ok{% else %}bad{% endif %}" data-label="{{ point }} · простой">{% if c.idle_percent is none %}—{% else %}{{ c.idle_percent }} %{% endif %}{% if c.coverage and c.coverage.from %}{{ coverage.mark(c.coverage) }}{% endif %}</td>
+      {% if money_ok %}<td class="num {% if c.avg_check is none %}muted{% elif c.check_ok %}ok{% else %}bad{% endif %}" data-label="{{ point }} · чек">{% if c.avg_check is none %}—{% else %}{{ money(c.avg_check) }}{% endif %}</td>{% endif %}
       {% endfor %}
     </tr>
     {% endfor %}

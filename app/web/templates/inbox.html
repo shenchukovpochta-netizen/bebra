@@ -27,7 +27,7 @@
 <div class="card">
 {{ list.views(views, '/inbox', tools, staff) }}
 <div class="table-wrap">
-<table>
+<table class="cards">
   <tr>
     <th>№</th>
     {{ list.th('Канал', 'channel', tools) }}
@@ -38,14 +38,14 @@
   </tr>
   {% for t in rows %}
   <tr class="{% if t.status == 'new' %}warn-row{% elif t.status in ('done', 'spam') %}muted{% endif %}">
-    <td class="nowrap"><a href="/inbox/{{ t.id }}">{{ t.no }}</a></td>
-    <td><span class="tag">{{ t.channel_label }}</span></td>
-    <td><a href="/inbox/{{ t.id }}">{{ t.who }}</a>
+    <td class="nowrap" data-label="№"><a href="/inbox/{{ t.id }}">{{ t.no }}</a></td>
+    <td data-label="Канал"><span class="tag">{{ t.channel_label }}</span></td>
+    <td data-label="Кто"><a href="/inbox/{{ t.id }}">{{ t.who }}</a>
       {% if t.client_id %}<br><small class="muted">клиент{% if t.renting %} · в аренде{% endif %}{% if t.booking_open %} · есть бронь{% endif %}</small>{% endif %}
       {% if t.subject %}<br><small class="muted">{{ t.subject }}</small>{% endif %}</td>
-    <td>{% if t.last_direction == 'out' %}<span class="muted">вы: </span>{% endif %}{{ t.preview or '—' }}</td>
-    <td class="nowrap">{% if t.waiting_since %}{% if t.waiting_hours is not none and t.waiting_hours >= 1 %}<b>{{ t.waiting_hours }} ч</b>{% else %}меньше часа{% endif %}<br><small class="muted">с {{ t.waiting_since|dmy }}</small>{% else %}—{% endif %}</td>
-    <td><span class="tag {% if t.status == 'new' %}rented{% endif %}">{{ t.status_label }}</span>{% if t.handled_by %}<br><small class="muted">{{ t.handled_by }}</small>{% endif %}</td>
+    <td data-label="Последнее">{% if t.last_direction == 'out' %}<span class="muted">вы: </span>{% endif %}{{ t.preview or '—' }}</td>
+    <td class="nowrap" data-label="Ждёт">{% if t.waiting_since %}{% if t.waiting_hours is not none and t.waiting_hours >= 1 %}<b>{{ t.waiting_hours }} ч</b>{% else %}меньше часа{% endif %}<br><small class="muted">с {{ t.waiting_since|dmy }}</small>{% else %}—{% endif %}</td>
+    <td data-label="Состояние"><span class="tag {% if t.status == 'new' %}rented{% endif %}">{{ t.status_label }}</span>{% if t.handled_by %}<br><small class="muted">{{ t.handled_by }}</small>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="6" class="muted">Обращений нет.</td></tr>{% endfor %}
   {{ list.footer(tools, '/inbox', 6) }}

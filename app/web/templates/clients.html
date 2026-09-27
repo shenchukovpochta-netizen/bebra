@@ -14,18 +14,18 @@
   <a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}">CSV</a>{% endif %}
 </div>
 <div class="card">
-<table>
+<table class="cards">
   {% set money_ok = can_view(staff, 'finance') %}
   <tr><th>Клиент</th><th>Телефон</th><th>Telegram</th><th>Аренда</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}</tr>
   {% for c in rows %}
   <tr>
-    <td><a href="/clients/{{ c.id }}">{{ c.full_name }}</a>
+    <td data-label="Клиент"><a href="/clients/{{ c.id }}">{{ c.full_name }}</a>
       {% if c.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[c.status] }}</span>{% endif %}</td>
-    <td>{{ c.phone }}</td>
-    <td>{% if c.tg_id %}✅{% if c.username %} @{{ c.username }}{% endif %}{% else %}<span class="muted">не привязан</span>{% endif %}</td>
-    <td>{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
-    <td>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}</td>
-    {% if money_ok %}<td class="num {% if c.balance < 0 %}bad{% endif %}">{{ money(c.balance) }}</td>{% endif %}
+    <td data-label="Телефон">{{ c.phone }}</td>
+    <td data-label="Telegram">{% if c.tg_id %}✅{% if c.username %} @{{ c.username }}{% endif %}{% else %}<span class="muted">не привязан</span>{% endif %}</td>
+    <td data-label="Аренда">{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td data-label="Оплачено">{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}</td>
+    {% if money_ok %}<td class="num {% if c.balance < 0 %}bad{% endif %}" data-label="Баланс">{{ money(c.balance) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="6" class="muted">Никого не найдено.</td></tr>{% endfor %}
 </table>

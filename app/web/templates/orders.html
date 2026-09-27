@@ -32,7 +32,7 @@
 <div class="card">
 {{ list.views(views, '/orders', tools, staff) }}
 <div class="table-wrap">
-<table>
+<table class="cards">
   {% set money_ok = can_view(staff, 'finance') %}
   <tr>
     {{ list.th('№', 'no', tools) }}
@@ -48,21 +48,21 @@
   </tr>
   {% for r in rows %}
   <tr>
-    <td><a href="/orders/{{ r.id }}">{{ r.no }}</a></td>
-    <td>{{ r.opened_at|dmy }}</td>
-    <td>{% if r.bike_id %}№ {{ r.bike_code }} {{ r.bike_model }}{% else %}{{ r.object_note or '—' }}{% endif %}</td>
-    <td class="opt">{{ r.location or '—' }}</td>
-    <td><span class="tag order-{{ r.status }}">{{ ORDER_STATUSES[r.status] }}</span></td>
-    <td>{{ PAYERS[r.payer] }}</td>
-    <td>{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.client_name }}</a>{% else %}{{ r.client_name or '' }}{% endif %}</td>
-    <td>{{ r.tech_name or '—' }}</td>
-    <td class="num">{{ r.days }}</td>
-    {% if money_ok %}<td class="num">{{ money(r.total if r.status == 'done' else r.estimate) }}</td>{% endif %}
+    <td data-label="№"><a href="/orders/{{ r.id }}">{{ r.no }}</a></td>
+    <td data-label="Открыт">{{ r.opened_at|dmy }}</td>
+    <td data-label="Объект">{% if r.bike_id %}№ {{ r.bike_code }} {{ r.bike_model }}{% else %}{{ r.object_note or '—' }}{% endif %}</td>
+    <td class="opt" data-label="Точка">{{ r.location or '—' }}</td>
+    <td data-label="Статус"><span class="tag order-{{ r.status }}">{{ ORDER_STATUSES[r.status] }}</span></td>
+    <td data-label="Плательщик">{{ PAYERS[r.payer] }}</td>
+    <td data-label="Клиент">{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.client_name }}</a>{% else %}{{ r.client_name or '' }}{% endif %}</td>
+    <td data-label="Техник">{{ r.tech_name or '—' }}</td>
+    <td class="num" data-label="Суток">{{ r.days }}</td>
+    {% if money_ok %}<td class="num" data-label="Сумма">{{ money(r.total if r.status == 'done' else r.estimate) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="10" class="muted">Нарядов нет.</td></tr>{% endfor %}
   {% if money_ok and unpaid.count %}
   <tr class="total"><td colspan="9">Закрыто, но не оплачено клиентами · {{ unpaid.count }}</td>
-    <td class="num bad">{{ money(unpaid.sum) }}</td></tr>
+    <td class="num bad" data-label="Сумма">{{ money(unpaid.sum) }}</td></tr>
   {% endif %}
   {{ list.footer(tools, '/orders', 10,
                  ('на сумму ' ~ money(total)) if money_ok and total else '') }}

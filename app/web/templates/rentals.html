@@ -40,7 +40,7 @@
 <div class="card">
 {{ list.views(views, '/rentals', tools, staff) }}
 <div class="table-wrap">
-<table>
+<table class="cards">
   {% set money_ok = can_view(staff, 'finance') %}
   <tr>
     {{ list.th('#', 'no', tools) }}
@@ -57,17 +57,17 @@
   </tr>
   {% for r in rows %}
   <tr>
-    <td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td>
-    <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
-    <td>{{ r.bike_code or '—' }} <span class="muted">{{ r.bike_model or '' }}</span></td>
-    <td class="opt">{{ r.location or '—' }}</td>
-    <td>{{ r.tariff_name }}{% if money_ok %} · {{ money(r.price) }}/{% else %} · {% endif %}{{ r.period_days }} дн. <small class="muted">{{ BILLING[r.billing] }}</small></td>
-    <td>{{ r.started_on|dmy }}{% if r.closed_on %} — {{ r.closed_on|dmy }}{% endif %}</td>
-    <td class="num">{{ r.days_running }}{% if r.in_repair %} <span class="tag repair" title="на велосипеде открыт наряд">ремонт</span>{% endif %}</td>
-    <td>{% if r.status == 'active' %}{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">закрыта</span>{% endif %}</td>
-    <td class="num">{% if r.overdue_days %}<span class="bad">{{ r.overdue_days }} дн.</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-    {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
-    <td class="actions nowrap">{% if r.status == 'active' and r.tg_id and can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/remind" class="inline-form"><input type="hidden" name="next" value="/rentals?status={{ status }}&view={{ view }}{{ qs }}"><button type="submit" class="ghost" title="напомнить клиенту сейчас">🔔</button></form>{% endif %}</td>
+    <td data-label="#"><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td>
+    <td data-label="Клиент">{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
+    <td data-label="Велосипед">{{ r.bike_code or '—' }} <span class="muted">{{ r.bike_model or '' }}</span></td>
+    <td class="opt" data-label="Точка">{{ r.location or '—' }}</td>
+    <td data-label="Тариф">{{ r.tariff_name }}{% if money_ok %} · {{ money(r.price) }}/{% else %} · {% endif %}{{ r.period_days }} дн. <small class="muted">{{ BILLING[r.billing] }}</small></td>
+    <td data-label="С">{{ r.started_on|dmy }}{% if r.closed_on %} — {{ r.closed_on|dmy }}{% endif %}</td>
+    <td class="num" data-label="Идёт">{{ r.days_running }}{% if r.in_repair %} <span class="tag repair" title="на велосипеде открыт наряд">ремонт</span>{% endif %}</td>
+    <td data-label="Оплачено">{% if r.status == 'active' %}{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">закрыта</span>{% endif %}</td>
+    <td class="num" data-label="Просрочка">{% if r.overdue_days %}<span class="bad">{{ r.overdue_days }} дн.</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+    {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}" data-label="Баланс">{{ money(r.balance) }}</td>{% endif %}
+    <td class="actions nowrap" data-label="Напомнить">{% if r.status == 'active' and r.tg_id and can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/remind" class="inline-form"><input type="hidden" name="next" value="/rentals?status={{ status }}&view={{ view }}{{ qs }}"><button type="submit" class="ghost" title="напомнить клиенту сейчас">🔔</button></form>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="11" class="muted">Пусто.</td></tr>{% endfor %}
   {{ list.footer(tools, '/rentals', 11,

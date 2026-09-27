@@ -78,7 +78,9 @@ HERE = Path(__file__).resolve().parent
 # не входит. Защита у неё одна - случайный токен в ссылке.
 # Хук «Входящих» (/hook/) - для шлюзов WhatsApp и n8n: входа в панель у
 # них нет, защита - свой токен в заголовке, лимит неудач и размера.
-PUBLIC = ("/login", "/static", "/healthz", "/sign/", "/hook/")
+# Манифест значка браузер запрашивает без cookie, как и сами значки в
+# /static: закрытый входом, он пришёл бы редиректом на /login.
+PUBLIC = ("/login", "/static", "/healthz", "/sign/", "/hook/", "/manifest.webmanifest")
 # Свой кабинет доступен любому сотруднику, каким бы урезанным ни был профиль.
 ALWAYS_OPEN = ("/logout", "/me", "/me/password")
 SESSION_DAYS = 14
@@ -140,7 +142,8 @@ DEMO_BODY_MAX = 1024 * 1024
 # (scrypt) сотня запросов в секунду с одного адреса заморозила бы демо
 # остальным. Предел - на адрес клиента: сколько запросов сразу и какой
 # темп в среднем, с запасом на всплеск - человек открывает вкладки
-# подряд. Статика и /healthz не считаются.
+# подряд. Статика, манифест значка и /healthz не считаются: базы они не
+# трогают, а манифест браузер берёт к каждой странице.
 DEMO_INFLIGHT = 4
 DEMO_RATE = 3.0
 DEMO_BURST = 40
@@ -328,7 +331,8 @@ class DemoGate:
             await send(message)
 
         limits = getattr(self.state, "demo_limits", None)
-        if limits is None or path == "/healthz" or path.startswith("/static/"):
+        if (limits is None or path in ("/healthz", "/manifest.webmanifest")
+                or path.startswith("/static/")):
             await self.app(scope, receive, tagged)
             return
         ip = (scope.get("client") or ("?",))[0]
@@ -566,13 +570,46 @@ class CachedStatic(StaticFiles):
         return response
 
 
+# Значок на главный экран: файлы рисует app/web/icons.py. Цвет - шапки
+# панели на телефоне: полоса браузера и заставка сливаются с ней.
+MANIFEST_ICONS = (("icon-192.png", "192x192", "any"), ("icon-512.png", "512x512", "any"),
+                  ("icon-maskable-512.png", "512x512", "maskable"))
+THEME_COLOR = "#211F1D"
+
+
+def app_names(title: str) -> tuple[str, str]:
+    """Имя приложения на телефоне: полное и под значком. «МАЙБАЙК» -
+    «МАЙБАЙК CRM» и «МАЙБАЙК»; хвост после « · » (демо) остаётся в обоих:
+    демо, поставленное на экран рядом с боевой панелью, не должно
+    выглядеть как она."""
+    head, sep, tail = title.partition(" · ")
+    return f"{head} CRM{sep}{tail}", f"{head} {tail}".strip()
+
+
+def web_manifest(title: str, stamp: str) -> dict:
+    """Манифест для «На экран Домой». Service worker нет намеренно: на
+    страницах телефоны и долги клиентов, и копия страницы в кэше
+    телефона пережила бы и выход из панели, и увольнение сотрудника."""
+    name, short = app_names(title)
+    return {
+        "id": "/", "name": name, "short_name": short, "lang": "ru",
+        "description": "Прокат: клиенты, аренды, парк и деньги",
+        "start_url": "/", "scope": "/", "display": "standalone",
+        "theme_color": THEME_COLOR, "background_color": THEME_COLOR,
+        "icons": [{"src": f"/static/{file}?v={stamp}", "sizes": sizes,
+                   "type": "image/png", "purpose": purpose}
+                  for file, sizes, purpose in MANIFEST_ICONS],
+    }
+
+
 def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI:
     app = FastAPI(title=cfg.title, docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", CachedStatic(directory=str(HERE / "static")),
               name="static")
     templates = Jinja2Templates(directory=str(HERE / "templates"))
+    static_v = static_stamp(HERE / "static")
     templates.env.globals.update(
-        static_v=static_stamp(HERE / "static"),
+        static_v=static_v, app_short=app_names(cfg.title)[1], THEME_COLOR=THEME_COLOR,
         # «Скоро платёж» подсвечивается с того же дня, с которого бот шлёт
         # «истекает через N дней», а не с зашитых двух.
         REMIND_BEFORE_DAYS=cfg.remind_before_days,
@@ -930,6 +967,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"ok": True}
+
+    @app.get("/manifest.webmanifest")
+    async def manifest() -> Response:
+        # Собирается по CRM_TITLE, а не лежит файлом: у демо на значке своё
+        # имя. no-cache - как у статики без метки: сменили имя или значки,
+        # телефон увидит это при следующем открытии.
+        return JSONResponse(web_manifest(cfg.title, static_v),
+                            media_type="application/manifest+json",
+                            headers={"Cache-Control": "no-cache"})
 
     if cfg.demo:
         @app.get("/robots.txt")

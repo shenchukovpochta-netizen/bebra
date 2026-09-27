@@ -38,17 +38,17 @@
 {% endif %}
 
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>Смена</th><th>Точка</th><th>Открыта</th><th>Закрыта</th><th class="num">Ожидалось</th><th class="num">Насчитали</th><th class="num">Расхождение</th></tr>
   {% for s in rows %}
   <tr class="{% if s.big_diff %}warn-row{% endif %}">
-    <td><a href="/cash/{{ s.id }}">{{ s.no }}</a>{% if s.status == 'open' %} <span class="tag rented">открыта</span>{% endif %}</td>
-    <td>{{ s.location or '—' }}</td>
-    <td>{{ s.opened_at|dmy }} <span class="muted">{{ s.opened_by or '' }}</span></td>
-    <td>{% if s.closed_at %}{{ s.closed_at|dmy }} <span class="muted">{{ s.closed_by or '' }}</span>{% else %}—{% endif %}</td>
-    <td class="num">{% if s.expected is not none %}{{ money(s.expected) }}{% else %}—{% endif %}</td>
-    <td class="num">{% if s.counted is not none %}{{ money(s.counted) }}{% else %}—{% endif %}</td>
-    <td class="num {% if s.big_diff %}bad{% endif %}">{% if s.diff is not none %}{{ money(s.diff) }}{% else %}—{% endif %}</td>
+    <td data-label="Смена"><a href="/cash/{{ s.id }}">{{ s.no }}</a>{% if s.status == 'open' %} <span class="tag rented">открыта</span>{% endif %}</td>
+    <td data-label="Точка">{{ s.location or '—' }}</td>
+    <td data-label="Открыта">{{ s.opened_at|dmy }} <span class="muted">{{ s.opened_by or '' }}</span></td>
+    <td data-label="Закрыта">{% if s.closed_at %}{{ s.closed_at|dmy }} <span class="muted">{{ s.closed_by or '' }}</span>{% else %}—{% endif %}</td>
+    <td class="num" data-label="Ожидалось">{% if s.expected is not none %}{{ money(s.expected) }}{% else %}—{% endif %}</td>
+    <td class="num" data-label="Насчитали">{% if s.counted is not none %}{{ money(s.counted) }}{% else %}—{% endif %}</td>
+    <td class="num {% if s.big_diff %}bad{% endif %}" data-label="Расхождение">{% if s.diff is not none %}{{ money(s.diff) }}{% else %}—{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Смен не было.</td></tr>{% endfor %}
 </table>

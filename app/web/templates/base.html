@@ -8,6 +8,20 @@
    обновления панели, и новая разметка едет по чужой таблице. #}
 <link rel="stylesheet" href="/static/fonts.css?v={{ static_v }}">
 <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+{# Значок на главный экран: манифест, значки и цвет полосы браузера.
+   Полоса - цвета шапки панели в обеих темах: на телефоне сверху всегда
+   тёмная шапка, и светлая полоса над ней выглядела бы щелью.
+   Service worker нет намеренно - см. web_manifest в app.py. #}
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png?v={{ static_v }}">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={{ static_v }}">
+<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: dark)">
+<meta name="application-name" content="{{ app_short }}">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ app_short }}">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 </head>
 <body class="{% if staff %}with-side{% endif %}">
 {% if staff %}

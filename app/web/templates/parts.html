@@ -51,7 +51,7 @@
 <div class="card">
 {{ list.views(views, '/parts', tools, staff) }}
 <div class="table-wrap">
-<table>
+<table class="cards">
   {% set money_ok = can_view(staff, 'finance') %}
   <tr>
     {{ list.th('Позиция', 'title', tools) }}
@@ -69,24 +69,25 @@
   </tr>
   {% for r in rows %}
   <tr class="{% if not r.active %}muted{% endif %}">
-    <td><a href="/parts/{{ r.id }}">{{ r.title }}</a>{% if not r.active %} <small class="muted">архив</small>{% endif %}</td>
-    <td class="opt">{{ r.node_title or '—' }}</td>
-    <td class="num {% if r.below %}bad{% endif %}">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· не хватает {{ r.short }}</small>{% endif %}</td>
-    <td class="num muted">{{ r.min_stock }}</td>
-    <td class="num opt {% if r.stale %}warn{% endif %}">{{ r.days_on_stock if r.days_on_stock is not none else '—' }}</td>
+    <td data-label="Позиция"><a href="/parts/{{ r.id }}">{{ r.title }}</a>{% if not r.active %} <small class="muted">архив</small>{% endif %}</td>
+    <td class="opt" data-label="Узел">{{ r.node_title or '—' }}</td>
+    <td class="num {% if r.below %}bad{% endif %}" data-label="На полке">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· не хватает {{ r.short }}</small>{% endif %}</td>
+    <td class="num muted" data-label="Мин.">{{ r.min_stock }}</td>
+    <td class="num opt {% if r.stale %}warn{% endif %}" data-label="Дней на складе">{{ r.days_on_stock if r.days_on_stock is not none else '—' }}</td>
     {% if money_ok %}
-    <td class="num">{{ money(r.cost) }}</td>
-    <td class="num opt">{{ money(r.cost_total) }}</td>
-    <td class="num opt">{{ money(r.price) }}</td>
-    <td class="num opt">{{ money(r.price_total) }}</td>
+    <td class="num" data-label="Себест.">{{ money(r.cost) }}</td>
+    <td class="num opt" data-label="Σ себест.">{{ money(r.cost_total) }}</td>
+    <td class="num opt" data-label="Цена клиенту">{{ money(r.price) }}</td>
+    <td class="num opt" data-label="Σ по клиенту">{{ money(r.price_total) }}</td>
     {% endif %}
-    <td class="opt">{{ r.model or 'все' }}</td>
+    <td class="opt" data-label="Совместимость">{{ r.model or 'все' }}</td>
   </tr>
   {% else %}<tr><td colspan="10" class="muted">Склад пуст. Заведите позицию и проведите приход.</td></tr>{% endfor %}
   {{ list.footer(tools, '/parts', 10,
                  ('по себестоимости ' ~ money(summary.cost) ~ ' · по клиентским ценам ' ~ money(summary.price))
                  if money_ok and summary.cost else '') }}
 </table>
+</div>
 <p class="muted">Первыми — те, чего не хватает до неснижаемого остатка.
   Себестоимость средняя: пересчитывается при каждом приходе, поэтому один
   дорогой приход не задирает стоимость всех ремонтов. Остаток — сумма

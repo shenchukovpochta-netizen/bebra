@@ -75,7 +75,7 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py',
          'app/crm/points.py', 'app/crm/readiness.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
-         'app/web/config.py')
+         'app/web/config.py', 'app/web/icons.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
                   'app/web/templates/_logo.html', 'app/web/templates/_bolt.html',
                   'app/web/templates/login.html', 'app/web/templates/missing.html',
@@ -146,7 +146,9 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/sign_agreement.html',
                   'app/web/templates/sign_missing.html',
                   'app/web/templates/_demo_banner.html')
-$webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css')
+$webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css',
+               'app/web/static/icon-192.png', 'app/web/static/icon-512.png',
+               'app/web/static/icon-maskable-512.png', 'app/web/static/apple-touch-icon.png')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
              'app/web/static/fonts/onest-400-latin.woff2',
@@ -197,6 +199,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_trackers.py', 'tests/test_cash.py',
           'tests/test_mailing.py', 'tests/test_esign.py', 'tests/test_paying.py', 'tests/test_notices.py', 'tests/test_estimate.py', 'tests/test_bonus.py',
           'tests/test_intake.py', 'tests/test_documents.py', 'tests/test_lists.py',
+          'tests/test_phone.py',
           'tests/test_extras.py', 'tests/test_battery_intake.py', 'tests/test_battery_search.py', 'tests/test_alerts.py', 'tests/test_service_reports.py', 'tests/test_norms.py', 'tests/test_idle_money.py', 'tests/test_money_chart.py', 'tests/test_list_tools.py', 'tests/test_list_more.py', 'tests/test_bike_card.py', 'tests/test_client_card.py', 'tests/test_prices.py', 'tests/test_block.py', 'tests/test_schedule.py', 'tests/test_audit.py', 'tests/test_promos.py', 'tests/test_bookings.py',
           'tests/test_pricing.py', 'tests/test_inbox.py', 'tests/test_inbox_web.py',
           'tests/test_avito.py', 'tests/test_points_pg.py',

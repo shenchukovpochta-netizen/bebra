@@ -20,18 +20,18 @@
   <div class="tile"><b>{{ money(totals.get('adjust', 0)) }}</b><span>корректировки</span></div>
 </div>
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>Дата</th><th>Клиент</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th>Кто</th></tr>
   {% for x in rows %}
   <tr>
-    <td>{{ x.created_at|dmy }}</td>
-    <td><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a></td>
-    <td>{{ KINDS.get(x.kind, x.kind) }}</td>
-    <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}">{{ money_signed(x.amount) }}</td>
-    <td>{{ period_label(x.period_from, x.period_to) }}</td>
-    <td>{{ METHODS.get(x.method, x.method or '') }}</td>
-    <td>{{ x.note or '' }}</td>
-    <td class="muted">{{ x.created_by or '' }}</td>
+    <td data-label="Дата">{{ x.created_at|dmy }}</td>
+    <td data-label="Клиент"><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a></td>
+    <td data-label="Вид">{{ KINDS.get(x.kind, x.kind) }}</td>
+    <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}" data-label="Сумма">{{ money_signed(x.amount) }}</td>
+    <td data-label="Период">{{ period_label(x.period_from, x.period_to) }}</td>
+    <td data-label="Способ">{{ METHODS.get(x.method, x.method or '') }}</td>
+    <td data-label="Заметка">{{ x.note or '' }}</td>
+    <td class="muted" data-label="Кто">{{ x.created_by or '' }}</td>
   </tr>
   {% else %}<tr><td colspan="8" class="muted">За период записей нет.</td></tr>{% endfor %}
 </table>
