@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 import os
 import re
 import shutil
@@ -14,6 +16,14 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+try:
+    import asyncpg
+    import pgserver
+    HAVE_PG = True
+except ImportError:                                    # pragma: no cover
+    HAVE_PG = False
 
 
 def _bash(script: str, cwd: str) -> subprocess.CompletedProcess:
@@ -388,6 +398,167 @@ class TestUpdate(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("install.sh", r.stderr)
         self.assertEqual(self.calls.read_text(), "")
+
+
+def rollback_commands() -> list[str]:
+    """Команды отката так, как их печатает update.sh: функция rollback из
+    самого скрипта, переменные - как у сервера из TestUpdate. Строки с
+    переносом «\\» склеены - одна команда на элемент."""
+    text = (ROOT / "update.sh").read_text(encoding="utf-8")
+    func = re.search(r"(?ms)^rollback\(\) \{\n.*?^\}\n", text).group()
+    r = subprocess.run(["bash", "-c", f"{func}\nrollback"], capture_output=True, text=True,
+                       env={**os.environ, "LC_ALL": "C.UTF-8", "DB_USER": "mb",
+                            "DB_NAME": "mbdb", "DUMP": "backups/pre-update.sql.gz",
+                            "CODE": "backups/pre-update-code.tar.gz"})
+    lines = [x.strip() for x in r.stdout.replace("\\\n", " ").splitlines()
+             if x.startswith("      ")]
+    return [" ".join(x.split()) for x in lines]
+
+
+@unittest.skipUnless(HAVE_PG and shutil.which("bash") and shutil.which("gzip"),
+                     "нужны pgserver, asyncpg, bash и gzip")
+class TestRollbackRestore(unittest.TestCase):
+    """Откат из текста update.sh - на настоящей базе со схемой проекта.
+    Сервер: дамп «до обновления», поверх - «новая версия». Команда
+    заливки идёт как напечатана, docker - заглушка, которая исполняет
+    «compose exec -T postgres …» прямо против тестового Postgres."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        base = Path(cls.tmp.name)
+        cls.pg = pgserver.get_server(str(base / "pg"))
+        cls.host = re.search(r"host=([^&]+)", cls.pg.get_uri()).group(1)
+        # psql и pg_dump - системные, если есть (так на сервере: 16.10+ с
+        # \restrict в дампе), иначе из комплекта pgserver.
+        from pgserver._commands import POSTGRES_BIN_PATH
+        cls.bin = {name: shutil.which(name) or str(POSTGRES_BIN_PATH / name)
+                   for name in ("psql", "pg_dump")}
+        cls.stub = base / "bin"
+        cls.stub.mkdir()
+        (cls.stub / "docker").write_text(
+            '#!/bin/sh\n'
+            'if [ "$1 $2 $3 $4" = "compose exec -T postgres" ]; then\n'
+            '  shift 4; cmd="$1"; shift; exec "$PSQL_DIR/$cmd" "$@"\n'
+            'fi\n'
+            'echo "docker $*" >> "$CALLS"\n', encoding="utf-8")
+        (cls.stub / "docker").chmod(0o755)
+        link = base / "pgbin"
+        link.mkdir()
+        (link / "psql").symlink_to(cls.bin["psql"])
+        cls.env = {**os.environ, "LC_ALL": "C.UTF-8", "PGHOST": cls.host,
+                   "PATH": f"{cls.stub}:{os.environ.get('PATH', '')}",
+                   "PSQL_DIR": str(link), "CALLS": str(base / "calls.log")}
+        asyncio.run(cls._prepare())
+        cls.commands = rollback_commands()
+
+    @classmethod
+    async def _prepare(cls):
+        """Роль и база как у сервера (.env TestUpdate), схема проекта."""
+        admin = await asyncpg.connect(cls.pg.get_uri())
+        try:
+            await admin.execute("create role mb superuser login")
+            await admin.execute("create database mbdb owner mb")
+        finally:
+            await admin.close()
+        from app.db import Database, _init_connection
+        pool = await asyncpg.create_pool(host=cls.host, user="mb", database="mbdb",
+                                         min_size=1, max_size=1, init=_init_connection)
+        try:
+            await Database(pool).apply_schema(ROOT / "schema.sql")
+        finally:
+            await pool.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.pg.cleanup()
+        cls.tmp.cleanup()
+
+    def sql(self, query: str):
+        async def go():
+            conn = await asyncpg.connect(host=self.host, user="mb", database="mbdb")
+            try:
+                return await conn.fetchval(query)
+            finally:
+                await conn.close()
+        return asyncio.run(go())
+
+    def command(self, word: str) -> str:
+        found = [c for c in self.commands if word in c]
+        self.assertEqual(len(found), 1, self.commands)
+        return found[0]
+
+    def restore(self, dump: str) -> subprocess.CompletedProcess:
+        """Сервер «после обновления»: дамп прежней базы в backups/, новая
+        схема и новые данные поверх. Затем - напечатанная команда заливки."""
+        server = Path(self.tmp.name) / "server"
+        (server / "backups").mkdir(parents=True, exist_ok=True)
+        (server / "backups" / "pre-update.sql.gz").write_bytes(gzip.compress(dump.encode()))
+        self.sql("insert into crm.settings (key, value) values ('probe', 'новая версия') "
+                 "on conflict (key) do update set value = excluded.value")
+        self.sql("create table if not exists crm.new_version_only (id int)")
+        # Все шаги отката, что идут в базу, подряд и до первого сбоя - как
+        # их прошёл бы человек: снос схем отдельной командой тоже в счёт.
+        steps = [c for c in self.commands if "exec -T postgres" in c]
+        self.assertTrue(steps, self.commands)
+        return subprocess.run(["bash", "-o", "pipefail", "-c", " && ".join(steps)],
+                              cwd=server, capture_output=True, text=True, env=self.env)
+
+    def dump(self) -> str:
+        """Дамп «до обновления» - настоящим pg_dump, как в update.sh."""
+        self.sql("insert into crm.settings (key, value) values ('probe', 'до обновления') "
+                 "on conflict (key) do update set value = excluded.value")
+        self.sql("drop table if exists crm.new_version_only")
+        r = subprocess.run([self.bin["pg_dump"], "-h", self.host, "-U", "mb", "-d", "mbdb"],
+                           capture_output=True, text=True, check=True)
+        self.assertIn("PostgreSQL database dump complete", r.stdout)
+        return r.stdout
+
+    def test_every_writer_is_stopped(self):
+        """MAX-бот держит мост в основную базу и пишет обращения: живой, он
+        вставлял бы строки между заливкой таблиц и их ключами."""
+        stop = self.command(" stop ")
+        self.assertIn("--profile max", stop, "без профиля bot-max не остановить")
+        services = set(stop.split(" stop ", 1)[1].split())
+        self.assertLessEqual({"bot", "crm", "bot-max"}, services)
+        self.assertNotIn("postgres", services)
+        order = [i for i, c in enumerate(self.commands)
+                 for word in (" stop ", "gunzip -c", "tar -xzf", "bootstrap.sh") if word in c]
+        self.assertEqual(order, sorted(order), "порядок отката")
+
+    def test_rollback_restores_the_dump(self):
+        dump = self.dump()
+        r = self.restore(dump)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        self.assertEqual(self.sql("select value from crm.settings where key = 'probe'"),
+                         "до обновления")
+        self.assertIsNone(self.sql("select to_regclass('crm.new_version_only')"))
+        # Ключи и триггеры на месте: заливка дошла до конца.
+        self.assertTrue(self.sql("select exists (select 1 from pg_trigger "
+                                 "where tgname = 'bikes_status_log' "
+                                 "and tgrelid = 'crm.bikes'::regclass)"))
+        self.assertTrue(self.sql("select exists (select 1 from pg_constraint "
+                                 "where conrelid = 'crm.ledger'::regclass "
+                                 "and contype = 'p')"))
+
+    def test_failed_restore_leaves_the_database_as_it_was(self):
+        """Сбой посреди заливки - после таблиц с данными, до ключей: всё
+        откатывается, включая снос схем. Раньше снос шёл отдельной
+        командой, и база оставалась наполовину: таблицы без ключей и
+        триггеров, а прежний код поднимался на ней как ни в чём не бывало."""
+        dump = self.dump()
+        # Первый ключ: всё до него - таблицы и COPY с данными.
+        cut = dump.rindex("ALTER TABLE ONLY", 0, dump.index("ADD CONSTRAINT"))
+        self.assertLess(dump.index("COPY crm."), cut)
+        r = self.restore(dump[:cut] + "SELECT 1/0;\n" + dump[cut:])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("division by zero", r.stderr)
+        self.assertEqual(self.sql("select value from crm.settings where key = 'probe'"),
+                         "новая версия")
+        self.assertIsNotNone(self.sql("select to_regclass('crm.new_version_only')"))
+        self.assertTrue(self.sql("select exists (select 1 from pg_constraint "
+                                 "where conrelid = 'crm.ledger'::regclass "
+                                 "and contype = 'p')"))
 
 
 class TestComposeLimits(unittest.TestCase):

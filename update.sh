@@ -37,15 +37,19 @@ rollback() {
   cat <<EOF
 
     Откат к моменту перед обновлением - база из дампа, затем прежний код:
-      docker compose stop bot crm
-      docker compose exec -T postgres psql -U $DB_USER -d $DB_NAME -v ON_ERROR_STOP=1 \\
-        -c 'drop schema if exists crm cascade; drop schema if exists bot cascade'
-      gunzip -c $DUMP | docker compose exec -T postgres psql -U $DB_USER -d $DB_NAME -v ON_ERROR_STOP=1
+      docker compose --profile max stop bot crm bot-max
+      { echo 'drop schema if exists crm cascade; drop schema if exists bot cascade;'; \\
+        gunzip -c $DUMP; } | docker compose exec -T postgres \\
+        psql -1 -v ON_ERROR_STOP=1 -U $DB_USER -d $DB_NAME
       tar -xzf $CODE
       bash bootstrap.sh
-    Схемы сносятся до заливки: дамп создаёт их заново, а поверх живых
-    таблиц он упал бы на первом же «уже существует». Код возвращается
-    до запуска: новый при старте снова применил бы свою схему к базе.
+    Останавливаются все, кто пишет в базу, и MAX-бот тоже: его мост в
+    CRM пишет обращения и max_id. Схемы сносятся до заливки (поверх
+    живых таблиц дамп упал бы на первом «уже существует») и в той же
+    транзакции (-1): сбой посреди заливки откатывает всё, и база
+    остаётся как была, а не наполовину без ключей и триггеров. Код
+    возвращается до запуска: новый при старте снова применил бы свою
+    схему к базе.
 EOF
 }
 

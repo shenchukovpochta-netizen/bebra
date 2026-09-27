@@ -347,6 +347,35 @@ class TestPages(WebCase):
         self.assertNotIn("−3 000 ₽", page)
         self.assertEqual(self.client.get("/finance?since=вчера").status_code, 303)
 
+    def test_finance_journal_is_paged(self):
+        """Журнал листается, как остальные списки: месяц в тысячу записей
+        одной страницей весил за полмегабайта (подписи карточек телефона),
+        а прежний предел в тысячу строк молча резал хвост. Подвал считает
+        все найденные записи, сумма - только внутри одного вида."""
+        before = len(run(self.crm.ledger(since=date.today().replace(day=1),
+                                         until=date.today(), limit=100000)))
+        for i in range(120):
+            run(self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                    amount=D(100 + i), note=f"платёж-{i:03d}"))
+        page = self.get_ok("/finance")
+        self.assertIn('class="list-foot"', page)
+        self.assertIn(f"Итого {before + 120}", page)
+        self.assertEqual(page.count("платёж-"), 50)
+        self.assertIn("платёж-119", page)             # новые сверху
+        self.assertNotIn("платёж-000", page)
+        page = self.get_ok("/finance?rows=300")
+        self.assertEqual(page.count("платёж-"), 120)
+        page = self.get_ok("/finance?page=3")
+        self.assertIn("платёж-000", page)
+        self.assertIn("стр. 3 из", page)
+        # Сортировка по сумме - по белому списку; чужое имя поля - как было.
+        page = self.get_ok("/finance?sort=amount&dir=asc&kind=payment")
+        self.assertIn("платёж-000", page)
+        self.assertIn("на сумму +", page)             # один вид - есть сумма
+        self.assertNotIn("на сумму", self.get_ok("/finance"))
+        page = self.get_ok("/finance?sort=note&dir=asc")
+        self.assertIn("платёж-119", page)
+
     def test_dashboard_and_reports_show_debtors(self):
         run(self.crm.add_ledger(client_id=self.client_id, kind="charge", amount=D(-3000)))
         self.assertIn("Иванов Иван", self.get_ok("/"))

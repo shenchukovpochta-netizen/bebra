@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block content %}
 <div class="bar">
   <h1>Финансы</h1>
@@ -21,7 +22,16 @@
 </div>
 <div class="card">
 <table class="cards">
-  <tr><th>Дата</th><th>Клиент</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th>Кто</th></tr>
+  <tr>
+    {{ list.th('Дата', 'date', tools) }}
+    {{ list.th('Клиент', 'client', tools) }}
+    {{ list.th('Вид', 'kind', tools) }}
+    {{ list.th('Сумма', 'amount', tools, 'num') }}
+    <th>Период</th>
+    {{ list.th('Способ', 'method', tools) }}
+    <th>Заметка</th>
+    {{ list.th('Кто', 'by', tools) }}
+  </tr>
   {% for x in rows %}
   <tr>
     <td data-label="Дата">{{ x.created_at|dmy }}</td>
@@ -34,6 +44,8 @@
     <td class="muted" data-label="Кто">{{ x.created_by or '' }}</td>
   </tr>
   {% else %}<tr><td colspan="8" class="muted">За период записей нет.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/finance', 8,
+                 ('на сумму ' ~ money_signed(found_sum)) if found_sum is not none else '') }}
 </table>
 </div>
 {% endblock %}

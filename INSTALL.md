@@ -751,11 +751,24 @@ cd /opt/mybike-bot && bash update.sh /root/mybike-bot.zip
    `127.0.0.1:${CRM_PORT:-8080}` (адрес — из `CRM_BIND`).
 
 В конце — и при любом сбое после шага 2 — скрипт печатает, как
-откатиться: остановить `bot` и `crm`, снести схемы `crm` и `bot`
-(дамп создаёт их заново, а поверх живых таблиц упал бы на «уже
-существует»), залить дамп, развернуть прежний код из
-`pre-update-…-code.tar.gz` и `bash bootstrap.sh`. Код — до запуска:
-новый при старте снова применил бы свою схему к восстановленной базе.
+откатиться: остановить всех, кто пишет в базу, — `bot`, `crm` и
+MAX-бота `bot-max` (его мост в CRM пишет обращения), снести схемы `crm`
+и `bot` (дамп создаёт их заново, а поверх живых таблиц упал бы на «уже
+существует») и залить дамп — снос и заливка идут одной транзакцией
+(`psql -1`): сбой посреди заливки откатывает всё, и база остаётся как
+была, а не наполовину без ключей и триггеров. Затем развернуть прежний
+код из `pre-update-…-code.tar.gz` и `bash bootstrap.sh`. Код — до
+запуска: новый при старте снова применил бы свою схему к
+восстановленной базе.
+
+```bash
+docker compose --profile max stop bot crm bot-max
+{ echo 'drop schema if exists crm cascade; drop schema if exists bot cascade;'; \
+  gunzip -c backups/pre-update-<дата-время>.sql.gz; } | docker compose exec -T postgres \
+  psql -1 -v ON_ERROR_STOP=1 -U mybike -d mybike
+tar -xzf backups/pre-update-<дата-время>-code.tar.gz
+bash bootstrap.sh
+```
 
 Путь к архиву можно дать и относительный — от каталога, откуда
 запускаете: `cd /root && bash /opt/mybike-bot/update.sh mybike-bot.zip`.

@@ -3398,6 +3398,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── финансы и заявки ───────────────────────
 
+    # Журнал финансов листается, как остальные списки. Месяц журнала - это
+    # тысяча с лишним строк: одной страницей с подписью у каждой ячейки
+    # (карточки телефона) он весил за полмегабайта, а прежний предел в
+    # тысячу строк молча отрезал хвост месяца. Теперь подвал говорит,
+    # сколько записей нашлось, а плитки по-прежнему считают весь период.
+    LEDGER_SORTS = {"date": "created_at", "client": "full_name", "kind": "kind",
+                    "amount": "amount", "method": "method", "by": "created_by"}
+
     @app.get("/finance")
     async def finance(request: Request) -> Response:
         since = logic.check_date(request.query_params.get("since"),
@@ -3408,10 +3416,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Дата: в виде ДД.ММ.ГГГГ.", "err")
             return redirect("/finance")
         rows = await crm.ledger(since=since.value, until=until.value,
-                                kind=kind or None, limit=1000)
+                                kind=kind or None, limit=100000)
+        tools = list_tools(request, rows, allowed=LEDGER_SORTS)
         totals = await crm.ledger_totals(since=since.value, until=until.value)
-        return render(request, "finance.html", rows=rows, totals=totals,
-                      since=since.value, until=until.value, kind=kind)
+        return render(request, "finance.html", rows=tools["rows"], tools=tools,
+                      totals=totals, since=since.value, until=until.value, kind=kind,
+                      # Сумма по найденному - только внутри одного вида: платежи
+                      # вперемешку с начислениями в одно число не складываются.
+                      found_sum=logic.sum_of(tools["all_rows"], "amount") if kind
+                      else None)
 
     @app.get("/finance.{ext}")
     async def finance_csv(request: Request, ext: str) -> Response:

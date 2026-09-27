@@ -234,6 +234,8 @@ class Crawl:
     empty: dict[str, list[str]] = dataclasses.field(default_factory=dict)
     odd: dict[str, list[str]] = dataclasses.field(default_factory=dict)
     sizes: dict[str, int] = dataclasses.field(default_factory=dict)
+    # Адреса со списком: подвал «строк: 50·100·300» - страницы листаются.
+    lists: set[str] = dataclasses.field(default_factory=set)
     seconds: float = 0.0
 
 
@@ -272,6 +274,8 @@ async def crawl(client: AsyncClient, start: list[str], *, follow: bool = True,
             continue
         result.sizes[url] = len(r.content)
         text = r.text
+        if 'class="list-foot"' in text:
+            result.lists.add(url)
         if rows := EMPTY_ROW.findall(text):
             result.empty[url] = [row.strip() for row in rows]
         for m in ODD.finditer(text):
@@ -523,11 +527,25 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
         pages = sorted({r for r in self.routes() if "{" not in r
                         and r not in ("/login", "/promos/new")
                         and not r.startswith(OWN_CHECK)})
+        span = urlencode({"since": (self.today - timedelta(days=60)).isoformat(),
+                          "until": self.today.isoformat()})
+        longest = max(logic.LIST_SIZES)
         async with self.client() as client:
             await self.login(client, "demo")
             result = await crawl(client, [*pages, *await self.details()], follow=False)
-        self.assertEqual(result.failures, [], "\n".join(result.failures))
-        heavy = {url: f"{size // 1024} КБ" for url, size in result.sizes.items()
+            # Список - ещё и самой длинной своей страницей: 300 строк выбирает
+            # любой оператор. Журнал финансов - за два месяца: с начала месяца
+            # его длина зависела бы от числа в календаре (/finance на 1000
+            # строках весил 527 КБ после 21-го и проходил до него).
+            self.assertIn("/finance", result.lists)
+            full = await crawl(client, [f"{url}{'&' if '?' in url else '?'}rows={longest}"
+                                        for url in sorted(result.lists)]
+                               + [f"/finance?{span}&rows={longest}"], follow=False)
+        self.assertEqual(result.failures + full.failures, [],
+                         "\n".join(result.failures + full.failures))
+        self.assertGreater(len(full.sizes), 10)
+        heavy = {url: f"{size // 1024} КБ"
+                 for url, size in {**result.sizes, **full.sizes}.items()
                  if size > HEAVY_PAGE}
         self.assertEqual(heavy, {}, "тяжёлые страницы")
         self.assertIn("/trackers", result.sizes)
