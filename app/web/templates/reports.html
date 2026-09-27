@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_coverage.html" as coverage %}
 {% block content %}
 {# Отчёты по ремонту нужны механику, деньги парка - нет: денежные блоки
    и колонки открыты только с доступом к разделу «Финансы». #}
@@ -21,7 +22,7 @@
   <table>
     <tr><th>Месяц</th><th>Простой</th>{% if money_ok %}<th>Чек/день</th><th>Потери</th><th>КПД</th>{% endif %}<th>Дней аренды</th><th>Дней парка</th></tr>
     {% for m in months_metrics %}{% set l = fleet_losses(m) %}
-    <tr><td>{{ m.month.strftime('%m.%Y') }}</td>
+    <tr><td>{{ m.month.strftime('%m.%Y') }}{{ coverage.mark(m.coverage) }}</td>
       <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
       {% if money_ok %}
       <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
@@ -31,7 +32,7 @@
       <td class="num">{{ m.rented_days|round(0)|int }}</td><td class="num">{{ m.operational_days|round(0)|int }}</td></tr>
     {% endfor %}
   </table>
-  <p class="muted">Простой — доля велосипеде-дней вне аренды (свободен, бронь, ремонт, ТО) в днях операционного парка; цель меньше {{ IDLE_TARGET_PERCENT }} %.{% if money_ok %} Чек — платежи клиентов за месяц на один день аренды; цель {{ money(CHECK_TARGET) }}. Потери — дни простоя × цель чека: столько не заработано, пока велосипеды стояли. КПД — поступившие деньги к потенциалу «каждый день парка по цели».{% endif %} История статусов ведётся с момента появления велосипеда в CRM: импортированные из таблицы считаются с даты импорта.</p>
+  <p class="muted">Простой — доля велосипеде-дней вне аренды (свободен, бронь, ремонт, ТО) в днях операционного парка; цель меньше {{ IDLE_TARGET_PERCENT }} %.{% if money_ok %} Чек — платежи клиентов за месяц на один день аренды; цель {{ money(CHECK_TARGET) }}. Потери — дни простоя × цель чека: столько не заработано, пока велосипеды стояли. КПД — поступившие деньги к потенциалу «каждый день парка по цели».{% endif %} История статусов ведётся с момента появления велосипеда в CRM: импортированные из таблицы считаются с даты импорта. «Неполный» — месяц, который ещё идёт, или тот, где история началась: формулы те же, но дней в счёте меньше{% if money_ok %}, и предоплата за неделю на несколько дней аренды завышает чек — с полными месяцами его сравнивают осторожно{% endif %}.</p>
 </section>
 {% if money_ok %}
 <section class="card">

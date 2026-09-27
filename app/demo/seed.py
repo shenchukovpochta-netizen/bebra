@@ -67,6 +67,9 @@ COMPANY = {
 # План месяца: часть выполнена, часть нет - сводке есть что подсветить.
 PLAN = {"plan_rented": "160", "plan_check": "500", "plan_repair": "8",
         "plan_spare": "4", "plan_free": "8"}
+# План по точкам - в сумме общий (160), по долям парка точек: странице
+# точки и «По точкам» есть что показать, а сводка с общим планом не спорит.
+POINT_PLANS = {core.P1: 80, core.P2: 58, core.P3: 22}
 
 # Таблицы с явными id сида и их колонки - в порядке записи (внешние ключи).
 _TABLES = ("purchases", "bikes", "batteries", "clients", "rentals", "rental_bikes",
@@ -206,6 +209,9 @@ async def _reference(conn: asyncpg.Connection, w: World) -> None:
     for name, phone in core.POINT_PHONES.items():
         await conn.execute("update crm.locations set phone = $2 where name = $1",
                            name, phone)
+    for name, rented in POINT_PLANS.items():
+        await conn.execute("update crm.locations set plan_rented = $2 where name = $1",
+                           name, rented)
     for row in await conn.fetch("select * from crm.locations order by sort, name"):
         opened = p3_open if row["name"] == core.P3 else start.date()
         w.points[row["name"]] = Point(

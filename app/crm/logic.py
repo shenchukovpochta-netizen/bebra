@@ -2672,12 +2672,18 @@ def search_digest(rows: dict[str, list[dict]]) -> str:
 
 # ─────────────────── план месяца и прогноз освобождения ───────────────────
 
-def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
+def month_plan(raw: dict[str, str] | None, *, fleet: int = 0,
+               places: Iterable[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """План на месяц из настроек. Не задан - считается от парка и целей.
 
     Умолчания берутся из трёх чисел, а не из воздуха: столько парк даёт,
     если держать простой в норме и чек на цели. План - это то, что можно
     подвинуть, а не то, что надо придумать с нуля.
+
+    `places` - справочник точек. Общий план не задан (plan_rented пуст), а
+    у каждой открытой точки свой - план сети это их сумма (source
+    «points»): умолчание от парка спорило бы с тем, что владелец уже
+    расписал по точкам. Заданный явно общий план главнее сумм.
     """
     raw = raw or {}
 
@@ -2688,10 +2694,18 @@ def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
             return default
         return value if value >= 0 else default
 
-    rented = number("plan_rented", int(round(fleet * (100 - IDLE_TARGET_PERCENT) / 100)))
+    rented = number("plan_rented", -1)
     check = to_money(raw.get("plan_check") or CHECK_TARGET)
     if check <= 0:
         check = CHECK_TARGET
+    points = plan_from_points(places, check=check) if places is not None else None
+    if rented >= 0:
+        source, per_day_plan = "settings", to_money(check * rented)
+    elif points:
+        source, rented, per_day_plan = "points", points["rented"], points["per_day"]
+    else:
+        rented = int(round(fleet * (100 - IDLE_TARGET_PERCENT) / 100))
+        source, per_day_plan = "default", to_money(check * rented)
     # Нормы парка. Ремонт по умолчанию - половина допустимого простоя:
     # вторая половина уходит на «свободен» и «на ТО». Подменных - 2 % парка,
     # меньше двух штук держать бессмысленно.
@@ -2701,8 +2715,67 @@ def month_plan(raw: dict[str, str] | None, *, fleet: int = 0) -> dict[str, Any]:
     # Свободных - вторая половина допустимого простоя: столько стоит на
     # точке «на выдачу», больше - уже некому выдавать.
     free = number("plan_free", max(int(round(fleet * IDLE_TARGET_PERCENT / 200)), 1))
-    return {"rented": rented, "check": check, "fleet": fleet,
-            "repair": repair, "spare": spare, "free": free}
+    return {"rented": rented,
+            # Чек суммы точек - средний по их плановым деньгам: у точек
+            # бывает свой чек, и «N велосипедов по X» обязано давать ту же
+            # сумму, что и точки.
+            "check": points["check"] if source == "points" else check,
+            # Общий чек - тот, что в настройках: он же чек точек без своего,
+            # и форма сводки правит его, а не средний по точкам.
+            "base_check": check,
+            "per_day": per_day_plan, "source": source, "points": points,
+            "fleet": fleet, "repair": repair, "spare": spare, "free": free}
+
+
+def point_plan(place: Mapping[str, Any] | None, *, check: Any) -> dict[str, Any] | None:
+    """План месяца одной точки: велосипедов в аренде на ней и чек в день.
+
+    Лежит в строке справочника (locations.plan_rented, plan_check), а не в
+    настройках под именем точки: переименование - каскад по тексту имени,
+    и ключ «план Павлюхиной» осиротел бы. Нет plan_rented или точка
+    закрыта - плана нет. Чек не задан - общий чек плана: точку планируют
+    числом велосипедов, а цена у сети одна.
+    """
+    if not place or place.get("active", True) is False:
+        return None
+    try:
+        rented = int(str(place.get("plan_rented")))
+    except (TypeError, ValueError):
+        return None
+    if rented < 0:
+        return None
+    own = to_money(place.get("plan_check") or 0)
+    used = own if own > 0 else to_money(check)
+    return {"rented": rented, "check": used, "own_check": own > 0,
+            "per_day": to_money(used * rented)}
+
+
+def plan_from_points(places: Iterable[Mapping[str, Any]] | None, *,
+                     check: Any) -> dict[str, Any] | None:
+    """Сумма планов открытых точек - только когда план есть у каждой.
+
+    Одна открытая точка без плана - None: сумма без неё занизила бы план
+    сети, и «план выполнен» было бы неправдой. Закрытые не в счёт.
+    """
+    plans = []
+    for place in places or ():
+        if not place.get("name") or place.get("active", True) is False:
+            continue
+        plan = point_plan(place, check=check)
+        if plan is None:
+            return None
+        plans.append(plan)
+    return sum_plans(plans, check=check) if plans else None
+
+
+def sum_plans(plans: Iterable[Mapping[str, Any]], *, check: Any) -> dict[str, Any]:
+    """Сумма планов точек: велосипеды и деньги в день складываются, чек -
+    средний по деньгам (у точек он бывает свой). Без велосипедов - общий."""
+    plans = list(plans)
+    rented = sum(int(p["rented"]) for p in plans)
+    money_per_day = to_money(sum((to_money(p["per_day"]) for p in plans), Decimal(0)))
+    return {"rented": rented, "per_day": money_per_day, "count": len(plans),
+            "check": (to_money(money_per_day / rented) if rented else to_money(check))}
 
 
 # Плитки парка на сводке: статус, подпись и откуда берётся норма.
@@ -2926,7 +2999,12 @@ def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,
     """
     days_in_month = max(int(days_in_month), 1)
     days_passed = min(max(int(days_passed), 0), days_in_month)
-    target = to_money(plan["check"] * plan["rented"] * days_in_month)
+    # per_day - у суммы планов точек: у них свой чек, и средний чек на
+    # число велосипедов дал бы копейки расхождения с точками.
+    per_day_plan = plan.get("per_day")
+    if per_day_plan is None:
+        per_day_plan = plan["check"] * plan["rented"]
+    target = to_money(per_day_plan * days_in_month)
     fact = to_money(metrics.get("revenue") or 0)
     # Сколько должно было прийти к сегодняшнему дню: план ровным темпом.
     pace = to_money(target * days_passed / days_in_month)
@@ -5533,6 +5611,42 @@ def days_by_status_location(status_log: Iterable[Mapping[str, Any]],
     return out
 
 
+def history_starts(status_log: Iterable[Mapping[str, Any]],
+                   location_log: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """С какого момента у сети и у каждой точки есть дни. Зеркало
+    CrmDB.history_starts.
+
+    status - первая строка журнала статусов: раньше неё велосипеде-дней
+    нет вовсе. points - {точка или None: момент}: первая строка журнала
+    мест с этой точкой; первая строка велосипеда тянется назад к началу
+    его статусов, как в days_by_status_location, а велосипед без журнала
+    мест - «без точки» с первого статуса. Месяц, в котором стоит момент,
+    неполный (month_coverage).
+    """
+    first_status: dict[Any, datetime] = {}
+    for row in status_log:
+        at = row["changed_at"]
+        if row["bike_id"] not in first_status or at < first_status[row["bike_id"]]:
+            first_status[row["bike_id"]] = at
+    points: dict[str | None, datetime] = {}
+
+    def seen(key: str | None, at: datetime) -> None:
+        if key not in points or at < points[key]:
+            points[key] = at
+
+    placed: set[Any] = set()
+    for row in sorted(location_log, key=lambda r: (r["changed_at"], r.get("id") or 0)):
+        at = row["changed_at"]
+        if row["bike_id"] not in placed:
+            placed.add(row["bike_id"])
+            at = min(at, first_status.get(row["bike_id"], at))
+        seen(row.get("to_location") or None, at)
+    for bike_id, at in first_status.items():
+        if bike_id not in placed:
+            seen(None, at)
+    return {"status": min(first_status.values(), default=None), "points": points}
+
+
 def _point_row(key: str | None, place: Mapping[str, Any] | None, *,
                counts: Mapping[str, int], days: Mapping[str, Any],
                money: Mapping[str, Any], rentals: Mapping[str, Any],
@@ -5655,15 +5769,25 @@ def points_history_from(settings: Mapping[str, Any], since: datetime) -> datetim
         return None
 
 
-def point_months(months: Iterable[Mapping[str, Any]], key: str | None) -> list[dict]:
+def point_months(months: Iterable[Mapping[str, Any]], key: str | None, *,
+                 starts: Mapping[str | None, datetime] | None = None) -> list[dict]:
     """Три числа одной точки по месяцам. months - [{"month", "days",
     "money"}] с ответами bike_days_by_location и money_by_location за
-    месяц: запрос на месяц один на все точки, а не по запросу на точку."""
+    месяц: запрос на месяц один на все точки, а не по запросу на точку.
+
+    С окном месяца (since, until из month_windows) у строки есть
+    coverage - неполный ли месяц: текущий или тот, где точка открылась
+    (`starts` - history_starts()["points"]).
+    """
     out = []
     for m in months:
         days = (m.get("days") or {}).get(key) or {}
         paid = ((m.get("money") or {}).get(key) or {}).get("paid") or 0
-        out.append({"month": m["month"], **fleet_metrics(days, paid)})
+        row = {"month": m["month"], **fleet_metrics(days, paid)}
+        if m.get("since") is not None and m.get("until") is not None:
+            row["coverage"] = month_coverage(m["since"], m["until"],
+                                             start=(starts or {}).get(key))
+        out.append(row)
     return out
 
 
@@ -5785,7 +5909,10 @@ def report_period(params: Mapping[str, Any], *, now: datetime,
                 "end": min(midnight(span["next"]), now),
                 "since": first, "until": span["today"], "key": span["key"],
                 "prev_key": span["prev_key"], "next_key": span["next_key"],
-                "query": f"month={span['key']}", "label": first.strftime("%m.%Y")}
+                "query": f"month={span['key']}", "label": first.strftime("%m.%Y"),
+                # Сутки периода и сколько из них прошло - для плана точек:
+                # тот же ровный темп, что у плана месяца на сводке.
+                "days": span["days"], "passed": span["passed"]}
     raw_since = str(params.get("since") or "").strip()
     raw_until = str(params.get("until") or "").strip()
     # report_day, а не check_date: год 1 или 9999 читается датой, но
@@ -5801,12 +5928,22 @@ def report_period(params: Mapping[str, Any], *, now: datetime,
                 "key": today.strftime("%Y-%m"), "prev_key": this_month["prev_key"],
                 "next_key": None,
                 "query": f"since={first.isoformat()}&until={last.isoformat()}",
-                "label": f"{first:%d.%m.%Y} — {last:%d.%m.%Y}"}
+                "label": f"{first:%d.%m.%Y} — {last:%d.%m.%Y}",
+                "days": (last - first).days + 1, "passed": (last - first).days + 1}
     start = now - timedelta(days=POINTS_PERIOD_DAYS)
     return {"kind": "days", "start": start, "end": now, "since": start.date(),
             "until": today, "key": today.strftime("%Y-%m"),
             "prev_key": this_month["prev_key"], "next_key": None, "query": "",
-            "label": f"последние {POINTS_PERIOD_DAYS} дней"}
+            "label": f"последние {POINTS_PERIOD_DAYS} дней",
+            "days": POINTS_PERIOD_DAYS, "passed": POINTS_PERIOD_DAYS}
+
+
+def plan_month(span: Mapping[str, Any], *, today: date) -> dict[str, Any]:
+    """Месяц плана на странице точки: выбранный в отчёте месяц, иначе
+    текущий. План месячный, и у «30 дней» или своего интервала своего
+    месяца нет - берётся тот, что идёт, как на сводке."""
+    first = span["since"] if span.get("kind") == "month" else today.replace(day=1)
+    return month_bounds(first, today=today)
 
 
 def month_windows(now: datetime, count: int = 6) -> list[dict[str, Any]]:
@@ -5822,6 +5959,42 @@ def month_windows(now: datetime, count: int = 6) -> list[dict[str, Any]]:
     return out
 
 
+def month_coverage(since: datetime, until: datetime, *,
+                   start: datetime | None = None) -> dict[str, Any]:
+    """Сколько суток месяца стоит за его тремя числами.
+
+    Неполный месяц - текущий (идёт по эту минуту) или тот, где началась
+    история: у сети - первая строка журнала статусов, у точки - начало
+    её журнала мест (точка открылась). Формулы те же, но предоплата за
+    неделю на четыре дня аренды даёт чек 600-770 ₽ на 4-е число, и без
+    пометки его сравнивают с полными месяцами. `since` - полночь первого
+    числа, `until` - конец окна (month_windows). days - календарные сутки
+    в счёте, `from` - с какого дня, если история началась внутри месяца.
+    Месяц целиком до начала истории - не «неполный», а пустой: прочерк
+    в таблице говорит сам за себя.
+    """
+    tz = since.tzinfo
+    following = (since + timedelta(days=32)).replace(day=1)
+    whole = (following.date() - since.date()).days
+    begin = max(since, start) if start is not None else since
+    if until <= begin:
+        return {"partial": False, "days": 0, "of": whole, "from": None,
+                "current": False}
+
+    def day_of(moment: datetime) -> date:
+        # Журнал приходит из базы в UTC: сутки считаются по часам панели.
+        return moment.astimezone(tz).date() if tz and moment.tzinfo else moment.date()
+
+    first_day = day_of(begin)
+    # Минус микросекунда: окно [since, until) до полуночи 1-го числа
+    # следующего месяца не задевает его первые сутки.
+    last_day = day_of(until - timedelta(microseconds=1))
+    current = until < following
+    return {"partial": begin > since or current,
+            "days": (last_day - first_day).days + 1, "of": whole,
+            "from": first_day if begin > since else None, "current": current}
+
+
 def point_card(report: Mapping[str, Any], key: str | None,
                place: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Строка одной точки из отчёта points_rows. Закрытой точки без данных
@@ -5832,6 +6005,36 @@ def point_card(report: Mapping[str, Any], key: str | None,
             return row
     return _point_row(key, place, counts={}, days={}, money={}, rentals={},
                       debt={}, cash=0, service={})
+
+
+def points_plan(report: Mapping[str, Any], *, check: Any, days: int,
+                passed: int) -> dict[str, Any]:
+    """Отчёт points_rows с планом точек: у строки - план за период и
+    выполнение тем же ровным темпом, что у плана месяца на сводке
+    (plan_progress). План периода - план в день × сутки периода: за 30
+    дней и за свой интервал период прошёл целиком, у текущего месяца -
+    прошедшие сутки (report_period, days и passed).
+
+    «Итого» плана - только по точкам с планом: выручка точки без плана
+    ничей план не выполняет. planned - сколько точек с планом; ноль -
+    колонок плана в отчёте нет вовсе.
+    """
+    rows, plans, paid = [], [], Decimal(0)
+    for row in report.get("rows") or ():
+        plan = point_plan(row.get("place"), check=check)
+        progress = None
+        if plan is not None:
+            progress = {**plan, **plan_progress(plan, {"revenue": row["paid"]},
+                                                days_in_month=days, days_passed=passed)}
+            plans.append(plan)
+            paid += to_money(row["paid"])
+        rows.append({**row, "plan": progress})
+    total = {**(report.get("total") or {}), "plan": None}
+    if plans:
+        both = sum_plans(plans, check=check)
+        total["plan"] = {**both, **plan_progress(both, {"revenue": paid},
+                                                 days_in_month=days, days_passed=passed)}
+    return {**report, "rows": rows, "total": total, "planned": len(plans)}
 
 
 def bikes_by_point(bikes: Iterable[Mapping[str, Any]]) -> dict[str | None, dict[str, int]]:

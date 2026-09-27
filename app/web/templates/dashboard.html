@@ -103,7 +103,7 @@
       {# Стрелки листают месяц: прошлый - целиком, вперёд - некуда, назад - до
          первого месяца истории. #}
       <span class="muted">{% if span.prev_key %}<a href="/?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %} {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a href="/?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}</span></h2>
-    <span class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день</span></div>
+    <span class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день{% if plan.source == 'points' %} · сумма планов {{ plan.points.count }} точек{% endif %}</span></div>
   <div class="tiles">
     <div class="tile"><b>{{ money(progress.target) }}</b><span>план месяца</span></div>
     <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>{% if span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}<br><small class="muted">ровным темпом было бы {{ money(progress.pace) }}</small></span></div>
@@ -116,6 +116,13 @@
   {% if progress.need_rented > operational %}
   <p class="muted bad">Столько велосипедов в парке нет: план этого месяца уже
     не вытянуть — либо поднимать чек, либо признать и поставить достижимый.</p>
+  {% endif %}
+  {# Общий план задан руками, а точки расписаны каждая: расхождение двух
+     планов видно здесь, а не в конце месяца. #}
+  {% if plan.source != 'points' and plan.points and plan.points.per_day != plan.per_day %}
+  <p class="muted">Планы точек в сумме — {{ plan.points.rented }} велосипедов,
+    {{ money(plan.points.per_day * span.days) }} за месяц: общий план задан
+    отдельно и расходится с ними.</p>
   {% endif %}
   <h3>Деньги по дням
     <span class="muted">· <a href="/?chart=days&month={{ span.key }}" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a> ·
@@ -150,8 +157,12 @@
 
   {% if can_edit(staff, 'finance') %}
   <form method="post" action="/plan" class="grid2">
-    <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented }}" size="5"></label>
-    <label>Чек в день <input name="plan_check" value="{{ plan.check }}" size="8"></label>
+    {# Общий план не задан (сумма точек или умолчание от парка): поле
+       пустое, расчёт - подсказкой. Со значением сохранение норм
+       записало бы его явным планом, и сумма точек, расписанных по
+       одной, не заступила бы никогда. #}
+    <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented if plan.source == 'settings' else '' }}" size="5"{% if plan.source != 'settings' %} placeholder="{{ 'сумма точек' if plan.source == 'points' else 'от парка' }}: {{ plan.rented }}"{% endif %}></label>
+    <label>Чек в день <input name="plan_check" value="{{ plan.base_check }}" size="8"></label>
     <label>Норма в ремонте <input name="plan_repair" value="{{ plan.repair }}" size="5"></label>
     <label>Норма подменных <input name="plan_spare" value="{{ plan.spare }}" size="5"></label>
     <label>Норма свободных <input name="plan_free" value="{{ plan.free }}" size="5"></label>
@@ -162,6 +173,10 @@
     то, что двигают, а не то, что придумывают с нуля.</p>
   <p class="muted">Нормы ремонта и подменных попадают на плитки парка ниже и
     на график сервиса: превышение видно сразу, а не в конце месяца.</p>
+  <p class="muted">Пустое «Велосипедов в аренде» — общий план не задан: тогда
+    он складывается из планов точек, если план есть у каждой открытой точки
+    (задаётся на странице точки в отчёте «По точкам»), иначе считается от
+    парка. Заданный здесь план главнее суммы точек.</p>
   {% endif %}
 </section>
 {% endif %}

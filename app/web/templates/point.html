@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_coverage.html" as coverage %}
 {% block title %}{{ row.title }} — {{ app_title }}{% endblock %}
 {% block content %}
 {% set money_ok = can_view(staff, 'finance') %}
@@ -66,6 +67,40 @@
 </ul>
 {% endif %}
 
+{# План месяца точки - деньги, поэтому только с финансами; у «без точки»
+   и у закрытой точки плана нет. Месяц - выбранный в отчёте, иначе текущий. #}
+{% if money_ok and place and place.active %}
+<section class="card">
+  <h2>План месяца <span class="muted">· {{ plan_span.first.strftime('%m.%Y') }}</span></h2>
+  {% if plan %}
+  <p class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день{% if not plan.own_check %} — общий чек плана{% endif %}</p>
+  <div class="tiles">
+    <div class="tile"><b>{{ money(progress.target) }}</b><span>план месяца</span></div>
+    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>{% if plan_span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}<br><small class="muted">ровным темпом было бы {{ money(progress.pace) }}</small></span></div>
+    <div class="tile"><b>{% if progress.percent is none %}—{% else %}{{ progress.percent }} %{% endif %}</b><span>плана выполнено</span></div>
+    {% if plan_span.is_current %}
+    <div class="tile {% if progress.forecast_ok %}good{% else %}warn{% endif %}"><b>{{ money(progress.forecast) }}</b><span>прогноз по темпу<br><small class="muted">столько придёт к концу месяца, если ничего не менять</small></span></div>
+    <div class="tile"><b>{{ money(progress.left) }}</b><span>осталось собрать за {{ progress.days_left }} дн.{% if progress.need_rented %}<br><small class="muted">это {{ progress.need_rented }} велосипедов каждый день по чеку плана</small>{% endif %}</span></div>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">Плана у точки нет: выручка точки видна в плитках выше, но
+    сравнить её не с чем.</p>
+  {% endif %}
+  {% if can_edit(staff, 'finance') %}
+  <form method="post" action="/plan/points/{{ place.id }}" class="grid2">
+    <label>Велосипедов в аренде <input name="plan_rented" value="{{ '' if place.plan_rented is none else place.plan_rented }}" size="5" inputmode="numeric" placeholder="нет плана"></label>
+    <label>Чек в день <input name="plan_check" value="{{ place.plan_check or '' }}" size="8" placeholder="общий: {{ money(base_check) }}"></label>
+    <button type="submit">Сохранить план точки</button>
+  </form>
+  <p class="muted">Пустое «Велосипедов в аренде» — плана у точки нет, пустой
+    чек — общий чек плана со сводки. Выручка точки — та же, что в отчёте:
+    платёж по точке своей аренды. Когда план есть у каждой открытой точки, а
+    общий план на сводке не задан, план сети — их сумма.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if money_ok %}
 <section class="card">
   <h2>Деньги по дням <span class="muted">· {{ chart_since|dmy }} — {{ span.until|dmy }}</span></h2>
@@ -93,12 +128,17 @@
   <table>
     <tr><th>Месяц</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th>{% endif %}<th class="num opt">Дней аренды</th><th class="num opt">Дней парка</th></tr>
     {% for c in months %}
-    <tr><td>{{ c.month.strftime('%m.%Y') }}</td>
+    <tr><td>{{ c.month.strftime('%m.%Y') }}{{ coverage.mark(c.coverage) }}</td>
       <td class="num {% if c.idle_percent is none %}muted{% elif c.idle_ok %}ok{% else %}bad{% endif %}">{% if c.idle_percent is none %}—{% else %}{{ c.idle_percent }} %{% endif %}</td>
       {% if money_ok %}<td class="num {% if c.avg_check is none %}muted{% elif c.check_ok %}ok{% else %}bad{% endif %}">{% if c.avg_check is none %}—{% else %}{{ money(c.avg_check) }}{% endif %}</td>{% endif %}
       <td class="num opt">{{ c.rented_days|round(0)|int }}</td><td class="num opt">{{ c.operational_days|round(0)|int }}</td></tr>
     {% endfor %}
   </table>
+  <p class="muted">«Неполный» — месяц, который ещё идёт, или тот, где точка
+    открылась: дней в счёте меньше{% if money_ok %}, и предоплата на несколько
+    дней аренды завышает чек{% endif %}.{% if months_history_from and not history_from %} История мест
+    ведётся с {{ months_history_from|dmy }}: раньше велосипед считается на той
+    точке, где стоял в тот день.{% endif %}</p>
 </section>
 <section class="card">
   <h2>Стоят дольше всех</h2>

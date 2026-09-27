@@ -1009,6 +1009,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── дашборд ───────────────────────
 
+    async def network_plan(settings: dict, counts: dict[str, int],
+                           places: list[dict] | None = None) -> dict:
+        """План месяца сети - один путь для сводки и сервиса.
+
+        Общий план не задан, а у каждой открытой точки свой - план сети
+        это их сумма (logic.month_plan, source «points»). Без справочника
+        точек сервис брал умолчание от парка, и норма «у клиента» на двух
+        экранах расходилась.
+        """
+        if places is None:
+            places = await crm.locations()
+        return logic.month_plan(settings, places=places, fleet=sum(
+            counts.get(code, 0) for code in logic.OPERATIONAL_STATUSES))
+
     @app.get("/")
     async def dashboard(request: Request) -> Response:
         rentals = await crm.active_rentals()
@@ -1029,7 +1043,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         settings = await crm.settings()
         places = await crm.locations()
         operational = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
-        plan = logic.month_plan(settings, fleet=operational)
+        plan = await network_plan(settings, bikes_by, places)
         # Месяц листается стрелками: прошлый - целиком, текущий - по
         # сегодняшний день, вперёд листать некуда, назад - до начала истории.
         span = logic.month_bounds(
@@ -1051,8 +1065,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # не видно, в какой день всё пошло не так.
         chart = logic.money_chart(
             await crm.money_by_day(first, span["last"]),
-            plan_per_day=logic.to_money(plan["check"] * plan["rented"]),
-            today=span["today"])
+            plan_per_day=plan["per_day"], today=span["today"])
         # Задачи на сегодня: один список поверх виджетов. Каждый источник
         # читается тем же запросом, что и его раздел, - список не вправе
         # показывать не то, что покажет раздел.
@@ -1204,8 +1217,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_edit(request, "finance"):
             return denied(request, "finance")
         data = await form(request)
-        rented = count_field(data, "plan_rented", what="Велосипедов в аренде",
-                             default="0", limit=9999)
+        # Пусто - «общий план не задан»: тогда он сумма планов точек (если
+        # они есть у каждой открытой точки), иначе от парка. Раньше пустое
+        # поле сохранялось нулём, и план в ноль велосипедов вытеснить было
+        # нечем.
+        rented_raw = (data.get("plan_rented") or "").strip()
+        rented = (count_field(data, "plan_rented", what="Велосипедов в аренде",
+                              limit=9999) if rented_raw else logic.Check(True, ""))
         check = cost_field(data, "plan_check")
         repair = count_field(data, "plan_repair", what="Норма ремонта",
                              default="0", limit=9999)
@@ -1224,6 +1242,34 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         await crm.set_setting("plan_free", str(free.value), by=who(request))
         flash(request, "План на месяц сохранён.")
         return redirect("/")
+
+    @app.post("/plan/points/{location_id}")
+    async def point_plan_save(request: Request, location_id: int) -> Response:
+        """План месяца точки: велосипедов в аренде на ней и чек. Право то же,
+        что у общего плана (финансы): это деньги, а не справочник. Лежит в
+        строке точки, поэтому переименование его не теряет. Пустое поле -
+        «не задано»: без велосипедов у точки плана нет, без чека - общий."""
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        place = next((p for p in await crm.locations() if p["id"] == location_id), None)
+        if place is None:
+            return render(request, "missing.html", status_code=404, what="Точка")
+        back = f"/reports/points/{location_id}"
+        data = await form(request)
+        rented = (count_field(data, "plan_rented", what="Велосипедов в аренде",
+                              limit=9999)
+                  if (data.get("plan_rented") or "").strip() else logic.Check(True, None))
+        check = cost_field(data, "plan_check")
+        for field in (rented, check):
+            if not field.ok:
+                flash(request, field.error, "err")
+                return redirect(back)
+        await crm.update_location(location_id, plan_rented=rented.value,
+                                  plan_check=check.value or None)
+        flash(request, f"План точки «{place['name']}» сохранён."
+              if rented.value is not None else
+              f"План точки «{place['name']}» снят.")
+        return redirect(back)
 
     async def tell_parts_arrived(orders: list[dict]) -> None:
         """В служебный чат: пришла запчасть, которую ждал наряд."""
@@ -3392,15 +3438,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         fleet_rows = await crm.bikes(limit=10000)
         fleet = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
         rented = bikes_by.get("rented", 0)
-        # Три числа по месяцам: текущий и пять прошлых.
+        # Три числа по месяцам: текущий и пять прошлых. Неполный месяц -
+        # текущий или тот, где начался журнал статусов, - помечен: платежи
+        # месяца на несколько дней аренды раздувают чек.
         now = datetime.now().astimezone()
-        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        started = (await crm.history_starts())["status"]
         months_metrics = []
-        for _ in range(6):
-            nxt = (first + timedelta(days=32)).replace(day=1)
-            m = await period_metrics(since=first, until=min(nxt, now))
-            months_metrics.append({"month": first.date(), **m})
-            first = (first - timedelta(days=1)).replace(day=1)
+        for m in logic.month_windows(now, 6):
+            months_metrics.append({
+                "month": m["month"],
+                **await period_metrics(since=m["since"], until=m["until"]),
+                "coverage": logic.month_coverage(m["since"], m["until"], start=started)})
         # Ровно 12 календарных месяцев, включая текущий: тем же шагом,
         # что и таблица выше, а не «минус 335 дней».
         since_year = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -3503,31 +3551,50 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                    floor=await history_floor(now.date()))
         places = await crm.locations()
         fleet = await crm.bikes(limit=10000)
+        settings = await crm.settings()
+        # Чек точки без своего - общий чек плана (не сумма точек: та сама
+        # из них складывается).
+        base_check = logic.month_plan(settings)["base_check"]
         return {"span": span, "places": places, "fleet": fleet,
-                "report": await points_report(places, fleet, span["start"],
-                                              span["end"], full=True),
-                "history_from": logic.points_history_from(await crm.settings(),
-                                                          span["start"])}
+                "base_check": base_check,
+                # План точки за период - тем же ровным темпом, что на сводке.
+                "report": logic.points_plan(
+                    await points_report(places, fleet, span["start"], span["end"],
+                                        full=True),
+                    check=base_check, days=span["days"], passed=span["passed"]),
+                "history_from": logic.points_history_from(settings, span["start"])}
 
-    async def points_by_month(count: int = 6) -> list[dict]:
+    async def points_by_month(count: int = 6) -> dict:
         """Дни и деньги всех точек по месяцам - запрос на месяц, а не на
-        точку: точек может быть и пять."""
-        out = []
-        for m in logic.month_windows(datetime.now().astimezone(), count):
-            out.append({"month": m["month"],
-                        "days": await crm.bike_days_by_location(m["since"], m["until"]),
-                        "money": await crm.money_by_location(m["since"], m["until"])})
-        return out
+        точку: точек может быть и пять. starts - с какого момента у точки
+        есть дни: месяц, где она открылась, неполный, как и текущий."""
+        windows = logic.month_windows(datetime.now().astimezone(), count)
+        months = [{**m, "days": await crm.bike_days_by_location(m["since"], m["until"]),
+                   "money": await crm.money_by_location(m["since"], m["until"])}
+                  for m in windows]
+        return {"months": months, "starts": (await crm.history_starts())["points"],
+                # Месяцы до внедрения истории мест - по карточке: одна
+                # строка под таблицей, как у периода отчёта.
+                "history_from": logic.points_history_from(await crm.settings(),
+                                                          windows[-1]["since"])}
 
     @app.get("/reports/points")
     async def points_page(request: Request) -> Response:
         data = await points_data(request)
         rows = data["report"]["rows"]
-        months = await points_by_month()
-        by_point = [logic.point_months(months, r["key"]) for r in rows]
+        by_month = await points_by_month()
+        months = by_month["months"]
+        by_point = [logic.point_months(months, r["key"], starts=by_month["starts"])
+                    for r in rows]
         return render(request, "points.html", **data,
+                      months_history_from=by_month["history_from"],
                       month_rows=[{"month": m["month"],
-                                   "cells": [cells[i] for cells in by_point]}
+                                   "cells": [cells[i] for cells in by_point],
+                                   # Текущий месяц неполный у всех точек
+                                   # сразу - пометка у месяца; у ячейки -
+                                   # только своя (точка открылась внутри).
+                                   "coverage": logic.month_coverage(m["since"],
+                                                                    m["until"])}
                                   for i, m in enumerate(months)])
 
     # Колонки выгрузки: заголовок, значение строки, денежная ли. Денежные
@@ -3549,6 +3616,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
          False),
         ("Дней аренды", lambda r: round(float(r["metrics"]["rented_days"]), 1), False),
     )
+    # План точек - только когда он есть хоть у одной точки: пустые колонки
+    # в каждой выгрузке только шумели бы. План - деньги, как и выручка.
+    POINT_PLAN_COLUMNS: tuple[tuple[str, Any, bool], ...] = (
+        ("План", lambda r: (r.get("plan") or {}).get("target"), True),
+        ("Выполнено, %", lambda r: (r.get("plan") or {}).get("percent"), True),
+    )
 
     @app.get("/reports/points.{ext}")
     async def points_table(request: Request, ext: str) -> Response:
@@ -3556,8 +3629,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             raise HTTPException(status_code=404)
         data = await points_data(request)
         money_ok = may_view(request, "finance")
-        columns = [c for c in POINT_COLUMNS if money_ok or not c[2]]
         report = data["report"]
+        columns = [c for c in POINT_COLUMNS
+                   + (POINT_PLAN_COLUMNS if report["planned"] else ())
+                   if money_ok or not c[2]]
         out = [["ИТОГО" if r["total"] else r["title"], *(get(r) for _, get, _ in columns)]
                for r in (*report["rows"], report["total"])]
         span = data["span"]
@@ -3590,10 +3665,29 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for order in orders:
             order["days"] = logic.order_days(order, today=date.today())
         money_ok = may_view(request, "finance")
+        # План месяца точки - за месяц отчёта или текущий, тем же ровным
+        # темпом, что на сводке; выручка - та же money_by_location.
+        plan = logic.point_plan(place, check=data["base_check"])
+        plan_span = logic.plan_month(span, today=date.today())
+        progress = None
+        if plan is not None and money_ok:
+            plan_since = datetime.combine(plan_span["first"], datetime.min.time()).astimezone()
+            plan_until = (datetime.now().astimezone() if plan_span["is_current"] else
+                          datetime.combine(plan_span["next"],
+                                           datetime.min.time()).astimezone())
+            paid = ((await crm.money_by_location(plan_since, plan_until)).get(name)
+                    or {}).get("paid") or 0
+            progress = logic.plan_progress(plan, {"revenue": paid},
+                                           days_in_month=plan_span["days"],
+                                           days_passed=plan_span["passed"])
+        by_month = await points_by_month()
         return render(request, "point.html", **data, place=place, key=key,
                       row=logic.point_card(data["report"], name, place),
                       chart=chart, chart_since=chart_since,
-                      months=logic.point_months(await points_by_month(), name),
+                      plan=plan, plan_span=plan_span, progress=progress,
+                      months=logic.point_months(by_month["months"], name,
+                                                starts=by_month["starts"]),
+                      months_history_from=by_month["history_from"],
                       standing=await standing_bikes(
                           [b for b in data["fleet"] if (b.get("location") or None) == name],
                           limit=10),
@@ -4078,8 +4172,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         tools = list_tools(request, rows, allowed=SERVICE_SORTS)
         settings = await crm.settings()
         counts = await crm.bike_counts()
-        plan = logic.month_plan(settings, fleet=sum(
-            counts.get(code, 0) for code in logic.OPERATIONAL_STATUSES))
+        plan = await network_plan(settings, counts)
         # График за месяц: по нему видно, ремонт у нас ровный или
         # скачет - и когда именно скакнул. Месяц листается стрелками.
         span = logic.month_bounds(

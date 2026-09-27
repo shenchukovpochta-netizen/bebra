@@ -180,6 +180,8 @@ class TestCrmSql(unittest.TestCase):
                                       estimate=d, created_by="me", location="Павлюхина"),
             self.db.update_work_order(1, location="Адоратского"),
             self.db.update_location(1, city="Казань", sort=10),
+            # план месяца точки - в её строке справочника
+            self.db.update_location(1, plan_rented=12, plan_check=d),
             self.db.rename_location(1, "Новая"),
             self.db.cash_shift_for("staff:a"), self.db.cash_shift_for(None),
             # безнал смены - по точке своей аренды, наличные - по отметке
@@ -191,6 +193,8 @@ class TestCrmSql(unittest.TestCase):
                                 datetime(2026, 9, 13, tzinfo=UTC)),
             self.db.bike_days_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                           datetime(2026, 9, 13, tzinfo=UTC)),
+            # с какого момента у сети и у точки есть дни: неполные месяцы
+            self.db.history_starts(),
             self.db.money_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                       datetime(2026, 9, 13, tzinfo=UTC)),
             # начало истории - нижняя граница стрелки «прошлый месяц»

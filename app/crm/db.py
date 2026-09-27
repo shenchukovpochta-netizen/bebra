@@ -41,9 +41,10 @@ BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location
                             "volts", "amp_hours"})
 # Имени здесь нет намеренно: на него текстом ссылаются парк, касса, аренды
 # и журнал мест, и переименование идёт только каскадом (rename_location).
+# План месяца точки - в её строке: переименование его не задевает.
 LOCATION_FIELDS = frozenset({"city", "address", "note", "active", "sort",
                             "public_title", "phone", "hours", "lat", "lon",
-                            "directions"})
+                            "directions", "plan_rented", "plan_check"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note",
                                "weight_kg", "speed_kmh", "range_km",
@@ -1890,6 +1891,47 @@ class CrmDB:
         for r in rows:
             if r["days"] and r["days"] > 0:
                 out.setdefault(r["location"], {})[r["status"]] = Decimal(str(r["days"]))
+        return out
+
+    async def history_starts(self) -> dict[str, Any]:
+        """С какого момента есть дни: у сети - первая строка журнала
+        статусов, у точки - первая строка журнала мест с ней (None - «без
+        точки»). Та же арифметика, что logic.history_starts и
+        bike_days_by_location: первая строка места велосипеда тянется к
+        началу его статусов, велосипед без журнала мест - «без точки».
+        Месяц с этим моментом неполный, и таблица по месяцам его помечает.
+        """
+        rows = await self.pool.fetch(
+            """
+            with s as (
+              select bike_id, min(changed_at) as a
+                from crm.bike_status_log group by bike_id
+            ), p as (
+              select bike_id, nullif(to_location, '') as location, changed_at,
+                     row_number() over (partition by bike_id
+                                        order by changed_at, id) as n
+                from crm.bike_location_log
+            ), t as (
+              select p.location,
+                     case when p.n = 1 then least(p.changed_at, s.a)
+                          else p.changed_at end as started
+                from p left join s on s.bike_id = p.bike_id
+              union all
+              select null, s.a from s
+               where not exists (select 1 from crm.bike_location_log x
+                                  where x.bike_id = s.bike_id)
+            )
+            select location, min(started) as started, false as network from t
+             group by location
+            union all
+            select null, min(a), true from s
+            """)
+        out: dict[str, Any] = {"status": None, "points": {}}
+        for r in rows:
+            if r["network"]:
+                out["status"] = r["started"]
+            elif r["started"] is not None:
+                out["points"][r["location"]] = r["started"]
         return out
 
     async def money_by_location(self, since: datetime, until: datetime

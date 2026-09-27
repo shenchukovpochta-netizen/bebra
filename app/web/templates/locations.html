@@ -20,7 +20,9 @@
   {% for r in g.rows %}{% set b = bikes.get(r.name) or {} %}
   <tr class="{% if not r.active %}muted{% endif %}">
     <td><b>{{ r.name }}</b>{% if not r.active %} <span class="tag">закрыта</span>{% endif %}{% if r.public_title %}<br><small class="muted">{{ r.public_title }}</small>{% endif %}
-      {% if can_view(staff, 'reports') %}<br><small><a href="/reports/points/{{ r.id }}">Аналитика точки</a></small>{% endif %}</td>
+      {% if can_view(staff, 'reports') %}<br><small><a href="/reports/points/{{ r.id }}">Аналитика точки</a></small>{% endif %}
+      {# План - деньги: виден с финансами, правится на странице точки. #}
+      {% if r.plan_rented is not none and can_view(staff, 'finance') %}<br><small class="muted">план месяца: {{ r.plan_rented }} в аренде{% if r.plan_check %} по {{ money(r.plan_check) }}{% endif %}</small>{% endif %}</td>
     <td class="num">{% if can_view(staff, 'bikes') %}<a href="/bikes?location={{ r.name|urlencode }}">{{ b.fleet or 0 }}</a>{% else %}{{ b.fleet or 0 }}{% endif %}{% if b.rented %}<br><small class="muted">в аренде {{ b.rented }}</small>{% endif %}</td>
     <td class="opt">{{ r.address or '—' }}{% if r.directions %}<br><small class="muted">{{ r.directions }}</small>{% endif %}{% if r.hours %}<br><small class="muted">{{ r.hours }}</small>{% endif %}</td>
     <td class="opt">{% if r.phone %}<a href="tel:{{ r.phone }}">{{ r.phone }}</a>{% else %}—{% endif %}</td>

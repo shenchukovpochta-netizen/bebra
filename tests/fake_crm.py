@@ -1454,6 +1454,9 @@ class FakeCrm:
         return crm_logic.days_by_status_location(self.status_log_, self.location_log_,
                                                  since, until)
 
+    async def history_starts(self):
+        return crm_logic.history_starts(self.status_log_, self.location_log_)
+
     async def money_by_location(self, since, until):
         keys = ("paid", "charged", "charged_fines", "bonus", "refunded")
         out: dict = {}
@@ -2039,7 +2042,8 @@ class FakeCrm:
                                    "address": address, "note": note, "active": True,
                                    "sort": 100, "public_title": None, "phone": None,
                                    "hours": None, "lat": None, "lon": None,
-                                   "directions": None,
+                                   "directions": None, "plan_rented": None,
+                                   "plan_check": None,
                                    "created_at": self._now(), **extra}
         return loc_id
 

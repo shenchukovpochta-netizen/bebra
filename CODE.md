@@ -237,6 +237,8 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | адреса, режим и телефоны точек | справочник в панели (Настройки → «Точки»); бот читает его снимком `app/crm/points.py`, зашитый текст в `app/faq.py` - запасной |
 | ответ на частый вопрос | `app/faq.py`, переводы `app/faq_i18n.py` |
 | число по точке, отчёт «По точкам» | `days_by_status_location`, `points_rows` в `app/crm/logic.py`; `*_by_location` и общее правило денег `_ledger_rentals` в `app/crm/db.py`; `points_report` в `app/web/app.py` |
+| план месяца сети и точки | `month_plan` (явный план, иначе сумма точек `plan_from_points`, иначе от парка; сводка и сервис - через `network_plan` в `app/web/app.py`), `point_plan`, `points_plan`, `plan_progress` в `app/crm/logic.py`; план точки - колонки `locations.plan_*`, маршруты `/plan` и `/plan/points/{id}` в `app/web/app.py` |
+| пометка «неполный месяц» в таблицах трёх чисел | `month_coverage` и `history_starts` в `app/crm/logic.py`, `CrmDB.history_starts` (зеркало в `tests/fake_crm.py` - та же чистая функция) |
 | новую колонку с именем точки | кортеж `CrmDB._LOCATION_REFS` в `app/crm/db.py` и `rename_location` в `tests/fake_crm.py`, иначе переименование оставит её со старым именем |
 | шаг анкеты или валидацию | `app/logic.py`, функция `anketa_steps` |
 | поведение бота в Telegram | `app/handlers/*.py` и порядок роутеров в `app/main.py` |
@@ -1024,7 +1026,8 @@ Jinja2, 83 файла в `app/web/templates/`, без сборки и без ф�
 разметкой, без скрипта.
 
 Партиалы начинаются с подчёркивания: `_list.html` (макросы `th`, `footer`, `views`),
-`_summary.html`, `_passport.html`, вкладки `_report_tabs.html`, `_cash_tabs.html`,
+`_summary.html`, `_passport.html`, `_coverage.html` (макрос `mark` - пометка неполного
+месяца в таблицах трёх чисел), вкладки `_report_tabs.html`, `_cash_tabs.html`,
 `_parts_tabs.html`, `_trackers_tabs.html`. Скриптов во всей панели два: карта (`_map.html`)
 и пересчёт суммы периода на шаге выдачи (`issue.html`). Стилей два, оба подключены в
 `base.html`: `app/web/static/style.css` (вся вёрстка, цвета переменными `:root`, тёмная тема
