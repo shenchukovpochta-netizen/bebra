@@ -18,6 +18,7 @@ try:
     import pgserver
     from httpx import ASGITransport, AsyncClient
 
+    from app.crm import logic
     from app.crm.db import CrmDB
     from app.db import Database, _init_connection
     from app.web.app import create_app, ensure_admin
@@ -145,6 +146,43 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
                          "staff:admin")
         page = await self.get_ok("/")
         self.assertIn("Списан: <b>1</b>", page)
+
+    async def test_overlong_and_unicode_ids_are_404_not_500(self):
+        """Двадцать цифр FastAPI читает в int, а asyncpg в bigint не кладёт:
+        карточка падала 500 (value out of int64 range). «²» в пути давал
+        JSON 422. Оба - адрес без записи. В параметре списка - просто мусор."""
+        huge = "9" * 20
+        # Pydantic читает в int и «+N», «-N», « N», «N.0», «1_000»: страж
+        # только по голым цифрам пропускал их в базу тем же 500.
+        for path in (f"/clients/{huge}", f"/trackers/{huge}", f"/rentals/{huge}",
+                     "/clients/%C2%B2", "/bikes/abc", f"/clients/+{huge}",
+                     f"/clients/-{huge}", f"/clients/%20{huge}", f"/clients/{huge}%20",
+                     f"/clients/{huge}.0", f"/trackers/+{huge}",
+                     "/rentals/1_000_000_000_000_000_000_000",
+                     "/clients/-9223372036854775809", f"/bikes/-{huge}/photo/x"):
+            r = await self.client.get(path)
+            self.assertEqual(r.status_code, 404, path)
+            self.assertIn("не найден", r.text, path)
+        for path in (f"/orders?bike={huge}", f"/orders.csv?bike={huge}",
+                     f"/issue?client={huge}", f"/orders/new?bike={huge}"):
+            await self.get_ok(path)
+
+    async def test_history_start_is_the_earliest_record(self):
+        """Начало истории - самая ранняя запись журнала статусов или денег:
+        с него стрелка «прошлый месяц» кончается."""
+        self.assertIsNone(await self.crm.history_start())
+        bike = await self.crm.create_bike(code="H-1", model="Kugoo V3")
+        client = await self.crm.create_client(full_name="Иванов Иван", phone="+79990000000")
+        await self.crm.add_ledger(client_id=client, kind="payment", amount=D(100))
+        await self.pool.execute("update crm.ledger set created_at = '2025-03-14 10:00+03'")
+        self.assertEqual((await self.crm.history_start()).date(), date(2025, 3, 14))
+        await self.pool.execute("update crm.bike_status_log set changed_at = "
+                                "'2025-01-31 23:30+03' where bike_id = $1", bike)
+        start = await self.crm.history_start()
+        self.assertEqual(start.astimezone(logic.MOSCOW).date(), date(2025, 1, 31))
+        self.assertNotIn('title="прошлый месяц"', await self.get_ok("/?month=2025-01"))
+        self.assertIn('/?month=2025-01" title="прошлый месяц"',
+                      await self.get_ok("/?month=2025-02"))
 
     async def test_points_report_on_postgres(self):
         """Третья точка через панель, выдача с неё, отчёт и страница точки,

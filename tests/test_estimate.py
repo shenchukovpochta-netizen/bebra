@@ -419,6 +419,14 @@ class TestEstimateFromBot(tw.WebCase):
         self.assertEqual((order["approved_by"], order["estimate"]),
                          ("клиент", D("10500.00")))
 
+    def test_forged_button_with_unicode_digits_is_ignored(self):
+        """callback_data подделывается: «²» для isdigit - цифра, и int()
+        ронял обработчик, а «٢» читался бы как наряд № 2."""
+        for junk in ("²", "٢", "9" * 30, ""):
+            with self.subTest(junk=junk):
+                self.assertEqual(self.press(f"est:ok:{junk}:100"), [None])
+        self.assertEqual(_run(self.crm.work_order(self.order_id))["status"], "approve")
+
 
 if __name__ == "__main__":                              # pragma: no cover
     unittest.main()

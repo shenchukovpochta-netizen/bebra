@@ -452,6 +452,25 @@ def parse_id(raw: Any) -> int | None:
     return int(text)
 
 
+_PATH_NUMBER = re.compile(r"[\s0-9+\-_.]+")
+
+
+def path_ids_ok(path: str) -> bool:
+    """Номера в адресе влезают в bigint. FastAPI читает `/{id}` в int
+    любой длины, и двадцать цифр падали в базе 500 (value out of int64
+    range) вместо 404. Предел тот же, что у parse_id: 18 цифр.
+
+    Смотрим на состав сегмента, а не на написание: pydantic читает в int
+    и «+N», «-N», « N», «N.0», «1_000», и даже «0-9» (это -9). Все его
+    написания - из ASCII-цифр, пробелов, знаков, «_» и «.»; больше 18
+    значащих цифр в таком сегменте - число за пределом, какое бы ни было."""
+    for part in str(path or "").split("/"):
+        if (_PATH_NUMBER.fullmatch(part)
+                and len(re.sub(r"[^0-9]", "", part).lstrip("0")) > 18):
+            return False
+    return True
+
+
 def check_choice(raw: Any, choices: dict[str, str] | Iterable[str],
                  *, what: str = "Значение") -> Check:
     value = str(raw or "").strip()
@@ -1204,7 +1223,8 @@ def check_mileage(raw: Any, *, current: Any = None, required: bool = True) -> Ch
     if not text:
         return (Check(False, error="Пробег: число километров с одометра.")
                 if required else Check(True, None))
-    if not text.isdigit():
+    # isascii: «²» для isdigit - цифра, и int() на нём ронял форму 500.
+    if not (text.isascii() and text.isdigit()):
         return Check(False, error="Пробег: целое число километров, например 4266.")
     km = int(text)
     if km > MAX_MILEAGE_KM:
@@ -2792,22 +2812,42 @@ def month_from(raw: Any, *, today: date | None = None) -> date:
     return first if first <= current else current
 
 
-def month_bounds(first: date, *, today: date | None = None) -> dict[str, Any]:
+def history_floor(start: date | datetime | None, *, today: date) -> date:
+    """Первое число месяца, с которого у панели есть история (CrmDB.
+    history_start): раньше него стрелка «прошлый месяц» не ведёт - там
+    пустые месяцы, и листать их можно было до 2000 года. Ни одной записи -
+    текущий месяц: назад листать нечего."""
+    current = today.replace(day=1)
+    if start is None:
+        return current
+    if isinstance(start, datetime):
+        start = start.astimezone(MOSCOW).date()
+    return min(max(start.replace(day=1), REPORT_FLOOR), current)
+
+
+def month_bounds(first: date, *, today: date | None = None,
+                 floor: date | None = None) -> dict[str, Any]:
     """Границы месяца для графиков: последний день, «сегодня» внутри
-    месяца (для прошлого - его последний день), соседние месяцы."""
+    месяца (для прошлого - его последний день), соседние месяцы.
+
+    `floor` - первый месяц истории (history_floor): стрелки назад с него
+    нет, а из месяца раньше него (старая ссылка) стрелка вперёд ведёт
+    сразу в него, а не через пустые месяцы по одному."""
     today = today or date.today()
     next_first = (first + timedelta(days=32)).replace(day=1)
     last = next_first - timedelta(days=1)
     prev_first = (first - timedelta(days=1)).replace(day=1)
     current = today.replace(day=1)
+    forward = min(max(next_first, floor), current) if floor else next_first
     return {"first": first, "last": last, "next": next_first,
             "prev": prev_first,
             "today": min(today, last),
             "days": (next_first - first).days,
             "passed": (min(today, last) - first).days + 1,
             "is_current": first == current,
-            "prev_key": prev_first.strftime("%Y-%m"),
-            "next_key": next_first.strftime("%Y-%m") if first < current else None,
+            "prev_key": (prev_first.strftime("%Y-%m")
+                         if floor is None or prev_first >= floor else None),
+            "next_key": forward.strftime("%Y-%m") if first < current else None,
             "key": first.strftime("%Y-%m")}
 
 
@@ -5718,7 +5758,8 @@ POINTS_PERIOD_DAYS = 30
 POINT_CHART_DAYS = 62
 
 
-def report_period(params: Mapping[str, Any], *, now: datetime) -> dict[str, Any]:
+def report_period(params: Mapping[str, Any], *, now: datetime,
+                  floor: date | None = None) -> dict[str, Any]:
     """Период отчёта по точкам: [start, end).
 
     По умолчанию - последние 30 дней до этой минуты. `month=ГГГГ-ММ` -
@@ -5726,9 +5767,12 @@ def report_period(params: Mapping[str, Any], *, now: datetime) -> dict[str, Any]
     интервал по дням включительно. Мусор в адресе - умолчание, а не
     ошибка: отчёт открывают по ссылке, и страница отказа ничего не даёт.
     `query` - хвост адреса, которым период едет в выгрузку и на страницу
-    точки: там обязаны быть те же числа.
+    точки: там обязаны быть те же числа. `floor` - первый месяц истории
+    (history_floor): «прошлого» раньше него нет.
     """
     tz, today = now.tzinfo, now.date()
+    # «Прошлый месяц» у окна дней и своего интервала - тот, что перед текущим.
+    this_month = month_bounds(today.replace(day=1), today=today, floor=floor)
 
     def midnight(day: date) -> datetime:
         return datetime.combine(day, datetime.min.time(), tzinfo=tz)
@@ -5736,7 +5780,7 @@ def report_period(params: Mapping[str, Any], *, now: datetime) -> dict[str, Any]
     month = str(params.get("month") or "").strip()
     if month:
         first = month_from(month, today=today)
-        span = month_bounds(first, today=today)
+        span = month_bounds(first, today=today, floor=floor)
         return {"kind": "month", "start": midnight(first),
                 "end": min(midnight(span["next"]), now),
                 "since": first, "until": span["today"], "key": span["key"],
@@ -5754,16 +5798,14 @@ def report_period(params: Mapping[str, Any], *, now: datetime) -> dict[str, Any]
         first, last = min(first, last), max(first, last)
         return {"kind": "custom", "start": midnight(first),
                 "end": midnight(last + timedelta(days=1)), "since": first, "until": last,
-                "key": today.strftime("%Y-%m"),
-                "prev_key": (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m"),
+                "key": today.strftime("%Y-%m"), "prev_key": this_month["prev_key"],
                 "next_key": None,
                 "query": f"since={first.isoformat()}&until={last.isoformat()}",
                 "label": f"{first:%d.%m.%Y} — {last:%d.%m.%Y}"}
     start = now - timedelta(days=POINTS_PERIOD_DAYS)
     return {"kind": "days", "start": start, "end": now, "since": start.date(),
             "until": today, "key": today.strftime("%Y-%m"),
-            "prev_key": (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m"),
-            "next_key": None, "query": "",
+            "prev_key": this_month["prev_key"], "next_key": None, "query": "",
             "label": f"последние {POINTS_PERIOD_DAYS} дней"}
 
 
@@ -6236,9 +6278,10 @@ def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None) -> Che
     if raw_percent and raw_amount not in ("", "0"):
         return Check(False, error="Скидка: либо процент, либо сумма, не обе.")
     if raw_percent:
-        if not raw_percent.isdigit() or not 1 <= int(raw_percent) <= 100:
+        # parse_id, а не isdigit: на «²» int() падал, и форма отвечала 500.
+        percent = parse_id(raw_percent)
+        if percent is None or not 1 <= percent <= 100:
             return Check(False, error="Процент скидки: целое от 1 до 100.")
-        percent = int(raw_percent)
     elif raw_amount:
         got = check_amount(raw_amount)
         if not got.ok:
@@ -6256,10 +6299,11 @@ def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None) -> Che
     for key, default in PROMO_KINDS[kind]["params"].items():
         raw = str(data.get(key) or "").strip() or str(default)
         low, high = PROMO_PARAM_RANGES[key]
-        if not raw.isdigit() or not low <= int(raw) <= high:
+        value = parse_id(raw)
+        if value is None or not low <= value <= high:
             return Check(False, error=f"{PROMO_PARAM_LABELS[key]}: целое от {low} "
                                       f"до {high}.")
-        params[key] = int(raw)
+        params[key] = value
     starts = ends = None
     if str(data.get("starts_on") or "").strip():
         got = check_date(data.get("starts_on"))
@@ -6276,10 +6320,10 @@ def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None) -> Che
     max_uses: int | None = None
     raw_max = str(data.get("max_uses") or "").strip()
     if raw_max:
-        if not raw_max.isdigit() or not 1 <= int(raw_max) <= 100000:
+        max_uses = parse_id(raw_max)
+        if max_uses is None or not 1 <= max_uses <= 100000:
             return Check(False, error="Предел применений: целое от 1 до 100000, "
                                       "пусто - без предела.")
-        max_uses = int(raw_max)
     text = check_promo_text(data.get("text"))
     if not text.ok:
         return text

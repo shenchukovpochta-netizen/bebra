@@ -347,6 +347,11 @@ class FakeCrm:
                 out[x["bike_id"]] = x["changed_at"]
         return out
 
+    async def history_start(self):
+        moments = [x["changed_at"] for x in self.status_log_]
+        moments += [x["created_at"] for x in self.ledger_]
+        return min(moments, default=None)
+
     async def bike_days_by_status(self, since, until):
         until = min(until, self._now())
         return crm_logic.days_by_status(self.status_log_, since, until)

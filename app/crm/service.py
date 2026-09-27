@@ -2015,8 +2015,10 @@ async def inbox_link_client(crm: Any, thread: dict, raw: Any, *, by: str) -> dic
                                       handled_by=by, handled_at=datetime.now(UTC))
         return None
     client = None
-    if text.isdigit() and len(text) <= 9:
-        client = await crm.client(int(text))
+    # parse_id: «²» для isdigit - цифра, и int() на нём ронял привязку 500.
+    card_id = logic.parse_id(text)
+    if card_id is not None and len(text) <= 9:
+        client = await crm.client(card_id)
     else:
         phone = bot_logic.normalize_phone(text)
         client = await crm.client_by_phone(phone) if phone else None

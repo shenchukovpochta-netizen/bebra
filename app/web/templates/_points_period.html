@@ -5,10 +5,11 @@
 <nav class="tabs">
   <a href="{{ base }}" {% if span.kind == 'days' %}class="on"{% endif %}>30 дней</a>
   {% if span.kind == 'month' %}
-  <a href="{{ base }}?month={{ span.prev_key }}" title="прошлый месяц">‹</a><a href="{{ base }}?month={{ span.key }}" class="on">{{ span.label }}</a>{% if span.next_key %}<a href="{{ base }}?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}
+  {# Стрелки назад нет у первого месяца истории: раньше него пусто. #}
+  {% if span.prev_key %}<a href="{{ base }}?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %}<a href="{{ base }}?month={{ span.key }}" class="on">{{ span.label }}</a>{% if span.next_key %}<a href="{{ base }}?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}
   {% else %}
   <a href="{{ base }}?month={{ span.key }}">Этот месяц</a>
-  <a href="{{ base }}?month={{ span.prev_key }}">Прошлый</a>
+  {% if span.prev_key %}<a href="{{ base }}?month={{ span.prev_key }}">Прошлый</a>{% endif %}
   {% endif %}
 </nav>
 <form method="get" action="{{ base }}" class="search">

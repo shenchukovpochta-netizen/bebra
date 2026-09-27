@@ -941,11 +941,13 @@ async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
     а чужой наряд отменить или согласовать клиент не должен.
     """
     parts = str(callback.data or "").split(":")
-    if crm is None or len(parts) not in (3, 4) or not parts[2].isdigit():
+    # parse_id, а не isdigit: «²» для isdigit - цифра, и int() ронял обработчик.
+    order_id = crm_logic.parse_id(parts[2]) if len(parts) in (3, 4) else None
+    if crm is None or order_id is None:
         await callback.answer()
         return
     agree = parts[1] == "ok"
-    order = await crm.work_order(int(parts[2]))
+    order = await crm.work_order(order_id)
     client = await crm.client_by_tg(user["tg_id"]) if user.get("tg_id") else None
     if (order is None or client is None
             or order.get("client_id") != client["id"]):

@@ -78,6 +78,10 @@ MONTH_TO_DATE = ("/reports/techs", "/reports/model-parts", "/reports/spend",
 # проверка ниже: /issue/docs пишет заявку на подпись прямо на GET, /sign/
 # пишет «открыто» в протокол подписи и открыт без входа.
 OWN_CHECK = ("/issue/docs", "/sign/")
+# Предел веса страницы. Трекеры с выпадающим списком парка в каждой строке
+# весили 2 МБ на 130 устройствах - так тяжелеют списки, и видно это только
+# на засеянных данных.
+HEAVY_PAGE = 500 * 1024
 # Параметры, у которых значение - свободный ввод или дата: для обхода
 # все их значения одинаковы, иначе «прошлый месяц» уводил бы в 2001 год.
 FREE = {"q", "dir", "next", "since", "until", "month", "started_on", "phone", "promo",
@@ -229,6 +233,7 @@ class Crawl:
     failures: list[str] = dataclasses.field(default_factory=list)
     empty: dict[str, list[str]] = dataclasses.field(default_factory=dict)
     odd: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    sizes: dict[str, int] = dataclasses.field(default_factory=dict)
     seconds: float = 0.0
 
 
@@ -265,6 +270,7 @@ async def crawl(client: AsyncClient, start: list[str], *, follow: bool = True,
             continue
         if not r.headers.get("content-type", "").startswith("text/html"):
             continue
+        result.sizes[url] = len(r.content)
         text = r.text
         if rows := EMPTY_ROW.findall(text):
             result.empty[url] = [row.strip() for row in rows]
@@ -509,6 +515,22 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
             result = await crawl(client, pages, follow=False)
         self.assertEqual(result.failures, [], "\n".join(result.failures))
         self.assertEqual(result.empty, {}, "разделы демо без строк")
+
+    async def test_no_page_is_heavy(self):
+        """Главная страница каждого раздела и карточка каждого вида - не
+        тяжелее HEAVY_PAGE: список в каждой строке растёт вместе с парком,
+        и на пустой базе тестов его не видно."""
+        pages = sorted({r for r in self.routes() if "{" not in r
+                        and r not in ("/login", "/promos/new")
+                        and not r.startswith(OWN_CHECK)})
+        async with self.client() as client:
+            await self.login(client, "demo")
+            result = await crawl(client, [*pages, *await self.details()], follow=False)
+        self.assertEqual(result.failures, [], "\n".join(result.failures))
+        heavy = {url: f"{size // 1024} КБ" for url, size in result.sizes.items()
+                 if size > HEAVY_PAGE}
+        self.assertEqual(heavy, {}, "тяжёлые страницы")
+        self.assertIn("/trackers", result.sizes)
 
     async def test_exports_are_marked(self):
         """Каждая выгрузка демо помечена: имя файла с demo- и строка

@@ -440,6 +440,32 @@ class TestTrackerPanel(tw.WebCase):
         self.client.post(f"/trackers/{self.tracker_id}/bike", data={"bike_id": ""})
         self.assertIsNone(tw.run(self.crm.tracker(self.tracker_id))["bike_id"])
 
+    def test_list_has_no_fleet_dropdown_binding_is_on_the_card(self):
+        """Список парка в каждой строке делал страницу в 2 МБ на 130
+        трекерах: привязка живёт на карточке, список остаётся лёгким."""
+        for i in range(30):
+            tw.run(self.crm.create_bike(code=f"F-{i}", model="Kugoo V3"))
+        bound = tw.run(self.crm.create_tracker(device_id="1002", alias="На B-1"))
+        tw.run(self.crm.update_tracker(bound, bike_id=self.bike_id))
+        page = self.get_ok("/trackers")
+        self.assertNotIn("<option", page.split('name="device_id"')[0],
+                         "в строках списка нет выпадающего списка велосипедов")
+        self.assertIn(f'href="/trackers/{self.tracker_id}#bind">привязать</a>', page)
+        self.assertIn(f'href="/bikes/{self.bike_id}">№ B-1</a>', page)
+        card = self.get_ok(f"/trackers/{self.tracker_id}")
+        self.assertIn('id="bind"', card)
+        self.assertEqual(card.count('<option value="'), 32, "весь парк - на карточке")
+        # Отказ привязки возвращает туда, где форма, - на карточку.
+        r = self.client.post(f"/trackers/{self.tracker_id}/bike",
+                             data={"bike_id": str(self.bike_id)})
+        self.assertEqual(r.headers["location"], f"/trackers/{self.tracker_id}")
+        self.assertIn("уже стоит другой трекер", self.get_ok(f"/trackers/{self.tracker_id}"))
+        for junk in ("B-1", "²", "٢"):
+            r = self.client.post(f"/trackers/{self.tracker_id}/bike", data={"bike_id": junk})
+            self.assertEqual(r.headers["location"], f"/trackers/{self.tracker_id}", junk)
+            self.assertIn("Такого велосипеда нет", self.get_ok("/trackers"), junk)
+        self.assertIsNone(tw.run(self.crm.tracker(self.tracker_id))["bike_id"])
+
     def test_manual_tracker_and_duplicate(self):
         r = self.client.post("/trackers", data={"device_id": "2002", "alias": "Метка",
                                                 "note": ""})

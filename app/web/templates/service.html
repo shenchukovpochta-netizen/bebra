@@ -27,7 +27,7 @@
 </div>
 
 <section class="card">
-  <h2>В ремонте по дням <span class="muted">· <a href="/service?month={{ span.prev_key }}" title="прошлый месяц">‹</a> {{ month.strftime('%m.%Y') }} {% if span.next_key %}<a href="/service?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %} · норма {{ chart.norm }}</span></h2>
+  <h2>В ремонте по дням <span class="muted">· {% if span.prev_key %}<a href="/service?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %} {{ month.strftime('%m.%Y') }} {% if span.next_key %}<a href="/service?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %} · норма {{ chart.norm }}</span></h2>
   {# Столбики чистым CSS: высота в процентах от пика. Библиотека графиков
      ради двадцати столбиков - это триста килобайт на страницу, которую
      открывают с телефона на точке. #}

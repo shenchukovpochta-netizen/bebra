@@ -134,10 +134,18 @@ class TestServiceInPanel(tw.WebCase):
         self.assertIn('href="/orders?status=approve"><b>0</b>', page)
         self.assertIn("Подменный фонд", page)
         self.assertIn(f"/bikes/{spare}", page)
-        past = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        past_first = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
+        past = past_first.strftime("%Y-%m")
+        self.assertNotIn(f"/service?month={past}", page,
+                         "история началась в этом месяце - назад листать некуда")
+        # Парк с прошлого месяца: стрелка ведёт туда, и дальше него - нет.
+        for row in self.crm.status_log_:
+            row["changed_at"] = datetime(past_first.year, past_first.month, 2, 12,
+                                         tzinfo=UTC)
         self.assertEqual(self.client.get(f"/service?month={past}").status_code, 200)
         self.assertIn(f"/service?month={past}", self.get_ok("/service"),
                       "стрелка на прошлый месяц")
+        self.assertNotIn('title="прошлый месяц"', self.get_ok(f"/service?month={past}"))
         summary = logic.service_summary(logic.service_rows(
             tw.run(self.crm.bikes(limit=100)), tw.run(self.crm.open_orders_by_bike())))
         self.assertEqual((summary["waiting"], summary["approving"]), (1, 0))

@@ -191,6 +191,8 @@ class TestCrmSql(unittest.TestCase):
                                           datetime(2026, 9, 13, tzinfo=UTC)),
             self.db.money_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                       datetime(2026, 9, 13, tzinfo=UTC)),
+            # начало истории - нижняя граница стрелки «прошлый месяц»
+            self.db.history_start(),
             self.db.location_money_by_day("Павлюхина", today, today),
             self.db.location_money_by_day(None, today, today),
             self.db.debt_by_location(),

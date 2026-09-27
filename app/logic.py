@@ -1223,7 +1223,8 @@ def parse_issue_form(raw: str | None) -> tuple[dict[str, str] | None, str]:
         if not _no_markup(value):
             return None, f"В строке «{key.strip()}» недопустимы символы < > и &."
         if field.startswith("kit_"):
-            if not value.isdigit():
+            # isascii: «²» для isdigit - цифра, и в акт ушло бы «АКБ: ²».
+            if not (value.isascii() and value.isdigit()):
                 return None, f"«{key.strip()}» - нужно число, получено «{value}»."
             data[field] = value
         elif value:

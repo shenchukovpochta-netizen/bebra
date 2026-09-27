@@ -449,6 +449,14 @@ class CrmDB:
             "group by bike_id")
         return {int(r["bike_id"]): r["since"] for r in rows}
 
+    async def history_start(self) -> datetime | None:
+        """Самая ранняя запись, из которой считаются три числа: журнал
+        статусов (дни парка) и журнал денег. Раньше неё месяцам нечего
+        показать, и стрелка «прошлый месяц» там кончается. None - пусто."""
+        return await self.pool.fetchval(
+            "select least((select min(changed_at) from crm.bike_status_log), "
+            "(select min(created_at) from crm.ledger))")
+
     async def bike_days_by_status(self, since: datetime, until: datetime) -> dict[str, Decimal]:
         """Велосипеде-дни по статусам за [since, until) по журналу статусов.
 

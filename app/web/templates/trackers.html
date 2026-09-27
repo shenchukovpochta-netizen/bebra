@@ -16,15 +16,12 @@
   {% for t in rows %}
   <tr class="{% if not t.active %}muted{% elif t.alarm %}warn-row{% endif %}">
     <td><a href="/trackers/{{ t.id }}">{{ t.alias or t.device_id }}</a>{% if not t.active %} <span class="tag muted">снят</span>{% endif %}</td>
+    {# Привязка - на карточке трекера: выпадающий список всего парка в
+       каждой строке делал страницу в два мегабайта. #}
     <td>
-      {% if can_edit(staff, 'trackers') %}
-      <form method="post" action="/trackers/{{ t.id }}/bike" class="inline-form">
-        <select name="bike_id"><option value="">не привязан</option>
-          {% for b in free_bikes %}<option value="{{ b.id }}" {% if t.bike_id == b.id %}selected{% endif %}>№ {{ b.code }} {{ b.model }}</option>{% endfor %}
-        </select>
-        <button type="submit" class="ghost">ок</button>
-      </form>
-      {% elif t.bike_id %}№ {{ t.bike_code }}{% else %}—{% endif %}
+      {% if t.bike_id %}{% if can_view(staff, 'bikes') %}<a href="/bikes/{{ t.bike_id }}">№ {{ t.bike_code }}</a>{% else %}№ {{ t.bike_code }}{% endif %} <small class="muted">{{ t.bike_model or '' }}</small>
+      {% elif can_edit(staff, 'trackers') %}<a href="/trackers/{{ t.id }}#bind">привязать</a>
+      {% else %}—{% endif %}
     </td>
     <td>{% if t.alarm %}<span class="tag bad">тревога</span>{% elif t.moving %}<span class="tag rented">едет</span>{% elif t.offline %}<span class="tag muted">молчит</span>{% else %}<span class="tag available">стоит</span>{% endif %}{% if t.blocked %} <span class="tag bad">🔒</span>{% endif %}</td>
     <td class="num opt {% if t.low_power %}bad{% endif %}">{% if t.voltage %}{{ t.voltage }} В{% else %}—{% endif %}</td>
@@ -34,8 +31,8 @@
   {% else %}<tr><td colspan="6" class="muted">Устройств нет. Опрос заводит их сам, как только они появятся в кабинете StarLine.</td></tr>{% endfor %}
 </table>
 <p class="muted">Трекер, которого опрос увидел в StarLine, заводится сам —
-  привязать его к велосипеду нужно руками: до этого координаты принадлежат
-  неизвестно чему. Один трекер на один велосипед.</p>
+  привязать его к велосипеду нужно руками, на карточке трекера: до этого
+  координаты принадлежат неизвестно чему. Один трекер на один велосипед.</p>
 </div>
 
 {% if alerts %}

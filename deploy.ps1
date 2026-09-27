@@ -202,6 +202,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_avito.py', 'tests/test_points_pg.py',
           'tests/test_point_analytics.py', 'tests/test_points_ops.py',
           'tests/test_points_web.py', 'tests/test_faq_points.py',
+          'tests/test_strict_ids.py',
           'tests/test_demo_seed.py', 'tests/test_demo_service.py',
           'tests/test_demo_extras.py', 'tests/test_demo_mode.py',
           'tests/test_demo_crawl.py', 'tests/test_readiness.py')

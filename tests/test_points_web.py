@@ -64,6 +64,18 @@ class TestPeriod(unittest.TestCase):
                           datetime(2026, 3, 1, tzinfo=MSK), date(2026, 2, 28)))
         self.assertEqual((span["query"], span["next_key"]), ("month=2026-02", "2026-03"))
 
+    def test_prev_month_stops_at_the_start_of_history(self):
+        """Первый месяц истории - без «прошлого»: раньше него пусто."""
+        this = date(2026, 9, 1)
+        for params in ({}, {"since": "2026-09-10"}, {"month": "2026-09"}):
+            span = logic.report_period(params, now=self.NOW, floor=this)
+            self.assertIsNone(span["prev_key"], params)
+            span = logic.report_period(params, now=self.NOW, floor=date(2026, 8, 1))
+            self.assertEqual(span["prev_key"], "2026-08", params)
+        old = logic.report_period({"month": "2001-01"}, now=self.NOW, floor=this)
+        self.assertEqual((old["key"], old["prev_key"], old["next_key"]),
+                         ("2001-01", None, "2026-09"))
+
     def test_custom_interval_is_inclusive_and_forgiving(self):
         span = logic.report_period({"since": "2026-09-10", "until": "2026-09-01"},
                                    now=self.NOW)
@@ -337,6 +349,23 @@ class TestPointsReport(PointsWebCase):
         self.assertNotIn(f'href="/reports/points/{self.ado}"',
                          self.get_ok("/reports/points"),
                          "закрытая точка без данных в сравнении не нужна")
+
+    def test_prev_month_link_stops_at_the_start_of_history(self):
+        """«Прошлый» и ‹ ведут назад только до первого месяца с записями:
+        ?month=2001-01 раньше открывал бесконечную ленту пустых месяцев."""
+        self.story()
+        first = logic.history_floor(tw.run(self.crm.history_start()), today=date.today())
+        for base in ("/reports/points", f"/reports/points/{self.pav}"):
+            page = self.get_ok(f"{base}?month={first:%Y-%m}")
+            self.assertNotIn('title="прошлый месяц"', page, base)
+            page = self.get_ok(f"{base}?month=2001-01")
+            self.assertNotIn('title="прошлый месяц"', page, base)
+            self.assertIn(f'{base}?month={first:%Y-%m}" title="следующий месяц"', page,
+                          "из пустого прошлого - сразу в первый месяц истории")
+        # Вся история - в этом месяце: «Прошлого» у окна 30 дней нет.
+        for row in self.crm.status_log_ + self.crm.location_log_:
+            row["changed_at"] = datetime.now(UTC)
+        self.assertNotIn(">Прошлый</a>", self.get_ok("/reports/points"))
 
     def test_period_is_carried_to_the_point_and_the_export(self):
         self.story()

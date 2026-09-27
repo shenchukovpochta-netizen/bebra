@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -101,6 +101,33 @@ class TestPlanLogic(unittest.TestCase):
         self.assertIsNone(now["next_key"], "у текущего месяца стрелки вперёд нет")
         self.assertTrue(now["is_current"])
 
+    def test_month_bounds_stop_at_the_start_of_history(self):
+        today, floor = date(2026, 9, 18), date(2026, 7, 1)
+        self.assertEqual(logic.month_bounds(date(2026, 8, 1), today=today,
+                                            floor=floor)["prev_key"], "2026-07")
+        first = logic.month_bounds(date(2026, 7, 1), today=today, floor=floor)
+        self.assertEqual((first["prev_key"], first["next_key"]), (None, "2026-08"),
+                         "у первого месяца истории стрелки назад нет")
+        old = logic.month_bounds(date(2001, 1, 1), today=today, floor=floor)
+        self.assertEqual((old["prev_key"], old["next_key"]), (None, "2026-07"),
+                         "из пустого прошлого - сразу в первый месяц истории")
+        self.assertEqual((old["first"], old["last"]), (date(2001, 1, 1), date(2001, 1, 31)),
+                         "сам месяц из адреса не подменяется")
+
+    def test_history_floor(self):
+        today = date(2026, 9, 18)
+        self.assertEqual(logic.history_floor(None, today=today), date(2026, 9, 1),
+                         "пусто - листать назад нечего")
+        self.assertEqual(logic.history_floor(date(2025, 3, 14), today=today),
+                         date(2025, 3, 1))
+        # 31 марта 22:00 UTC - это уже 1 апреля в Москве.
+        self.assertEqual(logic.history_floor(datetime(2026, 3, 31, 22, tzinfo=UTC),
+                                             today=today), date(2026, 4, 1))
+        self.assertEqual(logic.history_floor(date(1990, 1, 1), today=today),
+                         logic.REPORT_FLOOR)
+        self.assertEqual(logic.history_floor(date(2027, 1, 1), today=today),
+                         date(2026, 9, 1), "будущее - текущий месяц")
+
     def test_progress_at_the_end_of_the_month_asks_for_nothing(self):
         plan = {"rented": 10, "check": D(500), "fleet": 10}
         progress = logic.plan_progress(plan, {"revenue": D(0)},
@@ -175,13 +202,31 @@ class TestPlanInPanel(tw.WebCase):
     def test_dashboard_pages_through_months(self):
         page = self.get_ok("/")
         self.assertIn("прогноз по темпу", page)
-        self.assertIn("?month=", page)
-        past = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        # Парк заведён сегодня: прошлых месяцев у панели нет.
+        self.assertNotIn('title="прошлый месяц"', page)
+        past_first = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
+        past = past_first.strftime("%Y-%m")
+        for row in self.crm.status_log_:
+            row["changed_at"] = datetime(past_first.year, past_first.month, 2, 12,
+                                         tzinfo=UTC)
+        self.assertIn(f"/?month={past}", self.get_ok("/"))
         page = self.get_ok(f"/?month={past}")
         self.assertIn("пришло за месяц", page)
         self.assertNotIn("прогноз по темпу", page, "у прошлого месяца прогноза нет")
+        self.assertNotIn('title="прошлый месяц"', page, "раньше истории листать некуда")
         self.assertEqual(self.client.get("/?month=2999-01").status_code, 200)
         self.assertEqual(self.client.get("/?month=мусор").status_code, 200)
+
+    def test_old_link_before_history_steps_forward_into_it(self):
+        """?month=2001-01 из старой закладки: стрелки назад нет, вперёд -
+        сразу в первый месяц истории, а не через пустые месяцы по одному."""
+        past_first = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
+        for row in self.crm.status_log_:
+            row["changed_at"] = datetime(past_first.year, past_first.month, 2, 12,
+                                         tzinfo=UTC)
+        page = self.get_ok("/?month=2001-01")
+        self.assertNotIn('title="прошлый месяц"', page)
+        self.assertIn(f'/?month={past_first:%Y-%m}" title="следующий месяц"', page)
 
     def test_free_norm_is_saved_and_shown_on_the_tiles(self):
         r = self.client.post("/plan", data={"plan_rented": "120", "plan_check": "600",

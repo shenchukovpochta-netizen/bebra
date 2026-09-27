@@ -26,6 +26,8 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -738,7 +740,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                        else may_edit(request, code))
             if not allowed:
                 return secured(denied(request, code))
+        # Номер длиннее bigint: записи с ним нет, а база ответила бы 500.
+        if request.state.staff is not None and not logic.path_ids_ok(path):
+            return secured(render(request, "missing.html", status_code=404, what="Адрес"))
         return secured(await call_next(request))
+
+    @app.exception_handler(RequestValidationError)
+    async def not_a_number(request: Request, exc: RequestValidationError) -> Response:
+        """Номер в пути - не число («/clients/²», «/clients/abc»): это адрес
+        без записи, 404 страницей, а не JSON 422 голым текстом. Клиенту на
+        странице подписи - своя страница, без панели вокруг."""
+        if all((err.get("loc") or ("",))[0] == "path" for err in exc.errors()):
+            if request.url.path.startswith("/sign/"):
+                return render(request, "sign_missing.html", status_code=404)
+            if getattr(request.state, "staff", None) is not None:
+                return render(request, "missing.html", status_code=404, what="Адрес")
+        return await request_validation_exception_handler(request, exc)
 
     def secured(response: Response) -> Response:
         """Заголовки, которые браузер обязан соблюдать на каждой странице.
@@ -841,7 +858,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def form_ids(request: Request, name: str) -> list[int]:
         """Отмеченные галочками номера: form() оставляет только последний."""
         data = await request.form()
-        return [int(v) for v in data.getlist(name) if str(v).isdigit()]
+        return [i for v in data.getlist(name) if (i := logic.parse_id(v)) is not None]
+
+    async def by_id(getter: Any, raw: Any) -> dict | None:
+        """Запись по номеру из адреса или формы; не номер - None, как нет
+        записи. parse_id, а не isdigit: «²» для isdigit - цифра, и int()
+        на нём ронял страницу 500; «٢» int() молча читал как 2."""
+        record_id = logic.parse_id(raw)
+        return None if record_id is None else await getter(record_id)
 
     def cost_field(data: dict, name: str) -> logic.Check:
         """Стоимость в форме: пусто и «0» - ноль (запчастей не было, работа
@@ -869,6 +893,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     def summarize(rental: dict | None, balance: Any) -> dict:
         return logic.rental_summary(rental, balance, today=date.today())
+
+    async def history_floor(today: date) -> date:
+        """Первый месяц истории: стрелка «прошлый месяц» сводки, сервиса и
+        отчёта по точкам дальше него не ведёт."""
+        return logic.history_floor(await crm.history_start(), today=today)
 
     async def location_names(*current: Any) -> list[str]:
         """Точки для выпадающих списков и проверок форм - один источник на
@@ -1002,10 +1031,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         operational = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
         plan = logic.month_plan(settings, fleet=operational)
         # Месяц листается стрелками: прошлый - целиком, текущий - по
-        # сегодняшний день, вперёд листать некуда.
+        # сегодняшний день, вперёд листать некуда, назад - до начала истории.
         span = logic.month_bounds(
             logic.month_from(request.query_params.get("month"), today=today),
-            today=today)
+            today=today, floor=await history_floor(today))
         first, next_month = span["first"], span["next"]
         month_metrics = await period_metrics(
             since=datetime.combine(first, datetime.min.time()).astimezone(),
@@ -1377,7 +1406,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # MAX-аккаунт руками: мост из MAX-бота проставляет его сам, но
         # мост поднят не у всех, а рассылке нужен адрес получателя.
         raw_max = (data.get("max_id") or "").strip()
-        if raw_max and not raw_max.isdigit():
+        max_id = logic.parse_id(raw_max)
+        if raw_max and max_id is None:
             flash(request, "MAX id: только цифры, как в кабинете MAX.", "err")
             return None
         fields = {"full_name": name.value, "phone": phone, "note": note.value,
@@ -1385,7 +1415,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   "channel": channel.value, **spare,
                   "employer": employer.value, "experience": experience.value}
         if current is not None:
-            fields["max_id"] = int(raw_max) if raw_max else None
+            fields["max_id"] = max_id
         return fields
 
     @app.post("/clients")
@@ -1469,8 +1499,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # для штрафа - «Потеря аккумулятора» платежом это описка, а не
         # запись, которую стоит принять.
         preset = None
-        if (data.get("preset") or "").isdigit():
-            preset = await crm.work_type(int(data["preset"]))
+        if logic.parse_id(data.get("preset")) is not None:
+            preset = await by_id(crm.work_type, data.get("preset"))
             if preset is None or logic.sheet_price(preset, "own") is None:
                 flash(request, "Такой позиции в прайсе нет.", "err")
                 return redirect(f"/clients/{client_id}")
@@ -1605,7 +1635,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
-        if not batteries.isdigit() or not 0 <= int(batteries) <= 10:
+        battery_count = logic.parse_id(batteries)
+        if battery_count is None or not 0 <= battery_count <= 10:
             flash(request, "АКБ: число от 0 до 10.", "err")
             return None
         location = (data.get("location") or "").strip()
@@ -1615,7 +1646,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         months = data.get("service_months") or "24"
         bat_months = data.get("battery_service_months") or "15"
         for label, value in (("Срок службы", months), ("Срок службы АКБ", bat_months)):
-            if not value.isdigit() or not 1 <= int(value) <= 240:
+            got = logic.parse_id(value)
+            if got is None or not 1 <= got <= 240:
                 flash(request, f"{label}: число месяцев от 1 до 240.", "err")
                 return None
         residual = cost_field(data, "residual_price")
@@ -1631,10 +1663,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return {"code": code.value, "model": model.value, "note": note.value,
                 "frame_no": (data.get("frame_no") or "").strip() or None,
                 "motor_no": (data.get("motor_no") or "").strip() or None,
-                "battery_count": int(batteries), "purchase_price": price.value,
+                "battery_count": battery_count, "purchase_price": price.value,
                 "purchased_on": bought.value, "location": location or None,
-                "service_months": int(months), "residual_price": residual.value,
-                "battery_price": bat_price.value, "battery_service_months": int(bat_months),
+                "service_months": logic.parse_id(months),
+                "residual_price": residual.value,
+                "battery_price": bat_price.value,
+                "battery_service_months": logic.parse_id(bat_months),
                 # Подменный держат под замены, а не под выдачу: своего
                 # статуса у него нет, он такой же свободный.
                 "spare": bool(data.get("spare")),
@@ -1982,18 +2016,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                "new_client": None, "bike": None, "tariff": None,
                                "model": (p.get("model") or "").strip(),
                                "point": "", "places": []}
-        if (p.get("bike") or "").isdigit():
-            # С карточки велосипеда: модель известна, шаг выбора пропускается.
-            bike = await crm.bike(int(p["bike"]))
-            if bike is not None and bike.get("status") != "available":
-                flash(request, f"Велосипед {bike['code']} сейчас "
-                               f"«{logic.BIKE_STATUSES.get(bike['status'], bike['status'])}» "
-                               "- выберите другой.", "err")
-                bike = None
-            ctx["bike"] = bike
+        # С карточки велосипеда: модель известна, шаг выбора пропускается.
+        bike = await by_id(crm.bike, p.get("bike"))
+        if bike is not None and bike.get("status") != "available":
+            flash(request, f"Велосипед {bike['code']} сейчас "
+                           f"«{logic.BIKE_STATUSES.get(bike['status'], bike['status'])}» "
+                           "- выберите другой.", "err")
+            bike = None
+        ctx["bike"] = bike
         client = None
-        if (p.get("client") or "").isdigit():
-            client = await crm.client(int(p["client"]))
+        if logic.parse_id(p.get("client")) is not None:
+            client = await by_id(crm.client, p.get("client"))
         elif p.get("phone"):
             phone = bot_logic.normalize_phone(p["phone"])
             if phone is None:
@@ -2054,8 +2087,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Клиенту, который приедет завтра, можно обещать конкретный день:
         # прогноз считается по «оплачено до», а не по слову оператора.
         ctx["soon"] = logic.freeing_soon(await crm.active_rentals())
-        if (p.get("tariff") or "").isdigit():
-            ctx["tariff"] = await crm.tariff(int(p["tariff"]))
+        ctx["tariff"] = await by_id(crm.tariff, p.get("tariff"))
         if ctx["bike"] is not None:
             ctx["model"] = ctx["bike"]["model"]
         # Модель могли сменить последней: тариф берём того же срока, но
@@ -2175,12 +2207,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                          bike=data.get("bike_id"), started_on=data.get("started_on"),
                          promo=logic.clean_promo_code(data.get("promo_code")),
                          booking=data.get("booking_id"), location=data.get("location"))
-        try:
-            client = await crm.client(int(data.get("client_id") or 0))
-            tariff = await crm.tariff(int(data.get("tariff_id") or 0))
-            bike = await crm.bike(int(data.get("bike_id") or 0))
-        except (TypeError, ValueError):
-            client = tariff = bike = None
+        client = await by_id(crm.client, data.get("client_id"))
+        tariff = await by_id(crm.tariff, data.get("tariff_id"))
+        bike = await by_id(crm.bike, data.get("bike_id"))
         if client is None or tariff is None or bike is None:
             flash(request, "Выберите клиента, тариф и велосипед.", "err")
             return redirect(back)
@@ -2325,8 +2354,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Шаг «документы»: пакет на подпись по только что открытой аренде."""
         if not may_edit(request, "rentals"):
             return denied(request, "rentals")
-        raw = request.query_params.get("rental") or ""
-        rental = await crm.rental(int(raw)) if raw.isdigit() else None
+        rental = await by_id(crm.rental, request.query_params.get("rental"))
         if rental is None:
             return render(request, "missing.html", status_code=404, what="Аренда")
         client = await crm.client(rental["client_id"])
@@ -2430,8 +2458,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         avito = await inbox_avito()
         can_reply, why = logic.inbox_can_reply(thread, avito_ok=avito["live"])
         bot_state = None
-        if thread["channel"] == "tg" and db is not None and str(thread["ext_id"]).isdigit():
-            row = await db.get_user(int(thread["ext_id"]))
+        tg_id = logic.parse_id(thread["ext_id"]) if thread["channel"] == "tg" else None
+        if tg_id is not None and db is not None:
+            row = await db.get_user(tg_id)
             bot_state = logic.bot_client_state(dict(row) if row else None)
         [row] = logic.inbox_rows([thread])
         return render(request, "inbox_thread.html", t=row, messages=messages,
@@ -2552,7 +2581,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             login_failures.setdefault(ip_key, []).append(time.monotonic())
             return JSONResponse({"ok": False}, status_code=401)
         declared = request.headers.get("content-length") or ""
-        if declared.isdigit() and int(declared) > logic.HOOK_MAX_BYTES:
+        # isascii: заголовок читается в latin-1, и «²» в нём - «цифра»
+        # для isdigit, на которой int() ронял хук 500.
+        if (declared.isascii() and declared.isdigit()
+                and int(declared) > logic.HOOK_MAX_BYTES):
             return JSONResponse({"ok": False, "error": "too large"}, status_code=413)
         body = b""
         async for chunk in request.stream():
@@ -2765,8 +2797,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       bikes=await crm.bikes(status="available"),
                       tariffs=[t for t in await crm.tariffs(active_only=True)
                                if (t.get("kind") or "bike") == "bike"],
-                      client_id=int(client_id) if client_id and client_id.isdigit() else None,
-                      bike_id=int(bike_id) if bike_id and bike_id.isdigit() else None)
+                      client_id=logic.parse_id(client_id),
+                      bike_id=logic.parse_id(bike_id))
 
     async def fit_tariff(tariff: dict | None, bike: dict | None) -> tuple[dict | None, str]:
         """Тариф, который можно поставить аренде, или (None, почему нет).
@@ -2792,13 +2824,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/rentals")
     async def rental_create(request: Request) -> Response:
         data = await form(request)
-        try:
-            client = await crm.client(int(data.get("client_id") or 0))
-            tariff = await crm.tariff(int(data.get("tariff_id") or 0))
-            bike = (await crm.bike(int(data["bike_id"]))
-                    if (data.get("bike_id") or "").isdigit() else None)
-        except (TypeError, ValueError):
-            client = tariff = bike = None
+        client = await by_id(crm.client, data.get("client_id"))
+        tariff = await by_id(crm.tariff, data.get("tariff_id"))
+        bike = await by_id(crm.bike, data.get("bike_id"))
         started = logic.check_date(data.get("started_on"), default=date.today())
         billing_mode = data.get("billing") or "auto"
         if client is None or tariff is None:
@@ -2973,8 +3001,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if rental is None:
             return render(request, "missing.html", status_code=404, what="Аренда")
         data = await form(request)
-        raw = data.get("battery_id") or ""
-        battery = await crm.battery(int(raw)) if raw.isdigit() else None
+        battery = await by_id(crm.battery, data.get("battery_id"))
         if battery is None:
             flash(request, "Выберите аккумулятор.", "err")
             return redirect(f"/rentals/{rental_id}")
@@ -3084,8 +3111,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Аренда")
         data = await form(request)
         reason = logic.check_swap_reason(data.get("reason") or "repair")
-        new_bike = await crm.bike(int(data["bike_id"])) \
-            if (data.get("bike_id") or "").isdigit() else None
+        new_bike = await by_id(crm.bike, data.get("bike_id"))
         old_bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
         mileage_old = logic.check_mileage(
             data.get("mileage_old"), current=(old_bike or {}).get("mileage_km"),
@@ -3163,8 +3189,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if rental is None:
             return render(request, "missing.html", status_code=404, what="Аренда")
         data = await form(request)
-        tariff = await crm.tariff(int(data["tariff_id"])) \
-            if (data.get("tariff_id") or "").isdigit() else None
+        tariff = await by_id(crm.tariff, data.get("tariff_id"))
         if tariff is None or rental["status"] != "active":
             flash(request, "Выберите тариф; менять можно только у идущей аренды.", "err")
             return redirect(f"/rentals/{rental_id}")
@@ -3473,8 +3498,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def points_data(request: Request) -> dict:
         """Период, справочник, парк и сравнение точек - одно на отчёт, его
         выгрузку и страницу точки: там обязаны стоять те же числа."""
-        span = logic.report_period(request.query_params,
-                                   now=datetime.now().astimezone())
+        now = datetime.now().astimezone()
+        span = logic.report_period(request.query_params, now=now,
+                                   floor=await history_floor(now.date()))
         places = await crm.locations()
         fleet = await crm.bikes(limit=10000)
         return {"span": span, "places": places, "fleet": fleet,
@@ -3821,8 +3847,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/staff")
-        profile = await crm.access_profile(int(data.get("profile_id") or 0)) \
-            if (data.get("profile_id") or "").isdigit() else None
+        profile = await by_id(crm.access_profile, data.get("profile_id"))
         if profile is None:
             flash(request, "Выберите профиль доступа.", "err")
             return redirect("/staff")
@@ -3852,8 +3877,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Свой профиль менять нельзя — попросите другого "
                            "сотрудника с доступом к разделу.", "err")
             return redirect("/staff")
-        profile = await crm.access_profile(int(data.get("profile_id") or 0)) \
-            if (data.get("profile_id") or "").isdigit() else None
+        profile = await by_id(crm.access_profile, data.get("profile_id"))
         if profile is None:
             flash(request, "Такого профиля нет.", "err")
             return redirect("/staff")
@@ -4060,7 +4084,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # скачет - и когда именно скакнул. Месяц листается стрелками.
         span = logic.month_bounds(
             logic.month_from(request.query_params.get("month"), today=today),
-            today=today)
+            today=today, floor=await history_floor(today))
         chart = logic.repair_chart(
             await crm.bikes_in_status_by_day("repair", span["first"], span["today"]),
             norm=int(plan["repair"]))
@@ -4117,8 +4141,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         location = request.query_params.get("location") or ""
         # Наряды одного велосипеда - его история ремонтов целиком: с карточки
         # велосипеда сюда ведёт «все наряды».
-        bike_filter = (await crm.bike(int(bike_q))
-                       if bike_q.isdigit() else None)
+        bike_filter = await by_id(crm.bike, bike_q)
         rows = await crm.work_orders(status=status or None, payer=payer or None,
                                      bike_id=bike_filter["id"] if bike_filter else None,
                                      location=location or None, limit=300)
@@ -4147,7 +4170,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = await crm.work_orders(
             status=request.query_params.get("status") or None,
             payer=request.query_params.get("payer") or None,
-            bike_id=int(bike_q) if bike_q.isdigit() and len(bike_q) < 12 else None,
+            bike_id=logic.parse_id(bike_q),
             location=request.query_params.get("location") or None,
             limit=5000)
         money_ok = may_view(request, "finance")
@@ -4174,8 +4197,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def order_new(request: Request) -> Response:
         if not may_edit(request, "service"):
             return denied(request, "service")
-        bike_id = request.query_params.get("bike")
-        bike = await crm.bike(int(bike_id)) if (bike_id or "").isdigit() else None
+        bike = await by_id(crm.bike, request.query_params.get("bike"))
         return render(request, "order_form.html", bike=bike,
                       bikes=await crm.bikes(limit=10000),
                       techs=await crm.staff_all(),
@@ -4188,10 +4210,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not payer.ok:
             flash(request, payer.error, "err")
             return redirect("/orders/new")
-        bike = await crm.bike(int(data["bike_id"])) \
-            if (data.get("bike_id") or "").isdigit() else None
-        client = await crm.client(int(data["client_id"])) \
-            if (data.get("client_id") or "").isdigit() else None
+        bike = await by_id(crm.bike, data.get("bike_id"))
+        client = await by_id(crm.client, data.get("client_id"))
         estimate = cost_field(data, "estimate")
         complaint = logic.check_note(data.get("complaint"))
         # Где чиним. Пусто - точка велосипеда; у чужой техники без выбора
@@ -4202,7 +4222,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/orders/new")
-        tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
+        tech_id = logic.parse_id(data.get("tech_id"))
         try:
             order_id = await service.open_order(
                 crm, bike=bike, payer=payer.value, client=client,
@@ -4318,8 +4338,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Наряд закрыт - строки больше не добавляются.", "err")
             return redirect(f"/orders/{order_id}")
         data = await form(request)
-        work_type = await crm.work_type(int(data["work_type_id"])) \
-            if (data.get("work_type_id") or "").isdigit() else None
+        work_type = await by_id(crm.work_type, data.get("work_type_id"))
         title = logic.check_name(data.get("title") or (work_type or {}).get("title"),
                                  what="Работа")
         qty = count_field(data, "qty", what="Количество", limit=99, least=1)
@@ -4366,8 +4385,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_edit(request, "service"):
             return denied(request, "service")
         data = await form(request)
-        part = await crm.part(int(data["part_id"])) \
-            if (data.get("part_id") or "").isdigit() else None
+        part = await by_id(crm.part, data.get("part_id"))
         qty = count_field(data, "qty", what="Количество", default="1",
                           limit=999, least=1)
         if part is None or not qty.ok:
@@ -4433,7 +4451,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Наряд на согласовании: ответьте за клиента "
                            "или отправьте смету заново.", "err")
             return redirect(f"/orders/{order_id}")
-        tech_id = int(data["tech_id"]) if (data.get("tech_id") or "").isdigit() else None
+        tech_id = logic.parse_id(data.get("tech_id"))
         fields: dict[str, Any] = {"status": status.value, "tech_id": tech_id,
                                   "estimate": estimate.value, "note": note.value}
         # Велосипед перевезли чинить на другую точку - наряд едет за ним.
@@ -5052,12 +5070,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_edit(request, "settings"):
             return denied(request, "settings")
         data = await form(request)
-        if not (data.get("bike_model_id") or "").isdigit() \
-                or not (data.get("battery_model_id") or "").isdigit():
+        bike_model_id = logic.parse_id(data.get("bike_model_id"))
+        battery_model_id = logic.parse_id(data.get("battery_model_id"))
+        if bike_model_id is None or battery_model_id is None:
             flash(request, "Выберите модели.", "err")
             return redirect("/models")
         mode = data.get("mode") or "none"
-        await crm.set_compat(int(data["bike_model_id"]), int(data["battery_model_id"]),
+        await crm.set_compat(bike_model_id, battery_model_id,
                              fits=mode in ("fits", "primary"),
                              primary_fit=mode == "primary")
         return redirect("/models")
@@ -5108,14 +5127,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
-        if not str(months).isdigit() or not 1 <= int(months) <= 240:
+        service_months = logic.parse_id(months)
+        if service_months is None or not 1 <= service_months <= 240:
             flash(request, "Срок службы: число месяцев от 1 до 240.", "err")
             return None
-        model_id = int(data["model_id"]) if (data.get("model_id") or "").isdigit() else None
+        model_id = logic.parse_id(data.get("model_id"))
         return {"code": code.value, "model_id": model_id,
                 "serial_no": (data.get("serial_no") or "").strip() or None,
                 "location": location.value, "purchase_price": price.value,
-                "purchased_on": bought.value, "service_months": int(months),
+                "purchased_on": bought.value, "service_months": service_months,
                 "cycles": cycles.value, "note": note.value,
                 "volts": volts.value, "amp_hours": amps.value}
 
@@ -5251,10 +5271,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if rental is None:
             return render(request, "missing.html", status_code=404, what="Аренда")
         data = await form(request)
-        new = await crm.battery(int(data["battery_id"])) \
-            if (data.get("battery_id") or "").isdigit() else None
-        old = await crm.battery(int(data["old_id"])) \
-            if (data.get("old_id") or "").isdigit() else None
+        new = await by_id(crm.battery, data.get("battery_id"))
+        old = await by_id(crm.battery, data.get("old_id"))
         if new is None:
             flash(request, "Выберите батарею на замену.", "err")
             return redirect(f"/rentals/{rental_id}")
@@ -5501,7 +5519,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/mailing")
-        template_id = int(data["id"]) if (data.get("id") or "").isdigit() else None
+        template_id = logic.parse_id(data.get("id"))
         if template_id:
             await crm.update_template(template_id, title=title.value,
                                       body=body.value, body_max=body_max.value,
@@ -5536,8 +5554,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/mailing")
-        template = (await crm.template(int(data["template_id"]))
-                    if (data.get("template_id") or "").isdigit() else None)
+        template = await by_id(crm.template, data.get("template_id"))
         if template is None:
             flash(request, "Выберите шаблон.", "err")
             return redirect("/mailing")
@@ -5919,8 +5936,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 return redirect("/bank")
             flash(request, "Отмечено: платёж не наш.")
             return redirect("/bank")
-        client = (await crm.client(int(data["client_id"]))
-                  if (data.get("client_id") or "").isdigit() else None)
+        client = await by_id(crm.client, data.get("client_id"))
         if client is None:
             flash(request, "Выберите клиента, которому зачислить.", "err")
             return redirect("/bank")
@@ -6016,9 +6032,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                            "вернули наш шаблон. Ваш остался в архиве.")
             return redirect("/documents")
         if action in ("enable", "drop"):
-            raw_id = str(data.get("template_id") or "")
-            row = (await crm.doc_template(int(raw_id))
-                   if raw_id.isdigit() else None)
+            row = await by_id(crm.doc_template, data.get("template_id"))
             if row is None or row["kind"] != kind:
                 flash(request, "Шаблон не найден.", "err")
                 return redirect("/documents")
@@ -6325,8 +6339,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_edit(request, "finance"):
             return denied(request, "finance")
         data = await form(request)
-        client = (await crm.client(int(data["client_id"]))
-                  if (data.get("client_id") or "").isdigit() else None)
+        client = await by_id(crm.client, data.get("client_id"))
         if client is None:
             flash(request, "Выберите клиента, которому выставить счёт.", "err")
             return redirect("/payments")
@@ -6589,10 +6602,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_view(request, "trackers"):
             return denied(request, "trackers")
         rows = await tracker_rows_now()
+        # Списка парка здесь нет: привязка живёт на карточке трекера. Список
+        # в каждой строке - 130 трекеров на 190 велосипедов - это 2 МБ и
+        # треть секунды на страницу.
         return render(request, "trackers.html", rows=rows,
                       summary=logic.tracker_summary(rows),
-                      alerts=await crm.tracker_alerts(open_only=True, limit=50),
-                      free_bikes=await crm.bikes(limit=10000))
+                      alerts=await crm.tracker_alerts(open_only=True, limit=50))
 
     @app.post("/trackers")
     async def tracker_create(request: Request) -> Response:
@@ -6628,20 +6643,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if tracker is None:
             return render(request, "missing.html", status_code=404, what="Трекер")
         data = await form(request)
+        # Форма привязки - на карточке, туда и возвращаемся при отказе.
+        card = f"/trackers/{tracker_id}"
         raw = (data.get("bike_id") or "").strip()
-        bike_id = int(raw) if raw.isdigit() else None
-        if bike_id is not None and await crm.bike(bike_id) is None:
+        bike_id = logic.parse_id(raw)
+        if raw and (bike_id is None or await crm.bike(bike_id) is None):
             flash(request, "Такого велосипеда нет.", "err")
-            return redirect("/trackers")
+            return redirect(card)
         try:
             await crm.update_tracker(tracker_id, bike_id=bike_id)
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "На этом велосипеде уже стоит другой трекер.", "err")
-                return redirect("/trackers")
+                return redirect(card)
             raise
         flash(request, "Трекер привязан." if bike_id else "Трекер отвязан.")
-        return redirect(f"/trackers/{tracker_id}")
+        return redirect(card)
 
     @app.post("/trackers/{tracker_id}/toggle")
     async def tracker_toggle(request: Request, tracker_id: int) -> Response:
@@ -6696,7 +6713,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not tracker.get("active"):
             flash(request, "Трекер снят с наблюдения - опрос до него не дойдёт.", "err")
             return redirect(back)
-        alert_id = int(data["alert_id"]) if (data.get("alert_id") or "").isdigit() else None
+        alert_id = logic.parse_id(data.get("alert_id"))
         note = logic.check_note(data.get("note"))
         try:
             await crm.queue_tracker_command(
@@ -6806,7 +6823,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         batteries = data.get("battery_count") or "2"
         for label, value in (("Срок службы", months), ("Срок службы АКБ", bat_months),
                              ("АКБ", batteries)):
-            if not str(value).isdigit():
+            if logic.parse_id(value) is None:
                 flash(request, f"{label}: нужно число.", "err")
                 return redirect("/assets")
         bat_price = logic.check_amount(data.get("battery_price")) \
@@ -6820,15 +6837,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, place.error, "err")
             return redirect("/assets")
         location = place.value
-        supplier_id = int(data["supplier_id"]) \
-            if (data.get("supplier_id") or "").isdigit() else None
+        supplier_id = logic.parse_id(data.get("supplier_id"))
         try:
             result = await service.buy_bikes(
                 crm, supplier_id=supplier_id, purchased_on=bought.value, codes=codes,
                 model=model.value, price=price.value or Decimal(0),
-                battery_count=int(batteries), service_months=int(months),
+                battery_count=logic.parse_id(batteries),
+                service_months=logic.parse_id(months),
                 residual=residual.value, battery_price=bat_price.value,
-                battery_months=int(bat_months), location=location, note=note.value,
+                battery_months=logic.parse_id(bat_months), location=location,
+                note=note.value,
                 by=who(request))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
@@ -6845,12 +6863,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         пустых строк, заполненные берём, пустые молча пропускаем."""
         lines = []
         for i in range(limit):
-            part_id = (data.get(f"part_id_{i}") or "").strip()
-            qty = (data.get(f"qty_{i}") or "").strip()
-            if not part_id.isdigit() or not qty.isdigit() or int(qty) <= 0:
+            part_id = logic.parse_id(data.get(f"part_id_{i}"))
+            qty = logic.parse_id(data.get(f"qty_{i}"))
+            if part_id is None or not qty:
                 continue
             price = cost_field(data, f"price_{i}")
-            lines.append({"part_id": int(part_id), "qty": int(qty),
+            lines.append({"part_id": part_id, "qty": qty,
                           "price": price.value if price.ok else Decimal(0)})
         return lines
 
@@ -6956,8 +6974,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not note.ok:
             flash(request, note.error, "err")
             return redirect("/parts/receipts")
-        supplier_id = int(data["supplier_id"]) \
-            if (data.get("supplier_id") or "").isdigit() else None
+        supplier_id = logic.parse_id(data.get("supplier_id"))
         try:
             doc_id = await service.receive_parts(
                 crm, supplier_id=supplier_id, lines=doc_lines(data),
@@ -7124,8 +7141,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_edit(request, "inventory"):
             return denied(request, "inventory")
         data = await form(request)
-        part = await crm.part(int(data["part_id"])) \
-            if (data.get("part_id") or "").isdigit() else None
+        part = await by_id(crm.part, data.get("part_id"))
         qty = count_field(data, "qty", what="Количество", default="1", limit=9999)
         if part is None or not qty.ok:
             flash(request, qty.error or "Выберите позицию.", "err")
@@ -7164,8 +7180,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not status.ok:
             flash(request, status.error, "err")
             return redirect("/part-orders")
-        supplier_id = int(data["supplier_id"]) \
-            if (data.get("supplier_id") or "").isdigit() else order.get("supplier_id")
+        supplier_id = logic.parse_id(data.get("supplier_id"))
+        if supplier_id is None:
+            supplier_id = order.get("supplier_id")
         items = await crm.part_order_items(order_id)
         patch = {"status": status.value, "supplier_id": supplier_id,
                  "total": logic.order_total(items)}

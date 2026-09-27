@@ -713,6 +713,37 @@ class TestInboxActions(InboxCase):
         self.assertIsNone(self.thread(self.tg)["client_id"])
         self.assertIn("Клиента с таким номером", self.get_ok(f"/inbox/{self.tg}"))
 
+    def test_card_number_in_unicode_digits_is_not_a_card(self):
+        """«²» для isdigit - цифра: int() ронял привязку 500. «٢» int()
+        читал как 2 - чужую карточку по номеру, которого никто не набирал."""
+        cid = run(self.crm.create_client(full_name="Каримов Азиз", phone="+79001112233"))
+        arabic = str(cid).translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩"))
+        for junk in ("²", arabic, "9" * 30):
+            with self.subTest(junk=junk):
+                r = self.client.post(f"/inbox/{self.wa}/client", data={"client": junk})
+                self.assertEqual(r.status_code, 303)
+                self.assertIsNone(self.thread(self.wa)["client_id"])
+        self.assertIn("Клиента с таким номером", self.get_ok(f"/inbox/{self.wa}"))
+
+    def test_tg_address_in_unicode_digits_opens_the_card(self):
+        """Адрес собеседника Telegram - строка из базы. «²» ронял карточку
+        500 на int(), «٢» спрашивал бы у бота чужого пользователя № 2."""
+        asked = []
+        real = self.db.get_user
+
+        async def spy(tg_id):
+            asked.append(tg_id)
+            return await real(tg_id)
+        self.db.get_user = spy
+        for ext in ("²", "٢"):
+            with self.subTest(ext=ext):
+                got = run(self.crm.inbox_record(channel="tg", origin="bot", ext_id=ext,
+                                                direction="in"))
+                self.get_ok(f"/inbox/{got['thread_id']}")
+        self.assertEqual(asked, [])
+        self.get_ok(f"/inbox/{self.tg}")
+        self.assertEqual(asked, [7001], "настоящий адрес по-прежнему читается")
+
     def test_answered_elsewhere_stops_waiting(self):
         self.assertEqual(run(self.crm.inbox_open_count()), 3)
         r = self.client.post(f"/inbox/{self.wa}/answered")
@@ -867,6 +898,23 @@ class TestInboxHook(InboxCase):
         r = self.hook(content=big)
         self.assertEqual(r.status_code, 413)
         self.assertEqual(self.threads(), [])
+
+    def test_unicode_content_length_is_not_a_500(self):
+        """Заголовок читается в latin-1: «²» для isdigit - цифра, и int()
+        ронял хук 500. Такой размер не в счёт - тело меряется по ходу."""
+        import httpx
+
+        async def post() -> httpx.Response:
+            # Сырой ASGITransport: TestClient перекодировал бы байт \xb2 в
+            # UTF-8, и до хука дошло бы «Â²», а не «²».
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
+                                         base_url="http://test") as guest:
+                return await guest.post("/hook/inbox", content=body, headers={
+                    "Authorization": f"Bearer {HOOK}", "Content-Length": b"\xb2"})
+        body = json.dumps(green()).encode("utf-8")
+        r = run(post())
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(len(self.threads()), 1)
 
     def test_too_large_chunked_body_is_413(self):
         """Без Content-Length тело считается по ходу чтения."""

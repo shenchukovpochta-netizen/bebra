@@ -23,7 +23,7 @@
     <dt>Заметка</dt><dd>{{ tracker.note or '—' }}</dd>
   </dl>
   {% if can_edit(staff, 'trackers') %}
-  <form method="post" action="/trackers/{{ tracker.id }}/bike" class="inline-form">
+  <form method="post" action="/trackers/{{ tracker.id }}/bike" class="inline-form" id="bind">
     <select name="bike_id"><option value="">не привязан</option>
       {% for b in free_bikes %}<option value="{{ b.id }}" {% if tracker.bike_id == b.id %}selected{% endif %}>№ {{ b.code }} {{ b.model }}</option>{% endfor %}
     </select>
