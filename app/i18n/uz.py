@@ -280,13 +280,10 @@ T: dict[str, str] = {
         "Boshqa velosiped olish uchun avval joriy ijarani yoping — menyudagi "
         "«🔚 Ijarani yopish» tugmasi."
     ),
-    "RENT_REQUEST_SENT": (
-        "✅ Ijara arizasi operatorga yetkazildi. U topshirishni tasdiqlaydi "
-        "va velosiped ma'lumotlarini kiritadi, shundan keyin to'lov summasi "
-        "va topshirish Aktini yuboramiz.\n"
-        "Velosipedlarni har kuni 10:00 dan 19:00 gacha beramiz; shartnoma "
-        "avvalgisi amal qiladi."
-    ),
+    "HOURS_DEFAULT": "Har kuni 10:00 dan 19:00 gacha ishlaymiz.",
+    "HOURS_POINT": "Nuqtaning ish vaqti:\n{lines}",
+    "HOURS_POINTS": "Nuqtalarimizning ish vaqti:\n{lines}",
+    "RENT_REQUEST_SENT": "✅ Ijara arizasi operatorga yetkazildi. U topshirishni tasdiqlaydi va velosiped ma'lumotlarini kiritadi, shundan keyin to'lov summasi va topshirish Aktini yuboramiz. Shartnoma avvalgisi amal qiladi.{hours}",
     "RENT_REQUEST_FAILED": (
         "Texnik nosozlik tufayli arizani yetkazib bo'lmadi. Bizga "
         "to'g'ridan-to'g'ri yozing: " + URL
@@ -352,12 +349,7 @@ T: dict[str, str] = {
         "uchun kerak (masalan: «asosiy ishga chiqyapman»).\n\n"
         "Fikringizdan qaytdingizmi — «Bekor qilish» tugmasini bosing."
     ),
-    "CLOSE_REQUESTED": (
-        "Yopish so'rovi operatorga yetkazildi. U siz bilan bog'lanadi va "
-        "vaqtni aytadi; velosipedlarni har kuni 10:00 dan 19:00 gacha "
-        "istalgan nuqtada qabul qilamiz.\n"
-        "Ko'rikdan keyin tasdiqlash uchun qaytarish Aktini yuboramiz."
-    ),
+    "CLOSE_REQUESTED": "Yopish so'rovi operatorga yetkazildi. U siz bilan bog'lanadi va vaqtni aytadi; velosipedlarni istalgan nuqtada qabul qilamiz.{hours}\nKo'rikdan keyin tasdiqlash uchun qaytarish Aktini yuboramiz.",
     "CLOSE_REQUEST_FAILED": (
         "Texnik nosozlik tufayli so'rovni yetkazib bo'lmadi. Bizga "
         "to'g'ridan-to'g'ri yozing: " + URL
@@ -380,7 +372,7 @@ T: dict[str, str] = {
 
     # ── сроки и продление ──
     "BTN_EXTEND": "📅 Ijarani uzaytirish",
-    "REMIND_SOON": "📅 Eslatma: <b>{bike}</b> ijarasi {until} tugaydi. Qolgan kunlar: {days}.\n\nUzaytirmoqchimisiz — pastdagi tugmani bosing, operator summani aytadi. Topshirmoqchimisiz — menyudagi «🔚 Ijarani yopish»; velosipedlarni har kuni 10:00 dan 19:00 gacha qabul qilamiz.",
+    "REMIND_SOON": "📅 Eslatma: <b>{bike}</b> ijarasi {until} tugaydi. Qolgan kunlar: {days}.\n\nUzaytirmoqchimisiz — pastdagi tugmani bosing, operator summani aytadi. Topshirmoqchimisiz — menyudagi «🔚 Ijarani yopish».{hours}",
     "REMIND_LAST_DAY": "📅 Bugun <b>{bike}</b> ijarasining oxirgi kuni ({until} gacha).\n\nUzaytirish — pastdagi tugma. Bugun topshirsangiz — menyudagi «🔚 Ijarani yopish» tugmasini bosing, vaqtni kelishamiz.",
     "REMIND_OVERDUE": "⚠️ <b>{bike}</b> ijarasi muddati {until} tugagan.\n\nIltimos, pastdagi tugma bilan uzaytiring yoki velosipedni topshiring — aks holda shartnomaga ko'ra foydalanish haqi hisoblanaveradi.\nOperator bilan allaqachon kelishgan bo'lsangiz — shu xabarga javob yozing.",
     "EXTEND_NO_RENTAL": "Sizda faol ijara yo'q — uzaytiradigan narsa yo'q. Velosiped olish uchun: «🚲 Ijaraga olish» tugmasi.",
@@ -450,9 +442,10 @@ T: dict[str, str] = {
     "CAB_INTENT_LINE_RENEW": '📌 Siz aytdingiz: uzaytiraman',
     "CAB_INTENT_LINE_RETURN": '📌 Siz aytdingiz: topshiraman',
     "CAB_BOOK_MODEL": "🚲 <b>Ijaraga so'rov</b>\n\nQaysi velosiped? Yonida — hozir nechtasi bo'sh; bo'shi yo'q modelni ham tanlash mumkin, navbatga qo'yamiz.",
+    "CAB_BOOK_MODEL_AT": "🚲 <b>Ijaraga so'rov · {point}</b>\n\nQaysi velosiped? Yonida — shu nuqtada hozir nechtasi bo'sh; bo'shi yo'q modelni ham tanlash mumkin, navbatga qo'yamiz.",
     "CAB_BOOK_TARIFF": 'Qancha muddatga?',
-    "CAB_BOOK_POINT": 'Qaysi nuqtadan olasiz?',
-    "CAB_BOOK_WHEN": 'Qachon kelasiz? Har kuni 10:00 dan 19:00 gacha beramiz.',
+    "CAB_BOOK_POINT": "🚲 <b>Ijaraga so'rov</b>\n\nQaysi nuqtadan olasiz? Yonida — u yerda hozir nechta velosiped bo'sh.",
+    "CAB_BOOK_WHEN": "Qachon kelasiz?{hours}",
     "CAB_BOOK_DONE": "✅ So'rov qabul qilindi: {line}.\nOperator velosipedni tayyorlab, siz bilan bog'lanadi. Pasportingizni oling.",
     "CAB_BOOK_EXISTS": "Sizda allaqachon so'rov bor: {line}. Uni pastdagi tugma bilan olib tashlash mumkin.",
     "CAB_BOOK_HAS_RENTAL": 'Sizda ijara davom etmoqda — avval velosipedni topshiring.',

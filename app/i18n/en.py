@@ -280,13 +280,10 @@ T: dict[str, str] = {
         "To take another bike, first close the current rental — the "
         "“🔚 Close rental” button in the menu."
     ),
-    "RENT_REQUEST_SENT": (
-        "✅ Your rental request has been passed to the operator. They will "
-        "confirm the handover and enter the bike details; after that we "
-        "will send the amount to pay and the Handover Act.\n"
-        "We hand over bikes daily from 10:00 to 19:00; your existing "
-        "agreement remains in force."
-    ),
+    "HOURS_DEFAULT": "We are open daily from 10:00 to 19:00.",
+    "HOURS_POINT": "Opening hours of the point:\n{lines}",
+    "HOURS_POINTS": "Opening hours of our points:\n{lines}",
+    "RENT_REQUEST_SENT": "✅ Your rental request has been passed to the operator. They will confirm the handover and enter the bike details; after that we will send the amount to pay and the Handover Act. Your existing agreement remains in force.{hours}",
     "RENT_REQUEST_FAILED": (
         "We could not pass on your request due to a technical hiccup. "
         "Message us directly: " + URL
@@ -357,12 +354,7 @@ T: dict[str, str] = {
         "for the report (for example: “starting my main job”).\n\n"
         "Changed your mind — tap “Cancel”."
     ),
-    "CLOSE_REQUESTED": (
-        "The closure request has been passed to the operator. They will "
-        "contact you and set a time; we accept bikes daily from 10:00 to "
-        "19:00 at any of our points.\n"
-        "After the inspection we will send the Return Act for confirmation."
-    ),
+    "CLOSE_REQUESTED": "The closure request has been passed to the operator. They will contact you and set a time; we accept bikes at any of our points.{hours}\nAfter the inspection we will send the Return Act for confirmation.",
     "CLOSE_REQUEST_FAILED": (
         "We could not pass on the request due to a technical hiccup. "
         "Message us directly: " + URL
@@ -394,7 +386,7 @@ T: dict[str, str] = {
     # ── кнопки ──
     # ── сроки и продление ──
     "BTN_EXTEND": "📅 Extend the rental",
-    "REMIND_SOON": "📅 A reminder: your rental of <b>{bike}</b> ends {until}. Days left: {days}.\n\nWant to extend it — tap the button below and the operator will name the amount. Returning it — use “🔚 Close rental” in the menu; we accept bikes daily from 10:00 to 19:00.",
+    "REMIND_SOON": "📅 A reminder: your rental of <b>{bike}</b> ends {until}. Days left: {days}.\n\nWant to extend it — tap the button below and the operator will name the amount. Returning it — use “🔚 Close rental” in the menu.{hours}",
     "REMIND_LAST_DAY": "📅 Today is the last day of your rental of <b>{bike}</b> (until {until}).\n\nTo extend — the button below. Returning it today — tap “🔚 Close rental” in the menu and we will agree on a time.",
     "REMIND_OVERDUE": "⚠️ The rental term for <b>{bike}</b> expired {until}.\n\nPlease extend it with the button below or return the bike — otherwise, under the agreement, the usage fee keeps accruing.\nIf you have already arranged things with the operator — just reply to this message.",
     "EXTEND_NO_RENTAL": "No active rental is registered for you — there is nothing to extend. To take a bike: the “🚲 Rent” button.",
@@ -457,9 +449,10 @@ T: dict[str, str] = {
     "CAB_INTENT_LINE_RENEW": '📌 You said: extending',
     "CAB_INTENT_LINE_RETURN": '📌 You said: returning',
     "CAB_BOOK_MODEL": '🚲 <b>Rental request</b>\n\nWhich bike? Next to each — how many are free right now; a model with none free can still be chosen, we will put you in the queue.',
+    "CAB_BOOK_MODEL_AT": "🚲 <b>Rental request · {point}</b>\n\nWhich bike? Next to each — how many are free at this point right now; a model with none free can still be chosen, we will put you in the queue.",
     "CAB_BOOK_TARIFF": 'For how long?',
-    "CAB_BOOK_POINT": 'Which point will you pick it up at?',
-    "CAB_BOOK_WHEN": 'When will you come? We hand out bikes daily from 10:00 to 19:00.',
+    "CAB_BOOK_POINT": "🚲 <b>Rental request</b>\n\nWhich point will you pick it up at? Next to each — how many bikes are free there right now.",
+    "CAB_BOOK_WHEN": "When will you come?{hours}",
     "CAB_BOOK_DONE": '✅ Request accepted: {line}.\nThe operator will prepare the bike and contact you. Bring your passport.',
     "CAB_BOOK_EXISTS": 'You already have a request: {line}. You can withdraw it with the button below.',
     "CAB_BOOK_HAS_RENTAL": 'You have an active rental — return the bike first.',

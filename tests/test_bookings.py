@@ -1,5 +1,6 @@
-"""Заявка на аренду из кабинета: клиент выбирает модель, срок, точку и
-день, оператор открывает из неё мастер выдачи с готовыми полями.
+"""Заявка на аренду из кабинета: клиент выбирает точку, модель (со счётом
+свободных на этой точке), срок и день, оператор открывает из неё мастер
+выдачи с готовыми полями.
 
 Главное: заявка - намерение, а не аренда. Велосипед под неё не
 бронируется, одна открытая на клиента, при идущей аренде не подаётся,
@@ -48,6 +49,36 @@ class TestBookingLogic(unittest.TestCase):
         self.assertEqual([(m["title"], m["free"]) for m in got],
                          [("Kugoo V3", 2), ("Truck+", 0)])
         self.assertEqual(got[0]["id"], 1)
+
+    def test_models_count_only_the_chosen_point(self):
+        """«Свободно 2» по всему парку звало бы на точку, где их нет."""
+        models = [{"id": 1, "title": "Kugoo V3"}, {"id": 2, "title": "Truck+"}]
+        bikes = [{"model": "Kugoo V3", "status": "available", "location": "Павлюхина"},
+                 {"model": "Kugoo V3", "status": "available", "location": "Адоратского"},
+                 {"model": "Truck+", "status": "available", "location": None},
+                 {"model": "Truck+", "status": "rented", "location": "Павлюхина"}]
+        at = logic.booking_models(models, bikes, location="Павлюхина")
+        self.assertEqual([(m["title"], m["free"]) for m in at],
+                         [("Kugoo V3", 1), ("Truck+", 0)],
+                         "велосипед «не на точке» на точке не ждёт")
+        self.assertEqual([m["free"] for m in logic.booking_models(models, bikes)], [2, 1],
+                         "без точки - весь парк, как при одной точке")
+
+    def test_points_sum_what_the_model_step_will_show(self):
+        locations = [{"id": 7, "name": "Павлюхина", "public_title": "Май Байк — Павлюхина",
+                      "active": True},
+                     {"id": 3, "name": "Адоратского", "public_title": None, "active": True},
+                     {"id": 9, "name": "Закрытая", "active": False}]
+        models = [{"id": 1, "title": "Kugoo V3"}]
+        bikes = [{"model": "Kugoo V3", "status": "available", "location": "Адоратского"},
+                 {"model": "kugoo v3 pro", "status": "available", "location": "Адоратского"},
+                 {"model": "Не из каталога", "status": "available", "location": "Павлюхина"},
+                 {"model": "Kugoo V3", "status": "available", "location": "Закрытая"}]
+        got = logic.booking_points(locations, models, bikes,
+                                   aliases={"kugoo v3 pro": "Kugoo V3"})
+        # Порядок справочника, а не запаса: список не прыгает от выдачи к выдаче.
+        self.assertEqual(got, [{"id": 7, "title": "Май Байк — Павлюхина", "free": 0},
+                               {"id": 3, "title": "Адоратского", "free": 2}])
 
     def test_when_is_bounded(self):
         day = TODAY.strftime("%Y%m%d")

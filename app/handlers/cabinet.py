@@ -28,7 +28,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import company, notices, notify, paying, service
+from ..crm import company, notices, notify, paying, points, service
 from ..crm import logic as crm_logic
 from ..crm import sync as crm_sync
 from ..db import Database
@@ -630,11 +630,20 @@ async def cb_friends(callback: CallbackQuery, bot: Bot, user: dict,
 
 # ─────────────────────── заявка на аренду ───────────────────────
 #
-# Мастер в четыре нажатия: модель -> срок -> точка -> день. Выбор едет
-# в callback следующего шага (cab:book:d:<модель>:<тариф>:<точка>:<день>),
-# состояния у диалога нет: клиент может отвлечься на сутки и нажать
-# старую кнопку - она отработает по свежим данным или скажет, что
-# устарела.
+# Мастер в четыре нажатия: точка -> модель -> срок -> день. Точка первой,
+# когда их несколько: «свободно N» у модели считается по выбранной точке,
+# иначе клиент ехал бы туда, где его модели нет. Одна точка (или
+# справочник пуст) - шаг пропускается, счёт по всему парку, как раньше.
+# Выбор едет в callback следующего шага (cab:book:d:<модель>:<тариф>:
+# <точка>:<день>), состояния у диалога нет: клиент может отвлечься на
+# сутки и нажать старую кнопку - она отработает по свежим данным или
+# скажет, что устарела.
+#
+# Кнопки прежнего порядка (модель -> срок -> точка) точки в callback не
+# несут: cab:book:m:<модель> и cab:book:t:<модель>:<тариф>. Пока точка
+# одна, они работают как раньше; при нескольких - «кнопка устарела»:
+# их «свободно N» было по всем точкам сразу. Кнопка точки старого
+# порядка (cab:book:l:...) - тот же шаг, что кнопка срока нового.
 
 async def _book_model(crm: Any, model_id: int) -> dict | None:
     return next((m for m in await crm.bike_models(active_only=True)
@@ -647,11 +656,61 @@ async def _book_tariffs(crm: Any, model: dict) -> list[dict]:
         await crm.tariffs(active_only=True), model["title"], aliases=aliases))
 
 
+async def _book_point(crm: Any, loc_id: int) -> tuple[list[dict], dict | None] | None:
+    """Открытые точки и точка заявки по номеру из кнопки. None - устарела.
+
+    0 - точку не выбирали: справочник был пуст, точка одна или кнопка
+    старого порядка. Годится, пока открытых точек не больше одной (точка
+    тогда - она сама); при нескольких выбор за клиентом, а не за нами.
+    Точку, закрытую с тех пор, тоже не подставляем: звать туда нельзя.
+    """
+    locations = await crm.locations(active_only=True)
+    if not loc_id:
+        if len(locations) > 1:
+            return None
+        return locations, (locations[0] if locations else None)
+    location = next((loc for loc in locations if int(loc["id"]) == loc_id), None)
+    return None if location is None else (locations, location)
+
+
 def _when_rows(lang: str, tail: str, *, today: date) -> list[tuple[str, str]]:
     keys = ("CAB_BOOK_TODAY", "CAB_BOOK_TOMORROW", "CAB_BOOK_DAY2")
     days = [today + timedelta(days=n) for n in range(len(keys))]
     return [(i18n.t(lang, key).format(date=day.strftime("%d.%m")),
              f"cab:book:d:{tail}:{day:%Y%m%d}") for day, key in zip(days, keys, strict=True)]
+
+
+def _free_label(lang: str, title: str, free: int) -> str:
+    """«Модель (или точка) — свободно N» или «— под запись». Подпись кнопки
+    - не HTML, поэтому без экранирования: «&amp;» встал бы буквально."""
+    return i18n.t(lang, "CAB_BOOK_OPT_MODEL" if free else "CAB_BOOK_OPT_MODEL_NONE") \
+        .format(title=title, free=free)
+
+
+async def _send_no_models(bot: Bot, user: dict, lang: str) -> None:
+    await bot.send_message(user["tg_id"],
+                           i18n.t(lang, "CAB_BOOK_NO_MODELS").format(url=_support_url()),
+                           reply_markup=kb.cab_back(lang))
+
+
+async def _send_book_models(bot: Bot, crm: Any, user: dict, lang: str,
+                            location: dict | None, *, at_point: bool = False) -> None:
+    """Шаг моделей. at_point - точку выбрали из нескольких: счёт по ней и
+    её название в заголовке, чтобы «свободно 2» не читалось как по парку."""
+    models = crm_logic.booking_models(
+        await crm.bike_models(active_only=True), await crm.bikes(limit=10000),
+        aliases=crm_logic.model_aliases(await crm.bike_models()),
+        location=location["name"] if at_point and location else None)
+    if not models:
+        await _send_no_models(bot, user, lang)
+        return
+    loc_id = location["id"] if location else 0
+    rows = [(_free_label(lang, m["title"], m["free"]), f"cab:book:m:{m['id']}:{loc_id}")
+            for m in models]
+    text = (i18n.t(lang, "CAB_BOOK_MODEL_AT").format(
+                point=logic.esc(location.get("public_title") or location["name"]))
+            if at_point and location else i18n.t(lang, "CAB_BOOK_MODEL"))
+    await bot.send_message(user["tg_id"], text, reply_markup=kb.cab_choice(rows, lang))
 
 
 @router.callback_query(F.data == "cab:book")
@@ -673,30 +732,51 @@ async def cb_book(callback: CallbackQuery, bot: Bot, user: dict,
                 line=logic.esc(crm_logic.booking_line(booking))),
             reply_markup=kb.cab_booking(lang))
         return
-    models = crm_logic.booking_models(
-        await crm.bike_models(active_only=True), await crm.bikes(limit=10000),
-        aliases=crm_logic.model_aliases(await crm.bike_models()))
-    if not models:
-        await bot.send_message(user["tg_id"],
-                               i18n.t(lang, "CAB_BOOK_NO_MODELS").format(url=_support_url()),
-                               reply_markup=kb.cab_back(lang))
+    locations = await crm.locations(active_only=True)
+    if len(locations) < 2:
+        await _send_book_models(bot, crm, user, lang, locations[0] if locations else None)
         return
-    rows = [(i18n.t(lang, "CAB_BOOK_OPT_MODEL" if m["free"] else "CAB_BOOK_OPT_MODEL_NONE")
-             .format(title=m["title"], free=m["free"]), f"cab:book:m:{m['id']}")
-            for m in models]
-    await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_MODEL"),
+    models = await crm.bike_models(active_only=True)
+    if not models:
+        await _send_no_models(bot, user, lang)
+        return
+    places = crm_logic.booking_points(
+        locations, models, await crm.bikes(limit=10000),
+        aliases=crm_logic.model_aliases(await crm.bike_models()))
+    rows = [(_free_label(lang, p["title"], p["free"]), f"cab:book:p:{p['id']}")
+            for p in places]
+    await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_POINT"),
                            reply_markup=kb.cab_choice(rows, lang))
 
 
-@router.callback_query(F.data.regexp(r"^cab:book:m:\d+$"))
+@router.callback_query(F.data.regexp(r"^cab:book:p:\d+$"))
+async def cb_book_place(callback: CallbackQuery, bot: Bot, user: dict,
+                        crm: Any = None) -> None:
+    """Точка выбрана: модели со счётом свободных на ней."""
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    loc_id = int(str(callback.data).rsplit(":", 1)[-1])
+    found = await _book_point(crm, loc_id) if loc_id else None
+    if found is None:
+        await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
+        return
+    await callback.answer()
+    await _send_book_models(bot, crm, user, lang, found[1], at_point=True)
+
+
+@router.callback_query(F.data.regexp(r"^cab:book:m:\d+(:\d+)?$"))
 async def cb_book_model(callback: CallbackQuery, bot: Bot, user: dict,
                         crm: Any = None) -> None:
     client = await _client_for_callback(callback, bot, crm, user)
     if client is None:
         return
     lang = i18n.user_lang(user)
-    model = await _book_model(crm, int(str(callback.data).rsplit(":", 1)[-1]))
-    if model is None:
+    parts = str(callback.data).split(":")
+    model = await _book_model(crm, int(parts[3]))
+    found = await _book_point(crm, int(parts[4]) if len(parts) > 4 else 0)
+    if model is None or found is None:
         await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
         return
     await callback.answer()
@@ -706,49 +786,40 @@ async def cb_book_model(callback: CallbackQuery, bot: Bot, user: dict,
                                i18n.t(lang, "CAB_BOOK_NO_TARIFF").format(url=_support_url()),
                                reply_markup=kb.cab_back(lang))
         return
+    loc_id = found[1]["id"] if found[1] else 0
     rows = [(i18n.t(lang, "CAB_BOOK_OPT_TARIFF").format(
                 name=t["name"], price=crm_logic.money(t["price"])),
-             f"cab:book:t:{model['id']}:{t['id']}") for t in tariffs]
+             f"cab:book:l:{model['id']}:{t['id']}:{loc_id}") for t in tariffs]
     await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_TARIFF"),
                            reply_markup=kb.cab_choice(rows, lang))
 
 
-@router.callback_query(F.data.regexp(r"^cab:book:t:\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^cab:book:(t:\d+:\d+|l:\d+:\d+:\d+)$"))
 async def cb_book_tariff(callback: CallbackQuery, bot: Bot, user: dict,
                          crm: Any = None) -> None:
+    """Срок выбран (или точка - кнопкой старого порядка): спросить день.
+
+    Под вопросом - часы именно этой точки: заявку везут туда, и режим
+    соседней точки клиенту здесь ни к чему.
+    """
     client = await _client_for_callback(callback, bot, crm, user)
     if client is None:
         return
     lang = i18n.user_lang(user)
-    _, _, _, model_id, tariff_id = str(callback.data).split(":")
-    await callback.answer()
-    locations = await crm.locations(active_only=True)
-    if len(locations) > 1:
-        rows = [(str(loc.get("public_title") or loc["name"]),
-                 f"cab:book:l:{model_id}:{tariff_id}:{loc['id']}") for loc in locations]
-        await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_POINT"),
-                               reply_markup=kb.cab_choice(rows, lang))
+    parts = str(callback.data).split(":")
+    model_id, tariff_id = parts[3], parts[4]
+    found = await _book_point(crm, int(parts[5]) if len(parts) > 5 else 0)
+    if found is None:
+        await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
         return
-    # Одна точка (или ни одной в справочнике) - выбирать нечего.
-    loc_id = locations[0]["id"] if locations else 0
+    await callback.answer()
+    locations, location = found
+    loc_id = location["id"] if location else 0
+    hours = points.hours_note(lang, location["name"] if location else None, rows=locations)
     await bot.send_message(
-        user["tg_id"], i18n.t(lang, "CAB_BOOK_WHEN"),
+        user["tg_id"], i18n.t(lang, "CAB_BOOK_WHEN").format(hours=hours),
         reply_markup=kb.cab_choice(
             _when_rows(lang, f"{model_id}:{tariff_id}:{loc_id}", today=date.today()), lang))
-
-
-@router.callback_query(F.data.regexp(r"^cab:book:l:\d+:\d+:\d+$"))
-async def cb_book_point(callback: CallbackQuery, bot: Bot, user: dict,
-                        crm: Any = None) -> None:
-    client = await _client_for_callback(callback, bot, crm, user)
-    if client is None:
-        return
-    lang = i18n.user_lang(user)
-    tail = str(callback.data).split(":", 3)[-1]
-    await callback.answer()
-    await bot.send_message(
-        user["tg_id"], i18n.t(lang, "CAB_BOOK_WHEN"),
-        reply_markup=kb.cab_choice(_when_rows(lang, tail, today=date.today()), lang))
 
 
 @router.callback_query(F.data.regexp(r"^cab:book:d:\d+:\d+:\d+:\d+$"))
@@ -763,15 +834,14 @@ async def cb_book_when(callback: CallbackQuery, bot: Bot, cfg: Config, user: dic
     model = await _book_model(crm, int(model_id))
     tariff = await crm.tariff(int(tariff_id))
     wanted = crm_logic.booking_when(day, today=date.today())
-    if model is None or tariff is None or wanted is None:
+    found = await _book_point(crm, int(loc_id))
+    if model is None or tariff is None or wanted is None or found is None:
         await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
         return
-    location = next((loc for loc in await crm.locations(active_only=True)
-                     if int(loc["id"]) == int(loc_id)), None)
     try:
         booking = await service.create_booking(
             crm, client=client, model=model["title"], tariff=tariff,
-            location=location, wanted_on=wanted)
+            location=found[1], wanted_on=wanted)
     except service.ServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return

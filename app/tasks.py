@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError
 from . import i18n, logic, texts
 from . import keyboards as kb
 from .config import Config
+from .crm import points
 from .db import Database, utcnow
 from .services import files
 
@@ -92,20 +93,26 @@ REMIND_TEXT = {
 
 
 async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str, *,
-                           today: date | None = None) -> bool:
+                           today: date | None = None, crm: Any = None) -> bool:
     """Одно напоминание клиенту. False - не доставлено (бот заблокирован).
 
     Отметка о напоминании ставится в любом случае: иначе заблокировавший
     бота человек заставлял бы систему пытаться снова каждые пятнадцать
     минут до конца времён.
+    «Скоро заканчивается» называет часы точки этой аренды (из CRM), а не
+    общие: у точек справочника режим свой.
     """
     lang = i18n.user_lang(row)
     given = logic.issue_context(row.get("issue_data"))
     until = row["rent_until"]
+    hours = ""
+    if stage == logic.REMIND_SOON:
+        hours = points.hours_note(lang, await points.rental_location(crm, row["tg_id"]))
     text = i18n.t(lang, REMIND_TEXT[stage]).format(
         bike=logic.esc(given["bike_model"]),
         until=until.strftime("%d.%m.%Y"),
         days=max(logic.days_left(until, today=today) or 0, 0),
+        hours=hours,
     )
     delivered = True
     try:
@@ -163,7 +170,7 @@ async def buyout_once(bot: Any, db: Database, cfg: Config, vault: Any, *,
 
 
 async def remind_once(bot: Any, db: Database, cfg: Config, *,
-                      today: date | None = None) -> tuple[int, str]:
+                      today: date | None = None, crm: Any = None) -> tuple[int, str]:
     """Один проход напоминаний. Возвращает (сколько отправлено, сводка).
 
     Сводка возвращается наружу, а не шлётся здесь: решение о том, слать ли
@@ -171,13 +178,17 @@ async def remind_once(bot: Any, db: Database, cfg: Config, *,
     а проход идёт каждые пятнадцать минут.
     """
     rows = [dict(r) for r in await db.active_rentals()]
+    if crm is not None:
+        # Снимок точек обновляет конвейер апдейтов, а в час напоминаний
+        # апдейтов может не быть с самого перезапуска.
+        await points.refresh(crm)
     sent = 0
     for row in rows:
         stage = logic.reminder_due(row, before_days=cfg.remind_before_days,
                                    today=today)
         if stage is None:
             continue
-        await _notify_deadline(bot, db, row, stage, today=today)
+        await _notify_deadline(bot, db, row, stage, today=today, crm=crm)
         sent += 1
     return sent, logic.deadline_digest(rows, today=today)
 
@@ -216,7 +227,8 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
             today = now.date()
             if due_today(now, bot_done_on, cfg.remind_hour_utc):
                 try:
-                    sent, digest = await remind_once(bot, db, cfg, today=today)
+                    sent, digest = await remind_once(bot, db, cfg, today=today,
+                                                     crm=crm)
                     if sent:
                         log.info("напоминаний о сроке отправлено: %s", sent)
                     if vault is not None:

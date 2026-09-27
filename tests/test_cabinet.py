@@ -19,10 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     from aiogram import Bot, Dispatcher
-    from aiogram.methods import EditMessageText, SendMessage, SendPhoto
+    from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, SendPhoto
 
     from app import logic, texts
-    from app.crm import billing, service
+    from app.crm import billing, points, service
     from app.crm import logic as crm_logic
     from app.handlers import cabinet, contract, menu, moderation, registration
     from app.handlers import faq as faq_handlers
@@ -548,7 +548,8 @@ class TestTopUp(CabinetCase):
 
 
 class TestBooking(CabinetCase):
-    """Заявка на аренду из кабинета: четыре нажатия без состояния."""
+    """Заявка на аренду из кабинета: четыре нажатия без состояния, точка
+    первой, когда их несколько, - «свободно N» по ней, а не по парку."""
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
@@ -558,11 +559,14 @@ class TestBooking(CabinetCase):
             title="Kugoo V3", brand="Kugoo", factory_title=None, battery_slots=2,
             note=None)
         self.tariff_id = await self.crm.create_tariff("Неделя", 7, D(3000), None)
-        await self.crm.create_bike(code="B-1", model="Kugoo V3")
         self.loc1 = await self.crm.create_location(name="Павлюхина", city="Казань",
-                                                   address=None, note=None)
+                                                   address=None, note=None,
+                                                   hours="пн-вс: 10:00-19:00")
         self.loc2 = await self.crm.create_location(name="Адоратского", city="Казань",
-                                                   address=None, note=None)
+                                                   address=None, note=None,
+                                                   hours="пн-пт: 09:00-21:00")
+        # Единственный свободный стоит на Адоратского.
+        await self.crm.create_bike(code="B-1", model="Kugoo V3", location="Адоратского")
 
     def labels(self):
         markup = self.session.last_markup()
@@ -572,17 +576,35 @@ class TestBooking(CabinetCase):
         markup = self.session.last_markup()
         return [b.callback_data for row in markup.inline_keyboard for b in row]
 
+    def alerts(self):
+        return [m.text for m in self.session.calls
+                if isinstance(m, AnswerCallbackQuery) and m.text]
+
     async def test_four_taps_make_a_booking(self):
         await self.feed(msg("/cabinet"))
         self.assertIn("🚲 Забронировать велосипед", self.labels())
         await self.feed(cb("cab:book"))
+        self.assertIn("На какой точке заберёте?", self.last_text())
+        # Порядок справочника; рядом - свободные на самой точке.
+        self.assertEqual(self.labels()[:2], ["Адоратского — свободно 1",
+                                             "Павлюхина — под запись"])
+        self.assertIn(f"cab:book:p:{self.loc2}", self.callbacks())
+        await self.feed(cb(f"cab:book:p:{self.loc1}"))
+        self.assertIn("Kugoo V3 — под запись", self.labels(),
+                      "на Павлюхина свободного нет - и счёт это говорит")
+        self.assertIn("Павлюхина", self.last_text())
+        await self.feed(cb(f"cab:book:p:{self.loc2}"))
         self.assertIn("Kugoo V3 — свободно 1", self.labels())
-        await self.feed(cb(f"cab:book:m:{self.model_id}"))
+        self.assertIn("на этой точке", self.last_text())
+        await self.feed(cb(f"cab:book:m:{self.model_id}:{self.loc2}"))
         self.assertIn("Неделя — 3 000 ₽", self.labels())
-        await self.feed(cb(f"cab:book:t:{self.model_id}:{self.tariff_id}"))
-        self.assertEqual(sorted(self.labels()[:2]), ["Адоратского", "Павлюхина"])
+        self.assertIn(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc2}",
+                      self.callbacks())
         await self.feed(cb(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc2}"))
         self.assertTrue(self.labels()[0].startswith("Сегодня"))
+        when = self.last_text()
+        self.assertIn("📍 Адоратского · 🕙 пн-пт: 09:00-21:00", when)
+        self.assertNotIn("10:00", when, "ни зашитых часов, ни соседней точки")
         tomorrow = (date.today() + timedelta(days=1)).strftime("%Y%m%d")
         await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc2}:{tomorrow}"))
         booking = await self.crm.open_booking_of(self.client["id"])
@@ -608,8 +630,17 @@ class TestBooking(CabinetCase):
 
     async def test_single_point_is_skipped_and_stale_button_says_so(self):
         await self.crm.update_location(self.loc2, active=False)
+        await self.feed(cb("cab:book"))
+        # Одна точка - шага нет, счёт по всему парку, как до выбора точки.
+        self.assertIn("Kugoo V3 — свободно 1", self.labels())
+        self.assertIn(f"cab:book:m:{self.model_id}:{self.loc1}", self.callbacks())
+        # Кнопки прежнего порядка (без точки) при одной точке работают.
+        await self.feed(cb(f"cab:book:m:{self.model_id}"))
+        self.assertIn(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc1}",
+                      self.callbacks())
         await self.feed(cb(f"cab:book:t:{self.model_id}:{self.tariff_id}"))
         self.assertTrue(self.labels()[0].startswith("Сегодня"), self.labels())
+        self.assertIn("📍 Павлюхина · 🕙 пн-вс: 10:00-19:00", self.last_text())
         today = date.today().strftime("%Y%m%d")
         self.assertIn(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:{today}",
                       self.callbacks())
@@ -619,6 +650,46 @@ class TestBooking(CabinetCase):
                           "неделя вперёд - кнопка чужая")
         await self.feed(cb("cab:book:m:999"))
         self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+        self.assertEqual(self.alerts(), [texts.CAB_BOOK_STALE] * 2)
+
+    async def test_old_buttons_without_a_point_are_stale_among_several(self):
+        """Кнопка прежнего порядка несла «свободно N» по всем точкам: при
+        нескольких точках она не падает, а просит начать заново."""
+        stale = (f"cab:book:m:{self.model_id}", f"cab:book:t:{self.model_id}:{self.tariff_id}",
+                 f"cab:book:m:{self.model_id}:0", "cab:book:p:0", "cab:book:p:999")
+        for data in stale:
+            await self.feed(cb(data))
+            self.assertEqual(self.alerts()[-1], texts.CAB_BOOK_STALE, data)
+        self.assertEqual(len(self.alerts()), len(stale))
+        # Кнопка точки прежнего порядка - тот же шаг, что срок нового.
+        await self.feed(cb(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc1}"))
+        self.assertTrue(self.labels()[0].startswith("Сегодня"), self.labels())
+        self.assertIn("📍 Павлюхина · 🕙 пн-вс: 10:00-19:00", self.last_text())
+        # Точка без режима в справочнике: часы не выдумываем.
+        await self.crm.update_location(self.loc2, hours=None)
+        await self.feed(cb(f"cab:book:l:{self.model_id}:{self.tariff_id}:{self.loc2}"))
+        self.assertEqual(self.last_text(), "Когда приедете?")
+        # Точку закрыли, пока клиент выбирал день: заявку туда не пишем.
+        await self.crm.update_location(self.loc1, active=False)
+        today = date.today().strftime("%Y%m%d")
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:{today}"))
+        self.assertEqual(self.alerts()[-1], texts.CAB_BOOK_STALE)
+        self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+        await self.feed(cb(f"cab:book:p:{self.loc1}"))
+        self.assertEqual(self.alerts()[-1], texts.CAB_BOOK_STALE)
+
+    async def test_without_a_directory_the_old_hours_stay(self):
+        for loc in (self.loc1, self.loc2):
+            await self.crm.update_location(loc, active=False)
+        await self.feed(cb("cab:book"))
+        self.assertIn(f"cab:book:m:{self.model_id}:0", self.callbacks())
+        await self.feed(cb(f"cab:book:m:{self.model_id}:0"))
+        await self.feed(cb(f"cab:book:l:{self.model_id}:{self.tariff_id}:0"))
+        self.assertIn("с 10:00 до 19:00", self.last_text())
+        today = date.today().strftime("%Y%m%d")
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:0:{today}"))
+        booking = await self.crm.open_booking_of(self.client["id"])
+        self.assertIsNone(booking["location_id"])
 
     async def test_booking_is_refused_during_a_rental(self):
         await self.crm_rental(self.client)
@@ -626,6 +697,79 @@ class TestBooking(CabinetCase):
         self.assertNotIn("🚲 Забронировать велосипед", self.labels())
         await self.feed(cb("cab:book"))
         self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+
+
+class TestPointHours(CabinetCase):
+    """Часы в текстах про выдачу и сдачу - из справочника точек: про
+    конкретную аренду - её точки, про «вообще» - всех открытых."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Снимок точек общий на процесс и живёт пять минут: оставшийся от
+        # соседнего теста подменил бы справочник этого.
+        points.reset()
+        self.approved_user(act_in_signed_at="вчера",
+                           rent_until=date.today() + timedelta(days=2),
+                           issue_data={"bike_model": "Kugoo V3"})
+        for name, hours in (("Павлюхина", "пн-вс: 10:00-19:00"),
+                            ("Адоратского", "пн-пт: 09:00-21:00")):
+            await self.crm.create_location(name=name, city="Казань", address=None,
+                                           note=None, hours=hours)
+
+    async def asyncTearDown(self):
+        points.reset()
+        await super().asyncTearDown()
+
+    async def rent_at(self, location):
+        client = await self.crm_client(tg_id=USER_ID)
+        await self.crm.create_rental(
+            client_id=client["id"], bike_id=None, tariff_id=None, tariff_name="Неделя",
+            period_days=7, price=D(3000), billing="auto", started_on=date.today(),
+            contract_no=None, created_by="test", location=location)
+
+    async def close_request(self):
+        await self.feed(msg("🔚 Закрыть аренду"))
+        await self.feed(msg("выхожу на основную работу"))
+        return self.last_text()
+
+    async def test_close_request_lists_every_point_since_any_accepts(self):
+        """«Принимаем на любой точке» - значит часы каждой: одни часы точки
+        аренды (пн-вс) позвали бы на Адоратского в воскресенье."""
+        await self.rent_at("Павлюхина")
+        text = await self.close_request()
+        self.assertIn("Запрос на закрытие передан", text)
+        self.assertIn("на любой точке", text)
+        self.assertIn("Часы работы точек:", text)
+        self.assertIn("📍 Павлюхина · 🕙 пн-вс: 10:00-19:00", text)
+        self.assertIn("📍 Адоратского · 🕙 пн-пт: 09:00-21:00", text)
+        self.assertTrue(text.endswith("Акт возврата на подтверждение."), text)
+
+    async def test_rent_request_names_the_open_points(self):
+        self.db.users[USER_ID]["act_out_signed_at"] = "сегодня"
+        closed = next(loc for loc in await self.crm.locations() if loc["name"] == "Павлюхина")
+        await self.crm.update_location(closed["id"], active=False)
+        await self.feed(msg("🚲 Арендовать"))
+        text = self.last_text()
+        self.assertIn("Заявка на аренду передана", text)
+        self.assertIn("Часы работы точки:\n📍 Адоратского", text,
+                      "закрытую точку клиенту не называем")
+        self.assertNotIn("Павлюхина", text)
+
+    async def test_reminder_names_the_point_of_its_rental(self):
+        from app import tasks
+        await self.rent_at("Павлюхина")
+        sent, _ = await tasks.remind_once(self.bot, self.db, self.cfg, today=date.today(),
+                                          crm=self.crm)
+        self.assertEqual(sent, 1)
+        text = self.last_text()
+        self.assertIn("заканчивается", text)
+        self.assertIn("📍 Павлюхина · 🕙 пн-вс: 10:00-19:00", text)
+        self.assertNotIn("Адоратского", text)
+
+    async def test_bot_without_crm_keeps_the_old_hours(self):
+        from app import tasks
+        await tasks.remind_once(self.bot, self.db, self.cfg, today=date.today())
+        self.assertIn("Работаем ежедневно с 10:00 до 19:00.", self.last_text())
 
 
 class TestBotSync(CabinetCase):

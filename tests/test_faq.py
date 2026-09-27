@@ -20,6 +20,7 @@ from app import (
     texts,  # noqa: E402
 )
 from app import faq_i18n as i18n  # noqa: E402
+from app import i18n as i18n_packs  # noqa: E402
 from app.crm import points  # noqa: E402
 
 DAY = datetime(2026, 8, 10, 12, 0)      # рабочее время
@@ -667,6 +668,78 @@ class TestPointsSnapshot(unittest.TestCase):
         text = faq.answer(faq.BY_CODE["ADDR"], now=DAY, points=points.snapshot())
         for address in ADDRESSES:
             self.assertIn(address, text)
+
+
+class TestPointHours(unittest.TestCase):
+    """Часы в текстах про выдачу и сдачу (points.hours_note): у точки
+    справочника режим свой, общие «10–19» с ним спорили бы."""
+
+    PAVL = "📍 Май Байк — Павлюхина · 🕙 пн-вс: 10:00-19:00"
+    VOSS = "📍 Восстания · 🕙 пн-пт: 09:00-21:00"
+
+    def setUp(self):
+        points.reset()
+
+    def tearDown(self):
+        points.reset()
+
+    def test_without_a_directory_the_old_hours_stay(self):
+        self.assertEqual(points.hours_note("ru"), "\n" + texts.HOURS_DEFAULT)
+        self.assertIn("10:00", points.hours_note("ru", "Павлюхина", rows=[]))
+        self.assertEqual(points.hours_note("en"), "\n" + i18n_packs.PACKS["en"]["HOURS_DEFAULT"])
+
+    def test_every_open_point_with_hours_is_listed(self):
+        """Точку без режима пропускаем: выдумывать ей часы нельзя."""
+        points.set_snapshot(THREE_POINTS)
+        self.assertEqual(points.hours_note("ru"),
+                         f"\nЧасы работы точек:\n{self.PAVL}\n{self.VOSS}")
+
+    def test_one_point_is_named_alone(self):
+        points.set_snapshot(THREE_POINTS[2:])
+        self.assertEqual(points.hours_note("ru"), f"\nЧасы работы точки:\n{self.VOSS}")
+
+    def test_a_rentals_point_names_only_its_hours(self):
+        points.set_snapshot(THREE_POINTS)
+        self.assertEqual(points.hours_note("ru", "Восстания"),
+                         f"\nЧасы работы точки:\n{self.VOSS}")
+        # Точка аренды без режима - молчим, а не называем соседнюю.
+        self.assertEqual(points.hours_note("ru", "Адоратского"), "")
+        # Точку аренды закрыли (или её нет в справочнике) - все открытые.
+        self.assertIn(self.PAVL, points.hours_note("ru", "Закрытая"))
+
+    def test_directory_rows_skip_closed_points_and_are_escaped(self):
+        rows = [{"name": "Склад", "public_title": "Склад <двор> & бокс", "hours": "10-19",
+                 "active": True},
+                {"name": "Закрытая", "hours": "круглосуточно", "active": False}]
+        note = points.hours_note("ru", rows=rows)
+        self.assertEqual(note, "\nЧасы работы точки:\n📍 Склад &lt;двор&gt; &amp; бокс · 🕙 10-19")
+
+    def test_rental_location_comes_from_the_crm_rental(self):
+        class Crm:
+            def __init__(self, rental):
+                self.rental = rental
+
+            async def client_by_tg(self, tg_id):
+                return {"id": 1} if tg_id == 5 else None
+
+            async def active_rental_of(self, client_id):
+                return self.rental
+
+        run = asyncio.run
+        self.assertEqual(run(points.rental_location(Crm({"location": "Восстания"}), 5)),
+                         "Восстания")
+        self.assertIsNone(run(points.rental_location(Crm({"location": None}), 5)))
+        self.assertIsNone(run(points.rental_location(Crm(None), 5)))
+        self.assertIsNone(run(points.rental_location(Crm({"location": "X"}), 6)))
+        self.assertIsNone(run(points.rental_location(None, 5)), "бот без CRM")
+
+        class Broken:
+            async def client_by_tg(self, tg_id):
+                raise RuntimeError("база недоступна")
+
+        with self.assertLogs("app.crm.points", "ERROR"):
+            self.assertIsNone(run(points.rental_location(Broken(), 5)),
+                              "клиенту - ответ на запрос, а не трассировка")
 
 
 class TestRenterDetection(unittest.TestCase):

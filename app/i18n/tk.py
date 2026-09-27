@@ -271,13 +271,10 @@ T: dict[str, str] = {
         "Başga welosiped almak üçin ilki häzirki kärendäni ýapyň — menýudaky "
         "«🔚 Kärendäni ýapmak» düwmesi."
     ),
-    "RENT_REQUEST_SENT": (
-        "✅ Kärende arzasy operatora ýetirildi. Ol tabşyrmagy tassyklar we "
-        "welosipediň maglumatlaryny girizer, soňra töleg möçberini we "
-        "tabşyryş Aktyny ibereris.\n"
-        "Welosipedleri her gün 10:00-dan 19:00-a çenli berýäris; şertnama "
-        "öňküsi hereket edýär."
-    ),
+    "HOURS_DEFAULT": "Her gün 10:00-dan 19:00-a çenli işleýäris.",
+    "HOURS_POINT": "Nokadyň iş wagty:\n{lines}",
+    "HOURS_POINTS": "Nokatlarymyzyň iş wagty:\n{lines}",
+    "RENT_REQUEST_SENT": "✅ Kärende arzasy operatora ýetirildi. Ol tabşyrmagy tassyklar we welosipediň maglumatlaryny girizer, soňra töleg möçberini we tabşyryş Aktyny ibereris. Şertnama öňküsi hereket edýär.{hours}",
     "RENT_REQUEST_FAILED": (
         "Tehniki näsazlyk sebäpli arzany ýetirip bolmady. Bize göni ýazyň: "
         + URL
@@ -341,12 +338,7 @@ T: dict[str, str] = {
         "gerek (meselem: «esasy işe çykýaryn»).\n\n"
         "Pikiriňizi üýtgetdiňizmi — «Ýatyrmak» düwmesine basyň."
     ),
-    "CLOSE_REQUESTED": (
-        "Ýapmak barada haýyş operatora ýetirildi. Ol siziň bilen habarlaşar "
-        "we wagty aýdar; welosipedleri her gün 10:00-dan 19:00-a çenli "
-        "islendik nokatda kabul edýäris.\n"
-        "Gözegçilikden soň tassyklamak üçin gaýtaryş Aktyny ibereris."
-    ),
+    "CLOSE_REQUESTED": "Ýapmak barada haýyş operatora ýetirildi. Ol siziň bilen habarlaşar we wagty aýdar; welosipedleri islendik nokatda kabul edýäris.{hours}\nGözegçilikden soň tassyklamak üçin gaýtaryş Aktyny ibereris.",
     "CLOSE_REQUEST_FAILED": (
         "Tehniki näsazlyk sebäpli haýyşy ýetirip bolmady. Bize göni ýazyň: "
         + URL
@@ -369,7 +361,7 @@ T: dict[str, str] = {
 
     # ── сроки и продление ──
     "BTN_EXTEND": "📅 Kärendäni uzaltmak",
-    "REMIND_SOON": "📅 Ýatlatma: <b>{bike}</b> kärendesi {until} gutarýar. Galan günler: {days}.\n\nUzaltmak isleseňiz — aşakdaky düwmä basyň, operator möçberi aýdar. Tabşyrjak bolsaňyz — menýudaky «🔚 Kärendäni ýapmak»; welosipedleri her gün 10:00-dan 19:00-a çenli kabul edýäris.",
+    "REMIND_SOON": "📅 Ýatlatma: <b>{bike}</b> kärendesi {until} gutarýar. Galan günler: {days}.\n\nUzaltmak isleseňiz — aşakdaky düwmä basyň, operator möçberi aýdar. Tabşyrjak bolsaňyz — menýudaky «🔚 Kärendäni ýapmak».{hours}",
     "REMIND_LAST_DAY": "📅 Şu gün <b>{bike}</b> kärendesiniň soňky güni ({until} çenli).\n\nUzaltmak — aşakdaky düwme. Şu gün tabşyrjak bolsaňyz — menýudaky «🔚 Kärendäni ýapmak» düwmesine basyň, wagty ylalaşarys.",
     "REMIND_OVERDUE": "⚠️ <b>{bike}</b> kärendesiniň möhleti {until} gutardy.\n\nHaýyş edýäris, aşakdaky düwme bilen uzaldyň ýa-da welosipedi tabşyryň — ýogsam şertnama boýunça peýdalanmak tölegi hasaplanmagyny dowam edýär.\nOperator bilen eýýäm ylalaşan bolsaňyz — şu habara jogap ýazyň.",
     "EXTEND_NO_RENTAL": "Sizde işjeň kärende ýok — uzaltmaly zat ýok. Welosiped almak üçin: «🚲 Kärendä almak» düwmesi.",
@@ -439,9 +431,10 @@ T: dict[str, str] = {
     "CAB_INTENT_LINE_RENEW": '📌 Siz aýtdyňyz: uzaldaryn',
     "CAB_INTENT_LINE_RETURN": '📌 Siz aýtdyňyz: tabşyraryn',
     "CAB_BOOK_MODEL": '🚲 <b>Kärende üçin arza</b>\n\nHaýsy welosiped? Ýanynda — häzir näçesi boş; boşy ýok modeli hem saýlap bolýar, nobata goýarys.',
+    "CAB_BOOK_MODEL_AT": "🚲 <b>Kärende üçin arza · {point}</b>\n\nHaýsy welosiped? Ýanynda — şu nokatda häzir näçesi boş; boşy ýok modeli hem saýlap bolýar, nobata goýarys.",
     "CAB_BOOK_TARIFF": 'Näçe möhlete?',
-    "CAB_BOOK_POINT": 'Haýsy nokatdan alarsyňyz?',
-    "CAB_BOOK_WHEN": 'Haçan gelersiňiz? Her gün 10:00-dan 19:00-a çenli berýäris.',
+    "CAB_BOOK_POINT": "🚲 <b>Kärende üçin arza</b>\n\nHaýsy nokatdan alarsyňyz? Ýanynda — ol ýerde häzir näçe welosiped boş.",
+    "CAB_BOOK_WHEN": "Haçan gelersiňiz?{hours}",
     "CAB_BOOK_DONE": '✅ Arza kabul edildi: {line}.\nOperator welosipedi taýýarlap, siziň bilen habarlaşar. Pasportyňyzy alyň.',
     "CAB_BOOK_EXISTS": 'Sizde eýýäm arza bar: {line}. Aşakdaky düwme bilen aýryp bilersiňiz.',
     "CAB_BOOK_HAS_RENTAL": 'Kärendäňiz dowam edýär — ilki welosipedi tabşyryň.',

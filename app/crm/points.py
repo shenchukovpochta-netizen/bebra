@@ -14,13 +14,21 @@
 Пустой снимок - это «справочника нет», а не «точек нет»: ответы бота
 тогда остаются зашитыми в app/faq.py. Так же читает пустой справочник
 и панель (db.location_names -> logic.LOCATIONS).
+
+Отсюда же часы работы в текстах бота (hours_note): у точек справочника
+режим свой, и общее «ежедневно 10–19» в заявке или напоминании было бы
+неправдой для точки «пн-пт 9–21».
 """
 
 from __future__ import annotations
 
+import html
 import logging
 import time
+from collections.abc import Iterable, Mapping
 from typing import Any
+
+from .. import i18n
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +63,59 @@ def set_snapshot(rows: list[dict[str, Any]] | None) -> None:
     _snapshot = [{field: str(row.get(field) or "").strip() for field in FIELDS}
                  for row in rows or () if row.get("active", True)]
     _loaded_at = time.monotonic()
+
+
+def hours_note(lang: str | None, location: str | None = None, *,
+               rows: Iterable[Mapping[str, Any]] | None = None) -> str:
+    """Часы работы для текста клиенту: приставка «\\n…» к фразе или пусто.
+
+    location - точка аренды или заявки (имя из справочника): текст про
+    неё называет её часы, а не чужие. Без точки (или её с тех пор
+    закрыли) - все открытые: одна - её часы, несколько - списком.
+    Точка без режима пропускается: выдумывать ей часы нельзя, время
+    назовёт оператор. Справочника нет (пустой снимок, бот без CRM) -
+    прежние зашитые часы, как у ответов app/faq.py.
+    rows - строки справочника, если их уже прочитали; иначе снимок.
+    """
+    open_rows = [row for row in (snapshot() if rows is None else rows)
+                 if row.get("active", True)]
+    if not open_rows:
+        return "\n" + i18n.t(lang, "HOURS_DEFAULT")
+    own = [row for row in open_rows if location and row.get("name") == location]
+    lines = [line for line in map(_hours_line, own or open_rows) if line]
+    if not lines:
+        return ""
+    key = "HOURS_POINT" if len(lines) == 1 else "HOURS_POINTS"
+    return "\n" + i18n.t(lang, key).format(lines="\n".join(lines))
+
+
+def _hours_line(row: Mapping[str, Any]) -> str:
+    """«📍 точка · 🕙 режим» - как короткий список точек в app/faq.py.
+    Значения из панели экранируются: «&» в названии - сообщение, которое
+    Telegram не разберёт."""
+    hours = str(row.get("hours") or "").strip()
+    title = str(row.get("public_title") or row.get("name") or "").strip()
+    if not hours:
+        return ""
+    return f"📍 {html.escape(title, quote=False)} · 🕙 {html.escape(hours, quote=False)}"
+
+
+async def rental_location(crm: Any, tg_id: int) -> str | None:
+    """Точка идущей аренды клиента бота - для часов в тексте про неё.
+
+    None - бот без CRM, карточки или аренды в CRM нет, или база не
+    ответила: тогда текст назовёт часы всех точек, а не упадёт. Клиенту
+    нужен ответ на его запрос, а не трассировка.
+    """
+    if crm is None:
+        return None
+    try:
+        client = await crm.client_by_tg(tg_id)
+        rental = await crm.active_rental_of(client["id"]) if client else None
+    except Exception:                                    # noqa: BLE001
+        log.exception("точка аренды клиента %s не прочитана", tg_id)
+        return None
+    return (rental or {}).get("location") or None
 
 
 def reset() -> None:

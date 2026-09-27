@@ -48,6 +48,18 @@ class TestPacks(unittest.TestCase):
                     fields(russian_source(key)), fields(value),
                     f"{code}/{key}: плейсхолдеры разошлись с русским")
 
+    def test_visit_texts_carry_no_fixed_hours(self):
+        """Часы в текстах про выдачу и сдачу - из справочника точек ({hours}):
+        зашитые «10:00–19:00» рядом с точкой «пн-пт 9–21» были бы неправдой.
+        Прежние часы живут одним ключом HOURS_DEFAULT - на бот без CRM."""
+        for key in ("RENT_REQUEST_SENT", "REMIND_SOON", "CLOSE_REQUESTED", "CAB_BOOK_WHEN"):
+            variants = [("ru", getattr(texts, key))]
+            variants += [(code, pack[key]) for code, pack in i18n.PACKS.items()]
+            for code, value in variants:
+                self.assertIn("{hours}", value, f"{code}/{key}")
+                for fixed in ("10:00", "19:00", "۱۰:۰۰", "۱۹:۰۰"):
+                    self.assertNotIn(fixed, value, f"{code}/{key}")
+
     def test_no_empty_translations(self):
         for code, pack in i18n.PACKS.items():
             for key, value in pack.items():

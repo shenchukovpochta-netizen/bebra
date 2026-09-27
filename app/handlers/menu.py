@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import faq, faq_i18n, i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import company, inbox
+from ..crm import company, inbox, points
 from ..db import Database, utcnow
 from ..filters import StateIs
 from .faq import home, reply_for
@@ -219,7 +219,9 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
         kind="other", text="Хочет арендовать снова: заявка ушла в чат договоров",
         msg_id=f"rent:{sent.message_id}", name=user.get("full_name"),
         username=user.get("username"), phone=user.get("phone"), announce=False)
-    await message.answer(i18n.t(lang, "RENT_REQUEST_SENT"),
+    # Точку заявка ещё не знает: часы всех открытых точек справочника.
+    await message.answer(i18n.t(lang, "RENT_REQUEST_SENT").format(
+                             hours=points.hours_note(lang)),
                          reply_markup=kb.main_menu(lang))
 
 
@@ -368,7 +370,11 @@ async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
                    return_chat_id=sent.chat.id, return_message_id=sent.message_id)
     await db.log_event(tg_id, "close_requested")
     lang = i18n.user_lang(user)
-    await message.answer(i18n.t(lang, "CLOSE_REQUESTED"),
+    # Сдать можно на любой точке, и текст так и говорит: часы всех открытых,
+    # каждая своим режимом. Одни часы точки аренды рядом с «на любой»
+    # позвали бы на соседнюю в её выходной.
+    hours = points.hours_note(lang)
+    await message.answer(i18n.t(lang, "CLOSE_REQUESTED").format(hours=hours),
                          reply_markup=kb.main_menu(lang))
 
 

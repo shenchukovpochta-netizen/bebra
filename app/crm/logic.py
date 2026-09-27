@@ -6583,15 +6583,21 @@ BOOKING_DAYS_AHEAD = 3
 
 
 def booking_models(models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[str, Any]],
-                   *, aliases: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+                   *, aliases: Mapping[str, str] | None = None,
+                   location: str | None = None) -> list[dict[str, Any]]:
     """Модели каталога для выбора в кабинете, со счётом свободных сейчас.
 
     Модель без свободных остаётся в списке: заявка на неё - это лист
     ожидания, и оператор увидит спрос, которого не покрыл.
+    location - выбранная точка (имя из справочника): считаются свободные
+    только на ней, иначе «свободно 2» звало бы на точку, где их нет. Без
+    неё - весь парк: так при одной точке, где место могли и не вести.
     """
     free: dict[str, int] = {}
     for bike in bikes:
         if bike.get("status") != "available":
+            continue
+        if location is not None and bike.get("location") != location:
             continue
         title = catalogue_model(bike.get("model"), aliases)
         free[title] = free.get(title, 0) + 1
@@ -6603,6 +6609,23 @@ def booking_models(models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[
         out.append({"id": int(model["id"]), "title": title, "free": free.get(title, 0)})
     out.sort(key=lambda m: (-m["free"], m["title"]))
     return out
+
+
+def booking_points(locations: Iterable[Mapping[str, Any]],
+                   models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[str, Any]],
+                   *, aliases: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """Открытые точки для первого шага заявки, со счётом свободных на каждой.
+
+    Счёт - сумма того, что на точке покажет шаг моделей: велосипед модели
+    не из каталога выбрать нельзя, и обещать его незачем. Порядок - как
+    в справочнике, а не по запасу: точку выбирают по месту, и список не
+    должен переставляться от выдачи к выдаче.
+    """
+    models, bikes = list(models), list(bikes)
+    return [{"id": int(loc["id"]), "title": str(loc.get("public_title") or loc["name"]),
+             "free": sum(m["free"] for m in booking_models(
+                 models, bikes, aliases=aliases, location=str(loc["name"])))}
+            for loc in locations if loc.get("active", True)]
 
 
 def booking_when(raw: Any, *, today: date) -> date | None:
