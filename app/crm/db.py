@@ -3584,6 +3584,14 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.cash_moves where shift_id = $1 order by id", shift_id))
 
+    # Запись без отметки смены - смене s, только если другой смены в тот
+    # момент открыто не было: при двух открытых окно времени не говорит,
+    # чья она.
+    _SHIFT_ALONE = """not exists (select 1 from crm.cash_shifts o
+                                   where o.id <> s.id
+                                     and o.opened_at <= l.created_at
+                                     and coalesce(o.closed_at, now()) > l.created_at)"""
+
     async def shift_payments(self, shift_id: int, *, cash: bool = True) -> list[dict]:
         """Платежи за время смены - из журнала клиентов. cash=False -
         всё, что НЕ наличными: переводы, СБП, карта - деньги смены, но
@@ -3592,24 +3600,47 @@ class CrmDB:
         Смена не хранит копию этих строк: копия разошлась бы с журналом
         при первой же правке платежа, а сходимость кассы держится именно
         на том, что деньги в ящике и деньги в журнале - одно и то же.
+
+        Безнал смены не помнит (shift_id ставят только наличным), и по
+        одному окну при двух открытых точках блок «не в ящике» был пуст
+        почти всегда. Поэтому он - на смене точки своей аренды
+        (_ledger_rentals, как в отчёте «По точкам»). Запись без точки и
+        смена без точки - по-старому: только если смена была одна.
         """
-        method = "l.method = 'cash'" if cash else "coalesce(l.method, '') <> 'cash'"
+        if cash:
+            return _rows(await self.pool.fetch(
+                f"""
+                select l.*, c.full_name
+                  from crm.ledger l
+                  join crm.clients c on c.id = l.client_id
+                  join crm.cash_shifts s on s.id = $1
+                 where l.kind in ('payment', 'refund') and l.method = 'cash'
+                   and l.created_at >= s.opened_at
+                   and l.created_at < coalesce(s.closed_at, now())
+                   and (l.shift_id = s.id
+                        or (l.shift_id is null and {self._SHIFT_ALONE}))
+                 order by l.id
+                """, shift_id))
+        attr = _ledger_rentals(
+            "l.kind in ('payment', 'refund') and coalesce(l.method, '') <> 'cash' "
+            "and l.created_at >= (select opened_at from crm.cash_shifts where id = $1) "
+            "and l.created_at < (select coalesce(closed_at, now()) "
+            "from crm.cash_shifts where id = $1)")
         return _rows(await self.pool.fetch(
             f"""
+            with {attr}
             select l.*, c.full_name
-              from crm.ledger l
+              from attr a
+              join crm.ledger l on l.id = a.id
               join crm.clients c on c.id = l.client_id
               join crm.cash_shifts s on s.id = $1
-             where l.kind in ('payment', 'refund') and {method}
-               and l.created_at >= s.opened_at
-               and l.created_at < coalesce(s.closed_at, now())
-               and (l.shift_id = s.id
-                    or (l.shift_id is null
-                        and not exists (select 1 from crm.cash_shifts o
-                                         where o.id <> s.id
-                                           and o.opened_at <= l.created_at
-                                           and coalesce(o.closed_at, now())
-                                               > l.created_at)))
+              left join crm.rentals r on r.id = a.rental_id
+             where l.shift_id = s.id
+                or (l.shift_id is null
+                    and (nullif(r.location, '') = nullif(s.location, '')
+                         or ((nullif(r.location, '') is null
+                              or nullif(s.location, '') is null)
+                             and {self._SHIFT_ALONE})))
              order by l.id
             """, shift_id))
 

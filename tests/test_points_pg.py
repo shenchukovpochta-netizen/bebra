@@ -717,6 +717,33 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         entry = (await self.crm.ledger_of(cid))[0]
         self.assertEqual(entry["shift_id"], s2)
 
+    async def test_non_cash_goes_to_the_shift_of_its_point(self):
+        """Смены двух точек открыты разом: безнал показывался только когда
+        смена одна, и в демо 165 смен из 183 были без него. Теперь он на
+        смене точки своей аренды; без точки - по-старому. Ящик не меняется.
+        FakeCrm считает так же."""
+        real = await _noncash_story(self.crm)
+        self.assertEqual(await _noncash_story(FakeCrm()), real)
+        self.assertEqual(real["П"]["other"], [
+            ("Н", "payment", "sbp", D(100)),         # без точки, смена одна
+            ("П", "payment", "sbp", D(3000)),
+            ("П", "payment", "card", D(1000))])      # по заявке: аренда по дню
+        self.assertEqual(real["А"]["other"], [
+            ("А", "payment", "transfer", D(2000)),
+            ("А", "refund", "sbp", D(-500))])
+        self.assertEqual(real["-"]["other"], [
+            ("П", "payment", "sbp", D(300)),         # смена без точки одна - её
+            ("Н", "payment", "card", D(60))])
+        self.assertEqual(real["П"]["cash"], [("П", "payment", "cash", D(1500))])
+        self.assertEqual(real["А"]["cash"], [], "наличные без отметки при двух сменах ничьи")
+        self.assertEqual(real["П"]["state"],
+                         (D(1500), D(4100), {"sbp": D(3100), "card": D(1000)}, D(5600)),
+                         "безнал в ожидаемое не входит")
+        self.assertEqual(real["А"]["state"],
+                         (D(0), D(1500), {"transfer": D(2000), "sbp": D(-500)}, D(1500)))
+        self.assertEqual(real["-"]["state"],
+                         (D(0), D(360), {"sbp": D(300), "card": D(60)}, D(360)))
+
     # ─── паритет с заглушкой ───
 
     async def test_fake_crm_tells_the_same_story(self):
@@ -938,6 +965,76 @@ async def _points_story(crm):
         "gorky_rentals": sorted(r["client_id"] == clients["К1"]
                                 for r in await crm.rentals(location="Горький")),
     }
+
+
+async def _noncash_story(crm):
+    """Смены Павлюхина и Адоратского разом, затем смена без точки: платёж
+    аренды, платёж без аренды в записи, возврат, клиент без аренд (Н),
+    аренда без точки (Б), наличные с отметкой и без. Только методы CrmDB,
+    общие для базы и заглушки; ключи - имена, id у них разные."""
+    pav, ado = "Павлюхина", "Адоратского"
+    known = {x["name"] for x in await crm.locations()}
+    for name in (pav, ado):
+        if name not in known:
+            await crm.create_location(name=name, city="Казань", address=None, note=None)
+    tariff = await crm.tariff(await crm.create_tariff("Неделя", 7, D("3000"), None))
+    clients, rentals = {}, {}
+    for n, (who, place) in enumerate((("П", pav), ("А", ado), ("Б", None), ("Н", None))):
+        clients[who] = await crm.create_client(full_name=who, phone=f"+7999000003{n}")
+        if who == "Н":
+            continue
+        bike = await crm.create_bike(code=f"B-{n}", model="M", location=place,
+                                     by="staff:op")
+        rentals[who] = await service.open_rental(
+            crm, client=await crm.client(clients[who]), bike=await crm.bike(bike),
+            tariff=tariff, started_on=date.today(), contract_no=None, by="staff:op",
+            billing="manual")
+
+    async def pay(who, amount, method, kind="payment", **extra):
+        await crm.add_ledger(client_id=clients[who], kind=kind, amount=D(amount),
+                             method=method, created_by="staff:op", **extra)
+
+    async def shift(location):
+        return await crm.create_shift(location=location, opening=D(0), note=None,
+                                      by="staff:op")
+
+    async def close(shift_id):
+        await crm.close_shift(shift_id, counted=D(0), expected=D(0), note=None,
+                              by="staff:op")
+
+    shifts = {"П": await shift(pav)}
+    await pay("Н", 100, "sbp")                   # без точки, смена одна - её
+    await pay("А", 150, "sbp")                   # чужой точки - ничей, хоть смена одна
+    shifts["А"] = await shift(ado)
+    await pay("П", 3000, "sbp", rental_id=rentals["П"])
+    await pay("П", 1000, "card")                 # по заявке: аренды в записи нет
+    await pay("А", 2000, "transfer", rental_id=rentals["А"])
+    await pay("А", -500, "sbp", kind="refund", rental_id=rentals["А"])
+    await pay("Н", 700, "sbp")                   # без точки, смен две - ничей
+    await pay("Б", 400, "sbp", rental_id=rentals["Б"])   # аренда без точки - ничей
+    await pay("П", 1500, "cash", shift_id=shifts["П"])
+    await pay("А", 600, "cash")                  # наличные без отметки при двух - ничьи
+    await close(shifts["А"])
+    shifts["-"] = await shift(None)
+    await pay("А", 800, "sbp")                   # смена точки закрыта - ничей
+    await pay("Н", 50, "sbp")                    # без точки, смен две - ничей
+    await close(shifts["П"])
+    await pay("П", 300, "sbp")                   # смена точки закрыта, без точки одна - её
+    await pay("Н", 60, "card")
+
+    def rows(payments):
+        return [(p["full_name"], p["kind"], p["method"], p["amount"]) for p in payments]
+
+    out = {}
+    for key, sid in shifts.items():
+        cash = await crm.shift_payments(sid)
+        other = await crm.shift_payments(sid, cash=False)
+        state = logic.shift_state(await crm.cash_shift(sid), cash,
+                                  await crm.cash_moves(sid), other=other)
+        out[key] = {"cash": rows(cash), "other": rows(other),
+                    "state": (state["expected"], state["other"], state["by_method"],
+                              state["revenue"])}
+    return out
 
 
 POINTS = ("Павлюхина", "Адоратского", "Чистопольская", None)

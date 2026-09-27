@@ -40,12 +40,15 @@
     <tr>
       <td>{{ p.created_at|dmy }}</td>
       <td>{{ METHODS.get(p.method, p.method or 'не указано') }}</td>
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ p.client_id }}">{{ p.full_name }}</a>{% else %}{{ p.full_name }}{% endif %}</td>
+      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ p.client_id }}">{{ p.full_name }}</a>{% else %}{{ p.full_name }}{% endif %}{% if p.rental_id %} <small class="muted"><a href="/rentals/{{ p.rental_id }}">аренда #{{ p.rental_id }}</a></small>{% endif %}</td>
       <td class="num">{{ money(p.amount) }}</td>
       <td class="opt muted">{{ p.created_by or '—' }}</td>
     </tr>
     {% else %}<tr><td colspan="5" class="muted">За смену не наличными не платили.</td></tr>{% endfor %}
   </table>
+  <p class="muted">Безнал — по точке аренды платежа, как в отчёте «По точкам»:
+    смены точек открыты разом, и время не говорит, чей он. Платёж без точки,
+    как и любой платёж в смене без точки, виден, только когда смена была одна.</p>
 </section>
 
 <section class="card">

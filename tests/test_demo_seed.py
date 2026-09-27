@@ -304,6 +304,15 @@ class TestDemoSeed(unittest.IsolatedAsyncioTestCase):
                     or l.created_at >= coalesce(s.closed_at, 'infinity'))
             """)
         self.assertEqual(loose, 0, "наличные - внутри окна своей смены")
+        # Безнал - на смене точки своей аренды: по одному окну времени при
+        # точках, открытых разом, он был пуст в 165 сменах из 183.
+        seen, empty = [], 0
+        for shift in shifts:
+            other = await self.crm.shift_payments(shift["id"], cash=False)
+            empty += not other
+            seen += [p["id"] for p in other]
+        self.assertEqual(len(seen), len(set(seen)), "безнал - не больше чем в одной смене")
+        self.assertLess(empty, len(shifts) // 4, "безнал виден почти в каждой смене")
 
     async def test_phones_cannot_be_dialled(self):
         """Ни одного живого номера: код +7 000 не выдан никому. Прежний

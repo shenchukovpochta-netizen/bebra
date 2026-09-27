@@ -683,6 +683,51 @@ class TestCashPanel(tw.WebCase):
         self.assertEqual(state["revenue"], D(1000))
         self.assertEqual(state["cash"], D(0))
 
+    def test_non_cash_shows_on_the_shift_of_its_point(self):
+        """Смены двух точек открыты разом: безнал пропадал из обеих. Теперь
+        он - на смене точки своей аренды, и на /cash, и в карточке смены;
+        в ящик по-прежнему не идёт."""
+        pav = self.open_shift(opening="1000")
+        r = self.client.post("/cash", data={"location": "Адоратского",
+                                            "opening": "0", "note": ""})
+        ado = int(r.headers["location"].rsplit("/", 1)[1])
+        other = tw.run(self.crm.create_client(full_name="Петров Пётр",
+                                              phone="+79990000001"))
+        tariff = tw.run(self.crm.tariff(self.tariff_id))
+        spare = tw.run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        for cid, bike, point in ((self.client_id, self.bike_id, "Павлюхина"),
+                                 (other, spare, "Адоратского")):
+            tw.run(service.open_rental(
+                self.crm, client=tw.run(self.crm.client(cid)),
+                bike=tw.run(self.crm.bike(bike)), tariff=tariff,
+                started_on=date.today(), contract_no=None, by="t", billing="manual",
+                location=point))
+        ivanov = tw.run(self.crm.client(self.client_id))
+        petrov = tw.run(self.crm.client(other))
+        for client, kind, amount, method in ((ivanov, "payment", 3000, "sbp"),
+                                             (petrov, "payment", 2000, "card"),
+                                             (petrov, "refund", 500, "card")):
+            tw.run(service.add_entry(self.crm, client, kind=kind, amount=D(amount),
+                                     method=method, note=None, by="t"))
+
+        page = self.get_ok("/cash")
+        cards = {s.split("</h2>", 1)[0]: s for s in page.split("<h2>Открыта смена ")[1:]}
+        pav_card = next(v for k, v in cards.items() if "Павлюхина" in k)
+        ado_card = next(v for k, v in cards.items() if "Адоратского" in k)
+        self.assertIn(f"СБП {logic.money(D(3000))}", pav_card)
+        self.assertNotIn("Карта", pav_card)
+        self.assertIn(f"<b>{logic.money(D(1500))}</b><span>не в ящике", ado_card,
+                      "платёж минус возврат")
+        self.assertIn(f"Карта {logic.money(D(1500))}", ado_card)
+        self.assertIn(f"<b>{logic.money(D(1000))}</b><span>должно быть в ящике", pav_card)
+
+        mine, theirs = self.get_ok(f"/cash/{pav}"), self.get_ok(f"/cash/{ado}")
+        self.assertIn("Иванов Иван", mine)
+        self.assertNotIn("Петров Пётр", mine)
+        self.assertIn("Петров Пётр", theirs)
+        self.assertIn(logic.money(D(-500)), theirs, "возврат - строкой с минусом")
+        self.assertNotIn("Иванов Иван", theirs)
+
     def test_second_shift_on_the_same_point_is_refused(self):
         self.open_shift()
         r = self.client.post("/cash", data={"location": "Павлюхина", "opening": "0"})

@@ -2656,11 +2656,25 @@ class FakeCrm:
                 best[key] = s
         return [dict(s) for s in best.values()]
 
+    def _shift_owns(self, shift_id, here, entry, *, cash):
+        """Запись без отметки смены - этой ли смены: наличные по окну,
+        безнал по точке своей аренды, как в базе; без точки у записи или
+        у смены - только если смена в тот момент была одна."""
+        alone = not any(other["id"] != shift_id
+                        and other["opened_at"] <= entry["created_at"]
+                        < (other.get("closed_at") or self._now())
+                        for other in self.shifts_.values())
+        point = None if cash else self._entry_point(entry)
+        if point is not None and point == here:
+            return True
+        return (point is None or here is None) and alone
+
     async def shift_payments(self, shift_id, *, cash=True):
         shift = self.shifts_.get(shift_id)
         if shift is None:
             return []
         until = shift.get("closed_at") or self._now()
+        here = shift.get("location") or None
         rows = []
         for entry in self.ledger_:
             if entry["kind"] not in ("payment", "refund"):
@@ -2672,10 +2686,7 @@ class FakeCrm:
             if entry.get("shift_id") is not None:
                 if entry["shift_id"] != shift_id:
                     continue
-            elif any(other["id"] != shift_id
-                     and other["opened_at"] <= entry["created_at"]
-                     < (other.get("closed_at") or self._now())
-                     for other in self.shifts_.values()):
+            elif not self._shift_owns(shift_id, here, entry, cash=cash):
                 continue
             client = self.clients_.get(entry["client_id"]) or {}
             rows.append({**entry, "full_name": client.get("full_name")})

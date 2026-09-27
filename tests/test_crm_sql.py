@@ -182,6 +182,8 @@ class TestCrmSql(unittest.TestCase):
             self.db.update_location(1, city="Казань", sort=10),
             self.db.rename_location(1, "Новая"),
             self.db.cash_shift_for("staff:a"), self.db.cash_shift_for(None),
+            # безнал смены - по точке своей аренды, наличные - по отметке
+            self.db.shift_payments(1), self.db.shift_payments(1, cash=False),
             # заявка отдаёт мастеру выдачи имя своей точки, а не только вывеску
             self.db.booking(1), self.db.bookings(status="new"), self.db.open_booking_of(1),
             # аналитика по точкам: одно правило денег на окупаемость и точки
