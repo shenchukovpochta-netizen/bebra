@@ -78,6 +78,11 @@ class TestPlanLogic(unittest.TestCase):
         self.assertEqual(logic.plan_progress(plan, {"revenue": D(0)}, days_in_month=30,
                                              days_passed=0)["forecast"], D(0),
                          "в первый день делить не на что")
+        # Оценка - в целых рублях: 2 107 700 за 27 дней из 30.
+        got = logic.plan_progress(plan, {"revenue": D(2107700)}, days_in_month=30,
+                                  days_passed=27)
+        self.assertEqual(got["forecast"], D(2341889))
+        self.assertEqual(logic.money(got["forecast"]), "2 341 889 ₽")
 
     def test_month_from_the_address_never_goes_into_the_future(self):
         today = date(2026, 9, 18)

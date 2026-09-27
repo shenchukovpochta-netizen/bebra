@@ -825,7 +825,7 @@ class FakeCrm:
 
     async def ledger(self, *, since=None, until=None, kind=None, limit=1000):
         rows = []
-        for x in reversed(self.ledger_):
+        for x in sorted(self.ledger_, key=lambda x: (x["created_at"], x["id"]), reverse=True):
             d = x["created_at"].date()
             if since and d < since:
                 continue

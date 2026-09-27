@@ -104,9 +104,9 @@
          первого месяца истории. #}
       <span class="muted">{% if span.prev_key %}<a href="/?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %} {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a href="/?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}</span></h2>
     <span class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день{% if plan.source == 'points' %} · сумма планов {{ plan.points.count }} точек{% endif %}</span></div>
-  <div class="tiles">
+  <div class="tiles wide">
     <div class="tile"><b>{{ money(progress.target) }}</b><span>план месяца</span></div>
-    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>{% if span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}<br><small class="muted">ровным темпом было бы {{ money(progress.pace) }}</small></span></div>
+    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>{% if span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}<br><small class="muted">ровным темпом было бы <span class="nowrap">{{ money(progress.pace) }}</span></small></span></div>
     <div class="tile"><b>{% if progress.percent is none %}—{% else %}{{ progress.percent }} %{% endif %}</b><span>плана выполнено</span></div>
     {% if span.is_current %}
     <div class="tile {% if progress.forecast_ok %}good{% else %}warn{% endif %}"><b>{{ money(progress.forecast) }}</b><span>прогноз по темпу<br><small class="muted">столько придёт к концу месяца, если ничего не менять</small></span></div>
@@ -260,7 +260,7 @@
       <td><a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="muted">{{ b.model }}</span></td>
       <td>{{ BIKE_STATUSES[b.status] }}</td>
       <td class="num">{{ b.idle_days }}</td>
-      {% if money_ok %}<td class="num bad">−{{ money(b.lost) }}</td>{% endif %}
+      {% if money_ok %}<td class="num {% if b.lost %}bad{% endif %}">{% if b.lost %}−{{ money(b.lost) }}{% else %}—{% endif %}</td>{% endif %}
     </tr>
     {% endfor %}
   </table>

@@ -13,7 +13,7 @@
   <a class="btn ghost" href="/finance.xlsx?since={{ since|iso }}&until={{ until|iso }}&kind={{ kind }}">Excel</a>
   <a class="btn ghost" href="/finance.csv?since={{ since|iso }}&until={{ until|iso }}&kind={{ kind }}">CSV</a>
 </div>
-<div class="tiles">
+<div class="tiles wide">
   <div class="tile"><b>{{ money(totals.get('payment', 0)) }}</b><span>платежи</span></div>
   <div class="tile"><b>{{ money(-totals.get('charge', 0)) }}</b><span>начисления</span></div>
   <div class="tile"><b>{{ money(-totals.get('fine', 0)) }}</b><span>штрафы / ремонт</span></div>

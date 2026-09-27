@@ -3011,9 +3011,11 @@ def plan_progress(plan: dict[str, Any], metrics: dict[str, Any], *,
     left = max(target - fact, Decimal(0))
     days_left = days_in_month - days_passed
     # Прогноз - тем же темпом до конца месяца: «придёт столько, если
-    # ничего не менять». Не обещание, а ответ на «успеваем или нет».
-    forecast = (to_money(fact * days_in_month / days_passed)
-                if days_passed > 0 else Decimal(0))
+    # ничего не менять». Не обещание, а ответ на «успеваем или нет»,
+    # поэтому в целых рублях: копейки оценки - ложная точность, и в
+    # плитке «2 341 888,89 ₽» не влезало в строку.
+    forecast = (to_money(fact * days_in_month / days_passed).quantize(
+        Decimal(1), rounding=ROUND_HALF_UP) if days_passed > 0 else Decimal(0))
     return {
         "target": target, "fact": fact, "pace": pace, "left": left,
         "forecast": forecast,

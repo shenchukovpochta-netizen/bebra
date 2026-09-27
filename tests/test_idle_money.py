@@ -126,6 +126,16 @@ class TestIdleMoneyPages(tw.WebCase):
         self.assertIn("Стоят дольше всех", text)
         self.assertIn("B-1", text)
 
+    def test_zero_days_cost_nothing_not_minus_zero(self):
+        """Встал сегодня - ноль суток и прочерк в «Потеряно», а не «−0 ₽»:
+        минус у нуля читается как убыток, которого нет."""
+        self.stand(0)
+        for path in ("/", "/reports/points/none"):
+            text = self.get_ok(path)
+            with self.subTest(path):
+                self.assertIn("B-1", text)
+                self.assertNotIn("−0 ₽", text)
+
     def test_money_is_hidden_from_staff_without_finance(self):
         self.stand(7)
         profile = _run(self.crm.create_access_profile(

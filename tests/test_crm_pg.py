@@ -189,6 +189,24 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m["idle_percent"], 30.0)
         self.assertEqual(m["avg_check"], D("500.00"))
 
+    async def test_ledger_goes_by_date(self):
+        """Журнал финансов - по дате записи: бонус по скриншоту или выписка
+        задним числом получают номер строки позже сегодняшних платежей, но
+        встают на свою дату, а не наверх страницы."""
+        await self.seed()
+        from datetime import UTC, date, datetime, timedelta
+        now = datetime.now(UTC)
+        today = await self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                          amount=D("3500"), created_at=now)
+        late = await self.crm.add_ledger(client_id=self.client_id, kind="bonus",
+                                         amount=D("300"),
+                                         created_at=now - timedelta(days=3))
+        self.assertGreater(late, today)
+        rows = await self.crm.ledger(since=date.today() - timedelta(days=5),
+                                     until=date.today())
+        order = [r["id"] for r in rows if r["id"] in (today, late)]
+        self.assertEqual(order, [today, late])
+
     async def test_repair_by_node(self):
         await self.seed()
         from datetime import UTC, datetime, timedelta

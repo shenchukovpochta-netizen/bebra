@@ -86,6 +86,13 @@ h1 small{font:500 13px/1 var(--font-text);letter-spacing:0;text-transform:none}
 
 /* плитки сводки: цифры Unbounded, «горячая» — оранжевая */
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px}
+/* Плитки миллионов (план, журнал финансов): «2 084 600 ₽» в 160
+   пикселей не влезает, и «₽» уезжал на свою строку. */
+.tiles.wide{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+/* Готовность: две таблицы подряд - колонки одной ширины. */
+table.ready th:first-child{width:190px}
+table.ready th:last-child{width:110px}
+table.ready td:last-child{white-space:nowrap}
 /* Задачи на сегодня: число слева, дело справа, цвет по уровню. */
 .tasks{display:grid;gap:4px}
 .task{display:flex;gap:12px;align-items:baseline;padding:7px 10px;border-radius:10px;color:var(--text)}
@@ -141,7 +148,7 @@ table.editable td.grow input{width:100%;min-width:80px}
   table.editable td.actions button{padding:4px 8px;font-size:12px}
 }
 @media (max-width:700px){.scroll-hint{display:block}}
-td.nowrap,th.nowrap{white-space:nowrap}
+td.nowrap,th.nowrap,span.nowrap{white-space:nowrap}
 td.actions{white-space:nowrap;text-align:right}
 td.actions button{padding:5px 10px;font-size:13px}
 input.mini{text-align:right;font-variant-numeric:tabular-nums}
@@ -195,13 +202,16 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
   /* Вкладки без пробелов между ссылками строкой не переносятся и
      раздвигали страницу вбок («Настройки»); «В ремонте» рвалось надвое. */
   .tabs{display:flex;flex-wrap:wrap;gap:2px}
+  /* Строка поиска - во всю ширину: в ширину по умолчанию подсказка
+     «клиент, телефон, № велосипеда…» обрезалась на середине. */
+  .search input[name=q]{flex:1 1 100%}
 }
 @media (max-width:640px) and (prefers-color-scheme:dark){
   table.cards tr.warn-row{background:#3A2E1C}
   table.cards tr.bad-row{background:#40201F}
 }
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
-.tag{display:inline-block;padding:2px 9px;border-radius:999px;background:var(--chip);font-size:12px;font-weight:500;vertical-align:middle;color:var(--brand-dark)}
+.tag{display:inline-block;padding:2px 9px;border-radius:999px;background:var(--chip);font-size:12px;font-weight:500;vertical-align:middle;color:var(--brand-dark);white-space:nowrap}
 .tag.available,.tag.active{background:#E4F5E4;color:var(--ok)}
 .tag.rented{background:var(--brand);color:#fff}
 .tag.repair,.tag.reserved{background:var(--brand-pale);color:var(--brand-dark)}

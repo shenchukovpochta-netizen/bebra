@@ -1071,11 +1071,14 @@ class CrmDB:
             conds.append(f"l.kind = ${len(args)}")
         where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)
+        # Журнал - по дате записи, а не по номеру строки: запись задним
+        # числом (выписка банка, бонус по скриншоту, импорт) иначе вставала
+        # наверх страницы среди сегодняшних, и колонка «Дата» шла вразброд.
         return _rows(await self.pool.fetch(
             f"""
             select l.*, c.full_name
             from crm.ledger l join crm.clients c on c.id = l.client_id
-            {where} order by l.id desc limit ${len(args)}
+            {where} order by l.created_at desc, l.id desc limit ${len(args)}
             """, *args))
 
     async def ledger_totals(self, *, since: date | None = None,

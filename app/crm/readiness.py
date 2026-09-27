@@ -63,7 +63,7 @@ def check_company(settings: Mapping[str, Any]) -> dict[str, Any]:
     if missing:
         return item("company", "Реквизиты организации", TODO,
                     "Не заполнено: " + ", ".join(missing) + ". В поставочных договоре, "
-                    "актах и политике арендодатель - только подстановки: пустое поле "
+                    "актах и политике арендодатель — только подстановки: пустое поле "
                     "уйдёт клиенту прочерком.", href="/company", link="Заполнить")
     return item("company", "Реквизиты организации", OK,
                 f"{settings.get('company_short') or settings.get('company_name')}, "
@@ -136,11 +136,11 @@ def check_prices(models: Iterable[Mapping[str, Any]],
     if without:
         return item("prices", "Модели и тарифы", WARN,
                     "По запасному тарифу: " + ", ".join(without) + ". Если цена у них "
-                    "своя - заведите её, иначе выдача возьмёт общую.",
+                    "своя — заведите её, иначе выдача возьмёт общую.",
                     href="/tariffs", link="Тарифы")
     return item("prices", "Модели и тарифы", OK,
                 f"Моделей в каталоге: {len(catalogue)}, у каждой своя цена. Цены и "
-                "каталог свежей базы - поставочные: сверьте со своими.",
+                "каталог свежей базы — поставочные: сверьте со своими.",
                 href="/tariffs", link="Тарифы")
 
 
@@ -148,7 +148,7 @@ def check_staff(staff: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     active = [s for s in staff if s.get("active", True)]
     if len(active) <= 1:
         return item("staff", "Сотрудники", TODO,
-                    "В панели только администратор. У оператора и механика - свои "
+                    "В панели только администратор. У оператора и механика — свои "
                     "входы и права: иначе в журналах один автор на всех.",
                     href="/staff", link="Завести сотрудника")
     return item("staff", "Сотрудники", OK, f"Активных входов: {len(active)}.",
@@ -156,7 +156,7 @@ def check_staff(staff: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def check_bot(state: Mapping[str, Any]) -> dict[str, Any]:
-    how = ("Токен - в secrets/bot_token, затем «docker compose up -d crm» "
+    how = ("Токен — в secrets/bot_token, затем «docker compose up -d crm» "
            "(INSTALL.md, шаги 2 и 7).")
     if state.get("ok") is None:
         return item("bot", "Бот и панель", TODO,
@@ -189,7 +189,7 @@ def check_bank(last: Mapping[str, Any] | None, now: datetime) -> dict[str, Any]:
         return item("bank", "Выписка по счёту", OFF,
                     "Выписка ни разу не приходила: переводы на счёт зачисляются только "
                     "руками по заявке клиента.",
-                    how="Токен Точки и TOCHKA_ACCOUNT_ID в .env - выписку тянет бот "
+                    how="Токен Точки и TOCHKA_ACCOUNT_ID в .env — выписку тянет бот "
                         "(CRM.md, «Банк: выписка Точки и зачисление»).",
                     href="/bank", link="Выписка", required=False)
     seen = last.get("created_at") or last.get("booked_at")
@@ -262,8 +262,8 @@ def check_backup() -> dict[str, Any]:
     return item("backup", "Бэкап базы", UNKNOWN,
                 "Каталог бэкапов панели не смонтирован намеренно: дамп всей базы не "
                 "должен быть доступен процессу, который смотрит в интернет.",
-                how="На сервере: «ls -lt backups/ | head» - сверху mybike-<сегодня>.sql.gz. "
-                    "Нет его - «docker compose logs backup».", required=False)
+                how="На сервере: «ls -lt backups/ | head» — сверху mybike-<сегодня>.sql.gz. "
+                    "Нет его — «docker compose logs backup».", required=False)
 
 
 def checks(*, settings: Mapping[str, Any], consent: str,
