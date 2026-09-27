@@ -140,9 +140,275 @@ class TestScripts(unittest.TestCase):
                     self.assertIn(error, r.stderr, env)
 
     def test_scripts_parse(self):
-        for name in ("bootstrap.sh", "install.sh"):
+        for name in ("bootstrap.sh", "install.sh", "update.sh"):
             r = subprocess.run(["bash", "-n", str(ROOT / name)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_deploy_does_not_overwrite_server_documents(self):
+        """deploy.ps1 - путь обновления установки из исходников. Поставочные
+        docx несут одни подстановки, серверные - реквизиты владельца текстом:
+        залитые поверх, они ушли бы клиентам с прочерками. Документ, которого
+        на сервере нет, доезжает - без файла бот не поднимется."""
+        text = (ROOT / "deploy.ps1").read_text(encoding="utf-8-sig")
+        app_list = re.search(r"(?ms)^\$app = @\((.*?)\)$", text).group(1)
+        self.assertNotIn(".docx", app_list, "docx в $app уедут прямо в app/ поверх своих")
+        docs = set(re.findall(r"'(app/[\w.]+\.docx)'",
+                              re.search(r"(?ms)^\$docs = @\((.*?)\)$", text).group(1)))
+        self.assertEqual(docs, {p.relative_to(ROOT).as_posix()
+                                for p in (ROOT / "app").glob("*.docx")})
+        self.assertIn('scp $docs      "${Server}:${Path}/.docx-new/"', text)
+        self.assertIn("ssh $Server \"cd '$Path' && $keepDocs\"", text)
+        keep = re.search(r"(?m)^\$keepDocs = '([^']*)'$", text).group(1)
+        self.assertNotIn('"', keep, "PowerShell 5 теряет двойные кавычки по пути в ssh")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for name, body in (("app/contract_template.docx", "свой договор"),
+                               (".docx-new/contract_template.docx", "поставочный"),
+                               (".docx-new/new_act_template.docx", "новый вид")):
+                (base / name).parent.mkdir(parents=True, exist_ok=True)
+                (base / name).write_text(body, encoding="utf-8")
+            r = _bash(keep, tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((base / "app/contract_template.docx").read_text(encoding="utf-8"),
+                             "свой договор")
+            self.assertEqual((base / "app/new_act_template.docx").read_text(encoding="utf-8"),
+                             "новый вид")
+            self.assertFalse((base / ".docx-new").exists(), "черновой каталог остался")
+
+
+# Хвост дампа - как у pg_dump 16.10 и новее (postgres:16-alpine сегодня):
+# после «dump complete» идёт «\unrestrict <ключ>», и последней строкой
+# отметка уже не бывает. Старый формат - без \restrict - тоже в ходу.
+DUMP_OK = ("--\n-- PostgreSQL database dump\n--\n\n\\restrict k3yK3y\n\n"
+           "create table x ();\n"
+           "--\n-- PostgreSQL database dump complete\n--\n\n\\unrestrict k3yK3y\n\n")
+DUMP_OK_OLD = ("--\n-- PostgreSQL database dump\n--\ncreate table x ();\n"
+               "--\n-- PostgreSQL database dump complete\n--\n\n")
+# Заглушки команд сервера: пишут вызов в журнал CALLS и отвечают так, как
+# велит окружение теста. pg_dump - по FAKE_DUMP: ok, fail (код 1) или cut
+# (код 0, но без последней строки дампа).
+STUBS = {
+    "docker": """#!/bin/sh
+echo "docker $*" >> "$CALLS"
+case "$*" in
+  *pg_dump*)
+    case "$FAKE_DUMP" in
+      fail) printf -- '-- PostgreSQL database dump\\n'; exit 1 ;;
+      cut) printf -- '-- PostgreSQL database dump\\ncreate table x ();\\n'; exit 0 ;;
+      *) printf '%s' "$DUMP_OK"; exit 0 ;;
+    esac ;;
+  *" ps"*) echo "crm   Up" ;;
+esac
+exit 0
+""",
+    "curl": '#!/bin/sh\necho "curl $*" >> "$CALLS"\nexit "${FAKE_CURL:-0}"\n',
+    "id": "#!/bin/sh\necho 0\n",
+    "sleep": "#!/bin/sh\nexit 0\n",
+}
+
+
+@unittest.skipUnless(shutil.which("bash") and shutil.which("unzip") and shutil.which("gzip"),
+                     "нужны bash, unzip и gzip")
+class TestUpdate(unittest.TestCase):
+    """update.sh на заглушках docker и curl: сервер - временный каталог со
+    своими .env, секретом и правленым договором, архив - новая версия, в
+    которой лежат и подмены, не имеющие права доехать."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.server = self.base / "opt" / "mybike-bot"
+        self.calls = self.base / "calls.log"
+        self.calls.write_text("")
+        server = {".env": 'POSTGRES_USER="mb"\nPOSTGRES_DB="mbdb"\nCRM_PORT="18080"\n',
+                  "docker-compose.yml": "old\n",
+                  "bootstrap.sh": 'echo old-bootstrap >> "$CALLS"\n',
+                  "secrets/bot_token": "настоящий токен",
+                  "app/contract_template.docx": "договор, правленый владельцем",
+                  "backups/mybike-2026-09-01.sql.gz": "вчерашний бэкап"}
+        for name, text in server.items():
+            self.put(self.server / name, text)
+        shutil.copy(ROOT / "update.sh", self.server / "update.sh")
+        bin_dir = self.base / "bin"
+        for name, text in STUBS.items():
+            self.put(bin_dir / name, text).chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                    "CALLS": str(self.calls), "DUMP_OK": DUMP_OK, "LC_ALL": "C.UTF-8"}
+
+    @staticmethod
+    def put(path: Path, text: str) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def archive(self, **override: str | None) -> Path:
+        """Архив новой версии: проект в папке mybike-bot/, как в поставке.
+        None в override - файла в архиве нет."""
+        import zipfile
+        files = {"docker-compose.yml": "new\n", "schema.sql": "-- new\r\n",
+                 "bootstrap.sh": 'echo new-bootstrap >> "$CALLS"\n', "install.sh": "true\n",
+                 "update.sh": (ROOT / "update.sh").read_text(encoding="utf-8"),
+                 ".env.example": "X=1\n", "app/web/app.py": "# new\n",
+                 "app/contract_template.docx": "поставочный договор",
+                 "app/new_act_template.docx": "новый документ",
+                 ".env": "EVIL=1\n", "secrets/bot_token": "чужой токен",
+                 "backups/evil.sql.gz": "чужой дамп", **override}
+        path = self.base / "mybike-bot.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, text in files.items():
+                if text is not None:
+                    zf.writestr(f"mybike-bot/{name}", text)
+        return path
+
+    def run_update(self, *args: str, **env: str) -> subprocess.CompletedProcess:
+        # Не из каталога проекта: скрипт обязан перейти туда сам.
+        return subprocess.run(["bash", str(self.server / "update.sh"), *args],
+                              cwd=self.base, capture_output=True, text=True,
+                              env={**self.env, **env})
+
+    def read(self, name: str) -> str:
+        return (self.server / name).read_text(encoding="utf-8")
+
+    def test_refuses_without_the_archive(self):
+        r = self.run_update()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("укажите архив", r.stderr)
+        r = self.run_update(str(self.base / "нет.zip"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("нет файла", r.stderr)
+        self.assertEqual(self.calls.read_text(), "", "без архива - ни одного вызова")
+
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_relative_archive_is_taken_from_where_it_was_run(self):
+        """«bash /opt/mybike-bot/update.sh mybike-bot.zip» из /root: путь
+        архива - от каталога запуска, а не от каталога проекта."""
+        self.archive()
+        r = self.run_update("mybike-bot.zip")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.read("docker-compose.yml"), "new\n")
+
+    def test_failed_or_cut_dump_leaves_the_code_alone(self):
+        """Без дампа нет отката, поэтому дальше дампа скрипт не идёт: код,
+        бэкапы и контейнеры - как были, недописанный файл удалён."""
+        for mode, words in (("fail", "дамп не снялся"), ("cut", "дамп оборван")):
+            r = self.run_update(str(self.archive()), FAKE_DUMP=mode)
+            self.assertEqual(r.returncode, 1, mode)
+            self.assertIn(words, r.stderr)
+            self.assertEqual(self.read("docker-compose.yml"), "old\n", mode)
+            self.assertEqual(sorted(p.name for p in (self.server / "backups").iterdir()),
+                             ["mybike-2026-09-01.sql.gz"], mode)
+            self.assertNotIn("bootstrap", self.calls.read_text(), mode)
+
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_dump_of_either_pg_dump_format_is_accepted(self):
+        """Отметка «dump complete» ищется в хвосте, а не в последних
+        строках: с 16.10 за ней идёт \\unrestrict, и проверка по трём
+        строкам отвергала каждый целый дамп - обновление не шло никогда."""
+        import gzip
+        for dump in (DUMP_OK, DUMP_OK_OLD):
+            r = self.run_update(str(self.archive()), DUMP_OK=dump)
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+            self.assertEqual(self.read("docker-compose.yml"), "new\n")
+            made = sorted((self.server / "backups").glob("pre-update-*"))
+            dumps = [p for p in made if p.name.endswith(".sql.gz")]
+            self.assertEqual(len(dumps), 1)
+            self.assertEqual(gzip.decompress(dumps[0].read_bytes()).decode(), dump)
+            # следующий круг - с чистого листа: имя дампа до секунды
+            for p in made:
+                p.unlink()
+            self.put(self.server / "docker-compose.yml", "old\n")
+
+    @unittest.skipUnless(shutil.which("rsync") and shutil.which("tar"), "нужны rsync и tar")
+    def test_previous_code_is_kept_for_the_rollback(self):
+        """Прежний архив к откату обычно уже перезаписан новым: код до
+        обновления лежит рядом с дампом, без .env, секретов, docx и
+        бэкапов, и текст отката разворачивает именно его."""
+        import tarfile
+        r = self.run_update(str(self.archive()))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        codes = sorted((self.server / "backups").glob("pre-update-*-code.tar.gz"))
+        self.assertEqual(len(codes), 1)
+        with tarfile.open(codes[0]) as tf:
+            names = {n.removeprefix("./") for n in tf.getnames()}
+            self.assertEqual(tf.extractfile("./docker-compose.yml").read(), b"old\n")
+        self.assertIn("bootstrap.sh", names)
+        for secret in (".env", "secrets/bot_token", "app/contract_template.docx",
+                       "backups/mybike-2026-09-01.sql.gz"):
+            self.assertNotIn(secret, names)
+        self.assertFalse(any(n.startswith("backups") for n in names), names)
+        self.assertIn(f"tar -xzf backups/{codes[0].name}", r.stdout)
+        self.assertNotIn("прежний архив", r.stdout)
+
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_update_keeps_settings_documents_and_backups(self):
+        import gzip
+        r = self.run_update(str(self.archive()))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        dumps = sorted((self.server / "backups").glob("pre-update-*.sql.gz"))
+        self.assertEqual(len(dumps), 1)
+        self.assertIn("dump complete", gzip.decompress(dumps[0].read_bytes()).decode())
+        # код новый, а настройки, секреты, свои документы и бэкапы - свои
+        self.assertEqual(self.read("docker-compose.yml"), "new\n")
+        self.assertEqual(self.read(".env").count("EVIL"), 0)
+        self.assertEqual(self.read("secrets/bot_token"), "настоящий токен")
+        self.assertEqual(self.read("app/contract_template.docx"), "договор, правленый владельцем")
+        self.assertEqual(self.read("app/new_act_template.docx"), "новый документ",
+                         "нового документа на сервере не было - он доезжает")
+        self.assertFalse((self.server / "backups" / "evil.sql.gz").exists())
+        self.assertEqual(self.read("schema.sql"), "-- new\n", "CRLF снят")
+        calls = self.calls.read_text()
+        self.assertLess(calls.index("pg_dump -U mb -d mbdb"), calls.index("new-bootstrap"))
+        self.assertNotIn("old-bootstrap", calls)
+        self.assertIn("docker compose ps", calls)
+        self.assertIn("http://127.0.0.1:18080/healthz", calls)
+        self.assertIn("drop schema if exists crm cascade", r.stdout)
+        self.assertIn(dumps[0].name, r.stdout)
+
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_failure_after_the_code_prints_the_rollback(self):
+        r = self.run_update(str(self.archive()), FAKE_CURL="7")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("панель не отвечает", r.stderr)
+        self.assertIn("gunzip -c backups/pre-update-", r.stdout)
+        r = self.run_update(str(self.archive(**{"bootstrap.sh": "exit 1\n"})))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("bootstrap.sh не прошёл", r.stderr)
+        self.assertIn("drop schema if exists bot cascade", r.stdout)
+        # сбой посреди переноса кода (нет install.sh ни там, ни тут) - тоже откат
+        (self.server / "install.sh").unlink()
+        r = self.run_update(str(self.archive(**{"install.sh": None})))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Обновление прервано", r.stderr)
+        self.assertIn("gunzip -c backups/pre-update-", r.stdout)
+
+    def test_not_an_installed_project_is_refused(self):
+        (self.server / ".env").unlink()
+        r = self.run_update(str(self.archive()))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("install.sh", r.stderr)
+        self.assertEqual(self.calls.read_text(), "")
+
+
+class TestComposeLimits(unittest.TestCase):
+    """Предел памяти - у панели: она смотрит в интернет. База и бот без
+    предела: OOM посреди записи в журнал хуже тесноты."""
+
+    def block(self, name: str) -> str:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        found = re.search(rf"(?m)^  {re.escape(name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|^[a-z]|\Z)",
+                          compose, re.S)
+        self.assertIsNotNone(found, name)
+        return found.group(1)
+
+    def test_panel_has_a_limit_above_the_measured_peak(self):
+        m = re.search(r"(?m)^    mem_limit: (\d+)([mg])$", self.block("crm"))
+        self.assertIsNotNone(m, "у crm нет mem_limit")
+        limit = int(m.group(1)) * (2 ** 30 if m.group(2) == "g" else 2 ** 20)
+        # Замер: импорт xlsx на пределе распаковки поднимает панель до ~670 МБ.
+        self.assertGreaterEqual(limit, 900 * 2 ** 20)
+        for name in ("postgres", "bot", "backup"):
+            self.assertNotIn("mem_limit", self.block(name), name)
 
 
 def caddy_script() -> str:

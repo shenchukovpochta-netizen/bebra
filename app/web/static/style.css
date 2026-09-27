@@ -248,6 +248,7 @@ label.check input[type=checkbox]{accent-color:var(--brand)}
 .perms tr:hover td{background:var(--chip)}
 .tag.ok{background:#E4F5E4;color:var(--ok)}
 @media (prefers-color-scheme:dark){.tag.ok{background:#1F3A21}}
+.tag.warn{background:#FFF3D6;color:#7A4B00}
 /* Форма только для просмотра: fieldset[disabled] гасит поля, но рамку
    и отступы браузера в вёрстке карточки видеть не нужно. */
 fieldset.plain{border:0;margin:0;padding:0;min-width:0}

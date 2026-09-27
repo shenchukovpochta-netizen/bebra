@@ -35,17 +35,27 @@ if (-not $SkipTests) {
 # Явные списки вместо scp -r: так .env, secrets/ и __pycache__
 # не уедут на сервер по случайности.
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
-          'schema.sql', 'bootstrap.sh', 'install.sh', '.env.example', '.gitignore',
-          'README.md', 'CLAUDE.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'CODE.md', 'instrukciya-po-botu.html',
+          'schema.sql', 'bootstrap.sh', 'install.sh', 'update.sh', '.env.example', '.gitignore',
+          'README.md', 'CLAUDE.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'CODE.md', 'FRANCHISE.md',
+          'instrukciya-po-botu.html',
           'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
          'app/db.py',
          'app/logic.py', 'app/faq.py', 'app/faq_i18n.py', 'app/texts.py',
          'app/keyboards.py',
          'app/middlewares.py',
-         'app/filters.py', 'app/tasks.py', 'app/contract_template.docx',
-         'app/act_priema_template.docx', 'app/act_vozvrata_template.docx', 'app/act_vykup_template.docx',
-         'app/soglasie_template.docx', 'app/pdn_policy.docx')
+         'app/filters.py', 'app/tasks.py')
+# Документы - своим списком и не поверх: на сервере в них уже вписаны
+# реквизиты владельца или правки юриста, а поставочные несут одни
+# подстановки. Залитые поверх, они ушли бы клиентам с прочерками вместо
+# арендодателя. Доезжает только тот, которого на сервере ещё нет.
+$docs = @('app/contract_template.docx',
+          'app/act_priema_template.docx', 'app/act_vozvrata_template.docx',
+          'app/act_vykup_template.docx',
+          'app/soglasie_template.docx', 'app/pdn_policy.docx')
+# Команда для сервера - в одинарных кавычках: PowerShell не трогает `$f`.
+# Двойных кавычек в ней нет - Windows PowerShell 5 теряет их по пути в ssh.
+$keepDocs = 'for f in .docx-new/*.docx; do n=app/${f##*/}; if [ -e $n ]; then echo kept $n; else cp $f $n && echo new $n; fi; done; rm -rf .docx-new'
 # Переводы - отдельным списком: scp кладёт файлы в указанный каталог,
 # и из общего списка $app они уезжали бы в app/, а не в app/i18n/.
 $i18n = @('app/i18n/__init__.py', 'app/i18n/en.py', 'app/i18n/uz.py',
@@ -63,7 +73,7 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/banking.py', 'app/crm/mailing.py', 'app/crm/esign.py',
          'app/crm/paying.py', 'app/crm/notices.py',
          'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py',
-         'app/crm/points.py')
+         'app/crm/points.py', 'app/crm/readiness.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -124,6 +134,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/payment.html',
                   'app/web/templates/notices.html',
                   'app/web/templates/intake.html',
+                  'app/web/templates/readiness.html',
                   'app/web/templates/documents.html',
                   'app/web/templates/mailing.html',
                   'app/web/templates/campaign.html',
@@ -193,15 +204,15 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_points_web.py', 'tests/test_faq_points.py',
           'tests/test_demo_seed.py', 'tests/test_demo_service.py',
           'tests/test_demo_extras.py', 'tests/test_demo_mode.py',
-          'tests/test_demo_crawl.py')
+          'tests/test_demo_crawl.py', 'tests/test_readiness.py')
 
-foreach ($f in ($root + $app + $i18n + $handlers + $services + $max + $demo + $crm + $web +
+foreach ($f in ($root + $app + $docs + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {
   if (-not (Test-Path $f)) { throw "нет файла $f" }
 }
 
 Step "создаю каталоги на $Server"
-ssh $Server "mkdir -p '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/demo' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static/fonts' '$Path/tests'"
+ssh $Server "mkdir -p '$Path/.docx-new' '$Path/app/handlers' '$Path/app/services' '$Path/app/max' '$Path/app/demo' '$Path/app/i18n' '$Path/app/crm' '$Path/app/web/templates' '$Path/app/web/static/fonts' '$Path/tests'"
 if ($LASTEXITCODE -ne 0) { throw 'не удалось подключиться по SSH' }
 
 Step 'копирую файлы'
@@ -209,6 +220,8 @@ scp $root      "${Server}:${Path}/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (корень) не удался' }
 scp $app       "${Server}:${Path}/app/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (app) не удался' }
+scp $docs      "${Server}:${Path}/.docx-new/"
+if ($LASTEXITCODE -ne 0) { throw 'scp (документы) не удался' }
 scp $i18n      "${Server}:${Path}/app/i18n/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (i18n) не удался' }
 scp $handlers  "${Server}:${Path}/app/handlers/"
@@ -232,9 +245,13 @@ if ($LASTEXITCODE -ne 0) { throw 'scp (web/static/fonts) не удался' }
 scp $tests     "${Server}:${Path}/tests/"
 if ($LASTEXITCODE -ne 0) { throw 'scp (tests) не удался' }
 
+Step 'документы: ваши остаются, недостающие доезжают'
+ssh $Server "cd '$Path' && $keepDocs"
+if ($LASTEXITCODE -ne 0) { throw 'документы на сервере не разложены' }
+
 # CRLF в .sh ломает shebang: bash ругается на «\r: команда не найдена»
 Step 'нормализую переводы строк'
-ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh .env.example schema.sql && chmod +x bootstrap.sh install.sh"
+ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh update.sh .env.example schema.sql && chmod +x bootstrap.sh install.sh update.sh"
 
 Write-Host "`nФайлы на сервере. Дальше:" -ForegroundColor Green
 Write-Host "  ssh $Server"
@@ -243,3 +260,5 @@ Write-Host "  bash install.sh"
 Write-Host ""
 Write-Host "install.sh задаст вопросы, проверит каждый ответ через Telegram," -ForegroundColor DarkGray
 Write-Host "сам сгенерирует секреты и запустит бота. Править .env не нужно." -ForegroundColor DarkGray
+Write-Host "Документы (app/*.docx), которые уже есть на сервере, не заменены: новую" -ForegroundColor DarkGray
+Write-Host "редакцию заливайте файлом в $Path/app/ и docker compose restart bot." -ForegroundColor DarkGray

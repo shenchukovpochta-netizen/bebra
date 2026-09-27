@@ -223,7 +223,29 @@ def build(template_path: Path, ctx: dict[str, Any],
     template = load_template(template_path)
     filled, digest = render_xml(template, ctx)
     filled, media = put_marks(filled, marks or {})
+    return _pack(template, filled, media), digest
 
+
+def fill(template: bytes, ctx: dict[str, Any]) -> bytes:
+    """Документ с подставленными полями, без отпечатка - для Политики ПДн.
+
+    Политику не подписывают, но реквизиты оператора в ней те же, что в
+    договоре, и берутся из той же настройки. Файл без подстановок
+    (правленный владельцем текстом) и нечитаемый уходят байт в байт:
+    политика важнее реквизитов, и шаг ознакомления не должен падать.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(template)) as zf:
+            xml = zf.read(DOCUMENT_XML).decode("utf-8")
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError):
+        return template
+    if not PLACEHOLDER.search(xml):
+        return template
+    return _pack(template, substitute(xml, ctx), {})
+
+
+def _pack(template: bytes, filled: str, media: dict[str, bytes]) -> bytes:
+    """Архив шаблона с новым document.xml; остальное - байт в байт."""
     out = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(template)) as src, \
             zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
@@ -243,4 +265,4 @@ def build(template_path: Path, ctx: dict[str, Any],
             full = f"word/{name}"
             if full not in names:
                 dst.writestr(full, raw)
-    return out.getvalue(), digest
+    return out.getvalue()

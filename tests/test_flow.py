@@ -1845,6 +1845,32 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("нет поля", text)
         self.assertNotIn("______", text)
 
+    async def test_buyout_act_after_restart_carries_requisites(self):
+        """Дневной проход идёт мимо конвейера апдейтов, который освежает
+        снимок реквизитов. Бот перезапущен, снимка нет, а в поставочном акте
+        арендодатель - только подстановки: без чтения из базы акт ушёл бы
+        с прочерками вместо имени и ИНН."""
+        from app.crm import company, doctemplates
+        await self.buyout_rental()
+        row = self.db.users[USER_ID]
+        row["rent_until"] = row["buyout_from"] + timedelta(days=200)
+        company.reset()                                  # как после перезапуска
+        self.addCleanup(company.reset)
+        self.addCleanup(doctemplates.reset)
+        crm = FakeCrm()
+        crm.settings_.update({"company_name": "ИП Петров Пётр Петрович",
+                              "company_inn": "000000000019"})
+        from app import tasks as bot_tasks
+        self.assertEqual(await bot_tasks.buyout_once(
+            self.bot, self.db, self.cfg, self.vault,
+            today=row["buyout_from"] + timedelta(days=119), crm=crm), 1)
+        act = [m for m in self.session.documents()
+               if m.chat_id == USER_ID
+               and "переходе права собственности" in (m.caption or "")][-1]
+        text = docx_text(act.document.data).replace("\xa0", " ")
+        self.assertIn("ИП Петров Пётр Петрович", text)
+        self.assertIn("000000000019", text)
+
     # ─── длина сообщений и подписей ───
 
     # Всё по верхней границе валидаторов: место рождения 150, «кем выдан»
@@ -2145,6 +2171,28 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["state"], logic.WAIT_OFERTA)
         self.assertIsNotNone(row["policy_ack_at"], "момент ознакомления не записан")
         self.assertEqual(row["policy_version"], "2026-01-15")
+
+    async def test_policy_carries_requisites_from_the_setting(self):
+        """В поставочной политике оператор - подстановки: клиент получает
+        файл с реквизитами из «Реквизитов организации», а не скобки."""
+        import io
+        import re
+        import zipfile
+
+        from app.crm import company
+        company.set_snapshot({"company_name": "ИП Петров Пётр Петрович",
+                              "company_inn": "000000000019"})
+        self.addCleanup(company.reset)
+        await self.feed(msg("/start"))
+        await self.feed(cb("lang:ru"))
+        await self.feed(msg("Иванов Иван Иванович"))
+        policy = [m for m in self.session.documents()
+                  if "politika" in (m.document.filename or "")][-1]
+        xml = zipfile.ZipFile(io.BytesIO(policy.document.data)).read(
+            "word/document.xml").decode("utf-8")
+        text = "".join(re.findall(r"<w:t(?: [^>]*)?>(.*?)</w:t>", xml, re.S))
+        self.assertIn("ИП Петров Пётр Петрович (ИНН 000000000019", text.replace("\xa0", " "))
+        self.assertNotIn("{{", text)
 
     async def test_policy_step_ignores_text_and_resends(self):
         await self.feed(msg("/start"))

@@ -472,6 +472,34 @@ class TestImportPage(WebCase):
         c = run(self.crm.client_by_phone("+79600547202"))
         self.assertIn("импорт из таблицы", self.get_ok(f"/clients/{c['id']}"))
 
+    def test_second_import_is_refused_while_one_runs(self):
+        """Два разбора на пределе распаковки разом не влезают в mem_limit
+        панели, и OOM уронил бы все запросы вместе с недописанным импортом.
+        Второй получает отказ, а разбор идёт под замком."""
+        self.login()
+        lock = self.app.state.import_lock
+        seen = []
+        real = ix.run
+
+        async def spy(*args, **kwargs):
+            seen.append(lock.locked())
+            return await real(*args, **kwargs)
+
+        run(lock.acquire())
+        try:
+            with mock.patch.object(ix, "run", spy):
+                r = self.upload(sheet(ROWS), apply=True)
+            self.assertEqual(r.status_code, 303)
+            self.assertIn("идёт другой импорт", self.client.get("/import").text)
+            self.assertEqual((seen, run(self.crm.clients())), ([], []))
+        finally:
+            lock.release()
+        with mock.patch.object(ix, "run", spy):
+            r = self.upload(sheet(ROWS))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(seen, [True], "разбор - под замком")
+        self.assertFalse(lock.locked(), "замок отпущен")
+
     def test_bad_upload(self):
         self.login()
         r = self.upload(b"garbage", name="t.xlsx")

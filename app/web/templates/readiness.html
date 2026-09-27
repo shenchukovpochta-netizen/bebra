@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Готовность — {{ app_title }}{% endblock %}
+{% macro row(i) %}
+    <tr id="{{ i.code }}">
+      <td><b>{{ i.title }}</b><br><span class="tag{% if i.css %} {{ i.css }}{% endif %}">{{ i.label }}</span></td>
+      <td>{{ i.text }}{% if i.at %} <span class="muted">Последний раз: {{ i.at|dmy }}.</span>{% endif %}
+        {% if i.how %}<br><small class="muted">{{ i.how }}</small>{% endif %}</td>
+      <td>{% if i.href %}<a href="{{ i.href }}">{{ i.link }}</a>{% elif i.how %}<span class="muted">на сервере</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+    </tr>
+{% endmacro %}
+{% block content %}
+<div class="bar"><h1>Готовность к работе</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/documents">Документы</a><a href="/locations">Точки</a><a href="/models">Каталог</a><a href="/notices">Уведомления</a><a href="/intake">Ввод техники</a><a href="/readiness" class="on">Готовность</a></nav>
+</div>
+
+<div class="card">
+  <p>{% if summary.ready %}<span class="tag ok">можно выдавать</span>{% else %}<span class="tag bad">не всё настроено</span>{% endif %}
+    Обязательное: {{ summary.required_ok }} из {{ summary.required }}.
+    Подключено интеграций: {{ summary.optional_on }} из {{ summary.optional }}.</p>
+  <p class="muted">Страница ничего не меняет: она смотрит в базу, в настройки
+    панели и спрашивает бота, жив ли он. Опросы банка, трекеров и Авито
+    живут в процессе бота, поэтому о них здесь судят по следам в базе.
+    Порядок первого запуска — FRANCHISE.md, «Новый франчайзи за час».</p>
+</div>
+
+<div class="card">
+  <h2>Без этого прокат не работает</h2>
+  <table>
+    <tr><th>Что</th><th>Подробности</th><th>Где</th></tr>
+    {% for i in items if i.required %}{{ row(i) }}{% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2>Можно подключить позже</h2>
+  <table>
+    <tr><th>Что</th><th>Подробности</th><th>Где</th></tr>
+    {% for i in items if not i.required %}{{ row(i) }}{% endfor %}
+  </table>
+</div>
+{% endblock %}

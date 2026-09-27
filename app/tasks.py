@@ -121,15 +121,22 @@ async def _notify_deadline(bot: Any, db: Database, row: dict, stage: str, *,
 
 
 async def buyout_once(bot: Any, db: Database, cfg: Config, vault: Any, *,
-                      today: date | None = None) -> int:
+                      today: date | None = None, crm: Any = None) -> int:
     """Проверить графики выкупа и выдать акт тем, кто выплатил всё.
 
     Живёт в том же дневном проходе, что напоминания: выкуп копится по
     оплаченным дням, и «выплачено полностью» - это событие календаря,
     а не нажатие кнопки. Акт выдаётся один раз (buyout_done_at).
     """
+    from .crm import company, doctemplates
     from .handlers import contract as contract_handlers
 
+    # Снимки реквизитов и своих шаблонов освежает конвейер апдейтов, а
+    # этот проход идёт мимо него: после перезапуска бота первый же круг
+    # собрал бы акт с прочерками вместо арендодателя и по нашему шаблону
+    # вместо загруженного владельцем.
+    await company.refresh(crm)
+    await doctemplates.refresh(crm, getattr(cfg, "doc_dir", None))
     sent = 0
     for record in await db.active_rentals():
         row = dict(record)
@@ -213,7 +220,8 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                     if sent:
                         log.info("напоминаний о сроке отправлено: %s", sent)
                     if vault is not None:
-                        done = await buyout_once(bot, db, cfg, vault, today=today)
+                        done = await buyout_once(bot, db, cfg, vault, today=today,
+                                                 crm=crm)
                         if done:
                             log.info("актов выкупа выдано: %s", done)
                     if digest:

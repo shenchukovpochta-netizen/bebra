@@ -252,6 +252,22 @@ class TestMaxStart(unittest.IsolatedAsyncioTestCase):
         state, _ = await self.start(self.user(state=logic.NEW, status=logic.ST_NEW))
         self.assertEqual(state, logic.WAIT_FIO)
 
+    async def test_contract_carries_requisites_like_telegram(self):
+        """Арендодатель в поставочном договоре - подстановки реквизитов:
+        MAX обязан подставлять их тем же снимком, что и Telegram, иначе
+        договор уходит с «нет поля company_name»."""
+        from app.crm import company
+        from app.max import handlers
+        from app.services import contract
+        company.set_snapshot({"company_name": "ИП Петров Пётр Петрович"})
+        self.addCleanup(company.reset)
+        ctx = handlers._contract_ctx(self.ctx, self.user(), {}, number="АВМ-1",
+                                     signed_at="не подписан", issued_at=None)
+        self.assertEqual(ctx["company_name"], "ИП Петров Пётр Петрович")
+        self.assertEqual(ctx["company_inn"], "—")
+        used = contract.placeholders(self.cfg.contract_template.read_bytes())
+        self.assertEqual({f for f in used if f.startswith("company_")} - set(ctx), set())
+
 
 # Ключ переписки «Входящих» постоянный: тесты не зависят от случайности.
 INBOX_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="

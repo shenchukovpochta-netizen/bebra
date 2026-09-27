@@ -1325,6 +1325,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/staff", "staff"),
     ("/profiles", "staff"),
     ("/company", "settings"),
+    # Готовность установки: что не настроено - вкладка тех же настроек.
+    ("/readiness", "settings"),
     ("/notices", "settings"),
     ("/intake", "settings"),
     ("/documents", "settings"),

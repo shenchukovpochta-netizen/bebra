@@ -42,7 +42,17 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .. import logic as bot_logic
 from .. import texts
-from ..crm import billing, company, doctemplates, import_xlsx, logic, notices, notify, service
+from ..crm import (
+    billing,
+    company,
+    doctemplates,
+    import_xlsx,
+    logic,
+    notices,
+    notify,
+    readiness,
+    service,
+)
 from ..services import contract as contract_service
 from ..services import tochka
 from .config import WebConfig
@@ -4713,6 +4723,26 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                        "нескольких минут.")
         return redirect("/company")
 
+    @app.get("/readiness")
+    async def readiness_page(request: Request) -> Response:
+        """Готовность установки: что не настроено и куда идти чинить.
+
+        Только чтение и только то, что панель видит сама: база, свой конфиг
+        и живость бота. О фоновых опросах бота судим по их следам в базе.
+        """
+        settings = await crm.settings()
+        items = readiness.checks(
+            settings=settings, consent=texts.CONSENT, locations=await crm.locations(),
+            models=await crm.bike_models(active_only=True),
+            tariffs=await crm.tariffs(active_only=True, kind="bike"),
+            staff=await crm.staff_all(), bot=await bot_health(),
+            acquiring=acquiring_state(settings),
+            bank_last=next(iter(await crm.bank_txns(limit=1)), None),
+            trackers=await crm.trackers(), https=cfg.trust_proxy,
+            now=datetime.now(UTC))
+        return render(request, "readiness.html", items=items,
+                      summary=readiness.summary(items))
+
     # ───────────────── справочники: точки, модели, совместимость ─────────────────
 
     @app.get("/locations")
@@ -5923,9 +5953,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     }
 
     def our_template(kind: str) -> Path | None:
-        # В демо наших шаблонов нет: в них реквизиты настоящего ИП (ФИО,
-        # ИНН, счёт, телефоны), а демо публично и живёт на вымышленных.
-        # Страница тогда не показывает «Скачать наш», адрес отвечает 404.
+        # В демо наших шаблонов нет. Поставочные реквизитов уже не несут,
+        # но образ демо собирается из каталога сервера, а там лежат docx
+        # владельца с его ФИО, ИНН и счётом (update.sh их не трогает), а
+        # демо публично. Страница не показывает «Скачать наш», адрес - 404.
         if cfg.demo:
             return None
         path = OUR_TEMPLATES.get(kind)
@@ -7351,6 +7382,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── импорт таблицы ───────────────────────
 
+    # Импорт по одному: разбор xlsx на пределе распаковки - ~670 МБ, два
+    # разом упираются в mem_limit панели, и OOM роняет все открытые
+    # запросы вместе с недописанными импортами. Импорт - дело редкое,
+    # второму подождать минуту дешевле. На app.state - чтобы видели тесты.
+    app.state.import_lock = asyncio.Lock()
+
     @app.get("/import")
     async def import_page(request: Request) -> Response:
         return render(request, "import.html", report=None, applied=False)
@@ -7371,8 +7408,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if len(content) > IMPORT_MAX_BYTES:
             flash(request, "Файл больше 20 МБ - это не учётная таблица.", "err")
             return redirect("/import")
+        lock = app.state.import_lock
+        if lock.locked():
+            flash(request, "Сейчас идёт другой импорт - загрузите файл, когда он "
+                           "закончится.", "err")
+            return redirect("/import")
         try:
-            plan, done = await import_xlsx.run(crm, content, apply=apply, by=who(request))
+            async with lock:
+                plan, done = await import_xlsx.run(crm, content, apply=apply,
+                                                   by=who(request))
         except import_xlsx.ImportError_ as e:
             flash(request, str(e), "err")
             return redirect("/import")

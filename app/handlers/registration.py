@@ -14,12 +14,13 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from .. import i18n, logic, tasks, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import inbox
+from ..crm import company, inbox
 from ..crm import logic as crm_logic
 from ..crm import service as crm_service
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import StateIs
+from ..services import contract as contract_service
 from ..services import files, ocr
 from ..services.crypto import Vault
 
@@ -292,13 +293,16 @@ async def send_policy(bot: Bot, cfg: Config, tg_id: int,
                       lang: str = "ru") -> None:
     """Экран ознакомления: файл политики с кнопкой «Ознакомлен(а)».
 
-    Политика уходит документом как есть, без подстановок - это готовый
-    файл оператора, и предоставлять его через бота требует её же п. 3.2.
+    Политика уходит документом - это готовый файл оператора, и
+    предоставлять его через бота требует её же п. 3.2. Подставляются
+    только реквизиты оператора из «Реквизитов организации»: в поставке
+    их нет, а файл с реквизитами текстом уходит как есть.
     Файл читается с диска на каждый показ: он маленький, а кэш file_id
     пережил бы замену файла и продолжил слать старую редакцию.
     """
     try:
-        data = cfg.pdn_policy_file.read_bytes()
+        data = contract_service.fill(cfg.pdn_policy_file.read_bytes(),
+                                     company.context(company.snapshot()))
     except OSError:
         log.warning("файл политики ПДн %s не читается - шаг работает "
                     "текстом без вложения", cfg.pdn_policy_file)

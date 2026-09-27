@@ -478,11 +478,17 @@ def _contract_ctx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
     built.update(logic.issue_context(data.get("issue_data")))
     built["purge_days"] = str(ctx.cfg.purge_approved_days)
     built["signed_at"] = signed_at
+    # Реквизиты - те же, что в Telegram: в поставочном договоре они
+    # подстановками, и без этой строки MAX печатал бы «нет поля».
+    built.update(company.context(company.snapshot()))
     return built
 
 
 async def _build_docx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
                 signed_at: str, issued_at: Any) -> tuple[bytes, str]:
+    # Договор собирается и по кнопке модератора, а служебный апдейт снимок
+    # реквизитов не освежает (runner._dispatch_service): освежаем здесь.
+    await company.refresh(ctx.crm)
     try:
         return await asyncio.to_thread(
             contract_service.build,
