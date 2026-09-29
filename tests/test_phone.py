@@ -57,7 +57,7 @@ D = Decimal
 # и три числа по месяцам.
 CARD_TABLES = {"rentals.html": 1, "bikes.html": 1, "clients.html": 1, "orders.html": 1,
                "points.html": 2, "cash.html": 1, "finance.html": 1, "inbox.html": 1,
-               "batteries.html": 1, "parts.html": 1}
+               "batteries.html": 1, "parts.html": 1, "payments.html": 1}
 TABLE = re.compile(r'<table class="cards">(.*?)</table>', re.S)
 HEAD = re.compile(r"""\{\{\s*list\.th\('([^']*)'|<th\b[^>]*>(.*?)</th>""", re.S)
 LABEL = re.compile(r'data-label="([^"]*)"')
@@ -232,7 +232,7 @@ class TestCardPages(tw.WebCase if HAVE_WEB else unittest.TestCase):
 
     def test_rows_carry_one_label_per_column(self):
         for path in ("/rentals", "/bikes", "/clients", "/orders", "/cash", "/finance",
-                     "/inbox", "/batteries", "/parts", "/reports/points"):
+                     "/inbox", "/batteries", "/parts", "/reports/points", "/payments"):
             tables = self.rows_of(path)
             with self.subTest(path):
                 self.assertTrue(tables, "список не помечен как карточки")

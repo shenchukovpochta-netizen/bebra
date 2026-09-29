@@ -2268,6 +2268,92 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.crm.update_booking(second, client_id=1)
 
+    async def test_waitlist_reads_the_logs_and_marks_in_the_update(self):
+        """Лист ожидания на живой базе: «освободился» - из журналов статусов
+        и мест (их пишет триггер на любой путь), «раз в сутки» и «ответил» -
+        условием в самом UPDATE."""
+        await self.seed()
+        loc = (await self.crm.locations())[0]["name"]
+        since = datetime.now(UTC) - timedelta(hours=1)
+        got = await self.crm.freed_bikes(since)
+        self.assertEqual([b["id"] for b in got], [self.bike_id], "заведён свободным")
+        await self.crm.update_bike(self.bike_id, status="repair", by="t")
+        self.assertEqual(await self.crm.freed_bikes(since), [], "в ремонте - не свободен")
+        await self.crm.update_bike(self.bike_id, status="available", by="t")
+        await self.crm.update_bike(self.bike_id, location=loc, by="t")
+        row = (await self.crm.freed_bikes(since))[0]
+        self.assertEqual((row["location"], row["model"]), (loc, "Kugoo V3"))
+        moved = await self.pool.fetchval(
+            "select max(changed_at) from crm.bike_location_log where bike_id = $1",
+            self.bike_id)
+        self.assertEqual(row["freed_at"], moved, "переезд позже - событие переезда")
+        self.assertEqual(await self.crm.freed_bikes(datetime.now(UTC) + timedelta(minutes=1)),
+                         [], "старше окна - не событие")
+        bid = await self.crm.create_booking(client_id=self.client_id, model="Kugoo V3",
+                                            tariff_id=self.tariff_id, location_id=None,
+                                            wanted_on=date.today())
+        self.assertTrue(await self.crm.mark_waitlist(bid, self.bike_id))
+        self.assertFalse(await self.crm.mark_waitlist(bid, self.bike_id), "сегодня уже звали")
+        await self.pool.execute("update crm.bookings set waitlist_at = waitlist_at "
+                                "- interval '1 day' where id = $1", bid)
+        self.assertTrue(await self.crm.mark_waitlist(bid, self.bike_id), "назавтра - можно")
+        self.assertTrue(await self.crm.mark_coming(bid))
+        self.assertFalse(await self.crm.mark_coming(bid), "второе нажатие")
+        await self.pool.execute("update crm.bookings set waitlist_at = now() "
+                                "+ interval '1 minute' where id = $1", bid)
+        self.assertTrue(await self.crm.mark_coming(bid), "новое приглашение - новый ответ")
+        await self.crm.update_booking(bid, waitlist_bike_id=None)
+        row = await self.crm.booking(bid)
+        self.assertIsNone(row["waitlist_bike_id"])
+        self.assertIsNotNone(row["coming_at"])
+        await self.crm.update_booking(bid, status="cancelled")
+        await self.pool.execute("update crm.bookings set waitlist_at = null where id = $1", bid)
+        self.assertFalse(await self.crm.mark_waitlist(bid, self.bike_id), "снятую не зовём")
+
+    async def test_battery_ask_and_card_nudge_hold_their_term(self):
+        """Просьба о втором аккумуляторе и предложение привязать карту -
+        отметка с условием срока в UPDATE: двойное нажатие и повтор круга
+        второго сообщения не дают."""
+        await self.seed()
+        rid = await self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="auto",
+            started_on=date.today(), contract_no=None, created_by="t")
+        self.assertTrue(await self.crm.claim_battery_ask(rid, days=7))
+        self.assertFalse(await self.crm.claim_battery_ask(rid, days=7))
+        self.assertIsNotNone((await self.crm.active_rental_of(self.client_id))
+                             ["battery_asked_at"])
+        await self.pool.execute("update crm.rentals set battery_asked_at = now() "
+                                "- interval '8 days' where id = $1", rid)
+        self.assertTrue(await self.crm.claim_battery_ask(rid, days=7), "неделя прошла")
+        # позиция выполняет просьбу: отметка снята тем же UPDATE, и снятие
+        # позиции старую просьбу в карточку аренды не вернёт
+        extra = await self.crm.add_rental_extra(rid, kind="battery", title="Доп. АКБ",
+                                                price=D(700), battery_id=None, by="t")
+        row = await self.crm.rental(rid)
+        self.assertIsNone(row["battery_asked_at"])
+        self.assertEqual(row["price"], D(3700))
+        self.assertTrue(await self.crm.drop_rental_extra(extra, by="t"))
+        self.assertIsNone((await self.crm.rental(rid))["battery_asked_at"])
+        await self.crm.close_rental(rid, closed_on=date.today(), note=None)
+        self.assertFalse(await self.crm.claim_battery_ask(rid, days=7), "аренда закрыта")
+
+        self.assertEqual(await self.crm.cards_seen(), 0)
+        await self.crm.save_card_token(client_id=self.client_id, token="tk", mask="4477")
+        await self.crm.drop_card(self.client_id)
+        self.assertEqual(await self.crm.cards_seen(), 1, "снятая карта - тоже след банка")
+        self.assertTrue(await self.crm.claim_card_nudge(self.client_id, days=30))
+        self.assertFalse(await self.crm.claim_card_nudge(self.client_id, days=30))
+        # «Счета» берут отметку со строки аренды, а не из истории отправок
+        await self.crm.create_rental(
+            client_id=self.client_id, bike_id=None, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="auto",
+            started_on=date.today(), contract_no=None, created_by="t")
+        self.assertIsNotNone((await self.crm.active_rentals())[0]["card_nudge_at"])
+        await self.pool.execute("update crm.clients set card_nudge_at = now() "
+                                "- interval '31 days' where id = $1", self.client_id)
+        self.assertTrue(await self.crm.claim_card_nudge(self.client_id, days=30))
+
 
 if __name__ == "__main__":
     unittest.main()

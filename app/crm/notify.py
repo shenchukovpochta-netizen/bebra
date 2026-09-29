@@ -15,7 +15,7 @@ from typing import Any
 from .. import i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
-from . import company, logic
+from . import company, logic, points
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +127,23 @@ async def booking_cancelled(bot: Any, db: Any, client: dict, booking: dict,
         note=("\n" + bot_logic.esc(note)) if note else "",
         url=bot_logic.esc(company.support_url()))
     return await _send(bot, client["tg_id"], text, kb.cabinet_entry(lang))
+
+
+async def waitlist_free(bot: Any, db: Any, client: dict, booking: dict, bike: dict, *,
+                        locations: list[dict] | None = None) -> bool:
+    """Клиенту из листа ожидания: освободилась модель его заявки.
+
+    Модель - как в заявке (название каталога), а не заводское имя парка.
+    Часы - той точки, где стоит велосипед: ехать клиенту туда."""
+    if not client.get("tg_id") or bot is None:
+        return False
+    lang = await _lang(db, client["tg_id"])
+    text = i18n.t(lang, "CAB_WAITLIST").format(
+        model=bot_logic.esc(booking.get("model") or bike.get("model") or ""),
+        line=bot_logic.esc(logic.booking_line(booking)),
+        hours=points.hours_note(lang, bike.get("location"), rows=locations))
+    return await _send(bot, client["tg_id"], text,
+                       kb.waitlist(booking["id"], bike["id"], lang))
 
 
 async def referral_bonus(bot: Any, db: Any, agent: dict, friend: dict,
@@ -257,6 +274,17 @@ async def autocharge_fail(bot: Any, client: dict, amount: Any,
         mask=logic.card_mask((card or {}).get("mask")) or "----",
         amount=logic.money(amount), reason=human)
     return await _send(bot, client["tg_id"], text)
+
+
+async def card_nudge(bot: Any, db: Any, client: dict, *, hour: int) -> bool:
+    """Клиенту после оплаты по ссылке без сохранённой карты: зачем её
+    привязать и как это работает. Час - тот, в который идёт автосписание:
+    «спишем около 10:00» честнее, чем «спишем сами когда-нибудь»."""
+    if not client.get("tg_id") or bot is None:
+        return False
+    lang = await _lang(db, client["tg_id"])
+    return await _send(bot, client["tg_id"],
+                       i18n.t(lang, "CAB_CARD_NUDGE").format(hour=int(hour)))
 
 
 async def estimate(bot: Any, client: dict, order: dict, items: list[dict],

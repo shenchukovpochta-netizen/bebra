@@ -341,6 +341,36 @@ class TestDemoExtras(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(r["location_id"] in places for r in rows))
         self.assertTrue(all(r["rental_id"] for r in rows if r["status"] == "done"))
 
+    async def test_waitlist_trace_is_what_the_round_would_leave(self):
+        """След листа ожидания - как у настоящего круга: только открытые
+        заявки, велосипед их модели свободен на их точке и освободился
+        после подачи, позвали днём и не в будущем, ответ - после зова."""
+        rows = await self.rows(
+            """
+            select k.*, b.status as bike_status, b.location as bike_point, b.model as bike_model,
+                   l.name as point,
+                   (select max(s.changed_at) from crm.bike_status_log s
+                     where s.bike_id = b.id and s.to_status = 'available') as freed_at
+              from crm.bookings k
+              join crm.bikes b on b.id = k.waitlist_bike_id
+              join crm.locations l on l.id = k.location_id
+            """)
+        self.assertEqual(await self.pool.fetchval(
+            "select count(*) from crm.bookings where waitlist_at is not null "
+            "and waitlist_bike_id is null"), 0)
+        start, end = logic.WAITLIST_HOURS
+        for r in rows:
+            self.assertEqual(r["status"], "new")
+            self.assertEqual((r["bike_status"], r["bike_point"], r["bike_model"]),
+                             ("available", r["point"], r["model"]))
+            self.assertTrue(r["created_at"] < r["freed_at"] <= r["waitlist_at"] <= self.now)
+            self.assertTrue(start <= r["waitlist_at"].astimezone(MSK).hour < end)
+            if r["coming_at"] is not None:
+                self.assertTrue(r["waitlist_at"] < r["coming_at"] <= self.now)
+        self.assertLessEqual(sum(1 for r in rows if r["coming_at"]), 1)
+        per_bike = Counter(r["waitlist_bike_id"] for r in rows)
+        self.assertLessEqual(max(per_bike.values(), default=0), logic.WAITLIST_PER_BIKE)
+
     async def test_signed_requests_are_protocols(self):
         requests = await self.rows("select * from crm.sign_requests order by created_at")
         self.assertEqual([r["no"] for r in requests],

@@ -57,7 +57,7 @@ TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
                                 "note"})
 BOOKING_FIELDS = frozenset({
     "model", "tariff_id", "location_id", "wanted_on", "note", "status", "rental_id",
-    "handled_by", "handled_at",
+    "handled_by", "handled_at", "waitlist_bike_id",
 })
 PROMO_FIELDS = frozenset({
     "kind", "title", "percent", "amount", "code", "params", "starts_on", "ends_on",
@@ -89,6 +89,7 @@ RENTAL_FIELDS = frozenset({
     "contract_no", "bike_id", "billed_until", "notified_on", "notified_kind",
     "intent", "intent_until", "intent_by", "intent_at", "snooze_until",
     "mileage_start", "mileage_end", "review_asked_at", "service_invited_at",
+    "battery_asked_at",
 })
 
 
@@ -715,8 +716,11 @@ class CrmDB:
 
     # ─────────────────────── аренды ───────────────────────
 
+    # card_nudge_at - когда бот предлагал привязать карту: «Счета» берут
+    # его отсюда, а не из истории отправок, которая живёт 30 дней.
     _RENTAL_SELECT = """
         select r.*, c.full_name, c.phone, c.tg_id, c.status as client_status,
+               c.card_nudge_at,
                b.code as bike_code, b.model as bike_model,
                coalesce(l.balance, 0) as balance
         from crm.rentals r
@@ -2686,6 +2690,10 @@ class CrmDB:
         Цена аренды складывается из велосипеда и позиций. Записать позицию
         и забыть переписать цену значит выдать батарею бесплатно, а
         переписать цену без позиции - взять деньги неизвестно за что.
+
+        Доп. аккумулятор выполняет просьбу клиента из кабинета - отметка
+        снимается тем же UPDATE: иначе после снятия позиции старая просьба
+        снова встала бы плашкой в карточке аренды.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             extra_id = int(await conn.fetchval(
@@ -2695,9 +2703,13 @@ class CrmDB:
                 values ($1, $2, $3, $4, $5, $6) returning id
                 """, rental_id, kind, battery_id, title, price, by))
             await conn.execute(
-                "update crm.rentals set price = $2, updated_at = now() "
-                "where id = $1", rental_id,
-                await self._period_price(conn, rental_id))
+                """
+                update crm.rentals set price = $2, updated_at = now(),
+                       battery_asked_at = case when $3::boolean then null
+                                               else battery_asked_at end
+                 where id = $1
+                """, rental_id, await self._period_price(conn, rental_id),
+                kind == "battery")
             return extra_id
 
     async def drop_rental_extra(self, extra_id: int, *, by: str | None) -> bool:
@@ -2728,6 +2740,19 @@ class CrmDB:
             "select coalesce(sum(price), 0) from crm.rental_extras "
             "where rental_id = $1 and removed_at is null", rental_id)
         return Decimal(str(base or 0)) + Decimal(str(extras or 0))
+
+    async def claim_battery_ask(self, rental_id: int, *, days: int) -> bool:
+        """Клиент просит второй аккумулятор: отметка на аренде. False -
+        просьба моложе `days` дней уже есть или аренда закрыта: двойное
+        нажатие иначе дало бы команде две карточки на одну батарею."""
+        return await self.pool.fetchval(
+            """
+            update crm.rentals set battery_asked_at = now(), updated_at = now()
+             where id = $1 and status = 'active'
+               and (battery_asked_at is null
+                    or battery_asked_at < now() - make_interval(days => $2))
+            returning id
+            """, rental_id, days) is not None
 
     # ─────────────────── замена велосипеда в аренде ───────────────────
 
@@ -4244,6 +4269,25 @@ class CrmDB:
                 "update crm.card_tokens set active = false where id = $1", card_id)
         return fails
 
+    async def cards_seen(self) -> int:
+        """Сколько карт банк прислал за всё время, снятые тоже. Ноль - нет
+        доказательства, что эквайринг магазина вообще сохраняет карты, и
+        обещать клиенту автосписание нельзя."""
+        return int(await self.pool.fetchval("select count(*) from crm.card_tokens") or 0)
+
+    async def claim_card_nudge(self, client_id: int, *, days: int) -> bool:
+        """Отметка «предложили привязать карту». False - предлагали меньше
+        `days` дней назад: «раз в срок» держит условие в UPDATE, а не
+        история отправок, которая чистится и может не записаться."""
+        return await self.pool.fetchval(
+            """
+            update crm.clients set card_nudge_at = now()
+             where id = $1
+               and (card_nudge_at is null
+                    or card_nudge_at < now() - make_interval(days => $2))
+            returning id
+            """, client_id, days) is not None
+
     async def repairs_since(self, bike_id: int, since: date) -> int:
         """Сколько раз велосипед был в сервисе с даты. Нужен приглашению
         на ТО: тот, кто заезжал, зовётся зря."""
@@ -4442,6 +4486,59 @@ class CrmDB:
         await self.pool.execute(
             f"update crm.bookings set {sets}, updated_at = now() where id = $1",
             booking_id, *values)
+
+    async def freed_bikes(self, since: datetime) -> list[dict]:
+        """Свободные сейчас велосипеды, ставшие свободными (или переехавшие
+        на точку) не раньше `since` - события листа ожидания.
+
+        От парка, а не от журналов: свободных десятки, и у каждого два
+        коротких взгляда в журналы по индексу (bike_id, changed_at). Журналы
+        пишет база триггером на любой путь - возврат, наряд, ввод, пересчёт,
+        карточку, импорт, - поэтому крючков в коде путей не нужно.
+        freed_at - позднее из двух: переезд свободного велосипеда - тоже
+        «освободился», но уже на новой точке.
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select b.id, b.code, b.model, b.location, f.freed_at
+              from crm.bikes b
+              cross join lateral (
+                select greatest(
+                  (select max(s.changed_at) from crm.bike_status_log s
+                    where s.bike_id = b.id and s.to_status = 'available'
+                      and s.changed_at >= $1),
+                  (select max(l.changed_at) from crm.bike_location_log l
+                    where l.bike_id = b.id and l.changed_at >= $1)) as freed_at
+              ) f
+             where b.status = 'available' and f.freed_at is not null
+             order by f.freed_at, b.id
+            """, since))
+
+    async def mark_waitlist(self, booking_id: int, bike_id: int) -> bool:
+        """Клиента заявки позвали к велосипеду. False - сегодня уже звали
+        или заявка закрыта: «не чаще раза в сутки» держит условие в самом
+        UPDATE, а не проверка перед отправкой. Сутки - местные (сессия
+        живёт в Europe/Moscow)."""
+        return await self.pool.fetchval(
+            """
+            update crm.bookings set waitlist_at = now(), waitlist_bike_id = $2,
+                   updated_at = now()
+             where id = $1 and status = 'new'
+               and (waitlist_at is null or waitlist_at < date_trunc('day', now()))
+            returning id
+            """, booking_id, bike_id) is not None
+
+    async def mark_coming(self, booking_id: int) -> bool:
+        """Клиент нажал «Беру — приеду сегодня». True - впервые на это
+        приглашение: второе нажатие не шлёт команде вторую карточку, а
+        новое приглашение (другой день) - снова можно."""
+        return await self.pool.fetchval(
+            """
+            update crm.bookings set coming_at = now(), updated_at = now()
+             where id = $1 and status = 'new'
+               and (coming_at is null or coming_at < coalesce(waitlist_at, coming_at))
+            returning id
+            """, booking_id) is not None
 
     # ─────────────────────── акции ───────────────────────
     #

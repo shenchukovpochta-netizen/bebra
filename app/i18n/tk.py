@@ -492,6 +492,16 @@ T: dict[str, str] = {
     "BTN_INTENT_RENEW": '✅ Uzaldaryn',
     "BTN_INTENT_RETURN": '↩️ Tabşyraryn',
     "BTN_INBOX_ANSWER": "✍️ Jogap bermek",
+    "CAB_OPT_BATTERY": "🔋 + ikinji akkumulýator — {price} / {days} gün",
+    "CAB_OPT_BATTERY_FROM": "🔋 + ikinji akkumulýator — {price}-dan / {days} gün",
+    "CAB_BATTERY_ASKED": "🔋 Ýazdyk: {days} gün üçin ikinji akkumulýator.\nMenejer ony nokatda berer — golaýda bolanyňyzda alyň. Häzir hiç zat tutulmaýar: döwrüň bahasy indiki uzaltmadan ýokarlanar.",
+    "CAB_BATTERY_PENDING": "Ikinji akkumulýator baradaky haýyşyňyz eýýäm menejerde — ony nokatdan alyň.",
+    "CAB_BATTERY_STALE": "Düwme köneldi: ikinji akkumulýator eýýäm berildi ýa-da onuň bahasy ýok.",
+    "CAB_CARD_NUDGE": "💳 Töleg senesini ýatda saklamak islemeýärsiňizmi?\n\nIndiki gezek salgy arkaly SBP däl-de, <b>kart</b> bilen töläň — bank ony ýatda saklar. Täze döwri hasaplanymyzda, ony kartdan özümiz takmynan {hour}:00-da tutarys we möçberi bilen habar ibereris.\nKart belgisi bizde saklanmaýar. Pikiriňiz üýtgese — menejere aýdyň, aýyrarys.",
+    "CAB_WAITLIST": "🚲 <b>{model}</b> boşady — arzaňyzdaky ýaly: {line}.\n\nWelosiped bronlanmaýar: kim ilkinji gelse, şol alar. Şu gün gelseňiz — düwmä basyň, menejere duýdurarys.{hours}",
+    "CAB_WAITLIST_COMING": "✅ Menejere aýtdyk: sizi şu gün garaşýarys. Welosiped bronlanmaýar, şonuň üçin gijikdirmäň. Pasportyňyzy alyň.{hours}",
+    "CAB_WAITLIST_GONE": "Bu welosipedi eýýäm alyp gitdiler. Arzaňyz güýjünde — indikisi boşanda ýazarys.",
+    "BTN_WAITLIST_TAKE": "✅ Alýaryn — şu gün gelerin",
 }
 
 ERRORS: dict[str, str] = {

@@ -103,6 +103,10 @@ async def tell_paid(bot: Any, db: Any, crm: Any, cfg: Any, order: dict) -> None:
         crm, "pay_credited", client["id"],
         lambda: notify.payment_credited(bot, db, crm, client, order["amount"]))
     try:
+        await nudge_card(bot, db, crm, client, order)
+    except Exception:                                    # noqa: BLE001
+        log.exception("предложение привязать карту клиенту %s не собрано", client["id"])
+    try:
         bonus = await service.ref_paid(crm, client, logic.to_money(order["amount"]),
                                        by="эквайринг")
     except Exception:                                    # noqa: BLE001
@@ -110,6 +114,41 @@ async def tell_paid(bot: Any, db: Any, crm: Any, cfg: Any, order: dict) -> None:
         return
     if bonus:
         await notify.referral_bonus(bot, db, bonus["agent"], client, bonus["bonus"])
+
+
+async def nudge_card(bot: Any, db: Any, crm: Any, client: dict, order: dict) -> bool:
+    """Клиент заплатил по ссылке, а карты у нас нет - объяснить, зачем её
+    привязать. True - сообщение ушло.
+
+    Только по ссылке (автосписанию карта уже известна), только когда
+    автосписание включил владелец и банк уже присылал карты
+    (logic.card_nudge_ready) - иначе «спишем сами» было бы неправдой - и
+    не чаще раза в срок: отметка на карточке ставится до отправки, как у
+    напоминаний, чтобы недоставка не превращалась в повтор на каждой оплате.
+    Только арендатору: автосписание берёт долг идущих аренд, и должнику,
+    который уже сдал велосипед, «спишем новый период» - неправда, а срок
+    предложения съелся бы до следующей аренды.
+    """
+    if order.get("kind") != "link" or not client.get("tg_id"):
+        return False
+    settings = await crm.settings()
+    if not logic.card_nudge_ready(settings, await crm.cards_seen()):
+        return False
+    if await crm.card_of(client["id"]) is not None:
+        return False                     # банк отдал токен этой же оплатой
+    if await crm.active_rental_of(client["id"]) is None:
+        return False
+    state = await notices.settings(crm)
+    if not state.get("card_nudge", {}).get("enabled", True):
+        return False
+    days = logic.notice_param(state.get("card_nudge"), "every_days",
+                              logic.CARD_NUDGE_DAYS)
+    if not await crm.claim_card_nudge(client["id"], days=days):
+        return False
+    hour = logic.pay_settings(settings)["autocharge_hour"]
+    return await notices.send_client(
+        crm, "card_nudge", client["id"],
+        lambda: notify.card_nudge(bot, db, client, hour=hour))
 
 
 async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,

@@ -1357,6 +1357,54 @@ async def _bookings(conn: asyncpg.Connection, c: _Ctx) -> None:
                  "status", "rental_id", "handled_by", "handled_at", "created_at",
                  "updated_at"],
                 [(c.ids.take("bookings"), *r[:10], r[10], r[9] or r[10]) for r in rows])
+    await _waitlist(conn, c)
+
+
+async def _waitlist(conn: asyncpg.Connection, c: _Ctx) -> None:
+    """След листа ожидания: открытую заявку, чья модель освободилась на её
+    точке уже после подачи, бот «позвал» ближайшим дневным кругом (не
+    раньше 9:00 и не позже 18:00), а первая по очереди ответила «еду».
+    Бота в демо нет - это то, что оставил бы настоящий проход
+    (app/crm/waitlist.py), чтобы строка «уведомлён · ответил» была видна."""
+    rows = await conn.fetch(
+        """
+        select k.id, k.client_id, k.created_at, f.bike_id, f.freed_at
+          from crm.bookings k
+          join crm.locations l on l.id = k.location_id
+          join lateral (
+            select b.id as bike_id, max(s.changed_at) as freed_at
+              from crm.bikes b
+              join crm.bike_status_log s on s.bike_id = b.id and s.to_status = 'available'
+             where b.status = 'available' and b.location = l.name and b.model = k.model
+             group by b.id order by max(s.changed_at) desc, b.id limit 1) f on true
+         where k.status = 'new' and f.freed_at > k.created_at
+         order by k.id
+        """)
+    answered = False
+    per_bike: dict[int, int] = defaultdict(int)
+    for row in rows:
+        if per_bike[row["bike_id"]] >= logic.WAITLIST_PER_BIKE:
+            continue                     # как у круга: не больше N на велосипед
+        start, end = logic.WAITLIST_HOURS
+        called = row["freed_at"].astimezone(MSK) + timedelta(minutes=15)
+        if called.hour >= end:
+            called = at(called.date() + DAY, start + 0.1)
+        elif called.hour < start:
+            called = at(called.date(), start + 0.1)
+        if called > c.now:
+            continue
+        coming = called + timedelta(minutes=7) if not answered else None
+        if coming is not None and coming > c.now:
+            coming = None
+        await conn.execute(
+            "update crm.bookings set waitlist_at = $2, waitlist_bike_id = $3, "
+            "coming_at = $4 where id = $1",
+            row["id"], called, row["bike_id"], coming)
+        per_bike[row["bike_id"]] += 1
+        c.notice(called, "waitlist", row["client_id"])
+        if coming is not None:
+            answered = True
+            c.notice(coming, "waitlist_coming", row["client_id"])
 
 
 # ─────────────────────────── ПЭП ───────────────────────────

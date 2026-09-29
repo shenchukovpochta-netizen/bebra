@@ -248,10 +248,21 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                 # Проход CRM зовётся каждый круг, а что именно делать -
                 # решает он сам по расписанию уведомлений. Начисления и
                 # чистки внутри всё так же раз в сутки.
-                from .crm import billing
+                from .crm import billing, waitlist
                 local = datetime.now()
                 await billing.run_daily(bot, db, crm, cfg, today=local.date(),
                                         now=local, done=crm_done)
+                # Лист ожидания - каждый круг, а не раз в сутки: велосипед
+                # освобождается когда угодно, и звать к нему надо в тот же
+                # день. Свой try: сбой сверки не должен отменять проход.
+                try:
+                    called = await waitlist.run_once(bot, db, crm, now=local)
+                    if called:
+                        log.info("лист ожидания: позвали клиентов %s", called)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:                       # noqa: BLE001
+                    log.exception("лист ожидания не сверен")
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

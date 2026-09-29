@@ -117,4 +117,34 @@
 </section>
 </div>
 {% endif %}
+
+{# Кому автосписание не поможет: идущая аренда, а карты нет. Бот сам
+   предлагает привязку после оплаты по ссылке - только когда автосписание
+   включено и банк уже присылал карты: без этого «спишем сами» неправда. #}
+<section class="card">
+  <h2>Без привязанной карты <span class="muted">· {{ nocard|length }} из {{ renters }} арендаторов</span></h2>
+  <p class="muted">{% if nudge_ready %}Бот предлагает привязать карту после оплаты по ссылке
+    без неё — одному клиенту не чаще, чем задано в {% if can_view(staff, 'settings') %}<a href="/notices">уведомлениях</a>{% else %}уведомлениях{% endif %}.
+    {% elif not settings.autocharge %}Автосписание выключено — бот привязку карты не предлагает.
+    {% else %}Банк ещё не прислал ни одной карты, поэтому бот привязку не предлагает:
+    пока не видно, что эквайринг сохраняет карты. Одна оплата по ссылке картой это покажет.
+    {% endif %}Карт от банка за всё время: {{ cards_seen }}.</p>
+  {% if nocard %}
+  <details>
+    <summary>Список</summary>
+    <table class="cards">
+      <tr><th>Клиент</th><th>Телефон</th><th>Велосипед</th><th class="num">Баланс</th><th>Предлагали</th></tr>
+      {% for r in nocard %}
+      <tr>
+        <td data-label="Клиент">{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
+        <td data-label="Телефон">{{ r.phone or '—' }}{% if not r.tg_id %} <small class="muted">· без Telegram</small>{% endif %}</td>
+        <td data-label="Велосипед">{% if r.rental_id and can_view(staff, 'rentals') %}<a href="/rentals/{{ r.rental_id }}">{{ r.bike_code or '—' }}</a>{% else %}{{ r.bike_code or '—' }}{% endif %}</td>
+        <td data-label="Баланс" class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>
+        <td data-label="Предлагали" class="muted">{{ r.nudged_at|dmy if r.nudged_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+</section>
 {% endblock %}

@@ -177,6 +177,24 @@ class TestBookingFlow(tw.WebCase):
         self.assertEqual(fresh["handled_by"], "staff:admin")
         self.assertNotIn("Заявки из кабинета", self.get_ok("/issue"))
 
+    def test_issue_past_the_booking_closes_it_too(self):
+        """Выдача обычным мастером (без ?booking=) - всё равно выдача по
+        заявке: открытой она после возврата позвала бы клиента листом
+        ожидания к сданному велосипеду и не дала бы подать новую."""
+        booking = self.book()
+        r = self.client.post("/issue", data={"client_id": self.client_id,
+                                             "tariff_id": self.tariff_id,
+                                             "bike_id": self.bike_id,
+                                             "pay_amount": "3000", "pay_method": "cash",
+                                             "mileage": "10"})
+        self.assertEqual(r.status_code, 303)
+        fresh = _run(self.crm.booking(booking["id"]))
+        rental = _run(self.crm.active_rental_of(self.client_id))
+        self.assertEqual((fresh["status"], fresh["rental_id"], fresh["handled_by"]),
+                         ("done", rental["id"], "staff:admin"))
+        _run(self.crm.close_rental(rental["id"], closed_on=date.today(), note=None))
+        self.assertEqual(self.book()["status"], "new", "после возврата - новая заявка")
+
     def test_bookings_page_lists_and_cancels_with_a_note(self):
         booking = self.book()
         page = self.get_ok("/bookings")

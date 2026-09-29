@@ -510,6 +510,16 @@ T: dict[str, str] = {
     "BTN_INTENT_RENEW": '✅ I will extend',
     "BTN_INTENT_RETURN": '↩️ I will return',
     "BTN_INBOX_ANSWER": "✍️ Reply",
+    "CAB_OPT_BATTERY": "🔋 + second battery — {price} / {days} d.",
+    "CAB_OPT_BATTERY_FROM": "🔋 + second battery — from {price} / {days} d.",
+    "CAB_BATTERY_ASKED": "🔋 Noted: a second battery for {days} days.\nThe manager will hand it over at the point — pick it up when you are nearby. Nothing is charged now: the period price will go up from the next renewal.",
+    "CAB_BATTERY_PENDING": "Your request for a second battery is already with the manager — pick it up at the point.",
+    "CAB_BATTERY_STALE": "The button is outdated: the second battery is already issued or has no price.",
+    "CAB_CARD_NUDGE": "💳 Don't want to keep track of the payment date?\n\nNext time pay via the link <b>by card</b>, not via SBP — the bank will remember it. When we charge a new period, we will debit it from the card ourselves around {hour}:00 and send you a message with the amount.\nWe do not store the card number. Changed your mind — tell the manager, we will unlink it.",
+    "CAB_WAITLIST": "🚲 A <b>{model}</b> is free now — as in your request: {line}.\n\nThe bike is not reserved: whoever comes first takes it. Coming today — press the button, we will let the manager know.{hours}",
+    "CAB_WAITLIST_COMING": "✅ We told the manager: we expect you today. The bike is not reserved, so better not to delay. Bring your passport.{hours}",
+    "CAB_WAITLIST_GONE": "This bike has already been taken. Your request stays active — we will write when the next one is free.",
+    "BTN_WAITLIST_TAKE": "✅ I'll take it — coming today",
 }
 
 # Ошибки валидации: русский текст из logic.py -> перевод.

@@ -1801,6 +1801,13 @@ create unique index if not exists rental_extras_battery_once
   on crm.rental_extras (rental_id, battery_id)
   where removed_at is null and battery_id is not null;
 
+-- Клиент попросил второй аккумулятор кнопкой в кабинете (при пополнении
+-- или «продлю»). Это просьба, а не позиция: денег не берём и батарею не
+-- выдаём - позицию добавляет человек на точке, как и раньше. Отметка
+-- нужна, чтобы двойное нажатие не дало две карточки команде, а панель
+-- показала просьбу в карточке аренды.
+alter table crm.rentals add column if not exists battery_asked_at timestamptz;
+
 -- ────── паспорт аккумулятора и его сверка ──────
 --
 -- У велосипеда сверка появилась раньше: номер наклейки, серийный номер,
@@ -2140,6 +2147,12 @@ alter table crm.rentals add column if not exists service_invited_at timestamptz;
 -- карта получала отказ каждый день и каждый день писала об этом клиенту.
 alter table crm.card_tokens add column if not exists fails integer not null default 0;
 
+-- Когда бот последний раз предложил клиенту привязать карту (после
+-- оплаты по ссылке без сохранённой карты). На карточке, а не в истории
+-- отправок: история чистится через 30 дней, а сбой её записи не должен
+-- превращаться в повтор - «раз в 30 дней» держит условие в UPDATE.
+alter table crm.clients add column if not exists card_nudge_at timestamptz;
+
 -- Одна открытая заявка на зачисление у клиента. Проверка «уже есть»
 -- и вставка шли двумя запросами, а обновления бот обрабатывает
 -- параллельно: двойное нажатие «Я оплатил(а)» давало две карточки
@@ -2231,6 +2244,18 @@ create table if not exists crm.bookings (
 create unique index if not exists bookings_one_open
   on crm.bookings (client_id) where status = 'new';
 create index if not exists bookings_status_idx on crm.bookings (status, wanted_on, id);
+
+-- Лист ожидания (app/crm/waitlist.py): освободился велосипед модели
+-- заявки на её точке - бот зовёт клиента. waitlist_at - когда позвали
+-- (не чаще раза в сутки, условие в самом UPDATE), waitlist_bike_id - к
+-- какому велосипеду: по нему считается, сколько людей уже позвали к
+-- одному велосипеду, без курсора в настройках - перезапуск бота второго
+-- сообщения не даст. coming_at - клиент нажал «Беру — приеду сегодня».
+-- Велосипед при этом НЕ бронируется: заявка по-прежнему намерение.
+alter table crm.bookings add column if not exists waitlist_at timestamptz;
+alter table crm.bookings add column if not exists waitlist_bike_id bigint
+  references crm.bikes (id);
+alter table crm.bookings add column if not exists coming_at timestamptz;
 
 -- ─────────────────── трекеры: точки «без спутников» ───────────────────
 --

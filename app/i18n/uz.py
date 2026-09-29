@@ -503,6 +503,16 @@ T: dict[str, str] = {
     "BTN_INTENT_RENEW": '✅ Uzaytiraman',
     "BTN_INTENT_RETURN": '↩️ Topshiraman',
     "BTN_INBOX_ANSWER": "✍️ Javob berish",
+    "CAB_OPT_BATTERY": "🔋 + ikkinchi akkumulyator — {price} / {days} kun",
+    "CAB_OPT_BATTERY_FROM": "🔋 + ikkinchi akkumulyator — {price} dan / {days} kun",
+    "CAB_BATTERY_ASKED": "🔋 Yozib oldik: {days} kunga ikkinchi akkumulyator.\nMenejer uni nuqtada beradi — yaqin bo'lganingizda olib keting. Hozir hech narsa yechilmaydi: davr narxi keyingi uzaytirishdan oshadi.",
+    "CAB_BATTERY_PENDING": "Ikkinchi akkumulyator bo'yicha so'rovingiz menejerda — uni nuqtadan oling.",
+    "CAB_BATTERY_STALE": "Tugma eskirgan: ikkinchi akkumulyator allaqachon berilgan yoki uning narxi yo'q.",
+    "CAB_CARD_NUDGE": "💳 To'lov sanasini eslab yurishni xohlamaysizmi?\n\nKeyingi safar havola orqali SBP emas, <b>karta</b> bilan to'lang — bank uni eslab qoladi. Yangi davrni hisoblaganimizda, uni kartadan o'zimiz taxminan {hour}:00 da yechamiz va summa bilan xabar yuboramiz.\nKarta raqami bizda saqlanmaydi. Fikringiz o'zgarsa — menejerga ayting, uzib qo'yamiz.",
+    "CAB_WAITLIST": "🚲 <b>{model}</b> bo'shadi — so'rovingizdagidek: {line}.\n\nVelosiped band qilinmaydi: kim birinchi kelsa, o'sha oladi. Bugun kelsangiz — tugmani bosing, menejerni ogohlantiramiz.{hours}",
+    "CAB_WAITLIST_COMING": "✅ Menejerga yetkazdik: sizni bugun kutamiz. Velosiped band qilinmaydi, shuning uchun kechiktirmang. Pasportingizni oling.{hours}",
+    "CAB_WAITLIST_GONE": "Bu velosipedni allaqachon olib ketishdi. So'rovingiz kuchda — keyingisi bo'shaganda yozamiz.",
+    "BTN_WAITLIST_TAKE": "✅ Olaman — bugun kelaman",
 }
 
 ERRORS: dict[str, str] = {

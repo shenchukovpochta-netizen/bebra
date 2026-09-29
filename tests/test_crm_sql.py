@@ -188,6 +188,16 @@ class TestCrmSql(unittest.TestCase):
             self.db.shift_payments(1), self.db.shift_payments(1, cash=False),
             # заявка отдаёт мастеру выдачи имя своей точки, а не только вывеску
             self.db.booking(1), self.db.bookings(status="new"), self.db.open_booking_of(1),
+            # лист ожидания: события по журналам, отметки - условием в UPDATE
+            self.db.freed_bikes(datetime(2026, 9, 1, tzinfo=UTC)),
+            self.db.mark_waitlist(1, 2), self.db.mark_coming(1),
+            self.db.update_booking(1, waitlist_bike_id=None),
+            # второй аккумулятор при продлении и предложение привязать карту
+            self.db.claim_battery_ask(1, days=7), self.db.update_rental(1, battery_asked_at=None),
+            self.db.cards_seen(), self.db.claim_card_nudge(1, days=30),
+            # позиция-батарея снимает просьбу тем же UPDATE, что и цену
+            self.db.add_rental_extra(1, kind="battery", title="Доп. АКБ", price=d,
+                                     battery_id=None, by="t"),
             # аналитика по точкам: одно правило денег на окупаемость и точки
             self.db.model_money(datetime(2026, 9, 1, tzinfo=UTC),
                                 datetime(2026, 9, 13, tzinfo=UTC)),

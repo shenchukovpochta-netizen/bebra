@@ -28,7 +28,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import company, notices, notify, paying, points, service
+from ..crm import company, notices, notify, paying, points, service, waitlist
 from ..crm import logic as crm_logic
 from ..crm import sync as crm_sync
 from ..db import Database
@@ -295,6 +295,17 @@ def _pay_options(summary: dict, lang: str) -> list[dict]:
     return options
 
 
+async def _battery_button(crm: Any, rental: dict | None, lang: str) -> tuple[str, int] | None:
+    """«+ второй аккумулятор» при продлении: подпись и номер аренды, или
+    None - предлагать нечего (уже взят, нет цены, просьба свежая)."""
+    offer = await service.battery_offer(crm, rental)
+    if offer is None or rental is None:
+        return None
+    label = i18n.t(lang, "CAB_OPT_BATTERY" if offer["exact"] else "CAB_OPT_BATTERY_FROM")
+    return (label.format(price=crm_logic.money(offer["price"]), days=offer["days"]),
+            int(rental["id"]))
+
+
 @router.callback_query(F.data == "cab:pay")
 async def cb_pay(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
                  crm: Any = None) -> None:
@@ -322,7 +333,8 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
     await bot.send_message(
         user["tg_id"],
         i18n.t(lang, "CAB_PAY_PICK").format(balance=crm_logic.money(balance), hint=hint),
-        reply_markup=kb.cab_pay_options(options, lang))
+        reply_markup=kb.cab_pay_options(options, lang,
+                                        battery=await _battery_button(crm, rental, lang)))
 
 
 @router.callback_query(F.data.regexp(r"^cab:pay:(debt|p\d)$"))
@@ -437,9 +449,53 @@ async def cb_intent(callback: CallbackQuery, bot: Bot, user: dict,
     text = (i18n.t(lang, "CAB_INTENT_RENEW") if intent == "renew"
             else i18n.t(lang, "CAB_INTENT_RETURN").format(
                 until=until.strftime("%d.%m.%Y") if until else "—"))
-    await bot.send_message(user["tg_id"], text)
+    # «Продлю» - тот момент, когда второй аккумулятор нужнее всего:
+    # следующий период курьер уже планирует.
+    battery = await _battery_button(crm, rental, lang) if intent == "renew" else None
+    await bot.send_message(user["tg_id"], text,
+                           reply_markup=kb.cab_battery(*battery) if battery else None)
     await bot.send_message(user["tg_id"], await home_text(crm, client, lang),
                            reply_markup=await home_markup(crm, client, lang))
+
+
+@router.callback_query(F.data.startswith("cab:bat:"))
+async def cb_battery(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
+                     crm: Any = None) -> None:
+    """«+ второй аккумулятор»: просьба команде, а не покупка.
+
+    Номер аренды в callback сверяется с идущей арендой нажавшего: чужой
+    или старый номер - «кнопка устарела», а не просьба по чужой аренде.
+    Денег не берём и позиции не заводим: батарею выдаёт человек на точке."""
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    rental_id = crm_logic.parse_id(str(callback.data or "").rsplit(":", 1)[-1])
+    rental = await crm.active_rental_of(client["id"])
+    if rental is None or rental_id is None or int(rental["id"]) != rental_id:
+        await callback.answer(i18n.t(lang, "CAB_BATTERY_STALE"), show_alert=True)
+        return
+    state, offer = await service.ask_battery(crm, rental)
+    if state != "ok":
+        await callback.answer(i18n.t(lang, "CAB_BATTERY_STALE" if state == "stale"
+                                     else "CAB_BATTERY_PENDING"), show_alert=True)
+        return
+    await callback.answer()
+    price = crm_logic.money(offer["price"])
+    if not offer["exact"]:
+        price = f"от {price}"
+    await bot.send_message(user["tg_id"],
+                           i18n.t(lang, "CAB_BATTERY_ASKED").format(days=offer["days"]),
+                           reply_markup=kb.cabinet_entry(lang))
+    await notices.send_team(
+        crm, bot, "battery_request",
+        texts.BATTERY_REQUEST_CARD.format(
+            fio=logic.esc(client.get("full_name") or ""),
+            phone=logic.esc(client.get("phone") or ""), rental=rental["id"],
+            bike=logic.esc(rental.get("bike_code") or "—"),
+            point=logic.esc(rental.get("location") or "точка не указана"),
+            price=price, days=offer["days"]),
+        cfg.contract_chat_id, client_id=client["id"])
 
 
 def claim_card(claim: dict, balance: Any) -> str:
@@ -875,6 +931,53 @@ async def cb_book_cancel(callback: CallbackQuery, bot: Bot, user: dict,
     await bot.send_message(user["tg_id"], i18n.t(lang, "CAB_BOOK_CANCELLED"))
     await bot.send_message(user["tg_id"], await home_text(crm, client, lang),
                            reply_markup=await home_markup(crm, client, lang))
+
+
+@router.callback_query(F.data.startswith("wl:"))
+async def cb_waitlist(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict,
+                      crm: Any = None) -> None:
+    """«Беру — приеду сегодня» под сообщением листа ожидания.
+
+    Кнопка несёт номера заявки и велосипеда (wl:<заявка>:<велосипед>);
+    заявка сверяется с нажавшим: чужой номер или закрытая заявка -
+    «кнопка устарела». Велосипед не бронируется: отметка на заявке и
+    карточка команде, а если его уже забрали - подойдёт любой той же
+    модели на той же точке, иначе «заявка в силе, напишем»."""
+    client = await _client_for_callback(callback, bot, crm, user)
+    if client is None:
+        return
+    lang = i18n.user_lang(user)
+    parts = str(callback.data or "").split(":")
+    booking_id = crm_logic.parse_id(parts[1]) if len(parts) == 3 else None
+    bike_id = crm_logic.parse_id(parts[2]) if len(parts) == 3 else None
+    booking = await crm.booking(booking_id) if booking_id is not None else None
+    if (booking is None or bike_id is None or booking.get("status") != "new"
+            or int(booking["client_id"]) != int(client["id"])):
+        await callback.answer(i18n.t(lang, "CAB_BOOK_STALE"), show_alert=True)
+        return
+    bike = await waitlist.free_bike(crm, booking, bike_id)
+    if bike is None:
+        await callback.answer(i18n.t(lang, "CAB_WAITLIST_GONE"), show_alert=True)
+        return
+    first = await crm.mark_coming(booking["id"])
+    await callback.answer()
+    locations = await crm.locations(active_only=True)
+    await bot.send_message(
+        user["tg_id"],
+        i18n.t(lang, "CAB_WAITLIST_COMING").format(
+            hours=points.hours_note(lang, bike.get("location"), rows=locations)),
+        reply_markup=kb.cabinet_entry(lang))
+    if not first:
+        return                  # второе нажатие: команда уже знает
+    await notices.send_team(
+        crm, bot, "waitlist_coming",
+        texts.WAITLIST_COMING_CARD.format(
+            fio=logic.esc(client.get("full_name") or ""),
+            phone=logic.esc(client.get("phone") or ""),
+            line=logic.esc(crm_logic.booking_line(booking)),
+            bike=logic.esc(bike.get("code") or "—"),
+            point=logic.esc(bike.get("location") or "не на точке")),
+        cfg.contract_chat_id, client_id=client["id"])
 
 
 # ─────────────────────────── операторская часть ───────────────────────────

@@ -1068,6 +1068,51 @@ def battery_options(batteries: Iterable[dict], tariffs: Iterable[dict],
     return out
 
 
+# Через сколько дней кнопка «второй аккумулятор» снова появится после
+# просьбы. Позицию добавили - кнопки нет и так; не добавили за неделю -
+# команда забыла, и клиенту нужен способ напомнить без звонка.
+BATTERY_ASK_DAYS = 7
+
+
+def battery_offer(tariffs: Iterable[dict], rental: Mapping[str, Any] | None,
+                  extras: Iterable[Mapping[str, Any]] = (),
+                  batteries: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any] | None:
+    """Что предложить клиенту при продлении: {price, days, exact} или None.
+
+    `batteries` - то, что точка может выдать вторым (свободные, подходящие
+    велосипеду). Цена каждой - ровно та, что возьмёт выдача
+    (`battery_extra_price`): тариф модели батареи главнее запасного. Общий
+    тариф отдельно не смотрим - при своей цене модели он не сработает, и
+    клиенту назвали бы сумму, которую не спишут. Какую дадут, решит
+    человек на точке, поэтому exact - только когда цена у всех одна,
+    иначе честное «от» самой низкой.
+
+    None - не предлагаем: аренды нет, доп. аккумулятор уже взят, выдать
+    нечего или ни у одной батареи нет цены на срок аренды (без цены она
+    не выдаётся вовсе).
+    """
+    if not rental or rental.get("status", "active") != "active":
+        return None
+    if live_extras(e for e in extras if (e.get("kind") or "battery") == "battery"):
+        return None
+    days = int(rental.get("period_days") or 0)
+    if days <= 0:
+        return None
+    live = [t for t in tariffs if t.get("active", True)]
+    prices = sorted({price for b in batteries
+                     if (price := battery_extra_price(live, b, days)) is not None
+                     and price > 0})
+    if not prices:
+        return None
+    return {"price": prices[0], "days": days, "exact": len(prices) == 1}
+
+
+def battery_asked_recently(rental: Mapping[str, Any] | None, *, now: datetime) -> bool:
+    """Просьба о втором аккумуляторе ещё свежая - кнопку не показываем."""
+    asked = (rental or {}).get("battery_asked_at")
+    return isinstance(asked, datetime) and now - asked < timedelta(days=BATTERY_ASK_DAYS)
+
+
 def model_availability(bikes: Iterable[dict]) -> list[dict]:
     """Свободные велосипеды по моделям и точкам: {model, free, by_location}.
 
@@ -4750,6 +4795,46 @@ def autocharge_due(rentals: Iterable[Mapping[str, Any]],
     return due
 
 
+# Как часто можно предложить одному клиенту привязать карту: платит он
+# раз в период, и напоминать об этом на каждой оплате - уже спам.
+CARD_NUDGE_DAYS = 30
+
+
+def card_nudge_ready(settings: Mapping[str, Any] | None, cards_seen: Any) -> bool:
+    """Предлагать ли клиенту привязку карты. Только когда автосписание
+    включил владелец и банк уже присылал карты: без этого «спишем сами»
+    было бы обещанием, которого система не выполнит."""
+    return bool(pay_settings(settings)["autocharge"]) and int(cards_seen or 0) > 0
+
+
+def renters_without_card(rentals: Iterable[Mapping[str, Any]],
+                         cards: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Идущие аренды, у клиента которых нет привязанной карты: этим
+    автосписание не поможет, платить они будут сами. Клиент - одна строка.
+
+    nudged_at - `clients.card_nudge_at` со строки аренды: по той же отметке
+    бот решает «рано предлагать снова». История отправок живёт 30 дней, а
+    срок владелец ставит до 365 - по ней панель писала бы «не предлагали»
+    клиенту, которого бот ещё держит."""
+    have = {int(c["client_id"]) for c in cards
+            if c.get("client_id") is not None and c.get("active", True)}
+    seen: set[int] = set()
+    out = []
+    for rental in rentals:
+        client_id = rental.get("client_id")
+        if (client_id is None or rental.get("status", "active") != "active"
+                or int(client_id) in have or int(client_id) in seen):
+            continue
+        seen.add(int(client_id))
+        out.append({"client_id": int(client_id), "rental_id": rental.get("id"),
+                    "full_name": rental.get("full_name"), "phone": rental.get("phone"),
+                    "tg_id": rental.get("tg_id"), "bike_code": rental.get("bike_code"),
+                    "balance": to_money(rental.get("balance")),
+                    "nudged_at": rental.get("card_nudge_at")})
+    out.sort(key=lambda r: str(r.get("full_name") or "").casefold())
+    return out
+
+
 # ────────────────────── уведомления ──────────────────────
 #
 # Каталог - здесь, в коде: уведомление не появляется «по настройке», у
@@ -4809,6 +4894,14 @@ NOTICES: dict[str, dict[str, Any]] = {
         "group": "client", "target": "client", "hour": None,
         "title": "Списание с карты не прошло",
         "hint": "Банк отказал: на карте нет денег или она недействительна.",
+    },
+    "card_nudge": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Предложить привязать карту",
+        "hint": "После оплаты по ссылке без сохранённой карты - как работает "
+                "автосписание. Только когда оно включено и банк уже присылал "
+                "карты; одному клиенту не чаще раза в срок.",
+        "params": {"every_days": 30},
     },
     "promo_applied": {
         "group": "client", "target": "client", "hour": None,
@@ -4924,6 +5017,26 @@ NOTICES: dict[str, dict[str, Any]] = {
         "title": "Заявка на аренду снята",
         "hint": "Оператор снял заявку в панели; причина - в сообщении.",
     },
+    "waitlist": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "Лист ожидания: велосипед освободился",
+        "hint": "Клиенту с открытой заявкой, когда его модель освободилась на "
+                "его точке: сначала давним заявкам, раз в сутки на заявку и "
+                "только днём. Велосипед не бронируется - кто первым приедет.",
+        "params": {"per_bike": 2, "from_hour": 9, "to_hour": 18},
+    },
+    "waitlist_coming": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Клиент из листа ожидания едет",
+        "hint": "Нажал «Беру — приеду сегодня» под сообщением об освободившемся "
+                "велосипеде. Выдача - из заявки, как обычно.",
+    },
+    "battery_request": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Клиент просит второй аккумулятор",
+        "hint": "Кнопка в кабинете при пополнении или «продлю». Денег не "
+                "списано: выдайте батарею на точке и добавьте позицию в аренду.",
+    },
     "free_bikes": {
         "group": "channel", "target": "channel", "hour": 10,
         "title": "Свободные велосипеды в канал",
@@ -4973,6 +5086,18 @@ def notice_settings(rows: Iterable[Mapping[str, Any]] | None = None
             item["updated_at"] = row.get("updated_at")
         out[code] = item
     return out
+
+
+# Числовые параметры уведомлений в панели: имя для ошибки, подпись до поля
+# и после него, границы. Пока параметры были только сроками, панель писала
+# «через N дн.» у каждого - у числа клиентов на велосипед это было бы враньём.
+NOTICE_PARAMS: dict[str, tuple[str, str, str, int, int]] = {
+    "after_days": ("Срок", "через", "дн.", 0, 365),
+    "every_days": ("Срок", "не чаще раза в", "дн.", 1, 365),
+    "per_bike": ("Клиентов на велосипед", "не больше", "клиентов на велосипед", 1, 10),
+    "from_hour": ("Час начала", "с", "ч", 0, 23),
+    "to_hour": ("Час конца", "до", "ч", 1, 24),
+}
 
 
 def notice_param(setting: Mapping[str, Any] | None, key: str,
@@ -6661,6 +6786,115 @@ def booking_line(booking: Mapping[str, Any]) -> str:
     if isinstance(wanted, date):
         parts.append(wanted.strftime("%d.%m.%Y"))
     return " · ".join(parts)
+
+
+# ─────────────────────────── лист ожидания ───────────────────────────
+#
+# Заявка на модель, которой нет, - лист ожидания. Освободился велосипед
+# этой модели на точке заявки - бот зовёт: сначала давние заявки, не
+# больше N человек на велосипед, раз в сутки на заявку и только днём.
+# Велосипед при этом НЕ бронируется: кто первым приедет, того и он.
+
+# Сколько назад смотреть события «освободился». Сутки перекрывают ночь:
+# велосипед, сданный в 21:00, утром ещё свободен, и звать к нему надо.
+WAITLIST_LOOKBACK = timedelta(hours=24)
+# Умолчания параметров уведомления «waitlist»: двое на велосипед - один
+# может не ответить; с 9 до 18 - чтобы «приеду сегодня» успеть до закрытия.
+WAITLIST_PER_BIKE = 2
+WAITLIST_HOURS = (9, 18)
+
+
+def waitlist_hours_ok(setting: Mapping[str, Any] | None, now: datetime) -> bool:
+    """Днём ли сейчас: сообщение «освободился, приезжайте» в час ночи
+    будит, а не зовёт. Окно - параметры уведомления, час - местный."""
+    start = notice_param(setting, "from_hour", WAITLIST_HOURS[0])
+    end = notice_param(setting, "to_hour", WAITLIST_HOURS[1])
+    return start <= now.hour < end
+
+
+def waitlist_fits(bike: Mapping[str, Any], booking: Mapping[str, Any], *,
+                  aliases: Mapping[str, str] | None = None) -> bool:
+    """Велосипед годится заявке: свободен, та же модель (заводское имя
+    парка сводится к названию каталога) и та же точка. Заявка без точки
+    (точка была одна) ждёт на любой, без модели - любую."""
+    if bike.get("status", "available") != "available":
+        return False
+    want = str(booking.get("model") or "").strip()
+    if want and (catalogue_model(bike.get("model"), aliases)
+                 != catalogue_model(want, aliases)):
+        return False
+    if booking.get("location_id") is not None:
+        return bool(bike.get("location")) and bike.get("location") == booking.get(
+            "location_name")
+    return True
+
+
+def _called_to(bike: Mapping[str, Any], booking: Mapping[str, Any]) -> bool:
+    """Заявку уже звали к этому велосипеду после его освобождения."""
+    freed = bike.get("freed_at")
+    return (booking.get("waitlist_bike_id") == bike.get("id")
+            and isinstance(booking.get("waitlist_at"), datetime)
+            and (freed is None or booking["waitlist_at"] >= freed))
+
+
+def waitlist_taken(bike: Mapping[str, Any], bookings: Iterable[Mapping[str, Any]]) -> int:
+    """Сколько открытых заявок уже позвали к этому велосипеду с его
+    освобождения. Снятая или выданная заявка место отдаёт следующему."""
+    return sum(1 for b in bookings
+               if b.get("status", "new") == "new" and _called_to(bike, b))
+
+
+def waitlist_queue(bike: Mapping[str, Any], bookings: Iterable[Mapping[str, Any]], *,
+                   today: date, aliases: Mapping[str, str] | None = None) -> list[dict]:
+    """Кого звать к освободившемуся велосипеду - по очереди подачи.
+
+    Заявка, поданная уже после освобождения, не ждала: клиент при подаче
+    видел «свободно». Позванного сегодня (к этому или другому велосипеду)
+    второй раз за день не зовём, а про этот же велосипед - не зовём вовсе:
+    назавтра та же новость была бы уже спамом. Номер заявки растёт с
+    подачей, поэтому очередь - по нему."""
+    freed = bike.get("freed_at")
+    rows = [dict(b) for b in bookings
+            if b.get("status", "new") == "new"
+            and local_date(b.get("waitlist_at")) != today
+            and not _called_to(bike, b)
+            and (freed is None or not isinstance(b.get("created_at"), datetime)
+                 or b["created_at"] < freed)
+            and waitlist_fits(bike, b, aliases=aliases)]
+    rows.sort(key=lambda b: int(b.get("id") or 0))
+    return rows
+
+
+def booking_served(booking: Mapping[str, Any], rentals: Iterable[Mapping[str, Any]]) -> bool:
+    """Заявку уже закрыла аренда, заведённая после подачи. Выдача закрывает
+    открытую заявку сама (service.open_rental), но старые данные и импорт
+    могли оставить её «новой» - и лист ожидания позвал бы человека к
+    велосипеду, который он только что сдал."""
+    made = booking.get("created_at")
+    return isinstance(made, datetime) and any(
+        isinstance(r.get("created_at"), datetime) and r["created_at"] >= made
+        for r in rentals)
+
+
+def waitlist_note(booking: Mapping[str, Any], *, today: date) -> str:
+    """Строка в списке заявок: «уведомлён 14:05 · ответил 14:12».
+
+    «Не дошло» - сообщение не доставлено (бот заблокирован): место у
+    велосипеда отдано следующему, а сегодня этого клиента больше не зовём.
+    «Ответил» - только на последнее приглашение."""
+    at = booking.get("waitlist_at")
+    if not isinstance(at, datetime):
+        return ""
+
+    def when(moment: datetime) -> str:
+        local = moment.astimezone() if moment.tzinfo else moment
+        return local.strftime("%H:%M" if local.date() == today else "%d.%m %H:%M")
+
+    line = ("уведомлён " if booking.get("waitlist_bike_id") else "не дошло ") + when(at)
+    coming = booking.get("coming_at")
+    if isinstance(coming, datetime) and coming >= at:
+        line += " · ответил " + when(coming)
+    return line
 
 
 # ─────────────────────── сводка: задачи на сегодня ───────────────────────

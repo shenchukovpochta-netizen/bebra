@@ -629,7 +629,7 @@ class FakeCrm:
         c = self.clients_[r["client_id"]]
         b = self.bikes_.get(r["bike_id"]) if r["bike_id"] else None
         return {**r, "full_name": c["full_name"], "phone": c["phone"], "tg_id": c["tg_id"],
-                "client_status": c["status"],
+                "client_status": c["status"], "card_nudge_at": c.get("card_nudge_at"),
                 "bike_code": b["code"] if b else None,
                 "bike_model": b["model"] if b else None,
                 "balance": self._balance(r["client_id"])}
@@ -2344,6 +2344,9 @@ class FakeCrm:
             "title": title, "price": Decimal(price), "added_at": self._now(),
             "added_by": by, "removed_at": None, "removed_by": None}
         self._reprice(rental_id)
+        # Батарея выполняет просьбу из кабинета - как тем же UPDATE в базе.
+        if kind == "battery" and rental_id in self.rentals_:
+            self.rentals_[rental_id]["battery_asked_at"] = None
         return eid
 
     async def drop_rental_extra(self, extra_id, *, by):
@@ -2365,6 +2368,17 @@ class FakeCrm:
                       if e["rental_id"] == rental_id and e["removed_at"] is None),
                      Decimal(0))
         rental["price"] = base + extras
+
+    async def claim_battery_ask(self, rental_id, *, days):
+        """Как UPDATE ... where: просьба моложе срока - второй не бывает."""
+        rental = self.rentals_.get(rental_id)
+        if rental is None or rental["status"] != "active":
+            return False
+        asked = rental.get("battery_asked_at")
+        if asked is not None and self._now() - asked < timedelta(days=days):
+            return False
+        rental["battery_asked_at"] = self._now()
+        return True
 
     async def return_battery(self, battery_id, *, status="available", by):
         battery = self.batteries_.get(battery_id)
@@ -3122,6 +3136,19 @@ class FakeCrm:
             card["active"] = False
         return card["fails"]
 
+    async def cards_seen(self):
+        return len(self.cards_)
+
+    async def claim_card_nudge(self, client_id, *, days):
+        client = self.clients_.get(client_id)
+        if client is None:
+            return False
+        last = client.get("card_nudge_at")
+        if last is not None and self._now() - last < timedelta(days=days):
+            return False
+        client["card_nudge_at"] = self._now()
+        return True
+
 
     # ─────────────────── уведомления ───────────────────
 
@@ -3249,7 +3276,8 @@ class FakeCrm:
                                "wanted_on": wanted_on, "note": note, "status": "new",
                                "rental_id": None, "handled_by": None,
                                "handled_at": None, "created_at": self._now(),
-                               "updated_at": self._now()}
+                               "updated_at": self._now(), "waitlist_at": None,
+                               "waitlist_bike_id": None, "coming_at": None}
         return bid
 
     async def booking(self, booking_id):
@@ -3272,6 +3300,43 @@ class FakeCrm:
         b = self.bookings_[booking_id]
         b.update(fields)
         b["updated_at"] = self._now()
+
+    async def freed_bikes(self, since):
+        """Как в базе: свободные сейчас, с событием «стал свободен» или
+        «переехал» не раньше since; freed_at - позднее из событий."""
+        out = []
+        for bike in self.bikes_.values():
+            if bike["status"] != "available":
+                continue
+            moments = [x["changed_at"] for x in self.status_log_
+                       if x["bike_id"] == bike["id"] and x["to_status"] == "available"
+                       and x["changed_at"] >= since]
+            moments += [x["changed_at"] for x in self.location_log_
+                        if x["bike_id"] == bike["id"] and x["changed_at"] >= since]
+            if moments:
+                out.append({"id": bike["id"], "code": bike["code"], "model": bike["model"],
+                            "location": bike.get("location"), "freed_at": max(moments)})
+        return sorted(out, key=lambda b: (b["freed_at"], b["id"]))
+
+    async def mark_waitlist(self, booking_id, bike_id):
+        b = self.bookings_.get(booking_id)
+        if b is None or b["status"] != "new":
+            return False
+        at = b.get("waitlist_at")
+        if at is not None and crm_logic.local_date(at) >= crm_logic.local_date(self._now()):
+            return False
+        b.update(waitlist_at=self._now(), waitlist_bike_id=bike_id, updated_at=self._now())
+        return True
+
+    async def mark_coming(self, booking_id):
+        b = self.bookings_.get(booking_id)
+        if b is None or b["status"] != "new":
+            return False
+        coming, invited = b.get("coming_at"), b.get("waitlist_at")
+        if coming is not None and (invited is None or coming >= invited):
+            return False
+        b.update(coming_at=self._now(), updated_at=self._now())
+        return True
 
     # ─────────────────── акции ───────────────────
 

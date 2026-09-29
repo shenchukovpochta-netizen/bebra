@@ -634,6 +634,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
         PAY_STATUSES=logic.PAY_STATUSES, PAY_KINDS=logic.PAY_KINDS,
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
+        NOTICE_PARAMS=logic.NOTICE_PARAMS,
         DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
         BIKE_PASSPORT=logic.BIKE_PASSPORT, TAKE_WHAT=logic.TAKE_WHAT,
         ALERT_LEVELS=logic.ALERT_LEVELS, ALERT_STATES=logic.ALERT_STATES,
@@ -2722,6 +2723,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = await crm.bookings(limit=300)
         for row in rows:
             row["issue_url"] = booking_issue_url(row)
+            # Лист ожидания: звал ли бот клиента к освободившемуся велосипеду
+            # и нажал ли тот «еду» - оператор видит, кого ждать сегодня.
+            row["waitlist_note"] = logic.waitlist_note(row, today=date.today())
         return render(request, "bookings.html", rows=rows, today=date.today(),
                       fresh=[r for r in rows if r["status"] == "new"])
 
@@ -6369,8 +6373,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             at_minute = 0
         extra = {}
         for key, fallback in (default["extra"] or {}).items():
-            got = count_field(data, key, what="Срок", default=str(fallback),
-                              limit=365)
+            # Границы - по виду параметра: час не бывает 300-м, а число
+            # клиентов на велосипед - нулём.
+            what, _, _, least, limit = logic.NOTICE_PARAMS.get(
+                key, ("Срок", "через", "дн.", 0, 365))
+            got = count_field(data, key, what=what, default=str(fallback),
+                              limit=limit, least=least)
             if not got.ok:
                 flash(request, got.error, "err")
                 return redirect("/notices")
@@ -6470,12 +6478,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # В выпадающем списке - те, кто платит: должники и действующие
         # аренды. Весь список клиентов сюда не влезает и не нужен.
         picks = {c["id"]: c for c in await crm.debtors(200)}
-        for rental in await crm.active_rentals():
+        active = await crm.active_rentals()
+        for rental in active:
             picks.setdefault(rental["client_id"],
                              {"id": rental["client_id"],
                               "full_name": rental.get("full_name"),
                               "phone": rental.get("phone")})
         raw_settings = await crm.settings()
+        # Кому автосписание не поможет: идущая аренда, а карты нет. Когда
+        # бот предлагал привязку - отметка на карточке клиента (приезжает
+        # со строкой аренды); готовность предлагать - автосписание плюс
+        # карты от банка.
+        seen = await crm.cards_seen()
         return render(request, "payments.html",
                       rows=logic.pay_rows(orders), status=status,
                       settings=settings, acq=acquiring_state(raw_settings),
@@ -6483,7 +6497,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           await crm.pay_orders(limit=500)),
                       online=await acquiring_live() is not None,
                       clients_for_pick=sorted(
-                          picks.values(), key=lambda c: str(c.get("full_name") or "")))
+                          picks.values(), key=lambda c: str(c.get("full_name") or "")),
+                      nocard=logic.renters_without_card(active, await crm.cards()),
+                      renters=len({r["client_id"] for r in active}),
+                      cards_seen=seen,
+                      nudge_ready=logic.card_nudge_ready(raw_settings, seen))
 
     @app.post("/payments")
     async def payment_create(request: Request) -> Response:

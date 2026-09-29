@@ -127,6 +127,16 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
     if bike is not None:
         await crm.add_rental_bike(rental_id, bike_id=bike["id"], issued_on=started_on,
                                   mileage_start=mileage, reason="Выдача", created_by=by)
+    # Открытую заявку клиента закрывает любая выдача, а не только кнопка
+    # «Выдать» в «Бронях»: оставшись «новой», она после возврата позвала
+    # бы клиента листом ожидания (к только что сданному велосипеду) и не
+    # дала бы подать новую. Учёт заявки выдачу не срывает - только лог.
+    try:
+        booked = await crm.open_booking_of(client["id"])
+        if booked is not None:
+            await close_booking(crm, booked["id"], rental_id=rental_id, by=by)
+    except Exception:                                    # noqa: BLE001
+        log.exception("заявка клиента %s не закрыта выдачей", client.get("id"))
     for extra in extras:
         await crm.add_rental_extra(
             rental_id, kind=str(extra.get("kind") or "battery"),
@@ -1161,6 +1171,52 @@ async def swap_battery(crm: Any, rental: dict, old: dict | None, new: dict, *,
                                  cycles=int(old.get("cycles") or 0) + 1, by=by)
     await crm.update_battery(new["id"], status="rented", rental_id=rental["id"],
                              bike_id=rental.get("bike_id"), by=by)
+
+
+async def _spare_batteries(crm: Any, rental: dict) -> list[dict]:
+    """Что точка может выдать вторым: свободные батареи, а если матрица
+    совместимости знает модель велосипеда - только подходящие ей. Отбор
+    тот же, что в мастере выдачи: цена в кнопке - цена одной из них."""
+    free = await crm.batteries(status="available", limit=500)
+    if free and rental.get("bike_model"):
+        aliases = logic.model_aliases(await crm.bike_models())
+        fit = {m["id"] for m in await crm.compat_for_bike_model(
+            logic.catalogue_model(rental["bike_model"], aliases))}
+        if fit:
+            free = [b for b in free if b.get("model_id") in fit]
+    return free
+
+
+async def _battery_offer(crm: Any, rental: dict) -> dict | None:
+    return logic.battery_offer(await crm.tariffs(active_only=True), rental,
+                               await crm.rental_extras(rental["id"], live_only=True),
+                               await _spare_batteries(crm, rental))
+
+
+async def battery_offer(crm: Any, rental: dict | None, *,
+                        now: datetime | None = None) -> dict | None:
+    """Кнопка «+ второй аккумулятор» при продлении: {price, days, exact}
+    или None. Свежая просьба - тоже None: кнопка не зовёт нажать второй
+    раз, пока команда её не выполнила."""
+    if not rental or logic.battery_asked_recently(rental, now=now or datetime.now(UTC)):
+        return None
+    return await _battery_offer(crm, rental)
+
+
+async def ask_battery(crm: Any, rental: dict | None) -> tuple[str, dict | None]:
+    """Клиент нажал «+ второй аккумулятор»: записать просьбу.
+
+    Это просьба, а не покупка: денег не берём и позиции не заводим -
+    батарею выдаёт человек на точке и добавляет позицию, как всегда
+    (add_battery_extra). Возвращает (исход, предложение): "stale" -
+    предлагать нечего (батарея уже взята, выдать нечего, цены нет, аренда
+    закрыта), "pending" - просьба уже есть, "ok" - записана только что."""
+    offer = await _battery_offer(crm, rental) if rental else None
+    if offer is None:
+        return "stale", None
+    if not await crm.claim_battery_ask(rental["id"], days=logic.BATTERY_ASK_DAYS):
+        return "pending", offer
+    return "ok", offer
 
 
 # ─────────────────────────── касса ───────────────────────────

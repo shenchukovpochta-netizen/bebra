@@ -363,9 +363,31 @@ def cab_booking(lang: str = "ru") -> InlineKeyboardMarkup:
     ])
 
 
-def cab_pay_options(options: list[dict], lang: str = "ru") -> InlineKeyboardMarkup:
+def waitlist(booking_id: int, bike_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
+    """Под «освободился велосипед»: «еду сегодня» или снять заявку. Номер
+    заявки и велосипеда едут в callback - диалог без состояния, а чужой
+    номер обработчик сверяет с клиентом, нажавшим кнопку."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_WAITLIST_TAKE"),
+                              callback_data=f"wl:{int(booking_id)}:{int(bike_id)}")],
+        [InlineKeyboardButton(text=i18n.t(lang, "BTN_BOOK_CANCEL"),
+                              callback_data="cab:book:cancel")],
+    ])
+
+
+def cab_battery(label: str, rental_id: int) -> InlineKeyboardMarkup:
+    """Одна кнопка «+ второй аккумулятор» - под «продлю»."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"cab:bat:{int(rental_id)}")],
+    ])
+
+
+def cab_pay_options(options: list[dict], lang: str = "ru", *,
+                    battery: tuple[str, int] | None = None) -> InlineKeyboardMarkup:
     """Выбор суммы: долг и периоды вперёд. В callback - код кнопки, сумма
-    пересчитается при нажатии."""
+    пересчитается при нажатии. `battery` - подпись и номер аренды для
+    «+ второй аккумулятор»: пополнение - это продление, и спросить о
+    батарее здесь дешевле, чем звонком."""
     rows = []
     for option in options:
         if option["code"] == "debt":
@@ -375,6 +397,9 @@ def cab_pay_options(options: list[dict], lang: str = "ru") -> InlineKeyboardMark
                 n=option["periods"], days=option["days"], amount=option["label_amount"])
         rows.append([InlineKeyboardButton(text=label,
                                           callback_data=f"cab:pay:{option['code']}")])
+    if battery is not None:
+        rows.append([InlineKeyboardButton(text=battery[0],
+                                          callback_data=f"cab:bat:{int(battery[1])}")])
     rows.append([InlineKeyboardButton(text=i18n.t(lang, "BTN_CAB_BACK"),
                                       callback_data="cab:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
