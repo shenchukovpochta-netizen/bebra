@@ -74,6 +74,9 @@ FILES_404 = {
 # календаря и падал бы каждое первое число.
 MONTH_TO_DATE = ("/reports/techs", "/reports/model-parts", "/reports/spend",
                  "/reports/referrals")
+# Адреса для чужих серверов, которых в демо нет по устройству: метрик
+# франчайзеру демо не отдаёт (токена нет) - честный 404, не раздел.
+HOOKS_OFF = {"/hook/metrics": 404}
 # Маршруты, которые обход по ссылкам не открывает, - у каждого своя
 # проверка ниже: /issue/docs пишет заявку на подпись прямо на GET, /sign/
 # пишет «открыто» в протокол подписи и открыт без входа.
@@ -187,6 +190,9 @@ DETAILS: tuple[tuple[str, str, str], ...] = (
     ("пересчёт", "/stock-takes/{}", "select id from crm.stock_takes order by id"),
     ("точка", "/reports/points/{}", "select id from crm.locations order by id"),
     ("обращение", "/inbox/{}", "select id from crm.inbox_threads order by id"),
+    ("франчайзи: свежий и без ответа", "/franchisees/{}",
+     "select distinct on (error is null) id from crm.franchisees "
+     "order by error is null, id"),
     ("профиль доступа", "/profiles/{}", "select id from crm.access_profiles order by id"),
     ("выдача: клиент с арендой", "/issue?client={}",
      "select client_id from crm.rentals where status = 'active' order by id limit 1"),
@@ -405,7 +411,8 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
                  "/batteries?view=search", "/bikes?location=none",
                  "/rentals?status=all", "/rentals?status=closed", "/inbox?tab=all",
                  "/orders?location=none", "/orders?payer=client", "/bank?status=all",
-                 "/clients?status=blacklist", "/map?q=МБ-1"]
+                 "/clients?status=blacklist", "/map?q=МБ-1",
+                 "/franchisees/royalty?months=24"]
         # Фильтр по риску - форма, а не ссылка: каждый уровень отдельно.
         pages += [f"/clients?risk={level}" for level in logic.RISK_LEVELS]
         pages += [f"/rentals?view={v}" for v in ("debt", "overdue", "search", "repair",
@@ -491,7 +498,8 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((r.status_code, r.headers.get("location")), (303, "/"),
                              "вошедшего вход уводит на сводку")
             # Шаблон акции без вида - честный редирект на выбор шаблона.
-            result = await crawl(client, start, expect={**files, "/promos/new": 303})
+            result = await crawl(client, start, expect={**files, **HOOKS_OFF,
+                                                        "/promos/new": 303})
         self.assertEqual(result.failures, [], "\n".join(result.failures))
         self.assertEqual(result.odd, {}, "следы непредусмотренных данных")
 
@@ -517,7 +525,8 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
                           "until": self.today.isoformat()})
         pages = sorted({f"{r}?{span}" if r in MONTH_TO_DATE else r
                         for r in self.routes() if "{" not in r
-                        and r not in ("/login", "/healthz", "/me", "/promos/new")
+                        and r not in ("/login", "/healthz", "/me", "/promos/new",
+                                      *HOOKS_OFF)
                         and not r.startswith(OWN_CHECK)})
         async with self.client() as client:
             await self.login(client, "demo")

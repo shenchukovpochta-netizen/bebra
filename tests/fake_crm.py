@@ -76,6 +76,9 @@ class FakeCrm:
         self.ops_: dict[int, dict] = {}
         self.inbox_threads_: dict[int, dict] = {}
         self.inbox_messages_: dict[int, dict] = {}
+        self.franchisees_: dict[int, dict] = {}
+        self.franchise_snapshots_: dict[tuple, dict] = {}
+        self.franchise_months_: dict[tuple, dict] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
@@ -3836,6 +3839,96 @@ class FakeCrm:
     async def ops_reports_of_rental(self, rental_id):
         rows = [self._ops_row(o) for o in self.ops_.values() if o["rental_id"] == rental_id]
         return sorted(rows, key=lambda o: (o["created_at"], o["id"]))
+
+    # ────────── франшиза: франчайзи и роялти ──────────
+    _FRANCHISEE_FIELDS = frozenset({"name", "city", "base_url", "token_enc",
+                                    "royalty_percent", "fixed_fee", "contract_start",
+                                    "active", "note"})
+
+    def _franchisee_row(self, f):
+        """Как select в CrmDB: франчайзи и его последний снимок."""
+        snaps = [v for (fid, _), v in self.franchise_snapshots_.items() if fid == f["id"]]
+        last = max(snaps, key=lambda v: v["taken_on"], default=None)
+        return {**f, "data": dict(last["data"]) if last else None,
+                "taken_at": last["taken_at"] if last else None}
+
+    async def franchisees(self):
+        rows = sorted(self.franchisees_.values(),
+                      key=lambda f: (not f["active"], f["name"], f["id"]))
+        return [self._franchisee_row(f) for f in rows]
+
+    async def franchisee(self, franchisee_id):
+        f = self.franchisees_.get(franchisee_id)
+        return self._franchisee_row(f) if f else None
+
+    async def create_franchisee(self, **fields):
+        unknown = set(fields) - self._FRANCHISEE_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        fid = self._id()
+        self.franchisees_[fid] = {
+            "id": fid, "name": None, "city": None, "base_url": None, "token_enc": None,
+            "royalty_percent": Decimal("0.00"), "fixed_fee": Decimal("0.00"),
+            "contract_start": None, "active": True, "note": None, "polled_at": None,
+            "ok_at": None, "error": None, "created_at": self._now(),
+            "updated_at": self._now(), **fields}
+        return fid
+
+    async def update_franchisee(self, franchisee_id, *, terms_from=None, **fields):
+        unknown = set(fields) - self._FRANCHISEE_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        f = self.franchisees_.get(franchisee_id)
+        if f is None or not fields:
+            return
+        f.update(fields, updated_at=self._now())
+        if "royalty_percent" in fields or "fixed_fee" in fields:
+            since = terms_from or date.today().replace(day=1)
+            for (fid, month), m in self.franchise_months_.items():
+                if fid == franchisee_id and month >= since:
+                    m.update(royalty_percent=f["royalty_percent"], fixed_fee=f["fixed_fee"])
+
+    async def delete_franchisee(self, franchisee_id, *, wipe=False):
+        if franchisee_id not in self.franchisees_ or (not wipe and any(
+                fid == franchisee_id for fid, _ in self.franchise_months_)):
+            return False
+        del self.franchisees_[franchisee_id]
+        for store in (self.franchise_snapshots_, self.franchise_months_):
+            for key in [k for k in store if k[0] == franchisee_id]:
+                del store[key]
+        return True
+
+    async def save_franchise_snapshot(self, franchisee_id, *, data, months, taken_on):
+        f = self.franchisees_[franchisee_id]
+        self.franchise_snapshots_[(franchisee_id, taken_on)] = {
+            "taken_on": taken_on, "taken_at": self._now(), "data": dict(data)}
+        current = date.today().replace(day=1)
+        for m in months:
+            key = (franchisee_id, m["month"])
+            old = self.franchise_months_.get(key)
+            fresh = old is None or m["month"] >= current
+            self.franchise_months_[key] = {
+                "franchisee_id": franchisee_id, "partial": False, **m,
+                "reported_at": self._now(),
+                "royalty_percent": f["royalty_percent"] if fresh else old["royalty_percent"],
+                "fixed_fee": f["fixed_fee"] if fresh else old["fixed_fee"]}
+        f.update(polled_at=self._now(), ok_at=self._now(), error=None)
+
+    async def franchise_failed(self, franchisee_id, error):
+        f = self.franchisees_.get(franchisee_id)
+        if f is not None:
+            f.update(polled_at=self._now(), error=error)
+
+    async def franchise_months(self, since):
+        rows = [dict(m) for (_, month), m in self.franchise_months_.items() if month >= since]
+        return sorted(rows, key=lambda m: (-m["month"].toordinal(), m["franchisee_id"]))
+
+    async def purge_franchise_snapshots(self, days):
+        edge = date.today() - timedelta(days=days)
+        old = [k for k, v in self.franchise_snapshots_.items() if v["taken_on"] < edge]
+        for key in old:
+            del self.franchise_snapshots_[key]
+        return len(old)
 
     # ────────── входящие обращения ──────────
 

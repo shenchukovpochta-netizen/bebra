@@ -21,7 +21,7 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
-from .crm import banking, health, inbox, mailing, paying, tracking
+from .crm import banking, franchise, health, inbox, mailing, paying, tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, ops, registration
@@ -139,6 +139,10 @@ async def run() -> None:
     # Здоровье сервера: диск, отчёт сервиса backup, панель, сертификаты -
     # раз в час, владельцу через уведомление server_health.
     health_task = asyncio.create_task(health.health_loop(bot, crm, cfg))
+    # Франчайзи: раз в сутки забрать агрегаты с их серверов - здесь, а не
+    # в панели (панель ходит к франчайзи только по кнопке). Без ключа
+    # secrets/franchise_key задача выходит сразу.
+    franchise_task = asyncio.create_task(franchise.franchise_loop(crm, cfg))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([
@@ -173,8 +177,10 @@ async def run() -> None:
         mailing_task.cancel()
         inbox_task.cancel()
         health_task.cancel()
+        franchise_task.cancel()
         await asyncio.gather(retention, reminders, tracking_task, banking_task,
                              paying_task, mailing_task, inbox_task, health_task,
+                             franchise_task,
                              return_exceptions=True)
         if max_client is not None:
             await max_client.close()

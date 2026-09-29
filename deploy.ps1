@@ -75,7 +75,7 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/paying.py', 'app/crm/notices.py', 'app/crm/firstrun.py',
          'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py',
          'app/crm/points.py', 'app/crm/readiness.py', 'app/crm/waitlist.py',
-         'app/crm/health.py')
+         'app/crm/health.py', 'app/crm/franchise.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py', 'app/web/icons.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -152,7 +152,10 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/sign_agreement.html',
                   'app/web/templates/sign_missing.html',
                   'app/web/templates/_demo_banner.html',
-                  'app/web/templates/_server.html')
+                  'app/web/templates/_server.html',
+                  'app/web/templates/franchisees.html',
+                  'app/web/templates/franchisee.html',
+                  'app/web/templates/franchise_royalty.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css',
                'app/web/static/icon-192.png', 'app/web/static/icon-512.png',
                'app/web/static/icon-maskable-512.png', 'app/web/static/apple-touch-icon.png')
@@ -179,7 +182,7 @@ $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/contract.py', 'app/services/crypto.py',
               'app/services/mrz.py', 'app/services/ocr.py',
               'app/services/starline.py', 'app/services/tochka.py',
-              'app/services/avito.py', 'app/services/probes.py',
+              'app/services/avito.py', 'app/services/probes.py', 'app/services/franchise.py',
               'app/services/tochka_ca.pem')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
@@ -187,7 +190,8 @@ $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
 # crm-demo (python -m app.demo). Своим списком по той же причине, что i18n.
 $demo = @('app/demo/__init__.py', 'app/demo/__main__.py', 'app/demo/runtime.py',
           'app/demo/seed.py', 'app/demo/core.py', 'app/demo/world.py',
-          'app/demo/people.py', 'app/demo/seed_service.py', 'app/demo/seed_extras.py')
+          'app/demo/people.py', 'app/demo/seed_service.py', 'app/demo/seed_extras.py',
+          'app/demo/seed_franchise.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
           'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
@@ -221,7 +225,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_demo_crawl.py', 'tests/test_readiness.py',
           'tests/test_waitlist.py', 'tests/test_battery_offer.py', 'tests/test_card_nudge.py',
           'tests/test_backup.py', 'tests/test_health.py',
-          'tests/test_risk.py')
+          'tests/test_risk.py', 'tests/test_franchise.py',
+          'tests/test_franchise_web.py')
 
 foreach ($f in ($root + $app + $docs + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

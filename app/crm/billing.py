@@ -17,7 +17,7 @@ from aiogram.exceptions import TelegramAPIError
 from .. import i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
-from . import banking, logic, notices, notify, service
+from . import banking, franchise, logic, notices, notify, service
 
 log = logging.getLogger(__name__)
 
@@ -481,6 +481,15 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
                 log.info("CRM: расхождений в данных найдено %s", found)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: проверка расхождений не удалась")
+
+    if due("franchise_stale"):
+        notices.mark(done, "franchise_stale", today)
+        try:
+            stale = await franchise.report_stale(bot, crm, cfg, now=now)
+            if stale:
+                log.info("CRM: франчайзи без свежих данных %s", stale)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: сводка по франчайзи не собрана")
 
     if due("free_bikes"):
         notices.mark(done, "free_bikes", today)

@@ -159,6 +159,16 @@ if [ ! -s secrets/backup_key ]; then
 fi
 # Секрет доступа к бакету S3: пустой - облако выключено.
 [ -f secrets/backup_s3_secret ] || : > secrets/backup_s3_secret
+# Франшиза. Ключ токенов франчайзи генерируется сразу: без него раздел
+# «Франчайзи» не примет ни одного токена. Смена ключа делает сохранённые
+# токены нечитаемыми - их придётся ввести заново.
+if [ ! -s secrets/franchise_key ]; then
+  openssl rand -base64 32 | tr -d '\n' > secrets/franchise_key
+  say "сгенерирован secrets/franchise_key — положите его в бэкап отдельно от базы"
+fi
+# Токен адреса /hook/metrics для франчайзера: пустой - адреса нет. Включить:
+#   openssl rand -hex 32 | tr -d '\n' > secrets/metrics_token
+[ -f secrets/metrics_token ] || : > secrets/metrics_token
 chmod 600 secrets/* .env
 # Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
 # Вне swarm docker compose не копирует файл секрета, а подключает хостовый как

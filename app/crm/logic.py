@@ -26,6 +26,7 @@ import os
 import random
 import re
 import secrets
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -779,6 +780,624 @@ def fleet_metrics(days: dict[str, Any], revenue: Any) -> dict[str, Any]:
         "check_ok": avg_check is not None and avg_check >= CHECK_TARGET,
         "idle_breakdown": {s: days.get(s, Decimal(0)) for s in IDLE_STATUSES},
     }
+
+
+# ─────────────────── франшиза: метрики наружу и роялти ───────────────────
+#
+# Франчайзи живёт на своём сервере со своей копией системы. Франчайзеру он
+# отдаёт только агрегаты - GET /hook/metrics по токену: парк, три числа,
+# выручку по месяцам, названия точек. Ни клиента, ни телефона, ни суммы
+# отдельной аренды. Процесс бота франчайзера раз в сутки забирает ответ,
+# проверяет его здесь (чужой ответ - чужая строка) и считает роялти.
+# Три числа франчайзер пересчитывает из дней и выручки той же формулой
+# (fleet_metrics), а не верит готовым процентам: определение у сети одно.
+
+METRICS_FORMAT = 1
+# Текущий месяц и пять прошлых - как таблица трёх чисел в «Отчётах». Полгода
+# истории хватает, чтобы опрос, пропустивший неделю, не оставил дыр в роялти.
+METRICS_MONTHS = 6
+# Ответ франчайзи - килобайты. Всё, что больше, не наш формат, и дочитывать
+# его значит отдать чужому серверу память процесса бота.
+METRICS_MAX_BYTES = 256 * 1024
+METRICS_TIMEOUT = 20
+# Запросов с верным токеном на один адрес в час. Франчайзер ходит раз в
+# сутки и по кнопке; ответ - десяток запросов к базе, и утёкший токен не
+# должен превращаться в нагрузку на чужую панель.
+METRICS_RATE_LIMIT = 30
+METRICS_RATE_WINDOW = 3600
+METRICS_TEXT_LIMIT = 80
+METRICS_POINTS_LIMIT = 100
+METRICS_MONTHS_LIMIT = 24
+METRICS_COUNT_LIMIT = 10_000_000
+METRICS_DAYS_LIMIT = Decimal(10_000_000)
+METRICS_MONEY_LIMIT = Decimal("9999999999.99")      # numeric(12,2)
+# Ответ собирается в момент запроса: generated_at дальше суток от наших
+# часов - сбитые часы или чужой кэш, и такой ответ затёр бы свежие месяцы
+# старыми цифрами. Годы - те же, что у месяцев ответа.
+METRICS_CLOCK_SKEW = timedelta(days=1)
+METRICS_YEARS = (2000, 2100)
+# Данные устарели, если принятого ответа нет полтора суток: опрос раз в
+# сутки, и один пропущенный круг - ещё не повод для тревоги.
+FRANCHISE_STALE_HOURS = 36
+# Неудачный опрос повторяется не чаще раза в час: лежащему серверу
+# франчайзи запрос каждые десять минут не поможет.
+FRANCHISE_RETRY_MINUTES = 60
+FRANCHISE_TOKEN_MIN, FRANCHISE_TOKEN_MAX = 16, 200
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_VERSION_RE = re.compile(r"[0-9A-Za-z._+-]{1,40}")
+_MONTH_RE = re.compile(r"(\d{4})-(\d{2})")
+
+
+def metrics_months(now: datetime, count: int = METRICS_MONTHS
+                   ) -> list[tuple[datetime, datetime, bool]]:
+    """Границы месяцев для ответа, от нового к старому: текущий - по сейчас
+    (третий элемент True), прошлые - целиком. Тот же шаг, что у таблицы
+    трёх чисел в «Отчётах»: франчайзи и франчайзер обязаны видеть одно."""
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    for _ in range(count):
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        out.append((first, min(nxt, now), nxt > now))
+        first = (first - timedelta(days=1)).replace(day=1)
+    return out
+
+
+def _days_text(value: Any) -> str:
+    return str(Decimal(str(value or 0)).quantize(CENT, rounding=ROUND_HALF_UP))
+
+
+def metrics_block(m: Mapping[str, Any]) -> dict[str, Any]:
+    """Три числа периода (итог fleet_metrics) для ответа. Деньги и дни -
+    строкой: float в JSON терял бы копейки."""
+    return {
+        "idle_percent": m.get("idle_percent"),
+        "avg_check": None if m.get("avg_check") is None else str(to_money(m["avg_check"])),
+        "revenue": str(to_money(m.get("revenue"))),
+        "operational_days": _days_text(m.get("operational_days")),
+        "rented_days": _days_text(m.get("rented_days")),
+        "idle_days": _days_text(m.get("idle_days")),
+    }
+
+
+def metrics_payload(*, title: str, version: str, now: datetime,
+                    places: Iterable[Mapping[str, Any]], bikes: Mapping[str, Any],
+                    counts: Mapping[str, Any], last30: Mapping[str, Any],
+                    months: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Ответ /hook/metrics. Только агрегаты: названия и города точек, число
+    велосипедов, аренд и клиентов, три числа и выручка. Ни одного поля
+    карточки клиента - это граница, которую держит тест на ключи ответа.
+    Город копии - самый частый город открытых точек."""
+    points = [{"name": str(p.get("name") or ""), "city": p.get("city") or None}
+              for p in places if p.get("active", True) and p.get("name")]
+    cities: dict[str, int] = {}
+    for p in points:
+        if p["city"]:
+            cities[p["city"]] = cities.get(p["city"], 0) + 1
+    return {
+        "format": METRICS_FORMAT,
+        "name": str(title or ""),
+        "city": max(cities, key=lambda c: (cities[c], c)) if cities else None,
+        "version": version,
+        "generated_at": now.isoformat(timespec="seconds"),
+        "points": points,
+        "fleet": sum(int(bikes.get(s, 0) or 0) for s in OPERATIONAL_STATUSES),
+        "rented": int(bikes.get("rented", 0) or 0),
+        "rentals_active": int(counts.get("rentals", 0) or 0),
+        "clients": int(counts.get("clients", 0) or 0),
+        "last30": metrics_block(last30),
+        "months": [{"month": m["month"].strftime("%Y-%m"), "partial": bool(m.get("partial")),
+                    **metrics_block(m)} for m in months],
+    }
+
+
+class _BadMetrics(ValueError):
+    """Ответ франчайзи не прошёл проверку; текст - что именно не так."""
+
+
+def _m_text(value: Any, what: str, *, required: bool = False) -> str | None:
+    """Чужая строка: управляющие и невидимые символы (перевод строки,
+    переворот RTL, нулевая ширина, суррогаты) - вон, пробелы схлопнуты,
+    длина обрезана. В таблице франчайзера такие символы переставляли бы
+    соседние колонки и прятали подмену имени."""
+    if value is None and not required:
+        return None
+    if not isinstance(value, str):
+        raise _BadMetrics(f"{what}: ждали строку")
+    text = "".join(" " if ch.isspace() else ch for ch in value[:METRICS_TEXT_LIMIT * 4]
+                   if ch.isspace() or unicodedata.category(ch)[0] != "C")
+    text = " ".join(text.split())[:METRICS_TEXT_LIMIT].strip()
+    if not text:
+        if required:
+            raise _BadMetrics(f"{what}: пусто")
+        return None
+    return text
+
+
+def _m_int(value: Any, what: str) -> int:
+    # bool - подкласс int: true на месте числа клиентов - порча, а не 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _BadMetrics(f"{what}: ждали целое число")
+    if not 0 <= value <= METRICS_COUNT_LIMIT:
+        raise _BadMetrics(f"{what}: вне разумных пределов")
+    return value
+
+
+def _m_dec(value: Any, what: str, *, limit: Decimal, optional: bool = False,
+           places: Decimal = CENT) -> Decimal | None:
+    """Число из ответа: строка, целое или Decimal (parse_float=Decimal).
+    NaN, бесконечность, минус и «1e999» - порча, а не число."""
+    if value is None and optional:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise _BadMetrics(f"{what}: ждали число")
+    text = value.strip() if isinstance(value, str) else str(value)
+    if len(text) > 40:
+        raise _BadMetrics(f"{what}: ждали число")
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise _BadMetrics(f"{what}: ждали число") from None
+    if not number.is_finite() or number < 0 or number > limit:
+        raise _BadMetrics(f"{what}: вне разумных пределов")
+    return number.quantize(places, rounding=ROUND_HALF_UP)
+
+
+def _m_block(value: Any, what: str) -> dict[str, Any]:
+    """Три числа периода. Проценты и чек пересчитываются из дней и выручки
+    той же fleet_metrics, что у самой панели: присланные готовыми они
+    могли бы разойтись с днями, а сеть сравнивается по одной формуле."""
+    if not isinstance(value, dict):
+        raise _BadMetrics(f"{what}: ждали объект")
+    revenue = _m_dec(value.get("revenue"), f"{what}.revenue", limit=METRICS_MONEY_LIMIT)
+    idle = _m_dec(value.get("idle_days"), f"{what}.idle_days", limit=METRICS_DAYS_LIMIT)
+    rented = _m_dec(value.get("rented_days"), f"{what}.rented_days", limit=METRICS_DAYS_LIMIT)
+    operational = _m_dec(value.get("operational_days"), f"{what}.operational_days",
+                         limit=METRICS_DAYS_LIMIT)
+    # Операционный парк - это ровно простой плюс аренда: расхождение
+    # больше округления значит, что дни собраны не нашей формулой.
+    if abs(operational - idle - rented) > Decimal("0.05"):
+        raise _BadMetrics(f"{what}: дни не сходятся (простой + аренда ≠ парк)")
+    three = fleet_metrics({"available": idle, "rented": rented}, revenue)
+    return {"revenue": revenue, "idle_days": idle, "rented_days": rented,
+            "operational_days": operational, "idle_percent": three["idle_percent"],
+            "avg_check": three["avg_check"]}
+
+
+def _m_time(value: Any) -> datetime:
+    if not isinstance(value, str) or len(value) > 40:
+        raise _BadMetrics("generated_at: ждали дату и время ISO")
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise _BadMetrics("generated_at: ждали дату и время ISO") from None
+    if moment.tzinfo is None:
+        raise _BadMetrics("generated_at: без часового пояса")
+    # «0001-01-01T00:00+14:00» в UTC - год 0: astimezone в шаблоне падал бы
+    # OverflowError на каждом открытии карточки. Свой пояс момент хранит:
+    # по нему франчайзи резал месяцы.
+    try:
+        utc = moment.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise _BadMetrics("generated_at: вне разумных пределов") from None
+    low, high = METRICS_YEARS
+    if not (low <= moment.year <= high and low <= utc.year <= high):
+        raise _BadMetrics("generated_at: вне разумных пределов")
+    return moment
+
+
+def _month_after(month: date) -> date:
+    return (month + timedelta(days=32)).replace(day=1)
+
+
+def parse_metrics(data: Any, *, now: datetime | None = None) -> Check:
+    """Проверка ответа франчайзи. Check.value - только известные поля в
+    наших типах (Decimal, date, datetime); лишнее отброшено молча, негодное
+    - отказ целиком с причиной. Чужой ответ не должен ни уронить панель
+    франчайзера, ни подложить в неё разметку или «миллиард» в чек."""
+    try:
+        if not isinstance(data, dict):
+            raise _BadMetrics("ответ - не объект JSON")
+        fmt = data.get("format")
+        if isinstance(fmt, bool) or fmt != METRICS_FORMAT:
+            raise _BadMetrics(f"формат ответа не наш: ждали {METRICS_FORMAT}")
+        generated = _m_time(data.get("generated_at"))
+        if now is not None and generated - now > METRICS_CLOCK_SKEW:
+            raise _BadMetrics("generated_at: из будущего")
+        if now is not None and now - generated > METRICS_CLOCK_SKEW:
+            raise _BadMetrics("generated_at: старше суток - сбиты часы франчайзи "
+                              "или ответ из кэша")
+        version = data.get("version")
+        raw_points = data.get("points")
+        if not isinstance(raw_points, list):
+            raise _BadMetrics("points: ждали список")
+        if len(raw_points) > METRICS_POINTS_LIMIT:
+            raise _BadMetrics(f"points: больше {METRICS_POINTS_LIMIT}")
+        points = []
+        for item in raw_points:
+            if not isinstance(item, dict):
+                raise _BadMetrics("points: ждали объекты")
+            points.append({"name": _m_text(item.get("name"), "points.name", required=True),
+                           "city": _m_text(item.get("city"), "points.city")})
+        raw_months = data.get("months")
+        if not isinstance(raw_months, list):
+            raise _BadMetrics("months: ждали список")
+        if len(raw_months) > METRICS_MONTHS_LIMIT:
+            raise _BadMetrics(f"months: больше {METRICS_MONTHS_LIMIT}")
+        top = generated.date().replace(day=1)
+        months: dict[date, dict[str, Any]] = {}
+        for item in raw_months:
+            if not isinstance(item, dict):
+                raise _BadMetrics("months: ждали объекты")
+            found = _MONTH_RE.fullmatch(str(item.get("month") or ""))
+            if found is None or not 1 <= int(found.group(2)) <= 12 \
+                    or not 2000 <= int(found.group(1)) <= 2100:
+                raise _BadMetrics("months.month: ждали ГГГГ-ММ")
+            month = date(int(found.group(1)), int(found.group(2)), 1)
+            if month > top:
+                raise _BadMetrics("months.month: месяц позже самого ответа")
+            if month in months:
+                raise _BadMetrics("months.month: месяц дважды")
+            # Неполный - и месяц, закончившийся позже снимка, что бы ни
+            # написал франчайзи: снимок 31-го в полночь не несёт последних
+            # суток, и счёт по нему вышел бы заниженным.
+            ends = datetime.combine(_month_after(month), datetime.min.time(),
+                                    tzinfo=generated.tzinfo)
+            months[month] = {"month": month,
+                             "partial": item.get("partial") is True or generated < ends,
+                             **_m_block(item, f"months[{month:%Y-%m}]")}
+        out = {
+            "format": METRICS_FORMAT,
+            "name": _m_text(data.get("name"), "name", required=True),
+            "city": _m_text(data.get("city"), "city"),
+            "version": (version if isinstance(version, str)
+                        and _VERSION_RE.fullmatch(version) else None),
+            "generated_at": generated,
+            "points": points,
+            "fleet": _m_int(data.get("fleet"), "fleet"),
+            "rented": _m_int(data.get("rented"), "rented"),
+            "rentals_active": _m_int(data.get("rentals_active"), "rentals_active"),
+            "clients": _m_int(data.get("clients"), "clients"),
+            "last30": _m_block(data.get("last30"), "last30"),
+            "months": [months[m] for m in sorted(months, reverse=True)],
+        }
+    except _BadMetrics as exc:
+        return Check(False, error=str(exc))
+    return Check(True, out)
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} в JSON - не число")
+
+
+def parse_metrics_bytes(body: bytes, *, now: datetime | None = None) -> Check:
+    """Тело ответа целиком: размер, UTF-8, JSON без NaN и Infinity (Python
+    их принимает, а Decimal и Postgres - нет), глубина вложенности (тысячи
+    скобок - RecursionError) и затем parse_metrics."""
+    if len(body) > METRICS_MAX_BYTES:
+        return Check(False, error=f"ответ больше {METRICS_MAX_BYTES // 1024} КБ")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return Check(False, error="ответ не в UTF-8")
+    try:
+        data = json.loads(text, parse_float=Decimal, parse_constant=_no_constant)
+    except (ValueError, RecursionError, ArithmeticError):
+        # ArithmeticError - decimal.InvalidOperation от «1e99999999999999999999»:
+        # порядок больше, чем держит Decimal, и это не ValueError.
+        return Check(False, error="ответ не JSON")
+    return parse_metrics(data, now=now)
+
+
+def metrics_json(parsed: Mapping[str, Any]) -> dict[str, Any]:
+    """Проверенный ответ - обратно в формат провода для jsonb: деньги и дни
+    строкой, месяц ГГГГ-ММ. Снимок из базы читается тем же parse_metrics."""
+    block = metrics_block
+    return {
+        "format": METRICS_FORMAT, "name": parsed["name"], "city": parsed.get("city"),
+        "version": parsed.get("version"),
+        "generated_at": parsed["generated_at"].isoformat(timespec="seconds"),
+        "points": [dict(p) for p in parsed.get("points") or []],
+        "fleet": parsed["fleet"], "rented": parsed["rented"],
+        "rentals_active": parsed["rentals_active"], "clients": parsed["clients"],
+        "last30": block(parsed["last30"]),
+        "months": [{"month": m["month"].strftime("%Y-%m"), "partial": bool(m.get("partial")),
+                    **block(m)} for m in parsed.get("months") or []],
+    }
+
+
+def metrics_month_rows(parsed: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Месяцы ответа строками crm.franchise_months. partial едет в базу:
+    прошлый месяц, который последний ответ застал недоделанным, отчёт
+    роялти помечает, а не выдаёт за окончательный."""
+    return [{"month": m["month"], "revenue": m["revenue"],
+             "idle_percent": (None if m["idle_percent"] is None
+                              else Decimal(str(m["idle_percent"]))),
+             "avg_check": m["avg_check"], "operational_days": m["operational_days"],
+             "rented_days": m["rented_days"], "partial": bool(m.get("partial"))}
+            for m in parsed.get("months") or []]
+
+
+def metrics_url(base_url: str) -> str:
+    return str(base_url or "").rstrip("/") + "/hook/metrics"
+
+
+def check_base_url(raw: Any) -> Check:
+    """Адрес панели франчайзи. Только https: токен и чужие цифры открытым
+    текстом не ездят. http - лишь на свою машину (localhost): там нечего
+    перехватывать, и так устроены тесты. Логин в адресе, параметры и
+    «#» - признак подделки или опечатки, а не адреса панели."""
+    text = str(raw or "").strip().rstrip("/")
+    if not text:
+        return Check(False, error="Адрес: заполните поле, например https://crm.prokat.ru.")
+    if (len(text) > 200 or not text.isascii() or "\\" in text
+            or any(ch.isspace() or ord(ch) < 32 for ch in text)):
+        return Check(False, error="Адрес: латиницей, без пробелов (домен на кириллице - "
+                                  "в виде xn--…).")
+    parts = urlsplit(text)
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("https", "http") or not host:
+        return Check(False, error="Адрес: начинается с https://.")
+    if parts.scheme == "http" and host not in _LOOPBACK_HOSTS:
+        return Check(False, error="Адрес: только https — токен и цифры франчайзи "
+                                  "не должны ехать открытым текстом.")
+    if parts.username or parts.password or parts.query or parts.fragment or "@" in text:
+        return Check(False, error="Адрес: без логина, параметров и «#» — только "
+                                  "адрес панели.")
+    try:
+        _ = parts.port
+    except ValueError:
+        return Check(False, error="Адрес: порт не число.")
+    return Check(True, text)
+
+
+def check_franchise_token(raw: Any) -> Check:
+    """Токен метрик франчайзи: то, что лежит у него в secrets/metrics_token.
+    Пусто - «не менять» (value None)."""
+    text = str(raw or "").strip()
+    if not text:
+        return Check(True, None)
+    if not (FRANCHISE_TOKEN_MIN <= len(text) <= FRANCHISE_TOKEN_MAX) or not text.isascii() \
+            or any(ch.isspace() or ord(ch) < 33 for ch in text):
+        return Check(False, error=f"Токен: {FRANCHISE_TOKEN_MIN}–{FRANCHISE_TOKEN_MAX} "
+                                  "знаков латиницей и цифрами, как в файле "
+                                  "secrets/metrics_token франчайзи.")
+    return Check(True, text)
+
+
+def _percent(raw: Any) -> Decimal | None:
+    value = parse_money(raw)
+    if value is None or value < 0 or value > 100:
+        return None
+    return value
+
+
+def check_franchisee(data: Mapping[str, Any]) -> Check:
+    """Карточка франчайзи из формы. Токен проверяется отдельно
+    (check_franchise_token): его пустое поле значит «оставить прежний»."""
+    name = check_name(data.get("name"), what="Название")
+    if not name.ok:
+        return name
+    city = None
+    if str(data.get("city") or "").strip():
+        checked = check_name(data.get("city"), what="Город")
+        if not checked.ok:
+            return checked
+        city = checked.value
+    url = check_base_url(data.get("base_url"))
+    if not url.ok:
+        return url
+    percent = _percent(str(data.get("royalty_percent") or "0"))
+    if percent is None:
+        return Check(False, error="Роялти: процент от 0 до 100, например 5 или 5,5.")
+    fee = parse_money(str(data.get("fixed_fee") or "0"))
+    if fee is None or fee < 0 or fee > MAX_AMOUNT:
+        return Check(False, error="Фикс в месяц: сумма от нуля, например 15000.")
+    start = check_date(data.get("contract_start"))
+    if not start.ok:
+        return Check(False, error="Начало договора: дата, с месяца которой "
+                                  "считается роялти.")
+    note = check_note(data.get("note"))
+    if not note.ok:
+        return note
+    return Check(True, {"name": name.value, "city": city, "base_url": url.value,
+                        "royalty_percent": percent, "fixed_fee": fee,
+                        "contract_start": start.value, "note": note.value,
+                        "active": bool(data.get("active"))})
+
+
+def check_terms_from(raw: Any, *, today: date) -> Check:
+    """С какого месяца действуют условия роялти из карточки. Пусто -
+    текущий: пересмотр договора прошлых счетов не трогает. Прошлый месяц -
+    осознанная правка: опечатка в проценте, замеченная после первого
+    опроса, иначе навсегда осталась бы в закрытых месяцах. Будущего нет:
+    идущий месяц опрос всё равно пишет по карточке."""
+    current = today.replace(day=1)
+    text = str(raw or "").strip()
+    if not text:
+        return Check(True, current)
+    found = _MONTH_RE.fullmatch(text) or re.fullmatch(r"(\d{2})\.(\d{4})", text)
+    if found is not None:
+        year, month = ((found.group(1), found.group(2)) if "-" in text
+                       else (found.group(2), found.group(1)))
+        if 1 <= int(month) <= 12 and METRICS_YEARS[0] <= int(year):
+            first = date(int(year), int(month), 1)
+            if first <= current:
+                return Check(True, first)
+    return Check(False, error="Условия с месяца: ГГГГ-ММ, не позже текущего месяца.")
+
+
+def royalty(revenue: Any, percent: Any, fixed: Any) -> Decimal:
+    """Роялти месяца: выручка × процент + фикс, до копейки по правилу
+    округления журнала. Только Decimal: процент от миллионной выручки во
+    float терял бы копейки на каждом месяце."""
+    share = (to_money(revenue) * Decimal(str(percent or 0)) / 100).quantize(
+        CENT, rounding=ROUND_HALF_UP)
+    return share + to_money(fixed)
+
+
+def franchise_due(row: Mapping[str, Any], now: datetime) -> bool:
+    """Пора ли опросить франчайзи: раз в сутки после принятого ответа,
+    неудачу - не чаще FRANCHISE_RETRY_MINUTES. Без токена и выключенного
+    не трогаем вовсе."""
+    if not row.get("active") or not row.get("token_enc"):
+        return False
+    ok_at = row.get("ok_at")
+    if ok_at is not None and ok_at.astimezone(now.tzinfo).date() >= now.date():
+        return False
+    polled = row.get("polled_at")
+    return polled is None or now - polled >= timedelta(minutes=FRANCHISE_RETRY_MINUTES)
+
+
+def franchise_stale(row: Mapping[str, Any], now: datetime) -> bool:
+    """Нет свежих данных: у действующего франчайзи принятого ответа нет
+    дольше FRANCHISE_STALE_HOURS (или не было никогда)."""
+    if not row.get("active"):
+        return False
+    ok_at = row.get("ok_at")
+    return ok_at is None or now - ok_at > timedelta(hours=FRANCHISE_STALE_HOURS)
+
+
+def franchise_stale_text(stale: int, total: int) -> str:
+    """Сигнал в служебный чат - без имён и цифр: чат читают все, а раздел
+    «Франчайзи» только владелец."""
+    return (f"Франчайзи без свежих данных: {stale} из {total} — не отвечают на "
+            f"опрос дольше {FRANCHISE_STALE_HOURS} ч. Причина — в панели, "
+            f"раздел «Франчайзи».")
+
+
+def _trend(new: Decimal | None, old: Decimal | None) -> Decimal | None:
+    if new is None or not old:
+        return None
+    return ((new - old) * 100 / old).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+
+ROYALTY_PARTIAL = "неполные данные"
+
+
+def _month_royalty(f: Mapping[str, Any], row: Mapping[str, Any] | None, month: date,
+                   current: date) -> dict[str, Any]:
+    """Роялти одного месяца франчайзи: условия - записанные на месяц, до
+    месяца начала договора - ноль, текущий - «идёт» (цифра растёт), прошлый,
+    который последний принятый ответ застал незакончившимся, - «неполные
+    данные»: счёт по нему вышел бы заниженным."""
+    start = f.get("contract_start")
+    if row is None:
+        return {"revenue": None, "percent": None, "fixed": None, "royalty": None,
+                "mark": "нет данных"}
+    base = {"revenue": to_money(row["revenue"]), "percent": row["royalty_percent"],
+            "fixed": to_money(row["fixed_fee"])}
+    if start is None:
+        return {**base, "royalty": Decimal("0.00"), "mark": "нет даты договора"}
+    if month < start.replace(day=1):
+        return {**base, "royalty": Decimal("0.00"), "mark": "до договора"}
+    mark = ("идёт" if month >= current else ROYALTY_PARTIAL if row.get("partial")
+            else "")
+    return {**base, "royalty": royalty(row["revenue"], row["royalty_percent"],
+                                       row["fixed_fee"]), "mark": mark}
+
+
+def franchise_rows(franchisees: Iterable[Mapping[str, Any]],
+                   months: Iterable[Mapping[str, Any]], *, now: datetime,
+                   version: str | None = None) -> dict[str, Any]:
+    """Сравнение франчайзи: последний снимок, свежесть, выручка прошлого
+    месяца против позапрошлого и роялти прошлого месяца. Итог сети - не
+    среднее процентов, а те же формулы по суммам дней и денег."""
+    current = now.date().replace(day=1)
+    last = (current - timedelta(days=1)).replace(day=1)
+    before = (last - timedelta(days=1)).replace(day=1)
+    by_month = {(int(m["franchisee_id"]), m["month"]): m for m in months}
+    rows = []
+    sums = {"fleet": 0, "rented": 0, "rentals_active": 0, "clients": 0,
+            "idle": Decimal(0), "rented_days": Decimal(0), "revenue30": Decimal(0),
+            "last": Decimal(0), "royalty": Decimal(0)}
+    # Тренд сети - по сопоставимым: франчайзи, пришедший в прошлом месяце,
+    # иначе выдал бы свою выручку за рост всей сети.
+    same = {"last": Decimal(0), "before": Decimal(0)}
+    with_data = 0
+    for f in franchisees:
+        parsed = parse_metrics(f.get("data")) if f.get("data") else Check(False)
+        snap = parsed.value if parsed.ok else None
+        fid = int(f["id"])
+        last_row, before_row = by_month.get((fid, last)), by_month.get((fid, before))
+        last_rev = to_money(last_row["revenue"]) if last_row else None
+        before_rev = to_money(before_row["revenue"]) if before_row else None
+        paid = _month_royalty(f, last_row, last, current)
+        row = {**{k: f.get(k) for k in ("id", "name", "city", "active", "base_url", "ok_at",
+                                        "polled_at", "error", "taken_at")},
+               "has_token": bool(f.get("token_enc")), "stale": franchise_stale(f, now),
+               "snap": snap, "last_revenue": last_rev, "before_revenue": before_rev,
+               "trend": _trend(last_rev, before_rev), "royalty_last": paid["royalty"],
+               "royalty_mark": paid["mark"],
+               "same_version": (None if snap is None or not snap.get("version") or not version
+                                else snap["version"] == version)}
+        if snap is not None:
+            three = snap["last30"]
+            row.update(fleet=snap["fleet"], rented=snap["rented"],
+                       rentals_active=snap["rentals_active"], clients=snap["clients"],
+                       points=len(snap["points"]), idle_percent=three["idle_percent"],
+                       avg_check=three["avg_check"], revenue30=three["revenue"],
+                       idle_ok=(three["idle_percent"] is not None
+                                and three["idle_percent"] < IDLE_TARGET_PERCENT),
+                       check_ok=(three["avg_check"] is not None
+                                 and three["avg_check"] >= CHECK_TARGET))
+            if f.get("active"):
+                with_data += 1
+                for key in ("fleet", "rented", "rentals_active", "clients"):
+                    sums[key] += snap[key]
+                sums["idle"] += three["idle_days"]
+                sums["rented_days"] += three["rented_days"]
+                sums["revenue30"] += three["revenue"]
+        # Выручка и роялти прошлого месяца - по тому же правилу, что отчёт
+        # роялти: месяц с цифрами в счёт, даже если договор с тех пор снят.
+        # Иначе плитка и отчёт за один месяц показывали бы разные суммы.
+        sums["last"] += last_rev or 0
+        sums["royalty"] += paid["royalty"] or 0
+        if f.get("active"):
+            if last_rev is not None and before_rev:
+                same["last"] += last_rev
+                same["before"] += before_rev
+        rows.append(row)
+    three = fleet_metrics({"available": sums["idle"], "rented": sums["rented_days"]},
+                          sums["revenue30"])
+    total = {**sums, "with_data": with_data, "idle_percent": three["idle_percent"],
+             "avg_check": three["avg_check"], "revenue30": to_money(sums["revenue30"]),
+             "trend": _trend(same["last"], same["before"])}
+    return {"rows": rows, "total": total, "last": last, "before": before,
+            "stale": sum(1 for r in rows if r["stale"]),
+            "active": sum(1 for r in rows if r["active"])}
+
+
+def royalty_rows(franchisees: Iterable[Mapping[str, Any]],
+                 months: Iterable[Mapping[str, Any]], *, today: date,
+                 count: int = METRICS_MONTHS) -> list[dict[str, Any]]:
+    """Отчёт роялти: по месяцу на блок, от нового к старому, в блоке -
+    франчайзи по имени и итог. Строка «нет данных» - у действующего
+    франчайзи, чей месяц по договору уже идёт, а цифр нет: счёт за него
+    выставлять не по чему, и это видно, а не пропало."""
+    current = today.replace(day=1)
+    by_month = {(int(m["franchisee_id"]), m["month"]): m for m in months}
+    people = sorted(franchisees, key=lambda f: (str(f.get("name") or "").lower(), f["id"]))
+    out = []
+    month = current
+    for _ in range(max(count, 1)):
+        rows = []
+        for f in people:
+            row = by_month.get((int(f["id"]), month))
+            start = f.get("contract_start")
+            if row is None and not (f.get("active") and start is not None
+                                    and start.replace(day=1) <= month):
+                continue
+            rows.append({"id": f["id"], "name": f.get("name"), "city": f.get("city"),
+                         **_month_royalty(f, row, month, current)})
+        out.append({"month": month, "current": month == current, "rows": rows,
+                    "revenue": to_money(sum((r["revenue"] for r in rows
+                                             if r["revenue"] is not None), Decimal(0))),
+                    "royalty": to_money(sum((r["royalty"] for r in rows
+                                             if r["royalty"] is not None), Decimal(0))),
+                    "missing": sum(1 for r in rows if r["revenue"] is None),
+                    "partial": sum(1 for r in rows if r["mark"] == ROYALTY_PARTIAL)})
+        month = (month - timedelta(days=1)).replace(day=1)
+    return out
 
 
 # ─────────────────────────── быстрая выдача ───────────────────────────
@@ -1559,6 +2178,8 @@ SECTIONS: dict[str, str] = {
     "finance": "Финансы",
     "tariffs": "Тарифы",
     "reports": "Отчёты",
+    # Кабинет франчайзера: чужие копии системы, их цифры и роялти.
+    "franchise": "Франчайзи и роялти",
     "import": "Импорт таблицы",
     "staff": "Сотрудники и доступы",
     "settings": "Настройки: реквизиты и документы",
@@ -1619,6 +2240,9 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/assets", "finance"),
     ("/tariffs", "tariffs"),
     ("/reports", "reports"),
+    # Франчайзи: по умолчанию только у встроенного «Владельца», как
+    # «Входящие», - цифры чужого бизнеса менеджеру точки ни к чему.
+    ("/franchisees", "franchise"),
     ("/import", "import"),
     ("/staff", "staff"),
     ("/profiles", "staff"),
@@ -6281,6 +6905,14 @@ NOTICES: dict[str, dict[str, Any]] = {
                 "починено, и когда починилось. Упавший бот сам о себе не "
                 "напишет - для этого внешний монитор (INSTALL.md).",
         "params": {"disk_pct": 10, "cert_days": 14},
+    },
+    "franchise_stale": {
+        "group": "team", "target": "chat", "hour": 10,
+        "title": "Франчайзи без свежих данных",
+        "hint": "Кто из франчайзи дольше полутора суток не отвечает на опрос: "
+                "сломан адрес, токен или сервер. Только число, без имён и "
+                "цифр - раздел «Франчайзи» видит один владелец. Молчит, "
+                "когда франчайзи нет или все отвечают.",
     },
     "bank_unmatched": {
         # Час, а не «сразу по событию»: строка выписки появляется молча,

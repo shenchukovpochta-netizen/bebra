@@ -34,6 +34,14 @@ secrets:
     file: ./secrets/inbox_key
   inbox_hook_token:
     file: ./secrets/inbox_hook_token
+  # Франшиза. franchise_key - ключ, которым франчайзер шифрует токены
+  # своих франчайзи (генерирует bootstrap.sh, в бэкап - отдельно от базы).
+  # metrics_token - токен адреса /hook/metrics этой копии для франчайзера
+  # (пустой - адреса нет).
+  franchise_key:
+    file: ./secrets/franchise_key
+  metrics_token:
+    file: ./secrets/metrics_token
   # Ключ подписи cookie веб-панели и пароль её первого администратора.
   # Оба генерирует bootstrap.sh; пароль нужен только до первого входа.
   crm_secret:
@@ -122,7 +130,7 @@ services:
         condition: service_healthy
     secrets: [db_password, bot_token, pdn_key, starline_app_secret,
               starline_password, tochka_token, max_bot_token, avito_client_secret,
-              inbox_key]
+              inbox_key, franchise_key]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
@@ -134,6 +142,8 @@ services:
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
       AVITO_CLIENT_SECRET_FILE: /run/secrets/avito_client_secret
       INBOX_KEY_FILE: /run/secrets/inbox_key
+      # Опрос франчайзи раз в сутки: токены лежат в базе шифротекстом.
+      FRANCHISE_KEY_FILE: /run/secrets/franchise_key
       # Нужен ровно для рассылок: тем клиентам, у кого привязан MAX.
       # Пустой файл - такие получатели помечаются пропущенными.
       MAX_BOT_TOKEN_FILE: /run/secrets/max_bot_token
@@ -251,7 +261,7 @@ services:
       postgres:
         condition: service_healthy
     secrets: [db_password, bot_token, crm_secret, crm_admin_password, tochka_token,
-              inbox_key, inbox_hook_token]
+              inbox_key, inbox_hook_token, franchise_key, metrics_token]
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
       BOT_TOKEN_FILE: /run/secrets/bot_token
@@ -262,6 +272,10 @@ services:
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
       INBOX_KEY_FILE: /run/secrets/inbox_key
       INBOX_HOOK_TOKEN_FILE: /run/secrets/inbox_hook_token
+      # Франшиза: ключ токенов франчайзи (раздел «Франчайзи», кнопка
+      # «Обновить сейчас») и токен своего /hook/metrics для франчайзера.
+      FRANCHISE_KEY_FILE: /run/secrets/franchise_key
+      METRICS_TOKEN_FILE: /run/secrets/metrics_token
 
       POSTGRES_HOST: postgres
       POSTGRES_USER: ${POSTGRES_USER:-mybike}

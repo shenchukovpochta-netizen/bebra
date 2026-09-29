@@ -26,7 +26,7 @@ import asyncpg
 
 from ..crm import logic
 from ..crm.db import CrmDB
-from . import core, seed_extras, seed_service
+from . import core, seed_extras, seed_franchise, seed_service
 from .people import People
 from .world import MSK, Point, StaffMember, World, at
 
@@ -183,6 +183,9 @@ async def _populate(conn: asyncpg.Connection, *, today: date, seed: int,
                 await _write(conn, world, sim)
                 await seed_service.populate(conn, world)
                 await seed_extras.populate(conn, world, secret=secret)
+                await seed_franchise.populate(
+                    conn, world, secret=secret or getattr(world, "secret", None)
+                    or seed_extras.DEMO_SECRET)
         finally:
             for table, trigger in _TRIGGERS:
                 await conn.execute(f"alter table crm.{table} enable trigger {trigger}")

@@ -38,7 +38,8 @@
 {% set g_service = can_view(staff, 'service') or can_view(staff, 'inventory') %}
 {% set g_money = can_view(staff, 'finance') or can_view(staff, 'cash')
                  or can_view(staff, 'tariffs') %}
-{% set g_reports = can_view(staff, 'reports') or can_view(staff, 'import') %}
+{% set g_reports = can_view(staff, 'reports') or can_view(staff, 'import')
+                   or can_view(staff, 'franchise') %}
 {% set g_setup = can_view(staff, 'staff') or can_view(staff, 'settings') %}
 {# Открытие меню на телефоне - разметкой, без скрипта: панель обходится
    одним скриптом на всю систему (карта), и второй ради бутерброда
@@ -90,6 +91,7 @@
 
     {% if g_reports %}<div class="blk"><div class="grp">Отчёты</div>
       {% if can_view(staff, 'reports') %}<a href="/reports" {% if request.url.path.startswith('/reports') %}class="on"{% endif %}>Отчёты</a>{% endif %}
+      {% if can_view(staff, 'franchise') %}<a href="/franchisees" {% if request.url.path.startswith('/franchisees') %}class="on"{% endif %}>Франчайзи</a>{% endif %}
       {% if can_view(staff, 'import') %}<a href="/import" {% if request.url.path.startswith('/import') %}class="on"{% endif %}>Импорт</a>{% endif %}
     </div>{% endif %}
 

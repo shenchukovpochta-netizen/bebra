@@ -66,6 +66,10 @@ PROMO_FIELDS = frozenset({
 })
 INBOX_FIELDS = frozenset({"status", "note", "client_id", "client_manual", "handled_by",
                           "handled_at", "ext_cursor", "announced_at"})
+# Карточка франчайзи из формы. Итоги опроса (polled_at, ok_at, error) сюда
+# не входят: их пишут только save_franchise_snapshot и franchise_failed.
+FRANCHISEE_FIELDS = frozenset({"name", "city", "base_url", "token_enc", "royalty_percent",
+                               "fixed_fee", "contract_start", "active", "note"})
 TRACKER_FIELDS = frozenset({"device_id", "alias", "bike_id", "active", "last_seen",
                             "lat", "lon", "speed", "course", "voltage", "gsm_level",
                             "alarm", "note", "blocked", "blocked_at", "blocked_by",
@@ -5280,6 +5284,135 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             f"{self._OPS_SELECT} where o.rental_id = $1 order by o.created_at, o.id",
             rental_id))
+
+    # ─────────────────── франшиза: франчайзи и роялти ───────────────────
+
+    # Франчайзи вместе с последним принятым снимком: сравнению и карточке
+    # нужен ровно он, история снимков - только для отладки чужого ответа.
+    _FRANCHISEE_SELECT = """
+        select f.*, s.data, s.taken_at
+          from crm.franchisees f
+          left join lateral (
+                select data, taken_at from crm.franchise_snapshots
+                 where franchisee_id = f.id
+                 order by taken_on desc limit 1) s on true
+    """
+
+    async def franchisees(self) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            self._FRANCHISEE_SELECT + " order by f.active desc, f.name, f.id"))
+
+    async def franchisee(self, franchisee_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            self._FRANCHISEE_SELECT + " where f.id = $1", franchisee_id))
+
+    async def create_franchisee(self, **fields: Any) -> int:
+        unknown = set(fields) - FRANCHISEE_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        cols = list(fields)
+        places = ", ".join(f"${i}" for i in range(1, len(cols) + 1))
+        return int(await self.pool.fetchval(
+            f"insert into crm.franchisees ({', '.join(cols)}) values ({places}) "
+            "returning id", *fields.values()))
+
+    async def update_franchisee(self, franchisee_id: int, *, terms_from: date | None = None,
+                                **fields: Any) -> None:
+        """Правка карточки. Новые условия роялти ложатся на месяцы с
+        terms_from (по умолчанию - с идущего) той же транзакцией, иначе
+        отчёт до следующего опроса считал бы месяц по старым. Месяцы
+        раньше terms_from не трогаются: так пересмотр договора не
+        переписывает выставленное, а опечатку можно исправить назад."""
+        if not fields:
+            return
+        clause, values = _set_clause(fields, FRANCHISEE_FIELDS, 2)
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                f"update crm.franchisees set {clause}, updated_at = now() where id = $1",
+                franchisee_id, *values)
+            if "royalty_percent" in fields or "fixed_fee" in fields:
+                await conn.execute(
+                    """
+                    update crm.franchise_months m
+                       set royalty_percent = f.royalty_percent, fixed_fee = f.fixed_fee
+                      from crm.franchisees f
+                     where f.id = m.franchisee_id and m.franchisee_id = $1
+                       and m.month >= coalesce($2::date, date_trunc('month', now())::date)
+                    """, franchisee_id, terms_from)
+
+    async def delete_franchisee(self, franchisee_id: int, *, wipe: bool = False) -> bool:
+        """Удалить можно только франчайзи без истории месяцев: по ней
+        выставлены счета роялти, и каскад стёр бы их основание. Такого -
+        выключить. wipe - заведён по ошибке (дубль, проба): владелец явно
+        стирает и месяцы, иначе дубль навсегда удваивал бы итоги роялти.
+        False - не удалён."""
+        status = await self.pool.execute(
+            "delete from crm.franchisees f where f.id = $1 and ($2::boolean or not exists "
+            "(select 1 from crm.franchise_months m where m.franchisee_id = f.id))",
+            franchisee_id, wipe)
+        return str(status).endswith(" 1")
+
+    async def save_franchise_snapshot(self, franchisee_id: int, *, data: dict,
+                                      months: list[dict], taken_on: date) -> None:
+        """Принятый ответ франчайзи - одной транзакцией: снимок дня, месяцы
+        и отметка «данные свежие». Условия роялти месяцу пишутся, пока он
+        идёт; у закрытого месяца обновляются только цифры."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """
+                insert into crm.franchise_snapshots (franchisee_id, taken_on, data)
+                values ($1, $2, $3)
+                on conflict (franchisee_id, taken_on) do update
+                   set data = excluded.data, taken_at = now()
+                """, franchisee_id, taken_on, data)
+            for m in months:
+                await conn.execute(
+                    """
+                    insert into crm.franchise_months as fm
+                           (franchisee_id, month, revenue, idle_percent, avg_check,
+                            operational_days, rented_days, partial, royalty_percent,
+                            fixed_fee)
+                    select f.id, $2, $3, $4, $5, $6, $7, $8, f.royalty_percent, f.fixed_fee
+                      from crm.franchisees f where f.id = $1
+                    on conflict (franchisee_id, month) do update
+                       set revenue = excluded.revenue,
+                           idle_percent = excluded.idle_percent,
+                           avg_check = excluded.avg_check,
+                           operational_days = excluded.operational_days,
+                           rented_days = excluded.rented_days,
+                           partial = excluded.partial,
+                           reported_at = now(),
+                           royalty_percent = case
+                               when fm.month >= date_trunc('month', now())::date
+                               then excluded.royalty_percent else fm.royalty_percent end,
+                           fixed_fee = case
+                               when fm.month >= date_trunc('month', now())::date
+                               then excluded.fixed_fee else fm.fixed_fee end
+                    """, franchisee_id, m["month"], m["revenue"], m["idle_percent"],
+                    m["avg_check"], m["operational_days"], m["rented_days"],
+                    bool(m.get("partial")))
+            await conn.execute(
+                "update crm.franchisees set polled_at = now(), ok_at = now(), error = null "
+                "where id = $1", franchisee_id)
+
+    async def franchise_failed(self, franchisee_id: int, error: str) -> None:
+        """Неудачный опрос: когда пробовали и почему не вышло. Прежние
+        цифры и ok_at остаются - по ним видно, насколько данные старые."""
+        await self.pool.execute(
+            "update crm.franchisees set polled_at = now(), error = $2 where id = $1",
+            franchisee_id, error)
+
+    async def franchise_months(self, since: date) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.franchise_months where month >= $1 "
+            "order by month desc, franchisee_id", since))
+
+    async def purge_franchise_snapshots(self, days: int) -> int:
+        status = await self.pool.execute(
+            "delete from crm.franchise_snapshots where taken_on < current_date - $1::int",
+            days)
+        tail = str(status).rsplit(" ", 1)[-1]
+        return int(tail) if tail.isdigit() else 0
 
     # ─────────────────── входящие обращения ───────────────────
 

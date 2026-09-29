@@ -359,7 +359,7 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit","franchise":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
   ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
   ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
 on conflict (code) do update set
@@ -2441,6 +2441,69 @@ create index if not exists inbox_messages_queue_idx
 alter table crm.inbox_messages add column if not exists claimed_at timestamptz;
 create index if not exists inbox_messages_created_idx
   on crm.inbox_messages (created_at);
+
+-- ─────────────────── франшиза: франчайзи и роялти ───────────────────
+--
+-- Франчайзи живёт на своём сервере со своей копией системы и отдаёт наружу
+-- только агрегаты (GET /hook/metrics по токену). Здесь - кабинет
+-- франчайзера: кого опрашивать, на каких условиях роялти и что пришло.
+-- Раздел видит только встроенный «Владелец». Токен франчайзи лежит лишь
+-- шифротекстом (ключ secrets/franchise_key): дамп базы франчайзера не
+-- должен открывать чужие цифры. В crm.ledger ничего не пишется: роялти -
+-- расчёт для счёта, а не деньги проката.
+create table if not exists crm.franchisees (
+  id              bigserial primary key,
+  name            text          not null,
+  city            text,
+  base_url        text          not null,
+  token_enc       text,
+  royalty_percent numeric(5,2)  not null default 0
+                  check (royalty_percent >= 0 and royalty_percent <= 100),
+  fixed_fee       numeric(12,2) not null default 0 check (fixed_fee >= 0),
+  contract_start  date,
+  active          boolean       not null default true,
+  note            text,
+  polled_at       timestamptz,          -- последняя попытка опроса
+  ok_at           timestamptz,          -- последний принятый ответ
+  error           text,                 -- почему не удалась последняя попытка
+  created_at      timestamptz   not null default now(),
+  updated_at      timestamptz   not null default now()
+);
+-- Ответ франчайзи после проверки (logic.parse_metrics), не сырые байты:
+-- чужая строка сюда попадает уже очищенной. Одна строка на сутки -
+-- «Обновить сейчас» заменяет утренний снимок, а не копит дубли.
+create table if not exists crm.franchise_snapshots (
+  id            bigserial   primary key,
+  franchisee_id bigint      not null references crm.franchisees (id) on delete cascade,
+  taken_on      date        not null,
+  taken_at      timestamptz not null default now(),
+  data          jsonb       not null
+);
+create unique index if not exists franchise_snapshots_day_uq
+  on crm.franchise_snapshots (franchisee_id, taken_on);
+-- Месяц франчайзи: выручка и три числа - как их прислали последним разом,
+-- и условия роялти этого месяца. Условия пишутся в месяц, пока он идёт:
+-- правка процента по умолчанию действует с текущего месяца и прошлые не
+-- переписывает, как правка цены не трогает начисленное. Отсюда отчёт роялти: снимки
+-- живут 400 дней, а история месяцев - пока жив франчайзи.
+create table if not exists crm.franchise_months (
+  franchisee_id    bigint        not null references crm.franchisees (id) on delete cascade,
+  month            date          not null,
+  revenue          numeric(12,2) not null,
+  idle_percent     numeric(5,1),
+  avg_check        numeric(12,2),
+  operational_days numeric(12,2),
+  rented_days      numeric(12,2),
+  royalty_percent  numeric(5,2)  not null,
+  fixed_fee        numeric(12,2) not null,
+  reported_at      timestamptz   not null default now(),
+  primary key (franchisee_id, month)
+);
+-- Последний ответ застал месяц до его конца (logic.parse_metrics): прошлый
+-- такой месяц отчёт роялти помечает «неполные данные», а не выдаёт за
+-- окончательный. Условия прошлых месяцев правятся только явно - полем
+-- «Условия с месяца» карточки (опечатка, замеченная после первого опроса).
+alter table crm.franchise_months add column if not exists partial boolean not null default false;
 
 -- ─────────────────── точки: история места и привязка ───────────────────
 --

@@ -118,6 +118,7 @@ if backup_script:
 # содержат, а боевое приносят.
 DEMO_FORBIDDEN = ("db_password", "bot_token", "crm_secret", "crm_admin_password",
                   "tochka_token", "inbox_key", "inbox_hook_token", "pdn_key",
+                  "franchise_key", "metrics_token",
                   "avito_client_secret", "max_bot_token", r"starline_\w+",
                   "backup_key", "backup_s3_secret",
                   # тома боевой панели и базы

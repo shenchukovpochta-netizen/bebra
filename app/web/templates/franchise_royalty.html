@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Роялти франчайзи — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Роялти</h1>
+  <nav class="tabs"><a href="/franchisees">Сравнение</a> <a href="/franchisees/royalty" class="on">Роялти</a></nav>
+  <nav class="tabs">{% for n in (6, 12, 24) %}<a href="/franchisees/royalty?months={{ n }}" class="{% if count == n %}on{% endif %}">{{ n }} мес.</a> {% endfor %}</nav>
+  <a class="btn ghost" href="/franchisees/royalty.xlsx?months={{ count }}">Excel</a>
+  <a class="btn ghost" href="/franchisees/royalty.csv?months={{ count }}">CSV</a>
+</div>
+{% for b in blocks %}
+<div class="card">
+<h2>{{ b.month.strftime('%m.%Y') }}{% if b.current %} <span class="muted">· месяц идёт, цифры растут</span>{% endif %}
+  <span class="muted">· роялти {{ money(b.royalty) }}{% if b.missing %}, без данных {{ b.missing }}{% endif %}{% if b.partial %}, неполных {{ b.partial }}{% endif %}</span></h2>
+{% if b.rows %}
+<div class="table-wrap">
+<table class="cards">
+  <tr><th>Франчайзи</th><th class="num">Выручка</th><th class="num">Роялти, %</th><th class="num">Фикс</th><th class="num">Роялти</th><th class="opt">Отметка</th></tr>
+  {% for r in b.rows %}
+  <tr class="{% if r.revenue is none or r.mark == partial_mark %}warn-row{% endif %}">
+    <td data-label="Франчайзи"><a href="/franchisees/{{ r.id }}">{{ r.name }}</a>{% if r.city %}<br><small class="muted">{{ r.city }}</small>{% endif %}</td>
+    <td class="num" data-label="Выручка">{{ money(r.revenue) }}</td>
+    <td class="num" data-label="Роялти, %">{% if r.percent is none %}—{% else %}{{ '%g'|format(r.percent|float)|replace('.', ',') }} %{% endif %}</td>
+    <td class="num" data-label="Фикс">{{ money(r.fixed) }}</td>
+    <td class="num" data-label="Роялти"><b>{{ money(r.royalty) }}</b></td>
+    <td class="opt muted" data-label="Отметка">{{ r.mark }}</td>
+  </tr>
+  {% endfor %}
+  <tr class="total"><td data-label="Франчайзи">Итого</td><td class="num" data-label="Выручка">{{ money(b.revenue) }}</td><td data-label="Роялти, %"></td><td data-label="Фикс"></td>
+    <td class="num" data-label="Роялти">{{ money(b.royalty) }}</td><td class="opt" data-label="Отметка"></td></tr>
+</table>
+</div>
+{% else %}
+<p class="muted">В этом месяце договоров с франчайзи ещё не было.</p>
+{% endif %}
+</div>
+{% endfor %}
+<p class="muted">
+  Роялти месяца = выручка франчайзи (все платежи клиентов за месяц, как в его
+  «Отчётах») × процент + фикс, до копейки. Процент и фикс записаны на месяц,
+  пока он идёт: правка карточки действует с текущего месяца, а поле «Условия
+  с месяца» переписывает и прошлые — для опечатки. Месяцы до начала
+  договора — без роялти. «Нет данных» — месяц по договору идёт, а цифр от
+  франчайзи нет: счёт выставлять не по чему, причина — в карточке.
+  «Неполные данные» — последний принятый ответ пришёл до конца месяца, и
+  последних дней в сумме нет: дождитесь следующего опроса. Это расчёт
+  для счёта, в журнал денег проката он не пишется.
+</p>
+{% endblock %}

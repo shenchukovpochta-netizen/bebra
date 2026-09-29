@@ -88,7 +88,8 @@ Claude Code читает этот файл в начале каждой сесс
 `sign_events`, `pay_orders`, `card_tokens`, `notices`, `notice_log`,
 `bonuses`, `doc_templates`, `company_marks`, `saved_views`,
 `inbox_threads`, `inbox_messages`, `clients`, `rentals`,
-`rental_bikes`, `rental_extras`, `ledger`, `payment_claims`, `ops_reports`.
+`rental_bikes`, `rental_extras`, `ledger`, `payment_claims`, `ops_reports`,
+`franchisees`, `franchise_snapshots`, `franchise_months`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -484,6 +485,23 @@ Claude Code читает этот файл в начале каждой сесс
   Telegram и MAX пишет сам бот, и подделать их через хук нельзя. Сигнал
   в чат - когда человек начинает ждать, без имени, телефона и текста:
   чат читают все, раздел - только владелец.
+
+- **Франчайзи и роялти** (`franchisees`, `franchise_snapshots`,
+  `franchise_months`, `app/crm/franchise.py`): у каждого франчайзи своя
+  копия системы; наружу она отдаёт только агрегаты - `GET /hook/metrics`
+  по токену `secrets/metrics_token` (пусто и в демо - 404): парк, три
+  числа, выручку по месяцам, названия точек, без клиентов. Франчайзер
+  забирает их процессом бота раз в сутки, панель - только кнопкой
+  «Обновить сейчас». Токен франчайзи в базе - шифром ключа `secrets/franchise_key`.
+  Чужой ответ - чужая строка (`logic.parse_metrics`: https, предел байт,
+  типы и пределы чисел, чистка имён), а простой и чек пересчитываются из
+  дней и выручки той же формулой: определение трёх чисел у сети одно.
+  Роялти = выручка × % + фикс, Decimal; условия пишутся на месяц, пока он
+  идёт - правка не переписывает прошлые, кроме явного «Условия с месяца»
+  (опечатка после первого опроса). Прошлый месяц, который последний ответ
+  застал незакончившимся (`franchise_months.partial`), - «неполные
+  данные», а не готовый счёт. В `ledger` роялти не идёт.
+  Раздел `franchise` - только владельцу.
 
 - **Рабочая группа точек** (`ops_reports`, `app/crm/opsgroup.py`): бот
   читает темы группы (`OPS_CHAT_ID`, `OPS_TOPIC_*`) и сверяет формы с

@@ -97,11 +97,13 @@ Caddy: без профиля `demo` compose иначе не поднял бы и
 | отправка кампаний в Telegram и MAX | `crm.mailing.mailing_loop` | свой круг |
 | «Входящие»: ответы из панели в Telegram, MAX и Авито, сигналы о новых, опрос чатов Авито | `crm.inbox.inbox_loop` | 15 секунд, Авито — `AVITO_POLL_SECONDS` |
 | здоровье сервера: диск, отчёт `backup_status`, панель, сертификаты доменов; пульс для `/healthz/bot` | `crm.health.health_loop` | час, первая проверка через 15 минут после старта |
+| опрос франчайзи: `/hook/metrics` каждого раз в сутки, снимки и месяцы роялти | `crm.franchise.franchise_loop` | круг 10 минут, кому пора — `logic.franchise_due` |
 
 Все фоновые опросы живут здесь, а не в панели: веб-процессов может быть несколько, и каждый
 спрашивал бы банк об одном и том же. Правило «панель в интернет не ходит» — про фоновые
 опросы: один запрос при клиенте она делает, когда оператор жмёт «Выставить счёт»
-(`acquiring()` в `app/web/app.py`). `SIGTERM` не убивает процесс сразу: обработчик зовёт
+(`acquiring()` в `app/web/app.py`), и один к франчайзи по кнопке «Обновить сейчас»
+(`franchise.refresh_one`). `SIGTERM` не убивает процесс сразу: обработчик зовёт
 `dp.stop_polling()`, а `finally` отменяет задачи и ждёт `tasks.drain()`.
 
 ### Что происходит внутри панели
@@ -115,8 +117,8 @@ Caddy: без профиля `demo` compose иначе не поднял бы и
 касса, трекеры, склад, пересчёт, импорт. Обвязки две: `SessionMiddleware` с cookie
 `crm_session` снаружи и проверка входа внутри, порядок важен и подписан в коде. Страница без
 входа должна попасть в кортеж `PUBLIC = ("/login", "/static", "/healthz", "/sign/", "/hook/",
-"/manifest.webmanifest")`; хук `/hook/inbox` проверяет свой токен сам, без сессии, а манифест
-значка браузер запрашивает без cookie. Формы
+"/manifest.webmanifest")`; хуки `/hook/inbox` и `/hook/metrics` (агрегаты для франчайзера)
+проверяют свой токен сами, без сессии, а манифест значка браузер запрашивает без cookie. Формы
 без JS-фреймворка: страница это шаблон, действие это POST и редирект.
 
 Самый внешний слой в любом режиме - `BodyLimit`: тело больше `BODY_MAX` (импорт 20 МБ с
@@ -180,17 +182,19 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 `doctemplates` кладётся поверх: свой шаблон владелец загружает в панели, и пересборка для
 этого не нужна.
 
-Секретов шестнадцать, все файлами в `secrets/`: `db_password`, `bot_token`, `pdn_key`,
+Секретов восемнадцать, все файлами в `secrets/`: `db_password`, `bot_token`, `pdn_key`,
 `crm_secret`, `crm_admin_password`, `max_bot_token`, `starline_app_secret`,
 `starline_password`, `tochka_token`, `avito_client_secret`, `inbox_key`,
-`inbox_hook_token`, два демо-стенда - `demo_db_password`, `crm_demo_secret` - и два
+`inbox_hook_token`, `franchise_key` (бот и панель: токены франчайзи шифром),
+`metrics_token` (панель: токен своего `/hook/metrics`), два демо-стенда -
+`demo_db_password`, `crm_demo_secret` - и два
 сервиса `backup` - `backup_key` (шифрует копию в облаке) и `backup_s3_secret`. Секреты
 `backup` читает сам `backup.sh` (`/run/secrets/...`), и `consistency.py` сверяет их, как и
 переменные `.env`, с блоком сервиса. Содержимое
 окружения видно в `docker inspect` и в трейсбеках, поэтому в переменной лежит путь, а не
 значение: `_secret()` в `app/config.py` читает суффикс `*_FILE`. `bootstrap.sh` генерирует
 `db_password`, `pdn_key`, `crm_secret`, `crm_admin_password`, `inbox_key`, `backup_key`,
-`demo_db_password` и `crm_demo_secret` (оба демо - даже без профиля `demo`: compose
+`franchise_key`, `demo_db_password` и `crm_demo_secret` (оба демо - даже без профиля `demo`: compose
 объявляет секреты на уровне файла), требует `bot_token` руками и создаёт пустыми остальные:
 пустой файл означает «интеграции нет», и цикл просто не запускается. Ключа «Входящих» у
 демо нет: он производный от `CRM_SECRET` демо (`runtime.demo_config`), и сид шифрует тем же.
@@ -225,6 +229,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/crm/health.py` | здоровье сервера: ежечасная проверка, память между проверками в `crm.settings`, отправка через `notices.send_team`; суждение - `logic.health_problems`, `health_step` |
 | `app/services/probes.py` | замеры для проверки: `statvfs` диска, код ответа панели, срок сертификата домена |
 | `backup.sh`, `backup.Dockerfile` | сервис `backup`: дамп, копия в облако, проверка восстановления, отчёт `backup_status` |
+| `app/crm/franchise.py` | опрос франчайзи (`franchise_loop`, `poll_once`, `refresh_one` для кнопки панели), сигнал «без свежих данных», версия копии `code_stamp` |
 | `app/crm/import_xlsx.py` | импорт рабочей таблицы «ДЕЙСТВУЮЩИЕ АРЕНДАТОРЫ» |
 | `app/crm/opsgroup.py` | рабочая группа точек: сверка форм из тем с базой, ответы про долг и трекер (бывший n8n) |
 | `app/crm/inbox.py` | «Входящие»: запись обращений из ботов, отправка ответов из очереди, опрос чатов Авито |
@@ -237,6 +242,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/services/crypto.py` | шифрование анкеты в базе |
 | `app/services/mrz.py`, `ocr.py` | разбор машиночитаемой зоны и вызов tesseract в том же контейнере |
 | `app/services/starline.py`, `tochka.py` | клиенты внешних API, разбор ответа отделён от сети ради тестов |
+| `app/services/franchise.py` | запрос `/hook/metrics` франчайзи: только https, таймаут, предел байт, без переадресаций; разбор - `logic.parse_metrics_bytes` |
 | `app/max/*.py` | транспорт MAX: клиент API, цикл опроса, обработчики, клавиатуры, разборы |
 | `app/demo/__main__.py` | точка входа демо-стенда: проверка базы, сброс и сид, панель без бота, ночной сброс и живой день |
 | `app/demo/runtime.py` | конфиг демо (`demo_config`: внешние ключи пусты, файлы в `/tmp`), страж базы `check_database`, сброс под 503, ночной круг `nightly` с повтором (`after_failure`), живой день `live_day`/`DemoDay`: остаток дня сида - через `service` в свой час |
@@ -245,6 +251,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/demo/world.py`, `people.py` | общий «мир» сида для модулей; вымышленные ФИО и телефоны +7 000 0XX (кода на ноль нет - номер не набрать) |
 | `app/demo/seed_service.py` | наряды, склад, смета и счёт за ремонт, пересчёт - следствием истории ядра |
 | `app/demo/seed_extras.py` | трекеры, банк, счета, «Входящие», рассылки, акции, приглашения, баллы, заявки, ПЭП, рабочая группа, уведомления |
+| `app/demo/seed_franchise.py` | три вымышленных франчайзи для раздела «Франчайзи»: снимки тем же `metrics_payload`, месяцы роялти, производный ключ токенов |
 | `schema.sql` | вся схема одним файлом, читается сверху вниз |
 | `consistency.py` | сверка compose, `.env.example`, `config.py`, `deploy.ps1` и схемы между собой |
 | `update.sh` | обновление на сервере: дамп и прежний код в `backups/pre-update-…` (без них стоп; «dump complete» ищется в хвосте - с 16.10 за ней `\unrestrict`), код через `rsync` без `.env`, `secrets/`, `app/*.docx` и `backups/`, `bootstrap.sh`, `/healthz`, текст отката (стоп всех, кто пишет в базу, и `bot-max` тоже; снос схем и заливка дампа одной транзакцией `psql -1`) |
@@ -288,6 +295,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | новую переменную окружения | `.env.example`, `docker-compose.yml`, `app/config.py` или `app/web/config.py` |
 | новый файл в проекте | список заливки в `deploy.ps1`, иначе `consistency.py` ругнётся |
 | работу с внешним API | `app/services/starline.py`, `app/services/tochka.py`, `app/services/avito.py`, циклы в `app/crm/` |
+| франшиза: ответ `/hook/metrics`, его проверка, роялти, сравнение | `metrics_payload`, `parse_metrics`, `royalty_rows`, `franchise_rows` в `app/crm/logic.py`; `service.franchise_metrics`; опрос `app/crm/franchise.py`; раздел `/franchisees` в `app/web/app.py` |
 | входящее из нового канала или шлюза | разбор тела хука `parse_inbound` в `app/crm/logic.py`, запись `service.inbox_in`, отправка ответа `send_once` в `app/crm/inbox.py` |
 | разбор формы из рабочей группы точек | `parse_ops_*` в `app/crm/logic.py`, сверка в `app/crm/opsgroup.py`, темы в `filters.ops_topic` |
 | договор, акты, печать | `app/services/contract.py`, шаблоны `app/*.docx`, выбор шаблона `app/crm/doctemplates.py` |
@@ -1174,6 +1182,7 @@ python3 consistency.py
 | `paying_loop` | `app/crm/paying.py` | `POLL_SECONDS`, 60 с | Опрашивает открытые счета эквайринга, закрывает просроченные, раз в сутки делает автосписание |
 | `mailing_loop` | `app/crm/mailing.py` | `POLL_SECONDS`, 20 с | Берёт кампании в статусе «отправляется» и шлёт порцию `BATCH` = 50 сообщений |
 | `health_loop` | `app/crm/health.py` | `CHECK_SECONDS`, час; первая через `FIRST_CHECK_SECONDS` = 15 минут | Пульс сразу на старте; `check_once`: замеры `probes`, `logic.health_problems`, `health_step`, одно сообщение `server_health` на проверку; не доставлено - память прежняя, следующий круг скажет то же |
+| `franchise_loop` | `app/crm/franchise.py` | `POLL_SECONDS`, 600 с | Опрашивает франчайзи, кому пора (`logic.franchise_due`: раз в сутки после принятого ответа, неудачу - не чаще раза в час), пишет снимок и месяцы роялти; без `franchise_key` выходит сразу |
 
 Три цикла выходят сразу, если интеграция не настроена: `tracking_loop` и `banking_loop`
 проверяют `client.ready`, `paying_loop` проверяет `acquiring.token`. Задача при этом просто
@@ -1345,7 +1354,8 @@ python3 -m unittest tests.test_schedule tests.test_notices -q
 ### Граница «панель в интернет не ходит»
 
 Панель импортирует из `app/services` ровно два модуля (`app/web/app.py`): `contract` (сборка
-docx, сети не касается) и `tochka`. StarLine в коде панели нет вовсе (в шаблонах он
+docx, сети не касается) и `tochka`; третий, `franchise`, приходит через
+`app/crm/franchise.py` - ради кнопки «Обновить сейчас» (один запрос к одному франчайзи). StarLine в коде панели нет вовсе (в шаблонах он
 встречается только словом). Наружу панель ходит в две стороны: в Telegram - уведомлениями
 клиенту и `bot.get_me()` для ссылки-приглашения, и в банк - функцией `acquiring()` в
 `app/web/app.py`, которая создаёт `TochkaClient` на один запрос по кнопке оператора: ссылку
@@ -1613,6 +1623,7 @@ EMU), картинка идёт inline; вместе с ней правятся 
 | панель и бот на заглушке | `tests/test_web.py` и ещё около сорока файлов | `tests/fake_crm.py`, фейковый бот |
 | живой Postgres | `tests/test_crm_pg.py`, `tests/test_web_pg.py`, `tests/test_points_pg.py`, `tests/test_tariff_buy_pg.py` | `pgserver`, `asyncpg`, `httpx` |
 | скрипты установки и обновления | `tests/test_scripts.py` | `bash`, `openssl`; `update.sh` - на заглушках `docker` и `curl` в `PATH`, полный проход - с `rsync`; откат из его текста - на `pgserver` настоящим `pg_dump`: заливка возвращает дамп, сбой посреди заливки оставляет базу как была |
+| франшиза | `tests/test_franchise.py`, `tests/test_franchise_web.py` | ответ `/hook/metrics` без полей клиента, враждебные ответы франчайзи, роялти в Decimal, опрос через HTTP-сервер на 127.0.0.1, запись на `pgserver` |
 | демо-стенд: сид | `tests/test_demo_seed.py`, `tests/test_demo_service.py`, `tests/test_demo_extras.py` | `pgserver`: три числа в коридорах, «По точкам» = общим, журналы = статусам, детерминизм, только намеренные расхождения, телефоны +7 000, живой день после сброса в 04:00 |
 | демо-стенд: обход панели | `tests/test_demo_crawl.py` | `pgserver`: сид через `runtime.reset`, каждая GET-страница и ссылка под тремя логинами - только 200, разделы не пусты (отчёты «с начала месяца» - за 30 дней), ни одна страница раздела, карточка и самая длинная страница списка (`rows=300`, журнал финансов - за два месяца) не тяжелее 500 КБ (`HEAVY_PAGE`), выгрузки помечены, сид < 60 с |
 | панель на телефоне | `tests/test_phone.py` | исходники шаблонов и заглушка: подпись у каждой ячейки карточек и по шапке, `@media` только телефонный, манифест без входа, значки и их размеры, безопасная зона maskable, нет service worker |

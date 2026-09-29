@@ -58,7 +58,8 @@ D = Decimal
 CARD_TABLES = {"rentals.html": 1, "bikes.html": 1, "clients.html": 1, "orders.html": 1,
                "points.html": 3, "cash.html": 1, "finance.html": 1, "inbox.html": 1,
                "batteries.html": 1, "parts.html": 1, "payments.html": 1,
-               "tariff_report.html": 1, "buy.html": 1}
+               "tariff_report.html": 1, "buy.html": 1, "franchisees.html": 1,
+               "franchise_royalty.html": 1}
 TABLE = re.compile(r'<table class="cards">(.*?)</table>', re.S)
 HEAD = re.compile(r"""\{\{\s*list\.th\('([^']*)'|<th\b[^>]*>(.*?)</th>""", re.S)
 LABEL = re.compile(r'data-label="([^"]*)"')
@@ -234,6 +235,11 @@ class TestCardPages(tw.WebCase if HAVE_WEB else unittest.TestCase):
                                      tech_id=None, estimate=None, created_by="test"))
         tw.run(crm.inbox_record(channel="wa", origin="hook", ext_id="79990000001",
                                 direction="in", name="Гость"))
+        # Франчайзи без ответа: в строке прочерки - те же ячейки, что у снимка.
+        tw.run(crm.create_franchisee(name="Прокат Самара", city="Самара",
+                                     base_url="https://crm.example.org",
+                                     royalty_percent=D(5), fixed_fee=D(10000),
+                                     contract_start=date.today().replace(day=1)))
 
     def rows_of(self, path: str) -> list[list[list[tuple[str, dict]]]]:
         parser = CardParser()
@@ -243,7 +249,8 @@ class TestCardPages(tw.WebCase if HAVE_WEB else unittest.TestCase):
     def test_rows_carry_one_label_per_column(self):
         for path in ("/rentals", "/bikes", "/clients", "/orders", "/cash", "/finance",
                      "/inbox", "/batteries", "/parts", "/reports/points", "/payments",
-                     "/reports/tariffs", "/reports/buy"):
+                     "/reports/tariffs", "/reports/buy", "/franchisees",
+                     "/franchisees/royalty"):
             tables = self.rows_of(path)
             with self.subTest(path):
                 self.assertTrue(tables, "список не помечен как карточки")

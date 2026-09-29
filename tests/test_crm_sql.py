@@ -244,6 +244,26 @@ class TestCrmSql(unittest.TestCase):
             self.db.cash_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                      datetime(2026, 9, 13, tzinfo=UTC)),
             self.db.debtors(10, location="Павлюхина"), self.db.debtors(location="none"),
+            # франшиза: карточки, принятый ответ, неудача, месяцы роялти
+            self.db.franchisees(), self.db.franchisee(1),
+            self.db.create_franchisee(name="Самара", city="Самара",
+                                      base_url="https://crm.samara.example",
+                                      token_enc="v1:x", royalty_percent=d, fixed_fee=d,
+                                      contract_start=today, active=True, note=None),
+            self.db.update_franchisee(1, name="Самара-2", royalty_percent=d),
+            self.db.update_franchisee(1, note="x"),
+            self.db.update_franchisee(1, royalty_percent=d, fixed_fee=d,
+                                      terms_from=today.replace(day=1)),
+            self.db.delete_franchisee(1),
+            self.db.delete_franchisee(1, wipe=True),
+            self.db.save_franchise_snapshot(
+                1, data={"format": 1}, taken_on=today,
+                months=[{"month": today.replace(day=1), "revenue": d,
+                         "idle_percent": Decimal("8.5"), "avg_check": d,
+                         "operational_days": d, "rented_days": d, "partial": True}]),
+            self.db.franchise_failed(1, "таймаут"),
+            self.db.franchise_months(today.replace(day=1)),
+            self.db.purge_franchise_snapshots(400),
         ]
 
     def test_placeholders_match_arguments(self):
@@ -272,6 +292,9 @@ class TestCrmSql(unittest.TestCase):
                      self.db.update_tariff(1, evil="x"), self.db.update_rental(1, evil="x"),
                      self.db.create_bike(evil="x"),
                      self.db.update_inbox_thread(1, evil="x"),
+                     # итоги опроса пишет только сам опрос
+                     self.db.update_franchisee(1, ok_at=None),
+                     self.db.create_franchisee(name="x", error="x"),
                      # имя точки - только каскадом rename_location
                      self.db.update_location(1, name="x")):
             with self.assertRaises(ValueError):

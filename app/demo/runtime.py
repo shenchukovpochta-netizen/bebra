@@ -28,7 +28,7 @@ from typing import Any
 
 from ..crm import service
 from ..web.config import WebConfig
-from . import seed, seed_extras
+from . import seed, seed_extras, seed_franchise
 from .world import MSK
 
 log = logging.getLogger("crm.demo")
@@ -64,6 +64,10 @@ def demo_config(cfg: WebConfig) -> WebConfig:
         # сообщений - лишняя вещь, которую забудут. Сид шифрует тем же
         # (reset(..., secret=cfg.secret)).
         inbox_key=seed_extras.inbox_key_text(cfg.secret),
+        # Метрик наружу у демо нет: вымышленные цифры франчайзеру ни к чему.
+        # Ключ токенов франчайзи - производный, как у «Входящих»: сид
+        # шифрует им токены вымышленных франчайзи.
+        metrics_token="", franchise_key=seed_franchise.franchise_key_text(cfg.secret),
         storage_dir=SCRATCH / "kyc", bike_photo_dir=SCRATCH / "bikes",
         doc_dir=SCRATCH / "doctemplates")
 

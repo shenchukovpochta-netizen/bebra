@@ -2028,6 +2028,94 @@ async def close_booking(crm: Any, booking_id: int, *, rental_id: int, by: str) -
                              handled_by=by, handled_at=datetime.now(UTC))
 
 
+# ─────────────────── франшиза: метрики и франчайзи ───────────────────
+#
+# Сторона франчайзи - franchise_metrics: агрегаты своей копии для
+# /hook/metrics теми же запросами и формулами, что сводка и «Отчёты».
+# Сторона франчайзера - карточки франчайзи и запись принятого ответа.
+# Токен франчайзи - чужой ключ к чужим цифрам, поэтому в базе он лишь
+# шифротекстом, своим ключом FRANCHISE_KEY (не ключом анкеты и не
+# переписки: у каждого свой срок жизни и своя замена).
+
+_FRANCHISE_VAULTS: dict[str, Vault | None] = {}
+
+
+def franchise_vault(raw_key: str | None) -> Vault | None:
+    """Шифр токенов франчайзи по ключу из секрета или None, если ключа нет."""
+    key = (raw_key or "").strip()
+    if not key:
+        return None
+    if key not in _FRANCHISE_VAULTS:
+        try:
+            _FRANCHISE_VAULTS[key] = Vault.from_raw(key)
+        except KeyProblem:
+            log.error("FRANCHISE_KEY непригоден - токены франчайзи не читаются")
+            _FRANCHISE_VAULTS[key] = None
+    return _FRANCHISE_VAULTS[key]
+
+
+def franchise_seal(vault: Vault | None, token: str | None) -> str | None:
+    return vault.encrypt({"t": token}) if vault is not None and token else None
+
+
+def franchise_token(vault: Vault | None, row: Mapping[str, Any]) -> str | None:
+    """Токен франчайзи открытым текстом - только в памяти, на один запрос.
+    Нет ключа или шифротекст чужой - None, а не исключение."""
+    if vault is None or not row.get("token_enc"):
+        return None
+    token = vault.decrypt(row["token_enc"]).get("t")
+    return str(token) if token else None
+
+
+async def franchise_metrics(crm: Any, *, title: str, version: str,
+                            now: datetime) -> dict[str, Any]:
+    """Ответ /hook/metrics: парк сейчас, три числа за 30 дней (окно
+    сводки) и по месяцам (таблица «Отчётов»). Запросы - те же, что у
+    панели, поэтому франчайзер видит ровно то, что франчайзи на сводке."""
+    since = now - timedelta(days=logic.POINTS_PERIOD_DAYS)
+    last30 = logic.fleet_metrics(await crm.bike_days_by_status(since, now),
+                                 await crm.rental_revenue(since, now))
+    months = []
+    for first, until, partial in logic.metrics_months(now):
+        m = logic.fleet_metrics(await crm.bike_days_by_status(first, until),
+                                await crm.rental_revenue(first, until))
+        months.append({"month": first.date(), "partial": partial, **m})
+    return logic.metrics_payload(
+        title=title, version=version, now=now,
+        places=await crm.locations(active_only=True), bikes=await crm.bike_counts(),
+        counts=await crm.counts(), last30=last30, months=months)
+
+
+async def save_franchisee(crm: Any, vault: Vault | None, franchisee_id: int | None,
+                          fields: Mapping[str, Any], *, token: str | None,
+                          terms_from: date | None = None) -> int:
+    """Завести или поправить франчайзи. Новый токен шифруется здесь;
+    пустой - остаётся прежний. Без ключа токен не принимаем: хранить его
+    открытым текстом мы не станем. terms_from - с какого месяца правка
+    условий ложится на уже пришедшие месяцы (None - с идущего)."""
+    data = dict(fields)
+    if token:
+        if vault is None:
+            raise ServiceError("Не задан ключ secrets/franchise_key: токен негде "
+                               "хранить. Выполните bash bootstrap.sh и перезапустите "
+                               "панель и бота.")
+        data["token_enc"] = franchise_seal(vault, token)
+    if franchisee_id is None:
+        if not data.get("token_enc"):
+            raise ServiceError("Токен: без него франчайзи не ответит на опрос.")
+        return await crm.create_franchisee(**data)
+    await crm.update_franchisee(franchisee_id, terms_from=terms_from, **data)
+    return franchisee_id
+
+
+async def franchise_store(crm: Any, franchisee_id: int, parsed: Mapping[str, Any], *,
+                          today: date) -> None:
+    """Принятый ответ (уже logic.parse_metrics) - снимком дня и месяцами."""
+    await crm.save_franchise_snapshot(franchisee_id, data=logic.metrics_json(parsed),
+                                      months=logic.metrics_month_rows(parsed),
+                                      taken_on=today)
+
+
 # ─────────────────── входящие обращения ───────────────────
 #
 # Переписка шифруется своим ключом INBOX_KEY, не ключом анкеты: панель

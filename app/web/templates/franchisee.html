@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}{% if row %}{{ row.name }}{% else %}Новый франчайзи{% endif %} — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1 class="wrap">{% if row %}{{ row.name }}{% else %}Новый франчайзи{% endif %}</h1>
+  <nav class="tabs"><a href="/franchisees">Сравнение</a> <a href="/franchisees/royalty">Роялти</a></nav>
+  {% if row and can_edit(staff, 'franchise') %}
+  <form method="post" action="/franchisees/refresh/{{ row.id }}" class="inline-form"><button type="submit" class="ghost">Обновить сейчас</button></form>
+  {% endif %}
+</div>
+{% if not key_ok %}<p class="flash err">Не задан ключ <code>secrets/franchise_key</code>: токен негде хранить. Ключ создаёт <code>bootstrap.sh</code>, затем перезапуск панели и бота.</p>{% endif %}
+
+{% if row and history is defined %}
+{# Всё ниже - ответ чужого сервера после проверки: имена точек и версия
+   выводятся экранированными, числа - нашими типами. Форма, вернувшаяся
+   с ошибкой, показывается без этого блока: цифры - на карточке. #}
+<div class="card">
+<h2>Данные</h2>
+<p class="wrap">{% if not row.active %}<span class="tag">не действует — не опрашивается</span>
+  {% elif stale %}<span class="tag repair">нет свежих данных дольше {{ stale_hours }} ч</span>
+  {% else %}<span class="tag ok">свежие</span>{% endif %}
+  <br><small class="muted">Принят ответ: {{ row.ok_at|dmy }} · последняя попытка: {{ row.polled_at|dmy }}
+  · адрес <code>{{ row.base_url }}/hook/metrics</code> · токен {% if row.token_enc %}задан{% else %}<b>не задан</b>{% endif %}</small>
+  {% if row.error %}<br><small class="bad">Последняя попытка не удалась: {{ row.error }}</small>{% endif %}</p>
+{% if snap %}
+<div class="tiles">
+  <div class="tile"><b>{{ snap.fleet }}</b><span>парк, в аренде {{ snap.rented }}</span></div>
+  <div class="tile {% if snap.last30.idle_percent is not none and snap.last30.idle_percent < IDLE_TARGET_PERCENT %}good{% else %}warn{% endif %}"><b>{% if snap.last30.idle_percent is none %}—{% else %}{{ snap.last30.idle_percent }} %{% endif %}</b><span>простой за 30 дней</span></div>
+  <div class="tile {% if snap.last30.avg_check is not none and snap.last30.avg_check >= CHECK_TARGET %}good{% else %}warn{% endif %}"><b>{{ money(snap.last30.avg_check) }}</b><span>чек/день за 30 дней</span></div>
+  <div class="tile"><b>{{ money(snap.last30.revenue) }}</b><span>выручка за 30 дней</span></div>
+  <div class="tile"><b>{{ snap.rentals_active }}</b><span>аренд сейчас, клиентов {{ snap.clients }}</span></div>
+</div>
+<p class="muted small wrap">Прислано {{ snap.generated_at|dmy }} от «{{ snap.name }}»{% if snap.city %}, {{ snap.city }}{% endif %}.
+  Версия системы: {% if snap.version %}<code>{{ snap.version }}</code>{% if snap.version == version %} — как у нас{% else %} — не как у нас (<code>{{ version }}</code>){% endif %}{% else %}не сообщена{% endif %}.
+  Точки ({{ snap.points|length }}): {% for p in snap.points %}{{ p.name }}{% if p.city %} ({{ p.city }}){% endif %}{% if not loop.last %}, {% endif %}{% else %}не заведены{% endfor %}.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Месяц</th><th class="num">Простой</th><th class="num">Чек/день</th><th class="num">Выручка</th>
+      <th class="num opt">Дней в аренде</th><th class="num opt">Дней парка</th></tr>
+  {% for m in snap.months %}
+  <tr><td>{{ m.month.strftime('%m.%Y') }}{% if m.partial %} <small class="muted">идёт</small>{% endif %}</td>
+    <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+    <td class="num {% if m.avg_check is none %}muted{% elif m.avg_check >= CHECK_TARGET %}ok{% else %}bad{% endif %}">{{ money(m.avg_check) }}</td>
+    <td class="num">{{ money(m.revenue) }}</td>
+    <td class="num opt">{{ m.rented_days|round(1) }}</td>
+    <td class="num opt">{{ m.operational_days|round(1) }}</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p class="muted">Ответа от франчайзи ещё не было: проверьте адрес и токен и нажмите «Обновить сейчас».</p>
+{% endif %}
+</div>
+
+{% if history %}
+<div class="card">
+<h2>Роялти по месяцам</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Месяц</th><th class="num">Выручка</th><th class="num">%</th><th class="num">Фикс</th><th class="num">Роялти</th><th></th></tr>
+  {% for b in history %}{% for r in b.rows %}
+  <tr><td>{{ b.month.strftime('%m.%Y') }}</td>
+    <td class="num">{{ money(r.revenue) }}</td>
+    <td class="num">{% if r.percent is none %}—{% else %}{{ '%g'|format(r.percent|float)|replace('.', ',') }} %{% endif %}</td>
+    <td class="num">{{ money(r.fixed) }}</td>
+    <td class="num"><b>{{ money(r.royalty) }}</b></td>
+    <td class="muted">{{ r.mark }}</td></tr>
+  {% endfor %}{% endfor %}
+</table>
+</div>
+<p class="muted small">Условия (процент и фикс) записаны на каждый месяц, пока он идёт: правка карточки действует с месяца из поля «Условия с месяца» (пусто — с текущего) и более ранние не переписывает. «Неполные данные» — последний принятый ответ пришёл до конца месяца: счёт по такой строке вышел бы заниженным, дождитесь следующего опроса.</p>
+</div>
+{% endif %}
+{% endif %}
+
+{% if can_edit(staff, 'franchise') %}
+<div class="card">
+<h2>{% if row %}Карточка{% else %}Новый франчайзи{% endif %}</h2>
+{% set cs = values.contract_start %}
+<form method="post" action="{% if row %}/franchisees/{{ row.id }}{% else %}/franchisees/new{% endif %}" class="grid2">
+  <label>Название <input name="name" value="{{ values.name or '' }}" required placeholder="Май Байк Самара"></label>
+  <label>Город <input name="city" value="{{ values.city or '' }}" placeholder="Самара"></label>
+  <label class="wide">Адрес панели франчайзи <input name="base_url" value="{{ values.base_url or '' }}" required placeholder="https://crm.prokat-samara.ru" inputmode="url"></label>
+  <label class="wide">Токен метрик <input name="token" type="password" value="" autocomplete="off"
+    placeholder="{% if row and row.token_enc %}задан — оставьте пустым, чтобы не менять{% else %}из файла secrets/metrics_token франчайзи{% endif %}"></label>
+  <label>Роялти, % от выручки <input name="royalty_percent" value="{{ values.royalty_percent if values.royalty_percent is not none else '' }}" inputmode="decimal" placeholder="5"></label>
+  <label>Фикс в месяц, ₽ <input name="fixed_fee" value="{{ values.fixed_fee if values.fixed_fee is not none else '' }}" inputmode="decimal" placeholder="15000"></label>
+  {% if row %}
+  {# Прошлый месяц - осознанная правка: опечатка в проценте, замеченная
+     после первого опроса, иначе осталась бы в закрытых месяцах навсегда. #}
+  <label>Условия с месяца <input name="terms_from" type="month" value="{{ values.terms_from or '' }}" placeholder="ГГГГ-ММ">
+    <small class="muted">пусто — с текущего; раньше — перепишет и прошлые месяцы</small></label>
+  {% endif %}
+  <label>Начало договора <input name="contract_start" type="date" value="{{ cs if cs is string else cs|iso }}" required></label>
+  <label>Заметка <input name="note" value="{{ values.note or '' }}"></label>
+  <label class="check wide"><input type="checkbox" name="active" value="1" {% if values.active %}checked{% endif %}> Действует — опрашивать и считать роялти</label>
+  <button type="submit">Сохранить</button>
+</form>
+<p class="muted small">Франчайзи включает у себя адрес метрик: кладёт токен в
+  <code>secrets/metrics_token</code> и перезапускает панель (<code>docker compose restart crm</code>),
+  а токен передаёт вам. Панель франчайзи должна быть доступна по https (профиль
+  <code>https</code> и <code>CRM_DOMAIN</code>). Токен хранится зашифрованным и
+  здесь не показывается. Роялти = выручка месяца × процент + фикс; месяцы до
+  начала договора — без роялти.</p>
+{% if row %}
+<form method="post" action="/franchisees/{{ row.id }}/delete" class="inline-form">
+  <button type="submit" class="ghost">Удалить франчайзи</button>
+  <label class="check"><input type="checkbox" name="wipe" value="1"> заведён по ошибке — стереть и месяцы роялти</label>
+  <small class="muted">Без галочки — только без истории месяцев; с историей — снимите «Действует».</small>
+</form>
+{% endif %}
+</div>
+{% endif %}
+{% endblock %}

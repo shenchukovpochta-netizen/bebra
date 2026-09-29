@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Франчайзи — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Франчайзи</h1>
+  <nav class="tabs"><a href="/franchisees" class="on">Сравнение</a> <a href="/franchisees/royalty">Роялти</a></nav>
+  {% if can_edit(staff, 'franchise') %}<a class="btn" href="/franchisees/new">Добавить франчайзи</a>{% endif %}
+</div>
+{# Цифры франчайзи пришли с чужого сервера: всё выводится с
+   экранированием, а в базу попало только то, что прошло проверку. #}
+{% if not key_ok %}<p class="flash err">Не задан ключ <code>secrets/franchise_key</code>: токены франчайзи негде хранить, и процесс бота их не опрашивает. Ключ создаёт <code>bootstrap.sh</code>.</p>{% endif %}
+<div class="tiles">
+  <div class="tile"><b>{{ active }}</b><span>действующих франчайзи</span></div>
+  <div class="tile {% if stale %}warn{% endif %}"><b>{{ stale }}</b><span>без свежих данных</span></div>
+  <div class="tile"><b>{{ total.fleet }}</b><span>парк сети по последним данным</span></div>
+  <div class="tile"><b>{{ money(total.royalty) }}</b><span>роялти за {{ last.strftime('%m.%Y') }}</span></div>
+</div>
+<div class="card">
+<h2>Три числа за 30 дней</h2>
+<div class="table-wrap">
+<table class="cards">
+  <tr><th>Франчайзи</th><th class="num">Парк</th><th class="num">Простой</th>
+      <th class="num">Чек/день</th><th class="num opt">Выручка 30 дн</th>
+      <th class="num">Выручка {{ last.strftime('%m.%Y') }}</th><th class="num opt">к {{ before.strftime('%m.%Y') }}</th>
+      <th class="num opt">Аренд сейчас</th><th class="num">Роялти {{ last.strftime('%m.%Y') }}</th><th>Данные</th></tr>
+  {# Без снимка - прочерки в тех же ячейках, а не другой набор ячеек: на
+     телефоне у каждой ячейки подпись своей колонки (tests/test_phone.py). #}
+  {% for r in rows %}
+  <tr class="{% if not r.active %}muted{% elif r.stale %}warn-row{% endif %}">
+    <td data-label="Франчайзи"><a href="/franchisees/{{ r.id }}"><b>{{ r.name }}</b></a>{% if r.city %}<br><small class="muted">{{ r.city }}</small>{% endif %}
+      {% if not r.active %} <span class="tag">не действует</span>{% endif %}</td>
+    <td class="num {% if not r.snap %}muted{% endif %}" data-label="Парк">{% if r.snap %}{{ r.fleet }}<br><small class="muted">в аренде {{ r.rented }}</small>{% else %}—{% endif %}</td>
+    <td class="num {% if not r.snap or r.idle_percent is none %}muted{% elif r.idle_ok %}ok{% else %}bad{% endif %}" data-label="Простой">{% if not r.snap or r.idle_percent is none %}—{% else %}{{ r.idle_percent }} %{% endif %}</td>
+    <td class="num {% if not r.snap or r.avg_check is none %}muted{% elif r.check_ok %}ok{% else %}bad{% endif %}" data-label="Чек/день">{% if r.snap %}{{ money(r.avg_check) }}{% else %}—{% endif %}</td>
+    <td class="num opt {% if not r.snap %}muted{% endif %}" data-label="Выручка 30 дн">{% if r.snap %}{{ money(r.revenue30) }}{% else %}—{% endif %}</td>
+    <td class="num" data-label="Выручка {{ last.strftime('%m.%Y') }}">{{ money(r.last_revenue) }}</td>
+    <td class="num opt {% if r.trend is none %}muted{% elif r.trend >= 0 %}ok{% else %}bad{% endif %}" data-label="к {{ before.strftime('%m.%Y') }}">{% if r.trend is none %}—{% else %}{% if r.trend > 0 %}+{% endif %}{{ r.trend }} %{% endif %}</td>
+    <td class="num opt" data-label="Аренд сейчас">{% if r.snap %}{{ r.rentals_active }}{% else %}—{% endif %}</td>
+    <td class="num" data-label="Роялти {{ last.strftime('%m.%Y') }}">{{ money(r.royalty_last) }}{% if r.royalty_mark %}<br><small class="muted">{{ r.royalty_mark }}</small>{% endif %}</td>
+    <td data-label="Данные">{% if r.stale %}<span class="tag repair">нет свежих данных</span>{% elif r.active %}<span class="tag ok">свежие</span>{% endif %}
+      <br><small class="muted">{% if r.ok_at %}приняты {{ r.ok_at|dmy }}{% else %}ещё не приходили{% endif %}</small>
+      {% if r.error %}<br><small class="bad">{{ r.error }}</small>{% endif %}
+      {% if r.same_version == false %}<br><small class="muted">другая версия системы</small>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="10" class="muted">Франчайзи не заведены.</td></tr>{% endfor %}
+  {% if rows %}
+  <tr class="total">
+    <td data-label="Франчайзи"><b>Сеть</b><br><small class="muted">с данными {{ total.with_data }} из {{ active }}</small></td>
+    <td class="num" data-label="Парк">{{ total.fleet }}</td>
+    <td class="num {% if total.idle_percent is none %}muted{% elif total.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}" data-label="Простой">{% if total.idle_percent is none %}—{% else %}{{ total.idle_percent }} %{% endif %}</td>
+    <td class="num" data-label="Чек/день">{{ money(total.avg_check) }}</td>
+    <td class="num opt" data-label="Выручка 30 дн">{{ money(total.revenue30) }}</td>
+    <td class="num" data-label="Выручка {{ last.strftime('%m.%Y') }}">{{ money(total.last) }}</td>
+    <td class="num opt" data-label="к {{ before.strftime('%m.%Y') }}">{% if total.trend is none %}—{% else %}{% if total.trend > 0 %}+{% endif %}{{ total.trend }} %{% endif %}</td>
+    <td class="num opt" data-label="Аренд сейчас">{{ total.rentals_active }}</td>
+    <td class="num" data-label="Роялти {{ last.strftime('%m.%Y') }}">{{ money(total.royalty) }}</td>
+    <td data-label="Данные"></td>
+  </tr>
+  {% endif %}
+</table>
+</div>
+<p class="muted">
+  Цифры приходят с серверов франчайзи: процесс бота раз в сутки забирает
+  у каждого агрегаты по адресу <code>/hook/metrics</code> — парк, простой,
+  чек и выручку по месяцам, без клиентов и телефонов. Простой и чек
+  пересчитываются здесь из дней и выручки по тем же формулам, что у
+  сводки; «Сеть» — не среднее процентов, а суммы дней и денег.
+  «Нет свежих данных» — принятого ответа нет дольше {{ stale_hours }} ч:
+  причина — в карточке франчайзи. Цели те же: простой ниже
+  {{ IDLE_TARGET_PERCENT }} %, чек от {{ money(CHECK_TARGET) }}.
+  Тренд — выручка прошлого месяца против позапрошлого.
+</p>
+<p class="muted small">Эта копия системы — версия <code>{{ version }}</code>.
+  Адрес метрик этой копии для своего франчайзера:
+  {% if metrics_on %}включён (<code>/hook/metrics</code>, токен в <code>secrets/metrics_token</code>){% else %}выключен — пустой <code>secrets/metrics_token</code>{% endif %}.</p>
+</div>
+{% endblock %}

@@ -65,6 +65,11 @@ class WebConfig:
     # /hook/inbox для шлюзов WhatsApp и n8n. Пустой токен - хука нет.
     inbox_key: str = ""
     inbox_hook_token: str = ""
+    # Франшиза. metrics_token - токен адреса /hook/metrics этой копии
+    # (пусто - адреса нет, 404); franchise_key - ключ, которым франчайзер
+    # шифрует токены своих франчайзи (тот же файл, что у бота).
+    metrics_token: str = ""
+    franchise_key: str = ""
     # Демо-стенд для франшизы (python -m app.demo): плашка, подсказка
     # логинов, запрет опасных POST. Из окружения не читается намеренно -
     # включает его только свой вход, у которого нет боевых секретов.
@@ -100,4 +105,6 @@ class WebConfig:
             tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
             inbox_key=_secret("INBOX_KEY", required=False),
             inbox_hook_token=_secret("INBOX_HOOK_TOKEN", required=False),
+            metrics_token=_secret("METRICS_TOKEN", required=False),
+            franchise_key=_secret("FRANCHISE_KEY", required=False),
         )

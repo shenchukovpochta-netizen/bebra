@@ -184,6 +184,9 @@ class Config:
     # Ключ шифрования переписки во «Входящих» (secrets/inbox_key). Пусто -
     # обращения пишутся без текста, ответить из панели нельзя.
     inbox_key: str = ""
+    # Ключ шифрования токенов франчайзи (secrets/franchise_key): процесс
+    # бота опрашивает их раз в сутки. Пусто - опроса нет.
+    franchise_key: str = ""
     ops_chat_id: int | None = None
     ops_topic_fix: int | None = None
     ops_topic_return: int | None = None
@@ -284,6 +287,7 @@ class Config:
             avito_client_secret=_secret("AVITO_CLIENT_SECRET", required=False),
             avito_poll_seconds=_int("AVITO_POLL_SECONDS", "60"),
             inbox_key=_secret("INBOX_KEY", required=False),
+            franchise_key=_secret("FRANCHISE_KEY", required=False),
             ops_chat_id=_int_or_none("OPS_CHAT_ID"),
             ops_topic_fix=_int_or_none("OPS_TOPIC_FIX"),
             ops_topic_return=_int_or_none("OPS_TOPIC_RETURN"),

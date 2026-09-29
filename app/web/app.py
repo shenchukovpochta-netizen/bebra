@@ -49,6 +49,7 @@ from ..crm import (
     company,
     doctemplates,
     firstrun,
+    franchise,
     import_xlsx,
     logic,
     notices,
@@ -130,8 +131,10 @@ DEMO_BLOCKED_PATHS = frozenset({
     "/import",
 })
 # Мастер первого запуска в демо выключен, а его шаг «Сотрудники» завёл бы
-# вход мимо закрытого /staff.
-DEMO_BLOCKED_PREFIXES = ("/staff", "/profiles", "/documents", "/setup")
+# вход мимо закрытого /staff. «Обновить сейчас» у франчайзи - запрос на
+# чужой сервер.
+DEMO_BLOCKED_PREFIXES = ("/staff", "/profiles", "/documents", "/setup",
+                         "/franchisees/refresh")
 DEMO_BLOCKED_TEXT = "В демо-версии это недоступно."
 DEMO_PHOTO_TEXT = "Снимки в демо не хранятся: файл не сохранён."
 # Фото номера при сверке в демо не требуется: снимки не хранятся, и
@@ -611,6 +614,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
               name="static")
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     static_v = static_stamp(HERE / "static")
+    # Версия копии для франчайзера (/hook/metrics) и сравнения с ним.
+    code_v = franchise.code_stamp()
     templates.env.globals.update(
         static_v=static_v, app_short=app_names(cfg.title)[1], THEME_COLOR=THEME_COLOR,
         # «Скоро платёж» подсвечивается с того же дня, с которого бот шлёт
@@ -2882,6 +2887,212 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                  saved, duplicates, skipped)
         return JSONResponse({"ok": True, "saved": saved, "duplicates": duplicates,
                              "skipped": skipped})
+
+    # ─────────────────── франшиза: метрики наружу ───────────────────
+
+    metrics_hits: dict[str, list[float]] = {}
+
+    def metrics_rate_ok(ip: str) -> bool:
+        """Предел запросов с верным токеном на адрес (METRICS_RATE_LIMIT в
+        окне METRICS_RATE_WINDOW). Память процесса: рестарт обнуляет её,
+        и это ничего не даёт тому, кто пришёл с утёкшим токеном."""
+        now = time.monotonic()
+        if len(metrics_hits) > LOGIN_KEYS_SWEEP:
+            for stale in [k for k, ts in metrics_hits.items()
+                          if not ts or now - ts[-1] >= logic.METRICS_RATE_WINDOW]:
+                metrics_hits.pop(stale, None)
+        hits = [t for t in metrics_hits.get(ip, ())
+                if now - t < logic.METRICS_RATE_WINDOW]
+        if len(hits) >= logic.METRICS_RATE_LIMIT:
+            metrics_hits[ip] = hits
+            return False
+        metrics_hits[ip] = [*hits, now]
+        return True
+
+    @app.get("/hook/metrics")
+    async def metrics_hook(request: Request) -> Response:
+        """Агрегаты этой копии для франчайзера: парк, три числа, выручка
+        по месяцам, названия точек (service.franchise_metrics).
+
+        Входа в панель у франчайзера нет, поэтому проверки свои, как у
+        /hook/inbox: пустой токен (и демо) - адреса нет вовсе (404),
+        неверный - 401 и счёт неудач с адреса, верный - не чаще предела.
+        Ни клиентов, ни телефонов, ни отдельных платежей в ответе нет.
+        """
+        token = str(getattr(cfg, "metrics_token", "") or "")
+        if not token or cfg.demo:
+            return JSONResponse({"ok": False}, status_code=404)
+        header = request.headers.get("authorization") or ""
+        given = header[7:].strip() if header[:7].lower() == "bearer " else ""
+        ip = client_ip(request)
+        if not (given and hmac.compare_digest(given.encode(), token.encode())):
+            ip_key = "metrics:" + ip
+            if login_throttled(ip_key, logic.HOOK_FAIL_LIMIT):
+                return JSONResponse({"ok": False, "error": "too many attempts"},
+                                    status_code=429)
+            login_failures.setdefault(ip_key, []).append(time.monotonic())
+            return JSONResponse({"ok": False}, status_code=401)
+        if not metrics_rate_ok(ip):
+            return JSONResponse({"ok": False, "error": "too many requests"},
+                                status_code=429, headers={"Retry-After": "600"})
+        payload = await service.franchise_metrics(
+            crm, title=cfg.title, version=code_v, now=datetime.now().astimezone())
+        log.info("метрики отданы франчайзеру (%s)", ip)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    # ─────────────────────── франчайзи и роялти ───────────────────────
+    #
+    # Кабинет франчайзера. Опрашивает франчайзи процесс бота раз в сутки
+    # (app/crm/franchise.py); панель ходит к ним только по кнопке
+    # «Обновить сейчас» - один запрос к одному франчайзи при владельце.
+    # Всё, что пришло от франчайзи, уже прошло logic.parse_metrics и
+    # выводится шаблоном с экранированием: чужая строка - не разметка.
+
+    franchise_vault = service.franchise_vault(getattr(cfg, "franchise_key", ""))
+
+    def franchise_months_since(count: int) -> date:
+        month = date.today().replace(day=1)
+        for _ in range(max(count, 1) - 1):
+            month = (month - timedelta(days=1)).replace(day=1)
+        return month
+
+    async def franchisee_of(raw: str) -> dict | None:
+        """Франчайзи по номеру из адреса: не номер (и не bigint) - None,
+        то есть 404, а не 422 или 500 от базы."""
+        franchisee_id = logic.parse_id(raw)
+        return await crm.franchisee(franchisee_id) if franchisee_id is not None else None
+
+    def royalty_span(request: Request) -> int:
+        raw = request.query_params.get("months") or ""
+        return int(raw) if raw in ("6", "12", "24") else logic.METRICS_MONTHS
+
+    @app.get("/franchisees")
+    async def franchisees_page(request: Request) -> Response:
+        rows = await crm.franchisees()
+        # Два прошлых месяца: прошлый - роялти и тренд, позапрошлый - база тренда.
+        data = logic.franchise_rows(rows, await crm.franchise_months(
+            franchise_months_since(3)), now=datetime.now().astimezone(), version=code_v)
+        return render(request, "franchisees.html", **data, version=code_v,
+                      key_ok=franchise_vault is not None,
+                      metrics_on=bool(getattr(cfg, "metrics_token", "")) and not cfg.demo,
+                      stale_hours=logic.FRANCHISE_STALE_HOURS)
+
+    def franchisee_form_page(request: Request, row: dict | None, *,
+                             values: dict | None = None, status_code: int = 200
+                             ) -> Response:
+        return render(request, "franchisee.html", status_code=status_code, row=row,
+                      values=values or row or {"active": True},
+                      key_ok=franchise_vault is not None,
+                      stale_hours=logic.FRANCHISE_STALE_HOURS, version=code_v)
+
+    @app.get("/franchisees/new")
+    async def franchisee_new(request: Request) -> Response:
+        if not may_edit(request, "franchise"):
+            return denied(request, "franchise")
+        return franchisee_form_page(request, None)
+
+    async def franchisee_submit(request: Request, row: dict | None) -> Response:
+        data = await form(request)
+        checked = logic.check_franchisee(data)
+        token = logic.check_franchise_token(data.get("token"))
+        terms = logic.check_terms_from(data.get("terms_from"), today=date.today())
+        error = next((c.error for c in (checked, token, terms) if not c.ok), "")
+        values = {**(row or {}), **{k: v for k, v in data.items() if k != "token"},
+                  "active": bool(data.get("active"))}
+        if error:
+            flash(request, error, "err")
+            return franchisee_form_page(request, row, values=values, status_code=400)
+        try:
+            franchisee_id = await service.save_franchisee(
+                crm, franchise_vault, row["id"] if row else None, checked.value,
+                token=token.value, terms_from=terms.value)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return franchisee_form_page(request, row, values=values, status_code=400)
+        flash(request, "Франчайзи сохранён." if row else
+              "Франчайзи заведён: процесс бота опросит его в ближайшие минуты, "
+              "или нажмите «Обновить сейчас».")
+        return redirect(f"/franchisees/{franchisee_id}")
+
+    @app.post("/franchisees/new")
+    async def franchisee_create(request: Request) -> Response:
+        return await franchisee_submit(request, None)
+
+    async def royalty_data(request: Request) -> dict:
+        count = royalty_span(request)
+        return {"count": count, "blocks": logic.royalty_rows(
+            await crm.franchisees(),
+            await crm.franchise_months(franchise_months_since(count)),
+            today=date.today(), count=count)}
+
+    @app.get("/franchisees/royalty")
+    async def franchise_royalty(request: Request) -> Response:
+        return render(request, "franchise_royalty.html", **await royalty_data(request),
+                      partial_mark=logic.ROYALTY_PARTIAL)
+
+    @app.get("/franchisees/royalty.{ext}")
+    async def franchise_royalty_table(request: Request, ext: str) -> Response:
+        data = await royalty_data(request)
+        rows = [[b["month"], r["name"], r["city"], r["revenue"], r["percent"], r["fixed"],
+                 r["royalty"], r["mark"]]
+                for b in data["blocks"] for r in b["rows"]]
+        return await table(ext, f"royalty-{date.today():%Y%m}",
+                           ["Месяц", "Франчайзи", "Город", "Выручка", "Роялти, %",
+                            "Фикс", "Роялти", "Отметка"], rows)
+
+    @app.get("/franchisees/{franchisee_id}")
+    async def franchisee_card(request: Request, franchisee_id: str) -> Response:
+        row = await franchisee_of(franchisee_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Франчайзи")
+        parsed = logic.parse_metrics(row["data"]) if row.get("data") else None
+        now = datetime.now().astimezone()
+        history = logic.royalty_rows([row], await crm.franchise_months(
+            franchise_months_since(12)), today=now.date(), count=12)
+        return render(request, "franchisee.html", row=row, values=row,
+                      snap=parsed.value if parsed is not None and parsed.ok else None,
+                      stale=logic.franchise_stale(row, now),
+                      history=[b for b in history if b["rows"]],
+                      key_ok=franchise_vault is not None,
+                      stale_hours=logic.FRANCHISE_STALE_HOURS, version=code_v)
+
+    @app.post("/franchisees/{franchisee_id}")
+    async def franchisee_save(request: Request, franchisee_id: str) -> Response:
+        row = await franchisee_of(franchisee_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Франчайзи")
+        return await franchisee_submit(request, row)
+
+    @app.post("/franchisees/{franchisee_id}/delete")
+    async def franchisee_delete(request: Request, franchisee_id: str) -> Response:
+        row = await franchisee_of(franchisee_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Франчайзи")
+        # «Заведён по ошибке» - явная галочка: стираются и месяцы роялти.
+        # Без неё история держит карточку - по ней могли выставить счёт.
+        wipe = bool((await form(request)).get("wipe"))
+        if not await crm.delete_franchisee(row["id"], wipe=wipe):
+            flash(request, "Удалить нельзя: по франчайзи уже есть месяцы роялти. "
+                           "Снимите галочку «Действует» - опрос остановится, "
+                           "история останется. Заведён по ошибке - отметьте "
+                           "«стереть и месяцы».", "err")
+            return redirect(f"/franchisees/{row['id']}")
+        flash(request, "Франчайзи удалён.")
+        return redirect("/franchisees")
+
+    @app.post("/franchisees/refresh/{franchisee_id}")
+    async def franchisee_refresh(request: Request, franchisee_id: str) -> Response:
+        """«Обновить сейчас»: один запрос к одному франчайзи по кнопке
+        владельца. В демо закрыто стражем (DEMO_BLOCKED_PREFIXES)."""
+        row = await franchisee_of(franchisee_id)
+        if row is None:
+            return render(request, "missing.html", status_code=404, what="Франчайзи")
+        error = await franchise.refresh_one(crm, franchise_vault, row)
+        if error:
+            flash(request, f"Франчайзи не ответил: {error}", "err")
+        else:
+            flash(request, "Данные франчайзи обновлены.")
+        return redirect(f"/franchisees/{row['id']}")
 
     @app.get("/bookings")
     async def bookings_page(request: Request) -> Response:

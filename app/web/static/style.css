@@ -398,6 +398,9 @@ pre.preview{white-space:pre-wrap;font:inherit;background:var(--soft,#f3f1ee);
 pre.agreement{white-space:pre-wrap;font:inherit;font-size:14px;line-height:1.5}
 code.hash{font-size:12px;word-break:break-all}
 p.small{font-size:13px}
+/* Чужая строка без пробелов (имя из ответа франчайзи, длинный адрес) -
+   перенос в любом месте, а не прокрутка всей страницы на телефоне. */
+.wrap{overflow-wrap:anywhere}
 
 /* Столбики графика: чистый CSS, без библиотеки. Триста килобайт ради
    двадцати столбиков - это дорого для страницы, которую открывают
