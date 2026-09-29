@@ -520,6 +520,20 @@ T: dict[str, str] = {
     "CAB_WAITLIST_COMING": "✅ We told the manager: we expect you today. The bike is not reserved, so better not to delay. Bring your passport.{hours}",
     "CAB_WAITLIST_GONE": "This bike has already been taken. Your request stays active — we will write when the next one is free.",
     "BTN_WAITLIST_TAKE": "✅ I'll take it — coming today",
+    "FEEDBACK_ASK": "Thank you for riding with us! {bike} has been returned.\nHow was your rental? Rate it from 1 to 5 — just one tap.",
+    "FEEDBACK_BIKE": "Bike No. {code}",
+    "FEEDBACK_BIKE_ANY": "The bike",
+    "FEEDBACK_THANKS": "Thank you for the rating! We will be glad to see you again 🚲",
+    "FEEDBACK_THANKS_TOAST": "Thank you, rating received",
+    "FEEDBACK_ASK_COMMENT": "Sorry that not everything went well. What went wrong? Reply to this message with one text — we will read it and sort it out. You don't have to reply.",
+    "FEEDBACK_COMMENT_PLACEHOLDER": "What went wrong",
+    "FEEDBACK_COMMENT_THANKS": "Thank you, we have passed it on to the management.",
+    "FEEDBACK_STALE": "This button is outdated.",
+    "FEEDBACK_NOT_YOURS": "This button is not for you.",
+    "FEEDBACK_ALREADY": "Your rating has already been received — thank you!",
+    "FEEDBACK_COMMENT_EMPTY": "Write your comment as text, in one message.",
+    "FEEDBACK_COMMENT_LONG": "The comment is longer than {limit} characters — please shorten it.",
+    "FEEDBACK_COMMENT_DONE": "We have already received your comment — thank you!",
 }
 
 # Ошибки валидации: русский текст из logic.py -> перевод.

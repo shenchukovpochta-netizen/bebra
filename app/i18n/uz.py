@@ -513,6 +513,20 @@ T: dict[str, str] = {
     "CAB_WAITLIST_COMING": "✅ Menejerga yetkazdik: sizni bugun kutamiz. Velosiped band qilinmaydi, shuning uchun kechiktirmang. Pasportingizni oling.{hours}",
     "CAB_WAITLIST_GONE": "Bu velosipedni allaqachon olib ketishdi. So'rovingiz kuchda — keyingisi bo'shaganda yozamiz.",
     "BTN_WAITLIST_TAKE": "✅ Olaman — bugun kelaman",
+    "FEEDBACK_ASK": "Biz bilan bo'lganingiz uchun rahmat! {bike} qabul qilindi.\nIjara sizga qanday bo'ldi? 1 dan 5 gacha baholang — bitta bosish kifoya.",
+    "FEEDBACK_BIKE": "Velosiped № {code}",
+    "FEEDBACK_BIKE_ANY": "Velosiped",
+    "FEEDBACK_THANKS": "Baho uchun rahmat! Sizni yana kutib qolamiz 🚲",
+    "FEEDBACK_THANKS_TOAST": "Rahmat, baho qabul qilindi",
+    "FEEDBACK_ASK_COMMENT": "Hammasi yaxshi bo'lmaganidan afsusdamiz. Nima noto'g'ri bo'ldi? Bu xabarga bitta matn bilan javob bering — o'qib chiqamiz va hal qilamiz. Javob bermasangiz ham bo'ladi.",
+    "FEEDBACK_COMMENT_PLACEHOLDER": "Nima noto'g'ri bo'ldi",
+    "FEEDBACK_COMMENT_THANKS": "Rahmat, rahbariyatga yetkazdik.",
+    "FEEDBACK_STALE": "Bu tugma eskirgan.",
+    "FEEDBACK_NOT_YOURS": "Bu tugma siz uchun emas.",
+    "FEEDBACK_ALREADY": "Baho allaqachon qabul qilingan — rahmat!",
+    "FEEDBACK_COMMENT_EMPTY": "Izohni matn bilan, bitta xabarda yozing.",
+    "FEEDBACK_COMMENT_LONG": "Izoh {limit} belgidan uzun — qisqartiring.",
+    "FEEDBACK_COMMENT_DONE": "Izohingizni allaqachon oldik — rahmat!",
 }
 
 ERRORS: dict[str, str] = {

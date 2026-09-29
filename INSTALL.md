@@ -670,12 +670,19 @@ cd /opt/mybike-bot
 printf '%s' '<токен из MAX>' > secrets/max_bot_token
 chown 10001:10001 secrets/max_bot_token && chmod 600 secrets/max_bot_token
 nano .env        # заполните блок MAX_*: канал, чаты, админы
-docker compose --profile max up -d --build
+                 # и допишите max в COMPOSE_PROFILES: "https,max" (или "max")
+docker compose up -d --build
 docker compose logs -f bot-max
 ```
 
 В логе: «схема применена (база mybike_max)» и «бот MAX @имя готов».
-Остановить только MAX-бота: `docker compose --profile max stop bot-max`.
+
+`max` в `COMPOSE_PROFILES` обязателен: `bootstrap.sh` и обновление
+поднимают только профили оттуда. Бот, поднятый разовой командой
+`docker compose --profile max up -d`, `update.sh` всё равно пересоберёт,
+если застанет его работающим, но надёжнее строка в `.env`.
+Остановить только MAX-бота: `docker compose --profile max stop bot-max`
+(и уберите `max` из `COMPOSE_PROFILES`, иначе следующий `up -d` поднимет его снова).
 
 Отличия от Telegram-версии: меню и «Отмена» — кнопки под сообщением
 (reply-клавиатур в MAX нет), тем в группах нет — подписанные договоры
@@ -913,7 +920,9 @@ cd /opt/mybike-bot && bash update.sh /root/mybike-bot.zip
    вашими**. Документ, которого на сервере ещё не было (новый вид в новой
    версии), доезжает — без файла бот не поднимется.
 4. `bash bootstrap.sh`: досоздаёт недостающие секреты (как было с демо),
-   пересобирает образ и поднимает контейнеры.
+   пересобирает образ и поднимает контейнеры. MAX-бот, если он работал, а
+   `max` в `COMPOSE_PROFILES` нет, скрипт пересобирает отдельно:
+   `bootstrap.sh` поднимает только профили оттуда.
 5. `docker compose ps` и проверка панели: `/healthz` на
    `127.0.0.1:${CRM_PORT:-8080}` (адрес — из `CRM_BIND`).
 
@@ -935,7 +944,11 @@ docker compose --profile max stop bot crm bot-max
   psql -1 -v ON_ERROR_STOP=1 -U mybike -d mybike
 tar -xzf backups/pre-update-<дата-время>-code.tar.gz
 bash bootstrap.sh
+docker compose --profile max up -d --build bot-max   # только если MAX-бот работал
 ```
+
+Последнюю строку `update.sh` печатает сам, когда застал `bot-max`
+работающим: без неё клиенты MAX после отката остались бы без бота.
 
 Путь к архиву можно дать и относительный — от каталога, откуда
 запускаете: `cd /root && bash /opt/mybike-bot/update.sh mybike-bot.zip`.

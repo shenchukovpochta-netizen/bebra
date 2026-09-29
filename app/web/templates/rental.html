@@ -204,7 +204,8 @@
   <h2>Оценка клиента</h2>
   {% if feedback.score %}
   <p><b class="stars">{{ feedback_stars(feedback.score) }}</b> {{ feedback.score }} из 5 <span class="muted">· {{ feedback.answered_at|dmy }} · {{ FEEDBACK_CHANNELS.get(feedback.channel, feedback.channel) }}</span></p>
-  {% if feedback.comment %}<p class="wide">«{{ feedback.comment }}»</p>{% endif %}
+  {% if feedback.comment %}<p class="wide">«{{ feedback.comment }}»</p>
+  {% elif feedback.comment_hidden %}<p class="muted">Есть комментарий — его видят сотрудники с правом на клиентов.</p>{% endif %}
   {% elif feedback.channel %}
   <p class="muted">Спросили {{ feedback.asked_at|dmy }} в {{ FEEDBACK_CHANNELS.get(feedback.channel, feedback.channel) }} — ответа нет.</p>
   {% elif feedback.asked_at %}

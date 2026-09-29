@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     from aiogram.methods import AnswerCallbackQuery, SendMessage
@@ -134,7 +135,8 @@ class TestBatteryButton(CabinetCase):
 
     def labels(self):
         markup = self.session.last_markup()
-        return [b.text for row in markup.inline_keyboard for b in row] if markup else []
+        return ([plain(b.text) for row in markup.inline_keyboard for b in row]
+                if markup else [])
 
     def callbacks(self):
         markup = self.session.last_markup()
@@ -145,7 +147,7 @@ class TestBatteryButton(CabinetCase):
                 if isinstance(m, AnswerCallbackQuery) and m.show_alert]
 
     def team_cards(self):
-        return [m.text for m in self.session.sent_to(ADMIN_CHAT)
+        return [plain(m.text) for m in self.session.sent_to(ADMIN_CHAT)
                 if isinstance(m, SendMessage) and "второй аккумулятор" in (m.text or "")]
 
     async def test_pay_screen_offers_the_battery_for_the_rental_term(self):

@@ -315,8 +315,28 @@ class TestPanelClose(PanelCase):
                          "ноль стёр бы вчерашние снимки")
 
     def test_body_limit_fits_six_photos(self):
-        self.assertGreaterEqual(web_app.BODY_MAX,
+        self.assertGreaterEqual(web_app.PHOTOS_BODY_MAX,
                                 logic.RETURN_PHOTOS_MAX * logic.RETURN_PHOTO_MAX_BYTES)
+
+    def test_big_body_only_on_the_close_form(self):
+        """Шесть фото - только у закрытия аренды: открытый без входа /login
+        (и любой другой адрес) большой предел не получает. Пределы ужаты,
+        чтобы не гонять мегабайты."""
+        from unittest import mock
+        wide = ((web_app.WIDE_BODY_PATHS[0][0], 64 * 1024),)
+        with mock.patch.object(web_app, "BODY_MAX", 4096), \
+                mock.patch.object(web_app, "WIDE_BODY_PATHS", wide):
+            app = web_app.create_app(crm=self.crm, db=self.db, cfg=self.cfg, bot=self.bot)
+        client = tw.TestClient(app, follow_redirects=False)
+        big = {"note": "x" * 20000}
+        self.assertEqual(client.post("/login", data=big).status_code, 413)
+        self.assertEqual(client.post(f"/rentals/{self.rid}/extras", data=big).status_code, 413)
+        self.assertEqual(client.post(f"/rentals/{self.rid}/closeX", data=big).status_code,
+                         413)
+        # Без входа - переадресация на вход, тело не разбирается.
+        self.assertEqual(client.post(f"/rentals/{self.rid}/close", data=big).status_code, 303)
+        self.assertEqual(client.post(f"/rentals/{self.rid}/close",
+                                     data={"note": "x" * 70000}).status_code, 413)
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")

@@ -334,11 +334,15 @@ services:
   # дописывается, только если его адрес не совпал с адресом панели и
   # Caddy принял файл целиком (`caddy adapt`); иначе - предупреждение
   # в лог и одна панель. Пределы тела - как у самой панели (BODY_MAX,
-  # DEMO_BODY_MAX в app/web/app.py), а таймауты чтения не дают держать
-  # недокачанную загрузку открытой часами. read_body - на ВЕСЬ запрос
-  # с телом: шесть фото при сдаче (до 48 МБ) оператор шлёт с телефона на
-  # точке, и при 1 Мбит/с это минут шесть - на двух минутах закрытие
-  # обрывалось, не дойдя до панели. Медленный заголовок режет read_header.
+  # PHOTOS_BODY_MAX на закрытии аренды - WIDE_BODY_PATHS, DEMO_BODY_MAX
+  # в app/web/app.py): большой - только на POST закрытия с фото, остальным,
+  # и открытым без входа /login, /sign/, /hook/, - обычный. Таймауты
+  # чтения не дают держать недокачанную загрузку открытой часами.
+  # read_body - на ВЕСЬ запрос с телом, и у Caddy он один на сервер, по
+  # путям не делится: шесть фото при сдаче (до 48 МБ) оператор шлёт с
+  # телефона на точке, и при 1 Мбит/с это минут шесть - на двух минутах
+  # закрытие обрывалось, не дойдя до панели. Медленный заголовок режет
+  # read_header.
   caddy:
     image: caddy:2-alpine
     profiles: [https]
@@ -354,9 +358,15 @@ services:
         site() {
           printf '%s {\n\trequest_body {\n\t\tmax_size %s\n\t}\n\treverse_proxy %s\n}\n' "$$1" "$$3" "$$2"
         }
+        # Панель: большой предел - только закрытию аренды с фото.
+        panel() {
+          wide='path_regexp ^/rentals/[0-9]+/close$$'
+          printf '%s {\n\t@wide {\n\t\tmethod POST\n\t\t%s\n\t}\n\t@narrow not {\n\t\tmethod POST\n\t\t%s\n\t}\n\trequest_body @wide {\n\t\tmax_size %s\n\t}\n\trequest_body @narrow {\n\t\tmax_size %s\n\t}\n\treverse_proxy %s\n}\n' \
+            "$$1" "$$wide" "$$wide" "$$4" "$$3" "$$2"
+        }
         {
           printf '{\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 600s\n\t\t}\n\t}\n}\n'
-          if [ -n "$${CRM_DOMAIN}" ]; then site "$${CRM_DOMAIN}" crm:8080 51MB; fi
+          if [ -n "$${CRM_DOMAIN}" ]; then panel "$${CRM_DOMAIN}" crm:8080 22MB 51MB; fi
         } > /tmp/Caddyfile
         if [ -n "$${DEMO_DOMAIN}" ]; then
           crm=$$(printf %s "$${CRM_DOMAIN}" | tr A-Z a-z)
@@ -457,9 +467,11 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
-  # Бот в MAX. Не поднимается обычным `docker compose up` - только явно:
+  # Бот в MAX. Не поднимается обычным `docker compose up`, пока max нет в
+  # COMPOSE_PROFILES (.env): включается там, а не разовым --profile max -
+  # bootstrap.sh и update.sh поднимают только профили из COMPOSE_PROFILES.
   #   printf '%s' '<токен от @MasterBot>' > secrets/max_bot_token
-  #   docker compose --profile max up -d --build
+  #   COMPOSE_PROFILES="https,max" в .env, затем docker compose up -d --build
   # У него свой токен, свои чаты и своя база mybike_max (создаёт сам);
   # Telegram-бот и его данные не затрагиваются.
   bot-max:

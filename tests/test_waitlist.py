@@ -107,6 +107,40 @@ class TestWaitlistLogic(unittest.TestCase):
         got = logic.waitlist_queue(bike, rows, today=TODAY, aliases=self.ALIASES)
         self.assertEqual([b["id"] for b in got], [1, 2, 3])
 
+    def test_forgotten_booking_is_not_called(self):
+        """Заявка, чей день прошёл больше трёх суток назад, - забытая строка,
+        а не ожидание: её не зовут и места в очереди она не занимает."""
+        bike = self.bike()
+        rows = [self.booking(1, wanted_on=TODAY - timedelta(days=logic.WAITLIST_STALE_DAYS + 1)),
+                self.booking(2, wanted_on=TODAY - timedelta(days=logic.WAITLIST_STALE_DAYS)),
+                self.booking(3, wanted_on=TODAY + timedelta(days=1)),
+                self.booking(4, wanted_on=None)]
+        got = logic.waitlist_queue(bike, rows, today=TODAY, aliases=self.ALIASES)
+        self.assertEqual([b["id"] for b in got], [2, 3, 4])
+
+    def test_coming_client_is_on_today_dashboard(self):
+        """Заявка на завтра, а клиент на сегодняшний зов ответил «приеду
+        сегодня» - на сводке он в горящих «на выдачу сегодня», а не в
+        «ближайших днях». Ответ на вчерашний зов сегодня ничего не значит."""
+        called = datetime(2026, 9, 27, 12, 0).astimezone()
+        row = self.booking(1, full_name="Едет Сегодня", wanted_on=TODAY + timedelta(days=1),
+                           waitlist_at=called, waitlist_bike_id=5,
+                           coming_at=called + timedelta(minutes=7))
+        waiting = self.booking(2, full_name="Ждёт Завтра", wanted_on=TODAY + timedelta(days=1))
+        yesterday = self.booking(3, full_name="Ответил Вчера",
+                                 wanted_on=TODAY + timedelta(days=1),
+                                 waitlist_at=called - timedelta(days=1), waitlist_bike_id=5,
+                                 coming_at=called - timedelta(days=1, minutes=-5))
+        tasks = {t["code"]: t for t in logic.today_tasks(
+            bookings=[row, waiting, yesterday], today=TODAY)}
+        self.assertEqual(tasks["bookings"]["level"], "hot")
+        self.assertEqual(tasks["bookings"]["names"], ["Едет Сегодня"])
+        self.assertEqual(tasks["bookings_later"]["names"], ["Ждёт Завтра", "Ответил Вчера"])
+        self.assertTrue(logic.waitlist_coming_today(row, today=TODAY))
+        self.assertFalse(logic.waitlist_coming_today(
+            {**row, "coming_at": called - timedelta(minutes=1)}, today=TODAY),
+            "ответ до зова - ответ на прошлый зов")
+
     def test_same_bike_is_news_only_once(self):
         """Назавтра тот же велосипед - уже не новость: звать про него второй
         раз - спам, даже если «раз в сутки» позволяет."""
@@ -260,6 +294,15 @@ class TestWaitlistRound(unittest.IsolatedAsyncioTestCase):
         log = await self.crm.notice_log(code="waitlist")
         self.assertEqual(sorted(r["client_id"] for r in log),
                          sorted([self.clients[1], self.clients[2]]))
+
+    async def test_forgotten_booking_gives_its_place_to_today(self):
+        """Первая заявка забыта с прошлой недели: зовут второго и третьего,
+        а не давнего, который давно передумал."""
+        self.crm.bookings_[self.bookings[1]]["wanted_on"] = (
+            date.today() - timedelta(days=logic.WAITLIST_STALE_DAYS + 4))
+        await self.free()
+        self.assertEqual(await self.round(), 2)
+        self.assertEqual(self.called(), [102, 103])
 
     async def test_next_round_and_restart_send_nothing_new(self):
         await self.free()

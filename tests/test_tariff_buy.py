@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     import test_web as tw
@@ -404,12 +405,14 @@ class TestBuyLogic(unittest.TestCase):
         self.assertIn("; B — простой 18.0 %.", plan["lines"][-1])
         self.assertEqual(plan["count"], 2)
         plan = logic.buy_plan(rows, budget=D(70000))
-        self.assertEqual(plan["lines"][0], "На 70 000 ₽: A — 1 шт.; остаток 20 000 ₽.")
-        self.assertEqual(plan["lines"][1], "Не влезло в бюджет: A — ещё 1 шт. по 50 000 ₽.")
+        self.assertEqual(plain(plan["lines"][0]), "На 70 000 ₽: A — 1 шт.; остаток 20 000 ₽.")
+        self.assertEqual(plain(plan["lines"][1]),
+                         "Не влезло в бюджет: A — ещё 1 шт. по 50 000 ₽.")
         self.assertEqual((plan["spent"], plan["left"]), (D(50000), D(20000)))
         plan = logic.buy_plan(rows, budget=D(10000))
         self.assertEqual(plan["taken"], [])
-        self.assertIn("Не влезло в бюджет: A — ещё 2 шт. по 50 000 ₽.", plan["lines"])
+        self.assertIn("Не влезло в бюджет: A — ещё 2 шт. по 50 000 ₽.",
+                      [plain(x) for x in plan["lines"]])
 
     def test_plan_with_unknown_price(self):
         rows = logic.buy_rows(
@@ -506,8 +509,8 @@ class TestTariffAndBuyInPanel(tw.WebCase):
             self.assertIn(text, page)
         self.assertNotIn("None", page)
         # 24 000 и 16 000 на 40 дней аренды каждому; «Итого» - 40 000 на 80.
-        self.assertIn(f"Лучший чек — <b>Неделя</b>: {logic.money(D(600))}", page)
-        self.assertIn(logic.money(D(500)), page)
+        self.assertIn(f"Лучший чек — <b>Неделя</b>: {plain(logic.money(D(600)))}", page)
+        self.assertIn(plain(logic.money(D(500))), page)
         # 30 дней по умолчанию: платежи 40 суток назад в окно не попали.
         self.assertNotIn("Лучший чек — ", self.get_ok("/reports/tariffs"),
                          "нулевой чек лучшим не бывает")

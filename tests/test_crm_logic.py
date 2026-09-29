@@ -9,8 +9,8 @@ from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 D = Decimal
 TODAY = date(2026, 9, 13)
@@ -18,17 +18,29 @@ TODAY = date(2026, 9, 13)
 
 class TestMoney(unittest.TestCase):
     def test_format(self):
-        self.assertEqual(logic.money(3000), "3 000 ₽")
-        self.assertEqual(logic.money(D("11000.00")), "11 000 ₽")
-        self.assertEqual(logic.money(D("428.5")), "428,50 ₽")
-        self.assertEqual(logic.money(D("-3000")), "−3 000 ₽")
-        self.assertEqual(logic.money(0), "0 ₽")
+        """Разряды и «₽» - через неразрывный пробел U+00A0: сумма на плитке
+        сводки не переносится посреди числа («2 107 700 / ₽»)."""
+        nb = "\u00a0"
+        self.assertEqual(logic.NBSP, nb)
+        self.assertEqual(logic.money(3000), f"3{nb}000{nb}₽")
+        self.assertEqual(logic.money(D("11000.00")), f"11{nb}000{nb}₽")
+        self.assertEqual(logic.money(D("2107700")), f"2{nb}107{nb}700{nb}₽")
+        self.assertEqual(logic.money(D("428.5")), f"428,50{nb}₽")
+        self.assertEqual(logic.money(D("-3000")), f"−3{nb}000{nb}₽")
+        self.assertEqual(logic.money(0), f"0{nb}₽")
         self.assertEqual(logic.money(None), "—")
+        self.assertNotIn(" ", logic.money(D("-1234567.89")), "ни одного обычного пробела")
 
     def test_signed(self):
-        self.assertEqual(logic.money_signed(3000), "+3 000 ₽")
-        self.assertEqual(logic.money_signed(-3000), "−3 000 ₽")
-        self.assertEqual(logic.money_signed(0), "0 ₽")
+        self.assertEqual(plain(logic.money_signed(3000)), "+3 000 ₽")
+        self.assertEqual(plain(logic.money_signed(-3000)), "−3 000 ₽")
+        self.assertEqual(plain(logic.money_signed(0)), "0 ₽")
+
+    def test_parse_reads_back_what_money_prints(self):
+        for amount in (D("0"), D("3000"), D("-428.50"), D("2107700.05")):
+            self.assertEqual(logic.parse_money(logic.money(amount).replace("−", "-")),
+                             amount)
+        self.assertEqual(logic.parse_money("3\u202f000 ₽"), D("3000.00"), "узкий тоже")
 
     def test_parse(self):
         self.assertEqual(logic.parse_money("3000"), D("3000.00"))
@@ -187,7 +199,7 @@ class TestReminders(unittest.TestCase):
         ]
         text = logic.digest(rows, today=TODAY, before_days=2)
         self.assertIn("Долги", text)
-        self.assertIn("Петров — долг 3 000 ₽", text)
+        self.assertIn("Петров — долг 3 000 ₽", plain(text))
         self.assertIn("(11 дн.)", text)
         self.assertIn("Иванов · B-1 — платёж", text)
         self.assertNotIn("Сидоров", text)

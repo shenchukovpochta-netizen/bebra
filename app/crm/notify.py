@@ -249,16 +249,21 @@ async def review_ask(bot: Any, rental: dict,
                        texts.REVIEW_ASK.format(days=days, links=tail))
 
 
-def feedback_bike(row: dict) -> str:
+def feedback_bike(row: dict, lang: str = "ru") -> str:
     bike = row.get("bike_code")
-    return f"Велосипед № {bot_logic.esc(bike)}" if bike else "Велосипед"
+    if not bike:
+        return i18n.t(lang, "FEEDBACK_BIKE_ANY")
+    return i18n.t(lang, "FEEDBACK_BIKE").format(code=bot_logic.esc(bike))
 
 
-async def feedback_ask(bot: Any, row: dict) -> bool:
-    """Клиенту: «как вам аренда?» с пятью кнопками после сдачи."""
+async def feedback_ask(bot: Any, row: dict, db: Any = None) -> bool:
+    """Клиенту: «как вам аренда?» с пятью кнопками после сдачи - на его
+    языке (bot.users); без базы бота - по-русски."""
     if not row.get("tg_id") or bot is None:
         return False
-    return await _send(bot, row["tg_id"], texts.FEEDBACK_ASK.format(bike=feedback_bike(row)),
+    lang = await _lang(db, row["tg_id"]) if db is not None else "ru"
+    return await _send(bot, row["tg_id"],
+                       i18n.t(lang, "FEEDBACK_ASK").format(bike=feedback_bike(row, lang)),
                        kb.feedback_scores(int(row["rental_id"])))
 
 

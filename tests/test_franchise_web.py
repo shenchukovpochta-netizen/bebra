@@ -219,10 +219,10 @@ class TestFranchiseSection(tw.WebCase):
         page = self.get_ok("/franchisees")
         self.assertIn("свежие", page)
         # 100 000 × 5 % + 15 000 за прошлый месяц
-        self.assertIn(logic.money(D("20000")), page)
+        self.assertIn(tw.plain(logic.money(D("20000"))), page)
         self.assertIn("10.0 %", page, "простой пересчитан из дней: 10 из 100")
         royalty = self.get_ok("/franchisees/royalty")
-        self.assertIn(logic.money(D("20000")), royalty)
+        self.assertIn(tw.plain(logic.money(D("20000"))), royalty)
         self.get_ok("/franchisees/royalty?months=12")
         r = self.client.get("/franchisees/royalty.csv")
         self.assertEqual(r.status_code, 200)
@@ -336,7 +336,7 @@ class TestFranchiseSection(tw.WebCase):
         self.assertEqual(r.status_code, 303)
         self.assertEqual(prev_terms(), (D("7.00"), D("15000.00")))
         # 100 000 × 7 % + 15 000
-        self.assertIn(logic.money(D("22000")), self.get_ok("/franchisees/royalty"))
+        self.assertIn(tw.plain(logic.money(D("22000"))), self.get_ok("/franchisees/royalty"))
         future = (datetime.now().date().replace(day=1) + timedelta(days=32)).strftime("%Y-%m")
         r = self.client.post(f"/franchisees/{fid}", data=self.form(
             token="", royalty_percent="9", terms_from=future))
@@ -351,7 +351,7 @@ class TestFranchiseSection(tw.WebCase):
         twin = self.create(name="Май Байк Самара (дубль)")
         self.store(fid)
         self.store(twin)
-        self.assertIn(logic.money(D("40000")), self.get_ok("/franchisees/royalty"))
+        self.assertIn(tw.plain(logic.money(D("40000"))), self.get_ok("/franchisees/royalty"))
         self.client.post(f"/franchisees/{twin}/delete")
         self.assertIn(twin, self.crm.franchisees_, "без галочки история держит")
         r = self.client.post(f"/franchisees/{twin}/delete", data={"wipe": "1"})
@@ -360,7 +360,7 @@ class TestFranchiseSection(tw.WebCase):
         self.assertFalse(any(k[0] == twin for k in self.crm.franchise_months_))
         royalty = self.get_ok("/franchisees/royalty")
         self.assertNotIn("дубль", royalty)
-        self.assertNotIn(logic.money(D("40000")), royalty)
+        self.assertNotIn(tw.plain(logic.money(D("40000"))), royalty)
         self.assertIn(fid, self.crm.franchisees_)
 
     def test_delete_only_without_history(self):

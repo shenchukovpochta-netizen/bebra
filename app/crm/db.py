@@ -770,7 +770,10 @@ class CrmDB:
         велосипеда не его. Найденный потом велосипед историю не обеляет,
         и потеря в идущей аренде (замена) считается так же.
 
-        Досрочный возврат - закрыта раньше первого оплаченного срока.
+        Досрочный возврат - закрыта раньше первого оплаченного срока. Срок -
+        тот, что был при выдаче (`issue_period_days`): смена тарифа
+        переписывает `period_days`, и сдавший ровно в конец первой недели,
+        перейдя на месяц, иначе числился бы вернувшим досрочно.
         Закрытая в день выдачи без потери - исправление оператора, а не
         аренда: её нет ни в закрытых, ни в стаже, иначе ошибка выдачи
         делала бы новичка «низким риском».
@@ -806,7 +809,8 @@ class CrmDB:
                               or (e.to_status = 'rented' and e.changed_at > p.since))))
             ), r as (
               select x.client_id, x.status, x.started_on, x.closed_on,
-                     x.period_days, x.search_at, g.rental_id is not null as lost,
+                     coalesce(x.issue_period_days, x.period_days) as period_days,
+                     x.search_at, g.rental_id is not null as lost,
                      (x.status = 'closed' and g.rental_id is null
                       and coalesce(x.closed_on <= x.started_on, false)) as void
                 from x left join gone g on g.rental_id = x.id

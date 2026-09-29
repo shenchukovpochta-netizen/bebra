@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     import test_web as tw
@@ -158,7 +159,7 @@ class TestPromoLogic(unittest.TestCase):
 
     def test_text_substitutions(self):
         p = promo(kind="promocode", code="ВЕСНА", text="Код {code}: {discount} для {name}")
-        self.assertEqual(logic.promo_text(p, discount=D(300), name="Иван"),
+        self.assertEqual(plain(logic.promo_text(p, discount=D(300), name="Иван")),
                          "Код ВЕСНА: 300 ₽ для Иван")
         self.assertIn("10 %", logic.promo_mailing_body(promo(percent=10, text="{discount}")))
         self.assertEqual(logic.promo_mailing_body(promo(text="{name}")), "{name}",

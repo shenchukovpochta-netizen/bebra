@@ -32,6 +32,22 @@ DB_NAME="${POSTGRES_DB:-mybike}"
 STAMP="$(date +%F-%H%M%S)"
 DUMP="backups/pre-update-$STAMP.sql.gz"
 CODE="backups/pre-update-$STAMP-code.tar.gz"
+# MAX-бот - в профиле max. Поднятый когда-то «docker compose --profile max
+# up -d» без max в COMPOSE_PROFILES bootstrap.sh не трогает: он поднимает
+# только активные профили (а COMPOSE_PROFILES берёт из .env). Тогда bot-max
+# остался бы на прежнем образе - кнопки новой версии, которые шлёт
+# процесс бота, приходили бы к старому обработчику, - а откат не поднял
+# бы его вовсе. Работал до обновления - пересобирается и поднимается и
+# после обновления, и после отката.
+MAX_UP=""
+if [ -n "$(docker compose --profile max ps -q bot-max 2>/dev/null || true)" ]; then
+  MAX_UP=1
+fi
+MAX_LINE=""
+if [ -n "$MAX_UP" ]; then
+  MAX_LINE="
+      docker compose --profile max up -d --build bot-max"
+fi
 
 rollback() {
   cat <<EOF
@@ -42,14 +58,16 @@ rollback() {
         gunzip -c $DUMP; } | docker compose exec -T postgres \\
         psql -1 -v ON_ERROR_STOP=1 -U $DB_USER -d $DB_NAME
       tar -xzf $CODE
-      bash bootstrap.sh
+      bash bootstrap.sh$MAX_LINE
     Останавливаются все, кто пишет в базу, и MAX-бот тоже: его мост в
     CRM пишет обращения и max_id. Схемы сносятся до заливки (поверх
     живых таблиц дамп упал бы на первом «уже существует») и в той же
     транзакции (-1): сбой посреди заливки откатывает всё, и база
     остаётся как была, а не наполовину без ключей и триггеров. Код
     возвращается до запуска: новый при старте снова применил бы свою
-    схему к базе.
+    схему к базе.${MAX_UP:+ MAX-бот работал до обновления, а bootstrap.sh
+    поднимает только профили из COMPOSE_PROFILES - его поднимает
+    последняя строка.}
 EOF
 }
 
@@ -127,6 +145,14 @@ if ! bash bootstrap.sh; then
   printf '\n\033[31mbootstrap.sh не прошёл.\033[0m Логи: docker compose logs --tail 50\n' >&2
   rollback
   exit 1
+fi
+if [ -n "$MAX_UP" ]; then
+  say "bot-max работал до обновления: пересобираю и его"
+  if ! docker compose --profile max up -d --build bot-max; then
+    printf '\n\033[31mbot-max не поднялся.\033[0m Логи: docker compose logs --tail 50 bot-max\n' >&2
+    rollback
+    exit 1
+  fi
 fi
 
 # ─── 5. Проверка ─────────────────────────────────────────────────────────────

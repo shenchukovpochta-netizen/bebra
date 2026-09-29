@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     from app.crm import service
@@ -59,7 +60,7 @@ def ago(n: int, base: date = TODAY) -> date:
 
 
 def texts(risk: dict) -> str:
-    return " | ".join(r["text"] for r in risk["reasons"])
+    return plain(" | ".join(r["text"] for r in risk["reasons"]))
 
 
 class TestDebtTrack(unittest.TestCase):
@@ -272,7 +273,8 @@ async def build(crm, today: date) -> dict[str, int]:
     names = ("потерял", "старожил", "новый", "друг", "должник", "досрочный",
              "чёрный", "был в розыске", "ищем", "в день выдачи", "задним числом",
              "потерял при замене", "замена идёт", "сдал до кражи", "угнали в день выдачи",
-             "платил переводом", "давний разовый", "новичок с просрочкой")
+             "платил переводом", "давний разовый", "новичок с просрочкой",
+             "сменил на месяц", "сменил на неделю")
     ids = {}
     for i, name in enumerate(names):
         ids[name] = await crm.create_client(full_name=name, phone=f"+7999100{i:04d}")
@@ -281,11 +283,15 @@ async def build(crm, today: date) -> dict[str, int]:
     async def bike():
         return await crm.create_bike(code=f"R-{next(numbers)}", model="M")
 
-    async def rent(who, started, *, closed=None, bike_id=None, status="available"):
+    async def rent(who, started, *, closed=None, bike_id=None, status="available",
+                   period=7, switch_to=None):
         rid = await crm.create_rental(
             client_id=ids[who], bike_id=bike_id or await bike(), tariff_id=tariff,
-            tariff_name="Неделя", period_days=7, price=D(3000), billing="manual",
+            tariff_name="Неделя", period_days=period, price=D(3000), billing="manual",
             started_on=ago(started, today), contract_no=None, created_by="t")
+        if switch_to is not None:
+            # Смена тарифа посреди первого срока: срок выдачи помнит триггер.
+            await crm.update_rental(rid, period_days=switch_to)
         if closed is not None:
             await crm.close_rental(rid, closed_on=ago(closed, today), note=None,
                                    bike_status=status, closed_by="t")
@@ -364,6 +370,10 @@ async def build(crm, today: date) -> dict[str, int]:
     await rent("новичок с просрочкой", 12)
     for n, amount in ((12, -3000), (12, 3000), (5, -3000), (2, 3000)):
         await money("новичок с просрочкой", n, amount)
+    # Неделю перевёл на месяц и сдал ровно в конце оплаченной недели - не
+    # досрочно; месяц перевёл на неделю и сдал на десятый день - досрочно.
+    await rent("сменил на месяц", 60, closed=53, switch_to=30)
+    await rent("сменил на неделю", 60, closed=50, period=30, switch_to=7)
     return ids
 
 
@@ -382,7 +392,8 @@ EXPECTED = {"потерял": "high", "старожил": "low", "новый": "
             "задним числом": "high", "потерял при замене": "high",
             "замена идёт": "high", "сдал до кражи": "low",
             "угнали в день выдачи": "high", "платил переводом": "low",
-            "давний разовый": "medium", "новичок с просрочкой": "none"}
+            "давний разовый": "medium", "новичок с просрочкой": "none",
+            "сменил на месяц": "low", "сменил на неделю": "low"}
 
 
 def normal(facts: dict, ids: dict[str, int]) -> dict:
@@ -414,6 +425,9 @@ class TestRiskOnFake(unittest.TestCase):
         self.assertEqual(facts["был в розыске"]["searched"], 1)
         self.assertEqual(facts["ищем"]["search_now"], 1)
         self.assertEqual(facts["досрочный"]["early"], 2)
+        self.assertEqual((facts["сменил на месяц"]["early"],
+                          facts["сменил на неделю"]["early"]), (0, 1),
+                         "досрочно - против срока при выдаче, а не после смены тарифа")
         self.assertEqual(facts["в день выдачи"]["early"], 0,
                          "закрытая в день выдачи - исправление, а не возврат")
         self.assertEqual((facts["в день выдачи"]["done"], facts["в день выдачи"]["rentals"],

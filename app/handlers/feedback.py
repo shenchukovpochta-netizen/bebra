@@ -29,6 +29,26 @@ log = logging.getLogger(__name__)
 
 router = Router(name="feedback")
 
+# Отказы service.rate_rental и comment_rental - дословно строки texts:
+# переводим по тексту, чужой (непредвиденный) отказ уходит как есть.
+FEEDBACK_ERRORS: dict[str, str] = {
+    texts.FEEDBACK_STALE: "FEEDBACK_STALE",
+    texts.FEEDBACK_NOT_YOURS: "FEEDBACK_NOT_YOURS",
+    texts.FEEDBACK_ALREADY: "FEEDBACK_ALREADY",
+    texts.FEEDBACK_COMMENT_EMPTY: "FEEDBACK_COMMENT_EMPTY",
+    texts.FEEDBACK_COMMENT_LONG.format(limit=crm_logic.FEEDBACK_COMMENT_MAX):
+        "FEEDBACK_COMMENT_LONG",
+    texts.FEEDBACK_COMMENT_DONE: "FEEDBACK_COMMENT_DONE",
+}
+
+
+def refusal(lang: str, exc: Exception) -> str:
+    """Отказ оценки или комментария на языке клиента."""
+    key = FEEDBACK_ERRORS.get(str(exc))
+    if key is None:
+        return str(exc)
+    return i18n.t(lang, key).format(limit=crm_logic.FEEDBACK_COMMENT_MAX)
+
 
 class FeedbackReply(BaseFilter):
     """Ответ клиента в личке на просьбу о комментарии к его же оценке.
@@ -55,19 +75,21 @@ class FeedbackReply(BaseFilter):
 
 
 @router.callback_query(F.data.startswith("fb:"))
-async def cb_feedback(callback: CallbackQuery, bot: Bot, crm: Any = None) -> None:
+async def cb_feedback(callback: CallbackQuery, bot: Bot, crm: Any = None,
+                      user: dict | None = None) -> None:
+    lang = i18n.user_lang(user)
     parsed = crm_logic.parse_feedback_callback(callback.data)
     if parsed is None or crm is None:
-        await callback.answer(texts.FEEDBACK_STALE, show_alert=True)
+        await callback.answer(i18n.t(lang, "FEEDBACK_STALE"), show_alert=True)
         return
     rental_id, score = parsed
     try:
         row = await service.rate_rental(crm, rental_id, score, channel="tg",
                                         user_id=callback.from_user.id)
     except service.ServiceError as exc:
-        await callback.answer(str(exc), show_alert=True)
+        await callback.answer(refusal(lang, exc), show_alert=True)
         return
-    await callback.answer(texts.FEEDBACK_THANKS_TOAST)
+    await callback.answer(i18n.t(lang, "FEEDBACK_THANKS_TOAST"))
     # Кнопки снимаем: второе нажатие всё равно не пройдёт, а висящие
     # цифры выглядят так, будто оценку не приняли.
     message = getattr(callback, "message", None)
@@ -79,10 +101,10 @@ async def cb_feedback(callback: CallbackQuery, bot: Bot, crm: Any = None) -> Non
     chat = callback.from_user.id
     try:
         if not crm_logic.feedback_low(score):
-            await bot.send_message(chat, texts.FEEDBACK_THANKS)
+            await bot.send_message(chat, i18n.t(lang, "FEEDBACK_THANKS"))
             return
-        sent = await bot.send_message(chat, texts.FEEDBACK_ASK_COMMENT,
-                                      reply_markup=kb.feedback_comment())
+        sent = await bot.send_message(chat, i18n.t(lang, "FEEDBACK_ASK_COMMENT"),
+                                      reply_markup=kb.feedback_comment(lang))
     except TelegramAPIError:
         log.warning("ответ на оценку клиенту %s не доставлен", chat)
         return
@@ -102,6 +124,6 @@ async def st_feedback_comment(message: Message, feedback: dict,
     try:
         await service.comment_rental(crm, feedback, message.text or message.caption)
     except service.ServiceError as exc:
-        await message.answer(str(exc), reply_markup=menu)
+        await message.answer(refusal(lang, exc), reply_markup=menu)
         return
-    await message.answer(texts.FEEDBACK_COMMENT_THANKS, reply_markup=menu)
+    await message.answer(i18n.t(lang, "FEEDBACK_COMMENT_THANKS"), reply_markup=menu)

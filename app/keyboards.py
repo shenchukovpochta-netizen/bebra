@@ -503,12 +503,13 @@ def feedback_scores(rental_id: int) -> InlineKeyboardMarkup:
         for score in crm_logic.FEEDBACK_SCORES]])
 
 
-def feedback_comment() -> ForceReply:
+def feedback_comment(lang: str = "ru") -> ForceReply:
     """Просьба о комментарии: поле ответа открывается само, и ответ на это
     сообщение и есть комментарий - без состояния диалога. ForceReply
     скрывает меню; его возвращает ответ бота на комментарий, а
     промолчавшему - ловушка меню на любое следующее сообщение."""
-    return ForceReply(force_reply=True, input_field_placeholder="Что пошло не так")
+    return ForceReply(force_reply=True,
+                      input_field_placeholder=i18n.t(lang, "FEEDBACK_COMMENT_PLACEHOLDER")[:64])
 
 
 def review_sites(links: list[dict] | None = None,

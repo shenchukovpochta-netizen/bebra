@@ -150,7 +150,7 @@ async def run() -> None:
     # «Как вам аренда?» после сдачи и сигнал о низкой оценке: закрытие
     # кладёт вопрос в очередь (панель или бот), отправляет только этот круг.
     feedback_task = asyncio.create_task(
-        feedback.feedback_loop(bot, crm, cfg, max_client=max_client))
+        feedback.feedback_loop(bot, crm, cfg, db=db, max_client=max_client))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([

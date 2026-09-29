@@ -120,7 +120,7 @@ class TestPricePanel(tw.WebCase):
         self.assertEqual((row["price_ext"], row["parts_price_ext"]), (D(1500), D(0)))
         page = self.get_ok("/work-types")
         self.assertIn("Арендатору", page)
-        self.assertIn(logic.money(D(1500)), page)
+        self.assertIn(tw.plain(logic.money(D(1500))), page)
         # Оба поля листа пустые - работы в этом прайсе нет.
         self.client.post(f"/work-types/{row['id']}", data={
             "title": "Пайка ручки газа", "minutes": "30", "category": "Передняя часть",
@@ -150,7 +150,7 @@ class TestPricePanel(tw.WebCase):
         order_id = self.open(payer="client")
         page = self.get_ok(f"/orders/{order_id}")
         self.assertIn("Из прайса «Арендатору»", page)
-        self.assertIn(logic.money(D(800)), page)
+        self.assertIn(tw.plain(logic.money(D(800))), page)
         r = self.client.post(f"/orders/{order_id}/items", data={
             "work_type_id": work_type["id"], "qty": "1", "price": "",
             "parts_cost": "0", "labor_cost": "0"})

@@ -21,6 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests.plain import plain  # noqa: E402
+
 try:
     from aiogram import Bot, Dispatcher
     from aiogram.client.session.base import BaseSession
@@ -166,14 +168,15 @@ class FakeSession(BaseSession):
             return True
         return True
 
-    # помощники для проверок
+    # помощники для проверок; суммы в текстах - с обычными пробелами
+    # (tests/plain.py), сырые сообщения - в self.calls
     def sent(self) -> list[str]:
         out = []
         for m in self.calls:
             if isinstance(m, SendMessage):
-                out.append(m.text)
+                out.append(plain(m.text))
             elif isinstance(m, (SendPhoto, SendDocument)):
-                out.append(m.caption or "<файл>")
+                out.append(plain(m.caption) or "<файл>")
         return out
 
     def sent_to(self, chat_id: int) -> list:
@@ -2908,7 +2911,7 @@ class InboxHookCase(unittest.IsolatedAsyncioTestCase):
                             chat_type="supergroup", reply_to=card_id))
 
     def texts_to(self, chat_id: int) -> list[str]:
-        return [m.text or "" for m in self.session.sent_to(chat_id)
+        return [plain(m.text) or "" for m in self.session.sent_to(chat_id)
                 if isinstance(m, SendMessage)]
 
     def plain(self, body_enc):

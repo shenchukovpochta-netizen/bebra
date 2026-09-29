@@ -14,6 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests.plain import plain  # noqa: E402
+
 try:
     from fastapi.testclient import TestClient
 
@@ -44,11 +46,13 @@ class FakeBotDB:
 
 
 class FakeBot:
+    """Сообщения клиентам - с обычными пробелами в суммах (tests/plain.py)."""
+
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
     async def send_message(self, chat_id, text, reply_markup=None):
-        self.sent.append((chat_id, text))
+        self.sent.append((chat_id, plain(text)))
 
     async def get_me(self):
         return types.SimpleNamespace(username="mybike_test_bot")
@@ -77,9 +81,11 @@ class WebCase(unittest.TestCase):
         return self.client.post("/login", data={"login": login, "password": password})
 
     def get_ok(self, path):
+        """Страница с обычными пробелами в суммах (tests/plain.py): тексты
+        в тестах пишутся так, как их читает человек."""
         r = self.client.get(path)
         self.assertEqual(r.status_code, 200, f"{path}: {r.status_code}")
-        return r.text
+        return plain(r.text)
 
     def seed(self):
         """Клиент с Telegram, велосипед, тариф."""
@@ -509,6 +515,18 @@ class TestFleetMetricsPages(WebCase):
         self.assertIn("отложить на парк", page)
         self.assertIn("3 200 ₽", page)                       # 48000/24 + 9000*2/15
         self.assertIn("Павлюхина: свободных <b>0</b>, в ремонте и на ТО <b>1</b>", page)
+
+    def test_money_on_the_page_does_not_wrap(self):
+        """Сырая страница: сумма целиком на неразрывных пробелах - плитка
+        сводки не рвёт «2 107 700» и не уносит «₽» на свою строку."""
+        self.seed()
+        self.login()
+        run(self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                amount=D("2107700")))
+        for path in ("/", "/finance"):
+            raw = self.client.get(path).text
+            self.assertIn("2\u00a0107\u00a0700\u00a0₽", raw, path)
+            self.assertNotIn("2 107 700 ₽", raw, path)
 
     def test_bike_form_amortization_and_location(self):
         self.login()

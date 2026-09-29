@@ -720,8 +720,11 @@ class FakeCrm:
                 "search_now": sum(1 for r in rentals if r["status"] == "active"
                                   and r.get("search_at") is not None),
                 "searched": sum(1 for r in kept if r.get("search_at") is not None),
+                # Срок - первый оплаченный, при выдаче: смена тарифа
+                # переписывает period_days (issue_period_days - триггер).
                 "early": sum(1 for r in kept if r["closed_on"]
-                             < r["started_on"] + timedelta(days=r["period_days"])),
+                             < r["started_on"] + timedelta(days=(
+                                 r.get("issue_period_days") or r["period_days"]))),
                 "rent_days": sum(max((r["closed_on"] - r["started_on"]).days, 0)
                                  for r in rentals if r["status"] == "closed"),
                 "active_on": min((r["started_on"] for r in rentals

@@ -34,6 +34,7 @@ except ImportError:                                    # pragma: no cover
     HAVE_WEB = False
 
 try:
+    from app import texts as texts_ru
     from app.handlers import feedback as feedback_h
     from app.max import handlers as max_h
     HAVE_AIOGRAM = True
@@ -54,6 +55,16 @@ SCHEMA = Path(__file__).resolve().parent.parent / "schema.sql"
 
 D = Decimal
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+# Аренда неделю назад: закрытая в день выдачи - исправление оператора, и
+# её не спрашивают (logic.feedback_void).
+WEEK_AGO = date.today() - timedelta(days=7)
+
+
+def daytime(days: int = 0) -> datetime:
+    """Местный полдень: вопрос задаётся только днём (FEEDBACK_HOURS), и
+    прогон в полночь не должен менять исход теста."""
+    noon = datetime.combine(date.today() + timedelta(days=days), datetime.min.time())
+    return noon.replace(hour=12).astimezone()
 
 
 def run(coro):
@@ -111,6 +122,37 @@ class TestFeedbackLogic(unittest.TestCase):
         nobody = {**fresh, "tg_id": None}
         self.assertEqual(logic.feedback_skip_reason(nobody, enabled=True, now=NOW,
                                                     max_ready=False), "клиента нет в боте")
+        same_day = {**fresh, "started_on": NOW.date(), "closed_on": NOW.date()}
+        self.assertIn("в день выдачи", logic.feedback_skip_reason(
+            same_day, enabled=True, now=NOW, max_ready=False))
+        week = {**fresh, "started_on": NOW.date() - timedelta(days=7),
+                "closed_on": NOW.date()}
+        self.assertIsNone(logic.feedback_skip_reason(week, enabled=True, now=NOW,
+                                                     max_ready=False))
+
+    def test_backdated_return_is_stale_by_its_date(self):
+        """Закрыли сейчас, а дата возврата - неделю назад: closed_at свежий,
+        но спрашивать про такую сдачу поздно. Вчерашняя - ещё нет."""
+        row = {"closed_at": NOW - timedelta(minutes=1),
+               "started_on": NOW.date() - timedelta(days=30)}
+        self.assertTrue(logic.feedback_stale(
+            {**row, "closed_on": NOW.date() - timedelta(days=7)}, NOW))
+        self.assertTrue(logic.feedback_stale(
+            {**row, "closed_on": NOW.date() - timedelta(days=3)}, NOW))
+        self.assertFalse(logic.feedback_stale(
+            {**row, "closed_on": NOW.date() - timedelta(days=1)}, NOW))
+        self.assertFalse(logic.feedback_stale({**row, "closed_on": NOW.date()}, NOW))
+
+    def test_day_window_comes_from_the_notice(self):
+        self.assertEqual(logic.NOTICES["feedback_ask"]["params"],
+                         {"from_hour": logic.FEEDBACK_HOURS[0],
+                          "to_hour": logic.FEEDBACK_HOURS[1]})
+        self.assertTrue(logic.feedback_hours_ok({}, datetime(2026, 9, 20, 9, 0)))
+        self.assertTrue(logic.feedback_hours_ok({}, datetime(2026, 9, 20, 20, 59)))
+        self.assertFalse(logic.feedback_hours_ok({}, datetime(2026, 9, 20, 23, 40)))
+        self.assertFalse(logic.feedback_hours_ok({}, datetime(2026, 9, 20, 3, 0)))
+        late = {"extra": {"from_hour": 10, "to_hour": 24}}
+        self.assertTrue(logic.feedback_hours_ok(late, datetime(2026, 9, 20, 23, 40)))
 
     def test_comment_is_checked(self):
         self.assertFalse(logic.check_feedback_comment("   ").ok)
@@ -226,7 +268,7 @@ class FeedbackCase(unittest.TestCase):
         return run(self.crm.create_rental(
             client_id=client_id or self.client_id, bike_id=self.bike_id, tariff_id=None,
             tariff_name="Неделя", period_days=7, price=D(3000), billing="manual",
-            started_on=date.today(), contract_no=None, created_by="t"))
+            started_on=WEEK_AGO, contract_no=None, created_by="t"))
 
     def close(self, rental_id, bike_status="available"):
         run(service.close_rental(self.crm, run(self.crm.rental(rental_id)),
@@ -236,7 +278,7 @@ class FeedbackCase(unittest.TestCase):
     def asked(self, rental_id, **kw):
         """Вопрос ушёл: круг бота разобрал очередь."""
         self.close(rental_id, **kw)
-        run(feedback.ask_once(self.bot, self.crm))
+        run(feedback.ask_once(self.bot, self.crm, now=daytime()))
         return run(self.crm.feedback_of_rental(rental_id))
 
 
@@ -257,7 +299,7 @@ class TestQueue(FeedbackCase):
                                                 tg_id=6000 + n))
             rid = run(self.crm.create_rental(
                 client_id=client, bike_id=bike, tariff_id=None, tariff_name="Неделя",
-                period_days=7, price=D(3000), billing="manual", started_on=date.today(),
+                period_days=7, price=D(3000), billing="manual", started_on=WEEK_AGO,
                 contract_no=None, created_by="t"))
             self.close(rid, bike_status=status)
             self.assertIsNone(run(self.crm.feedback_of_rental(rid)), status)
@@ -299,7 +341,7 @@ class TestAsk(FeedbackCase):
     def test_question_goes_once_with_five_buttons(self):
         rid = self.rent()
         self.close(rid)
-        self.assertEqual(run(feedback.ask_once(self.bot, self.crm)), 1)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, now=daytime())), 1)
         chat, text, markup = self.bot.sent[-1]
         self.assertEqual(chat, 5001)
         self.assertIn("Как вам аренда", text)
@@ -309,7 +351,7 @@ class TestAsk(FeedbackCase):
         row = run(self.crm.feedback_of_rental(rid))
         self.assertEqual(row["channel"], "tg")
         self.assertIsNotNone(row["asked_at"])
-        self.assertEqual(run(feedback.ask_once(self.bot, self.crm)), 0)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, now=daytime())), 0)
         self.assertEqual(len(self.bot.sent), 1, "второй круг не спрашивает снова")
         log = run(self.crm.notice_log(limit=5))
         self.assertEqual((log[0]["code"], log[0]["status"]), ("feedback_ask", "sent"))
@@ -318,7 +360,7 @@ class TestAsk(FeedbackCase):
         run(self.crm.set_notice("feedback_ask", enabled=False, at_hour=None, by="t"))
         rid = self.rent()
         self.close(rid)
-        self.assertEqual(run(feedback.ask_once(self.bot, self.crm)), 0)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, now=daytime())), 0)
         self.assertEqual(self.bot.sent, [])
         row = run(self.crm.feedback_of_rental(rid))
         self.assertIsNone(row["channel"])
@@ -326,14 +368,14 @@ class TestAsk(FeedbackCase):
         self.assertEqual(run(self.crm.notice_log(limit=1))[0]["status"], "skipped")
         # Включили обратно - накопленное не догоняется.
         run(self.crm.set_notice("feedback_ask", enabled=True, at_hour=None, by="t"))
-        run(feedback.ask_once(self.bot, self.crm))
+        run(feedback.ask_once(self.bot, self.crm, now=daytime()))
         self.assertEqual(self.bot.sent, [])
 
     def test_client_without_a_bot_is_skipped(self):
         other = run(self.crm.create_client(full_name="Без бота", phone="+79990000001"))
         rid = self.rent(other)
         self.close(rid)
-        run(feedback.ask_once(self.bot, self.crm))
+        run(feedback.ask_once(self.bot, self.crm, now=daytime()))
         self.assertEqual(self.bot.sent, [])
         self.assertEqual(run(self.crm.feedback_of_rental(rid))["skipped"],
                          "клиента нет в боте")
@@ -344,7 +386,8 @@ class TestAsk(FeedbackCase):
         rid = self.rent(other)
         self.close(rid)
         mx = FakeMax()
-        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, max_client=mx)), 1)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, max_client=mx,
+                                               now=daytime())), 1)
         self.assertEqual(self.bot.sent, [])
         self.assertEqual(mx.sent[0]["user_id"], 777)
         self.assertEqual(mx.sent[0]["keyboard"][0][0]["payload"], f"fb:{rid}:1")
@@ -356,16 +399,53 @@ class TestAsk(FeedbackCase):
         rid = self.rent(other)
         self.close(rid)
         self.assertEqual(run(feedback.ask_once(self.bot, self.crm,
-                                               max_client=FakeMax(fail=True))), 0)
+                                               max_client=FakeMax(fail=True), now=daytime())), 0)
         self.assertEqual(run(self.crm.notice_log(limit=1))[0]["status"], "failed")
         mx = FakeMax()
-        run(feedback.ask_once(self.bot, self.crm, max_client=mx))
+        run(feedback.ask_once(self.bot, self.crm, max_client=mx, now=daytime()))
         self.assertEqual(mx.sent, [], "отметка до отправки: повтора нет")
+
+    def test_same_day_close_is_a_correction_not_asked(self):
+        """Выдали не тот велосипед и закрыли в тот же день - это исправление
+        оператора (как у оценки риска), и человеку на точке не приходит
+        «как вам аренда?»."""
+        rid = run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=None,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="manual",
+            started_on=date.today(), contract_no=None, created_by="t"))
+        self.close(rid)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, now=daytime())), 0)
+        self.assertEqual(self.bot.sent, [])
+        row = run(self.crm.feedback_of_rental(rid))
+        self.assertIsNone(row["channel"])
+        self.assertIn("в день выдачи", row["skipped"])
+
+    def test_backdated_close_is_not_asked(self):
+        """Оператор вечером догоняет возвраты: закрытие сейчас, дата - неделю
+        назад. Спрашивать поздно, как и у бота, пролежавшего неделю."""
+        rid = self.rent()
+        run(service.close_rental(self.crm, run(self.crm.rental(rid)),
+                                 closed_on=date.today() - timedelta(days=5), note=None,
+                                 by="staff:t"))
+        run(feedback.ask_once(self.bot, self.crm, now=daytime()))
+        self.assertEqual(self.bot.sent, [])
+        self.assertIn("давнее", run(self.crm.feedback_of_rental(rid))["skipped"])
+
+    def test_night_close_is_asked_in_the_morning(self):
+        rid = self.rent()
+        self.close(rid)
+        night = daytime().replace(hour=23, minute=40)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, now=night)), 0)
+        self.assertIsNone(run(self.crm.feedback_of_rental(rid))["asked_at"],
+                          "ночью очередь ждёт, а не помечается")
+        morning = daytime(1).replace(hour=9, minute=5)
+        self.assertEqual(run(feedback.ask_once(self.bot, self.crm, now=morning)), 1)
+        self.assertEqual(run(self.crm.feedback_of_rental(rid))["channel"], "tg")
 
     def test_stale_return_is_not_asked(self):
         rid = self.rent()
         self.close(rid)
-        later = datetime.now(UTC) + timedelta(hours=logic.FEEDBACK_ASK_HOURS + 1)
+        later = daytime(3)
         run(feedback.ask_once(self.bot, self.crm, now=later))
         self.assertEqual(self.bot.sent, [])
         self.assertIn("давнее", run(self.crm.feedback_of_rental(rid))["skipped"])
@@ -592,7 +672,7 @@ class TestMaxButtons(FeedbackCase):
         self.rid = self.rent(self.max_client)
         self.close(self.rid)
         self.mx = FakeMax()
-        run(feedback.ask_once(self.bot, self.crm, max_client=self.mx))
+        run(feedback.ask_once(self.bot, self.crm, max_client=self.mx, now=daytime()))
         self.ctx = types.SimpleNamespace(cl=self.mx, crm=self.crm)
 
     def test_stranger_is_refused_owner_rates_and_comments(self):
@@ -660,11 +740,11 @@ class TestThroughTheDispatcher(unittest.IsolatedAsyncioTestCase):
         bike = await self.crm.create_bike(code="МБ-7", model="Kugoo V3")
         self.rid = await self.crm.create_rental(
             client_id=client, bike_id=bike, tariff_id=None, tariff_name="Неделя",
-            period_days=7, price=D(3000), billing="manual", started_on=date.today(),
+            period_days=7, price=D(3000), billing="manual", started_on=WEEK_AGO,
             contract_no=None, created_by="t")
         await service.close_rental(self.crm, await self.crm.rental(self.rid),
                                    closed_on=date.today(), note=None, by="bot")
-        await feedback.ask_once(self.bot, self.crm)
+        await feedback.ask_once(self.bot, self.crm, now=daytime())
 
     async def asyncTearDown(self):
         await self.bot.session.close()
@@ -707,6 +787,84 @@ class TestThroughTheDispatcher(unittest.IsolatedAsyncioTestCase):
         return [m.reply_markup for m in self.session.sent_to(self.tf.USER_ID)
                 if isinstance(m, self.tf.SendMessage)]
 
+    def answers(self):
+        return [m.text for m in self.session.calls
+                if isinstance(m, self.tf.AnswerCallbackQuery)]
+
+    async def test_client_language_is_kept(self):
+        """Курьер выбрал английский на /start: вопрос, благодарность, просьба
+        о комментарии, подсказка поля и отказы - на английском, как
+        остальные сообщения клиенту (MAX-бот говорит по-русски)."""
+        from app.i18n import en
+        tf = self.tf
+        self.db.users[tf.USER_ID]["lang"] = "en"
+        rid = await self.crm.create_rental(
+            client_id=(await self.crm.feedback_of_rental(self.rid))["client_id"],
+            bike_id=await self.crm.create_bike(code="МБ-8", model="Kugoo V3"),
+            tariff_id=None, tariff_name="Неделя", period_days=7, price=D(3000),
+            billing="manual", started_on=WEEK_AGO, contract_no=None, created_by="t")
+        await service.close_rental(self.crm, await self.crm.rental(rid),
+                                   closed_on=date.today(), note=None, by="bot")
+        before = len(self.texts())
+        await feedback.ask_once(self.bot, self.crm, db=self.db, now=daytime())
+        self.assertEqual(self.texts()[before:], [
+            en.T["FEEDBACK_ASK"].format(bike=en.T["FEEDBACK_BIKE"].format(code="МБ-8"))])
+        await self.feed(tf.cb(f"fb:{rid}:2"))
+        self.assertEqual(self.answers()[-1], en.T["FEEDBACK_THANKS_TOAST"])
+        self.assertEqual(self.texts()[-1], en.T["FEEDBACK_ASK_COMMENT"])
+        self.assertEqual(self.menus()[-1].input_field_placeholder,
+                         en.T["FEEDBACK_COMMENT_PLACEHOLDER"])
+        await self.feed(tf.cb(f"fb:{rid}:4"))
+        self.assertEqual(self.answers()[-1], en.T["FEEDBACK_ALREADY"])
+        await self.feed(tf.cb(f"fb:{self.rid}:3", user_id=tf.USER_ID + 1,
+                              chat_id=tf.USER_ID + 1))
+        self.assertEqual(self.answers()[-1], texts_ru.FEEDBACK_NOT_YOURS,
+                         "чужой без языка - по-русски")
+        row = await self.crm.feedback_of_rental(rid)
+        await self.feed(tf.msg("Brakes squeaked", reply_to=int(row["prompt_msg"])))
+        self.assertEqual(self.texts()[-1], en.T["FEEDBACK_COMMENT_THANKS"])
+        await self.feed(tf.msg("Again", reply_to=int(row["prompt_msg"])))
+        self.assertEqual(self.texts()[-1], en.T["FEEDBACK_COMMENT_DONE"])
+
+    def test_every_refusal_is_translatable(self):
+        """Отказы сервиса совпадают со строками texts дословно: иначе
+        перевод по тексту молча отвалится и клиент получит русский."""
+        crm = FakeCrm()
+
+        async def refusals():
+            got = []
+            cid = await crm.create_client(full_name="К", phone="+79990000001", tg_id=1)
+            rid = await crm.create_rental(
+                client_id=cid, bike_id=await crm.create_bike(code="B", model="M"),
+                tariff_id=None, tariff_name="Неделя", period_days=7, price=D(3000),
+                billing="manual", started_on=WEEK_AGO, contract_no=None, created_by="t")
+            try:                    # не спрошенную оценить нельзя - «устарела»
+                await service.rate_rental(crm, rid, 3, channel="tg", user_id=1)
+            except service.ServiceError as exc:
+                got.append(str(exc))
+            await service.close_rental(crm, await crm.rental(rid), closed_on=date.today(),
+                                       note=None, by="t")
+            await feedback.ask_once(None, crm, now=daytime())   # вопрос «ушёл» в tg
+            for user in (2, 1, 1):
+                try:
+                    await service.rate_rental(crm, rid, 2, channel="tg", user_id=user)
+                except service.ServiceError as exc:
+                    got.append(str(exc))
+            row = await crm.feedback_of_rental(rid)
+            for text in ("", "я" * (logic.FEEDBACK_COMMENT_MAX + 1), "ок", "снова"):
+                try:
+                    await service.comment_rental(crm, row, text)
+                except service.ServiceError as exc:
+                    got.append(str(exc))
+            return got
+
+        got = asyncio.run(refusals())
+        self.assertEqual(len(got), 6, got)
+        for text in got:
+            self.assertIn(text, feedback_h.FEEDBACK_ERRORS)
+            key = feedback_h.FEEDBACK_ERRORS[text]
+            self.assertNotEqual(feedback_h.refusal("en", Exception(text)), text, key)
+
 
 # ─────────────────────────── панель ───────────────────────────
 
@@ -719,13 +877,13 @@ class TestFeedbackPages(tw.WebCase):
         rid = run(self.crm.create_rental(
             client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
             tariff_name="Неделя", period_days=7, price=D(3000), billing="manual",
-            started_on=date.today(), contract_no=None, created_by="t"))
+            started_on=WEEK_AGO, contract_no=None, created_by="t"))
         r = self.client.post(f"/rentals/{rid}/close",
                              data={"closed_on": date.today().isoformat(),
                                    "bike_status": "available"})
         self.assertEqual(r.status_code, 303)
         self.rid = rid
-        run(feedback.ask_once(RecordingBot(), self.crm))
+        run(feedback.ask_once(RecordingBot(), self.crm, now=daytime()))
         run(service.rate_rental(self.crm, rid, 2, channel="tg", user_id=5001))
         run(service.comment_rental(self.crm, run(self.crm.feedback_of_rental(rid)),
                                    "Долго ждал оператора"))
@@ -770,6 +928,12 @@ class TestFeedbackPages(tw.WebCase):
         self.client.post("/logout")
         self.login("petr", "password-1")
         self.assertEqual(self.client.get("/reports/feedback").status_code, 403)
+        # Карточку аренды механик видит, но слова клиента - нет: иначе она
+        # была бы обходом закрытого отчёта. Оценка остаётся.
+        page = self.get_ok(f"/rentals/{self.rid}")
+        self.assertIn("★★☆☆☆", page)
+        self.assertNotIn("Долго ждал оператора", page)
+        self.assertIn("с правом на клиентов", page)
 
     def test_notice_switches_are_on_the_notices_page(self):
         page = self.get_ok("/notices")
@@ -817,7 +981,7 @@ class TestFeedbackOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.rid = await self.crm.create_rental(
             client_id=self.client_id, bike_id=self.bike_id, tariff_id=None,
             tariff_name="Неделя", period_days=7, price=D(3000), billing="manual",
-            started_on=date.today(), contract_no=None, created_by="t")
+            started_on=WEEK_AGO, contract_no=None, created_by="t")
 
     async def asyncTearDown(self):
         await self.pool.close()
@@ -876,7 +1040,7 @@ class TestFeedbackOnPostgres(unittest.IsolatedAsyncioTestCase):
         second = await self.crm.create_rental(
             client_id=self.client_id, bike_id=self.bike_id, tariff_id=None,
             tariff_name="Неделя", period_days=7, price=D(3000), billing="manual",
-            started_on=date.today(), contract_no=None, created_by="t")
+            started_on=WEEK_AGO, contract_no=None, created_by="t")
         await service.close_rental(self.crm, await self.crm.rental(second),
                                    closed_on=date.today() - timedelta(days=3), note=None,
                                    by="t")

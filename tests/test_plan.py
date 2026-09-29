@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     import test_web as tw
@@ -82,7 +83,7 @@ class TestPlanLogic(unittest.TestCase):
         got = logic.plan_progress(plan, {"revenue": D(2107700)}, days_in_month=30,
                                   days_passed=27)
         self.assertEqual(got["forecast"], D(2341889))
-        self.assertEqual(logic.money(got["forecast"]), "2 341 889 ₽")
+        self.assertEqual(plain(logic.money(got["forecast"])), "2 341 889 ₽")
 
     def test_month_from_the_address_never_goes_into_the_future(self):
         today = date(2026, 9, 18)

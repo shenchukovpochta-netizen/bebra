@@ -130,11 +130,22 @@ def to_money(value: Any) -> Decimal:
     return Decimal(str(value or 0)).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+# Неразрывный пробел для сумм: между разрядами и перед «₽». Именно U+00A0,
+# а не узкий U+202F: ширина та же, что у обычного пробела (вёрстка плиток и
+# таблиц не сдвигается), так группирует разряды русская локаль CLDR, тот же
+# знак уже ставит сумме бот (app/logic.py, money), поиск по странице в
+# браузере находит «2 107» и с ним, а Telegram, шрифты docx и старые
+# Android рисуют его везде - узкий там местами становится квадратом.
+NBSP = "\u00a0"
+
+
 def money(value: Any) -> str:
     """Сумма для человека: 3000 -> «3 000 ₽», -428.5 -> «−428,50 ₽».
 
     Целые - без копеек: цены проката круглые, и «3 000,00» только шумит.
-    Пробел неразрывный: перенос строки посреди «11 000» читается как опечатка.
+    Пробелы неразрывные (NBSP): перенос посреди «2 107 700» или отдельно
+    «₽» на плитке сводки читается как опечатка. Только для глаз: выгрузки
+    xlsx и csv кладут в ячейку число (to_money), а не эту строку.
     """
     if value is None:
         return "—"
@@ -143,10 +154,10 @@ def money(value: Any) -> str:
     amount = abs(amount)
     whole = int(amount)
     cents = int((amount - whole) * 100)
-    text = f"{whole:,}".replace(",", " ")
+    text = f"{whole:,}".replace(",", NBSP)
     if cents:
         text += f",{cents:02d}"
-    return f"{sign}{text} ₽"
+    return f"{sign}{text}{NBSP}₽"
 
 
 def cents(value: Any) -> int:
@@ -166,7 +177,9 @@ def parse_money(raw: Any) -> Decimal | None:
     Минус допускается: корректировка бывает в обе стороны. Знак у остальных
     видов записей всё равно переопределит signed_amount.
     """
-    text = str(raw or "").strip().replace(" ", "").replace(" ", "")
+    text = str(raw or "").strip()
+    for space in (" ", NBSP, "\u202f", "\u2009"):
+        text = text.replace(space, "")
     text = text.replace("₽", "").replace("р.", "").replace("руб", "").replace(",", ".")
     if not re.fullmatch(r"-?\d{1,9}(\.\d{1,2})?", text):
         return None
@@ -6875,8 +6888,11 @@ NOTICES: dict[str, dict[str, Any]] = {
         "group": "client", "target": "client", "hour": None,
         "title": "«Как вам аренда?» после сдачи",
         "hint": "Оценка от 1 до 5 кнопкой, когда велосипед вернули. "
+                "Только днём: закрытие поздно вечером спросят утром; сдачу "
+                "давнее двух суток и закрытую в день выдачи не спрашивают. "
                 "Выключено - сдачи помечаются неспрошенными и после "
                 "включения не догоняются.",
+        "params": {"from_hour": 9, "to_hour": 21},
     },
     # ─ команде ─
     "feedback_low": {
@@ -7500,6 +7516,10 @@ FEEDBACK_COMMENT_KEEP_DAYS = 90
 # Спрашиваем только свежую сдачу: бот, лежавший неделю, не должен после
 # подъёма спросить «как вам аренда» у всех, кто сдал велосипед за неделю.
 FEEDBACK_ASK_HOURS = 48
+# Окно вопроса, местные часы (параметры уведомления «feedback_ask»):
+# сдача днём и вечером спрашивается сразу, а закрытие, которое оператор
+# провёл за полночь, ждёт утра - сообщение о вчерашней сдаче в 23:40 будит.
+FEEDBACK_HOURS = (9, 21)
 # Сигнал о низкой оценке ждёт комментарий: одно сообщение «2 из 5, есть
 # комментарий» лучше двух подряд.
 FEEDBACK_ALERT_WAIT_MINUTES = 10
@@ -7565,13 +7585,40 @@ def feedback_channel(row: Mapping[str, Any], *, max_ready: bool) -> str | None:
 
 
 def feedback_stale(row: Mapping[str, Any], now: datetime) -> bool:
-    """Сдача давнее FEEDBACK_ASK_HOURS: спрашивать поздно."""
+    """Сдача давнее FEEDBACK_ASK_HOURS: спрашивать поздно.
+
+    Сдача - и момент закрытия в панели (closed_at), и дата возврата
+    (closed_on). Закрытие задним числом - обычное дело: оператор вечером
+    догоняет возвраты, и closed_at у них сегодняшний, а велосипед вернули
+    неделю назад. Дата возврата живёт до конца своих местных суток."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    limit = timedelta(hours=FEEDBACK_ASK_HOURS)
     at = row.get("closed_at") or row.get("created_at")
-    if not isinstance(at, datetime):
-        return False
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=UTC)
-    return now - at > timedelta(hours=FEEDBACK_ASK_HOURS)
+    if isinstance(at, datetime):
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        if now - at > limit:
+            return True
+    day = row.get("closed_on")
+    if isinstance(day, date) and not isinstance(day, datetime):
+        end = datetime.combine(day + timedelta(days=1), datetime.min.time()).astimezone()
+        return now - end > limit
+    return False
+
+
+def feedback_void(row: Mapping[str, Any]) -> bool:
+    """Закрыта в день выдачи: исправление оператора, а не аренда - то же
+    правило, что у оценки риска (CrmDB.risk_facts, `void`). Вопрос «как вам
+    аренда?» пришёл бы человеку, который стоит на точке и ждёт исправленную
+    выдачу. Потерянных здесь нет: их в очередь не ставят вовсе."""
+    start, end = row.get("started_on"), row.get("closed_on")
+    return isinstance(start, date) and isinstance(end, date) and end <= start
+
+
+def feedback_hours_ok(setting: Mapping[str, Any] | None, now: datetime) -> bool:
+    """Днём ли спрашивать; вне окна очередь ждёт утра. Час - местный."""
+    return notice_hours_ok(setting, now, FEEDBACK_HOURS)
 
 
 def feedback_skip_reason(row: Mapping[str, Any], *, enabled: bool, now: datetime,
@@ -7579,6 +7626,8 @@ def feedback_skip_reason(row: Mapping[str, Any], *, enabled: bool, now: datetime
     """Почему не спрашиваем эту сдачу; None - спрашиваем."""
     if not enabled:
         return "выключено в настройках"
+    if feedback_void(row):
+        return "закрыта в день выдачи: исправление, а не аренда"
     if feedback_stale(row, now):
         return "сдача давнее двух суток"
     if str(row.get("client_status") or "active") != "active":
@@ -9633,14 +9682,27 @@ WAITLIST_LOOKBACK = timedelta(hours=24)
 # может не ответить; с 9 до 18 - чтобы «приеду сегодня» успеть до закрытия.
 WAITLIST_PER_BIKE = 2
 WAITLIST_HOURS = (9, 18)
+# Заявка, чей день прошёл больше трёх суток назад, уже не ожидание, а
+# забытая строка: клиент не пришёл, а снять её было некому. Звать её к
+# каждому освободившемуся велосипеду - спам человеку, который давно
+# передумал, и место в очереди впереди тех, кто подал заявку сегодня.
+# Три дня - столько же, на сколько вперёд кабинет вообще принимает заявку.
+WAITLIST_STALE_DAYS = 3
+
+
+def notice_hours_ok(setting: Mapping[str, Any] | None, now: datetime,
+                    default: tuple[int, int]) -> bool:
+    """Час `now` внутри окна уведомления (from_hour, to_hour) - параметры
+    в панели, иначе умолчание каталога. Час - местный."""
+    start = notice_param(setting, "from_hour", default[0])
+    end = notice_param(setting, "to_hour", default[1])
+    return start <= now.hour < end
 
 
 def waitlist_hours_ok(setting: Mapping[str, Any] | None, now: datetime) -> bool:
     """Днём ли сейчас: сообщение «освободился, приезжайте» в час ночи
     будит, а не зовёт. Окно - параметры уведомления, час - местный."""
-    start = notice_param(setting, "from_hour", WAITLIST_HOURS[0])
-    end = notice_param(setting, "to_hour", WAITLIST_HOURS[1])
-    return start <= now.hour < end
+    return notice_hours_ok(setting, now, WAITLIST_HOURS)
 
 
 def waitlist_fits(bike: Mapping[str, Any], booking: Mapping[str, Any], *,
@@ -9682,11 +9744,15 @@ def waitlist_queue(bike: Mapping[str, Any], bookings: Iterable[Mapping[str, Any]
     Заявка, поданная уже после освобождения, не ждала: клиент при подаче
     видел «свободно». Позванного сегодня (к этому или другому велосипеду)
     второй раз за день не зовём, а про этот же велосипед - не зовём вовсе:
-    назавтра та же новость была бы уже спамом. Номер заявки растёт с
-    подачей, поэтому очередь - по нему."""
+    назавтра та же новость была бы уже спамом. Заявку, чей день прошёл
+    больше WAITLIST_STALE_DAYS назад, не зовём: закрыть её забыли, а
+    клиент давно передумал. Номер заявки растёт с подачей, поэтому
+    очередь - по нему."""
     freed = bike.get("freed_at")
+    oldest = today - timedelta(days=WAITLIST_STALE_DAYS)
     rows = [dict(b) for b in bookings
             if b.get("status", "new") == "new"
+            and not (isinstance(b.get("wanted_on"), date) and b["wanted_on"] < oldest)
             and local_date(b.get("waitlist_at")) != today
             and not _called_to(bike, b)
             and (freed is None or not isinstance(b.get("created_at"), datetime)
@@ -9705,6 +9771,15 @@ def booking_served(booking: Mapping[str, Any], rentals: Iterable[Mapping[str, An
     return isinstance(made, datetime) and any(
         isinstance(r.get("created_at"), datetime) and r["created_at"] >= made
         for r in rentals)
+
+
+def waitlist_coming_today(booking: Mapping[str, Any], *, today: date) -> bool:
+    """Клиент нажал «Беру — приеду сегодня» на сегодняшнем зове: едет
+    сегодня, какой бы день он ни выбрал в заявке. Ответ на прошлый зов
+    к новому не относится - как и в строке waitlist_note."""
+    at, coming = booking.get("waitlist_at"), booking.get("coming_at")
+    return (isinstance(at, datetime) and isinstance(coming, datetime)
+            and coming >= at and local_date(coming) == today)
 
 
 def waitlist_note(booking: Mapping[str, Any], *, today: date) -> str:
@@ -9798,7 +9873,10 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
         "warn", key="no")
 
     bookings = [b for b in bookings if b.get("status", "new") == "new"]
-    due = [b for b in bookings if b.get("wanted_on") is None or b["wanted_on"] <= today]
+    # Сегодня - и заявка на завтра, если клиент ответил на сегодняшний
+    # зов листа ожидания «приеду сегодня»: он уже в пути.
+    due = [b for b in bookings if b.get("wanted_on") is None or b["wanted_on"] <= today
+           or waitlist_coming_today(b, today=today)]
     later = [b for b in bookings if b not in due]
     add("bookings", "Заявки на выдачу сегодня", due, "/bookings", "hot")
     add("bookings_later", "Заявки на ближайшие дни", later, "/bookings", "info")

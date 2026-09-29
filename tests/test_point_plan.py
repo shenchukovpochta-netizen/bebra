@@ -25,8 +25,8 @@ from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     from tests import test_points_web as tpw
@@ -278,8 +278,9 @@ class TestPointPlanInPanel(tpw.PointsWebCase if HAVE_WEB else unittest.TestCase)
         self.assertIn("плана выполнено", page)
         self.assertIn("общий чек плана", page)
         span = logic.month_bounds(date.today().replace(day=1), today=date.today())
-        self.assertIn(logic.money(D(1000) * span["days"]), page, "2 × 500 × дни месяца")
-        self.assertIn(logic.money(D(15000)), page)
+        self.assertIn(plain(logic.money(D(1000) * span["days"])), page,
+                      "2 × 500 × дни месяца")
+        self.assertIn(plain(logic.money(D(15000))), page)
         self.client.post(f"/plan/points/{self.pav}",
                          data={"plan_rented": "3", "plan_check": "650"})
         row = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)

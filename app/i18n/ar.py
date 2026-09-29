@@ -486,6 +486,20 @@ T: dict[str, str] = {
     "CAB_WAITLIST_COMING": "✅ أبلغنا المدير: ننتظرك اليوم. الدراجة غير محجوزة، لذا من الأفضل عدم التأخير. أحضر جواز سفرك.{hours}",
     "CAB_WAITLIST_GONE": "هذه الدراجة أُخذت بالفعل. طلبك ما زال قائمًا — سنكتب لك عندما تتاح التالية.",
     "BTN_WAITLIST_TAKE": "✅ سآخذها — سآتي اليوم",
+    "FEEDBACK_ASK": "شكرًا لأنك كنت معنا! تم استلام {bike}.\nكيف كان الإيجار؟ قيّمه من 1 إلى 5 — ضغطة واحدة فقط.",
+    "FEEDBACK_BIKE": "الدراجة رقم {code}",
+    "FEEDBACK_BIKE_ANY": "الدراجة",
+    "FEEDBACK_THANKS": "شكرًا على التقييم! يسعدنا أن نراك مجددًا 🚲",
+    "FEEDBACK_THANKS_TOAST": "شكرًا، تم استلام التقييم",
+    "FEEDBACK_ASK_COMMENT": "يؤسفنا أن الأمور لم تكن كلها على ما يرام. ما الذي حدث؟ ردّ على هذه الرسالة بنص واحد — سنقرأه ونعالج الأمر. يمكنك أيضًا ألا ترد.",
+    "FEEDBACK_COMMENT_PLACEHOLDER": "ما الذي حدث",
+    "FEEDBACK_COMMENT_THANKS": "شكرًا، أبلغنا الإدارة.",
+    "FEEDBACK_STALE": "هذا الزر قديم.",
+    "FEEDBACK_NOT_YOURS": "هذا الزر ليس لك.",
+    "FEEDBACK_ALREADY": "تم استلام التقييم بالفعل — شكرًا!",
+    "FEEDBACK_COMMENT_EMPTY": "اكتب التعليق نصًا في رسالة واحدة.",
+    "FEEDBACK_COMMENT_LONG": "التعليق أطول من {limit} حرف — يرجى اختصاره.",
+    "FEEDBACK_COMMENT_DONE": "استلمنا تعليقك بالفعل — شكرًا!",
 }
 
 ERRORS: dict[str, str] = {

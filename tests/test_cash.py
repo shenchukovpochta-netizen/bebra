@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
 from app.services import tochka  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     import test_web as tw
@@ -714,18 +715,19 @@ class TestCashPanel(tw.WebCase):
         cards = {s.split("</h2>", 1)[0]: s for s in page.split("<h2>Открыта смена ")[1:]}
         pav_card = next(v for k, v in cards.items() if "Павлюхина" in k)
         ado_card = next(v for k, v in cards.items() if "Адоратского" in k)
-        self.assertIn(f"СБП {logic.money(D(3000))}", pav_card)
+        self.assertIn(f"СБП {plain(logic.money(D(3000)))}", pav_card)
         self.assertNotIn("Карта", pav_card)
-        self.assertIn(f"<b>{logic.money(D(1500))}</b><span>не в ящике", ado_card,
+        self.assertIn(f"<b>{plain(logic.money(D(1500)))}</b><span>не в ящике", ado_card,
                       "платёж минус возврат")
-        self.assertIn(f"Карта {logic.money(D(1500))}", ado_card)
-        self.assertIn(f"<b>{logic.money(D(1000))}</b><span>должно быть в ящике", pav_card)
+        self.assertIn(f"Карта {plain(logic.money(D(1500)))}", ado_card)
+        self.assertIn(f"<b>{plain(logic.money(D(1000)))}</b><span>должно быть в ящике",
+                      pav_card)
 
         mine, theirs = self.get_ok(f"/cash/{pav}"), self.get_ok(f"/cash/{ado}")
         self.assertIn("Иванов Иван", mine)
         self.assertNotIn("Петров Пётр", mine)
         self.assertIn("Петров Пётр", theirs)
-        self.assertIn(logic.money(D(-500)), theirs, "возврат - строкой с минусом")
+        self.assertIn(plain(logic.money(D(-500))), theirs, "возврат - строкой с минусом")
         self.assertNotIn("Иванов Иван", theirs)
 
     def test_second_shift_on_the_same_point_is_refused(self):

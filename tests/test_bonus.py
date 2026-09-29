@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 try:
     import test_web as tw
@@ -67,12 +68,12 @@ class TestBonusLogic(unittest.TestCase):
 
     def test_promise_is_addressed_to_the_right_side(self):
         settings = {"bonus": D(500), "friend_bonus": D(300)}
-        self.assertEqual(logic.bonus_promise(settings), "вам 300 ₽ и другу 500 ₽",
+        self.assertEqual(plain(logic.bonus_promise(settings)), "вам 300 ₽ и другу 500 ₽",
                          "другу - его сумма первой")
-        self.assertEqual(logic.bonus_promise(settings, for_agent=True),
+        self.assertEqual(plain(logic.bonus_promise(settings, for_agent=True)),
                          "вам 500 ₽ и другу 300 ₽", "агенту - наоборот")
-        self.assertEqual(logic.bonus_promise({"bonus": D(500), "friend_bonus": D(0)},
-                                             for_agent=True), "вам 500 ₽")
+        self.assertEqual(plain(logic.bonus_promise({"bonus": D(500), "friend_bonus": D(0)},
+                                                   for_agent=True)), "вам 500 ₽")
 
     def test_old_client_is_not_a_new_friend(self):
         now = datetime.now(UTC)

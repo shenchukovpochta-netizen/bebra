@@ -107,7 +107,7 @@ class TestIdleMoneyPages(tw.WebCase):
         self.stand(10)
         text = self.get_ok(f"/bikes/{self.bike_id}")
         self.assertIn("Простаивает 10 сут.", text)
-        self.assertIn(tw.logic.money(logic.idle_cost(10)).split(" ")[0], text)
+        self.assertIn(tw.plain(tw.logic.money(logic.idle_cost(10))), text)
 
     def test_rented_bike_has_no_idle_line(self):
         text = self.get_ok(f"/bikes/{self.bike_id}")

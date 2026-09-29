@@ -231,6 +231,7 @@ case "$*" in
       cut) printf -- '-- PostgreSQL database dump\\ncreate table x ();\\n'; exit 0 ;;
       *) printf '%s' "$DUMP_OK"; exit 0 ;;
     esac ;;
+  *"ps -q bot-max"*) [ -n "$FAKE_MAX" ] && echo "0123abcd" ;;
   *" ps"*) echo "crm   Up" ;;
 esac
 exit 0
@@ -416,6 +417,28 @@ class TestUpdate(unittest.TestCase):
         self.assertIn("Обновление прервано", r.stderr)
         self.assertIn("gunzip -c backups/pre-update-", r.stdout)
 
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_running_max_bot_is_rebuilt_and_comes_back_after_rollback(self):
+        """bot-max подняли когда-то «--profile max up» без max в
+        COMPOSE_PROFILES: bootstrap.sh его не пересоберёт, и старый
+        обработчик получал бы кнопки новой версии. Работал - пересобирается
+        после bootstrap, и откат поднимает его тоже."""
+        r = self.run_update(str(self.archive()), FAKE_MAX="1")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        calls = self.calls.read_text()
+        up = "docker compose --profile max up -d --build bot-max"
+        self.assertIn(up, calls)
+        self.assertLess(calls.index("new-bootstrap"), calls.index(up))
+        self.assertIn(up, r.stdout, "и в тексте отката")
+        self.assertLess(r.stdout.index("bash bootstrap.sh"), r.stdout.index(up))
+
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_stopped_max_bot_stays_stopped(self):
+        r = self.run_update(str(self.archive()))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertNotIn("up -d --build bot-max", self.calls.read_text())
+        self.assertNotIn("up -d --build bot-max", r.stdout)
+
     def test_not_an_installed_project_is_refused(self):
         (self.server / ".env").unlink()
         r = self.run_update(str(self.archive()))
@@ -424,16 +447,21 @@ class TestUpdate(unittest.TestCase):
         self.assertEqual(self.calls.read_text(), "")
 
 
-def rollback_commands() -> list[str]:
+def rollback_commands(max_up: bool = False) -> list[str]:
     """Команды отката так, как их печатает update.sh: функция rollback из
     самого скрипта, переменные - как у сервера из TestUpdate. Строки с
-    переносом «\\» склеены - одна команда на элемент."""
+    переносом «\\» склеены - одна команда на элемент. `max_up` - MAX-бот
+    работал до обновления (MAX_UP и MAX_LINE считает сам update.sh)."""
     text = (ROOT / "update.sh").read_text(encoding="utf-8")
     func = re.search(r"(?ms)^rollback\(\) \{\n.*?^\}\n", text).group()
+    extra = {}
+    if max_up:
+        line = re.search(r'(?m)^  MAX_LINE="\n(.*)"$', text).group(1)
+        extra = {"MAX_UP": "1", "MAX_LINE": "\n" + line}
     r = subprocess.run(["bash", "-c", f"{func}\nrollback"], capture_output=True, text=True,
                        env={**os.environ, "LC_ALL": "C.UTF-8", "DB_USER": "mb",
                             "DB_NAME": "mbdb", "DUMP": "backups/pre-update.sql.gz",
-                            "CODE": "backups/pre-update-code.tar.gz"})
+                            "CODE": "backups/pre-update-code.tar.gz", **extra})
     lines = [x.strip() for x in r.stdout.replace("\\\n", " ").splitlines()
              if x.startswith("      ")]
     return [" ".join(x.split()) for x in lines]
@@ -550,6 +578,15 @@ class TestRollbackRestore(unittest.TestCase):
                  for word in (" stop ", "gunzip -c", "tar -xzf", "bootstrap.sh") if word in c]
         self.assertEqual(order, sorted(order), "порядок отката")
 
+    def test_running_max_bot_is_started_again(self):
+        """bootstrap.sh поднимает только профили из COMPOSE_PROFILES: если
+        MAX-бот работал, откат поднимает его последней строкой, иначе
+        клиенты MAX остались бы без бота."""
+        self.assertFalse(any("up -d" in c and "bot-max" in c for c in self.commands))
+        commands = rollback_commands(max_up=True)
+        self.assertEqual(commands[-1], "docker compose --profile max up -d --build bot-max")
+        self.assertIn("bash bootstrap.sh", commands[-2])
+
     def test_rollback_restores_the_dump(self):
         dump = self.dump()
         r = self.restore(dump)
@@ -643,8 +680,7 @@ class TestCaddyfile(unittest.TestCase):
     def test_panel_and_demo(self):
         out, _ = self.build("crm.x.ru", "demo.x.ru")
         self.assertEqual(self.sites(out), ["crm.x.ru", "demo.x.ru"])
-        self.assertRegex(out, r"crm\.x\.ru \{\n\trequest_body \{\n\t\tmax_size 51MB\n"
-                              r"\t\}\n\treverse_proxy crm:8080\n")
+        self.assertIn("\treverse_proxy crm:8080\n", out)
         self.assertRegex(out, r"max_size 1MB\n\t\}\n\treverse_proxy crm-demo:8080\n")
         # Недокачанную загрузку нельзя держать открытой: таймауты чтения.
         self.assertIn("read_body 600s", out)
@@ -678,13 +714,46 @@ class TestCaddyfile(unittest.TestCase):
     def test_body_limits_match_the_panel(self):
         """Предел Caddy не ниже предела панели для законной загрузки и не
         выше её предела вообще: иначе импорт на 20 МБ упрётся в Caddy, а
-        лишнее прочитает панель."""
+        лишнее прочитает панель. Большой - только на закрытии аренды с
+        фото, теми же путями, что у панели (WIDE_BODY_PATHS)."""
+        from app.crm import logic as logic_mod
         from app.web import app as web_app
         out, _ = self.build("crm.x.ru", "demo.x.ru")
-        crm, demo = (int(x) * 1000 * 1000 for x in re.findall(r"max_size (\d+)MB", out))
+        panel = out[out.index("crm.x.ru {"):out.index("demo.x.ru {")]
+        wide = re.search(r"request_body @wide \{\n\t\tmax_size (\d+)MB", panel)
+        narrow = re.search(r"request_body @narrow \{\n\t\tmax_size (\d+)MB", panel)
+        self.assertEqual(len(re.findall(r"request_body", panel)), 2,
+                         "без предела на всё остальное")
+        crm, photos = (int(m.group(1)) * 1000 * 1000 for m in (narrow, wide))
         self.assertGreater(crm, web_app.IMPORT_MAX_BYTES + 64 * 1024)
         self.assertLessEqual(crm, web_app.BODY_MAX)
-        self.assertLessEqual(demo, web_app.DEMO_BODY_MAX)
+        self.assertGreater(photos, logic_mod.RETURN_PHOTOS_MAX
+                           * logic_mod.RETURN_PHOTO_MAX_BYTES)
+        self.assertLessEqual(photos, web_app.PHOTOS_BODY_MAX)
+        demo = int(re.search(r"max_size (\d+)MB", out[out.index("demo.x.ru {"):]).group(1))
+        self.assertLessEqual(demo * 1000 * 1000, web_app.DEMO_BODY_MAX)
+        # Те же пути, что у панели, и только POST.
+        paths = re.findall(r"path_regexp (\S+)", panel)
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(set(paths), {"^/rentals/[0-9]+/close$"})
+        self.assertEqual([p.pattern for p, _ in web_app.WIDE_BODY_PATHS],
+                         [paths[0].strip("^$")])
+        self.assertEqual(panel.count("method POST"), 2)
+        self.assertIn("@narrow not {", panel)
+
+    @unittest.skipUnless(shutil.which("caddy"), "нет caddy в PATH")
+    def test_real_caddy_accepts_the_file(self):
+        """С настоящим caddy (если он есть рядом): файл разбирается, у
+        панели два request_body с противоположными условиями."""
+        out, _ = self.build("crm.x.ru", "demo.x.ru")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Caddyfile"
+            path.write_text(out, encoding="utf-8")
+            r = subprocess.run(["caddy", "adapt", "--config", str(path),
+                                "--adapter", "caddyfile"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.count('"max_size":51000000'), 1)
+        self.assertEqual(r.stdout.count('"max_size":22000000'), 1)
 
 
 class TestConsistencyDemoGuard(unittest.TestCase):

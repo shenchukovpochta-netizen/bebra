@@ -42,12 +42,19 @@ async def _ask_max(max_client: Any, row: dict) -> bool:
     return True
 
 
-async def ask_once(bot: Any, crm: Any, *, max_client: Any = None,
+async def ask_once(bot: Any, crm: Any, *, db: Any = None, max_client: Any = None,
                    now: datetime | None = None) -> int:
-    """Разобрать очередь вопросов. Возвращает, сколько ушло."""
+    """Разобрать очередь вопросов. Возвращает, сколько ушло. `db` - база
+    бота: из неё язык клиента для Telegram (MAX-бот говорит по-русски)."""
     now = now or datetime.now(UTC)
     state = await notices.settings(crm)
-    enabled = bool(state.get("feedback_ask", {}).get("enabled", True))
+    setting = state.get("feedback_ask") or {}
+    enabled = bool(setting.get("enabled", True))
+    # Ночью очередь ждёт утра: закрытие, проведённое оператором за
+    # полночь, - не повод будить клиента. Выключенное помечается и ночью:
+    # писать оно всё равно не будет.
+    if enabled and not logic.feedback_hours_ok(setting, now.astimezone()):
+        return 0
     sent = 0
     for row in await crm.feedback_queue(BATCH):
         # Выключено - всё равно помечаем: включение обратно не должно
@@ -62,7 +69,7 @@ async def ask_once(bot: Any, crm: Any, *, max_client: Any = None,
         channel = logic.feedback_channel(row, max_ready=max_client is not None)
         if not await crm.mark_feedback_asked(row["id"], channel=channel):
             continue
-        ok = (await notify.feedback_ask(bot, row) if channel == "tg"
+        ok = (await notify.feedback_ask(bot, row, db) if channel == "tg"
               else await _ask_max(max_client, row))
         await notices.record(crm, "feedback_ask", status="sent" if ok else "failed",
                              client_id=row.get("client_id"),
@@ -85,11 +92,11 @@ async def alert_once(bot: Any, crm: Any, cfg: Any) -> int:
     return told
 
 
-async def feedback_loop(bot: Any, crm: Any, cfg: Any, *, max_client: Any = None,
-                        interval: int = POLL_SECONDS) -> None:
+async def feedback_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
+                        max_client: Any = None, interval: int = POLL_SECONDS) -> None:
     while True:
         try:
-            asked = await ask_once(bot, crm, max_client=max_client)
+            asked = await ask_once(bot, crm, db=db, max_client=max_client)
             if asked:
                 log.info("CRM: вопросов об оценке аренды отправлено %s", asked)
             told = await alert_once(bot, crm, cfg)

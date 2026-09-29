@@ -23,6 +23,7 @@ try:
     from app.db import Database, _init_connection
     from app.web.app import create_app, ensure_admin
     from app.web.config import WebConfig
+    from tests.plain import plain
     from tests.test_import import ROWS, sheet
     from tests.test_web import FakeBot, FakeBotDB
     HAVE_ALL = True
@@ -79,7 +80,7 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
     async def get_ok(self, path: str) -> str:
         r = await self.client.get(path)
         self.assertEqual(r.status_code, 200, f"{path}: {r.status_code}")
-        return r.text
+        return plain(r.text)
 
     async def post(self, path: str, **data) -> str:
         r = await self.client.post(path, data=data)

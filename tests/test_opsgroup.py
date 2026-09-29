@@ -15,10 +15,10 @@ from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from app import logic as bot_logic  # noqa: E402
 from app.crm import logic, opsgroup, service  # noqa: E402
 from tests.fake_crm import FakeCrm  # noqa: E402
+from tests.plain import plain  # noqa: E402
 
 D = Decimal
 TODAY = date.today()
@@ -221,7 +221,7 @@ class TestParsing(unittest.TestCase):
                                    {"full_name": "<Иван>", "phone": "+7900"}, D(0),
                                    today=TODAY)
         self.assertIn("Долга нет", text)
-        self.assertIn("К оплате сейчас: 3 000 ₽", text)
+        self.assertIn("К оплате сейчас: 3 000 ₽", plain(text))
         self.assertIn("просрочка 2 дн.", text)
         self.assertIn("&lt;Иван&gt;", text)
         text = logic.ops_debt_text({"code": "B-1", "status": "available"}, None, None,
@@ -423,7 +423,7 @@ class TestReturn(OpsCase):
         self.close()
         out = self.handle("return", return_text())
         self.assertEqual(out.reaction, "👍")
-        self.assertIn("долг 3 000 ₽", out.reply)
+        self.assertIn("долг 3 000 ₽", plain(out.reply))
         self.assertIn("1 500", out.reply)
         row = self.reports()[0]
         self.assertEqual(row["rental_id"], self.rental_id)
@@ -460,7 +460,7 @@ class TestQueries(OpsCase):
     def test_debt_by_motor_and_phone(self):
         out = self.handle("debt", "60v240w2305001")
         self.assertIn("Иванов Иван Иванович", out.reply)
-        self.assertIn("Долг по журналу: 3 000 ₽", out.reply)
+        self.assertIn("Долг по журналу: 3 000 ₽", plain(out.reply))
         out = self.handle("debt", "8 900 123-45-67")
         self.assertIn("B-1", out.reply)
         self.assertIn("Не нашёл", self.handle("debt", "60V0000000").reply)
@@ -599,7 +599,7 @@ class TestOpsThroughBot(unittest.IsolatedAsyncioTestCase):
     async def test_debt_reply(self):
         await self.feed(ops_update("60V240W2305001", thread=23488))
         [reply] = self.replies()
-        self.assertIn("Долг по журналу: 3 000 ₽", reply.text)
+        self.assertIn("Долг по журналу: 3 000 ₽", plain(reply.text))
         self.assertEqual(reply.message_thread_id, 23488)
 
 

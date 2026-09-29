@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import dataclasses
 import io
 import os
@@ -588,10 +589,20 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status_code, 200, url)
                 self.assertRegex(r.headers["content-disposition"], r'filename="demo-', url)
                 if url.endswith(".xlsx"):
-                    first = load_workbook(io.BytesIO(r.content)).active["A1"].value
+                    sheet = load_workbook(io.BytesIO(r.content)).active
+                    first = sheet["A1"].value
+                    cells = [c for row in sheet.iter_rows(values_only=True) for c in row]
                 else:
-                    first = r.content.decode("utf-8-sig").splitlines()[0]
+                    text = r.content.decode("utf-8-sig")
+                    first = text.splitlines()[0]
+                    cells = [c for row in csv.reader(io.StringIO(text)) for c in row]
                 self.assertTrue(str(first).startswith("Демо-версия"), url)
+                # Суммы в выгрузке - числа, а не строки money(): неразрывный
+                # пробел внутри числа Excel и разбор csv читают как текст.
+                spaced = [c for c in cells if isinstance(c, str)
+                          and re.fullmatch(r"[−+-]?[\d\u00a0\u202f ]+([.,]\d+)?(\u00a0₽)?", c)
+                          and re.search(r"\d[\u00a0\u202f]", c)]
+                self.assertEqual(spaced, [], url)
 
     # ─────────────────────────── роли ───────────────────────────
 

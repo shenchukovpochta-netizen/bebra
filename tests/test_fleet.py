@@ -12,6 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests.plain import plain  # noqa: E402
+
 try:
     from aiogram import Bot, Dispatcher
     from aiogram.methods import EditMessageText, SendMessage
@@ -166,7 +168,7 @@ class TestFleetChat(unittest.IsolatedAsyncioTestCase):
         await self.feed(self.admin_msg("узел: контроллер\nзапчасти: 2500\nработа: 500\nчто: прошил",
                                        reply_to=card_index, reply_text=card_text))
         reply = self.sent()[-1].text
-        self.assertIn("B-03: Контроллер - 3 000 ₽", reply)
+        self.assertIn("B-03: Контроллер - 3 000 ₽", plain(reply))
         entries = await self.crm.bike_log(self.bike_id)
         self.assertEqual((entries[0]["kind"], entries[0]["cost"], entries[0]["created_by"]),
                          ("repair", D("3000.00"), f"tg:{ADMIN_ID}"))

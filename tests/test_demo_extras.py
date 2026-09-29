@@ -393,9 +393,16 @@ class TestDemoExtras(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.pool.fetchval(
             "select count(*) from crm.bookings where waitlist_at is not null "
             "and waitlist_bike_id is null"), 0)
+        # След есть в любой день сида: ради строки «уведомлён · ответил» он и
+        # сеется, а совпадение «модель освободилась на точке заявки» у трёх-
+        # четырёх свежих заявок само по себе редкость.
+        self.assertTrue(rows, "в демо нет следа листа ожидания")
         start, end = logic.WAITLIST_HOURS
         for r in rows:
             self.assertEqual(r["status"], "new")
+            self.assertIsNotNone(await self.pool.fetchval(
+                "select tg_id from crm.clients where id = $1", r["client_id"]),
+                "круг зовёт только клиента в Telegram")
             self.assertEqual((r["bike_status"], r["bike_point"], r["bike_model"]),
                              ("available", r["point"], r["model"]))
             self.assertTrue(r["created_at"] < r["freed_at"] <= r["waitlist_at"] <= self.now)

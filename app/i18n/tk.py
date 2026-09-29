@@ -502,6 +502,20 @@ T: dict[str, str] = {
     "CAB_WAITLIST_COMING": "✅ Menejere aýtdyk: sizi şu gün garaşýarys. Welosiped bronlanmaýar, şonuň üçin gijikdirmäň. Pasportyňyzy alyň.{hours}",
     "CAB_WAITLIST_GONE": "Bu welosipedi eýýäm alyp gitdiler. Arzaňyz güýjünde — indikisi boşanda ýazarys.",
     "BTN_WAITLIST_TAKE": "✅ Alýaryn — şu gün gelerin",
+    "FEEDBACK_ASK": "Biz bilen bolanyňyz üçin sag boluň! {bike} kabul edildi.\nKireý size nähili boldy? 1-den 5-e çenli bahalandyryň — bir gezek basmak ýeterlik.",
+    "FEEDBACK_BIKE": "Welosiped № {code}",
+    "FEEDBACK_BIKE_ANY": "Welosiped",
+    "FEEDBACK_THANKS": "Baha üçin sag boluň! Sizi ýene görmäge şat bolarys 🚲",
+    "FEEDBACK_THANKS_TOAST": "Sag boluň, baha kabul edildi",
+    "FEEDBACK_ASK_COMMENT": "Hemme zadyň gowy bolmandygyna gynanýarys. Näme nädogry boldy? Bu habara bir tekst bilen jogap beriň — okap, çözeris. Jogap bermeseňizem bolýar.",
+    "FEEDBACK_COMMENT_PLACEHOLDER": "Näme nädogry boldy",
+    "FEEDBACK_COMMENT_THANKS": "Sag boluň, ýolbaşçylara ýetirdik.",
+    "FEEDBACK_STALE": "Bu düwme köneldi.",
+    "FEEDBACK_NOT_YOURS": "Bu düwme siz üçin däl.",
+    "FEEDBACK_ALREADY": "Baha eýýäm kabul edildi — sag boluň!",
+    "FEEDBACK_COMMENT_EMPTY": "Teswiri tekst bilen, bir habarda ýazyň.",
+    "FEEDBACK_COMMENT_LONG": "Teswir {limit} belgiden uzyn — gysgaldyň.",
+    "FEEDBACK_COMMENT_DONE": "Teswiriňizi eýýäm aldyk — sag boluň!",
 }
 
 ERRORS: dict[str, str] = {

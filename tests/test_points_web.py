@@ -297,8 +297,8 @@ class TestPointsReport(PointsWebCase):
         dash = self.get_ok("/")
         self.assertIn("По точкам за 30 дней", dash)
         self.assertIn("50.0 %", dash)
-        self.assertIn(logic.money(D("405.56")), dash)
-        self.assertIn(logic.money(D(500)), dash)
+        self.assertIn(tw.plain(logic.money(D("405.56"))), dash)
+        self.assertIn(tw.plain(logic.money(D(500))), dash)
         self.assertIn('href="/reports/points"', dash)
 
     def test_dashboard_block_needs_two_points(self):
@@ -427,7 +427,7 @@ class TestPointsReport(PointsWebCase):
         page = self.get_ok("/reports/points")
         self.assertIn(PAV, page)
         self.assertNotIn("Чек/день", page)
-        self.assertNotIn(logic.money(D(15000)), page)
+        self.assertNotIn(tw.plain(logic.money(D(15000))), page)
         head = self.table("/reports/points.csv")["Точка"]
         self.assertIn("Простой, %", head)
         for column in ("Чек/день", "Выручка", "Долг", "Наличные", "Выручка сервиса"):

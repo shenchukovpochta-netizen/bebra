@@ -102,12 +102,20 @@ IMPORT_MAX_BYTES = 20 * 1024 * 1024
 # файловые части формы не ограничивает: каждая копится в памяти до
 # мегабайта и дальше пишется во временный файл, частей до тысячи. Без
 # предела чужая загрузка на /login (он открыт без входа) заполняла бы
-# диск, общий с базой, ещё до проверки пароля. Самая тяжёлая законная
-# форма - закрытие аренды с шестью фото при сдаче (телефонное фото - до
-# 8 МБ, и шесть таких - обычное дело); за ней импорт таблицы. Мегабайт
-# сверху - разметка multipart. Caddy режет тело тем же пределом.
-BODY_MAX = max(IMPORT_MAX_BYTES, BIKE_PHOTO_MAX, logic.DOC_MAX_BYTES,
-               logic.RETURN_PHOTO_MAX_BYTES * logic.RETURN_PHOTOS_MAX) + 1024 * 1024
+# диск, общий с базой, ещё до проверки пароля. Самая тяжёлая обычная
+# форма - импорт таблицы; мегабайт сверху - разметка multipart.
+BODY_MAX = max(IMPORT_MAX_BYTES, BIKE_PHOTO_MAX, logic.DOC_MAX_BYTES) + 1024 * 1024
+# Закрытие аренды с шестью фото при сдаче (телефонное фото - до 8 МБ, и
+# шесть таких - обычное дело) - единственная форма тяжелее, и большой
+# предел только у неё. Поднятый для всей панели, он раздал бы по 49 МБ и
+# открытым без входа /login, /sign/ и /hook/: десяток таких запросов
+# разом - это уже память панели (предел 1 ГБ) и диск, общий с базой.
+# Без входа большое тело до разбора формы не доходит: страж входа
+# отвечает переадресацией раньше. Caddy делит пределы теми же путями.
+PHOTOS_BODY_MAX = logic.RETURN_PHOTO_MAX_BYTES * logic.RETURN_PHOTOS_MAX + 1024 * 1024
+WIDE_BODY_PATHS: tuple[tuple[re.Pattern[str], int], ...] = (
+    (re.compile(r"/rentals/[0-9]+/close"), PHOTOS_BODY_MAX),
+)
 TOO_LARGE_PAGE = (
     '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -210,18 +218,31 @@ class BodyLimit:
     Заявленная длина больше предела - 413 сразу, тело не читается вовсе.
     Тело без длины (chunked) считается по мере чтения: перешло предел -
     чтение обрывается, и если ответ ещё не начат, уходит тот же 413.
+    `wide` - свой, больший предел для POST на пути целиком по образцу
+    (закрытие аренды с фото); остальным - общий `limit`.
     """
 
-    def __init__(self, app: Any, *, limit: int) -> None:
+    def __init__(self, app: Any, *, limit: int,
+                 wide: tuple[tuple[re.Pattern[str], int], ...] = ()) -> None:
         self.app = app
         self.limit = limit
+        self.wide = wide
+
+    def limit_for(self, scope: Any) -> int:
+        if scope.get("method") == "POST":
+            path = scope.get("path") or ""
+            for pattern, limit in self.wide:
+                if pattern.fullmatch(path):
+                    return limit
+        return self.limit
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        limit = self.limit_for(scope)
         for name, value in scope.get("headers") or ():
-            if name == b"content-length" and value.isdigit() and int(value) > self.limit:
+            if name == b"content-length" and value.isdigit() and int(value) > limit:
                 await self.refuse(scope, receive, send)
                 return
         state = {"read": 0, "over": False, "started": False}
@@ -230,7 +251,7 @@ class BodyLimit:
             message = await receive()
             if message["type"] == "http.request":
                 state["read"] += len(message.get("body") or b"")
-                if state["read"] > self.limit:
+                if state["read"] > limit:
                     state["over"] = True
                     raise BodyTooLarge
             return message
@@ -865,7 +886,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     if cfg.demo:
         app.add_middleware(DemoGate, state=app.state)
     # Самый внешний слой: слишком большое тело отсекается раньше всего.
-    app.add_middleware(BodyLimit, limit=DEMO_BODY_MAX if cfg.demo else BODY_MAX)
+    # В демо загрузок нет вовсе - и широких путей тоже.
+    app.add_middleware(BodyLimit, limit=DEMO_BODY_MAX if cfg.demo else BODY_MAX,
+                       wide=() if cfg.demo else WIDE_BODY_PATHS)
 
     login_failures: dict[str, list[float]] = {}
     # Использованные ключи денежных форм. Процесс панели один, и проверка
@@ -3440,6 +3463,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                             rental.get("balance", 0))
         bike = await crm.bike(rental["bike_id"]) if rental.get("bike_id") else None
         moves = logic.rental_bike_rows(await crm.rental_bikes(rental_id))
+        # Комментарий к оценке - слова клиента, как переписка «Входящих»:
+        # отчёт «Оценки» открыт только с правом на клиентов, и карточка
+        # аренды (её видит и механик) не должна быть обходом. Оценка
+        # остаётся: она и в служебном чате, который читают все.
+        feedback = await crm.feedback_of_rental(rental_id)
+        if feedback and feedback.get("comment") and not may_view(request, "clients"):
+            feedback = {**feedback, "comment": None, "comment_hidden": True}
         return render(request, "rental.html", rental=rental, summary=summary, bike=bike,
                       order=(await crm.open_order_of(rental["bike_id"])
                              if rental.get("bike_id") else None),
@@ -3467,7 +3497,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       max_extra=logic.MAX_EXTRA_BATTERIES,
                       ops=await crm.ops_reports_of_rental(rental_id),
                       return_photos=await crm.return_photos(rental_id=rental_id),
-                      feedback=await crm.feedback_of_rental(rental_id),
+                      feedback=feedback,
                       # Возврат и замена - по умолчанию на точке аренды: в
                       # аренде велосипед числится именно там.
                       places=await location_names(rental.get("location"),

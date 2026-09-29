@@ -160,8 +160,11 @@ class TestMileageInPanel(tw.WebCase):
     # ─── парк ───
 
     def test_park_list_and_card_show_and_edit_mileage(self):
-        # в списке парка тысячи разделены неразрывным пробелом
-        self.assertIn("4\u00a0266 км", self.get_ok("/bikes"))
+        # в списке парка тысячи разделены неразрывным пробелом - по сырой
+        # странице: get_ok сводит его к обычному (tests/plain.py)
+        r = self.client.get("/bikes")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("4\u00a0266 км", r.text)
         r = self.client.post(f"/bikes/{self.bike_id}/edit", data={
             "code": "B-1", "model": "Kugoo V3", "mileage_km": "5000",
             "battery_count": "2", "service_months": "24",

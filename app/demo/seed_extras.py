@@ -1383,6 +1383,7 @@ async def _bookings(conn: asyncpg.Connection, c: _Ctx) -> None:
         rows.append((client.id, model, tariff(model, 14 if i else 7), loc[last.point],
                      today + timedelta(days=1 - i), "Как в прошлый раз" if i else None,
                      "new", None, None, None, min(created, now)))
+    await _waitlist_bait(conn, c, rows, loc)
     c.open_bookings = {r[0] for r in rows}
     # Закрытые выдачей: аренда началась в день заявки, до неё аренды не было.
     issued = [r for r in w.rentals if r.started_on >= today - timedelta(days=30)
@@ -1426,39 +1427,118 @@ async def _bookings(conn: asyncpg.Connection, c: _Ctx) -> None:
     await _waitlist(conn, c)
 
 
+def _call_time(freed: datetime) -> datetime:
+    """Когда круг листа ожидания позвал бы к велосипеду, свободному с
+    `freed`: через четверть часа (круг напоминаний), но только днём -
+    ночное освобождение зовут утром (logic.WAITLIST_HOURS)."""
+    start, end = logic.WAITLIST_HOURS
+    called = freed.astimezone(MSK) + timedelta(minutes=15)
+    if called.hour >= end:
+        called = at(called.date() + DAY, start + 0.1)
+    elif called.hour < start:
+        called = at(called.date(), start + 0.1)
+    return called
+
+
+# Насколько назад искать свежий возврат для заявки листа ожидания: заявка
+# в кабинете - не дальше трёх дней вперёд, и поданная раньше двух суток
+# назад со днём «завтра» была бы невозможна.
+WAITLIST_BAIT_BACK = timedelta(hours=40)
+
+
+async def _waitlist_bait(conn: asyncpg.Connection, c: _Ctx, rows: list[tuple],
+                         loc: dict[str, int]) -> None:
+    """Лист ожидания виден в демо каждый день, а не когда повезёт.
+
+    След (_waitlist) бывает, только если модель открытой заявки освободилась
+    на её точке после подачи и всё ещё свободна, - а из трёх-четырёх
+    свежих заявок это совпадает редко. Не совпало ни у одной - одна
+    заявка клиента в Telegram (без «как в прошлый раз»: там модель
+    названа) подаётся за несколько часов до свежего возврата и просит его
+    модель на его точке. `rows` - строки заявок до записи, правится на
+    месте; подача не раньше карточки клиента и его прошлой сдачи."""
+    w = c.w
+    rng = random.Random(f"demo-waitlist:{w.seed}:{w.attempt}")
+    free = [r for r in await conn.fetch(
+        """
+        select b.id, b.model, b.location, max(s.changed_at) as freed_at
+          from crm.bikes b
+          join crm.bike_status_log s on s.bike_id = b.id and s.to_status = 'available'
+         where b.status = 'available' and b.location is not null
+         group by b.id
+        having max(s.changed_at) > $1
+         order by max(s.changed_at) desc, b.id
+        """, c.now - WAITLIST_BAIT_BACK) if _call_time(r["freed_at"]) <= c.now]
+    points = {pid: name for name, pid in loc.items()}
+
+    def waits(row: tuple) -> bool:
+        return row[0] in c.tg and any(
+            b["model"] == row[1] and b["location"] == points.get(row[3])
+            and b["freed_at"] > row[10] for b in free)
+
+    opened = [i for i, row in enumerate(rows) if row[6] == "new"]
+    if any(waits(rows[i]) for i in opened):
+        return
+    days_of = {t["id"]: key[2] for key, t in w.tariffs.items() if key[0] == "bike"}
+    for i in opened:
+        row = rows[i]
+        if row[0] not in c.tg or row[5] == "Как в прошлый раз":
+            continue
+        client = w.client(row[0])
+        floor = client.created_at + timedelta(minutes=10)
+        last = (c.by_client.get(row[0]) or [None])[-1]
+        if last is not None and last.closed_at is not None:
+            floor = max(floor, last.closed_at + timedelta(hours=1))
+        floor = max(floor, at(row[4] - timedelta(days=logic.BOOKING_DAYS_AHEAD)))
+        for bike in free:
+            tariff = w.tariffs.get(("bike", bike["model"], days_of.get(row[2], 7)))
+            if tariff is None or bike["location"] not in loc:
+                continue
+            created = bike["freed_at"] - timedelta(hours=rng.uniform(1, 6))
+            if created < floor:
+                created = floor
+            if created >= bike["freed_at"] - timedelta(minutes=10):
+                continue
+            rows[i] = (row[0], bike["model"], tariff["id"], loc[bike["location"]], row[4],
+                       row[5], "new", None, None, None, created)
+            return
+
+
 async def _waitlist(conn: asyncpg.Connection, c: _Ctx) -> None:
     """След листа ожидания: открытую заявку, чья модель освободилась на её
     точке уже после подачи, бот «позвал» ближайшим дневным кругом (не
     раньше 9:00 и не позже 18:00), а первая по очереди ответила «еду».
     Бота в демо нет - это то, что оставил бы настоящий проход
-    (app/crm/waitlist.py), чтобы строка «уведомлён · ответил» была видна."""
-    rows = await conn.fetch(
+    (app/crm/waitlist.py), чтобы строка «уведомлён · ответил» была видна.
+    Звать можно только клиента в Telegram, как у круга (`_can_hear`)."""
+    # Все пары «заявка - свободный велосипед её модели на её точке,
+    # освободившийся после подачи»; зовёт первый дневной круг после
+    # самого раннего такого освобождения, которое уже наступило.
+    pairs = await conn.fetch(
         """
-        select k.id, k.client_id, k.created_at, f.bike_id, f.freed_at
+        select k.id, k.client_id, k.created_at, b.id as bike_id, f.freed_at
           from crm.bookings k
           join crm.locations l on l.id = k.location_id
+          join crm.bikes b on b.status = 'available' and b.location = l.name
+                          and b.model = k.model
           join lateral (
-            select b.id as bike_id, max(s.changed_at) as freed_at
-              from crm.bikes b
-              join crm.bike_status_log s on s.bike_id = b.id and s.to_status = 'available'
-             where b.status = 'available' and b.location = l.name and b.model = k.model
-             group by b.id order by max(s.changed_at) desc, b.id limit 1) f on true
+            select max(s.changed_at) as freed_at from crm.bike_status_log s
+             where s.bike_id = b.id and s.to_status = 'available') f on true
          where k.status = 'new' and f.freed_at > k.created_at
-         order by k.id
+         order by k.id, f.freed_at, b.id
         """)
+    rows: dict[int, Any] = {}
+    for pair in pairs:
+        if pair["id"] not in rows and _call_time(pair["freed_at"]) <= c.now:
+            rows[pair["id"]] = pair
     answered = False
     per_bike: dict[int, int] = defaultdict(int)
-    for row in rows:
+    for row in rows.values():
         if per_bike[row["bike_id"]] >= logic.WAITLIST_PER_BIKE:
             continue                     # как у круга: не больше N на велосипед
-        start, end = logic.WAITLIST_HOURS
-        called = row["freed_at"].astimezone(MSK) + timedelta(minutes=15)
-        if called.hour >= end:
-            called = at(called.date() + DAY, start + 0.1)
-        elif called.hour < start:
-            called = at(called.date(), start + 0.1)
-        if called > c.now:
-            continue
+        if row["client_id"] not in c.tg:
+            continue                     # писать некуда - круг его не зовёт
+        called = _call_time(row["freed_at"])
         coming = called + timedelta(minutes=7) if not answered else None
         if coming is not None and coming > c.now:
             coming = None

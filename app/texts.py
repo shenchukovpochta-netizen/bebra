@@ -1195,6 +1195,20 @@ FEEDBACK_ASK_COMMENT = (
 )
 FEEDBACK_COMMENT_THANKS = "Спасибо, передали руководителю."
 FEEDBACK_STALE = "Эта кнопка устарела."
+# {bike} в вопросе - одно из двух: с номером или без (номера нет у аренды
+# без велосипеда в карточке).
+FEEDBACK_BIKE = "Велосипед № {code}"
+FEEDBACK_BIKE_ANY = "Велосипед"
+# Подсказка в поле ответа (ForceReply): Telegram режет её до 64 знаков.
+FEEDBACK_COMMENT_PLACEHOLDER = "Что пошло не так"
+# Отказы service.rate_rental и comment_rental (и проверки комментария в
+# crm/logic.py) - дословно те же строки: обработчик переводит их по тексту
+# (FEEDBACK_ERRORS в handlers/feedback.py), а тест держит их в согласии.
+FEEDBACK_NOT_YOURS = "Эта кнопка не для вас."
+FEEDBACK_ALREADY = "Оценка уже принята — спасибо!"
+FEEDBACK_COMMENT_EMPTY = "Напишите комментарий текстом, одним сообщением."
+FEEDBACK_COMMENT_LONG = "Комментарий длиннее {limit} знаков — сократите его."
+FEEDBACK_COMMENT_DONE = "Комментарий уже получили — спасибо!"
 # Фото при сдаче ответом на карточку сдачи в служебном чате.
 RETURN_PHOTO_SAVED = "📷 Фото приложено к аренде № {rental} ({count} из {limit})."
 RETURN_PHOTO_LATE = (

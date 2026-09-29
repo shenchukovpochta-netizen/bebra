@@ -17,6 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests.plain import plain  # noqa: E402
+
 try:
     from aiogram import Bot, Dispatcher
     from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, SendPhoto
@@ -91,7 +93,8 @@ class CabinetCase(unittest.IsolatedAsyncioTestCase):
         await settle()
 
     def texts_to(self, chat_id):
-        return [m.text for m in self.session.sent_to(chat_id) if isinstance(m, SendMessage)]
+        return [plain(m.text) for m in self.session.sent_to(chat_id)
+                if isinstance(m, SendMessage)]
 
     def last_text(self, chat_id=USER_ID):
         return self.texts_to(chat_id)[-1]
@@ -277,7 +280,7 @@ class TestCabinetScreens(CabinetCase):
 
     def labels(self):
         markup = self.session.last_markup()
-        return [b.text for row in markup.inline_keyboard for b in row]
+        return [plain(b.text) for row in markup.inline_keyboard for b in row]
 
     def callbacks(self):
         markup = self.session.last_markup()
@@ -298,6 +301,8 @@ class TestCabinetScreens(CabinetCase):
         await self.feed(cb("cab:pay"))
         labels = self.labels()
         self.assertEqual(labels[0], "Долг — 3 000 ₽")
+        raw = self.session.last_markup().inline_keyboard[0][0].text
+        self.assertEqual(raw, "Долг — 3\u00a0000\u00a0₽", "кнопка не рвёт сумму")
         self.assertNotIn("1 × 7 дн. — 3 000 ₽", labels, "долг равен периоду - не дублируем")
         self.assertIn("2 × 7 дн. — 6 000 ₽", labels)
 
@@ -447,8 +452,8 @@ class TestTopUp(CabinetCase):
         self.assertEqual(claims[0]["amount_hint"], D(3000))
         card = self.claim_card()
         self.assertIn("Иванов Иван", card.text)
-        self.assertIn("ожидаемая сумма: <b>3 000 ₽</b>", card.text)
-        labels = [b.text for row in card.reply_markup.inline_keyboard for b in row]
+        self.assertIn("ожидаемая сумма: <b>3 000 ₽</b>", plain(card.text))
+        labels = [plain(b.text) for row in card.reply_markup.inline_keyboard for b in row]
         self.assertEqual(labels, ["✅ Зачислить 3 000 ₽", "❌ Отклонить"])
         self.assertIn(texts.CAB_CLAIM_SENT, self.texts_to(USER_ID))
         # карточка привязана: по ней найдётся ответ суммой
@@ -470,7 +475,7 @@ class TestTopUp(CabinetCase):
         self.assertEqual(done["resolved_by"], f"tg:{ADMIN_ID}")
         # карточка помечена, кнопки сняты
         edits = [m for m in self.session.calls if isinstance(m, EditMessageText)]
-        self.assertTrue(edits and "Зачислено 3 000 ₽" in edits[-1].text)
+        self.assertTrue(edits and "Зачислено 3 000 ₽" in plain(edits[-1].text))
         self.assertIsNone(edits[-1].reply_markup)
         # клиент узнал о зачислении и новой дате
         text = self.last_text()
@@ -570,7 +575,7 @@ class TestBooking(CabinetCase):
 
     def labels(self):
         markup = self.session.last_markup()
-        return [b.text for row in markup.inline_keyboard for b in row]
+        return [plain(b.text) for row in markup.inline_keyboard for b in row]
 
     def callbacks(self):
         markup = self.session.last_markup()
