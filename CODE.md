@@ -240,6 +240,8 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | адреса, режим и телефоны точек | справочник в панели (Настройки → «Точки»); бот читает его снимком `app/crm/points.py`, зашитый текст в `app/faq.py` - запасной; часы в заявке, закрытии, напоминании и шаге «Когда приедете?» - `{hours}` из `points.hours_note` |
 | ответ на частый вопрос | `app/faq.py`, переводы `app/faq_i18n.py` |
 | число по точке, отчёт «По точкам» | `days_by_status_location`, `points_rows` в `app/crm/logic.py`; `*_by_location` и общее правило денег `_ledger_rentals` в `app/crm/db.py`; `points_report` в `app/web/app.py` |
+| переброска между точками | чистая `transfer_plan` (спрос `weekday_demand` + заявки, предложение по `freeing_soon`, жадные перевозки, запас `transfer_settings`) в `app/crm/logic.py`; выдачи по дням `CrmDB.issues_by_day`; одна выборка на сводку, отчёт и точку - `point_advice` в `app/web/app.py`; перевозка - `service.transfer_bikes` через `update_bike(keep_rented_location=True, from_location=...)`, маршрут `/bikes/transfer`, запас - `/locations/transfer` |
+| скидка на простой, ограничение акции моделью и точкой | `idle_models` (дни с позднего из `bike_status_since` и `CrmDB.bike_location_since`), `idle_promo_rows`, `idle_promo_form`, `idle_promo_settings`, `promo_scope` и `promo_new_only` (в `params` акции) и проверка в `promo_fits`, форма с ошибкой - `promo_form_echo` - `app/crm/logic.py`; модель и точка в контексте - `service.promo_context`; сверка показанной скидки при выдаче - `promo_stamp` и поле `promo_seen` в `issue_create`; формы - `promo_new`, `promo_choices`, `/promos/settings` в `app/web/app.py`; имя точки в `params` переименовывает `rename_location` |
 | план месяца сети и точки | `month_plan` (явный план, иначе сумма точек `plan_from_points`, иначе от парка; сводка и сервис - через `network_plan` в `app/web/app.py`), `point_plan`, `points_plan`, `plan_progress` в `app/crm/logic.py`; план точки - колонки `locations.plan_*`, маршруты `/plan` и `/plan/points/{id}` в `app/web/app.py` |
 | пометка «неполный месяц» в таблицах трёх чисел | `month_coverage` и `history_starts` в `app/crm/logic.py`, `CrmDB.history_starts` (зеркало в `tests/fake_crm.py` - та же чистая функция) |
 | новую колонку с именем точки | кортеж `CrmDB._LOCATION_REFS` в `app/crm/db.py` и `rename_location` в `tests/fake_crm.py`, иначе переименование оставит её со старым именем |
@@ -1589,7 +1591,7 @@ discover). Имена модулей при этом разные, то есть
 
 ### Фейковая база и почему её держат в синхроне
 
-`tests/fake_crm.py` повторяет контракт `app/crm/db.py`: 350 публичных методов там, 350
+`tests/fake_crm.py` повторяет контракт `app/crm/db.py`: 353 публичных метода там, 353
 здесь, имена совпадают ровно. Живого Postgres большинству тестов не нужно, а подъём базы на
 каждый тест стоил бы минут прогона.
 

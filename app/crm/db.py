@@ -405,6 +405,7 @@ class CrmDB:
 
     async def update_bike(self, bike_id: int, *, by: str | None = None,
                           keep_rented_location: bool = False,
+                          from_location: str | None = None,
                           **fields: Any) -> dict | None:
         """by - кто меняет: триггер журнала статусов читает его из
         set_config('crm.actor') в той же транзакции.
@@ -416,16 +417,23 @@ class CrmDB:
         ждёт замка строки и перечитывает её, так что status в CASE - уже
         после выдачи. Возвращает статус и точку после записи: вызывающий
         видит, что точку не записали.
+
+        from_location - переброска: писать, только если велосипед всё ещё
+        на этой точке, тем же приёмом в WHERE. Уехал - None, строки нет.
         """
         _, values = _set_clause(fields, BIKE_FIELDS, 2)
         sets = ", ".join(
             f"{col} = case when status = 'rented' then {col} else ${i} end"
             if col == "location" and keep_rented_location else f"{col} = ${i}"
             for i, col in enumerate(fields, start=2))
+        where = "id = $1"
+        if from_location is not None:
+            values = [*values, from_location]
+            where += f" and location = ${len(values) + 1}"
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
             return _row(await conn.fetchrow(
-                f"update crm.bikes set {sets}, updated_at = now() where id = $1 "
+                f"update crm.bikes set {sets}, updated_at = now() where {where} "
                 "returning status, location", bike_id, *values))
 
     async def bike_status_log(self, bike_id: int, limit: int = 30) -> list[dict]:
@@ -448,6 +456,16 @@ class CrmDB:
         """
         rows = await self.pool.fetch(
             "select bike_id, max(changed_at) as since from crm.bike_status_log "
+            "group by bike_id")
+        return {int(r["bike_id"]): r["since"] for r in rows}
+
+    async def bike_location_since(self) -> dict[int, datetime]:
+        """С какого момента каждый велосипед на своей точке - по журналу мест.
+
+        Переброска статус не меняет, и «простаивает на точке» без этого
+        числа считало бы дни, простоянные на прошлой точке."""
+        rows = await self.pool.fetch(
+            "select bike_id, max(changed_at) as since from crm.bike_location_log "
             "group by bike_id")
         return {int(r["bike_id"]): r["since"] for r in rows}
 
@@ -2055,6 +2073,24 @@ class CrmDB:
         keys = ("issued", "first_periods", "renewals", "active")
         return {r["location"]: {k: int(r[k] or 0) for k in keys} for r in rows}
 
+    async def issues_by_day(self, since: date, until: date) -> list[dict]:
+        """Выдачи по точке аренды, модели и дню начала за [since, until) -
+        спрос для переброски между точками. Модель - того велосипеда,
+        что выдали (первая строка журнала перемещений), а не того, что на
+        руках после замены: спрашивали именно его. Аренда без велосипеда
+        модели не знает и в спрос не идёт."""
+        return _rows(await self.pool.fetch(
+            """
+            select nullif(r.location, '') as location, b.model, r.started_on,
+                   count(*) as issued
+              from crm.rentals r
+              join crm.bikes b on b.id = coalesce(
+                     (select rb.bike_id from crm.rental_bikes rb
+                       where rb.rental_id = r.id order by rb.id limit 1), r.bike_id)
+             where r.started_on >= $1 and r.started_on < $2
+             group by 1, 2, 3
+            """, since, until))
+
     async def service_by_location(self, since: datetime, until: datetime
                                   ) -> dict[str | None, dict[str, Any]]:
         """Сервис по точке за период.
@@ -3027,6 +3063,13 @@ class CrmDB:
                             await conn.execute(
                                 "update crm.saved_views set query = $2 where id = $1",
                                 view["id"], query)
+                    # Акция с ограничением точкой хранит её имя в params:
+                    # без каскада скидка на простой молча перестала бы
+                    # находить аренды переименованной точки.
+                    await conn.execute(
+                        "update crm.promos set params = jsonb_set(params, '{location}', "
+                        "to_jsonb($2::text)) where params->>'location' = $1",
+                        old, new_name)
             except asyncpg.UniqueViolationError:
                 # Страховка: занятое имя, успевшее появиться после проверок.
                 return "taken"

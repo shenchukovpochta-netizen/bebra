@@ -53,10 +53,10 @@ except ImportError:                                    # pragma: no cover
     HAVE_PIL = False
 
 D = Decimal
-# Шаблон - сколько в нём таблиц-карточек. «По точкам» - две: сами точки
-# и три числа по месяцам.
+# Шаблон - сколько в нём таблиц-карточек. «По точкам» - три: сами точки,
+# прогноз переброски и три числа по месяцам.
 CARD_TABLES = {"rentals.html": 1, "bikes.html": 1, "clients.html": 1, "orders.html": 1,
-               "points.html": 2, "cash.html": 1, "finance.html": 1, "inbox.html": 1,
+               "points.html": 3, "cash.html": 1, "finance.html": 1, "inbox.html": 1,
                "batteries.html": 1, "parts.html": 1, "payments.html": 1}
 TABLE = re.compile(r'<table class="cards">(.*?)</table>', re.S)
 HEAD = re.compile(r"""\{\{\s*list\.th\('([^']*)'|<th\b[^>]*>(.*?)</th>""", re.S)
@@ -120,7 +120,9 @@ class TestCardTemplates(unittest.TestCase):
     def test_month_matrix_names_the_point(self):
         """В матрице «три числа по месяцам» колонка - это точка и число:
         карточка месяца без имени точки была бы столбиком процентов."""
-        matrix = self.tables("points.html")[1]
+        # Матрица - та, где шапка в две строки: порядок блоков страницы
+        # меняется, а устройство матрицы - нет.
+        matrix = next(t for t in self.tables("points.html") if "rowspan" in t)
         self.assertIn('data-label="Месяц"', matrix)
         self.assertIn('data-label="{{ point }} · простой"', matrix)
         self.assertIn('data-label="{{ point }} · чек"', matrix)

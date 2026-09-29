@@ -3,6 +3,7 @@
 {% block content %}
 {% set editable = can_edit(staff, 'promos') %}
 {% set params = promo_params(promo) %}
+{% set scope = promo_scope(promo) %}
 <div class="bar"><h1>{% if is_new %}Новая акция · {{ spec.title }}{% else %}{{ promo.title }}
   {% if not promo.active %}<span class="tag">выключена</span>{% elif alive %}<span class="tag ok">действует</span>{% else %}<span class="tag">не действует</span>{% endif %}{% endif %}</h1>
   <a class="btn ghost" href="/promos">Все акции</a>
@@ -12,6 +13,12 @@
 <section class="card">
   <h2>{{ spec.title }} <small class="muted">· {{ spec.when }}</small></h2>
   <p class="muted">{{ spec.hint }}</p>
+  {% if is_new and (scope.model or scope.location) %}
+  {# Заготовка из подсказки «простаивает»: ничего ещё не действует, пока
+     человек не нажал кнопку - скидка это деньги. #}
+  <p class="flash">Заготовка из подсказки о простое: проверьте скидку и срок.
+    Акция заработает, только когда вы её заведёте.</p>
+  {% endif %}
   {% if editable %}
   <form method="post" action="{% if is_new %}/promos{% else %}/promos/{{ promo.id }}{% endif %}" class="grid2">
     <input type="hidden" name="kind" value="{{ kind }}">
@@ -24,6 +31,11 @@
     {% for key, value in params.items() %}
     <label>{{ PROMO_PARAM_LABELS[key] }} <input name="{{ key }}" inputmode="numeric" value="{{ value }}"></label>
     {% endfor %}
+    {% if spec.scope %}
+    <label>Только модель <select name="model"><option value="">любая</option>{% for m in models %}<option value="{{ m }}"{% if m == scope.model %} selected{% endif %}>{{ m }}</option>{% endfor %}</select></label>
+    <label>Только точка <select name="location"><option value="">любая</option>{% for p in places %}<option value="{{ p }}"{% if p == scope.location %} selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+    <label class="check"><input type="checkbox" name="new_only" value="1" {% if promo_new_only(promo) %}checked{% endif %}> Только новые аренды — первый период выдачи</label>
+    {% endif %}
     <label>Действует с <input type="date" name="starts_on" value="{{ promo.starts_on|iso if promo.starts_on else '' }}"></label>
     <label>Действует по <input type="date" name="ends_on" value="{{ promo.ends_on|iso if promo.ends_on else '' }}"></label>
     <label>Предел применений <input name="max_uses" inputmode="numeric" value="{{ promo.max_uses or '' }}" placeholder="пусто — без предела"></label>
@@ -35,12 +47,17 @@
   <p class="muted">Подстановки в тексте: {% for code, label in PROMO_TEXT_FIELDS.items() %}<code>{{ '{' }}{{ code }}{{ '}' }}</code> — {{ label }}{% if not loop.last %}, {% endif %}{% endfor %}.
     Пустой текст — уйдёт текст шаблона. Скидка — либо процент от цены велосипеда
     за период, либо сумма, но не больше самой цены; доп. аккумулятор в скидку
-    не входит.</p>
+    не входит.{% if spec.scope %} Модель и точка — велосипед аренды и точка
+    выдачи: скидка ляжет только на такие аренды. Без «только новые аренды» —
+    и на продления идущих: каждый, кто уже катается на этой модели с этой
+    точки, получит её на ближайшем продлении, а простой от этого не
+    уменьшится. «Один раз на клиента» не даст дарить её каждую неделю.{% endif %}</p>
   {% else %}
   <dl>
     <dt>Скидка</dt><dd>{{ promo_discount_label(promo) }}</dd>
     {% if promo.code %}<dt>Промокод</dt><dd><code>{{ promo.code }}</code></dd>{% endif %}
     {% for key, value in params.items() %}<dt>{{ PROMO_PARAM_LABELS[key] }}</dt><dd>{{ value }}</dd>{% endfor %}
+    {% if spec.scope %}<dt>Только для</dt><dd>{{ promo_scope_label(promo) or 'всех моделей и точек' }}{% if promo_new_only(promo) %}, только новые аренды{% endif %}</dd>{% endif %}
     <dt>Действует</dt><dd>{% if promo.starts_on or promo.ends_on %}{{ promo.starts_on|dmy if promo.starts_on else '…' }} — {{ promo.ends_on|dmy if promo.ends_on else '…' }}{% else %}без срока{% endif %}</dd>
     <dt>Предел</dt><dd>{{ promo.max_uses or 'нет' }}</dd>
     <dt>Один раз на клиента</dt><dd>{{ 'да' if promo.once_per_client else 'нет' }}</dd>

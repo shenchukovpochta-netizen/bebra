@@ -91,6 +91,74 @@
   оплаченные клиентские наряды, в выручку аренды они не входят{% endif %}.</p>
 </div>
 
+{# Переброска - совет на завтра и послезавтра, от периода отчёта не
+   зависит. Везёт человек: отмечает велосипеды и жмёт кнопку, панель
+   только ставит им точку (журнал мест пишет триггер). #}
+{% if transfer %}
+{% set move_ok = can_edit(staff, 'bikes') %}
+<section class="card" id="transfer">
+  <h2>Переброска между точками <span class="muted">· на {{ transfer.days|map('dmy')|join(' и ') }}</span></h2>
+  {% for g in transfer.moves %}
+  <div>
+    <h3>Перевезти {{ g.label }}</h3>
+    {% if move_ok %}
+    <form method="post" action="/bikes/transfer">
+      {# Откуда - тоже в форме: устаревшая форма не должна везти велосипед
+         с точки, куда его тем временем увезли. #}
+      <input type="hidden" name="source" value="{{ g.source }}">
+      <input type="hidden" name="target" value="{{ g.target }}">
+      {% for m in g.lines %}
+      <p><b>{{ m.count }} × {{ m.model }}</b> <small class="muted">— отмечены дольше всех стоящие, выбор за вами</small></p>
+      <ul class="inline">
+        {% for b in m.bikes %}<li><label class="check"><input type="checkbox" name="bike_ids" value="{{ b.id }}"{% if b.picked %} checked{% endif %}> № {{ b.code }} <small class="muted">· стоит {{ b.idle_days or 0 }} дн.</small></label></li>{% endfor %}
+      </ul>
+      {% endfor %}
+      <button type="submit">Перевезли на {{ g.target }}</button>
+    </form>
+    {% else %}
+    {% for m in g.lines %}<p>{{ m.count }} × {{ m.model }}: {% for b in m.bikes if b.picked %}№ {{ b.code }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endfor %}
+    {% endif %}
+  </div>
+  {% else %}
+  <p>Перебрасывать нечего: {% if transfer.short %}там, где на завтра не хватает, лишних
+    той же модели нет ни на одной точке — их видно в прогнозе ниже{% else %}на завтра и
+    послезавтра каждой точке хватает своих{% endif %}.</p>
+  {% endfor %}
+  <p class="muted">Спрос — выдачи модели на точке в тот же день недели за {{ transfer.weeks }}
+    недель в среднем плюс открытые заявки на день; будет — свободные сейчас (без ремонта,
+    брони и подменных) и аренды, у которых к этому дню кончается «оплачено до», если
+    клиент не сказал «продлю». Точка отдаёт только свободные сверх своего прогноза и
+    запаса {{ transfer.safety }}, недостача закрывается от самого большого излишка.</p>
+  {% if transfer.rows %}
+  <details>
+    <summary>Прогноз по точкам и моделям</summary>
+    <div class="table-wrap">
+    <table class="cards">
+      <tr><th>Точка</th><th>Модель</th><th class="num">Свободно</th>{% for day in transfer.days %}<th class="num">К {{ day|dmy }}: спрос / будет</th>{% endfor %}<th>Итог</th></tr>
+      {% for r in transfer.rows %}
+      <tr>
+        <td data-label="Точка">{{ r.location }}</td>
+        <td data-label="Модель">{{ r.model }}</td>
+        <td class="num" data-label="Свободно">{{ r.free }}</td>
+        {% for st in r.steps %}{% set day = st.on %}<td class="num" data-label="К {{ day|dmy }}: спрос / будет">{{ st.want }} / {{ st.have }}{% if st.booked %} <small class="muted">· заявок {{ st.booked }}</small>{% endif %}</td>{% endfor %}
+        <td class="{% if r.need > r.covered %}bad{% elif r.spare %}ok{% endif %}" data-label="Итог">{% if r.need %}не хватает {{ r.need }}{% if r.covered %}, привезут {{ r.covered }}{% endif %}{% elif r.spare %}лишних {{ r.spare }}{% else %}в норме{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+  </details>
+  {% endif %}
+  {% if can_edit(staff, 'settings') %}
+  <form method="post" action="/locations/transfer" class="inline-form">
+    <label>Запас на точке <input name="transfer_safety" value="{{ transfer.safety }}" size="3" inputmode="numeric"></label>
+    <button type="submit" class="ghost">Сохранить</button>
+  </form>
+  <p class="muted small">Запас — сколько свободных каждой модели точка оставляет себе сверх
+    прогноза: на курьера без заявки. Ноль — отдавать всё лишнее.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if report.rows %}
 <section class="card">
   <h2>Три числа по месяцам</h2>

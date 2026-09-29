@@ -672,6 +672,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         PROMO_TEXT_FIELDS=logic.PROMO_TEXT_FIELDS,
         promo_discount_label=logic.promo_discount_label,
         promo_params=logic.promo_params,
+        promo_scope=logic.promo_scope, promo_scope_label=logic.promo_scope_label,
+        promo_new_only=logic.promo_new_only,
+        IDLE_PROMO_LENGTH=logic.IDLE_PROMO_LENGTH,
         COMPANY_FIELDS=company.COMPANY_FIELDS,
         CONTACT_FIELDS=company.CONTACT_FIELDS,
         CLIENT_CHANNELS=logic.CLIENT_CHANNELS, channel_label=logic.channel_label,
@@ -1116,15 +1119,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Задачи на сегодня: один список поверх виджетов. Каждый источник
         # читается тем же запросом, что и его раздел, - список не вправе
         # показывать не то, что покажет раздел.
+        bookings = await crm.bookings(status="new")
+        # Переброска и простой - та же выборка, что в отчёте по точкам и на
+        # странице точки: строка задачи ведёт туда, где то же самое.
+        advice = await point_advice(places, fleet, rentals=rows, bookings=bookings,
+                                    settings=settings)
         tasks = logic.today_tasks(
             expiring=expiring,
             search=logic.search_rows(rentals, settings=logic.search_settings(settings),
                                      today=today),
             orders=await crm.work_orders(open_only=True, limit=500),
             claims=await crm.pending_claims(),
-            bookings=await crm.bookings(status="new"),
+            bookings=bookings,
             alerts=await crm.tracker_alerts(open_only=True, limit=500),
-            today=today)
+            transfers=(advice["transfer"] or {}).get("moves", ()),
+            idle=advice["idle"], today=today)
         return render(request, "dashboard.html",
                       tasks=tasks,
                       inbox_waiting=(await crm.inbox_open_count()
@@ -1396,6 +1405,45 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         order = {loc: i for i, loc in enumerate(names)}
         return sorted(out.values(),
                       key=lambda r: (order.get(r["location"], len(order)), r["location"]))
+
+    async def point_advice(places: list[dict], fleet: list[dict], *,
+                           rentals: list[dict] | None = None,
+                           bookings: list[dict] | None = None,
+                           settings: dict | None = None,
+                           with_transfer: bool = True) -> dict[str, Any]:
+        """Переброска между точками и скидка на простаивающие - одна выборка
+        на сводку, отчёт по точкам и страницу точки: иначе три экрана
+        советовали бы разное. Переброска - когда точек больше одной;
+        странице точки она не нужна (with_transfer=False)."""
+        today = date.today()
+        now = datetime.now(UTC)
+        if settings is None:
+            settings = await crm.settings()
+        names = logic.point_choices(places)
+        aliases = logic.model_aliases(await crm.bike_models())
+        since = await crm.bike_status_since()
+        transfer = None
+        if with_transfer and len(names) > 1:
+            transfer = logic.transfer_plan(
+                points=names, bikes=fleet,
+                rentals=rentals if rentals is not None else await crm.active_rentals(),
+                history=await crm.issues_by_day(
+                    today - timedelta(days=7 * logic.TRANSFER_WEEKS), today),
+                bookings=(bookings if bookings is not None
+                          else await crm.bookings(status="new")),
+                today=today, safety=logic.transfer_settings(settings)["safety"],
+                aliases=aliases,
+                idle={int(b["id"]): logic.idle_days(since.get(b["id"]), now=now)
+                      for b in fleet})
+        idle = logic.idle_promo_settings(settings)
+        # Простой на точке - и от переезда: привезённый переброской стоит
+        # на новой точке с приезда, а не со смены статуса.
+        return {"transfer": transfer, "idle_settings": idle,
+                "idle": logic.idle_promo_rows(
+                    logic.idle_models(fleet, since=since, now=now, days=idle["days"],
+                                      moved=await crm.bike_location_since(),
+                                      points=names, aliases=aliases),
+                    await crm.promos(active_only=True), today=today)}
 
     @app.post("/billing/run")
     async def billing_run(request: Request) -> Response:
@@ -1967,6 +2015,41 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Сохранено.")
         return redirect(f"/bikes/{bike_id}")
 
+    @app.post("/bikes/transfer")
+    async def bikes_transfer(request: Request) -> Response:
+        """Переброска между точками по подсказке отчёта «По точкам»: оператор
+        отметил велосипеды, панель переставила им точку той же записью, что
+        и карточка. Само ничего не едет - подсказка только считает."""
+        data = await form(request)
+        back = "/reports/points#transfer"
+        target = logic.check_location(data.get("target"), await location_names())
+        if not target.ok or not target.value:
+            flash(request, "Выберите точку, куда везти.", "err")
+            return redirect(back)
+        # Откуда везут - из формы, а не с карточки: велосипед, который
+        # увезли на третью точку, пока форма была открыта, отсюда не едет.
+        # Справочником имя не проверяется: оно лишь сравнивается с точкой
+        # велосипеда, и чужая строка просто ни с чем не совпадёт.
+        source = " ".join(str(data.get("source") or "").split())
+        if not source:
+            flash(request, "Форма перевозки устарела — обновите страницу.", "err")
+            return redirect(back)
+        ids = (await form_ids(request, "bike_ids"))[:logic.TRANSFER_MAX_BIKES]
+        bikes = [b for b in [await crm.bike(i) for i in ids] if b is not None]
+        if not bikes:
+            flash(request, "Отметьте велосипеды, которые везёте.", "err")
+            return redirect(back)
+        got = await service.transfer_bikes(crm, bikes, source=source, target=target.value,
+                                           by=who(request))
+        if got["moved"]:
+            flash(request, f"С {source} на {target.value} перевезено {len(got['moved'])}: "
+                           + ", ".join(f"№ {b['code']}" for b in got["moved"]) + ".")
+        if got["skipped"]:
+            flash(request, f"Не перевезены — уже не свободны или уже не на {source}: "
+                           + ", ".join(f"№ {b['code']}" for b in got["skipped"]) + ".",
+                  "err")
+        return redirect(back)
+
     @app.post("/bikes/{bike_id}/status")
     async def bike_status(request: Request, bike_id: int) -> Response:
         bike = await crm.bike(bike_id)
@@ -2239,24 +2322,33 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                                    tariff["period_days"]),
                    battery_slots=int(ctx["bike"].get("battery_count") or 0),
                    max_extra=logic.MAX_EXTRA_BATTERIES)
+        # Точка выдачи: выбранная на шагах (из заявки или фильтром), иначе
+        # точка заявки, иначе точка велосипеда. Велосипед встанет на неё
+        # тем же UPDATE, что и в «в аренде»: пока аренда идёт, он числится
+        # на её точке. Правило и список - те же, что у оформления
+        # (issue_create): по этой точке считается скидка, и с ней сверится
+        # пересчёт, - точка из закрытой заявки не должна разойтись с ним.
+        booking = (await crm.booking(ctx["booking_id"])
+                   if ctx["booking_id"] is not None else None)
+        ctx.update(point=logic.issue_point(ctx["point"], booking=booking, bike=ctx["bike"]),
+                   issue_places=await location_names(
+                       ctx["bike"].get("location"), (booking or {}).get("location_name")))
         # Акция видна до денег: оператор называет клиенту сумму со
         # скидкой, а не объясняет баллы после оплаты. Промокод приходит
         # адресом (?promo=) - мастер без скрипта, проверка кода это
-        # перезагрузка шага. Выборка та же, что у начисления.
+        # перезагрузка шага. Выборка та же, что у начисления, - с моделью
+        # и точкой: акция на простой ограничена ими.
         preview = await service.preview_promo(crm, client=client, tariff=tariff,
                                               started_on=start, code=p.get("promo"),
-                                              today=date.today())
+                                              today=date.today(),
+                                              model=ctx["bike"].get("model"),
+                                              location=ctx["point"])
         discount = preview["discount"]
         # Начало в будущем: скидка ляжет в свой день, если акция доживёт, -
         # с оплаты сейчас её не снимаем, баллы зачтутся в следующий период.
         pay_due = logic.issue_payment_default(tariff["price"], balance)
         if not preview["deferred"]:
             pay_due = max(pay_due - discount, Decimal(0))
-        # Точка выдачи: выбранная на шагах (из заявки или фильтром), иначе
-        # точка велосипеда. Велосипед встанет на неё тем же UPDATE, что и
-        # в «в аренде»: пока аренда идёт, он числится на её точке.
-        ctx.update(point=logic.issue_point(ctx["point"], bike=ctx["bike"]),
-                   issue_places=await location_names(ctx["bike"].get("location")))
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
@@ -2266,7 +2358,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                 or (bot_user or {}).get("contract_no") or ""),
                    promo=preview["promo"], promo_discount=discount,
                    promo_code=preview["code"], promo_error=preview["error"],
-                   promo_note=preview["note"], promo_deferred=preview["deferred"])
+                   promo_note=preview["note"], promo_deferred=preview["deferred"],
+                   promo_seen=logic.promo_stamp(preview["promo"], discount))
         return render(request, "issue.html", **ctx)
 
     @app.post("/issue/client")
@@ -2342,13 +2435,27 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Промокод проверяется до аренды: неверный код - это отказ до
         # денег, а не выдача без скидки, о которой клиент узнает потом.
         promo_code = logic.clean_promo_code(data.get("promo_code"))
-        if promo_code:
-            preview = await service.preview_promo(
-                crm, client=client, tariff=tariff, started_on=started.value,
-                code=promo_code, today=date.today())
-            if preview["error"]:
-                flash(request, preview["error"], "err")
-                return redirect(back)
+        preview = await service.preview_promo(
+            crm, client=client, tariff=tariff, started_on=started.value,
+            code=promo_code, today=date.today(), model=bike.get("model"),
+            location=logic.issue_point(place.value, booking=booking, bike=bike))
+        if promo_code and preview["error"]:
+            flash(request, preview["error"], "err")
+            return redirect(back)
+        # Скидка, названная клиенту на шаге 4, обязана совпасть с той, что
+        # ляжет в журнал. Точку выдачи, дату и код на шаге меняют без
+        # перезагрузки, а акция с ограничением точкой от них зависит: иначе
+        # клиент платит сумму со скидкой и уходит с долгом (или получает
+        # скидку, о которой ему не сказали). Разошлось - назад на шаг с
+        # новыми значениями. Форма без поля (открыта до обновления панели)
+        # не сверяется: сравнить не с чем.
+        seen = data.get("promo_seen")
+        if seen is not None and seen != logic.promo_stamp(preview["promo"],
+                                                          preview["discount"]):
+            flash(request, "Скидка по акции для этой выдачи другая, чем была на экране: "
+                           "сменились точка, дата или промокод. Проверьте сумму к оплате "
+                           "и оформите снова.", "err")
+            return redirect(back)
         # Номер договора: с формы, иначе из карточки, иначе из бота - оператор
         # его наизусть не помнит, а в акте и отчётах он нужен.
         contract_no = contract.value or client.get("contract_no")
@@ -3649,7 +3756,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         months = by_month["months"]
         by_point = [logic.point_months(months, r["key"], starts=by_month["starts"])
                     for r in rows]
+        # Переброска - на завтра и послезавтра, от периода отчёта не зависит:
+        # это совет, что сделать сейчас, а не история.
+        advice = await point_advice(data["places"], data["fleet"])
         return render(request, "points.html", **data,
+                      transfer=advice["transfer"],
                       months_history_from=by_month["history_from"],
                       month_rows=[{"month": m["month"],
                                    "cells": [cells[i] for cells in by_point],
@@ -3744,7 +3855,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                            days_in_month=plan_span["days"],
                                            days_passed=plan_span["passed"])
         by_month = await points_by_month()
+        # Простаивающие модели этой точки - с готовой формой скидки или с
+        # уже идущей акцией; у «без точки» акцию не ограничить.
+        idle = ([r for r in (await point_advice(data["places"], data["fleet"],
+                                                with_transfer=False))["idle"]
+                 if r["location"] == name] if place else [])
         return render(request, "point.html", **data, place=place, key=key,
+                      idle=idle,
                       row=logic.point_card(data["report"], name, place),
                       chart=chart, chart_since=chart_since,
                       plan=plan, plan_span=plan_span, progress=progress,
@@ -4976,6 +5093,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Точка добавлена.")
         return redirect("/locations")
 
+    # До /locations/{location_id}: иначе «transfer» ушёл бы туда номером точки.
+    @app.post("/locations/transfer")
+    async def transfer_settings_save(request: Request) -> Response:
+        """Запас на точке для переброски: сколько свободных каждой модели
+        точка оставляет себе сверх прогноза. Правится в блоке «Переброска»
+        отчёта по точкам, а право - настроек: это правило сети, а не отчёт."""
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        got = count_field(data, "transfer_safety", what="Запас на точке",
+                          default=str(logic.TRANSFER_SAFETY),
+                          limit=logic.TRANSFER_SAFETY_MAX)
+        if not got.ok:
+            flash(request, got.error, "err")
+            return redirect("/reports/points#transfer")
+        await crm.set_setting("transfer_safety", str(got.value), by=who(request))
+        flash(request, f"Запас на точке для переброски: {got.value}.")
+        return redirect("/reports/points#transfer")
+
     @app.post("/locations/{location_id}")
     async def location_edit(request: Request, location_id: int) -> Response:
         if not may_edit(request, "settings"):
@@ -5784,11 +5920,28 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     # Раздел свой, а не вкладка приглашений: акции живут рядом с
     # рассылками, а не с отчётами, и правит их тот, кто ведёт клиентов.
 
+    async def promo_choices(promo: dict | None = None) -> dict[str, list[str]]:
+        """Модели и точки для ограничения акции - и для списка в форме, и для
+        проверки. Модели - каталог и то, что стоит в парке, по-клиентски
+        (как у цены); точки - справочник. Текущее значение акции остаётся
+        в списке, даже если модель убрали из каталога: иначе первая же
+        правка акции стёрла бы её ограничение."""
+        scope = logic.promo_scope(promo or {})
+        aliases = logic.model_aliases(catalogue := await crm.bike_models())
+        models = {str(m["title"]) for m in catalogue if m.get("active") and m.get("title")}
+        models |= {logic.catalogue_model(b.get("model"), aliases)
+                   for b in await crm.bikes(limit=10000) if b.get("model")}
+        if scope["model"]:
+            models.add(scope["model"])
+        return {"models": sorted(m for m in models if m),
+                "places": await location_names(scope["location"])}
+
     @app.get("/promos")
     async def promos_page(request: Request) -> Response:
         rows = await crm.promos()
         return render(request, "promos.html", rows=rows,
                       totals=logic.promo_totals(rows), today=date.today(),
+                      idle_settings=logic.idle_promo_settings(await crm.settings()),
                       recent=await crm.bonuses(kind="promo", limit=20))
 
     @app.get("/promos/new")
@@ -5799,26 +5952,67 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if kind not in logic.PROMO_KINDS:
             flash(request, "Выберите шаблон акции.", "err")
             return redirect("/promos")
-        return render(request, "promo_form.html", promo=logic.promo_form_defaults(kind),
+        choices = await promo_choices()
+        promo = logic.promo_form_defaults(kind)
+        if kind == logic.IDLE_PROMO_KIND:
+            # Из подсказки о простое: модель, точка и скидка уже стоят, но
+            # заводит акцию человек - форма только заполнена.
+            promo = logic.idle_promo_form(
+                request.query_params, today=date.today(),
+                percent=logic.idle_promo_settings(await crm.settings())["percent"],
+                **choices)
+        return render(request, "promo_form.html", promo=promo, **choices,
                       kind=kind, spec=logic.PROMO_KINDS[kind], is_new=True)
+
+    # До /promos/{promo_id}: иначе «settings» ушло бы туда номером акции.
+    @app.post("/promos/settings")
+    async def promo_settings_save(request: Request) -> Response:
+        """Порог простоя и скидка заготовки для подсказки «простаивает»."""
+        if not may_edit(request, "promos"):
+            return denied(request, "promos")
+        data = await form(request)
+        days = count_field(data, "idle_promo_days", what="Простаивает дольше",
+                           default=str(logic.IDLE_PROMO_DAYS), limit=365, least=1)
+        percent = count_field(data, "idle_promo_percent", what="Скидка",
+                              default=str(logic.IDLE_PROMO_PERCENT), limit=100, least=1)
+        for field in (days, percent):
+            if not field.ok:
+                flash(request, field.error, "err")
+                return redirect("/promos")
+        await crm.set_setting("idle_promo_days", str(days.value), by=who(request))
+        await crm.set_setting("idle_promo_percent", str(percent.value), by=who(request))
+        flash(request, f"Подсказка о простое: от {days.value} дн., скидка "
+                       f"{percent.value} %.")
+        return redirect("/promos")
 
     @app.post("/promos")
     async def promo_create(request: Request) -> Response:
         if not may_edit(request, "promos"):
             return denied(request, "promos")
         data = await form(request)
-        got = logic.check_promo_form(data)
+        choices = await promo_choices()
+
+        def again(error: str) -> Response:
+            # Форма с введённым, а не редирект на заготовку: чистая форма
+            # теряла модель, точку, срок и «один раз на клиента», и после
+            # правки одного поля заводилась скидка на всю сеть без срока.
+            flash(request, error, "err")
+            kind = str(data.get("kind") or "").strip()
+            if kind not in logic.PROMO_KINDS:
+                return redirect("/promos")
+            return render(request, "promo_form.html", status_code=400,
+                          promo=logic.promo_form_echo(data, kind), **choices,
+                          kind=kind, spec=logic.PROMO_KINDS[kind], is_new=True)
+
+        got = logic.check_promo_form(data, **choices)
         if not got.ok:
-            flash(request, got.error, "err")
-            return redirect(f"/promos/new?kind={quote(data.get('kind') or '', safe='')}")
+            return again(got.error)
         try:
             promo_id = await crm.create_promo(**got.value, by=who(request))
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
-                flash(request, f"Промокод {got.value['code']} уже действует у "
-                               "другой акции: выключите её или выберите другое слово.",
-                      "err")
-                return redirect(f"/promos/new?kind={got.value['kind']}")
+                return again(f"Промокод {got.value['code']} уже действует у другой "
+                             "акции: выключите её или выберите другое слово.")
             raise
         flash(request, f"Акция «{got.value['title']}» заведена и действует.")
         return redirect(f"/promos/{promo_id}")
@@ -5830,6 +6024,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Акция")
         kind = promo["kind"]
         return render(request, "promo_form.html", promo=promo, kind=kind,
+                      **(await promo_choices(promo)),
                       spec=logic.PROMO_KINDS.get(kind, {}), is_new=False,
                       grants=await crm.bonuses(promo_id=promo_id, limit=50),
                       alive=logic.promo_alive(promo, today=date.today()),
@@ -5845,7 +6040,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         # Шаблон у заведённой акции не меняется: у каждого свои параметры,
         # и «сезонная», ставшая «промокодом», потеряла бы смысл журнала.
-        got = logic.check_promo_form(data, kind=promo["kind"])
+        got = logic.check_promo_form(data, kind=promo["kind"],
+                                     **(await promo_choices(promo)))
         if not got.ok:
             flash(request, got.error, "err")
             return redirect(f"/promos/{promo_id}")

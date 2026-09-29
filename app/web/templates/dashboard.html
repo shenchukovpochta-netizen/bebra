@@ -9,12 +9,16 @@
 {% endif %}
 {# Задачи на сегодня: горящее сверху. Разделы, закрытые профилем, в
    список не попадают - иначе строка вела бы в «нет доступа». #}
+{# Перевозка ведёт в отчёт по точкам (там же выбор велосипедов), простой -
+   в готовую форму акции: и строка видна тем, кому открыт её адрес. #}
 {% set task_ok = {'overdue': 'rentals', 'soon': 'rentals', 'theft': 'rentals', 'search': 'rentals',
                   'orders': 'service', 'bookings': 'issue', 'bookings_later': 'issue',
-                  'claims': 'claims', 'alerts_urgent': 'trackers', 'alerts': 'trackers'} %}
+                  'claims': 'claims', 'alerts_urgent': 'trackers', 'alerts': 'trackers',
+                  'transfer': 'reports', 'idle_promo': 'promos'} %}
 {% set visible = tasks|selectattr('code', 'in', task_ok)|list %}
 {% set my_tasks = [] %}
-{% for t in visible %}{% if can_view(staff, task_ok[t.code]) %}{% set _ = my_tasks.append(t) %}{% endif %}{% endfor %}
+{# edit - строка ведёт в форму: видна тому, кто может её сохранить. #}
+{% for t in visible %}{% if can_view(staff, task_ok[t.code]) and (not t.edit or can_edit(staff, task_ok[t.code])) %}{% set _ = my_tasks.append(t) %}{% endif %}{% endfor %}
 <section class="card">
   <h2>Задачи на сегодня <span class="muted">· {{ my_tasks|length }}</span></h2>
   {% if my_tasks %}

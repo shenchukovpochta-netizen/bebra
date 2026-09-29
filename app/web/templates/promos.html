@@ -40,7 +40,7 @@
       <td><a href="/promos/{{ p.id }}"><b>{{ p.title }}</b></a>{% if p.code %} <code>{{ p.code }}</code>{% endif %}</td>
       <td>{{ spec.get('title', p.kind) }}</td>
       <td>{{ promo_discount_label(p) }}</td>
-      <td class="opt muted">{% for key, value in params.items() %}{{ PROMO_PARAM_LABELS[key] }}: {{ value }}{% if not loop.last %} · {% endif %}{% else %}{{ spec.get('when', '') }}{% endfor %}{% if p.once_per_client %} · один раз на клиента{% endif %}</td>
+      <td class="opt muted">{% for key, value in params.items() %}{{ PROMO_PARAM_LABELS[key] }}: {{ value }}{% if not loop.last %} · {% endif %}{% else %}{{ spec.get('when', '') }}{% endfor %}{% if promo_scope_label(p) %} · только {{ promo_scope_label(p) }}{% endif %}{% if promo_new_only(p) %} · только новые аренды{% endif %}{% if p.once_per_client %} · один раз на клиента{% endif %}</td>
       <td class="opt">{% if p.starts_on or p.ends_on %}{{ p.starts_on|dmy if p.starts_on else '…' }} — {{ p.ends_on|dmy if p.ends_on else '…' }}{% else %}<span class="muted">без срока</span>{% endif %}{% if p.max_uses %}<br><small class="muted">не больше {{ p.max_uses }} раз</small>{% endif %}</td>
       <td class="num">{{ p.uses }}</td>
       <td class="num">{{ money(p.total) }}</td>
@@ -52,6 +52,27 @@
     отзыв: она меняет баланс, но платежом не считается — средний чек парка
     считается по платежам, и скидка его не завышает. На одно начисление
     периода срабатывает одна акция, выгоднейшая для клиента.</p>
+</div>
+
+{# Подсказка «простаивает»: сводка и страница точки предлагают сезонную
+   акцию на модель, которая стоит на точке дольше порога. Порог и скидка
+   заготовки - здесь, у того, кто заводит акции. #}
+<div class="card">
+  <h2>Скидка на простаивающие</h2>
+  <p class="muted">Когда свободные велосипеды одной модели стоят на точке в
+    среднем дольше порога, сводка и страница точки предлагают акцию: сезонную,
+    только на эту модель и эту точку, только новые аренды (продление идущей
+    простой не снимает), на {{ IDLE_PROMO_LENGTH }} дней, один раз на клиента.
+    Предлагают, а не включают — заводит её человек.</p>
+  {% if can_edit(staff, 'promos') %}
+  <form method="post" action="/promos/settings" class="inline-form">
+    <label>Простаивает от, дн. <input name="idle_promo_days" value="{{ idle_settings.days }}" size="4" inputmode="numeric"></label>
+    <label>Скидка, % <input name="idle_promo_percent" value="{{ idle_settings.percent }}" size="4" inputmode="numeric"></label>
+    <button type="submit" class="ghost">Сохранить</button>
+  </form>
+  {% else %}
+  <p>Порог — {{ idle_settings.days }} дн., скидка — {{ idle_settings.percent }} %.</p>
+  {% endif %}
 </div>
 
 {% if recent %}

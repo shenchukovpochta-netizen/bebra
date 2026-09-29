@@ -504,10 +504,12 @@ class TestPromoPages(tw.WebCase):
         self.assertEqual(self.client.get("/promos/999").status_code, 404)
 
     def test_bad_form_is_explained(self):
+        """Ошибка - та же форма с введённым, а не чистая заготовка."""
         r = self.client.post("/promos", data={"kind": "promocode", "title": "Код",
                                               "percent": "10", "code": "!"})
-        self.assertEqual(r.status_code, 303)
-        self.assertIn("Промокод", self.get_ok("/promos/new?kind=promocode"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Промокод: буквы, цифры", r.text)
+        self.assertIn('value="Код"', r.text)
 
     def test_duplicate_active_code_is_refused(self):
         r = self.client.post("/promos", data={"kind": "promocode", "title": "А",
@@ -515,7 +517,9 @@ class TestPromoPages(tw.WebCase):
         first = int(r.headers["location"].rsplit("/", 1)[1])
         r = self.client.post("/promos", data={"kind": "promocode", "title": "Б",
                                               "percent": "10", "code": "весна"})
-        self.assertEqual(r.headers["location"], "/promos/new?kind=promocode")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("уже действует у другой акции", r.text)
+        self.assertIn('value="весна"', r.text, "введённое слово на месте")
         self.assertEqual(len(_run(self.crm.promos())), 1)
         # выключили первую - слово освободилось
         self.client.post(f"/promos/{first}/toggle")

@@ -687,6 +687,105 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await fake.saved_view(f_view))["query"],
                          f"status=active&location={new}&sort=days")
 
+    async def test_rename_carries_the_promo_scope(self):
+        """Скидка на простой, ограниченная точкой, после переименования
+        находит аренды той же точки; чужая точка и модель не тронуты."""
+        point = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
+        base = {"kind": "season", "percent": 15, "amount": None, "code": None,
+                "starts_on": None, "ends_on": None, "max_uses": None,
+                "once_per_client": True, "text": None, "note": None, "by": "t"}
+        mine = await self.crm.create_promo(title="А", **base,
+                                           params={"model": "MT", "location": "Павлюхина"})
+        other = await self.crm.create_promo(title="Б", **base,
+                                            params={"location": "Адоратского"})
+        bare = await self.crm.create_promo(title="В", **base, params={})
+        self.assertEqual(await self.crm.rename_location(point["id"], "Павлюхина 97А"), "ok")
+        scopes = {p: logic.promo_scope(await self.crm.promo(p)) for p in (mine, other, bare)}
+        self.assertEqual(scopes, {mine: {"model": "MT", "location": "Павлюхина 97А"},
+                                  other: {"model": None, "location": "Адоратского"},
+                                  bare: {"model": None, "location": None}})
+
+    # ─── переброска ───
+
+    async def test_transfer_moves_free_bikes_through_the_location_log(self):
+        """Перевозка - та же запись, что правка карточки: журнал мест с
+        автором, статус и «сколько стоит» не тронуты; выданный велосипед
+        остаётся на точке аренды."""
+        await self.seed()
+        free = await self.crm.create_bike(code="F-1", model="MT", location="Адоратского",
+                                          by="staff:a")
+        busy = await self.crm.create_bike(code="R-1", model="MT", location="Адоратского")
+        await self.rent(await self.client(1), busy, location="Адоратского")
+        since = (await self.crm.bike_status_since())[free]
+        got = await service.transfer_bikes(
+            self.crm, [await self.crm.bike(free), await self.crm.bike(busy)],
+            source="Адоратского", target="Павлюхина", by="staff:mover")
+        self.assertEqual(([b["code"] for b in got["moved"]],
+                          [b["code"] for b in got["skipped"]]), (["F-1"], ["R-1"]))
+        self.assertEqual(moves(await self.crm.bike_location_log(free))[-1],
+                         ("Адоратского", "Павлюхина", "staff:mover"))
+        self.assertEqual((await self.crm.bike_status_since())[free], since,
+                         "переезд не сбрасывает «сколько стоит»")
+        self.assertGreater((await self.crm.bike_location_since())[free], since,
+                           "а «стоит на этой точке» считается с приезда")
+        self.assertEqual((await self.crm.bike(busy))["location"], "Адоратского")
+
+    async def test_transfer_checks_the_source_in_the_update(self):
+        """Точка отправления - условие в WHERE, как keep_rented_location:
+        велосипед, который увезли, пока форма была открыта, не
+        переписывается, и журнал мест не получает несуществующего рейса.
+        Зеркало ведёт себя так же."""
+        async def story(crm):
+            bike = await crm.create_bike(code="S-1", model="MT", location="Адоратского")
+            stale = await crm.bike(bike)
+            await crm.update_bike(bike, location="Горького", by="staff:other")
+            gone = await crm.update_bike(bike, by="staff:mover", keep_rented_location=True,
+                                         from_location="Адоратского", location="Павлюхина")
+            got = await service.transfer_bikes(crm, [stale], source="Адоратского",
+                                               target="Павлюхина", by="staff:mover")
+            here = await crm.update_bike(bike, by="staff:mover", keep_rented_location=True,
+                                         from_location="Горького", location="Павлюхина")
+            return (gone, [b["code"] for b in got["skipped"]], here,
+                    moves(await crm.bike_location_log(bike)),
+                    sorted(await crm.bike_location_since()) == [bike])
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        self.assertEqual(real, (None, ["S-1"], {"status": "available",
+                                               "location": "Павлюхина"},
+                                [(None, "Адоратского", None),
+                                 ("Адоратского", "Горького", "staff:other"),
+                                 ("Горького", "Павлюхина", "staff:mover")], True))
+
+    async def test_issues_by_day_on_postgres_and_fake(self):
+        """Спрос для переброски: выдачи по точке, модели выданного
+        велосипеда (замена его не подменяет) и дню - на базе и в зеркале."""
+        async def story(crm):
+            tariff = await crm.create_tariff("Неделя", 7, D("3000"), None)
+            a = await crm.create_bike(code="A", model="MT", location="Адоратского")
+            b = await crm.create_bike(code="B", model="KG", location="Адоратского")
+            c = await crm.create_bike(code="C", model="MT", location="Павлюхина")
+            out = []
+            for n, (bike, place) in enumerate(((a, None), (c, "Павлюхина")), start=1):
+                cid = await crm.create_client(full_name=f"К{n}", phone=f"+7999100000{n}")
+                rid = await service.open_rental(
+                    crm, client=await crm.client(cid), bike=await crm.bike(bike),
+                    tariff=await crm.tariff(tariff), started_on=date.today(),
+                    contract_no=None, by="t", billing="manual", location=place)
+                out.append(rid)
+            await service.swap_bike(crm, await crm.rental(out[0]), await crm.bike(b),
+                                    reason="client", by="t")
+            rows = await crm.issues_by_day(date.today() - timedelta(days=1),
+                                           date.today() + timedelta(days=1))
+            empty = await crm.issues_by_day(date.today() + timedelta(days=1),
+                                            date.today() + timedelta(days=2))
+            return sorted((r["location"], r["model"], r["started_on"], int(r["issued"]))
+                          for r in rows), empty
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        self.assertEqual(real[0], [("Адоратского", "MT", date.today(), 1),
+                                   ("Павлюхина", "MT", date.today(), 1)])
+        self.assertEqual(real[1], [])
+
     # ─── касса ───
 
     async def test_cash_goes_to_own_point_shift(self):

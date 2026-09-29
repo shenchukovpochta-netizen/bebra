@@ -155,6 +155,19 @@
     {% endfor %}
   </table>
   {% else %}<p class="muted">Простаивающих велосипедов на точке нет.</p>{% endif %}
+  {# Модель, которая стоит дольше порога, - повод для скидки. Кнопка только
+     открывает заполненную форму акции; уже идущая акция - на её месте. #}
+  {% if idle %}
+  <h3>Простаивают модели</h3>
+  <ul>
+    {% for r in idle %}
+    <li>{{ r.model }} простаивает {{ r.days }} дн. <small class="muted">· свободных {{ r.count }}, дольше всех {{ r.max }} дн.</small>
+      {% if r.promo %}— идёт акция {% if can_view(staff, 'promos') %}<a href="/promos/{{ r.promo.id }}">«{{ r.promo.title }}»</a>{% else %}«{{ r.promo.title }}»{% endif %}{% if r.promo.ends_on %} до {{ r.promo.ends_on|dmy }}{% endif %}
+      {% elif can_edit(staff, 'promos') %}— <a class="btn ghost" href="{{ r.url }}">Предложить скидку</a>
+      {% else %}— можно предложить скидку, это в разделе «Акции»{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 </section>
 </div>
 

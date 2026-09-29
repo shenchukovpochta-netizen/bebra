@@ -347,6 +347,13 @@ class FakeCrm:
                 out[x["bike_id"]] = x["changed_at"]
         return out
 
+    async def bike_location_since(self):
+        out = {}
+        for x in self.location_log_:
+            if x["bike_id"] not in out or x["changed_at"] > out[x["bike_id"]]:
+                out[x["bike_id"]] = x["changed_at"]
+        return out
+
     async def history_start(self):
         moments = [x["changed_at"] for x in self.status_log_]
         moments += [x["created_at"] for x in self.ledger_]
@@ -454,8 +461,11 @@ class FakeCrm:
         return bid
 
     async def update_bike(self, bike_id, *, by=None, keep_rented_location=False,
-                          **fields):
+                          from_location=None, **fields):
         if bike_id not in self.bikes_:
+            return None
+        if from_location is not None and self.bikes_[bike_id].get("location") != from_location:
+            # Как условие в WHERE: велосипед уже не на точке отправления.
             return None
         before = self.bikes_[bike_id]["status"]
         place = self.bikes_[bike_id].get("location")
@@ -1533,6 +1543,22 @@ class FakeCrm:
                     row["renewals"] += 1
         return out
 
+    async def issues_by_day(self, since, until):
+        """Как db.issues_by_day: модель первого выданного велосипеда."""
+        out: dict = {}
+        for r in self.rentals_.values():
+            if not since <= r["started_on"] < until:
+                continue
+            first = min((x for x in self.rental_bikes_ if x["rental_id"] == r["id"]),
+                        key=lambda x: x["id"], default=None)
+            bike = self.bikes_.get(first["bike_id"] if first else r.get("bike_id"))
+            if bike is None:
+                continue
+            key = (r.get("location") or None, bike.get("model"), r["started_on"])
+            out[key] = out.get(key, 0) + 1
+        return [{"location": loc, "model": model, "started_on": on, "issued": n}
+                for (loc, model, on), n in out.items()]
+
     async def service_by_location(self, since, until):
         out: dict = {}
 
@@ -2089,6 +2115,10 @@ class FakeCrm:
             query = crm_logic.query_with_renamed(view["query"], "location", old, new_name)
             if query is not None:
                 view["query"] = query
+        for promo in self.promos_.values():
+            params = promo.get("params") or {}
+            if isinstance(params, dict) and params.get("location") == old:
+                promo["params"] = {**params, "location": new_name}
         return "ok"
 
     async def bike_models(self, *, active_only=False):

@@ -195,6 +195,9 @@
   <input type="hidden" name="tariff_id" value="{{ tariff.id }}">
   <input type="hidden" name="bike_id" value="{{ bike.id }}">
   {% if booking_id %}<input type="hidden" name="booking_id" value="{{ booking_id }}">{% endif %}
+  {# Какую скидку показали: оформление пересчитает по точке, дате и коду
+     из формы и при расхождении вернёт на шаг, а не выдаст с другой суммой. #}
+  <input type="hidden" name="promo_seen" value="{{ promo_seen }}">
   <div class="cols">
   <section class="card">
     <h2>Сводка</h2>
@@ -204,7 +207,7 @@
       {# Точка аренды - снимок выдачи: по ней считаются выручка и чек точки,
          и велосипед числится на ней, пока аренда идёт. #}
       <dt>Точка выдачи</dt><dd><select name="location" style="max-width:260px">{% if not point %}<option value="">не указана</option>{% endif %}{% for loc in issue_places %}<option value="{{ loc }}" {% if loc == point %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select>
-        <span class="muted">по ней считаются выручка и чек точки</span></dd>
+        <span class="muted">по ней считаются выручка и чек точки{% if promo %}; скидка посчитана для этой точки{% endif %}</span></dd>
       <dt>Тариф</dt><dd>{{ tariff.name }} — {{ money(tariff.price) }} / {{ tariff.period_days }} дн. <span class="muted">({{ money(per_day) }} в день)</span></dd>
       <dt>Итого за период</dt><dd><b id="period-total" data-base="{{ tariff.price }}">{{ money(tariff.price) }}</b>
         <span class="muted">велосипед плюс отмеченные доп. аккумуляторы</span></dd>
@@ -236,7 +239,8 @@
     <label>Способ <select name="pay_method">{% for code, label in METHODS.items() %}<option value="{{ code }}" {% if code == 'sbp' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <label>Промокод <input name="promo_code" value="{{ promo_code }}" placeholder="если клиент назвал" style="max-width:220px;text-transform:uppercase"></label>
     <p class="muted">0 — выдать без оплаты: клиент получит уведомление с долгом и ссылкой на оплату из кабинета (если Telegram привязан).
-      Неверный промокод остановит оформление; проверить его заранее можно в блоке ниже.</p>
+      Неверный промокод остановит оформление, как и смена точки, даты или кода, меняющая
+      скидку: шаг вернётся с новой суммой. Проверить код заранее можно в блоке ниже.</p>
   </section>
   {% if batteries %}
   <section class="card">

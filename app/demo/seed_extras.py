@@ -105,6 +105,10 @@ FAR_AWAY = (55.8615, 49.2365)
 SETTINGS = {
     "tracker_offline_hours": str(DEMO_OFFLINE_HOURS),
     "review_bonus": "300",
+    # Парк демо крутится быстрее боевого: свободный стоит день-два. С
+    # боевым порогом в неделю подсказку «простаивает - предложить скидку»
+    # покупатель франшизы не увидел бы никогда.
+    "idle_promo_days": "2",
 }
 REF_SETTINGS = {"ref_enabled": "1", "ref_bonus": "500", "ref_min_payment": "1000"}
 

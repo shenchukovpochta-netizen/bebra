@@ -156,6 +156,11 @@ class TestCrmSql(unittest.TestCase):
             # правка карточки: точку велосипеда в аренде UPDATE не пишет
             self.db.update_bike(1, note="x", location="Павлюхина", spare=True,
                                 keep_rented_location=True, by="me"),
+            # переброска: только с той точки, что в форме, - условие в WHERE
+            self.db.update_bike(1, location="Павлюхина", keep_rented_location=True,
+                                from_location="Адоратского", by="me"),
+            # «простаивает на точке» - с позднего из смены статуса и переезда
+            self.db.bike_location_since(),
             self.db.rentals(location="Павлюхина"),
             self.db.rentals(status="active", location="none"),
             self.db.create_rental(client_id=1, bike_id=None, tariff_id=None,
@@ -214,6 +219,8 @@ class TestCrmSql(unittest.TestCase):
             self.db.debt_by_location(),
             self.db.rentals_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                         datetime(2026, 9, 13, tzinfo=UTC)),
+            # спрос для переброски: выдачи по точке, модели и дню
+            self.db.issues_by_day(date(2026, 7, 19), today),
             self.db.service_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                         datetime(2026, 9, 13, tzinfo=UTC)),
             self.db.cash_by_location(datetime(2026, 9, 1, tzinfo=UTC),

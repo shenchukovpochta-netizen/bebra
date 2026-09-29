@@ -150,7 +150,13 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
                                       "tariff_name": tariff["name"],
                                       "base_price": base,
                                       "billing": "auto", "status": "active",
-                                      "promo_code": logic.clean_promo_code(promo_code)},
+                                      "promo_code": logic.clean_promo_code(promo_code),
+                                      # Модель и точка - для акции с
+                                      # ограничением; точка та же, что
+                                      # решила база в create_rental.
+                                      "bike_model": (bike or {}).get("model"),
+                                      "location": logic.issue_point(
+                                          location, booking=booking, bike=bike)},
                          today=date.today(), applied=applied)
     # Шаг воронки приглашений. Учёт не вправе сорвать выдачу велосипеда,
     # поэтому ошибка здесь только в логе.
@@ -242,15 +248,21 @@ async def charge_all(crm: Any, *, today: date,
 
 async def promo_context(crm: Any, *, client_id: int, rental_id: int | None,
                         period_index: int, period_from: date, today: date,
-                        code: Any) -> dict[str, Any]:
+                        code: Any, model: Any = None,
+                        location: Any = None) -> dict[str, Any]:
     """Контекст для logic.promo_fits - один и тот же у предпросмотра на
     выдаче и у начисления: иначе оператор видел бы одну скидку, а в
-    журнал ложилась бы другая."""
+    журнал ложилась бы другая. Модель - по каталогу: в парке она заводская,
+    а акцию ограничивают клиентским названием, как и цену."""
     history = logic.rental_history(await crm.client_rentals(client_id), rental_id)
+    model = str(model or "").strip()
+    if model:
+        model = logic.catalogue_model(model, logic.model_aliases(await crm.bike_models()))
     return {
         "period_index": period_index, "period_from": period_from, "today": today,
         "code": logic.clean_promo_code(code),
         "client_uses": await crm.promo_client_uses(client_id),
+        "model": model, "location": str(location or "").strip(),
         **history,
     }
 
@@ -274,7 +286,9 @@ async def promo_for_period(crm: Any, *, rental: dict, period_from: date,
     period_index = await crm.rental_charge_count(rental["id"]) + 1
     ctx = await promo_context(crm, client_id=rental["client_id"], rental_id=rental["id"],
                               period_index=period_index, period_from=period_from,
-                              today=today, code=rental.get("promo_code"))
+                              today=today, code=rental.get("promo_code"),
+                              model=rental.get("bike_model"),
+                              location=rental.get("location"))
     base = logic.to_money(rental.get("base_price") or rental["price"])
     picked = logic.pick_promo(promos, ctx, base)
     if picked is None:
@@ -286,10 +300,12 @@ async def promo_for_period(crm: Any, *, rental: dict, period_from: date,
 
 
 async def preview_promo(crm: Any, *, client: dict, tariff: dict, started_on: date,
-                        code: Any, today: date) -> dict[str, Any]:
+                        code: Any, today: date, model: Any = None,
+                        location: Any = None) -> dict[str, Any]:
     """Что акция даст на выдаче - до денег.
 
-    Та же выборка, что и у начисления первого периода: тот же контекст,
+    Та же выборка, что и у начисления первого периода: тот же контекст
+    (с моделью велосипеда и точкой выдачи - для акции с ограничением),
     та же цена велосипеда. `error` - отказ (кода нет, срок вышел, этому
     клиенту не положен): выдача с таким кодом не оформляется, иначе
     клиент узнал бы об отсутствии скидки после оплаты. `note` - код
@@ -309,7 +325,8 @@ async def preview_promo(crm: Any, *, client: dict, tariff: dict, started_on: dat
             out.update(error=str(exc), code="")
     ctx = await promo_context(crm, client_id=client["id"], rental_id=None,
                               period_index=1, period_from=started_on,
-                              today=max(today, started_on), code=out["code"])
+                              today=max(today, started_on), code=out["code"],
+                              model=model, location=location)
     if code_promo is not None and not logic.promo_fits(code_promo, ctx):
         out.update(error=f"Промокод {out['code']} действует, но этому клиенту не "
                          "подходит: он уже получал эту акцию.", code="")
@@ -986,6 +1003,40 @@ async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
                            "Откройте её заново.")
     return {"old_bike_id": old_id, "new_bike_id": new_bike["id"],
             "old_status": status}
+
+
+async def transfer_bikes(crm: Any, bikes: Iterable[dict], *, source: str, target: str,
+                         by: str) -> dict[str, list[dict]]:
+    """Переброска: отмеченные оператором свободные велосипеды - с точки
+    `source` на точку `target`.
+
+    Та же запись, что правка точки в карточке (`update_bike` с
+    keep_rented_location): журнал мест пишет триггер, автор - `by`, статус
+    и «сколько стоит» не трогаются. Везут только свободные: велосипед в
+    аренде числится на точке аренды, в ремонте - там, где его чинят.
+    Выданный, пока форма была открыта, остаётся где был - условие в самом
+    UPDATE, и такой велосипед уходит в `skipped`, а не в `moved`. Так же и
+    с точкой отправления: форма знает, откуда везут, и велосипед, который
+    тем временем увезли на третью точку, отсюда не «переезжает» - иначе
+    журнал мест записал бы рейс, которого не было. Условие тоже в UPDATE:
+    две вкладки с одной перевозкой не перепишут друг друга.
+    """
+    if not str(target or "").strip():
+        raise ServiceError("Выберите точку, куда везти.")
+    if not str(source or "").strip():
+        raise ServiceError("Форма перевозки устарела - обновите страницу.")
+    moved: list[dict] = []
+    skipped: list[dict] = []
+    for bike in bikes:
+        # Прочитанное перед записью - только отсев; решает условие в UPDATE.
+        if (bike.get("status") != "available" or bike.get("location") != source
+                or source == target):
+            skipped.append(bike)
+            continue
+        saved = await crm.update_bike(int(bike["id"]), by=by, keep_rented_location=True,
+                                      from_location=source, location=target)
+        (moved if saved and saved.get("location") == target else skipped).append(bike)
+    return {"moved": moved, "skipped": skipped}
 
 
 async def start_search(crm: Any, rental: dict, *, note: str | None, by: str) -> None:

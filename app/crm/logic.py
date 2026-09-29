@@ -3120,6 +3120,212 @@ def forecast_summary(free_now: int, soon: dict[str, list[dict]]) -> dict[str, in
     return out
 
 
+# ─────────────────── переброска между точками ───────────────────
+#
+# Точек несколько, и нужная модель часто стоит не там, где её спросят:
+# на Адоратского три свободных Monster Truck, а на Павлюхина их завтра
+# ждут. Подсказка на завтра и послезавтра: спрос - выдачи этой модели на
+# точке в тот же день недели за восемь недель плюс открытые заявки,
+# предложение - свободные сейчас и те, что вернутся по «оплачено до»
+# (freeing_soon). Перевозит оператор, отмечая велосипеды сам: система
+# считает, а не двигает парк.
+
+TRANSFER_WEEKS = 8
+TRANSFER_DAYS = 2
+# Запас на точке по умолчанию: один свободный каждой модели сверх своего
+# прогноза - на курьера, который пришёл без заявки.
+TRANSFER_SAFETY = 1
+TRANSFER_SAFETY_MAX = 50
+# Сколько велосипедов показать к перевозке сверх предложенных: оператор
+# выбирает сам, но весь парк точки в форме - это уже список, а не выбор.
+TRANSFER_EXTRA_CHOICES = 3
+# Велосипедов за одну перевозку: больше - это уже не газель, а чужая форма.
+TRANSFER_MAX_BIKES = 50
+
+
+def transfer_settings(settings: Mapping[str, Any] | None = None) -> dict[str, int]:
+    """Запас на точке: сколько свободных каждой модели точка оставляет себе
+    сверх своего прогноза. Ноль - честный ноль: «перевозить всё лишнее»."""
+    raw = str((settings or {}).get("transfer_safety") or "").strip()
+    value = parse_id(raw)
+    if value is None or value > TRANSFER_SAFETY_MAX:
+        value = TRANSFER_SAFETY
+    return {"safety": value}
+
+
+def weekday_demand(history: Iterable[Mapping[str, Any]], *, today: date,
+                   weeks: int = TRANSFER_WEEKS,
+                   aliases: Mapping[str, str] | None = None
+                   ) -> dict[tuple[str, str, int], Decimal]:
+    """Выдач в среднем за день недели: (точка, модель, weekday) -> число.
+
+    Окно - `weeks` недель до сегодня, сам сегодняшний день не входит: он
+    ещё не кончился. Делится на число недель, а не на дни с выдачами:
+    вторник без единой выдачи - тоже вторник, и он тянет среднее вниз.
+    """
+    weeks = max(int(weeks), 1)
+    start = today - timedelta(days=7 * weeks)
+    counts: dict[tuple[str, str, int], int] = {}
+    for row in history:
+        on = row.get("started_on")
+        if isinstance(on, datetime):
+            on = on.date()
+        place = str(row.get("location") or "").strip()
+        model = catalogue_model(row.get("model"), aliases)
+        if not isinstance(on, date) or not place or not model or not start <= on < today:
+            continue
+        key = (place, model, on.weekday())
+        counts[key] = counts.get(key, 0) + int(row.get("issued") or 1)
+    return {key: Decimal(n) / Decimal(weeks) for key, n in counts.items()}
+
+
+def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
+                  rentals: Iterable[Mapping[str, Any]],
+                  history: Iterable[Mapping[str, Any]],
+                  bookings: Iterable[Mapping[str, Any]] = (), today: date,
+                  safety: int = TRANSFER_SAFETY, weeks: int = TRANSFER_WEEKS,
+                  days: int = TRANSFER_DAYS,
+                  aliases: Mapping[str, str] | None = None,
+                  idle: Mapping[int, int | None] | None = None) -> dict[str, Any]:
+    """Прогноз по точкам и моделям на `days` дней вперёд и перевозки.
+
+    По каждой точке и модели, к концу завтра и к концу послезавтра:
+    спрос - среднее weekday_demand плюс открытые заявки на день (заявка на
+    сегодня и просроченная - спрос завтрашнего дня: клиент ещё ждёт, а
+    сегодняшний день прогноз не считает); будет - свободные сейчас плюс
+    аренды, которые освободятся к этому дню (freeing_soon: «продлю» не
+    возвращается, розыск - тоже). Спрос копится по дням и округляется до
+    целых, а в предложении только свободные: ремонт, бронь и подменный
+    фонд выдать нельзя.
+
+    need - сколько не хватает в худший из дней; spare - сколько можно
+    отдать: не больше свободных сейчас (везут только их) и так, чтобы в
+    любой из дней у точки остался её прогноз плюс `safety`. Перевозки -
+    жадно: самой большой нехватке - от самого большого излишка той же
+    модели. `idle` - дни простоя по велосипеду: к перевозке предлагаются
+    дольше всех стоящие, их и надо везти.
+    """
+    names = [str(p).strip() for p in points if str(p or "").strip()]
+    order = {name: i for i, name in enumerate(names)}
+    days = max(int(days), 1)
+    safety = max(int(safety), 0)
+    horizon = [today + timedelta(days=d) for d in range(1, days + 1)]
+    idle = idle or {}
+    cells: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def cell(place: str, model: str) -> dict[str, Any]:
+        return cells.setdefault((place, model), {
+            "location": place, "model": model, "free": 0, "bikes": [],
+            # back[k] - освободится через k дней (0 - сегодня или просрочка)
+            "back": [0] * (days + 1), "avg": [Decimal(0)] * days,
+            "booked": [0] * days})
+
+    for bike in bikes:
+        place = str(bike.get("location") or "").strip()
+        if bike.get("status") != "available" or bike.get("spare") or place not in order:
+            continue
+        model = catalogue_model(bike.get("model"), aliases)
+        if not model:
+            continue
+        row = cell(place, model)
+        row["free"] += 1
+        row["bikes"].append({"id": int(bike["id"]), "code": bike.get("code"),
+                             "idle_days": idle.get(int(bike["id"]))})
+    for after, rows in freeing_soon(rentals, today=today, horizon=days).items():
+        for rental in rows:
+            # Аренда в розыске «освобождается сегодня» по просрочке, но
+            # велосипед у пропавшего клиента завтра на точку не встанет.
+            if rental.get("search_at"):
+                continue
+            place = str(rental.get("location") or "").strip()
+            model = catalogue_model(rental.get("bike_model"), aliases)
+            if place in order and model:
+                cell(place, model)["back"][int(after)] += 1
+    for (place, model, weekday), value in weekday_demand(
+            history, today=today, weeks=weeks, aliases=aliases).items():
+        if place not in order:
+            continue
+        for i, on in enumerate(horizon):
+            if on.weekday() == weekday:
+                cell(place, model)["avg"][i] += value
+    for booking in bookings:
+        if booking.get("status", "new") != "new":
+            continue
+        place = str(booking.get("location_name") or "").strip()
+        model = catalogue_model(booking.get("model"), aliases)
+        wanted = booking.get("wanted_on") or today
+        i = max((wanted - today).days, 1) - 1
+        if place in order and model and i < days:
+            cell(place, model)["booked"][i] += 1
+
+    out_rows: list[dict[str, Any]] = []
+    for (place, model), row in cells.items():
+        demand = Decimal(0)
+        need, room = 0, row["free"]
+        steps = []
+        for i, on in enumerate(horizon):
+            demand += row["avg"][i] + row["booked"][i]
+            want = int(demand.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+            have = row["free"] + sum(row["back"][:i + 2])
+            steps.append({"on": on, "demand": demand.quantize(Decimal("0.1"),
+                                                              rounding=ROUND_HALF_UP),
+                          "want": want, "have": have, "booked": row["booked"][i]})
+            need = max(need, want - have)
+            room = min(room, have - want - safety)
+        if not (row["free"] or any(row["back"]) or demand):
+            continue
+        # Дольше всех стоящие - первыми: перевезти их и есть снижение
+        # простоя; у кого журнала нет - в конец, по номеру.
+        row["bikes"].sort(key=lambda b: (-(b["idle_days"] or 0), str(b["code"] or "")))
+        out_rows.append({"location": place, "model": model, "free": row["free"],
+                         "back": sum(row["back"]), "steps": steps,
+                         "need": max(need, 0), "spare": max(room, 0),
+                         "bikes": row["bikes"], "covered": 0})
+    out_rows.sort(key=lambda r: (order[r["location"]], r["model"]))
+
+    left = {(r["location"], r["model"]): r["spare"] for r in out_rows}
+    taken = {(r["location"], r["model"]): 0 for r in out_rows}
+    by_key = {(r["location"], r["model"]): r for r in out_rows}
+    moves: list[dict[str, Any]] = []
+    for target in sorted((r for r in out_rows if r["need"]),
+                         key=lambda r: (-r["need"], order[r["location"]], r["model"])):
+        want = target["need"]
+        sources = sorted((r for r in out_rows if r["model"] == target["model"]
+                          and r["location"] != target["location"]
+                          and left[(r["location"], r["model"])] > 0),
+                         key=lambda r: (-left[(r["location"], r["model"])],
+                                        order[r["location"]]))
+        for source in sources:
+            if want <= 0:
+                break
+            key = (source["location"], source["model"])
+            count = min(want, left[key])
+            left[key] -= count
+            want -= count
+            # Предложенные - следующие по простою, ещё не отданные другой
+            # перевозке; к ним пара запасных на выбор оператора.
+            pool = by_key[key]["bikes"][taken[key]:]
+            taken[key] += count
+            moves.append({"source": source["location"], "target": target["location"],
+                          "model": target["model"], "count": count,
+                          "bikes": [{**b, "picked": i < count} for i, b in
+                                    enumerate(pool[:count + TRANSFER_EXTRA_CHOICES])]})
+        target["covered"] = target["need"] - want
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for move in moves:
+        group = groups.setdefault((move["source"], move["target"]), {
+            "source": move["source"], "target": move["target"], "lines": [], "count": 0})
+        group["lines"].append(move)
+        group["count"] += move["count"]
+    for group in groups.values():
+        group["label"] = (f"с {group['source']} на {group['target']}: " + ", ".join(
+            f"{m['count']} × {m['model']}" for m in group["lines"]))
+    return {"rows": out_rows, "moves": list(groups.values()), "days": horizon,
+            "safety": safety, "weeks": weeks,
+            "short": sum(r["need"] - r["covered"] for r in out_rows)}
+
+
 # ─────────────────── закупки основных средств ───────────────────
 
 def purchase_no(number: int) -> str:
@@ -6356,10 +6562,15 @@ PROMO_KINDS: dict[str, dict[str, Any]] = {
     },
     "season": {
         "title": "Сезонная",
-        "hint": "Скидка на каждый период, начисленный в окне дат акции.",
+        "hint": "Скидка на каждый период, начисленный в окне дат акции. Можно "
+                "ограничить моделью, точкой и только новыми арендами - так "
+                "снимают простой.",
         "when": "каждый период в окне дат",
         "defaults": {"percent": 10, "once_per_client": False},
         "params": {},
+        # Ограничение моделью и точкой аренды - ровно то, что нужно
+        # скидке на простаивающие: отдельного шаблона под неё нет.
+        "scope": True,
         "text": "Акция «{title}»: скидка {discount} на период аренды.",
     },
     "renewal": {
@@ -6434,6 +6645,40 @@ def promo_params(promo: Mapping[str, Any]) -> dict[str, int]:
     return out
 
 
+def _promo_raw_params(promo: Mapping[str, Any]) -> Mapping[str, Any]:
+    """params акции словарём: jsonb приходит и строкой, мусор - пустой."""
+    raw = promo.get("params")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = {}
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def promo_scope(promo: Mapping[str, Any]) -> dict[str, str | None]:
+    """Ограничение акции: модель велосипеда (название каталога) и точка
+    аренды. None - любая. Лежит в params, рядом с числовыми параметрами:
+    колонка ради двух необязательных строк не нужна."""
+    raw = _promo_raw_params(promo)
+    return {key: (str(raw.get(key) or "").strip() or None)
+            for key in ("model", "location")}
+
+
+def promo_new_only(promo: Mapping[str, Any]) -> bool:
+    """«Только новые аренды»: скидка лишь на первый период выдачи. Без неё
+    сезонная ложится и на продления идущих аренд, а простой снимает только
+    новый курьер - продлевающий катался бы и без скидки."""
+    return _promo_raw_params(promo).get("new_only") is True
+
+
+def promo_scope_label(promo: Mapping[str, Any]) -> str:
+    """«Monster Truck · Адоратского» - для списка и карточки; пусто - без
+    ограничения."""
+    scope = promo_scope(promo)
+    return " · ".join(v for v in (scope["model"], scope["location"]) if v)
+
+
 def promo_discount(promo: Mapping[str, Any], price: Any) -> Decimal:
     """Скидка с цены велосипеда за период: процент или сумма, не больше
     самой цены. Доп. аккумулятор - отдельная позиция, в скидку не входит."""
@@ -6477,7 +6722,9 @@ def promo_fits(promo: Mapping[str, Any], ctx: Mapping[str, Any]) -> bool:
     начало), today, code (промокод, названный на выдаче), previous_rentals
     (сколько аренд у клиента было до этой), last_closed_on (когда
     закрылась последняя из них), client_uses ({promo_id: сколько раз
-    клиент уже получал эту акцию}).
+    клиент уже получал эту акцию}), model (модель велосипеда аренды по
+    каталогу) и location (точка аренды) - для акции с ограничением;
+    «только новые аренды» (promo_new_only) смотрит на period_index.
     """
     kind = str(promo.get("kind") or "")
     if kind not in PROMO_KINDS:
@@ -6488,6 +6735,17 @@ def promo_fits(promo: Mapping[str, Any], ctx: Mapping[str, Any]) -> bool:
         used = (ctx.get("client_uses") or {}).get(promo.get("id"), 0)
         if int(used or 0) > 0:
             return False
+    # Ограничение проверяется у любого шаблона, где оно записано: лишняя
+    # скидка хуже недоданной, а аренда без велосипеда или точки под
+    # ограничение не подходит - про неё нельзя сказать, что это та модель.
+    scope = promo_scope(promo)
+    if scope["model"] and scope["model"].casefold() != \
+            str(ctx.get("model") or "").strip().casefold():
+        return False
+    if scope["location"] and scope["location"] != str(ctx.get("location") or "").strip():
+        return False
+    if promo_new_only(promo) and index != 1:
+        return False
     if kind in PROMO_FIRST_KINDS and index != 1:
         return False
     if kind == "first":
@@ -6527,6 +6785,17 @@ def pick_promo(promos: Iterable[Mapping[str, Any]], ctx: Mapping[str, Any],
                 discount == best[1] and int(promo["id"]) < int(best[0]["id"])):
             best = (dict(promo), discount)
     return best
+
+
+def promo_stamp(promo: Mapping[str, Any] | None, discount: Any) -> str:
+    """Что предпросмотр выдачи показал оператору: «акция:скидка», «-» - без
+    акции. Едет скрытым полем шага 4 и сверяется с пересчётом при
+    оформлении: точку, дату и код на шаге меняют без перезагрузки, а
+    акция с ограничением от них зависит - клиенту назвали бы одну сумму,
+    а в журнал легла бы другая."""
+    if promo is None:
+        return "-"
+    return f"{int(promo['id'])}:{to_money(discount)}"
 
 
 def rental_history(rentals: Iterable[Mapping[str, Any]],
@@ -6588,12 +6857,16 @@ def check_promo_text(raw: Any) -> Check:
     return Check(True, text or None)
 
 
-def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None) -> Check:
+def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None,
+                     models: Iterable[str] = (), places: Iterable[str] = ()) -> Check:
     """Форма акции целиком: возвращает словарь колонок или первую ошибку.
 
     Скидка - либо процент, либо сумма: обе сразу это спор, ни одной -
     пустая акция. Код нужен только промокоду, у остальных он отбрасывается,
     чтобы случайное слово в поле не сделало из сезонной акции промокод.
+    Ограничение моделью и точкой - только у шаблона со `scope`, и только
+    из списков `models` и `places`: у прочих поле отбрасывается тем же
+    правилом, что и код. Там же галочка «только новые аренды» (new_only).
     """
     kind = str(kind or data.get("kind") or "").strip()
     if kind not in PROMO_KINDS:
@@ -6634,6 +6907,19 @@ def check_promo_form(data: Mapping[str, Any], *, kind: str | None = None) -> Che
             return Check(False, error=f"{PROMO_PARAM_LABELS[key]}: целое от {low} "
                                       f"до {high}.")
         params[key] = value
+    if PROMO_KINDS[kind].get("scope"):
+        for key, allowed, what in (("model", models, "Модель"),
+                                   ("location", places, "Точка")):
+            value = " ".join(str(data.get(key) or "").split())
+            if not value:
+                continue
+            if value not in set(allowed):
+                return Check(False, error=f"{what}: недопустимое значение.")
+            params[key] = value
+        # Флаг пишется только поднятым: у старых акций ключа нет, и они
+        # продолжают ложиться на продления, как ложились.
+        if data.get("new_only"):
+            params["new_only"] = True
     starts = ends = None
     if str(data.get("starts_on") or "").strip():
         got = check_date(data.get("starts_on"))
@@ -6683,6 +6969,41 @@ def promo_form_defaults(kind: str) -> dict[str, Any]:
     }
 
 
+def promo_form_echo(data: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    """Форма новой акции, вернувшаяся с ошибкой: введённое, а не заготовка.
+
+    Редирект на чистую форму терял модель, точку, срок и «один раз на
+    клиента» заготовки из подсказки о простое: человек правил одно поле из
+    ошибки и заводил бессрочную скидку на всю сеть. Значения - как есть,
+    строками: проверит их check_promo_form при следующей отправке; дата,
+    которую не разобрать, остаётся пустой - ошибка про неё уже на экране.
+    """
+    promo = promo_form_defaults(kind)
+    spec = PROMO_KINDS.get(kind) or {}
+
+    def text(key: str) -> str:
+        return str(data.get(key) or "").strip()
+
+    def day(key: str) -> date | None:
+        got = check_date(data.get(key))
+        return got.value if got.ok else None
+
+    params: dict[str, Any] = {key: text(key) or default
+                              for key, default in spec.get("params", {}).items()}
+    if spec.get("scope"):
+        params.update({key: " ".join(text(key).split()) for key in ("model", "location")
+                       if text(key)})
+        if data.get("new_only"):
+            params["new_only"] = True
+    promo.update(title=text("title"), percent=text("percent") or None,
+                 amount=text("amount") or None, code=text("code") or None,
+                 params=params, starts_on=day("starts_on"), ends_on=day("ends_on"),
+                 max_uses=text("max_uses") or None,
+                 once_per_client=bool(data.get("once_per_client")),
+                 text=text("text"), note=text("note") or None)
+    return promo
+
+
 def promo_totals(promos: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """Плитки раздела: сколько акций действует, сколько раз сработали
     и на какую сумму - по всем, включая выключенные: скидка, розданная
@@ -6692,6 +7013,155 @@ def promo_totals(promos: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     total = to_money(sum((to_money(p.get("total")) for p in rows), Decimal(0)))
     return {"active": sum(1 for p in rows if p.get("active")),
             "count": len(rows), "uses": uses, "total": total}
+
+
+# ─────────────────── скидка на простаивающие ───────────────────
+#
+# Модель на точке стоит свободной дольше порога в среднем - сводка и
+# страница точки предлагают сезонную акцию, ограниченную этой моделью и
+# точкой. Предлагают, а не включают: скидка - это деньги, решает человек.
+# Заведённая акция встаёт на место предложения.
+
+IDLE_PROMO_KIND = "season"
+IDLE_PROMO_DAYS = 7
+IDLE_PROMO_PERCENT = 15
+# Срок заготовки: две недели - два недельных периода, за них видно,
+# сработала ли скидка; бессрочная скидка на модель - уже цена, а не акция.
+IDLE_PROMO_LENGTH = 14
+# В «Задачах на сегодня» - самые долгие: весь список живёт на странице точки.
+IDLE_PROMO_TASKS = 3
+
+
+def idle_promo_settings(settings: Mapping[str, Any] | None = None) -> dict[str, int]:
+    """Порог простоя в днях и скидка заготовки в процентах: из настроек,
+    иначе умолчания. Ноль не принимается ни там, ни там: «простаивает 0
+    дней» - весь свободный парк, скидка 0 % - не акция."""
+    settings = settings or {}
+
+    def number(key: str, default: int, high: int) -> int:
+        value = parse_id(settings.get(key))
+        return value if value is not None and 1 <= value <= high else default
+
+    return {"days": number("idle_promo_days", IDLE_PROMO_DAYS, 365),
+            "percent": number("idle_promo_percent", IDLE_PROMO_PERCENT, 100)}
+
+
+def idle_models(bikes: Iterable[Mapping[str, Any]], *,
+                since: Mapping[int, datetime | None], now: datetime, days: int,
+                moved: Mapping[int, datetime | None] | None = None,
+                points: Iterable[str] | None = None,
+                aliases: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """Модели, которые на точке стоят свободными дольше `days` в среднем.
+
+    Среднее - по свободным велосипедам этой модели на этой точке: один
+    давно стоящий среди выдаваемых - это не простой модели. Дни - idle_days
+    от позднего из двух моментов: смены статуса (`since`) и переезда
+    (`moved`, журнал мест). Переброска статус не трогает, и без журнала
+    мест только что привезённый велосипед «простаивал» бы на новой точке
+    все дни, что стоял на старой: подсказка звала бы скидку туда, куда его
+    повезли под спрос. «Стоят дольше всех» считает по-прежнему от статуса -
+    там вопрос, сколько велосипед не зарабатывает, а не где. Подменный фонд
+    не в счёт: его держат под замены нарочно, и скидка его не выдаст.
+    Велосипед без журнала - ноль дней, так же как в «Стоят дольше всех».
+    `points` - только эти точки; «не на точке» не попадает никогда: акцию
+    на него не ограничить.
+    """
+    moved = moved or {}
+    allowed = None if points is None else {str(p) for p in points}
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for bike in bikes:
+        place = str(bike.get("location") or "").strip()
+        if bike.get("status") != "available" or bike.get("spare") or not place:
+            continue
+        if allowed is not None and place not in allowed:
+            continue
+        model = catalogue_model(bike.get("model"), aliases)
+        if not model:
+            continue
+        start = since.get(int(bike["id"]))
+        arrived = moved.get(int(bike["id"]))
+        if start is not None and arrived is not None:
+            start = max(start, arrived)
+        stood = idle_days(start, now=now) or 0
+        groups.setdefault((place, model), {"location": place, "model": model,
+                                           "bikes": []})["bikes"].append(
+            {"id": int(bike["id"]), "code": bike.get("code"), "idle_days": stood})
+    out = []
+    for group in groups.values():
+        stood = [b["idle_days"] for b in group["bikes"]]
+        average = Decimal(sum(stood)) / Decimal(len(stood))
+        if average < max(int(days), 1):
+            continue
+        group["bikes"].sort(key=lambda b: (-b["idle_days"], str(b["code"] or "")))
+        out.append({**group, "count": len(stood), "days": int(average),
+                    "max": max(stood)})
+    out.sort(key=lambda r: (-r["days"], r["location"], r["model"]))
+    return out
+
+
+def idle_promo_url(row: Mapping[str, Any]) -> str:
+    """Форма акции, заполненная под простой: модель, точка, сколько стоит."""
+    return (f"/promos/new?kind={IDLE_PROMO_KIND}"
+            f"&model={quote(str(row['model']), safe='')}"
+            f"&location={quote(str(row['location']), safe='')}"
+            f"&idle={int(row.get('days') or 0)}")
+
+
+def idle_promo_rows(rows: Iterable[Mapping[str, Any]],
+                    promos: Iterable[Mapping[str, Any]], *,
+                    today: date) -> list[dict[str, Any]]:
+    """К каждому простою - действующая акция, которая его уже закрывает:
+    с ограничением этой моделью, этой точкой или обоими. Общая акция без
+    ограничения не в счёт: она про всех, а не ответ на этот простой, и
+    прятать за ней подсказку значило бы молчать о простое."""
+    live = [p for p in promos
+            if PROMO_KINDS.get(str(p.get("kind") or ""), {}).get("scope")
+            and promo_alive(p, today=today)]
+    out = []
+    for row in rows:
+        running = None
+        for promo in live:
+            scope = promo_scope(promo)
+            if not (scope["model"] or scope["location"]):
+                continue
+            if scope["model"] and scope["model"].casefold() != str(row["model"]).casefold():
+                continue
+            if scope["location"] and scope["location"] != row["location"]:
+                continue
+            running = dict(promo)
+            break
+        out.append({**row, "promo": running, "url": idle_promo_url(row)})
+    return out
+
+
+def idle_promo_form(query: Mapping[str, Any], *, today: date, percent: int,
+                    models: Iterable[str], places: Iterable[str]) -> dict[str, Any]:
+    """Заготовка акции из подсказки о простое: сезонная, ограниченная моделью
+    и точкой, только новые аренды, скидка из настроек, две недели с
+    сегодня, один раз на клиента - скидка зовёт нового курьера, а не дарит
+    тем, кто уже катается: без «только новые» каждая идущая аренда этой
+    модели с этой точки получила бы её на ближайшем продлении, а простой
+    от этого не меньше. Модель и точка - только из списков: адрес собирает
+    кто угодно, чужое значение просто не подставляется. Ничего не заводит:
+    кнопку «Завести» жмёт человек."""
+    promo = promo_form_defaults(IDLE_PROMO_KIND)
+    model = " ".join(str(query.get("model") or "").split())
+    place = " ".join(str(query.get("location") or "").split())
+    model = model if model in set(models) else ""
+    place = place if place in set(places) else ""
+    if not (model or place):
+        return promo
+    stood = parse_id(query.get("idle"))
+    promo.update(
+        title=" на ".join(v for v in (model, place) if v)[:NAME_LIMIT],
+        percent=percent, starts_on=today,
+        ends_on=today + timedelta(days=IDLE_PROMO_LENGTH - 1),
+        once_per_client=True,
+        params={**promo["params"], **({"model": model} if model else {}),
+                **({"location": place} if place else {}), "new_only": True},
+        note=(f"Простой {stood} дн.: предложено сводкой" if stood
+              else "Простой: предложено сводкой"))
+    return promo
 
 
 # ─────────────────── заявки на аренду из кабинета ───────────────────
@@ -6925,13 +7395,16 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
                 claims: Iterable[Mapping[str, Any]] = (),
                 bookings: Iterable[Mapping[str, Any]] = (),
                 alerts: Iterable[Mapping[str, Any]] = (),
+                transfers: Iterable[Mapping[str, Any]] = (),
+                idle: Iterable[Mapping[str, Any]] = (),
                 today: date | None = None) -> list[dict[str, Any]]:
     """Задачи на сегодня по данным сводки. Пустые группы не показываются.
 
     `expiring` - строки виджета «истекает аренда» (с summary), `search` -
     результат search_rows, `orders` - открытые наряды, `bookings` - новые
-    заявки, `alerts` - открытые тревоги. Порядок: горящее, потом
-    завтрашнее, потом остальное; внутри уровня - по числу.
+    заявки, `alerts` - открытые тревоги, `transfers` - перевозки
+    transfer_plan, `idle` - простои idle_promo_rows (самые долгие). Порядок:
+    горящее, потом завтрашнее, потом остальное; внутри уровня - по числу.
     """
     today = today or date.today()
     tasks: list[dict[str, Any]] = []
@@ -6975,6 +7448,24 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
     add("alerts_urgent", "Срочные тревоги трекеров", urgent, "/alerts", "hot",
         key="bike_code")
     add("alerts", "Новые тревоги трекеров", yellow, "/alerts", "info", key="bike_code")
+
+    # Перевозка и простой - по строке на предложение: у каждой свой адрес
+    # (перевозка - на отчёт по точкам, простой - в готовую форму акции).
+    for move in transfers:
+        tasks.append({"code": "transfer", "title": "Перевезти " + move["label"],
+                      "count": int(move["count"]), "url": "/reports/points#transfer",
+                      "level": "warn", "names": []})
+    for row in list(idle)[:IDLE_PROMO_TASKS]:
+        promo = row.get("promo")
+        head = f"{row['model']} на {row['location']} простаивает {row['days']} дн."
+        tasks.append({
+            "code": "idle_promo", "count": int(row["count"]), "level": "info",
+            "title": (f"{head} — идёт акция «{promo['title']}»" if promo
+                      else f"{head} — предложить скидку?"),
+            "url": f"/promos/{promo['id']}" if promo else row["url"],
+            # Предложение ведёт в форму акции: видно тому, кто её заведёт.
+            "edit": promo is None,
+            "names": _names(row.get("bikes") or [], "code")})
 
     order = {level: i for i, level in enumerate(TASK_LEVELS)}
     tasks.sort(key=lambda t: (order[t["level"]], -t["count"]))
