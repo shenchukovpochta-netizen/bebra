@@ -38,10 +38,10 @@
         {% if n.enabled %}checked{% endif %} {% if not can %}disabled{% endif %}></td>
       <td><b>{{ n.title }}</b>{% if n.hint %}<br><small class="muted">{{ n.hint }}</small>{% endif %}
         {% for key, value in n.extra.items() %}
-        {% set p = NOTICE_PARAMS.get(key, ('Срок', 'через', 'дн.', 0, 365)) %}
-        <br><label class="inline-label">{{ p[1] }}
+        {% set lab = n.labels[key] %}
+        <br><label class="inline-label">{{ lab[1] }}
           <input name="{{ key }}" value="{{ value }}" size="3" class="mini"
-                 form="nt{{ n.code }}" {% if not can %}disabled{% endif %}> {{ p[2] }}</label>
+                 form="nt{{ n.code }}" {% if not can %}disabled{% endif %}> {{ lab[2] }}</label>
         {% endfor %}</td>
       <td class="muted">{% if group == 'team' and n.target == 'chat' %}
         {# Адресат - сотрудник с Telegram вместо служебного чата: техник

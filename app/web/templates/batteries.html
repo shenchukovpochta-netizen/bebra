@@ -19,12 +19,13 @@
 <nav class="tabs">
   <a href="/batteries" {% if not view %}class="on"{% endif %}>Все</a>
   <a href="/batteries?view=search" {% if view == 'search' %}class="on"{% endif %}>🔎 В розыске · {{ summary.search }}</a>
+  <a href="/batteries/plan">План замены</a>
 </nav>
 
 <div class="tiles">
   <div class="tile"><b>{{ summary.operational }}</b><span>в обороте<br><small class="muted">свободна, у клиента, ремонт, ТО</small></span></div>
   <div class="tile"><b>{{ summary.available }}</b><span>свободных на точках</span></div>
-  <div class="tile {% if summary.tired %}warn{% endif %}"><b>{{ summary.tired }}</b><span>пора смотреть<br><small class="muted">от {{ BATTERY_CYCLES_WARN }} циклов или отслужила срок</small></span></div>
+  <div class="tile {% if summary.tired %}warn{% endif %}"><b>{{ summary.tired }}</b><span>пора смотреть<br><small class="muted">выработала ресурс ({{ max_cycles }} циклов, у модели может быть свой) или отслужила срок</small></span></div>
   <div class="tile {% if summary.search %}warn{% endif %}"><b>{{ summary.search }}</b><span>в розыске<br><small class="muted">уехали с арендой, которую ищут</small></span></div>
   <div class="tile {% if summary.lost %}warn{% endif %}"><b>{{ summary.lost }}</b><span>утеряно</span></div>
 </div>
@@ -41,14 +42,15 @@
     {# У клиента - дни с выдачи; в остальных статусах - дни в статусе по журналу. #}
     <td class="num" data-label="Дней" title="{% if b.rental_days is not none %}дней у клиента с выдачи{% else %}дней в этом статусе{% endif %}">{{ b.rental_days if b.rental_days is not none else b.status_days }}</td>
     <td data-label="Где">{% if b.bike_code %}<a href="/bikes/{{ b.bike_id }}">№ {{ b.bike_code }}</a>{% else %}{{ b.location or '—' }}{% endif %}</td>
-    <td class="num opt {% if b.cycles >= BATTERY_CYCLES_WARN %}bad{% endif %}" data-label="Циклов">{{ b.cycles }}</td>
+    <td class="num opt {% if b.cycles_out %}bad{% endif %}" data-label="Циклов" title="ресурс {{ b.cycle_limit }}">{{ b.cycles }}</td>
     <td class="num opt" data-label="Износ">{% if b.wear is none %}—{% else %}{{ b.wear }} %{% endif %}</td>
     <td data-label="У кого">{% if b.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.client_name }}</a>{% else %}{{ b.client_name or '' }}{% endif %}{% if b.client_id and b.rental_id and can_view(staff, 'rentals') %} <small><a href="/rentals/{{ b.rental_id }}">аренда #{{ b.rental_id }}</a></small>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="9" class="muted">Батарей нет. Заведите их с наклейками — по ним батарею и ищут.</td></tr>{% endfor %}
 </table>
-<p class="muted">Первыми — те, что в розыске, затем те, что пора смотреть: от {{ BATTERY_CYCLES_WARN }} циклов
-  ёмкость заметно просела, и клиент начинает жаловаться на «не доезжает».
+<p class="muted">Первыми — те, что в розыске, затем те, что пора смотреть: выработав ресурс
+  циклов, ёмкость заметно просела, и клиент начинает жаловаться на «не доезжает».
+  Когда и во что обойдётся замена — во вкладке <a href="/batteries/plan">«План замены»</a>.
   Статус «У клиента» ставит и снимает выдача, как и у велосипеда.
   Розыск — состояние аренды, а не батареи: пока клиент не нашёлся,
   батарея у него и числится «у клиента». Признание кражи уводит в

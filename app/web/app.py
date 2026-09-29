@@ -637,7 +637,6 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BANK_STATUSES=logic.BANK_STATUSES, MATCH_REASONS=logic.MATCH_REASONS,
         PAY_STATUSES=logic.PAY_STATUSES, PAY_KINDS=logic.PAY_KINDS,
         NOTICES=logic.NOTICES, NOTICE_GROUPS=logic.NOTICE_GROUPS,
-        NOTICE_PARAMS=logic.NOTICE_PARAMS,
         DOC_TEMPLATES=logic.DOC_TEMPLATES, COMPANY_MARKS=logic.COMPANY_MARKS,
         BIKE_PASSPORT=logic.BIKE_PASSPORT, TAKE_WHAT=logic.TAKE_WHAT,
         ALERT_LEVELS=logic.ALERT_LEVELS, ALERT_STATES=logic.ALERT_STATES,
@@ -654,6 +653,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BATTERY_STATUSES=logic.BATTERY_STATUSES,
         BATTERY_MANUAL_STATUSES=logic.BATTERY_MANUAL_STATUSES,
         BATTERY_CYCLES_WARN=logic.BATTERY_CYCLES_WARN,
+        BATTERY_WEAR_REASONS=logic.BATTERY_WEAR_REASONS,
         IDLE_TARGET_PERCENT=logic.IDLE_TARGET_PERCENT, CHECK_TARGET=logic.CHECK_TARGET,
         NO_POINT_TITLE=logic.NO_POINT_TITLE,
         amortization_month=logic.amortization_month, fleet_losses=logic.fleet_losses,
@@ -1154,7 +1154,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             bookings=bookings,
             alerts=await crm.tracker_alerts(open_only=True, limit=500),
             transfers=(advice["transfer"] or {}).get("moves", ()),
-            idle=advice["idle"], today=today)
+            idle=advice["idle"], today=today,
+            repair_norm=logic.repair_norm_default(settings))
         return render(request, "dashboard.html",
                       tasks=tasks, setup=await setup_wanted(request.state.staff, settings),
                       inbox_waiting=(await crm.inbox_open_count()
@@ -2894,7 +2895,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     ORDER_SORTS = {"no": "no", "bike": "bike_code", "status": "status",
                    "payer": "payer", "client": "client_name",
                    "tech": "tech_name", "total": "total", "opened": "opened_at",
-                   "location": "location"}
+                   "location": "location", "days": "days", "overdue": "overdue"}
     PART_SORTS = {"title": "title", "node": "node_title", "stock": "stock",
                   "cost": "cost", "price": "price", "days": "days_on_stock",
                   "cost_total": "cost_total", "price_total": "price_total",
@@ -4378,11 +4379,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for bike in bikes:
             bike["idle_days"] = logic.idle_days(since.get(bike["id"]), now=now)
         q = request.query_params.get("q") or ""
+        settings = await crm.settings()
+        norm = logic.repair_norm_default(settings)
         rows = logic.rows_search(
-            logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today),
+            logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today,
+                               norm=norm),
             q, ("code", "model", "order_no", "tech", "client", "complaint"))
         tools = list_tools(request, rows, allowed=SERVICE_SORTS)
-        settings = await crm.settings()
         counts = await crm.bike_counts()
         plan = await network_plan(settings, counts)
         # График за месяц: по нему видно, ремонт у нас ровный или
@@ -4398,6 +4401,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   and b.get("status") in logic.OPERATIONAL_STATUSES]
         return render(request, "service.html", rows=tools["rows"], tools=tools, q=q,
                       summary=logic.service_summary(rows), spares=spares,
+                      repair_norm=norm,
                       chart=chart, plan=plan, month=span["first"], span=span,
                       tiles=logic.fleet_tiles(
                           counts, plan,
@@ -4406,7 +4410,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       orders=await crm.work_orders(open_only=True, limit=200))
 
     SERVICE_SORTS = {"bike": "code", "model": "model", "stage": "stage",
-                     "days": "days", "lost": "lost", "order": "order_no",
+                     "days": "days", "overdue": "overdue", "lost": "lost",
+                     "order": "order_no",
                      "tech": "tech", "payer": "payer_title", "client": "client",
                      "estimate": "estimate"}
 
@@ -4418,21 +4423,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for bike in bikes:
             bike["idle_days"] = logic.idle_days(since.get(bike["id"]), now=now)
         rows = logic.rows_search(
-            logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today),
+            logic.service_rows(bikes, await crm.open_orders_by_bike(), today=today,
+                               norm=logic.repair_norm_default(await crm.settings())),
             request.query_params.get("q") or "",
             ("code", "model", "order_no", "tech", "client", "complaint"))
         money_ok = may_view(request, "finance")
-        header = ["Велосипед", "Модель", "Этап", "Суток", "Наряд", "Техник",
-                  "Чей ремонт", "Клиент", "Жалоба"]
+        header = ["Велосипед", "Модель", "Этап", "Суток", "Срок", "Сверх срока",
+                  "Наряд", "Техник", "Чей ремонт", "Клиент", "Жалоба"]
         if money_ok:
-            header[4:4] = ["Потеряно"]
+            header[6:6] = ["Потеряно"]
             header.append("Смета")
         out = []
         for r in rows:
-            line = [r["code"], r.get("model"), r["stage"], r["days"], r["order_no"],
-                    r["tech"], r["payer_title"], r["client"], r["complaint"]]
+            line = [r["code"], r.get("model"), r["stage"], r["days"], r["norm"],
+                    r["overdue"], r["order_no"], r["tech"], r["payer_title"],
+                    r["client"], r["complaint"]]
             if money_ok:
-                line[4:4] = [r["lost"]]
+                line[6:6] = [r["lost"]]
                 line.append(r["estimate"])
             out.append(line)
         return await table(ext, "service", header, out)
@@ -4447,17 +4454,27 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Наряды одного велосипеда - его история ремонтов целиком: с карточки
         # велосипеда сюда ведёт «все наряды».
         bike_filter = await by_id(crm.bike, bike_q)
+        # «Дольше срока» - открытые наряды, пересидевшие срок своего узла:
+        # сюда ведут плитка рабочего стола и задача на сводке.
+        overdue_only = request.query_params.get("overdue") == "1"
         rows = await crm.work_orders(status=status or None, payer=payer or None,
                                      bike_id=bike_filter["id"] if bike_filter else None,
-                                     location=location or None, limit=300)
+                                     location=location or None, open_only=overdue_only,
+                                     limit=300)
+        norm = logic.repair_norm_default(await crm.settings())
         for order in rows:
             order["days"] = logic.order_days(order, today=date.today())
+            order["norm"] = logic.order_norm(order, norm)
+            order["overdue"] = logic.order_overdue(order, default=norm, today=date.today())
+        if overdue_only:
+            rows = [o for o in rows if o["overdue"]]
         # Итог «сколько за ремонт ещё не заплатили» считается по всем
         # закрытым клиентским нарядам, а не по видимой странице: иначе
         # он менялся бы от фильтра и ничего не значил.
         tools = list_tools(request, rows, allowed=ORDER_SORTS)
         return render(request, "orders.html", rows=tools["rows"], tools=tools,
-                      bike_filter=bike_filter,
+                      bike_filter=bike_filter, overdue_only=overdue_only,
+                      repair_norm=norm,
                       status=status, payer=payer, location=location,
                       places=await filter_points(location),
                       views=await views_of(request, "/orders"),
@@ -4472,26 +4489,33 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Тот же фильтр, что у списка: выгрузка с карточки велосипеда - это
         # история ремонтов одного велосипеда, а не все наряды парка.
         bike_q = request.query_params.get("bike") or ""
+        overdue_only = request.query_params.get("overdue") == "1"
         rows = await crm.work_orders(
             status=request.query_params.get("status") or None,
             payer=request.query_params.get("payer") or None,
             bike_id=logic.parse_id(bike_q),
             location=request.query_params.get("location") or None,
-            limit=5000)
+            open_only=overdue_only, limit=5000)
         money_ok = may_view(request, "finance")
         header = ["Наряд", "Открыт", "Объект", "Статус", "Плательщик", "Клиент",
-                  "Техник", "Суток", "Закрыт", "Оплачен", "Точка"]
+                  "Техник", "Суток", "Закрыт", "Оплачен", "Точка", "Срок",
+                  "Сверх срока"]
         if money_ok:
             header.insert(8, "Сумма")
         today = date.today()
+        norm = logic.repair_norm_default(await crm.settings())
         out = []
         for o in rows:
+            late = logic.order_overdue(o, default=norm, today=today)
+            if overdue_only and not late:
+                continue
             line = [o["no"], o.get("opened_at"),
                     o.get("bike_code") or o.get("object_note"),
                     logic.ORDER_STATUSES.get(o["status"], o["status"]),
                     logic.PAYERS.get(o["payer"], o["payer"]), o.get("client_name"),
                     o.get("tech_name"), logic.order_days(o, today=today),
-                    o.get("closed_at"), o.get("paid_at"), o.get("location")]
+                    o.get("closed_at"), o.get("paid_at"), o.get("location"),
+                    logic.order_norm(o, norm), late]
             if money_ok:
                 line.insert(8, logic.to_money(
                     o.get("total") if o["status"] == "done" else o.get("estimate")))
@@ -4551,7 +4575,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         items = await crm.order_items(order_id)
         stocks = await crm.stock_map()
         invoices = await crm.work_order_invoices(order_id)
+        norm = logic.repair_norm_default(await crm.settings())
         return render(request, "order.html", order=order, items=items,
+                      norm=logic.order_norm(order, norm),
+                      norm_node=logic.order_norm_node(order, norm),
+                      overdue=logic.order_overdue(order, default=norm,
+                                                  today=date.today()),
                       totals=logic.order_totals(items),
                       client_total=logic.order_totals_client(items),
                       estimate=logic.estimate_state(order),
@@ -4874,7 +4903,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                  ("title", "category"))
         tools = list_tools(request, rows, allowed=WORK_SORTS)
         return render(request, "work_types.html", rows=tools["rows"], tools=tools,
-                      q=q, can_manage=may_edit(request, "service"))
+                      q=q, can_manage=may_edit(request, "service"),
+                      nodes=await crm.repair_nodes(),
+                      repair_norm=logic.repair_norm_default(await crm.settings()))
 
     @app.get("/work-types.{ext}")
     async def work_types_csv(request: Request, ext: str) -> Response:
@@ -4932,6 +4963,40 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/work-types")
         flash(request, "Вид работ добавлен.")
         return redirect("/work-types")
+
+    @app.post("/work-types/norms")
+    async def repair_norms_save(request: Request) -> Response:
+        """Сроки ремонта: общий и по узлам. Маршрут - раньше строки прайса,
+        иначе «/work-types/{type_id}» поймал бы «norms» и ответил 422.
+
+        Пустое поле узла - «своего срока нет, общий». Сохраняется одной
+        формой: срок ставят, глядя на соседние узлы, а не по одному.
+        """
+        data = await form(request)
+        common = count_field(data, "repair_norm_days", what="Общий срок",
+                             default=str(logic.ORDER_STUCK_DAYS),
+                             limit=logic.REPAIR_NORM_MAX)
+        if not common.ok:
+            flash(request, common.error, "err")
+            return redirect("/work-types#norms")
+        nodes = await crm.repair_nodes()
+        changes: list[tuple[str, int | None]] = []
+        for node in nodes:
+            field = f"norm_{node['code']}"
+            if field not in data:
+                continue
+            got = logic.check_norm_days(data.get(field))
+            if not got.ok:
+                flash(request, f"{node['title']}: {got.error}", "err")
+                return redirect("/work-types#norms")
+            if got.value != node.get("norm_days"):
+                changes.append((node["code"], got.value))
+        await crm.set_setting("repair_norm_days", str(common.value), by=who(request))
+        for code, value in changes:
+            await crm.set_node_norm(code, value)
+        flash(request, "Сроки ремонта сохранены"
+              + (f": узлов изменено {len(changes)}." if changes else "."))
+        return redirect("/work-types#norms")
 
     @app.post("/work-types/{type_id}")
     async def work_type_edit(request: Request, type_id: int) -> Response:
@@ -5622,7 +5687,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         months = count_field(data, "service_months", what="Срок службы",
                              default="15", limit=240)
         volt = count_field(data, "voltage", what="Напряжение", default="0", limit=200)
-        for check in (title, price, months, volt):
+        # Ресурс в циклах: пусто или ноль - «своего нет», действует общий
+        # из плана замены.
+        cycles = count_field(data, "max_cycles", what="Ресурс, циклов", default="0",
+                             limit=logic.BATTERY_CYCLES_MAX)
+        for check in (title, price, months, volt, cycles):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/models")
@@ -5633,7 +5702,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 brand=(data.get("brand") or "").strip() or None,
                 voltage=volt.value or None,
                 capacity=capacity.value if capacity.ok and capacity.value else None,
-                price=price.value, service_months=months.value or 15)
+                price=price.value, service_months=months.value or 15,
+                max_cycles=cycles.value or None)
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "Модель АКБ с таким названием уже есть.", "err")
@@ -5653,7 +5723,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         months = count_field(data, "service_months", what="Срок службы",
                              default="15", limit=240)
         volt = count_field(data, "voltage", what="Напряжение", default="0", limit=200)
-        for check in (title, note, price, months, volt):
+        cycles = count_field(data, "max_cycles", what="Ресурс, циклов", default="0",
+                             limit=logic.BATTERY_CYCLES_MAX)
+        for check in (title, note, price, months, volt, cycles):
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/models")
@@ -5663,7 +5735,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 title=title.value, brand=(data.get("brand") or "").strip() or None,
                 voltage=volt.value or None,
                 capacity=capacity.value if capacity.ok and capacity.value else None,
-                price=price.value, service_months=months.value or 15, note=note.value)
+                price=price.value, service_months=months.value or 15, note=note.value,
+                max_cycles=cycles.value or None)
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "Такая модель АКБ уже есть.", "err")
@@ -5697,13 +5770,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         q = request.query_params.get("q") or ""
         location = request.query_params.get("location") or ""
         view = request.query_params.get("view") or ""
+        cycles = logic.battery_max_cycles(await crm.settings())
         rows = logic.battery_rows(await crm.batteries(
             status=status or None, q=q or None, location=location or None,
-            in_search=view == "search"), since=await crm.battery_status_since())
+            in_search=view == "search"), since=await crm.battery_status_since(),
+            max_cycles=cycles)
         return render(request, "batteries.html", rows=rows,
                       summary=logic.battery_summary(
-                          logic.battery_rows(await crm.batteries())),
+                          logic.battery_rows(await crm.batteries(), max_cycles=cycles)),
                       status=status, q=q, location=location, view=view,
+                      max_cycles=cycles,
                       locations=await filter_points(location),
                       models=await crm.battery_models(active_only=True))
 
@@ -5711,9 +5787,67 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def battery_new(request: Request) -> Response:
         if not may_edit(request, "batteries"):
             return denied(request, "batteries")
-        return render(request, "battery_form.html", battery=None,
-                      models=await crm.battery_models(active_only=True),
+        # Из плана замены приходят с моделью: форма сразу с ней и её сроком
+        # службы, иначе новая батарея получила бы срок по умолчанию.
+        models = await crm.battery_models(active_only=True)
+        wanted = logic.parse_id(request.query_params.get("model_id"))
+        return render(request, "battery_form.html", battery=None, models=models,
+                      model=next((m for m in models if m["id"] == wanted), None),
                       locations=await location_names())
+
+    # ─────────────────── план замены аккумуляторов ───────────────────
+    #
+    # Маршруты - раньше карточки «/batteries/{battery_id}»: иначе «plan»
+    # ушёл бы туда номером батареи и ответил 422.
+
+    async def battery_plan_data() -> dict[str, Any]:
+        cycles = logic.battery_max_cycles(await crm.settings())
+        return logic.battery_wear_plan(await crm.batteries(limit=10000),
+                                       today=date.today(), max_cycles=cycles)
+
+    @app.get("/batteries/plan")
+    async def battery_plan_page(request: Request) -> Response:
+        """Что менять в ближайшие 1/3/6 месяцев и сколько на это отложить."""
+        plan = await battery_plan_data()
+        return render(request, "battery_plan.html", plan=plan,
+                      summary=logic.battery_summary(logic.battery_rows(
+                          await crm.batteries(), max_cycles=plan["max_cycles"])))
+
+    @app.get("/batteries/plan.{ext}")
+    async def battery_plan_table(request: Request, ext: str) -> Response:
+        plan = await battery_plan_data()
+        money_ok = may_view(request, "finance")
+        header = ["Номер", "Модель", "Статус", "Точка", "Куплена", "Срок, мес.",
+                  "Возраст, мес.", "Циклов", "Ресурс", "Заменить до", "Причина"]
+        if money_ok:
+            header.append("Цена замены")
+        out = []
+        for r in plan["rows"]:
+            line = [r["code"], r.get("model_title"),
+                    logic.BATTERY_STATUSES.get(r["status"], r["status"]),
+                    r.get("location"), r.get("purchased_on"), r["service_months"],
+                    r["age_months"], r["cycles"], r["cycle_limit"], r["replace_on"],
+                    logic.BATTERY_WEAR_REASONS.get(r["reason"] or "", "")]
+            if money_ok:
+                line.append(r["price"])
+            out.append(line)
+        return await table(ext, "battery-plan", header, out)
+
+    @app.post("/batteries/plan")
+    async def battery_plan_settings(request: Request) -> Response:
+        """Общий ресурс АКБ в циклах - для моделей без своего."""
+        if not may_edit(request, "batteries"):
+            return denied(request, "batteries")
+        data = await form(request)
+        got = count_field(data, "battery_max_cycles", what="Ресурс, циклов",
+                          default=str(logic.BATTERY_CYCLES_WARN),
+                          limit=logic.BATTERY_CYCLES_MAX, least=1)
+        if not got.ok:
+            flash(request, got.error, "err")
+            return redirect("/batteries/plan")
+        await crm.set_setting("battery_max_cycles", str(got.value), by=who(request))
+        flash(request, f"Общий ресурс: {got.value} циклов.")
+        return redirect("/batteries/plan")
 
     async def battery_fields(request: Request, data: dict,
                              current: str | None = None) -> dict | None:
@@ -5775,8 +5909,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         battery = await crm.battery(battery_id)
         if battery is None:
             return render(request, "missing.html", status_code=404, what="Батарея")
-        row = logic.battery_rows([battery], since=await crm.battery_status_since())[0]
+        cycles = logic.battery_max_cycles(await crm.settings())
+        row = logic.battery_rows([battery], since=await crm.battery_status_since(),
+                                 max_cycles=cycles)[0]
         return render(request, "battery.html", battery=row,
+                      wear=logic.battery_wear(battery, today=date.today(),
+                                              max_cycles=cycles),
                       log=await crm.battery_status_log(battery_id),
                       models=await crm.battery_models(active_only=True),
                       locations=await location_names(battery.get("location")),
@@ -6893,10 +7031,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             at_minute = 0
         extra = {}
         for key, fallback in (default["extra"] or {}).items():
-            # Границы - по виду параметра: час не бывает 300-м, а число
-            # клиентов на велосипед - нулём.
-            what, _, _, least, limit = logic.NOTICE_PARAMS.get(
-                key, ("Срок", "через", "дн.", 0, 365))
+            # Подпись и пределы - по виду параметра (logic.NOTICE_PARAMS): час
+            # не бывает 300-м, число клиентов на велосипед - нулём, день
+            # недели - 1..7.
+            what, _, _, least, limit = logic.notice_param_label(code, key)
             got = count_field(data, key, what=what, default=str(fallback),
                               limit=limit, least=least)
             if not got.ok:
@@ -7567,7 +7705,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         node = request.query_params.get("node") or ""
         q = request.query_params.get("q") or ""
         rows = logic.part_rows(await crm.parts(node=node or None, q=q or None),
-                               await crm.stock_map(), await crm.part_last_moved())
+                               await crm.stock_map(), await crm.part_last_moved(),
+                               transit=await crm.parts_in_transit())
         tools = list_tools(request, rows, allowed=PART_SORTS)
         # График денег на полке - только тем, кому открыты деньги: это
         # сумма, а не количество гаек.
@@ -7586,10 +7725,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = logic.part_rows(
             await crm.parts(node=request.query_params.get("node") or None,
                             q=request.query_params.get("q") or None),
-            await crm.stock_map(), await crm.part_last_moved())
+            await crm.stock_map(), await crm.part_last_moved(),
+            transit=await crm.parts_in_transit())
         money_ok = may_view(request, "finance")
         header = ["Позиция", "Узел", "Совместимость", "Остаток", "Ед.",
-                  "Неснижаемый", "Не хватает", "Дней на складе"]
+                  "Неснижаемый", "Не хватает", "В пути", "Дней на складе"]
         if money_ok:
             header += ["Себестоимость", "Σ себестоимость", "Цена клиенту",
                        "Σ по клиенту"]
@@ -7597,7 +7737,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for r in rows:
             line = [r["title"], logic.REPAIR_NODES.get(r.get("node"), ""),
                     r.get("model") or "все", r["stock"], r.get("unit"),
-                    r.get("min_stock"), r["short"] or "", r.get("days_on_stock")]
+                    r.get("min_stock"), r["short"] or "", r["transit"] or "",
+                    r.get("days_on_stock")]
             if money_ok:
                 line += [logic.to_money(r.get("cost") or 0), r["cost_total"],
                          logic.to_money(r.get("price") or 0), r["price_total"]]
@@ -7714,6 +7855,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Позиция")
         return render(request, "part.html", part=part,
                       stock=await crm.part_stock(part_id),
+                      transit=(await crm.parts_in_transit()).get(part_id, 0),
                       moves=await crm.part_moves(part_id=part_id, limit=100),
                       nodes=await crm.repair_nodes())
 
@@ -7807,7 +7949,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = logic.part_rows(await crm.parts(active_only=True), await crm.stock_map())
         order = await crm.open_part_order()
         return render(request, "part_orders.html",
-                      needs=logic.part_needs(rows, await crm.waiting_orders_parts()),
+                      needs=logic.part_needs(rows, await crm.waiting_orders_parts(),
+                                             await crm.parts_in_transit()),
                       orders=await crm.part_orders(limit=100), current=order,
                       items=await crm.part_order_items(order["id"]) if order else [],
                       parts=await crm.parts(active_only=True),

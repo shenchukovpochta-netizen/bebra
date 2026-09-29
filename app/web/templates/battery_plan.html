@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}План замены АКБ — {{ app_title }}{% endblock %}
+{% block content %}
+{% set money_ok = can_view(staff, 'finance') %}
+<div class="bar"><h1>Батареи</h1>
+  <a class="btn ghost" href="/batteries/plan.xlsx">Excel</a>
+  <a class="btn ghost" href="/batteries/plan.csv">CSV</a>
+</div>
+
+<nav class="tabs">
+  <a href="/batteries">Все</a>
+  <a href="/batteries?view=search">🔎 В розыске · {{ summary.search }}</a>
+  <a href="/batteries/plan" class="on">План замены</a>
+</nav>
+
+{# Горизонты накопительные: «за 3 месяца» включает первый. Это бюджет
+   «сколько отложить к кварталу», а не разбивка по месяцам. #}
+<div class="tiles">
+  {% for h in plan.horizons %}
+  <div class="tile {% if loop.first and h.count %}warn{% endif %}"><b>{{ h.count }}</b><span>заменить за {{ h.months }} мес.<br><small class="muted">до {{ h.until|dmy }}{% if money_ok %} · {{ money(h.budget) }}{% if h.unpriced %}, без цены {{ h.unpriced }}{% endif %}{% endif %}</small></span></div>
+  {% endfor %}
+  <div class="tile {% if plan.overdue %}hot{% endif %}"><b>{{ plan.overdue }}</b><span>срок уже вышел<br><small class="muted">возят курьеров сверх ресурса</small></span></div>
+  <div class="tile"><b>{{ plan.total }}</b><span>в обороте<br><small class="muted">{% if plan.undated %}без даты покупки {{ plan.undated }} — срок от заведения{% else %}даты покупки у всех{% endif %}</small></span></div>
+</div>
+
+<section class="card">
+  <h2>По моделям</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Модель</th>{% if money_ok %}<th class="num">Цена сейчас</th>{% endif %}
+      {% for h in plan.horizons %}<th class="num">за {{ h.months }} мес.</th>{% endfor %}<th></th></tr>
+    {% for m in plan.models %}
+    <tr>
+      <td>{{ m.title }}</td>
+      {% if money_ok %}<td class="num">{% if m.price %}{{ money(m.price) }}{% else %}<span class="muted">нет в каталоге</span>{% endif %}</td>{% endif %}
+      {% for h in plan.horizons %}{% set c = m.cells[h.months] %}
+      <td class="num">{{ c.count }}{% if money_ok and c.count %}<br><small class="muted">{{ money(c.budget) }}{% if c.unpriced %} + {{ c.unpriced }} без цены{% endif %}</small>{% endif %}</td>
+      {% endfor %}
+      <td class="actions nowrap">{% if m.model_id and can_edit(staff, 'batteries') %}<a class="btn ghost" href="/batteries/new?model_id={{ m.model_id }}">+ купленную</a>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="{{ 3 + plan.horizons|length }}" class="muted">В ближайшие полгода менять нечего.</td></tr>{% endfor %}
+    {% if plan.models and money_ok %}
+    <tr class="total"><td>Итого</td><td></td>
+      {% for h in plan.horizons %}<td class="num">{{ h.count }}<br><small>{{ money(h.budget) }}</small></td>{% endfor %}<td></td></tr>
+    {% endif %}
+  </table>
+  </div>
+  <p class="muted">Бюджет — по сегодняшней цене модели в каталоге: новую
+    батарею купят по нынешней цене. Нет цены у модели — берётся цена покупки
+    этой батареи, нет и её — батарея «без цены», и сумма честно неполная.
+    Купленную батарею заводят кнопкой «+ купленную»: форма откроется с
+    моделью, её ценой и сроком службы. Амортизация от плана не меняется.</p>
+</section>
+
+<section class="card">
+  <h2>Что менять в ближайшие полгода</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>№</th><th>Модель</th><th>Статус</th><th class="opt">Где</th>
+      <th class="num">Возраст / срок, мес.</th><th class="num">Циклы / ресурс</th>
+      <th>Заменить до</th><th class="opt">Почему</th></tr>
+    {% for b in plan.rows %}
+    <tr class="{% if b.overdue %}bad-row{% elif b.left_days <= 31 %}warn-row{% endif %}">
+      <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
+      <td>{{ b.model_title or '—' }}</td>
+      <td><span class="tag {{ b.status }}">{{ BATTERY_STATUSES[b.status] }}</span></td>
+      <td class="opt">{% if b.bike_code %}<a href="/bikes/{{ b.bike_id }}">№ {{ b.bike_code }}</a>{% else %}{{ b.location or '—' }}{% endif %}</td>
+      <td class="num">{{ b.age_months if b.age_months is not none else '—' }} / {{ b.service_months }}{% if not b.dated %} <small class="muted" title="даты покупки нет: возраст от заведения карточки">≈</small>{% endif %}</td>
+      <td class="num {% if b.cycles >= b.cycle_limit %}bad{% endif %}">{{ b.cycles }} / {{ b.cycle_limit }}</td>
+      <td class="{% if b.overdue %}bad{% endif %}">{{ b.replace_on|dmy }}{% if b.overdue %} <small>· срок вышел</small>{% endif %}</td>
+      <td class="opt muted">{{ BATTERY_WEAR_REASONS[b.reason] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="8" class="muted">В ближайшие полгода менять нечего.</td></tr>{% endfor %}
+  </table>
+  </div>
+  <p class="muted">Дата замены — что наступит раньше: конец срока службы от
+    даты покупки (срок с карточки батареи, как у амортизации) или конец
+    ресурса циклов при нынешнем темпе этой батареи. Батарея моложе месяца
+    считается только по сроку: темпа у неё ещё нет. Без даты покупки темпа
+    нет тоже — неизвестно, с какого дня шёл счётчик, — и циклы решают,
+    только когда ресурс уже выработан. Считаются батареи в
+    обороте — на сборке, утерянные, проданные и списанные не входят.</p>
+</section>
+
+<section class="card narrow">
+  <h2>Ресурс по умолчанию</h2>
+  <form method="post" action="/batteries/plan" class="grid2">
+    <label>Циклов заряда <input name="battery_max_cycles" value="{{ plan.max_cycles }}" size="6" inputmode="numeric" {% if not can_edit(staff, 'batteries') %}disabled{% endif %}></label>
+    {% if can_edit(staff, 'batteries') %}<button type="submit">Сохранить</button>{% endif %}
+  </form>
+  <p class="muted">Для моделей без своего ресурса. Свой ресурс модели — в
+    {% if can_view(staff, 'settings') %}<a href="/models">каталоге</a>{% else %}каталоге{% endif %}:
+    у разных химий он отличается вдвое. Тем же
+    числом список батарей решает, кого «пора смотреть».</p>
+</section>
+{% endblock %}

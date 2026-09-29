@@ -70,6 +70,10 @@ PLAN = {"plan_rented": "160", "plan_check": "500", "plan_repair": "8",
 # План по точкам - в сумме общий (160), по долям парка точек: странице
 # точки и «По точкам» есть что показать, а сводка с общим планом не спорит.
 POINT_PLANS = {core.P1: 80, core.P2: 58, core.P3: 22}
+# Сроки ремонта по узлам, суток: без них весь сервис мерился бы общим
+# сроком, и разницы между колодками и мотор-колесом в демо не видно.
+REPAIR_NORMS = {"brake_pads": 1, "tube_tire": 1, "controller": 4,
+                "motor_wheel": 5, "battery": 5, "frame": 7}
 
 # Таблицы с явными id сида и их колонки - в порядке записи (внешние ключи).
 _TABLES = ("purchases", "bikes", "batteries", "clients", "rentals", "rental_bikes",
@@ -246,6 +250,9 @@ async def _reference(conn: asyncpg.Connection, w: World) -> None:
         on conflict (key) do update set value = excluded.value,
           updated_by = excluded.updated_by, updated_at = excluded.updated_at
         """, [(k, v, start) for k, v in settings.items()])
+    await conn.executemany(
+        "update crm.repair_nodes set norm_days = $2 where code = $1",
+        list(REPAIR_NORMS.items()))
 
     w.suppliers[core.SUPPLIER_BIKES] = await conn.fetchval(
         "insert into crm.suppliers (name, phone, note, created_at) "

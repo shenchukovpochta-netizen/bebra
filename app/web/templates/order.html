@@ -18,7 +18,9 @@
     <dt>Точка</dt><dd>{{ order.location or '—' }}</dd>
     <dt>Жалоба</dt><dd>{{ order.complaint or '—' }}</dd>
     <dt>Открыт</dt><dd>{{ order.opened_at|dmy }} · {{ order.created_by or '' }}</dd>
-    <dt>Суток в работе</dt><dd class="{% if open_now and days >= ORDER_STUCK_DAYS %}bad{% endif %}"><b>{{ days }}</b>{% if open_now and days >= ORDER_STUCK_DAYS %} — велосипед копит простой{% endif %}</dd>
+    <dt>Суток в работе</dt><dd class="{% if overdue %}bad{% endif %}"><b>{{ days }}</b>
+      {% if open_now %}<span class="muted">· срок {{ norm }} дн.{% if norm_node %} ({{ norm_node }}){% else %} (общий){% endif %}</span>{% endif %}
+      {% if overdue %} — просрочено на {{ overdue }} дн., велосипед копит простой{% endif %}</dd>
     {% if order.closed_at %}<dt>Закрыт</dt><dd>{{ order.closed_at|dmy }}</dd>{% endif %}
     {% if order.payer == 'client' and money_ok %}<dt>Оплата</dt><dd>{% if order.paid_at %}получена {{ order.paid_at|dmy }}{% else %}<span class="warn">не отмечена</span>{% endif %}</dd>{% endif %}
     {% if money_ok %}<dt>Смета</dt><dd>{{ money(order.estimate) }}{% if order.status == 'done' %} · итог <b>{{ money(order.total) }}</b>{% endif %}</dd>{% endif %}

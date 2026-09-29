@@ -7,7 +7,10 @@
 
 {% set money_ok = can_view(staff, 'finance') %}
 <div class="tiles">
-  <div class="tile {% if stock < part.min_stock %}warn{% endif %}"><b>{{ stock }} {{ part.unit }}</b><span>на полке{% if stock < part.min_stock %}<br><small class="muted">неснижаемый {{ part.min_stock }}</small>{% endif %}</span></div>
+  {# «На пределе» - ровно неснижаемый: следующий расход уведёт ниже. #}
+  {% set at_min = part.min_stock > 0 and stock == part.min_stock %}
+  <div class="tile {% if stock < part.min_stock or at_min %}warn{% endif %}"><b>{{ stock }} {{ part.unit }}</b><span>на полке{% if stock < part.min_stock %}<br><small class="muted">неснижаемый {{ part.min_stock }}</small>{% elif at_min %}<br><small class="muted">на пределе: неснижаемый {{ part.min_stock }}</small>{% endif %}</span></div>
+  {% if transit %}<a class="tile" href="/part-orders"><b>{{ transit }} {{ part.unit }}</b><span>в пути<br><small class="muted">в отправленном заказе</small></span></a>{% endif %}
   {% if money_ok %}
   <div class="tile"><b>{{ money(part.cost) }}</b><span>себестоимость средняя</span></div>
   <div class="tile"><b>{{ money(part.price) }}</b><span>цена клиенту</span></div>

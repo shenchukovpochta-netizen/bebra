@@ -184,6 +184,18 @@ class TestCrmSql(unittest.TestCase):
                                       complaint="x", object_note="самокат", tech_id=None,
                                       estimate=d, created_by="me", location="Павлюхина"),
             self.db.update_work_order(1, location="Адоратского"),
+            # нормы ремонта: узел наряда с нормой - в той же выборке
+            self.db.repair_nodes(), self.db.set_node_norm("motor_wheel", 5),
+            self.db.set_node_norm("brake_pads", None), self.db.work_order(1),
+            self.db.open_orders_by_bike(), self.db.open_order_of(1),
+            # склад: что уже едет от поставщика
+            self.db.parts_in_transit(),
+            # ресурс модели АКБ в циклах - для плана замены
+            self.db.create_battery_model(title="t", brand=None, voltage=60,
+                                         capacity=d, price=d, service_months=15,
+                                         note=None, max_cycles=800),
+            self.db.update_battery_model(1, max_cycles=None, service_months=15),
+            self.db.battery_models(), self.db.batteries(), self.db.battery(1),
             self.db.update_location(1, city="Казань", sort=10),
             # план месяца точки - в её строке справочника
             self.db.update_location(1, plan_rented=12, plan_check=d),

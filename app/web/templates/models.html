@@ -94,6 +94,7 @@
           <label>Ёмкость, А·ч <input name="capacity" value="{{ m.capacity or '' }}" size="5"></label>
           <label>Цена <input name="price" value="{{ m.price }}"></label>
           <label>Срок службы, мес. <input name="service_months" value="{{ m.service_months or 15 }}" size="4"></label>
+          <label>Ресурс, циклов <input name="max_cycles" value="{{ m.max_cycles or '' }}" size="6" placeholder="общий"></label>
           <button type="submit" class="ghost">Сохранить</button>
         </form>
       </td>
@@ -111,9 +112,13 @@
     <label>Ёмкость, А·ч <input name="capacity" size="5"></label>
     <label>Цена <input name="price" value="0"></label>
     <label>Срок службы, мес. <input name="service_months" value="15" size="4"></label>
+    <label>Ресурс, циклов <input name="max_cycles" size="6" placeholder="общий"></label>
     <button type="submit">Добавить</button>
   </form>
   {% endif %}
+  <p class="muted">Ресурс в циклах — для плана замены АКБ: пусто — общий из
+    «Батареи → План замены». Срок службы и цена здесь же: по сроку считается
+    износ, по цене — бюджет замены.</p>
 </section>
 </div>
 

@@ -58,6 +58,38 @@
     пустые — работы в этом прайсе нет, и наряд попросит цену руками.
     Ноль — честный ноль: колодки в рамках ТО.</p>
 </section>
+<section class="card" id="norms">
+  <h2>Сроки ремонта</h2>
+  {# Срок - сутки, которые открытый наряд может стоять. У наряда берётся
+     самый долгий из сроков его строк: «колодки плюс мотор» стоит, пока не
+     сделан мотор. Пусто - у узла своего срока нет, его строку меряет общий.
+     «Срок», а не «норма»: нормой ремонта план месяца зовёт число
+     велосипедов в ремонте. #}
+  <form method="post" action="/work-types/norms">
+  <fieldset {% if not can_manage %}disabled{% endif %} class="plain">
+  <label class="inline-label">Общий срок, суток
+    <input name="repair_norm_days" value="{{ repair_norm }}" size="3" class="mini" inputmode="numeric"></label>
+  <div class="table-wrap">
+  <table class="editable">
+    <tr><th>Узел</th><th class="num">Срок, суток</th></tr>
+    {% for n in nodes %}
+    <tr>
+      <td>{{ n.title }}</td>
+      <td class="num"><input name="norm_{{ n.code }}" value="{{ '' if n.norm_days is none else n.norm_days }}"
+        size="3" class="mini" inputmode="numeric" placeholder="{{ repair_norm }}" aria-label="Срок: {{ n.title }}"></td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% if can_manage %}<button type="submit">Сохранить сроки</button>{% endif %}
+  </fieldset>
+  </form>
+  <p class="muted">Наряд дольше срока подсвечивается на рабочем столе и в
+    списке нарядов («просрочено на N дн.») и попадает в утреннюю сводку
+    служебного чата. Срок наряда — самый долгий из сроков его строк; пустое
+    поле — своего срока у узла нет, и его строку меряет общий. Считаются все открытые
+    этапы, «ждёт запчасть» и «на согласовании» тоже: велосипед стоит.</p>
+</section>
 {% if can_manage %}
 <section class="card narrow">
   <h2>Новый вид работ</h2>

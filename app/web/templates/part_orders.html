@@ -6,10 +6,14 @@
 </div>
 
 {% set money_ok = can_view(staff, 'finance') %}
-{% set from_orders = needs|selectattr('source', 'equalto', 'order')|list %}
+{# Покрытые поставкой потребности остаются в списке - видно, что их ждут, -
+   но в счёт «что заказать» и в заказ не идут. #}
+{% set open_needs = needs|rejectattr('covered')|list %}
+{% set covered = needs|selectattr('covered')|list %}
+{% set from_orders = open_needs|selectattr('source', 'equalto', 'order')|list %}
 <div class="tiles">
   <div class="tile {% if from_orders %}hot{% endif %}"><b>{{ from_orders|length }}</b><span>наряды ждут запчасть<br><small class="muted">велосипеды стоят</small></span></div>
-  <div class="tile {% if needs|length %}warn{% endif %}"><b>{{ needs|length }}</b><span>всего потребностей</span></div>
+  <div class="tile {% if open_needs|length %}warn{% endif %}"><b>{{ open_needs|length }}</b><span>всего потребностей{% if covered %}<br><small class="muted">ещё {{ covered|length }} уже в пути</small>{% endif %}</span></div>
   <div class="tile"><b>{{ items|length }}</b><span>строк в текущем заказе</span></div>
 </div>
 
@@ -18,15 +22,15 @@
   <table>
     <tr><th>Позиция</th><th>Сколько</th><th>Откуда потребность</th><th class="opt">Наряд</th></tr>
     {% for n in needs %}
-    <tr>
+    <tr class="{% if n.covered %}muted{% endif %}">
       <td>{% if n.part_id %}<a href="/parts/{{ n.part_id }}">{{ n.title }}</a>{% else %}{{ n.title }} <small class="muted">нет в номенклатуре</small>{% endif %}</td>
-      <td class="num">{{ n.qty }}</td>
-      <td>{{ NEED_SOURCES[n.source] }}</td>
+      <td class="num">{% if n.covered %}—{% else %}{{ n.qty }}{% endif %}{% if n.transit %} <small class="muted">· в пути {{ n.transit }}</small>{% endif %}</td>
+      <td>{{ NEED_SOURCES[n.source] }}{% if n.edge %} <small class="muted">· на пределе</small>{% endif %}{% if n.covered %} <small class="muted">· уже едет, заказывать не надо</small>{% endif %}</td>
       <td class="opt">{% if n.work_order_no %}<a href="/orders/{{ n.work_order_id }}">{{ n.work_order_no }}</a>{% if n.bike_code %} · № {{ n.bike_code }}{% endif %}{% else %}—{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">Потребностей нет: остатки в норме, наряды запчастей не ждут.</td></tr>{% endfor %}
   </table>
-  {% if can_edit(staff, 'inventory') and needs %}
+  {% if can_edit(staff, 'inventory') and open_needs %}
   <form method="post" action="/part-orders/collect">
     <button type="submit">Собрать в заказ</button>
   </form>

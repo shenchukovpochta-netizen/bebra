@@ -14,17 +14,23 @@
     <button type="submit">Показать</button>
   </form>
   {% if can_edit(staff, 'service') %}<a class="btn" href="/orders/new">+ Наряд</a>{% endif %}
-  {% set bike_q = ('&bike=' ~ bike_filter.id if bike_filter else '') ~ (('&location=' ~ (location|urlencode)) if location else '') %}
+  {% set bike_q = ('&bike=' ~ bike_filter.id if bike_filter else '') ~ (('&location=' ~ (location|urlencode)) if location else '') ~ ('&overdue=1' if overdue_only else '') %}
   <a class="btn ghost" href="/orders.xlsx?status={{ status }}&payer={{ payer }}{{ bike_q }}">Excel</a>
   <a class="btn ghost" href="/orders.csv?status={{ status }}&payer={{ payer }}{{ bike_q }}">CSV</a>
 </div>
 {# «На согласовании» вынесено кнопкой: это самый дорогой статус - техника
    разобрана и ждёт, а в выпадающем списке его не видно. #}
-<nav class="tabs"><a href="/orders" class="{% if not status %}on{% endif %}">Все</a>
+<nav class="tabs"><a href="/orders" class="{% if not status and not overdue_only %}on{% endif %}">Все</a>
   <a href="/orders?status=approve" class="{% if status == 'approve' %}on{% endif %}">На согласовании</a>
   <a href="/orders?status=waiting" class="{% if status == 'waiting' %}on{% endif %}">Ждут запчасть</a>
+  <a href="/orders?overdue=1" class="{% if overdue_only %}on{% endif %}">Дольше срока</a>
   <a href="/orders?status=done&payer=client" class="{% if status == 'done' %}on{% endif %}">Закрытые клиентские</a>
 </nav>
+{% if overdue_only %}
+<p class="flash">Открытые наряды дольше срока ремонта: срок — самого долгого
+  узла в строках наряда, у наряда без узлов со своим сроком общий,
+  {{ repair_norm }} дн. Сроки узлов — в <a href="/work-types">«Видах работ»</a>.</p>
+{% endif %}
 {% if bike_filter %}
 <p class="flash">Наряды велосипеда <a href="/bikes/{{ bike_filter.id }}">№ {{ bike_filter.code }}</a> {{ bike_filter.model }} —
   вся история ремонтов, открытые и закрытые. <a href="/orders">Все наряды</a></p>
@@ -43,11 +49,11 @@
     {{ list.th('Плательщик', 'payer', tools) }}
     {{ list.th('Клиент', 'client', tools) }}
     {{ list.th('Техник', 'tech', tools) }}
-    <th>Суток</th>
+    {{ list.th('Суток', 'days', tools, 'num') }}
     {% if money_ok %}{{ list.th('Сумма', 'total', tools, 'num') }}{% endif %}
   </tr>
   {% for r in rows %}
-  <tr>
+  <tr class="{% if r.overdue %}warn-row{% endif %}">
     <td data-label="№"><a href="/orders/{{ r.id }}">{{ r.no }}</a></td>
     <td data-label="Открыт">{{ r.opened_at|dmy }}</td>
     <td data-label="Объект">{% if r.bike_id %}№ {{ r.bike_code }} {{ r.bike_model }}{% else %}{{ r.object_note or '—' }}{% endif %}</td>
@@ -56,7 +62,7 @@
     <td data-label="Плательщик">{{ PAYERS[r.payer] }}</td>
     <td data-label="Клиент">{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.client_name }}</a>{% else %}{{ r.client_name or '' }}{% endif %}</td>
     <td data-label="Техник">{{ r.tech_name or '—' }}</td>
-    <td class="num" data-label="Суток">{{ r.days }}</td>
+    <td class="num {% if r.overdue %}bad{% endif %}" data-label="Суток">{{ r.days }}{% if r.overdue %}<br><small title="срок {{ r.norm }} дн.">просрочено на {{ r.overdue }} дн.</small>{% endif %}</td>
     {% if money_ok %}<td class="num" data-label="Сумма">{{ money(r.total if r.status == 'done' else r.estimate) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="10" class="muted">Нарядов нет.</td></tr>{% endfor %}

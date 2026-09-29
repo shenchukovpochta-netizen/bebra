@@ -891,10 +891,14 @@ async def collect_part_needs(crm: Any, *, by: str) -> dict:
     """Собрать потребности склада в заказ: нехватка и наряды, ждущие запчасть.
 
     Заказ один и собирается дополнением: нажали второй раз - добавились
-    только новые строки, уже внесённые руками не задваиваются.
+    только новые строки, уже внесённые руками не задваиваются. То, что уже
+    едет в отправленном заказе, вычитается: иначе вторая неделя без
+    поставки заказывала бы ту же нехватку ещё раз.
     """
     rows = logic.part_rows(await crm.parts(active_only=True), await crm.stock_map())
-    needs = logic.part_needs(rows, await crm.waiting_orders_parts())
+    needs = [n for n in logic.part_needs(rows, await crm.waiting_orders_parts(),
+                                         await crm.parts_in_transit())
+             if not n["covered"]]
     order = await crm.open_part_order()
     if order is None:
         order_id = await crm.create_part_order(supplier_id=None, note=None, created_by=by)

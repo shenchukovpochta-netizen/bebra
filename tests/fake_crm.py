@@ -28,6 +28,8 @@ class FakeCrm:
         self.location_log_: list[dict] = []
         self.repair_items_: list[dict] = []
         self.work_types_: dict[int, dict] = {}
+        # Сроки ремонта узлов (repair_nodes.norm_days): только заданные.
+        self.node_norms_: dict[str, int] = {}
         self.orders_: dict[int, dict] = {}
         self.order_items_: list[dict] = []
         self.takes_: dict[int, dict] = {}
@@ -369,7 +371,17 @@ class FakeCrm:
                    Decimal(0))
 
     async def repair_nodes(self):
-        return [{"code": c, "title": t} for c, t in crm_logic.REPAIR_NODES.items()]
+        return [{"code": c, "title": t, "norm_days": self.node_norms_.get(c)}
+                for c, t in crm_logic.REPAIR_NODES.items()]
+
+    async def set_node_norm(self, code, norm_days):
+        if code not in crm_logic.REPAIR_NODES:
+            return False
+        if norm_days is None:
+            self.node_norms_.pop(code, None)
+        else:
+            self.node_norms_[code] = int(norm_days)
+        return True
 
     async def create_repair(self, bike_id, *, items, note, created_by):
         total = sum((Decimal(str(i.get("parts_cost") or 0))
@@ -1011,10 +1023,22 @@ class FakeCrm:
         bike = self.bikes_.get(o.get("bike_id")) or {}
         client = self.clients_.get(o.get("client_id")) or {}
         tech = self.staff.get(o.get("tech_id")) or {}
+        # Как lateral в базе: самый долгий узел строк наряда со своим сроком,
+        # при равенстве - первый по справочнику; norm_general - есть строка,
+        # которую меряет общий срок (узел без срока или строка без узла).
+        order = list(crm_logic.REPAIR_NODES)
+        lines = [i for i in self.order_items_ if i["order_id"] == o["id"]]
+        normed = sorted({i["node"] for i in lines if i.get("node") in self.node_norms_},
+                        key=lambda c: (-self.node_norms_[c], order.index(c)))
+        top = normed[0] if normed else None
         return {**o, "bike_code": bike.get("code"), "bike_model": bike.get("model"),
                 "bike_status": bike.get("status"), "client_name": client.get("full_name"),
                 "client_phone": client.get("phone"), "tech_name": tech.get("name"),
-                "tech_login": tech.get("login")}
+                "tech_login": tech.get("login"),
+                "node_norm": self.node_norms_.get(top) if top else None,
+                "norm_node": crm_logic.REPAIR_NODES.get(top) if top else None,
+                "norm_general": any(i.get("node") not in self.node_norms_
+                                    for i in lines)}
 
     async def work_orders(self, *, status=None, payer=None, tech_id=None,
                           bike_id=None, open_only=False, location=None, limit=300):
@@ -1895,6 +1919,14 @@ class FakeCrm:
                                           and i["id"] == item_id)]
         return len(self.part_order_items_) < before
 
+    async def parts_in_transit(self):
+        out: dict[int, int] = {}
+        for item in self.part_order_items_:
+            order = self.part_orders_.get(item["order_id"]) or {}
+            if order.get("status") == "ordered":
+                out[item["part_id"]] = out.get(item["part_id"], 0) + int(item["qty"])
+        return out
+
     async def waiting_orders_parts(self):
         rows = []
         for order in self.orders_.values():
@@ -2169,7 +2201,7 @@ class FakeCrm:
         return dict(model) if model else None
 
     async def create_battery_model(self, *, title, brand, voltage, capacity, price,
-                                   service_months, note):
+                                   service_months, note, max_cycles=None):
         if any(m["title"] == title for m in self.battery_models_.values()):
             raise UniqueError("battery model")
         model_id = self._id()
@@ -2177,7 +2209,7 @@ class FakeCrm:
             "id": model_id, "title": title, "brand": brand, "voltage": voltage,
             "capacity": capacity, "price": Decimal(str(price or 0)),
             "service_months": int(service_months), "active": True, "note": note,
-            "created_at": self._now()}
+            "max_cycles": max_cycles, "created_at": self._now()}
         return model_id
 
     async def update_battery_model(self, model_id, **fields):
@@ -2222,7 +2254,8 @@ class FakeCrm:
         client = self.clients_.get(rental.get("client_id")) or {}
         return {**battery, "model_title": model.get("title"),
                 "voltage": model.get("voltage"), "capacity": model.get("capacity"),
-                "model_price": model.get("price"), "bike_code": bike.get("code"),
+                "model_price": model.get("price"),
+                "model_max_cycles": model.get("max_cycles"), "bike_code": bike.get("code"),
                 "bike_model": bike.get("model"),
                 "client_name": client.get("full_name") or None,
                 "rental_started": rental.get("started_on")

@@ -17,7 +17,8 @@
 </div>
 
 <div class="tiles">
-  <div class="tile {% if summary.below %}warn{% endif %}"><b>{{ summary.below }}</b><span>ниже неснижаемого<br><small class="muted">это и есть список «что заказать»</small></span></div>
+  <a class="tile {% if summary.below %}warn{% endif %}" href="/part-orders"><b>{{ summary.below }}</b><span>ниже неснижаемого<br><small class="muted">это и есть список «что заказать»</small></span></a>
+  <a class="tile {% if summary.at_min %}warn{% endif %}" href="/part-orders"><b>{{ summary.at_min }}</b><span>на пределе<br><small class="muted">ровно неснижаемый: в заказ по одной</small></span></a>
   <div class="tile"><b>{{ summary.positions }}</b><span>позиций в номенклатуре</span></div>
   <div class="tile {% if summary.empty %}warn{% endif %}"><b>{{ summary.empty }}</b><span>нет на полке</span></div>
   {% if can_view(staff, 'finance') %}<div class="tile"><b>{{ money(summary.cost) }}</b><span>склад по себестоимости</span></div>{% endif %}
@@ -71,7 +72,7 @@
   <tr class="{% if not r.active %}muted{% endif %}">
     <td data-label="Позиция"><a href="/parts/{{ r.id }}">{{ r.title }}</a>{% if not r.active %} <small class="muted">архив</small>{% endif %}</td>
     <td class="opt" data-label="Узел">{{ r.node_title or '—' }}</td>
-    <td class="num {% if r.below %}bad{% endif %}" data-label="На полке">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· не хватает {{ r.short }}</small>{% endif %}</td>
+    <td class="num {% if r.below %}bad{% elif r.at_min %}warn{% endif %}" data-label="На полке">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· не хватает {{ r.short }}</small>{% elif r.at_min %} <small>· на пределе</small>{% endif %}{% if r.transit %} <small class="muted">· в пути {{ r.transit }}</small>{% endif %}</td>
     <td class="num muted" data-label="Мин.">{{ r.min_stock }}</td>
     <td class="num opt {% if r.stale %}warn{% endif %}" data-label="Дней на складе">{{ r.days_on_stock if r.days_on_stock is not none else '—' }}</td>
     {% if money_ok %}
@@ -88,7 +89,12 @@
                  if money_ok and summary.cost else '') }}
 </table>
 </div>
-<p class="muted">Первыми — те, чего не хватает до неснижаемого остатка.
+<p class="muted">Первыми — те, чего не хватает до неснижаемого остатка, за
+  ними — на пределе: неснижаемый — точка заказа, поэтому ровно на нём позиция
+  тоже попадает в заказ, по одной штуке. «В пути» — сколько едет в
+  отправленном заказе: нехватку, которая уже в пути, «Собрать в заказ»
+  второй раз не закажет. Раз в неделю
+  список на исходе уходит в служебный чат (уведомление «Запчасти на исходе»).
   Себестоимость средняя: пересчитывается при каждом приходе, поэтому один
   дорогой приход не задирает стоимость всех ремонтов. Остаток — сумма
   движений, отдельной колонки нет намеренно.</p>

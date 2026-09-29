@@ -364,7 +364,7 @@ class TestPartOrdersInPanel(tw.WebCase):
     def test_needs_come_from_min_stock(self):
         page = self.get_ok("/part-orders")
         self.assertIn("Контроллер", page)
-        self.assertIn("Ниже неснижаемого", page)
+        self.assertIn("Неснижаемый остаток", page)
 
     def test_waiting_order_makes_a_need(self):
         self.client.post("/orders", data={"bike_id": self.bike_id, "payer": "own",

@@ -52,7 +52,8 @@ BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "max_load_kg", "size_note", "photo_url",
                                "description"})
 BATTERY_MODEL_FIELDS = frozenset({"title", "brand", "voltage", "capacity",
-                                  "price", "service_months", "active", "note"})
+                                  "price", "service_months", "active", "note",
+                                  "max_cycles"})
 TEMPLATE_FIELDS_DB = frozenset({"code", "title", "body", "body_max", "active",
                                 "note"})
 BOOKING_FIELDS = frozenset({
@@ -553,7 +554,15 @@ class CrmDB:
 
     async def repair_nodes(self) -> list[dict]:
         return _rows(await self.pool.fetch(
-            "select code, title from crm.repair_nodes order by sort, code"))
+            "select code, title, norm_days from crm.repair_nodes order by sort, code"))
+
+    async def set_node_norm(self, code: str, norm_days: int | None) -> bool:
+        """Срок ремонта узла, суток; None - «своего нет, общий». False -
+        такого узла нет: справочник узлов правится только схемой."""
+        row = await self.pool.fetchrow(
+            "update crm.repair_nodes set norm_days = $2 where code = $1 returning code",
+            code, norm_days)
+        return row is not None
 
     async def create_repair(self, bike_id: int, *, items: list[dict], note: str | None,
                             created_by: str | None) -> int:
@@ -1344,14 +1353,33 @@ class CrmDB:
     # на рабочем столе как «без наряда» - самый дорогой простой прятался.
     _OPEN_SQL = "(" + ", ".join(f"'{s}'" for s in logic.ORDER_OPEN) + ")"
 
+    # node_norm - срок ремонта самого долгого узла среди строк наряда (из
+    # тех, у кого срок задан), norm_node - его название; norm_general -
+    # есть строка, которую меряет общий срок (узел без своего срока или
+    # строка без узла). По ним рабочий стол и сводка в чат считают
+    # «просрочено на N дн.» (logic.order_norm): без norm_general колодки
+    # (1 сут.) рядом с проводкой без срока укоротили бы весь наряд до суток.
     _ORDER_SELECT = """
         select o.*, b.code as bike_code, b.model as bike_model, b.status as bike_status,
                c.full_name as client_name, c.phone as client_phone,
-               s.name as tech_name, s.login as tech_login
+               s.name as tech_name, s.login as tech_login,
+               nn.norm_days as node_norm, nn.title as norm_node,
+               exists (select 1 from crm.work_order_items gi
+                       left join crm.repair_nodes gn on gn.code = gi.node
+                       where gi.order_id = o.id and gn.norm_days is null)
+                 as norm_general
         from crm.work_orders o
         left join crm.bikes b on b.id = o.bike_id
         left join crm.clients c on c.id = o.client_id
         left join crm.staff s on s.id = o.tech_id
+        left join lateral (
+          select n.norm_days, n.title
+          from crm.work_order_items i
+          join crm.repair_nodes n on n.code = i.node
+          where i.order_id = o.id and n.norm_days is not null
+          order by n.norm_days desc, n.sort
+          limit 1
+        ) nn on true
     """
 
     async def work_orders(self, *, status: str | None = None, payer: str | None = None,
@@ -2643,6 +2671,20 @@ class CrmDB:
             "returning id", order_id, item_id)
         return row is not None
 
+    async def parts_in_transit(self) -> dict[int, int]:
+        """Сколько каждой позиции едет от поставщика: строки отправленных
+        заказов. Собираемый заказ сюда не входит - он ещё не заказан, а
+        задвоить его строки не даёт уникальный индекс."""
+        rows = await self.pool.fetch(
+            """
+            select i.part_id, sum(i.qty) as qty
+            from crm.part_order_items i
+            join crm.part_orders o on o.id = i.order_id
+            where o.status = 'ordered'
+            group by i.part_id
+            """)
+        return {int(r["part_id"]): int(r["qty"] or 0) for r in rows}
+
     async def waiting_orders_parts(self) -> list[dict]:
         """Наряды в состоянии «ждёт запчасть» с их узлами: из них и
         собирается половина потребностей склада."""
@@ -3134,13 +3176,15 @@ class CrmDB:
     async def create_battery_model(self, *, title: str, brand: str | None,
                                    voltage: int | None, capacity: Decimal | None,
                                    price: Decimal, service_months: int,
-                                   note: str | None) -> int:
+                                   note: str | None,
+                                   max_cycles: int | None = None) -> int:
         return int(await self.pool.fetchval(
             """
             insert into crm.battery_models (title, brand, voltage, capacity, price,
-                                            service_months, note)
-            values ($1, $2, $3, $4, $5, $6, $7) returning id
-            """, title, brand, voltage, capacity, price, service_months, note))
+                                            service_months, note, max_cycles)
+            values ($1, $2, $3, $4, $5, $6, $7, $8) returning id
+            """, title, brand, voltage, capacity, price, service_months, note,
+            max_cycles))
 
     async def update_battery_model(self, model_id: int, **fields: Any) -> None:
         if not fields:
@@ -3195,7 +3239,8 @@ class CrmDB:
 
     _BATTERY_SELECT = """
         select b.*, m.title as model_title, m.voltage, m.capacity,
-               m.price as model_price, bk.code as bike_code, bk.model as bike_model,
+               m.price as model_price, m.max_cycles as model_max_cycles,
+               bk.code as bike_code, bk.model as bike_model,
                c.full_name as client_name, r.client_id,
                r.started_on as rental_started,
                -- Розыск - состояние аренды, а не батареи: пока клиент

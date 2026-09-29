@@ -296,6 +296,51 @@ async def report_silent_estimates(bot: Any, crm: Any, cfg: Any, *,
     return len(rows)
 
 
+async def report_repair_overdue(bot: Any, crm: Any, cfg: Any, *, today: date,
+                                chat_id: Any = None) -> int:
+    """Наряды дольше срока ремонта - в служебный чат. Молчим, когда все
+    укладываются: ежедневное «просрочек нет» перестают читать через неделю.
+
+    Срок наряда - самый долгий из сроков его строк; строку без своего
+    срока меряет общий (`repair_norm_days`), см. `logic.order_norm`.
+    Велосипед сверх срока - это простой, который никто не планировал.
+    """
+    rows = logic.overdue_orders(
+        await crm.work_orders(open_only=True, limit=500),
+        default=logic.repair_norm_default(await crm.settings()), today=today)
+    text = logic.repair_overdue_lines(rows)
+    if not text:
+        return 0
+    try:
+        await bot.send_message(chat_id or cfg.contract_chat_id, text)
+        await notices.record(crm, "repair_overdue", status="sent")
+    except TelegramAPIError as exc:
+        log.exception("сводка по срокам ремонта не доставлена")
+        await notices.record(crm, "repair_overdue", status="failed", detail=str(exc))
+        return 0
+    return len(rows)
+
+
+async def report_parts_low(bot: Any, crm: Any, cfg: Any, *,
+                           chat_id: Any = None) -> int:
+    """Запчасти ниже неснижаемого и на пределе - раз в неделю в чат, с тем,
+    что уже едет от поставщика. Молчим, когда запас в норме."""
+    rows = logic.parts_low(logic.part_rows(
+        await crm.parts(active_only=True), await crm.stock_map(),
+        transit=await crm.parts_in_transit()))
+    text = logic.parts_low_lines(rows)
+    if not text:
+        return 0
+    try:
+        await bot.send_message(chat_id or cfg.contract_chat_id, text)
+        await notices.record(crm, "parts_low", status="sent")
+    except TelegramAPIError as exc:
+        log.exception("сводка по складу не доставлена")
+        await notices.record(crm, "parts_low", status="failed", detail=str(exc))
+        return 0
+    return len(rows)
+
+
 async def report_ref_spikes(bot: Any, crm: Any, cfg: Any, *, today: date,
                             chat_id: Any = None) -> int:
     """Агенты, у которых за сутки подозрительно много друзей.
@@ -454,6 +499,29 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
                 log.info("CRM: нарядов молчит на согласовании %s", silent)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: сводка по согласованиям не собрана")
+
+    if due("repair_overdue"):
+        notices.mark(done, "repair_overdue", today)
+        try:
+            late = await report_repair_overdue(bot, crm, cfg, today=today,
+                                               chat_id=chat("repair_overdue"))
+            if late:
+                log.info("CRM: нарядов дольше срока ремонта %s", late)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: сводка по срокам ремонта не собрана")
+
+    # Недельное: час проверяет расписание, день недели - параметр. Отметка
+    # ставится каждый день, иначе в чужой день проход проверял бы его
+    # каждые 15 минут. Ручной проход шлёт сразу, как и остальные.
+    if due("parts_low"):
+        notices.mark(done, "parts_low", today)
+        if manual or logic.weekly_due(state.get("parts_low"), today):
+            try:
+                low = await report_parts_low(bot, crm, cfg, chat_id=chat("parts_low"))
+                if low:
+                    log.info("CRM: запчастей на исходе %s", low)
+            except Exception:                            # noqa: BLE001
+                log.exception("CRM: сводка по складу не собрана")
 
     if due("bank_unmatched"):
         notices.mark(done, "bank_unmatched", today)

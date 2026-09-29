@@ -1585,7 +1585,115 @@ def fine_presets(types: Iterable[Mapping[str, Any]]) -> list[dict]:
 
 # Сколько суток наряд может стоять, прежде чем это станет заметно.
 # Велосипед в ремонте - это велосипед вне аренды, то есть прямой простой.
+# Это общий срок ремонта по умолчанию: владелец правит его настройкой
+# `repair_norm_days`, а узлам ставит свой (`repair_nodes.norm_days`).
+# «Срок», а не «норма»: нормой ремонта в плане месяца зовётся другое -
+# сколько велосипедов в ремонте держать нормально.
 ORDER_STUCK_DAYS = 3
+REPAIR_NORM_MAX = 365
+
+
+def repair_norm_default(settings: Mapping[str, Any] | None = None) -> int:
+    """Общий срок ремонта, суток. Мусор в настройке - к умолчанию: срок
+    минус три дня превратил бы в просрочку весь сервис."""
+    try:
+        value = int(str((settings or {}).get("repair_norm_days")))
+    except (TypeError, ValueError):
+        return ORDER_STUCK_DAYS
+    return value if 0 <= value <= REPAIR_NORM_MAX else ORDER_STUCK_DAYS
+
+
+def check_norm_days(raw: Any) -> Check:
+    """Срок ремонта узла из формы. Пусто - «своего нет, общий»; ноль -
+    честный ноль: колодки меняют в тот же день."""
+    text = str(raw or "").strip()
+    if not text:
+        return Check(True, None)
+    value = parse_id(text)
+    if value is None or value > REPAIR_NORM_MAX:
+        return Check(False, error=f"Срок: целое число суток от 0 до {REPAIR_NORM_MAX}.")
+    return Check(True, value)
+
+
+def order_norm(order: Mapping[str, Any] | None,
+               default: int = ORDER_STUCK_DAYS) -> int:
+    """Срок наряда: самый долгий из сроков его строк. Строка меряется
+    сроком своего узла, а узел без своего срока и строка без узла - общим
+    (`norm_general` из запроса); наряд без строк - тоже общим.
+
+    Самый долгий, а не первый: наряд «колодки плюс мотор-колесо» стоит,
+    пока не сделан мотор, и срок колодок сделал бы его просроченным
+    на второй день. По той же причине строка без своего срока не
+    выпадает из счёта: добавленная работа не может укоротить срок.
+    """
+    order = order or {}
+    node = order.get("node_norm")
+    if node is None:
+        return int(default)
+    if order.get("norm_general"):
+        return max(int(node), int(default))
+    return int(node)
+
+
+def order_norm_node(order: Mapping[str, Any] | None,
+                    default: int = ORDER_STUCK_DAYS) -> str | None:
+    """Узел, по которому считается срок наряда; None - действует общий.
+    Подпись к «срок N дн.» обязана совпадать с самим сроком: колодки в
+    подписи при сроке в трое суток от проводки читались бы как ошибка."""
+    order = order or {}
+    node = order.get("node_norm")
+    if node is None or (order.get("norm_general") and int(default) > int(node)):
+        return None
+    return order.get("norm_node")
+
+
+def order_overdue(order: Mapping[str, Any] | None, *, default: int = ORDER_STUCK_DAYS,
+                  today: date | None = None) -> int:
+    """На сколько суток открытый наряд пересидел срок. 0 - укладывается
+    или закрыт: закрытый простоя больше не копит."""
+    if not order_is_open(dict(order or {})):
+        return 0
+    return max(order_days(dict(order or {}), today=today)
+               - order_norm(order, default), 0)
+
+
+def overdue_orders(orders: Iterable[Mapping[str, Any]], *,
+                   default: int = ORDER_STUCK_DAYS,
+                   today: date | None = None) -> list[dict]:
+    """Открытые наряды дольше срока - дольше всех просроченные первыми."""
+    rows = []
+    for order in orders:
+        late = order_overdue(order, default=default, today=today)
+        if late:
+            rows.append({**order, "norm": order_norm(order, default),
+                         "norm_node": order_norm_node(order, default),
+                         "days": order_days(dict(order), today=today),
+                         "overdue": late})
+    rows.sort(key=lambda r: (-r["overdue"], str(r.get("no") or "")))
+    return rows
+
+
+def repair_overdue_lines(rows: Sequence[Mapping[str, Any]], *, limit: int = 15) -> str:
+    """Сводка просроченных нарядов для служебного чата, HTML.
+
+    Узел в строке - тот, по которому считался срок: без него «срок 5»
+    читается как придирка, а с ним видно, что держит велосипед.
+    """
+    if not rows:
+        return ""
+    lines = [f"⏱ Наряды дольше срока ремонта: {len(rows)}"]
+    for row in rows[:limit]:
+        what = html.escape(str(row.get("bike_code") and f"№ {row['bike_code']}"
+                               or row.get("object_note") or "—"), quote=False)
+        node = row.get("norm_node")
+        norm = (f"срок {row['norm']} дн."
+                + (f" ({html.escape(str(node), quote=False)})" if node else ""))
+        stage = ORDER_STATUSES.get(str(row.get("status") or ""), "")
+        lines.append(f"• {row.get('no')} — {what}: {row['days']} дн., {norm}, "
+                     f"просрочено на {row['overdue']} дн. · {stage}")
+    if len(rows) > limit:
+        lines.append(f"…и ещё {len(rows) - limit}: «Сервис → Наряды».")
+    return "\n".join(lines)
 
 
 def order_no(number: int) -> str:
@@ -1651,18 +1759,22 @@ def order_is_open(order: dict | None) -> bool:
     return bool(order) and str(order.get("status") or "") in ORDER_OPEN
 
 
-def order_stuck(order: dict, *, today: date | None = None) -> bool:
-    """Наряд стоит дольше нормы - велосипед копит простой."""
-    return order_is_open(order) and order_days(order, today=today) >= ORDER_STUCK_DAYS
+def order_stuck(order: dict, *, today: date | None = None,
+                default: int = ORDER_STUCK_DAYS) -> bool:
+    """Наряд стоит дольше срока - велосипед копит простой. Срок - самый
+    долгий из сроков его строк, общий (`default`) - у строк без своего."""
+    return order_overdue(order, default=default, today=today) > 0
 
 
 def service_rows(bikes: Iterable[dict], orders_by_bike: dict[int, dict], *,
-                 today: date | None = None) -> list[dict]:
+                 today: date | None = None,
+                 norm: int = ORDER_STUCK_DAYS) -> list[dict]:
     """Рабочий стол сервиса: велосипеды в ремонте и что с ними.
 
     Главная строка здесь - «в ремонте, а наряда нет»: велосипед стоит,
     никто им не занят, и в отчёте простоя он выглядит как обычный ремонт.
-    Такие идут первыми и по убыванию суток.
+    Такие идут первыми и по убыванию суток. `norm` - общий срок ремонта:
+    им меряются строки наряда без своего срока (`order_norm`).
     """
     today = today or date.today()
     rows = []
@@ -1672,12 +1784,15 @@ def service_rows(bikes: Iterable[dict], orders_by_bike: dict[int, dict], *,
         order = orders_by_bike.get(bike["id"])
         days = order_days(order, today=today) if order else (bike.get("idle_days") or 0)
         order = order or {}
+        overdue = order_overdue(order, default=norm, today=today) if order else 0
         rows.append({**bike, "order": order or None,
                      "stage": ORDER_STATUSES.get(order.get("status"), "Без наряда"),
                      "days": days,
                      # Что этот велосипед уже не заработал, пока стоит.
                      "lost": idle_cost(days),
-                     "stuck": (not order) or order_stuck(order, today=today),
+                     "norm": order_norm(order, norm) if order else None,
+                     "overdue": overdue,
+                     "stuck": (not order) or overdue > 0,
                      # Плоские поля наряда - по ним сортируют, ищут и
                      # выгружают: вложенный словарь для этого не годится.
                      "order_no": order.get("no") or "",
@@ -1704,6 +1819,10 @@ def service_summary(rows: Iterable[dict]) -> dict[str, Any]:
         "total": len(rows),
         "no_order": sum(1 for r in rows if r["order"] is None),
         "stuck": sum(1 for r in rows if r["stuck"]),
+        # Плитка «дольше срока» ведёт в /orders?overdue=1, поэтому считает
+        # только наряды сверх срока: велосипед без наряда там не виден, и
+        # у него своя плитка - иначе число и список расходились бы.
+        "overdue": sum(1 for r in rows if r.get("overdue")),
         # Два состояния, где техника стоит не из-за нас: ждём клиента
         # и ждём поставщика. Их видно плитками, а не только фильтром.
         "approving": sum(1 for r in rows
@@ -2414,7 +2533,7 @@ PART_ORDER_STATUSES: dict[str, str] = {
     "cancelled": "Отменён",
 }
 NEED_SOURCES: dict[str, str] = {
-    "order": "Наряд ждёт запчасть", "min_stock": "Ниже неснижаемого",
+    "order": "Наряд ждёт запчасть", "min_stock": "Неснижаемый остаток",
     "manual": "Вписали руками",
 }
 PART_UNITS: tuple[str, ...] = ("шт", "компл.", "м", "л", "кг")
@@ -2470,17 +2589,23 @@ STOCK_STALE_DAYS = 90
 
 def part_rows(parts: Iterable[dict], stocks: dict[int, int],
               moved: Mapping[int, Any] | None = None,
-              *, today: date | None = None) -> list[dict]:
+              *, today: date | None = None,
+              transit: Mapping[int, int] | None = None) -> list[dict]:
     """Остатки склада: позиция, сколько на полке и чего не хватает.
 
     Первыми - те, чей остаток ниже неснижаемого: это и есть список
-    «что заказать», и он должен быть виден без прокрутки.
+    «что заказать», и он должен быть виден без прокрутки. За ними - «на
+    пределе»: ровно неснижаемый, и следующий же расход уведёт ниже, -
+    они тоже в заказе (по одной, `part_needs`): поставка идёт днями.
 
     `moved` - когда позицию последний раз трогали. Отсюда «дней на
     складе»: запчасть, которая лежит квартал, - это деньги на полке,
-    и увидеть их можно только так.
+    и увидеть их можно только так. `transit` - сколько уже едет от
+    поставщика: нехватка, которая уже в пути, - это не повод заказывать
+    второй раз.
     """
     moved = moved or {}
+    transit = transit or {}
     today = today or date.today()
     rows = []
     for part in parts:
@@ -2492,12 +2617,17 @@ def part_rows(parts: Iterable[dict], stocks: dict[int, int],
         rows.append({**part, "stock": stock,
                      "short": max(minimum - stock, 0),
                      "below": stock < minimum,
+                     # Без неснижаемого предела нет: «0 из 0» - это пустая
+                     # полка (плитка «нет на полке»), а не сигнал заказать.
+                     "at_min": minimum > 0 and stock == minimum,
+                     "transit": int(transit.get(int(part["id"]), 0)),
                      "days_on_stock": days,
                      "stale": bool(days is not None and stock > 0
                                    and days >= STOCK_STALE_DAYS),
                      "cost_total": to_money(part.get("cost") or 0) * max(stock, 0),
                      "price_total": to_money(part.get("price") or 0) * max(stock, 0)})
-    rows.sort(key=lambda r: (not r["below"], -r["short"], str(r.get("title") or "")))
+    rows.sort(key=lambda r: (not r["below"], not r["at_min"], -r["short"],
+                             str(r.get("title") or "")))
     return rows
 
 
@@ -2506,6 +2636,7 @@ def stock_summary(rows: Iterable[dict]) -> dict[str, Any]:
     return {
         "positions": len(rows),
         "below": sum(1 for r in rows if r["below"]),
+        "at_min": sum(1 for r in rows if r.get("at_min")),
         "empty": sum(1 for r in rows if r["stock"] <= 0),
         "stale": sum(1 for r in rows if r.get("stale")),
         "cost": to_money(sum((r["cost_total"] for r in rows), Decimal(0))),
@@ -2515,8 +2646,10 @@ def stock_summary(rows: Iterable[dict]) -> dict[str, Any]:
     }
 
 
-def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = ()) -> list[dict]:
-    """Что заказывать: нехватка до неснижаемого и наряды, ждущие запчасть.
+def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = (),
+               transit: Mapping[int, int] | None = None) -> list[dict]:
+    """Что заказывать: нехватка до неснижаемого, позиции ровно на нём
+    («на пределе», `edge`) и наряды, ждущие запчасть.
 
     Наряд в состоянии «ждёт запчасть» - это велосипед, который стоит
     и копит простой, поэтому его строки идут первыми, даже если на полке
@@ -2526,7 +2659,14 @@ def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = ()) -> list[dict]
     считается от сегодняшнего остатка, а наряд заберёт ещё одну сверх.
     Иначе в заказ ушла бы только первая строка - уникальный индекс не даёт
     положить позицию в заказ дважды, и вторая потребность пропала бы молча.
+
+    `transit` - сколько каждой позиции уже едет в отправленных заказах.
+    Оно вычитается: остаток на полке ниже неснижаемого, пока поставка в
+    пути, и без вычета «Собрать в заказ» заказал бы то же самое второй
+    раз. Покрытая поставкой потребность остаётся в списке (`covered`) -
+    видно, что её ждут, - но в заказ не идёт.
     """
+    transit = transit or {}
     needs: list[dict] = []
     by_part: dict[int, dict] = {}
 
@@ -2552,16 +2692,62 @@ def part_needs(rows: Iterable[dict], waiting: Iterable[dict] = ()) -> list[dict]
     for order in waiting:
         add({"source": "order", "part_id": order.get("part_id"),
              "title": order.get("title") or "", "qty": int(order.get("qty") or 1),
+             "edge": False,
              "work_order_id": order.get("work_order_id"),
              "work_order_no": order.get("work_order_no"),
              "bike_code": order.get("bike_code")})
     for row in rows:
-        if row["below"] and row.get("active", True):
-            add({"source": "min_stock", "part_id": int(row["id"]),
-                 "title": row.get("title") or "", "qty": row["short"],
-                 "work_order_id": None, "work_order_no": None, "bike_code": None})
-    needs.sort(key=lambda n: (n["source"] != "order", n["title"]))
+        if not row.get("active", True) or not (row["below"] or row.get("at_min")):
+            continue
+        # Неснижаемый - точка заказа: ровно на нём следующий же расход уведёт
+        # ниже, а поставка идёт днями. Ниже - нехватка до него; на пределе -
+        # одна штука сверх, партию владелец поправит в заказе.
+        add({"source": "min_stock", "part_id": int(row["id"]),
+             "title": row.get("title") or "",
+             "qty": row["short"] if row["below"] else 1, "edge": not row["below"],
+             "work_order_id": None, "work_order_no": None, "bike_code": None})
+    for need in needs:
+        coming = int(transit.get(int(need["part_id"]), 0)) if need.get("part_id") else 0
+        need["transit"] = coming
+        need["qty"] = max(int(need["qty"]) - coming, 0)
+        need["covered"] = coming > 0 and need["qty"] == 0
+    needs.sort(key=lambda n: (n["covered"], n["source"] != "order", n["title"]))
     return needs
+
+
+def parts_low(rows: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Позиции на исходе: ниже неснижаемого или ровно на нём. Архивные -
+    нет: их больше не заказывают."""
+    return [dict(r) for r in rows
+            if (r.get("below") or r.get("at_min")) and r.get("active", True)]
+
+
+def parts_low_lines(rows: Sequence[Mapping[str, Any]], *, limit: int = 20) -> str:
+    """Недельная сводка склада для служебного чата, HTML.
+
+    «В пути» рядом с нехваткой обязательно: без него владелец каждую
+    неделю видел бы одни и те же позиции и заказывал их повторно.
+    """
+    if not rows:
+        return ""
+    below = [r for r in rows if r.get("below")]
+    edge = [r for r in rows if not r.get("below")]
+    lines = [f"📦 Запчасти на исходе: {len(rows)}"
+             + (f" (ниже неснижаемого {len(below)}, на пределе {len(edge)})"
+                if below and edge else "")]
+    for row in [*below, *edge][:limit]:
+        title = html.escape(str(row.get("title") or "—"), quote=False)
+        unit = html.escape(str(row.get("unit") or "шт"), quote=False)
+        stock, minimum = int(row.get("stock") or 0), int(row.get("min_stock") or 0)
+        state = (f"не хватает {minimum - stock}" if row.get("below")
+                 else "ровно неснижаемый")
+        coming = int(row.get("transit") or 0)
+        lines.append(f"• {title} — {stock} из {minimum} {unit}, {state}"
+                     + (f", в пути {coming}" if coming else ""))
+    if len(rows) > limit:
+        lines.append(f"…и ещё {len(rows) - limit}.")
+    lines.append("Заказ собирается кнопкой: «Склад → Заказ запчастей».")
+    return "\n".join(lines)
 
 
 def order_total(items: Iterable[dict]) -> Decimal:
@@ -3345,6 +3531,17 @@ def months_between(since: Any, until: date) -> int:
     return max(months, 0)
 
 
+def add_months(day: date, months: int) -> date:
+    """Та же дата через N месяцев; 31-е в коротком месяце - его последний
+    день. Пара к months_between: срок службы «15 месяцев» от 31 января
+    кончается 30 апреля следующего года, а не падает на несуществующем дне."""
+    total = day.year * 12 + day.month - 1 + int(months)
+    year, month = divmod(total, 12)
+    month += 1
+    nxt = date(year + (month == 12), month % 12 + 1, 1)
+    return date(year, month, min(day.day, (nxt - timedelta(days=1)).day))
+
+
 def wear_percent(bike: dict, *, today: date | None = None) -> float | None:
     """Износ рамы в процентах срока службы. None - дата покупки не задана.
 
@@ -3451,8 +3648,17 @@ BATTERY_MANUAL_STATUSES = ("available", "repair", "maintenance", "lost",
 # недособранную технику в наличие значит обещать клиенту то, чего нет.
 BATTERY_OPERATIONAL = ("available", "rented", "repair", "maintenance")
 # Циклов, после которых батарею пора смотреть: ёмкость к этому моменту
-# заметно просела, и клиент начинает жаловаться на «не доезжает».
+# заметно просела, и клиент начинает жаловаться на «не доезжает». Это
+# общий ресурс по умолчанию: владелец правит его настройкой
+# `battery_max_cycles`, а модели ставит свой (`battery_models.max_cycles`).
 BATTERY_CYCLES_WARN = 500
+BATTERY_CYCLES_MAX = 100000
+# Горизонты плана замены, месяцев: «в этом месяце» - деньги сейчас,
+# квартал и полгода - деньги, которые надо отложить.
+BATTERY_PLAN_HORIZONS = (1, 3, 6)
+# Темп циклов по батарее, которой меньше месяца, - не темп: первая неделя
+# после ввода в оборот дала бы «кончится через месяц» или «через век».
+BATTERY_PACE_MIN_DAYS = 30
 
 
 def check_battery_status(raw: Any) -> Check:
@@ -3511,14 +3717,34 @@ def issue_point(chosen: Any, *, booking: Mapping[str, Any] | None = None,
     return None
 
 
+def battery_max_cycles(settings: Mapping[str, Any] | None = None) -> int:
+    """Общий ресурс АКБ в циклах (`battery_max_cycles`): для моделей без
+    своего. Мусор в настройке - к умолчанию, а не к нулю: ноль объявил бы
+    весь парк батарей отслужившим."""
+    try:
+        value = int(str((settings or {}).get("battery_max_cycles")))
+    except (TypeError, ValueError):
+        return BATTERY_CYCLES_WARN
+    return value if 1 <= value <= BATTERY_CYCLES_MAX else BATTERY_CYCLES_WARN
+
+
+def battery_cycle_limit(battery: Mapping[str, Any],
+                        default: int = BATTERY_CYCLES_WARN) -> int:
+    """Ресурс этой батареи: модели (`model_max_cycles`), иначе общий."""
+    own = battery.get("model_max_cycles")
+    return int(own) if own else int(default)
+
+
 def battery_rows(batteries: Iterable[dict], *, today: date | None = None,
                  since: Mapping[int, datetime] | None = None,
-                 now: datetime | None = None) -> list[dict]:
+                 now: datetime | None = None,
+                 max_cycles: int = BATTERY_CYCLES_WARN) -> list[dict]:
     """Список батарей с износом, признаком «пора смотреть» и днями.
 
     `since` - когда батарея вошла в текущий статус (по журналу): отсюда
     «в ремонте 12 дней». Дни у клиента - от начала аренды, за которой
     батарея числится: у клиента она с выдачи, а не с последней замены.
+    `max_cycles` - общий ресурс; у модели может быть свой.
     """
     today = today or date.today()
     now = now or datetime.now(UTC)
@@ -3530,14 +3756,16 @@ def battery_rows(batteries: Iterable[dict], *, today: date | None = None,
         wear = (float(round(min(100 * passed / max(months, 1), 100), 1))
                 if battery.get("purchased_on") else None)
         cycles = int(battery.get("cycles") or 0)
+        limit = battery_cycle_limit(battery, max_cycles)
         started = battery.get("rental_started")
         if isinstance(started, datetime):
             started = started.date()
         rows.append({**battery, "wear": wear, "cycles": cycles,
+                     "cycle_limit": limit, "cycles_out": cycles >= limit,
                      # Розыск - состояние аренды, а не батареи: пока
                      # клиент не нашёлся, батарея числится у него.
                      "in_search": bool(battery.get("search_at")),
-                     "tired": cycles >= BATTERY_CYCLES_WARN
+                     "tired": cycles >= limit
                      or (wear is not None and wear >= 100),
                      "rental_days": (max((today - started).days, 0)
                                      if started and battery.get("client_id") else None),
@@ -3573,6 +3801,120 @@ def battery_amortization(battery: dict) -> Decimal | None:
         price = model_price
     months = max(int(battery.get("service_months") or 15), 1)
     return to_money(to_money(price) / months)
+
+
+# Что считает план замены: батареи в обороте. На сборке ещё не служит,
+# утеря, списание и продажа из парка уже вышли - менять там нечего.
+BATTERY_PLAN_STATUSES = BATTERY_OPERATIONAL
+BATTERY_WEAR_REASONS = {"age": "срок службы", "cycles": "ресурс циклов"}
+
+
+def battery_wear(battery: Mapping[str, Any], *, today: date,
+                 max_cycles: int = BATTERY_CYCLES_WARN) -> dict:
+    """Когда батарею менять: по сроку службы или по циклам - что раньше.
+
+    Срок - от даты покупки; без неё от заведения карточки, самой ранней
+    известной даты (`dated` = False): батарея не моложе этого, и прогноз
+    тогда оптимистичен - экран это помечает. Срок службы берётся с карточки
+    батареи, как у амортизации и у «износа» в списке: одно число на одну
+    батарею, иначе список и план спорили бы друг с другом.
+
+    Циклы - по темпу этой батареи: сколько набрала за прожитые дни, столько
+    наберёт и дальше. Моложе месяца - темпа нет, только срок. Без даты
+    покупки темпа нет тоже: начало счётчика неизвестно, а карточку старой
+    батареи заводят сразу с её циклами - 300 циклов «за месяц с заведения»
+    отправили бы её в замену за три недели. Такая меряется ресурсом только
+    когда он уже выработан.
+    """
+    months = max(int(battery.get("service_months") or 15), 1)
+    start = local_date(battery.get("purchased_on"))
+    dated = start is not None
+    if start is None:
+        start = (local_date(battery.get("created_at"))
+                 or local_date(battery.get("commissioned_at")))
+    limit = battery_cycle_limit(battery, max_cycles)
+    cycles = int(battery.get("cycles") or 0)
+    by_age = add_months(start, months) if start else None
+    by_cycles = None
+    if cycles >= limit:
+        by_cycles = today
+    elif cycles > 0 and dated and start is not None:
+        lived = (today - start).days
+        if lived >= BATTERY_PACE_MIN_DAYS:
+            # Целочисленно: сколько дней уйдёт на оставшиеся циклы при
+            # нынешнем темпе, с округлением вверх. Потолок в век - чтобы
+            # батарея с одним циклом за год не уводила дату за 9999 год.
+            left = -(-(limit - cycles) * lived // cycles)
+            by_cycles = today + timedelta(days=min(left, 36500))
+    options = [(d, why) for d, why in ((by_age, "age"), (by_cycles, "cycles"))
+               if d is not None]
+    replace_on, reason = min(options) if options else (None, None)
+    return {"service_months": months, "age_months": (months_between(start, today)
+                                                     if start else None),
+            "dated": dated, "cycles": cycles, "cycle_limit": limit,
+            "by_age": by_age, "by_cycles": by_cycles,
+            "replace_on": replace_on, "reason": reason,
+            "left_days": (replace_on - today).days if replace_on else None}
+
+
+def battery_wear_plan(batteries: Iterable[Mapping[str, Any]], *, today: date,
+                      max_cycles: int = BATTERY_CYCLES_WARN,
+                      horizons: Sequence[int] = BATTERY_PLAN_HORIZONS) -> dict[str, Any]:
+    """План замены АКБ: что менять в ближайшие 1/3/6 месяцев и почём.
+
+    Горизонты накопительные: «за три месяца» включает первый, - так
+    читается бюджет «сколько отложить к кварталу». Просроченные (срок уже
+    вышел) входят в каждый горизонт: их менять первыми.
+
+    Бюджет - по сегодняшней цене модели из каталога, а не по цене покупки:
+    новую батарею купят по нынешней цене. Нет цены у модели - берётся
+    цена покупки этой батареи; нет и её - батарея считается «без цены», и
+    бюджет честно помечен неполным. Амортизацию план не трогает.
+    """
+    rows = []
+    for battery in batteries:
+        if battery.get("status") not in BATTERY_PLAN_STATUSES:
+            continue
+        wear = battery_wear(battery, today=today, max_cycles=max_cycles)
+        model_price = to_money(battery.get("model_price") or 0)
+        price = model_price if model_price > 0 else (
+            to_money(battery["purchase_price"])
+            if battery.get("purchase_price") is not None else None)
+        rows.append({**battery, **wear, "price": price,
+                     "overdue": bool(wear["replace_on"] and wear["replace_on"] <= today)})
+    ends = {h: add_months(today, h) for h in horizons}
+    far = ends[max(horizons)] if horizons else today
+    due = [r for r in rows if r["replace_on"] and r["replace_on"] <= far]
+    due.sort(key=lambda r: (r["replace_on"], str(r.get("code") or "")))
+    models: dict[Any, dict[str, Any]] = {}
+    for row in due:
+        key = row.get("model_id")
+        model = models.setdefault(key, {
+            "model_id": key, "title": row.get("model_title") or "без модели",
+            "price": to_money(row["model_price"]) if row.get("model_price") else None,
+            "cells": {h: {"count": 0, "budget": Decimal(0), "unpriced": 0}
+                      for h in horizons}})
+        for h in horizons:
+            if row["replace_on"] <= ends[h]:
+                cell = model["cells"][h]
+                cell["count"] += 1
+                if row["price"] is None:
+                    cell["unpriced"] += 1
+                else:
+                    cell["budget"] += row["price"]
+    totals = []
+    for h in horizons:
+        cells = [m["cells"][h] for m in models.values()]
+        totals.append({"months": h, "until": ends[h],
+                       "count": sum(c["count"] for c in cells),
+                       "budget": to_money(sum((c["budget"] for c in cells), Decimal(0))),
+                       "unpriced": sum(c["unpriced"] for c in cells)})
+    return {"rows": due, "horizons": totals,
+            "models": sorted(models.values(), key=lambda m: m["title"]),
+            "overdue": sum(1 for r in rows if r["overdue"]),
+            "undated": sum(1 for r in rows if not r["dated"]),
+            "unknown": sum(1 for r in rows if r["replace_on"] is None),
+            "total": len(rows), "max_cycles": max_cycles}
 
 
 def compat_matrix(bike_models: Iterable[dict], battery_models: Iterable[dict],
@@ -5218,6 +5560,22 @@ NOTICES: dict[str, dict[str, Any]] = {
         "title": "Клиент ответил на смету",
         "hint": "Согласовал или отказался - техник ждёт именно этого.",
     },
+    "repair_overdue": {
+        "group": "team", "target": "chat", "hour": 10,
+        "title": "Наряды дольше срока ремонта",
+        "hint": "Открытые наряды, которые стоят дольше срока своего самого "
+                "долгого узла (или общего срока). Сроки - в «Сервис → Виды "
+                "работ». Молчит, когда все укладываются.",
+    },
+    "parts_low": {
+        # Раз в неделю, а не каждый день: запчасть заказывают партией, и
+        # ежедневный список одних и тех же позиций перестают читать.
+        "group": "team", "target": "chat", "hour": 10,
+        "title": "Запчасти на исходе — раз в неделю",
+        "hint": "Позиции ниже неснижаемого и на самом пределе, с тем, что "
+                "уже едет от поставщика. Молчит, когда запас в норме.",
+        "params": {"weekday": 1},
+    },
     # ─ в канал ─
     "inbox_new": {
         "group": "team", "target": "chat", "hour": None,
@@ -5320,6 +5678,8 @@ NOTICE_PARAMS: dict[str, tuple[str, str, str, int, int]] = {
     # Здоровье сервера: у порога диска единица - проценты, а не дни.
     "disk_pct": ("Порог диска", "диск: свободно меньше", "%", 1, 90),
     "cert_days": ("Порог сертификата", "сертификат: осталось меньше", "дн.", 1, 90),
+    # Недельная сводка: день недели, а не «через 1 дн.».
+    "weekday": ("День недели", "день недели", "1 — пн … 7 — вс", 1, 7),
 }
 
 
@@ -5331,6 +5691,28 @@ def notice_param(setting: Mapping[str, Any] | None, key: str,
         return int(extra[key])
     except (KeyError, ValueError, TypeError):
         return default
+
+
+# Параметр уведомления на экране: имя в ошибке, подпись до поля и после,
+# пределы. Одна таблица на все уведомления - NOTICE_PARAMS по имени
+# параметра; уведомлению с особой подписью того же имени хватит
+# `param_labels` в каталоге. Неизвестное имя - срок в днях.
+NOTICE_PARAM_DEFAULT_LABEL = ("Срок", "через", "дн.", 0, 365)
+
+
+def notice_param_label(code: str, key: str) -> tuple[str, str, str, int, int]:
+    labels = (NOTICES.get(code) or {}).get("param_labels") or {}
+    return tuple(labels.get(key) or NOTICE_PARAMS.get(key)  # type: ignore[return-value]
+                 or NOTICE_PARAM_DEFAULT_LABEL)
+
+
+def weekly_due(setting: Mapping[str, Any] | None, today: date) -> bool:
+    """Недельное уведомление: сегодня его день. Час проверяет обычное
+    расписание; день недели вне 1..7 - понедельник, а не «никогда»."""
+    weekday = notice_param(setting, "weekday", 1)
+    if not 1 <= weekday <= 7:
+        weekday = 1
+    return today.isoweekday() == weekday
 
 
 def notice_time(setting: Mapping[str, Any] | None) -> str:
@@ -5368,6 +5750,7 @@ def notice_rows(settings: Mapping[str, Mapping[str, Any]],
         row["time"] = notice_time(item)
         row["target_title"] = NOTICE_TARGETS.get(item["target"], "—")
         row["sent"] = int(counts.get(code, 0))
+        row["labels"] = {key: notice_param_label(code, key) for key in item["extra"]}
         out.setdefault(item["group"], []).append(row)
     return out
 
@@ -7717,14 +8100,17 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
                 alerts: Iterable[Mapping[str, Any]] = (),
                 transfers: Iterable[Mapping[str, Any]] = (),
                 idle: Iterable[Mapping[str, Any]] = (),
-                today: date | None = None) -> list[dict[str, Any]]:
+                today: date | None = None,
+                repair_norm: int = ORDER_STUCK_DAYS) -> list[dict[str, Any]]:
     """Задачи на сегодня по данным сводки. Пустые группы не показываются.
 
     `expiring` - строки виджета «истекает аренда» (с summary), `search` -
     результат search_rows, `orders` - открытые наряды, `bookings` - новые
     заявки, `alerts` - открытые тревоги, `transfers` - перевозки
-    transfer_plan, `idle` - простои idle_promo_rows (самые долгие). Порядок:
-    горящее, потом завтрашнее, потом остальное; внутри уровня - по числу.
+    transfer_plan, `idle` - простои idle_promo_rows (самые долгие),
+    `repair_norm` - общий срок ремонта (у узла наряда может быть свой).
+    Порядок: горящее, потом завтрашнее, потом остальное; внутри уровня -
+    по числу.
     """
     today = today or date.today()
     tasks: list[dict[str, Any]] = []
@@ -7749,8 +8135,8 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
     add("search", "Кандидаты в розыск", list(search.get("candidates", [])),
         "/rentals/search", "hot")
 
-    stuck = [o for o in orders if order_stuck(o, today=today)]
-    add("orders", f"Наряды стоят дольше {ORDER_STUCK_DAYS} дн.", stuck, "/service",
+    stuck = [o for o in orders if order_stuck(o, today=today, default=repair_norm)]
+    add("orders", "Наряды дольше срока ремонта", stuck, "/orders?overdue=1",
         "warn", key="no")
 
     bookings = [b for b in bookings if b.get("status", "new") == "new"]
