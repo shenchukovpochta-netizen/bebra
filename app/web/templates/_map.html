@@ -42,8 +42,12 @@
     return box;
   }
   var map = L.map(node);
+  /* Плиткам - Referer только с адресом сайта: панель в целом шлёт его лишь
+     себе (same-origin), а OSM без Referer отвечает 403 «Access blocked».
+     strict-origin: ни страница, ни поиск в адресе наружу не уходят. */
   L.tileLayer({{ map_cfg.tiles|tojson }},
-              {maxZoom: 19, attribution: {{ map_cfg.attribution|tojson }}}).addTo(map);
+              {maxZoom: 19, attribution: {{ map_cfg.attribution|tojson }},
+               referrerPolicy: 'strict-origin'}).addTo(map);
   var bounds = [];
   /* Линия трека: её рисуем только на карточке трекера, на общей карте
      её нет - сто линий поверх друг друга читать нельзя. */

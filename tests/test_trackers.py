@@ -427,6 +427,20 @@ class TestTrackerPanel(tw.WebCase):
         self.assertIn("Truck+ 101", card)
         self.assertIn("без велосипеда", card)
 
+    def test_tiles_get_the_site_origin_as_referer(self):
+        """OSM без Referer отвечает 403 «Access blocked», а панель в целом
+        шлёт его только себе (same-origin). Плиткам - только адрес сайта:
+        страница и поиск в адресе наружу не уходят."""
+        page = self.get_ok("/map")
+        self.assertIn("referrerPolicy: 'strict-origin'", page)
+        r = self.client.get("/map")
+        self.assertEqual(r.headers["referrer-policy"], "same-origin")
+        self.assertEqual(logic.map_config()["tiles"],
+                         "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+        # своя подложка из настроек по-прежнему главнее
+        self.assertEqual(logic.map_config({"map_tiles": "https://t.example/{z}/{x}/{y}.png"})
+                         ["tiles"], "https://t.example/{z}/{x}/{y}.png")
+
     def test_tracker_is_bound_to_a_bike_and_only_to_one(self):
         r = self.client.post(f"/trackers/{self.tracker_id}/bike",
                              data={"bike_id": str(self.bike_id)})

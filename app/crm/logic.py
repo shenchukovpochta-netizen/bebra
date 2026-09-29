@@ -4359,7 +4359,8 @@ def tracker_title(row: Mapping[str, Any]) -> str:
 # пересобирая образ.
 MAP_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
 MAP_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-MAP_TILES = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+# Один адрес без {s}: поддомены a/b/c OSM больше не советует.
+MAP_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 MAP_ATTRIBUTION = "© OpenStreetMap"
 MAP_CENTER = (55.7887, 49.1221)                 # Казань, если точек нет
 
