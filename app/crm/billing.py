@@ -17,7 +17,7 @@ from aiogram.exceptions import TelegramAPIError
 from .. import i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
-from . import banking, franchise, logic, notices, notify, service
+from . import banking, franchise, logic, notices, notify, photos, service
 
 log = logging.getLogger(__name__)
 
@@ -588,8 +588,22 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
             talk = await crm.purge_inbox(logic.INBOX_KEEP_DAYS)
             if talk:
                 log.info("CRM: старых сообщений «Входящих» удалено %s", talk)
+            # Комментарий к оценке - тоже слова клиента: тот же срок.
+            said = await crm.purge_feedback_comments(logic.FEEDBACK_COMMENT_KEEP_DAYS)
+            if said:
+                log.info("CRM: старых комментариев к оценкам стёрто %s", said)
         except Exception:                                # noqa: BLE001
             log.exception("CRM: чистка журналов не удалась")
+        # Фото при сдаче - своим шагом: том другой, и сбой диска не должен
+        # отменять чистку журналов (и наоборот). Срок - настройка владельца.
+        try:
+            days = logic.return_photo_days(await crm.settings())
+            folder = getattr(cfg, "bike_photo_dir", None)
+            dropped = await photos.purge(crm, folder, days) if folder else 0
+            if dropped:
+                log.info("CRM: фото при сдаче старше %s дн. удалено %s", days, dropped)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: чистка фото при сдаче не удалась")
 
     # Сводка по оплатам собирается здесь, а не берётся из прохода
     # напоминаний: у напоминаний свои часы (8, 9 и 14), у сводки свой

@@ -66,7 +66,8 @@ $handlers = @('app/handlers/__init__.py', 'app/handlers/registration.py',
               'app/handlers/moderation.py', 'app/handlers/menu.py',
               'app/handlers/contract.py', 'app/handlers/faq.py',
               'app/handlers/cabinet.py', 'app/handlers/fleet.py',
-              'app/handlers/staff.py', 'app/handlers/ops.py')
+              'app/handlers/staff.py', 'app/handlers/ops.py',
+              'app/handlers/feedback.py')
 # CRM: логика, база, биллинг, синхронизация с ботом; веб-панель со шаблонами.
 $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/billing.py', 'app/crm/service.py', 'app/crm/company.py', 'app/crm/notify.py',
@@ -75,7 +76,8 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/paying.py', 'app/crm/notices.py', 'app/crm/firstrun.py',
          'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py',
          'app/crm/points.py', 'app/crm/readiness.py', 'app/crm/waitlist.py',
-         'app/crm/health.py', 'app/crm/franchise.py')
+         'app/crm/health.py', 'app/crm/franchise.py', 'app/crm/feedback.py',
+         'app/crm/photos.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py', 'app/web/icons.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -103,6 +105,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/tariff_report.html', 'app/web/templates/buy.html',
                   'app/web/templates/referrals.html',
                   'app/web/templates/channels.html',
+                  'app/web/templates/feedback.html',
                   'app/web/templates/integrity.html',
                   'app/web/templates/_report_tabs.html',
                   'app/web/templates/points.html', 'app/web/templates/point.html',
@@ -226,7 +229,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_waitlist.py', 'tests/test_battery_offer.py', 'tests/test_card_nudge.py',
           'tests/test_backup.py', 'tests/test_health.py',
           'tests/test_risk.py', 'tests/test_franchise.py',
-          'tests/test_franchise_web.py')
+          'tests/test_franchise_web.py', 'tests/test_feedback.py',
+          'tests/test_return_photos.py')
 
 foreach ($f in ($root + $app + $docs + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

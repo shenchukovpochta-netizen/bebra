@@ -249,6 +249,19 @@ async def review_ask(bot: Any, rental: dict,
                        texts.REVIEW_ASK.format(days=days, links=tail))
 
 
+def feedback_bike(row: dict) -> str:
+    bike = row.get("bike_code")
+    return f"Велосипед № {bot_logic.esc(bike)}" if bike else "Велосипед"
+
+
+async def feedback_ask(bot: Any, row: dict) -> bool:
+    """Клиенту: «как вам аренда?» с пятью кнопками после сдачи."""
+    if not row.get("tg_id") or bot is None:
+        return False
+    return await _send(bot, row["tg_id"], texts.FEEDBACK_ASK.format(bike=feedback_bike(row)),
+                       kb.feedback_scores(int(row["rental_id"])))
+
+
 async def autocharge_ok(bot: Any, client: dict, amount: Any,
                         card: dict | None, until: Any = None) -> bool:
     """Клиенту: с карты списали. Молча списывать нельзя - это выглядит

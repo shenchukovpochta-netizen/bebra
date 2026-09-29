@@ -59,7 +59,7 @@ CARD_TABLES = {"rentals.html": 1, "bikes.html": 1, "clients.html": 1, "orders.ht
                "points.html": 3, "cash.html": 1, "finance.html": 1, "inbox.html": 1,
                "batteries.html": 1, "parts.html": 1, "payments.html": 1,
                "tariff_report.html": 1, "buy.html": 1, "franchisees.html": 1,
-               "franchise_royalty.html": 1}
+               "franchise_royalty.html": 1, "feedback.html": 1}
 TABLE = re.compile(r'<table class="cards">(.*?)</table>', re.S)
 HEAD = re.compile(r"""\{\{\s*list\.th\('([^']*)'|<th\b[^>]*>(.*?)</th>""", re.S)
 LABEL = re.compile(r'data-label="([^"]*)"')

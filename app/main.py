@@ -21,10 +21,11 @@ from aiogram.types import BotCommand
 
 from . import tasks
 from .config import Config
-from .crm import banking, franchise, health, inbox, mailing, paying, tracking
+from .crm import banking, feedback, franchise, health, inbox, mailing, paying, tracking
 from .crm.db import CrmDB
 from .db import Database
 from .handlers import cabinet, contract, faq, fleet, menu, moderation, ops, registration
+from .handlers import feedback as feedback_h
 from .handlers import staff as staff_h
 from .max.client import MaxClient
 from .middlewares import PipelineMiddleware
@@ -85,6 +86,9 @@ async def run() -> None:
     # Рабочая группа точек - самой первой: её роутер забирает любое
     # сообщение из своих тем, и до меню с его ловушкой они не доходят.
     dp.include_router(ops.router)
+    # Оценка аренды - до кабинета и меню: её кнопка и ответ на просьбу о
+    # комментарии приходят в любом шаге сценария, а меню ловит всё подряд.
+    dp.include_router(feedback_h.router)
     dp.include_router(cabinet.router)
     dp.include_router(staff_h.router)
     # Парк из служебного чата - до модерации: ответ на карточку велосипеда
@@ -143,6 +147,10 @@ async def run() -> None:
     # в панели (панель ходит к франчайзи только по кнопке). Без ключа
     # secrets/franchise_key задача выходит сразу.
     franchise_task = asyncio.create_task(franchise.franchise_loop(crm, cfg))
+    # «Как вам аренда?» после сдачи и сигнал о низкой оценке: закрытие
+    # кладёт вопрос в очередь (панель или бот), отправляет только этот круг.
+    feedback_task = asyncio.create_task(
+        feedback.feedback_loop(bot, crm, cfg, max_client=max_client))
     # Команда /cabinet в меню бота (кнопка «Меню» слева от поля ввода).
     try:
         await bot.set_my_commands([
@@ -178,9 +186,10 @@ async def run() -> None:
         inbox_task.cancel()
         health_task.cancel()
         franchise_task.cancel()
+        feedback_task.cancel()
         await asyncio.gather(retention, reminders, tracking_task, banking_task,
                              paying_task, mailing_task, inbox_task, health_task,
-                             franchise_task,
+                             franchise_task, feedback_task,
                              return_exceptions=True)
         if max_client is not None:
             await max_client.close()

@@ -79,6 +79,8 @@ class FakeCrm:
         self.franchisees_: dict[int, dict] = {}
         self.franchise_snapshots_: dict[tuple, dict] = {}
         self.franchise_months_: dict[tuple, dict] = {}
+        self.feedback_: dict[int, dict] = {}
+        self.return_photos_: dict[int, dict] = {}
         self._seq = 0
         # Профили нумеруются отдельно: иначе встроенные съедали бы первые
         # id, и клиент из seed() перестал бы быть первым.
@@ -762,6 +764,15 @@ class FakeCrm:
         rows = [r for r in self.rentals_.values() if r["bike_id"] == bike_id]
         return self._rental_row(max(rows, key=lambda r: r["id"])) if rows else None
 
+    async def last_closed_rental_of(self, client_id):
+        rows = [r for r in self.rentals_.values()
+                if r["client_id"] == client_id and r["status"] == "closed"]
+        if not rows:
+            return None
+        oldest = datetime.min.replace(tzinfo=UTC)
+        return self._rental_row(max(rows, key=lambda r: (r.get("closed_at") or oldest,
+                                                         r["id"])))
+
     async def flagged_clients(self):
         return [{k: c.get(k) for k in ("id", "full_name", "phone", "phone2", "phone3",
                                        "status", "note")}
@@ -854,7 +865,8 @@ class FakeCrm:
         r = self.rentals_.get(rental_id)
         if r is None or r["status"] != "active":
             return False
-        r.update(status="closed", closed_on=closed_on, close_note=note)
+        r.update(status="closed", closed_on=closed_on, close_note=note,
+                 closed_at=self._now())
         if mileage_end is not None:
             r["mileage_end"] = int(mileage_end)
         if r["bike_id"] is not None and self.bikes_[r["bike_id"]]["status"] == "rented":
@@ -873,6 +885,145 @@ class FakeCrm:
             if extra["rental_id"] == rental_id and extra["removed_at"] is None:
                 extra.update(removed_at=self._now(), removed_by=closed_by)
         return True
+
+    # ─── оценка аренды после сдачи ───
+    def _feedback_row(self, f):
+        c = self.clients_[f["client_id"]]
+        r = self.rentals_[f["rental_id"]]
+        b = self.bikes_.get(r["bike_id"]) if r.get("bike_id") else None
+        return {**f, "tg_id": c.get("tg_id"), "max_id": c.get("max_id"),
+                "full_name": c["full_name"], "client_status": c.get("status"),
+                "location": r.get("location"), "closed_on": r.get("closed_on"),
+                "closed_at": r.get("closed_at"), "started_on": r.get("started_on"),
+                "bike_code": b["code"] if b else None,
+                "bike_model": b["model"] if b else None}
+
+    async def queue_feedback(self, rental_id, client_id):
+        if any(f["rental_id"] == rental_id for f in self.feedback_.values()):
+            return False
+        fid = self._id()
+        self.feedback_[fid] = {
+            "id": fid, "rental_id": rental_id, "client_id": client_id,
+            "channel": None, "skipped": None, "score": None, "comment": None,
+            "prompt_msg": None, "created_at": self._now(), "asked_at": None,
+            "answered_at": None, "commented_at": None, "alerted_at": None}
+        return True
+
+    async def feedback_queue(self, limit=50):
+        rows = [self._feedback_row(f) for f in sorted(self.feedback_.values(),
+                                                      key=lambda f: f["id"])
+                if f["asked_at"] is None]
+        return rows[:limit]
+
+    async def mark_feedback_asked(self, feedback_id, *, channel, skipped=None):
+        f = self.feedback_.get(feedback_id)
+        if f is None or f["asked_at"] is not None:
+            return False
+        f.update(asked_at=self._now(), channel=channel, skipped=skipped)
+        return True
+
+    async def feedback_of_rental(self, rental_id):
+        f = next((f for f in self.feedback_.values() if f["rental_id"] == rental_id), None)
+        return self._feedback_row(f) if f else None
+
+    async def answer_feedback(self, rental_id, score):
+        f = next((f for f in self.feedback_.values() if f["rental_id"] == rental_id), None)
+        if (f is None or f["score"] is not None or f["asked_at"] is None
+                or f["channel"] is None):
+            return False
+        f.update(score=int(score), answered_at=self._now())
+        return True
+
+    async def set_feedback_prompt(self, feedback_id, prompt_msg):
+        self.feedback_[feedback_id]["prompt_msg"] = prompt_msg
+
+    async def feedback_by_prompt(self, channel, prompt_msg, user_id):
+        channel = "max" if channel == "max" else "tg"
+        who = "max_id" if channel == "max" else "tg_id"
+        for f in self.feedback_.values():
+            if (f["channel"] == channel and f["prompt_msg"] == prompt_msg
+                    and self.clients_[f["client_id"]].get(who) == user_id):
+                return self._feedback_row(f)
+        return None
+
+    async def comment_feedback(self, feedback_id, comment):
+        f = self.feedback_.get(feedback_id)
+        if f is None or f["commented_at"] is not None or f["score"] is None:
+            return False
+        f.update(comment=comment, commented_at=self._now())
+        return True
+
+    async def purge_feedback_comments(self, days):
+        edge = self._now() - timedelta(days=days)
+        old = [f for f in self.feedback_.values()
+               if f["comment"] is not None and f["commented_at"] < edge]
+        for f in old:
+            f["comment"] = None
+        return len(old)
+
+    async def feedback_to_alert(self, *, low, wait_minutes, limit=50):
+        edge = self._now() - timedelta(minutes=wait_minutes)
+        rows = [self._feedback_row(f) for f in sorted(self.feedback_.values(),
+                                                      key=lambda f: f["id"])
+                if f["score"] is not None and f["score"] <= low
+                and f["alerted_at"] is None
+                and (f["comment"] is not None or f["answered_at"] < edge)]
+        return rows[:limit]
+
+    async def mark_feedback_alerted(self, feedback_id):
+        f = self.feedback_.get(feedback_id)
+        if f is None or f["alerted_at"] is not None:
+            return False
+        f["alerted_at"] = self._now()
+        return True
+
+    async def feedback_rows(self, since):
+        rows = [self._feedback_row(f) for f in self.feedback_.values()
+                if f["asked_at"] is not None]
+        return sorted((r for r in rows if r["closed_on"] and r["closed_on"] >= since),
+                      key=lambda r: -r["id"])
+
+    async def client_feedback(self, client_id, limit=50):
+        rows = [self._feedback_row(f) for f in self.feedback_.values()
+                if f["client_id"] == client_id and f["score"] is not None]
+        return sorted(rows, key=lambda r: -r["id"])[:limit]
+
+    # ─── фото при сдаче ───
+    async def add_return_photo(self, rental_id, *, bike_id, path, created_by, limit):
+        if sum(1 for p in self.return_photos_.values()
+               if p["rental_id"] == rental_id) >= limit:
+            return None
+        pid = self._id()
+        self.return_photos_[pid] = {"id": pid, "rental_id": rental_id,
+                                    "bike_id": bike_id, "path": path,
+                                    "created_by": created_by,
+                                    "created_at": self._now()}
+        return pid
+
+    async def return_photos(self, *, rental_id=None, bike_id=None, limit=60):
+        if rental_id is not None:
+            rows = [dict(p) for p in self.return_photos_.values()
+                    if p["rental_id"] == rental_id]
+            return sorted(rows, key=lambda p: p["id"])[:limit]
+        rows = [{**p, "closed_on": self.rentals_[p["rental_id"]].get("closed_on")}
+                for p in self.return_photos_.values() if p["bike_id"] == bike_id]
+        return sorted(rows, key=lambda p: -p["id"])[:limit]
+
+    async def return_photo(self, photo_id):
+        p = self.return_photos_.get(photo_id)
+        return dict(p) if p else None
+
+    async def old_return_photos(self, days, limit=1000):
+        edge = self._now() - timedelta(days=days)
+        rows = [{"id": p["id"], "path": p["path"]} for p in self.return_photos_.values()
+                if p["created_at"] < edge]
+        return sorted(rows, key=lambda p: p["id"])[:limit]
+
+    async def drop_return_photos(self, ids):
+        gone = [i for i in ids if i in self.return_photos_]
+        for i in gone:
+            del self.return_photos_[i]
+        return len(gone)
 
     async def charge_period(self, rental_id, client_id, *, period_from, period_to,
                             amount, note, created_by="billing", created_at=None,

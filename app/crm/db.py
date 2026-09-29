@@ -928,6 +928,13 @@ class CrmDB:
             f"{self._RENTAL_SELECT} where r.bike_id = $1 order by r.id desc limit 1",
             bike_id))
 
+    async def last_closed_rental_of(self, client_id: int) -> dict | None:
+        """Последняя закрытая аренда клиента - к ней бот прикладывает фото,
+        присланные сразу после подписи акта возврата."""
+        return _row(await self.pool.fetchrow(
+            f"{self._RENTAL_SELECT} where r.client_id = $1 and r.status = 'closed' "
+            "order by r.closed_at desc nulls last, r.id desc limit 1", client_id))
+
     async def flagged_clients(self) -> list[dict]:
         """Карточки с закрытым статусом - стоп-лист для сверки выдачи.
         Их единицы, поэтому сравнение идёт в Python: lower() кириллицы
@@ -1088,7 +1095,8 @@ class CrmDB:
                 """
                 update crm.rentals
                    set status = 'closed', closed_on = $2, close_note = $3,
-                       mileage_end = coalesce($4, mileage_end), updated_at = now()
+                       mileage_end = coalesce($4, mileage_end), closed_at = now(),
+                       updated_at = now()
                  where id = $1 and status = 'active'
                 returning bike_id, location
                 """, rental_id, closed_on, note, mileage_end)
@@ -1109,6 +1117,167 @@ class CrmDB:
                 "where rental_id = $1 and removed_at is null",
                 rental_id, closed_by)
             return True
+
+    # ─────────────── оценка аренды после сдачи ───────────────
+
+    _FEEDBACK_SELECT = """
+        select f.*, c.tg_id, c.max_id, c.full_name, c.status as client_status,
+               r.location, r.closed_on, r.closed_at, r.started_on,
+               b.code as bike_code, b.model as bike_model
+        from crm.feedback f
+        join crm.clients c on c.id = f.client_id
+        join crm.rentals r on r.id = f.rental_id
+        left join crm.bikes b on b.id = r.bike_id
+    """
+
+    async def queue_feedback(self, rental_id: int, client_id: int) -> bool:
+        """Очередь вопроса «как вам аренда?». Повтор - False: строка одна на
+        аренду (уникальный индекс), второго вопроса не будет."""
+        got = await self.pool.fetchval(
+            "insert into crm.feedback (rental_id, client_id) values ($1, $2) "
+            "on conflict (rental_id) do nothing returning id", rental_id, client_id)
+        return got is not None
+
+    async def feedback_queue(self, limit: int = 50) -> list[dict]:
+        """Не спрошенные сдачи - с тем, что нужно для вопроса."""
+        return _rows(await self.pool.fetch(
+            f"{self._FEEDBACK_SELECT} where f.asked_at is null order by f.id limit $1",
+            limit))
+
+    async def mark_feedback_asked(self, feedback_id: int, *, channel: str | None,
+                                  skipped: str | None = None) -> bool:
+        """Отметка «спросили» - до отправки, как у напоминаний: сбой
+        доставки не должен превращаться в вопрос каждую минуту. False -
+        строку уже взял другой круг."""
+        got = await self.pool.fetchval(
+            "update crm.feedback set asked_at = now(), channel = $2, skipped = $3 "
+            "where id = $1 and asked_at is null returning id",
+            feedback_id, channel, skipped)
+        return got is not None
+
+    async def feedback_of_rental(self, rental_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._FEEDBACK_SELECT} where f.rental_id = $1", rental_id))
+
+    async def answer_feedback(self, rental_id: int, score: int) -> bool:
+        """Оценка ложится один раз: второе нажатие упирается в «score is
+        null» и ничего не меняет. Не спрошенную оценить нельзя."""
+        got = await self.pool.fetchval(
+            "update crm.feedback set score = $2, answered_at = now() "
+            "where rental_id = $1 and score is null and asked_at is not null "
+            "and channel is not null returning id", rental_id, score)
+        return got is not None
+
+    async def set_feedback_prompt(self, feedback_id: int, prompt_msg: str) -> None:
+        await self.pool.execute(
+            "update crm.feedback set prompt_msg = $2 where id = $1",
+            feedback_id, prompt_msg)
+
+    async def feedback_by_prompt(self, channel: str, prompt_msg: str,
+                                 user_id: int) -> dict | None:
+        """Оценка, на просьбу о комментарии к которой ответили. Только у
+        своего клиента: ответ чужого человека сюда не попадёт."""
+        who = "c.max_id" if channel == "max" else "c.tg_id"
+        return _row(await self.pool.fetchrow(
+            f"{self._FEEDBACK_SELECT} where f.channel = $1 and f.prompt_msg = $2 "
+            f"and {who} = $3", "max" if channel == "max" else "tg", prompt_msg,
+            user_id))
+
+    async def comment_feedback(self, feedback_id: int, comment: str) -> bool:
+        """Комментарий - один: повторный ответ на ту же просьбу не
+        переписывает первый. Проверка по commented_at, а не по comment:
+        стёртый по сроку комментарий не должен уступить место позднему
+        ответу на ту же просьбу."""
+        got = await self.pool.fetchval(
+            "update crm.feedback set comment = $2, commented_at = now() "
+            "where id = $1 and commented_at is null and score is not null returning id",
+            feedback_id, comment)
+        return got is not None
+
+    async def purge_feedback_comments(self, days: int) -> int:
+        """Комментарии к оценкам старше срока стираются, оценка и момент
+        комментария остаются: отчёт по-прежнему видит, что клиент писал."""
+        return len(await self.pool.fetch(
+            "update crm.feedback set comment = null "
+            "where comment is not null "
+            "and commented_at < now() - make_interval(days => $1) returning id",
+            days))
+
+    async def feedback_to_alert(self, *, low: int, wait_minutes: int,
+                                limit: int = 50) -> list[dict]:
+        """Низкие оценки без сигнала: с комментарием - сразу, без него -
+        когда вышло время подождать комментарий."""
+        return _rows(await self.pool.fetch(
+            f"{self._FEEDBACK_SELECT} where f.score <= $1 and f.alerted_at is null "
+            "and (f.comment is not null "
+            "or f.answered_at < now() - make_interval(mins => $2)) "
+            "order by f.id limit $3", low, wait_minutes, limit))
+
+    async def mark_feedback_alerted(self, feedback_id: int) -> bool:
+        got = await self.pool.fetchval(
+            "update crm.feedback set alerted_at = now() "
+            "where id = $1 and alerted_at is null returning id", feedback_id)
+        return got is not None
+
+    async def feedback_rows(self, since: date) -> list[dict]:
+        """Спрошенные и неспрошенные сдачи с дня since - для отчёта."""
+        return _rows(await self.pool.fetch(
+            f"{self._FEEDBACK_SELECT} where f.asked_at is not null "
+            "and r.closed_on >= $1 order by f.id desc", since))
+
+    async def client_feedback(self, client_id: int, limit: int = 50) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            f"{self._FEEDBACK_SELECT} where f.client_id = $1 and f.score is not null "
+            "order by f.id desc limit $2", client_id, limit))
+
+    # ─────────────── фото при сдаче ───────────────
+
+    async def add_return_photo(self, rental_id: int, *, bike_id: int | None,
+                               path: str, created_by: str | None,
+                               limit: int) -> int | None:
+        """Снимок к аренде. None - у неё уже `limit` снимков. Счёт и
+        вставка - под замком строки аренды: два альбома в одну секунду
+        иначе оба увидели бы «пять» и положили седьмой."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("select 1 from crm.rentals where id = $1 for update",
+                               rental_id)
+            count = await conn.fetchval(
+                "select count(*) from crm.return_photos where rental_id = $1", rental_id)
+            if int(count or 0) >= limit:
+                return None
+            return int(await conn.fetchval(
+                "insert into crm.return_photos (rental_id, bike_id, path, created_by) "
+                "values ($1, $2, $3, $4) returning id",
+                rental_id, bike_id, path, created_by))
+
+    async def return_photos(self, *, rental_id: int | None = None,
+                            bike_id: int | None = None, limit: int = 60) -> list[dict]:
+        """Снимки аренды или велосипеда, новые сверху."""
+        if rental_id is not None:
+            return _rows(await self.pool.fetch(
+                "select * from crm.return_photos where rental_id = $1 "
+                "order by id limit $2", rental_id, limit))
+        return _rows(await self.pool.fetch(
+            "select p.*, r.closed_on from crm.return_photos p "
+            "join crm.rentals r on r.id = p.rental_id "
+            "where p.bike_id = $1 order by p.id desc limit $2", bike_id, limit))
+
+    async def return_photo(self, photo_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            "select * from crm.return_photos where id = $1", photo_id))
+
+    async def old_return_photos(self, days: int, limit: int = 1000) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select id, path from crm.return_photos "
+            "where created_at < now() - make_interval(days => $1) order by id limit $2",
+            days, limit))
+
+    async def drop_return_photos(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        return int((await self.pool.execute(
+            "delete from crm.return_photos where id = any($1::bigint[])",
+            list(ids))).split()[-1] or 0)
 
     async def charge_period(self, rental_id: int, client_id: int, *,
                             period_from: date, period_to: date, amount: Decimal,

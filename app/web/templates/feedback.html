@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Оценки аренды — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Оценки аренды</h1>
+  {% with active = 'feedback' %}{% include '_report_tabs.html' %}{% endwith %}
+</div>
+{% macro stats_cells(r) %}
+  <td class="num">{{ r.asked }}</td>
+  <td class="num">{{ r.answered }}{% if r.rate is not none %} <span class="muted">· {{ r.rate }} %</span>{% endif %}</td>
+  <td class="num"><b>{{ feedback_avg(r.avg) }}</b></td>
+  {% for s in FEEDBACK_SCORES|reverse %}<td class="num {% if not r.dist[s] %}muted{% endif %}">{{ r.dist[s] }}</td>{% endfor %}
+  <td class="num {% if r.low %}bad{% endif %}">{{ r.low }}</td>
+{% endmacro %}
+{% macro stats_head(first) %}
+  <tr><th>{{ first }}</th><th class="num">Спросили</th><th class="num">Ответили</th><th class="num">Средняя</th>
+    {% for s in FEEDBACK_SCORES|reverse %}<th class="num">{{ s }}★</th>{% endfor %}<th class="num">Низких</th></tr>
+{% endmacro %}
+<div class="tiles">
+  <div class="tile"><b>{{ feedback_avg(total.avg) }}</b><span>средняя за год, из 5</span></div>
+  <div class="tile"><b>{{ total.answered }} из {{ total.asked }}</b><span>ответили на вопрос{% if total.rate is not none %} · {{ total.rate }} %{% endif %}</span></div>
+  <div class="tile {% if total.low %}hot{% endif %}"><b>{{ total.low }}</b><span>низких (3 и ниже)</span></div>
+</div>
+<section class="card">
+  <h2>По месяцам сдачи</h2>
+  <table>
+    {{ stats_head('Месяц') }}
+    {% for r in months %}
+    <tr><td class="nowrap">{{ r.month.strftime('%m.%Y') }}</td>{{ stats_cells(r) }}</tr>
+    {% endfor %}
+    <tr class="total"><td><b>ИТОГО</b></td>{{ stats_cells(total) }}</tr>
+  </table>
+</section>
+<section class="card">
+  <h2>По точкам аренды</h2>
+  <table>
+    {{ stats_head('Точка') }}
+    {% for r in points %}
+    <tr><td>{{ r.location or 'без точки' }}</td>{{ stats_cells(r) }}</tr>
+    {% else %}<tr><td colspan="10" class="muted">За год оценок не было.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Точка — та, где велосипед выдали, как у денег в отчёте «По
+    точкам». «Спросили» — вопросы, которые ушли клиенту в Telegram или MAX;
+    клиенты без бота и сдачи при выключенном уведомлении в долю ответов не
+    входят.</p>
+</section>
+<section class="card">
+  <h2>Низкие оценки <span class="muted">· 3 и ниже</span></h2>
+  <table class="cards">
+    <tr><th>Когда</th><th>Аренда</th><th>Клиент</th><th>Точка</th><th>Оценка</th><th>Комментарий</th></tr>
+    {% for f in low %}
+    <tr><td class="nowrap muted" data-label="Когда">{{ f.answered_at|dmy }}</td>
+      <td data-label="Аренда"><a href="/rentals/{{ f.rental_id }}">#{{ f.rental_id }}</a>{% if f.bike_code %} <span class="muted">№ {{ f.bike_code }}</span>{% endif %}</td>
+      <td data-label="Клиент"><a href="/clients/{{ f.client_id }}">{{ f.full_name }}</a></td>
+      <td data-label="Точка">{{ f.location or 'без точки' }}</td>
+      <td class="nowrap" data-label="Оценка"><span class="stars">{{ feedback_stars(f.score) }}</span> {{ f.score }}</td>
+      <td data-label="Комментарий">{% if f.comment %}{{ f.comment }}{% elif f.commented_at %}<span class="muted">стёрт по сроку</span>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="6" class="muted">Низких оценок за год нет.</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Вопрос «Как вам аренда?» бот задаёт сам после сдачи
+    велосипеда, одной кнопкой от 1 до 5. На 3 и ниже просит написать, что пошло
+    не так, и сообщает в служебный чат — выключить вопрос и выбрать адресат
+    сигнала можно в {% if can_view(staff, 'settings') %}<a href="/notices">уведомлениях</a>{% else %}уведомлениях{% endif %}.
+    Комментарий — слова клиента, как переписка «Входящих»: хранится
+    {{ FEEDBACK_COMMENT_KEEP_DAYS }} дней, оценка остаётся.</p>
+</section>
+{% endblock %}

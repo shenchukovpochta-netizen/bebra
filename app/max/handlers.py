@@ -27,6 +27,8 @@ from typing import Any
 from .. import logic, tasks, texts
 from ..config import Config
 from ..crm import company, inbox
+from ..crm import logic as crm_logic
+from ..crm import service as crm_service
 from ..db import Database, utcnow
 from ..services import contract as contract_service
 from ..services import files, ocr
@@ -671,6 +673,55 @@ async def cb_menu(ctx: Ctx, user: dict, callback_id: str, item: str) -> None:
             await _say(ctx, user["tg_id"], texts.MENU_PROMPT, kb.main_menu())
             return
         await _say(ctx, user["tg_id"], texts.SUPPORT_PROMPT, kb.support_cancel())
+
+
+async def cb_feedback(ctx: Ctx, user: dict, callback_id: str, payload: str) -> None:
+    """Оценка аренды кнопкой. Проверка та же, что в Telegram
+    (app/handlers/feedback.py): оценку принимает только клиент этой
+    аренды - по max_id его карточки, через мост в CRM."""
+    parsed = crm_logic.parse_feedback_callback(payload)
+    if parsed is None or ctx.crm is None:
+        await ctx.cl.answer_callback(callback_id, texts.FEEDBACK_STALE)
+        return
+    rental_id, score = parsed
+    try:
+        row = await crm_service.rate_rental(ctx.crm, rental_id, score, channel="max",
+                                            user_id=user["tg_id"])
+    except crm_service.ServiceError as exc:
+        await ctx.cl.answer_callback(callback_id, str(exc))
+        return
+    await ctx.cl.answer_callback(callback_id, texts.FEEDBACK_THANKS_TOAST)
+    if not crm_logic.feedback_low(score):
+        await _say(ctx, user["tg_id"], texts.FEEDBACK_THANKS)
+        return
+    # Просьба о комментарии без ForceReply (в MAX его нет): ответ на это
+    # сообщение и есть комментарий, поэтому его mid запоминаем у оценки.
+    sent = await ctx.cl.send(user_id=user["tg_id"], text=texts.FEEDBACK_ASK_COMMENT)
+    mid = ((sent or {}).get("message") or {}).get("body", {}).get("mid")
+    if mid:
+        await ctx.crm.set_feedback_prompt(row["id"], str(mid))
+
+
+async def st_feedback_comment(ctx: Ctx, user: dict, reply_to_mid: str | None,
+                              text: str | None) -> bool:
+    """Ответ на просьбу о комментарии к оценке. False - это не он, и
+    сообщение идёт дальше по сценарию как обычно."""
+    if not reply_to_mid or ctx.crm is None:
+        return False
+    try:
+        row = await ctx.crm.feedback_by_prompt("max", str(reply_to_mid), user["tg_id"])
+    except Exception:                                   # noqa: BLE001
+        log.exception("оценка по ответу MAX-клиента %s не прочитана", user["tg_id"])
+        return False
+    if row is None:
+        return False
+    try:
+        await crm_service.comment_rental(ctx.crm, row, text)
+    except crm_service.ServiceError as exc:
+        await _say(ctx, user["tg_id"], logic.esc(str(exc)))
+        return True
+    await _say(ctx, user["tg_id"], texts.FEEDBACK_COMMENT_THANKS)
+    return True
 
 
 async def cb_support_cancel(ctx: Ctx, user: dict, callback_id: str) -> None:

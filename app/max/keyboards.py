@@ -64,6 +64,13 @@ def reject_reasons(tg_id: int, reasons: dict[str, tuple[str, str]]) -> list:
     return rows
 
 
+def feedback_scores(rental_id: int) -> list:
+    """Оценка аренды: та же разметка, что в Telegram (fb:<аренда>:<оценка>);
+    кто нажал, сверяет обработчик по max_id клиента аренды."""
+    return [[_cb(f"{score}{'⭐' if score == 5 else ''}", f"fb:{int(rental_id)}:{score}")
+             for score in (1, 2, 3, 4, 5)]]
+
+
 def sign_contract() -> list:
     return [
         [_cb("✍️ Подписываю", "sign")],

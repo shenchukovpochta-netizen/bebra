@@ -54,6 +54,7 @@ from ..crm import (
     logic,
     notices,
     notify,
+    photos,
     readiness,
     service,
 )
@@ -102,8 +103,11 @@ IMPORT_MAX_BYTES = 20 * 1024 * 1024
 # мегабайта и дальше пишется во временный файл, частей до тысячи. Без
 # предела чужая загрузка на /login (он открыт без входа) заполняла бы
 # диск, общий с базой, ещё до проверки пароля. Самая тяжёлая законная
-# форма - импорт таблицы; мегабайт сверху - разметка multipart.
-BODY_MAX = max(IMPORT_MAX_BYTES, BIKE_PHOTO_MAX, logic.DOC_MAX_BYTES) + 1024 * 1024
+# форма - закрытие аренды с шестью фото при сдаче (телефонное фото - до
+# 8 МБ, и шесть таких - обычное дело); за ней импорт таблицы. Мегабайт
+# сверху - разметка multipart. Caddy режет тело тем же пределом.
+BODY_MAX = max(IMPORT_MAX_BYTES, BIKE_PHOTO_MAX, logic.DOC_MAX_BYTES,
+               logic.RETURN_PHOTO_MAX_BYTES * logic.RETURN_PHOTOS_MAX) + 1024 * 1024
 TOO_LARGE_PAGE = (
     '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -679,6 +683,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
+        feedback_stars=logic.feedback_stars, feedback_avg=logic.feedback_avg,
+        FEEDBACK_SCORES=logic.FEEDBACK_SCORES, FEEDBACK_CHANNELS=logic.FEEDBACK_CHANNELS,
+        FEEDBACK_COMMENT_KEEP_DAYS=logic.FEEDBACK_COMMENT_KEEP_DAYS,
+        RETURN_PHOTOS_MAX=logic.RETURN_PHOTOS_MAX,
         BOOKING_STATUSES=logic.BOOKING_STATUSES, booking_line=logic.booking_line,
         PROMO_KINDS=logic.PROMO_KINDS, PROMO_PARAM_LABELS=logic.PROMO_PARAM_LABELS,
         PROMO_TEXT_FIELDS=logic.PROMO_TEXT_FIELDS,
@@ -1662,7 +1670,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                 if logic.to_money(balance) < 0 else ""),
                       pay_orders=await crm.pay_orders(client_id=client_id,
                                                       limit=10),
-                      bonuses=await crm.bonuses(client_id=client_id, limit=20))
+                      bonuses=await crm.bonuses(client_id=client_id, limit=20),
+                      feedback=await crm.client_feedback(client_id, limit=20))
 
     @app.post("/clients/{client_id}/edit")
     async def client_edit(request: Request, client_id: int) -> Response:
@@ -1933,7 +1942,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       idle_days=idle, idle_lost=logic.idle_cost(idle),
                       amortization=logic.amortization_month(bike),
                       places=await location_names(bike.get("location")),
-                      on_rent=logic.bike_on_rent(bike))
+                      on_rent=logic.bike_on_rent(bike),
+                      # Фото при сдаче - за правом на аренды, как и сами
+                      # снимки: механику без него ссылки ни к чему.
+                      return_photos=(await crm.return_photos(bike_id=bike_id, limit=12)
+                                     if may_view(request, "rentals") else []))
 
     @app.post("/bikes/{bike_id}/check")
     async def bike_check(request: Request, bike_id: int) -> Response:
@@ -3453,6 +3466,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           await crm.rental_extras(rental_id, live_only=True)),
                       max_extra=logic.MAX_EXTRA_BATTERIES,
                       ops=await crm.ops_reports_of_rental(rental_id),
+                      return_photos=await crm.return_photos(rental_id=rental_id),
+                      feedback=await crm.feedback_of_rental(rental_id),
                       # Возврат и замена - по умолчанию на точке аренды: в
                       # аренде велосипед числится именно там.
                       places=await location_names(rental.get("location"),
@@ -3640,6 +3655,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect(f"/rentals/{rental_id}")
+        # Фото проверяются до закрытия: негодный файл - повод поправить
+        # форму, а не закрытая аренда без снимков.
+        try:
+            shots = await return_uploads(request)
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect(f"/rentals/{rental_id}")
         try:
             await service.close_rental(crm, rental, closed_on=closed.value, note=note.value,
                                        bike_status=data.get("bike_status") or "available",
@@ -3648,12 +3670,72 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/rentals/{rental_id}")
+        saved, failed = 0, ""
+        for raw, suffix in shots:
+            try:
+                await photos.save(crm, cfg.bike_photo_dir, rental, raw, suffix,
+                                  by=who(request))
+                saved += 1
+            except service.ServiceError as exc:
+                failed = str(exc)
         client = await crm.client(rental["client_id"])
         await notify.rental_closed(bot, db, crm, client, rental)
         km = logic.ridden({**rental, "mileage_end": mileage.value})
         flash(request, "Аренда закрыта, велосипед освобождён."
-              + (f" Накатал {km} км." if km is not None else ""))
+              + (f" Накатал {km} км." if km is not None else "")
+              + (f" Фото при сдаче: {saved}." if saved else ""))
+        if failed:
+            flash(request, f"Аренда закрыта, но не все фото сохранились: {failed}", "err")
         return redirect(f"/rentals/{rental_id}")
+
+    async def return_uploads(request: Request) -> list[tuple[bytes, str]]:
+        """Фото при сдаче из формы закрытия: не больше шести, jpg/png/webp,
+        до 8 МБ каждое. Пустые поля браузера пропускаем. В демо файлы
+        посетителей на диск не пишем - как снимки сверки."""
+        data = await request.form()
+        uploads = [u for u in data.getlist("photos")
+                   if not isinstance(u, str) and getattr(u, "filename", "")]
+        if cfg.demo:
+            for upload in uploads:
+                await upload.close()
+            if uploads:
+                flash(request, DEMO_PHOTO_TEXT)
+            return []
+        try:
+            if len(uploads) > logic.RETURN_PHOTOS_MAX:
+                raise service.ServiceError(
+                    f"Фото при сдаче: не больше {logic.RETURN_PHOTOS_MAX}.")
+            shots: list[tuple[bytes, str]] = []
+            for upload in uploads:
+                suffix = logic.return_photo_suffix(upload.filename)
+                if suffix is None:
+                    raise service.ServiceError("Фото при сдаче: только jpg, png или webp.")
+                raw = await upload.read()
+                if len(raw) > logic.RETURN_PHOTO_MAX_BYTES:
+                    raise service.ServiceError(
+                        f"Фото «{upload.filename}» больше "
+                        f"{logic.RETURN_PHOTO_MAX_BYTES // (1024 * 1024)} МБ — "
+                        "сфотографируйте меньшим размером.")
+                if raw:
+                    shots.append((raw, suffix))
+            return shots
+        finally:
+            # Файлы формы больше мегабайта Starlette держит во временных
+            # файлах на диске - закрываем сразу, а не когда соберёт мусор.
+            for upload in uploads:
+                await upload.close()
+
+    @app.get("/rentals/{rental_id}/photos/{photo_id}")
+    async def rental_photo(request: Request, rental_id: int, photo_id: int) -> Response:
+        """Фото при сдаче - только вошедшим с правом на аренды (страж
+        раздела по адресу). Путь берём из базы и сверяем с шаблоном: путь
+        из адреса или из чужой строки увёл бы куда угодно."""
+        row = await crm.return_photo(photo_id)
+        path = photos.path_of(cfg.bike_photo_dir, (row or {}).get("path"))
+        if row is None or int(row["rental_id"]) != rental_id or path is None \
+                or not path.is_file():
+            return render(request, "missing.html", status_code=404, what="Фото")
+        return FileResponse(path)
 
     @app.post("/rentals/{rental_id}/tariff")
     async def rental_tariff(request: Request, rental_id: int) -> Response:
@@ -4394,6 +4476,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows.append(["ИТОГО", *(data["totals"].get(c, 0) for c in data["columns"]),
                      data["total"]])
         return await table(ext, "channels", header, rows)
+
+    @app.get("/reports/feedback")
+    async def feedback_report(request: Request) -> Response:
+        """Как клиенты оценивают аренду: по месяцам сдачи и по точкам,
+        и низкие оценки поимённо. В отчёте имена и слова клиентов, поэтому
+        право - на клиентов, как у «Каналов»."""
+        if not may_view(request, "clients"):
+            return denied(request, "clients")
+        months = 12
+        today = date.today()
+        since = today.replace(day=1)
+        for _ in range(months - 1):
+            since = (since - timedelta(days=1)).replace(day=1)
+        data = logic.feedback_report(await crm.feedback_rows(since), months=months,
+                                     today=today)
+        return render(request, "feedback.html", since=since, **data)
 
     @app.get("/reports/referrals")
     async def referrals_report(request: Request) -> Response:
@@ -7327,6 +7425,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "intake.html",
                       checks=logic.bike_check_settings(settings),
                       search=logic.search_settings(settings),
+                      return_photo_days=logic.return_photo_days(settings),
                       rows=[{**b, "state": logic.bike_check_state(b, settings)}
                             for b in rows],
                       cells=[{**b, "state": logic.battery_check_state(b, settings)}
@@ -7354,6 +7453,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 return redirect("/intake")
             if got.value:
                 await crm.set_setting(key, str(got.value), by=by)
+        # Срок хранения фото при сдаче: пусто - не трогаем, ноль не
+        # принимаем - «хранить 0 дней» стёрло бы вчерашние снимки.
+        if (data.get("return_photo_days") or "").strip():
+            days = count_field(data, "return_photo_days", what="Срок хранения фото",
+                               default=str(logic.RETURN_PHOTO_DAYS), limit=3650, least=1)
+            if not days.ok:
+                flash(request, days.error, "err")
+                return redirect("/intake")
+            await crm.set_setting("return_photo_days", str(days.value), by=by)
         flash(request, "Правила ввода техники сохранены.")
         return redirect("/intake")
 

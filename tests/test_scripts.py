@@ -643,12 +643,22 @@ class TestCaddyfile(unittest.TestCase):
     def test_panel_and_demo(self):
         out, _ = self.build("crm.x.ru", "demo.x.ru")
         self.assertEqual(self.sites(out), ["crm.x.ru", "demo.x.ru"])
-        self.assertRegex(out, r"crm\.x\.ru \{\n\trequest_body \{\n\t\tmax_size 22MB\n"
+        self.assertRegex(out, r"crm\.x\.ru \{\n\trequest_body \{\n\t\tmax_size 51MB\n"
                               r"\t\}\n\treverse_proxy crm:8080\n")
         self.assertRegex(out, r"max_size 1MB\n\t\}\n\treverse_proxy crm-demo:8080\n")
         # Недокачанную загрузку нельзя держать открытой: таймауты чтения.
-        self.assertIn("read_body 120s", out)
+        self.assertIn("read_body 600s", out)
         self.assertIn("read_header 10s", out)
+
+    def test_read_body_fits_the_largest_body_from_a_phone(self):
+        """read_body у Caddy - на весь запрос с телом. Самое тяжёлое -
+        закрытие аренды с шестью фото с телефона на точке: предел тела
+        должен пройти и на 1 Мбит/с, иначе закрытие обрывается прокси."""
+        out, _ = self.build("crm.x.ru", "demo.x.ru")
+        biggest = max(int(x) for x in re.findall(r"max_size (\d+)MB", out)) * 1000 * 1000
+        seconds = int(re.search(r"read_body (\d+)s", out).group(1))
+        self.assertGreaterEqual(seconds, biggest * 8 // 1_000_000)
+        self.assertLessEqual(seconds, 900, "и не часами")
 
     def test_demo_on_the_panel_domain_keeps_the_panel(self):
         out, err = self.build("crm.x.ru", "CRM.x.ru")

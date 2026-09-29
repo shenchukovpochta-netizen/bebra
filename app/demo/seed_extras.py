@@ -1,6 +1,6 @@
 """Остальное демо-стенда: трекеры и карта, банк, счета и карты, входящие,
-рассылки, акции, приглашения и баллы, заявки, ПЭП, рабочая группа точек,
-уведомления, сохранённые фильтры.
+рассылки, акции, приглашения и баллы, оценки после сдачи, заявки, ПЭП,
+рабочая группа точек, уведомления, сохранённые фильтры.
 
 Опора - World ядра: аренды, платежи (world.payments), клиенты, велосипеды
 с подсказкой «у этого трекер» (Bike.tracker), точки и сотрудники. Чего в
@@ -120,7 +120,7 @@ _TABLES = ("clients", "ledger", "bonuses", "referrals", "trackers", "tracker_pos
            "tracker_alerts", "tracker_commands", "bank_txns", "pay_orders", "card_tokens",
            "promos", "bookings", "sign_requests", "sign_events", "message_templates",
            "campaigns", "campaign_sends", "inbox_threads", "inbox_messages",
-           "ops_reports", "saved_views", "notice_log")
+           "ops_reports", "saved_views", "notice_log", "feedback")
 _LEDGER = ["id", "client_id", "rental_id", "kind", "amount", "method", "period_from",
            "period_to", "note", "created_by", "created_at", "shift_id"]
 _BONUS = ["id", "client_id", "kind", "amount", "ledger_id", "ref_id", "note",
@@ -160,6 +160,7 @@ async def populate(conn: asyncpg.Connection, world: World, *,
     await _referrals(conn, c)
     await _promos(conn, c)
     await _reviews(conn, c)
+    await _feedback(conn, c)
     await _bookings(conn, c)
     await _signing(conn, c)
     await _mailing(conn, c)
@@ -1288,6 +1289,63 @@ async def _reviews(conn: asyncpg.Connection, c: _Ctx) -> None:
                 f"update crm.rentals r set {column} = u.t "
                 "from unnest($1::bigint[], $2::timestamptz[]) as u(id, t) where r.id = u.id",
                 [m[0] for m in marks], [m[1] for m in marks])
+
+
+# Оценки после сдачи: довольный курьер ставит пять не глядя, поэтому
+# хвост низких короткий, но есть - иначе отчёт нечему учить.
+FEEDBACK_WEIGHTS = ((5, 0.55), (4, 0.25), (3, 0.1), (2, 0.06), (1, 0.04))
+FEEDBACK_COMMENTS = (
+    "Тормоза скрипели всю неделю, на ТО так и не поправили",
+    "При сдаче ждал оператора минут двадцать",
+    "Аккумулятор к вечеру садился, на полную смену не хватало",
+    "Выдали грязным, крыло треснутое",
+    "Дороговато для такого пробега",
+)
+
+
+async def _feedback(conn: asyncpg.Connection, c: _Ctx) -> None:
+    """«Как вам аренда?» после каждой сдачи - как круг бота (crm/feedback.py):
+    вопрос через минуту после закрытия, в Telegram или MAX; без мессенджера -
+    «пропущено». Отвечает больше половины; низкая оценка просит комментарий
+    и уходит сигналом в чат. Потерянные велосипеды не спрашиваются, как у
+    service.close_rental. Ничего не ждёт бота: вопрос задан, сигнал ушёл.
+    Генератор свой: оценки не перетасовывают разделы после них."""
+    rng, now = random.Random(f"demo-feedback:{c.w.seed}:{c.w.attempt}"), c.now
+    weights = [w for _, w in FEEDBACK_WEIGHTS]
+    rows = []
+    for r in sorted(c.w.rentals, key=lambda r: r.id):
+        if r.status != "closed" or r.lost or r.closed_at is None or r.closed_at > now:
+            continue
+        asked = min(r.closed_at + timedelta(seconds=rng.uniform(20, 90)), now)
+        channel = ("tg" if r.client_id in c.tg
+                   else "max" if r.client_id in c.mx else None)
+        c.notice(asked, "feedback_ask", r.client_id)
+        score = comment = answered = commented = alerted = prompt = None
+        if channel is not None and rng.random() < 0.62:
+            got = asked + timedelta(minutes=rng.uniform(1, 180))
+            if got <= now:
+                answered = got
+                score = rng.choices([s for s, _ in FEEDBACK_WEIGHTS], weights)[0]
+        if score is not None and score <= logic.FEEDBACK_LOW:
+            prompt = str(700_000 + r.id)
+            if rng.random() < 0.7:
+                said = answered + timedelta(minutes=rng.uniform(1, 8))
+                if said <= now:
+                    comment, commented = rng.choice(FEEDBACK_COMMENTS), said
+                    # Старше срока слова клиента дневной проход бота уже
+                    # стёр бы; момент комментария и оценка остаются.
+                    if now - said > timedelta(days=logic.FEEDBACK_COMMENT_KEEP_DAYS):
+                        comment = None
+            alerted = min(commented or answered + timedelta(
+                minutes=logic.FEEDBACK_ALERT_WAIT_MINUTES), now)
+            c.notice(alerted, "feedback_low", r.client_id, status="sent")
+        rows.append((c.ids.take("feedback"), r.id, r.client_id, channel,
+                     None if channel else "клиента нет в боте", score, comment, prompt,
+                     r.closed_at, asked, answered, commented, alerted))
+    await _copy(conn, "feedback",
+                ["id", "rental_id", "client_id", "channel", "skipped", "score", "comment",
+                 "prompt_msg", "created_at", "asked_at", "answered_at", "commented_at",
+                 "alerted_at"], rows)
 
 
 # ─────────────────────────── заявки ───────────────────────────

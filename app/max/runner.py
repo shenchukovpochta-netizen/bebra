@@ -174,6 +174,11 @@ async def _dispatch_callback(ctx: Ctx, user: dict, info: dict) -> None:
     if payload == "contract_mistake" and user["state"] == logic.WAIT_SIGN:
         await handlers.cb_mistake(ctx, user, cid)
         return
+    if payload.startswith("fb:"):
+        # Оценка аренды - в любом шаге: вопрос приходит после сдачи, когда
+        # человек может быть уже где угодно в своём сценарии.
+        await handlers.cb_feedback(ctx, user, cid, payload)
+        return
     if payload.startswith("menu:"):
         # Только из меню: старая кнопка, нажатая посреди анкеты, не должна
         # выдёргивать человека из шага приглашением «выберите действие».
@@ -195,6 +200,11 @@ async def _dispatch_message(ctx: Ctx, user: dict, info: dict) -> None:
 
     if (text or "").strip() == "/start":
         await handlers.start(ctx, user)
+        return
+    # Ответ на просьбу о комментарии к оценке - до разбора по шагу: шаг
+    # тут ни при чём, а в меню ответ ушёл бы в «выберите действие».
+    if info.get("reply_to_mid") and await handlers.st_feedback_comment(
+            ctx, user, info.get("reply_to_mid"), text):
         return
     if not logic.is_known_state(state):
         log.warning("неизвестное состояние %r у %s - сбрасываю", state,

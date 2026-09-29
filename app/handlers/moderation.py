@@ -8,19 +8,23 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReactionTypeEmoji
 
 from .. import i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import inbox
+from ..crm import inbox, photos
+from ..crm import logic as crm_logic
+from ..crm import service as crm_service
 from ..crm import sync as crm_sync
 from ..db import Database, utcnow
 from ..filters import ServiceChatReply, is_operator
+from ..services import files
 from ..services.crypto import Vault
 from . import contract
 
@@ -281,7 +285,16 @@ async def mod_reply(message: Message, bot: Bot, db: Database, cfg: Config,
         return
     returned = await db.user_by_return_message(message.chat.id, replied.message_id)
     if returned is not None:
-        await _return_reply(message, bot, db, cfg, vault, dict(returned))
+        target = dict(returned)
+        if _photo_of(message) is not None:
+            # Фото при сдаче - ответом на ту же карточку, что и форма
+            # закрытия. Подпись со строками «ключ: значение» идёт дальше
+            # как форма, и ошибку в ней оператор увидит; подпись-заметка
+            # («царапина слева») формой не считается.
+            await _return_photo(message, bot, cfg, target, crm)
+            if not logic.is_close_form(message.caption):
+                return
+        await _return_reply(message, bot, db, cfg, vault, target)
         return
     extending = await db.user_by_extend_message(message.chat.id, replied.message_id)
     if extending is not None:
@@ -687,6 +700,71 @@ async def _return_reply(message: Message, bot: Bot, db: Database,
     # пересылают в «Фиксацию сдачи», где разбирает другой бот.
     row = await db.get_user(tg_id)
     await _closure_report(message, bot, cfg, dict(row) if row else target, parsed)
+
+
+def _photo_of(message: Message) -> tuple[str, int, str] | None:
+    """(file_id, размер, расширение) снимка в сообщении: фото или картинка
+    файлом (так шлют без сжатия). Не картинка - None."""
+    if message.photo:
+        best = message.photo[-1]
+        return best.file_id, int(best.file_size or 0), ".jpg"
+    doc = message.document
+    suffix = crm_logic.return_photo_suffix(getattr(doc, "file_name", None),
+                                           getattr(doc, "mime_type", None)) if doc else None
+    if doc is not None and suffix is not None:
+        return doc.file_id, int(doc.file_size or 0), suffix
+    return None
+
+
+async def _return_photo(message: Message, bot: Bot, cfg: Config, target: dict,
+                        crm: Any) -> None:
+    """Фото при сдаче из служебного чата - к аренде этого клиента.
+
+    Аренда - идущая (акт возврата ещё не подписан) или закрытая не раньше
+    часа назад: карточка сдачи живёт до следующей аренды, и снимок через
+    неделю не должен лечь к давно закрытой. Успех - реакцией, а не
+    сообщением: альбом из шести фото дал бы шесть ответов в чат.
+    """
+    if crm is None:
+        return
+    file_id, size, suffix = _photo_of(message) or ("", 0, "")
+    try:
+        if size > crm_logic.RETURN_PHOTO_MAX_BYTES:
+            raise crm_service.ServiceError(
+                f"Снимок больше {crm_logic.RETURN_PHOTO_MAX_BYTES // (1024 * 1024)} МБ.")
+        client = await crm.client_by_tg(target["tg_id"])
+        active = await crm.active_rental_of(client["id"]) if client else None
+        last = (await crm.last_closed_rental_of(client["id"])
+                if client and active is None else None)
+        rental = crm_logic.return_photo_rental(active, last, now=datetime.now(UTC))
+        if rental is None:
+            await message.reply(texts.RETURN_PHOTO_LATE.format(
+                minutes=crm_logic.RETURN_PHOTO_MINUTES))
+            return
+        try:
+            raw = await files.download(bot, file_id, crm_logic.RETURN_PHOTO_MAX_BYTES)
+        except files.TooLarge as exc:
+            raise crm_service.ServiceError(
+                f"Снимок больше {crm_logic.RETURN_PHOTO_MAX_BYTES // (1024 * 1024)} МБ."
+            ) from exc
+        await photos.save(crm, cfg.bike_photo_dir, dict(rental), raw, suffix,
+                          by=f"tg:{message.from_user.id}")
+    except crm_service.ServiceError as exc:
+        await message.reply(logic.esc(str(exc)))
+        return
+    except TelegramAPIError:
+        log.exception("фото при сдаче не скачано")
+        await message.reply("Фото не скачалось — пришлите ещё раз.")
+        return
+    try:
+        await bot.set_message_reaction(chat_id=message.chat.id,
+                                       message_id=message.message_id,
+                                       reaction=[ReactionTypeEmoji(emoji="👍")])
+    except TelegramAPIError:
+        # Реакции в чате выключены - скажем словами, одно сообщение.
+        count = len(await crm.return_photos(rental_id=rental["id"]))
+        await message.reply(texts.RETURN_PHOTO_SAVED.format(
+            rental=rental["id"], count=count, limit=crm_logic.RETURN_PHOTOS_MAX))
 
 
 async def _closure_report(message: Message, bot: Bot, cfg: Config,

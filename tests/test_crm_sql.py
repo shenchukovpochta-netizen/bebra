@@ -264,6 +264,24 @@ class TestCrmSql(unittest.TestCase):
             self.db.franchise_failed(1, "таймаут"),
             self.db.franchise_months(today.replace(day=1)),
             self.db.purge_franchise_snapshots(400),
+            # оценка после сдачи и фото при сдаче
+            self.db.last_closed_rental_of(1),
+            self.db.queue_feedback(1, 1), self.db.feedback_queue(),
+            self.db.mark_feedback_asked(1, channel="tg"),
+            self.db.mark_feedback_asked(1, channel=None, skipped="выключено"),
+            self.db.feedback_of_rental(1), self.db.answer_feedback(1, 4),
+            self.db.set_feedback_prompt(1, "77"),
+            self.db.feedback_by_prompt("tg", "77", 5001),
+            self.db.feedback_by_prompt("max", "mid.1", 5001),
+            self.db.comment_feedback(1, "грязный"), self.db.purge_feedback_comments(90),
+            self.db.feedback_to_alert(low=3, wait_minutes=10),
+            self.db.mark_feedback_alerted(1), self.db.feedback_rows(today),
+            self.db.client_feedback(1),
+            self.db.add_return_photo(1, bike_id=1, path="returns/ret-1-0123456789ab.jpg",
+                                     created_by="me", limit=6),
+            self.db.return_photos(rental_id=1), self.db.return_photos(bike_id=1),
+            self.db.return_photo(1), self.db.old_return_photos(180),
+            self.db.drop_return_photos([1, 2]),
         ]
 
     def test_placeholders_match_arguments(self):

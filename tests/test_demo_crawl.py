@@ -62,6 +62,7 @@ ODD = re.compile(r"\bNone\b|\bnan\b|\[текст зашифрован|(?<!<code>
 FILES_404 = {
     "/clients/{client_id}/contract": "договор - файл бота, бота у демо нет",
     "/bikes/{bike_id}/photo/{field}": "снимки сверки в демо не сохраняются",
+    "/rentals/{rental_id}/photos/{photo_id}": "фото при сдаче в демо не сохраняются",
     "/batteries/{battery_id}/photo/{field}": "снимки сверки в демо не сохраняются",
     "/signings/{request_id}/doc/{index}": "пакет на подпись в демо без файлов",
     "/sign/{token}/doc/{index}": "пакет на подпись в демо без файлов",
@@ -117,6 +118,8 @@ DETAILS: tuple[tuple[str, str, str], ...] = (
      "select client_id from crm.card_tokens order by id limit 1"),
     ("подписи по статусу", "/clients/{}",
      "select distinct on (status) client_id from crm.sign_requests order by status, id"),
+    ("клиент с низкой оценкой", "/clients/{}",
+     "select client_id from crm.feedback where score <= 3 order by id limit 1"),
     ("клиент без аренд", "/clients/{}",
      "select c.id from crm.clients c where not exists (select 1 from crm.rentals r "
      "where r.client_id = c.id) and not exists (select 1 from crm.work_orders o "
@@ -140,6 +143,9 @@ DETAILS: tuple[tuple[str, str, str], ...] = (
      "order by id limit 1"),
     ("аренда с подписью", "/rentals/{}",
      "select rental_id from crm.sign_requests order by id limit 1"),
+    ("оценка после сдачи", "/rentals/{}",
+     "select distinct on (score is null, channel is null, comment is null) rental_id "
+     "from crm.feedback order by score is null, channel is null, comment is null, id"),
     ("велосипед по статусу", "/bikes/{}",
      "select distinct on (status) id from crm.bikes order by status, id"),
     ("велосипед с нарядом", "/bikes/{}",
@@ -473,7 +479,10 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
                             "order by id limit 1")
         token = await one("select token from crm.sign_requests where status = 'signed' "
                           "order by id limit 1")
+        rental = await one("select id from crm.rentals where status = 'closed' "
+                           "order by id limit 1")
         return {f"/clients/{client}/contract": 404, f"/bikes/{bike}/photo/frame_no": 404,
+                f"/rentals/{rental}/photos/1": 404,
                 f"/batteries/{battery}/photo/code": 404,
                 f"/signings/{signing}/doc/0": 404, f"/sign/{token}/doc/0": 404,
                 "/documents/mine/1": 404, "/documents/marks/stamp": 404,

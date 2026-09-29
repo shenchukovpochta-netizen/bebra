@@ -2690,3 +2690,64 @@ begin
     on conflict (key) do nothing;
   end if;
 end $$;
+
+-- ────── оценка аренды после сдачи и фото при сдаче ──────
+--
+-- Момент закрытия аренды. closed_on - день возврата, его ставит оператор
+-- и может поставить задним числом; фото из бота принимаются к аренде,
+-- закрытой не больше часа назад, и для этого нужен момент, а не день.
+-- Старым арендам он неизвестен и остаётся пустым: выдумывать его нечем.
+alter table crm.rentals add column if not exists closed_at timestamptz;
+
+-- Оценка аренды клиентом. Строка появляется при закрытии аренды
+-- (service.close_rental) - это очередь вопроса; спрашивает процесс бота
+-- (app/crm/feedback.py), ответ ложится в ту же строку. Одна строка на
+-- аренду - поэтому один вопрос и один ответ: вторая строка упирается в
+-- уникальный индекс, вторая оценка - в «score is null». Старых аренд в
+-- очереди нет: строка появляется только при закрытии, и деплой не
+-- спросит «как вам аренда» у всех, кто сдал велосипед за год.
+-- channel пуст, если не спросили; почему - в skipped (выключено, клиента
+-- нет в боте, устарело). prompt_msg - сообщение с просьбой о комментарии:
+-- ответ на него и есть комментарий, состояния диалога для этого не нужно.
+-- comment - слова клиента: живёт 90 дней, как переписка «Входящих», потом
+-- дневной проход бота его стирает; commented_at и оценка остаются.
+-- alerted_at - низкая оценка ушла сигналом в чат, один раз.
+create table if not exists crm.feedback (
+  id           bigserial   primary key,
+  rental_id    bigint      not null references crm.rentals (id) on delete cascade,
+  client_id    bigint      not null references crm.clients (id) on delete cascade,
+  channel      text,
+  skipped      text,
+  score        integer     check (score between 1 and 5),
+  comment      text,
+  prompt_msg   text,
+  created_at   timestamptz not null default now(),
+  asked_at     timestamptz,
+  answered_at  timestamptz,
+  commented_at timestamptz,
+  alerted_at   timestamptz
+);
+create unique index if not exists feedback_rental_idx on crm.feedback (rental_id);
+create index if not exists feedback_client_idx on crm.feedback (client_id, id desc);
+create index if not exists feedback_queue_idx on crm.feedback (id) where asked_at is null;
+create index if not exists feedback_alert_idx on crm.feedback (id)
+  where score is not null and alerted_at is null;
+
+-- Фото при сдаче: до шести снимков к аренде, из формы закрытия в панели
+-- или ответом оператора на карточку сдачи в боте. Файлы - на томе
+-- bikefiles (без персональных данных, как снимки сверки), путь - от его
+-- корня; срок хранения - settings.return_photo_days, чистит дневной
+-- проход бота. Велосипед - снимком на момент сдачи: карточка велосипеда
+-- показывает его фото и после того, как аренду забудут.
+create table if not exists crm.return_photos (
+  id          bigserial   primary key,
+  rental_id   bigint      not null references crm.rentals (id) on delete cascade,
+  bike_id     bigint      references crm.bikes (id) on delete set null,
+  path        text        not null,
+  created_by  text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists return_photos_rental_idx on crm.return_photos (rental_id, id);
+create index if not exists return_photos_bike_idx on crm.return_photos (bike_id, id desc)
+  where bike_id is not null;
+create index if not exists return_photos_age_idx on crm.return_photos (created_at);

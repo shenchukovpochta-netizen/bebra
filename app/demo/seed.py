@@ -368,14 +368,14 @@ async def _write(conn: asyncpg.Connection, w: World, sim: core.Sim) -> None:
             intent[2] if intent else None, intent[3] if intent else None,
             r.search_at, "staff:demo" if r.search_at else None,
             "Не отвечает на звонки и сообщения, трекер молчит" if r.search_at else None,
-            r.base_price, r.point))
+            r.base_price, r.point, r.closed_at))
     await _copy(conn, "rentals",
                 ["id", "client_id", "bike_id", "tariff_id", "tariff_name", "period_days",
                  "price", "billing", "contract_no", "started_on", "billed_until",
                  "status", "closed_on", "close_note", "created_by", "created_at",
                  "updated_at", "mileage_start", "mileage_end", "intent", "intent_until",
                  "intent_by", "intent_at", "search_at", "search_by", "search_note",
-                 "base_price", "location"], rows)
+                 "base_price", "location", "closed_at"], rows)
     await _copy(conn, "rental_bikes",
                 ["id", "rental_id", "bike_id", "issued_on", "returned_on",
                  "mileage_start", "mileage_end", "reason", "created_by", "created_at"],

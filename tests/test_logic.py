@@ -615,6 +615,17 @@ class TestCloseForm(unittest.TestCase):
         self.assertIsNone(data)
         self.assertIn("колесо", err)
 
+    def test_photo_caption_form_or_note(self):
+        """Подпись к фото при сдаче: строка «ключ: значение» - форма, даже
+        битая (её ошибку оператор должен увидеть), без двоеточия - заметка."""
+        self.assertTrue(logic.is_close_form("адрес: а\nпринял: и"))
+        self.assertTrue(logic.is_close_form("когда: 07.08\nадрес: а"))
+        self.assertTrue(logic.is_close_form("прниял: ирик"))
+        self.assertFalse(logic.is_close_form("царапина слева"))
+        self.assertFalse(logic.is_close_form(""))
+        self.assertFalse(logic.is_close_form(None))
+        self.assertFalse(logic.is_close_form(": смайлик"))
+
     def test_markup_is_rejected(self):
         data, err = self.parse("адрес: <b>а</b>\nпринял: и")
         self.assertIsNone(data)

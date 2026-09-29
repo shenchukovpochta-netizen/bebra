@@ -223,11 +223,17 @@ services:
       STORAGE_DIR: /files/kyc
       # Свои шаблоны документов и печать: их кладёт панель.
       DOC_TEMPLATE_DIR: /doctemplates
+      # Фото при сдаче: оператор присылает их ответом на карточку сдачи,
+      # бот кладёт на том снимков техники и чистит по сроку.
+      BIKE_PHOTO_DIR: /bikes
       TZ: ${TZ:-Europe/Moscow}
     volumes:
       - kycfiles:/files
       # Свои шаблоны документов и печать: панель их кладёт, бот читает.
       - doctemplates:/doctemplates:ro
+      # Снимки техники - на запись: фото при сдаче из служебного чата пишет
+      # бот, и он же удаляет их по сроку дневным проходом. ПДн там нет.
+      - bikefiles:/bikes
       # Правка документов не должна требовать пересборки образа.
       - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
       - ./app/act_priema_template.docx:/srv/app/act_priema_template.docx:ro
@@ -329,7 +335,10 @@ services:
   # Caddy принял файл целиком (`caddy adapt`); иначе - предупреждение
   # в лог и одна панель. Пределы тела - как у самой панели (BODY_MAX,
   # DEMO_BODY_MAX в app/web/app.py), а таймауты чтения не дают держать
-  # недокачанную загрузку открытой часами.
+  # недокачанную загрузку открытой часами. read_body - на ВЕСЬ запрос
+  # с телом: шесть фото при сдаче (до 48 МБ) оператор шлёт с телефона на
+  # точке, и при 1 Мбит/с это минут шесть - на двух минутах закрытие
+  # обрывалось, не дойдя до панели. Медленный заголовок режет read_header.
   caddy:
     image: caddy:2-alpine
     profiles: [https]
@@ -346,8 +355,8 @@ services:
           printf '%s {\n\trequest_body {\n\t\tmax_size %s\n\t}\n\treverse_proxy %s\n}\n' "$$1" "$$3" "$$2"
         }
         {
-          printf '{\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 120s\n\t\t}\n\t}\n}\n'
-          if [ -n "$${CRM_DOMAIN}" ]; then site "$${CRM_DOMAIN}" crm:8080 22MB; fi
+          printf '{\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 600s\n\t\t}\n\t}\n}\n'
+          if [ -n "$${CRM_DOMAIN}" ]; then site "$${CRM_DOMAIN}" crm:8080 51MB; fi
         } > /tmp/Caddyfile
         if [ -n "$${DEMO_DOMAIN}" ]; then
           crm=$$(printf %s "$${CRM_DOMAIN}" | tr A-Z a-z)
@@ -514,8 +523,10 @@ services:
 volumes:
   pgdata:
   kycfiles:
-  # Снимки сверки техники. Персональных данных в них нет, поэтому
-  # и срока хранения нет: номер на раме не устаревает.
+  # Снимки техники: сверка и фото при сдаче. Персональных данных в них
+  # нет. У снимков сверки нет и срока хранения - номер на раме не
+  # устаревает; фото при сдаче живут return_photo_days (по умолчанию 180).
+  # Пишут панель и бот (фото из служебного чата), оба под uid 10001.
   bikefiles:
   # Загруженные владельцем шаблоны договора и актов, подпись и
   # печать. Панель пишет, бот читает: том общий, права разные.

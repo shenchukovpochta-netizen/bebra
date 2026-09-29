@@ -1053,6 +1053,9 @@ unzip -p /root/mybike-bot.zip mybike-bot/update.sh > /opt/mybike-bot/update.sh
 | Выключить демо-стенд | убрать `demo` из `COMPOSE_PROFILES` и очистить `DEMO_DOMAIN`, затем `docker compose --profile demo rm -sf crm-demo postgres-demo && docker compose up -d` |
 
 Сканы и договоры лежат в отдельном томе `kycfiles` и в дамп базы не попадают.
+Снимки техники (сверка номера и фото при сдаче) — в томе `bikefiles`: его
+пишут и панель, и бот; фото при сдаче удаляются сами через «Настройки → Ввод
+техники → Фото при сдаче» дней (180 по умолчанию).
 
 Снапшоты VPS в панели Beget бэкап не заменяют: в снапшоте лежит и `secrets/`,
 то есть его утечка равна полной компрометации. Дамп базы храните отдельно
@@ -1073,6 +1076,7 @@ unzip -p /root/mybike-bot.zip mybike-bot/update.sh > /opt/mybike-bot/update.sh
 | Карточка модерации не приходит | Бот не добавлен в чат модерации, либо `ADMIN_CHAT_ID` указан неверно |
 | «Недостаточно прав» при нажатии «Одобрить» | Вашего `tg_id` нет в `ADMINS` |
 | `password authentication failed` у Postgres | Вы пересоздали `secrets/db_password` после первого запуска. Том базы хранит старый пароль: либо верните файл, либо `docker compose down -v` (**удалит данные**) |
+| Фото при сдаче или снимок сверки «не сохранился», в логе `Permission denied: '/bikes/...'` | Том `bikefiles` создан старым образом, где каталога `/bikes` не было, и принадлежит root. Один раз: `docker compose run --rm -u root bot chown -R 10001:10001 /bikes && docker compose up -d` |
 | «Telegram НЕ отвечает» при установке | С сервера недоступен `api.telegram.org`. Без прокси бот работать не будет — это стоит выяснить до того, как вкладываться дальше |
 
 Первое действие при любой непонятной ситуации — `docker compose logs -f bot`.

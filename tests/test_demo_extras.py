@@ -111,7 +111,9 @@ class TestDemoExtras(unittest.IsolatedAsyncioTestCase):
             "inbox_messages": ("created_at", "sent_at"),
             "ops_reports": ("created_at",), "notice_log": ("created_at",),
             "saved_views": ("created_at",), "clients": ("created_at",),
-            "rentals": ("review_asked_at", "service_invited_at"),
+            "rentals": ("review_asked_at", "service_invited_at", "closed_at"),
+            "feedback": ("created_at", "asked_at", "answered_at", "commented_at",
+                         "alerted_at"),
         }
         for table, columns in checks.items():
             for column in columns:
@@ -149,6 +151,39 @@ class TestDemoExtras(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await one("select count(*) from crm.card_tokens t join "
                                    "crm.settings s on s.key = 'autocharge' "
                                    "where s.value = '1'"), 0, "автосписание выключено")
+        self.assertEqual(await one("select count(*) from crm.feedback "
+                                   "where asked_at is null"), 0, "вопрос об оценке задан")
+        self.assertEqual(await one("select count(*) from crm.feedback where score <= 3 "
+                                   "and alerted_at is null"), 0, "сигнал о низкой ушёл")
+
+    async def test_feedback_follows_the_bot(self):
+        """Оценка - на каждую сдачу, кроме потерянных, как у
+        service.close_rental; ответ - только там, где вопрос ушёл."""
+        one = self.pool.fetchval
+        self.assertEqual(await one(
+            "select count(*) from crm.rentals r join crm.bikes b on b.id = r.bike_id "
+            "where r.status = 'closed' and b.status <> 'lost' and not exists "
+            "(select 1 from crm.feedback f where f.rental_id = r.id)"), 0)
+        self.assertEqual(await one(
+            "select count(*) from crm.feedback f join crm.rentals r on r.id = f.rental_id "
+            "where r.close_note = 'Признан потерянным: клиент не вернул велосипед'"), 0)
+        self.assertEqual(await one("select count(*) from crm.feedback "
+                                   "where score is not null and channel is null"), 0)
+        self.assertEqual(await one(
+            "select count(*) from crm.feedback f join crm.clients c on c.id = f.client_id "
+            "where f.channel is null and (c.tg_id is not null or c.max_id is not null)"), 0)
+        self.assertGreater(await one("select count(*) from crm.feedback where score <= 3 "
+                                     "and comment is not null"), 0)
+        self.assertEqual(await one(
+            "select count(*) from crm.feedback where comment is not null and "
+            "commented_at < $1::timestamptz - make_interval(days => $2)",
+            self.now, logic.FEEDBACK_COMMENT_KEEP_DAYS), 0,
+            "старше срока комментарий стёрт, как дневным проходом")
+        self.assertGreater(await one("select count(*) from crm.feedback "
+                                     "where channel = 'max' and score is not null"), 0)
+        self.assertEqual(await one(
+            "select count(*) from crm.feedback f join crm.rentals r on r.id = f.rental_id "
+            "where f.asked_at < r.closed_at or f.answered_at < f.asked_at"), 0)
 
     # ─────────────────────────── трекеры ───────────────────────────
 

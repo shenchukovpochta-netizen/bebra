@@ -268,6 +268,10 @@ pre.report{white-space:pre-wrap;word-break:break-word;font:13px/1.5 ui-monospace
 label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check input{width:auto;margin:0}
 .checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px 16px}
 .checks label.check{margin:4px 0}
+/* фото при сдаче: миниатюры рядами, клик - снимок целиком */
+.photos{display:flex;flex-wrap:wrap;gap:8px}
+.photos img{display:block;width:120px;height:90px;object-fit:cover;border-radius:10px;border:1px solid var(--line);background:var(--bg)}
+.stars{color:var(--brand);letter-spacing:.06em}
 .card.three{margin-bottom:16px}.card.three .tiles{margin-bottom:8px}.three-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:10px}.three-head h2{margin:0}.tile.good{border-color:var(--green);box-shadow:inset 4px 0 0 var(--green)}.tile.warn{border-color:var(--brand);box-shadow:inset 4px 0 0 var(--brand)}.tile small{display:block;font-size:12px;margin-top:2px}
 .tag.maintenance{background:#E8F4FF;color:#0B5A86}.tag.written_off{background:var(--ink);color:#fff}
 

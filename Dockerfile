@@ -22,10 +22,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY schema.sql ./schema.sql
 
-# Не root: контейнер держит сканы паспортов, лишние права тут ни к чему
+# Не root: контейнер держит сканы паспортов, лишние права тут ни к чему.
+# /bikes - точка монтирования тома снимков техники: каталог из образа
+# отдаёт новому пустому тому своего владельца, иначе том создаётся
+# root-овым, и ни панель, ни бот (uid 10001) не запишут в него фото.
 RUN useradd --system --uid 10001 --create-home bot \
-    && mkdir -p /files/kyc \
-    && chown -R bot:bot /srv /files
+    && mkdir -p /files/kyc /bikes \
+    && chown -R bot:bot /srv /files /bikes
 USER bot
 
 CMD ["python", "-m", "app.main"]

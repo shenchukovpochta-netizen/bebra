@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aiogram.types import (
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -9,6 +10,7 @@ from aiogram.types import (
 )
 
 from . import i18n, logic
+from .crm import logic as crm_logic
 
 # Все подписи кнопок идут через i18n.t(lang, "BTN_*"): русский - источник,
 # перевод подхватывается по языку клиента. Обработчики, которые ловят
@@ -490,6 +492,23 @@ def estimate_answer(order_id: int, cents: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="✖️ Не надо",
                               callback_data=f"est:no:{order_id}:{cents}")],
     ])
+
+
+def feedback_scores(rental_id: int) -> InlineKeyboardMarkup:
+    """Оценка аренды: пять кнопок в ряд, от плохого к хорошему. Кто
+    нажал, сверяет обработчик: номер аренды в кнопке не секрет."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"{score}{'⭐' if score == 5 else ''}",
+                             callback_data=crm_logic.feedback_callback(rental_id, score))
+        for score in crm_logic.FEEDBACK_SCORES]])
+
+
+def feedback_comment() -> ForceReply:
+    """Просьба о комментарии: поле ответа открывается само, и ответ на это
+    сообщение и есть комментарий - без состояния диалога. ForceReply
+    скрывает меню; его возвращает ответ бота на комментарий, а
+    промолчавшему - ловушка меню на любое следующее сообщение."""
+    return ForceReply(force_reply=True, input_field_placeholder="Что пошло не так")
 
 
 def review_sites(links: list[dict] | None = None,

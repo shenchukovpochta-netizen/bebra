@@ -160,14 +160,16 @@
   {% endif %}
 
   <h2>Закрыть аренду</h2>
-  <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2">
+  <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2" enctype="multipart/form-data">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
     <label>Пробег при возврате, км <input name="mileage" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% else %}с дисплея{% endif %}"></label>
     <label>Точка возврата <select name="return_location">{% if not home %}<option value="">не указана</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="maintenance">на ТО</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option><option value="written_off">списан</option></select></label>
     <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
+    {% if not demo %}<label class="wide">Фото при сдаче, до {{ RETURN_PHOTOS_MAX }} <input name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>{% endif %}
     <button type="submit" class="danger">Закрыть</button>
   </form>
+  <p class="muted">Фото при сдаче — jpg, png или webp до 8 МБ: спор «царапина была до меня» решается снимком, а не памятью. Их можно прислать и ответом на карточку сдачи в служебном чате — пока аренда идёт и в первый час после подписи акта.{% if demo %} В демо снимки не хранятся.{% endif %}</p>
   <p class="muted">Велосипед встанет на точку возврата: сданный на другой точке дальше простаивает там, а не там, где его выдали. Пробег необязателен: без него у аренды не будет «накатал». Начисления останавливаются, неиспользованный остаток периода не возвращается автоматически — при необходимости добавьте корректировку в карточке клиента.</p>
 </section>
 {% endif %}
@@ -189,6 +191,28 @@
     {% endfor %}
   </table>
   <p class="muted">За всю аренду накатано <b>{{ total_km }} км</b> по всем велосипедам вместе: после замены одометр нового считается со своего начала.</p>
+</section>
+{% endif %}
+{% if return_photos or feedback %}
+<section class="card">
+  {% if return_photos %}
+  <h2>Фото при сдаче <span class="muted">· {{ return_photos|length }}</span></h2>
+  <p class="photos">{% for ph in return_photos %}<a href="/rentals/{{ rental.id }}/photos/{{ ph.id }}" target="_blank" rel="noopener"><img src="/rentals/{{ rental.id }}/photos/{{ ph.id }}" alt="Фото при сдаче {{ loop.index }}" loading="lazy"></a>{% endfor %}</p>
+  <p class="muted">Приложил {{ return_photos[0].created_by or '—' }}, {{ return_photos[0].created_at|dmy }}. Хранятся по сроку из настроек «Ввод техники».</p>
+  {% endif %}
+  {% if feedback %}
+  <h2>Оценка клиента</h2>
+  {% if feedback.score %}
+  <p><b class="stars">{{ feedback_stars(feedback.score) }}</b> {{ feedback.score }} из 5 <span class="muted">· {{ feedback.answered_at|dmy }} · {{ FEEDBACK_CHANNELS.get(feedback.channel, feedback.channel) }}</span></p>
+  {% if feedback.comment %}<p class="wide">«{{ feedback.comment }}»</p>{% endif %}
+  {% elif feedback.channel %}
+  <p class="muted">Спросили {{ feedback.asked_at|dmy }} в {{ FEEDBACK_CHANNELS.get(feedback.channel, feedback.channel) }} — ответа нет.</p>
+  {% elif feedback.asked_at %}
+  <p class="muted">Не спрашивали: {{ feedback.skipped or 'нет канала' }}.</p>
+  {% else %}
+  <p class="muted">Вопрос «как вам аренда?» в очереди бота.</p>
+  {% endif %}
+  {% endif %}
 </section>
 {% endif %}
 {% if ops %}

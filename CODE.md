@@ -98,6 +98,7 @@ Caddy: без профиля `demo` compose иначе не поднял бы и
 | «Входящие»: ответы из панели в Telegram, MAX и Авито, сигналы о новых, опрос чатов Авито | `crm.inbox.inbox_loop` | 15 секунд, Авито — `AVITO_POLL_SECONDS` |
 | здоровье сервера: диск, отчёт `backup_status`, панель, сертификаты доменов; пульс для `/healthz/bot` | `crm.health.health_loop` | час, первая проверка через 15 минут после старта |
 | опрос франчайзи: `/hook/metrics` каждого раз в сутки, снимки и месяцы роялти | `crm.franchise.franchise_loop` | круг 10 минут, кому пора — `logic.franchise_due` |
+| «Как вам аренда?» после сдачи и сигнал о низкой оценке | `crm.feedback.feedback_loop` | минута |
 
 Все фоновые опросы живут здесь, а не в панели: веб-процессов может быть несколько, и каждый
 спрашивал бы банк об одном и том же. Правило «панель в интернет не ходит» — про фоновые
@@ -121,8 +122,10 @@ Caddy: без профиля `demo` compose иначе не поднял бы и
 проверяют свой токен сами, без сессии, а манифест значка браузер запрашивает без cookie. Формы
 без JS-фреймворка: страница это шаблон, действие это POST и редирект.
 
-Самый внешний слой в любом режиме - `BodyLimit`: тело больше `BODY_MAX` (импорт 20 МБ с
-запасом; в демо `DEMO_BODY_MAX`, мегабайт) получает 413 до разбора формы. Starlette сам
+Самый внешний слой в любом режиме - `BodyLimit`: тело больше `BODY_MAX` (шесть фото при сдаче
+по 8 МБ с запасом, Caddy режет тем же 51MB; в демо `DEMO_BODY_MAX`, мегабайт) получает 413 до
+разбора формы. `read_body` у Caddy (600 с) - на весь запрос с телом: столько нужно, чтобы
+51MB дошли с телефона на 1 Мбит/с; медленный заголовок режет `read_header` (10 с). Starlette сам
 файловые части не ограничивает, и загрузка на открытый `/login` иначе писала бы временные
 файлы на диск сервера. Пароль (scrypt) и выгрузки (`table()` → `_table`) считаются в потоке:
 десятки миллисекунд и секунды процессора не держат цикл событий.
@@ -172,7 +175,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 |---|---|---|
 | `pgdata` | postgres | postgres |
 | `kycfiles` | `bot`, `bot-max` | `crm` смонтирован `:ro`, потому что там ПДн |
-| `bikefiles` | `crm` | `crm` |
+| `bikefiles` | `crm` (снимки сверки, фото при сдаче из формы), `bot` (фото при сдаче из служебного чата, чистка по сроку) | `crm` |
 | `doctemplates` | `crm` | `bot` смонтирован `:ro` |
 | `caddydata` | caddy | caddy |
 | `pgdata_demo` | postgres-demo | postgres-demo; бэкап его не берёт, демо пересеивается каждую ночь |
@@ -205,7 +208,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 
 | Файл | Строка про него |
 |---|---|
-| `app/main.py` | точка входа бота: конфиг, роутеры, восемь фоновых задач, остановка |
+| `app/main.py` | точка входа бота: конфиг, роутеры, десять фоновых задач, остановка |
 | `app/max_main.py` | точка входа MAX: свой конфиг из `MAX_*`, создание базы, мост в CRM |
 | `app/web/__main__.py` | точка входа панели: uvicorn, первый админ |
 | `app/web/app.py` | все маршруты и формы панели |
@@ -233,7 +236,9 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/crm/import_xlsx.py` | импорт рабочей таблицы «ДЕЙСТВУЮЩИЕ АРЕНДАТОРЫ» |
 | `app/crm/opsgroup.py` | рабочая группа точек: сверка форм из тем с базой, ответы про долг и трекер (бывший n8n) |
 | `app/crm/inbox.py` | «Входящие»: запись обращений из ботов, отправка ответов из очереди, опрос чатов Авито |
-| `app/handlers/*.py` | сценарий Telegram: кабинет, договор, вопросы, парк из чата, меню, модерация, регистрация, привязка сотрудника, рабочая группа точек (`ops.py`, подключается первым) |
+| `app/crm/feedback.py` | «Как вам аренда?»: круг бота разбирает очередь вопросов (её кладёт `service.close_rental`) и шлёт сигнал о низкой оценке |
+| `app/crm/photos.py` | фото при сдаче: запись файла и строки (панель и бот), путь из базы по шаблону, чистка по сроку |
+| `app/handlers/*.py` | сценарий Telegram: кабинет, договор, вопросы, парк из чата, меню, модерация, регистрация, привязка сотрудника, рабочая группа точек (`ops.py`, подключается первым), оценка аренды (`feedback.py`, до кабинета: кнопка `fb:` и ответ на просьбу о комментарии) |
 | `app/middlewares.py`, `app/filters.py` | конвейер до обработчиков и общие фильтры |
 | `app/texts.py`, `app/i18n/*.py` | тексты бота и переводы на восемь языков (`i18n.PACKS`) |
 | `app/faq.py`, `app/faq_i18n.py` | факты проката и автоответы, русский в `faq.py` вместе с фактами |
@@ -299,6 +304,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | входящее из нового канала или шлюза | разбор тела хука `parse_inbound` в `app/crm/logic.py`, запись `service.inbox_in`, отправка ответа `send_once` в `app/crm/inbox.py` |
 | разбор формы из рабочей группы точек | `parse_ops_*` в `app/crm/logic.py`, сверка в `app/crm/opsgroup.py`, темы в `filters.ops_topic` |
 | договор, акты, печать | `app/services/contract.py`, шаблоны `app/*.docx`, выбор шаблона `app/crm/doctemplates.py` |
+| оценка после сдачи, фото при сдаче | очередь - `service.close_rental`, вопрос и сигнал - `app/crm/feedback.py`, кнопка - `app/handlers/feedback.py` и `app/max/handlers.py` (`service.rate_rental`), файлы - `app/crm/photos.py`, отчёт - `feedback_report` в `app/web/app.py` и `logic.feedback_report` |
 | данные демо-стенда: парк, аренды, деньги, точки | `app/demo/core.py` (ядро), `seed_service.py` (сервис, склад), `seed_extras.py` (остальное), сотрудники и реквизиты - `app/demo/seed.py`; коридоры чисел держат `tests/test_demo_seed.py` и соседи |
 | шаг мастера первого запуска | правила - `app/crm/firstrun.py`; маршруты `/setup*` в `app/web/app.py` рядом с `/readiness`, пишут только общими с разделами помощниками (`save_company`, `add_location`, `store_tariff`, `add_staff`): своя запись в мастере - второй путь, который разойдётся с разделом; кого встречать после входа и на сводке - `setup_wanted` |
 | что закрыто в демо, плашка, логины на входе, пределы | `DEMO_BLOCKED_PATHS`, `DEMO_BLOCKED_PREFIXES`, `DEMO_LOGINS`, `DemoGate`, `DemoLimits`, `DEMO_BODY_MAX`, `DEMO_EXPORT_*` в `app/web/app.py`, шаблон `_demo_banner.html`; `DEMO_LOGINS` сверяется с `seed.STAFF` тестом |
@@ -510,7 +516,8 @@ python3 consistency.py
 | Оператор зачислил заявку | `cb_claim`, `claim_amount_reply` → `cabinet.credit` | не меняется | `service.credit_claim` → `crm.credit_claim`: заявка `confirmed` и `crm.ledger` вида `payment` одной транзакцией |
 | Клиент просит закрыть аренду | `menu.start_close`, `st_close_reason` | `approved` → `wait_close_reason` → `approved` | `close_reason`, `close_requested_at`, `return_chat_id`, `return_message_id` |
 | Форма закрытия от оператора | `_return_reply` → `contract.send_act_out` | → `wait_return_sign` | `return_data` |
-| Подпись Акта возврата | `cb_return_sign` | `wait_return_sign` → `approved` | `act_out_signed_at`, `act_out_path`, `act_out_sha256`, событие `rental_closed`. **CRM:** `sync.on_rental_closed` → `crm.close_rental`: аренда `closed`, велосипед `available` на точке возврата (строка «адрес» формы через `logic.match_location`; не узнали - точка аренды), позиции `rental_extras` сняты |
+| Фото ответом на карточку сдачи | `mod_reply` → `_return_photo` (`app/handlers/moderation.py`) | не меняется | `photos.save`: файл на `bikefiles` и `crm.return_photos` к идущей аренде или закрытой не больше часа назад; подпись со строкой «ключ: значение» (`logic.is_close_form`) идёт дальше в `_return_reply`, даже битая - ошибку оператор видит |
+| Подпись Акта возврата | `cb_return_sign` | `wait_return_sign` → `approved` | `act_out_signed_at`, `act_out_path`, `act_out_sha256`, событие `rental_closed`. **CRM:** `sync.on_rental_closed` → `crm.close_rental`: аренда `closed` (`closed_at`), велосипед `available` на точке возврата (строка «адрес» формы через `logic.match_location`; не узнали - точка аренды), позиции `rental_extras` сняты, строка `crm.feedback` в очередь вопроса «как вам аренда?» |
 
 ### Начисления идут по двум разным правилам
 
@@ -1183,6 +1190,7 @@ python3 consistency.py
 | `mailing_loop` | `app/crm/mailing.py` | `POLL_SECONDS`, 20 с | Берёт кампании в статусе «отправляется» и шлёт порцию `BATCH` = 50 сообщений |
 | `health_loop` | `app/crm/health.py` | `CHECK_SECONDS`, час; первая через `FIRST_CHECK_SECONDS` = 15 минут | Пульс сразу на старте; `check_once`: замеры `probes`, `logic.health_problems`, `health_step`, одно сообщение `server_health` на проверку; не доставлено - память прежняя, следующий круг скажет то же |
 | `franchise_loop` | `app/crm/franchise.py` | `POLL_SECONDS`, 600 с | Опрашивает франчайзи, кому пора (`logic.franchise_due`: раз в сутки после принятого ответа, неудачу - не чаще раза в час), пишет снимок и месяцы роялти; без `franchise_key` выходит сразу |
+| `feedback_loop` | `app/crm/feedback.py` | `POLL_SECONDS`, 60 с | Вопрос «как вам аренда?» по очереди `crm.feedback` (Telegram, иначе MAX), отметка до отправки; низкая оценка - `notices.send_team("feedback_low")`, подождав комментарий до 10 минут |
 
 Три цикла выходят сразу, если интеграция не настроена: `tracking_loop` и `banking_loop`
 проверяют `client.ready`, `paying_loop` проверяет `acquiring.token`. Задача при этом просто
@@ -1543,7 +1551,9 @@ AES-256-GCM (`app/services/crypto.py`). Ключ живёт docker secret `secre
 обнуляет пути и `anketa_enc`, но сохраняет `doc_sha256` и реквизиты договора.
 
 Тома в `docker-compose.yml`: панель монтирует `kycfiles:/files:ro` и пишет только на свой
-`bikefiles`, бот читает `doctemplates:/doctemplates:ro`, а пишет туда панель.
+`bikefiles`, бот читает `doctemplates:/doctemplates:ro`, а пишет туда панель. `bikefiles` бот
+монтирует на запись: фото при сдаче из служебного чата кладёт он, и он же удаляет их по сроку
+(`photos.purge` в дневном проходе). ПДн на этом томе нет - снимки техники, а не людей.
 
 ### Документы docx, `app/services/contract.py`
 

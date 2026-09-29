@@ -107,6 +107,19 @@
       <td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
     {% else %}<tr><td colspan="6" class="muted">Аренд не было.</td></tr>{% endfor %}
   </table>
+  {% if feedback %}
+  {# Оценка после сдачи: «тройка» от постоянного клиента - повод
+     позвонить до того, как он уйдёт к конкуренту. #}
+  <h3>Оценки аренд</h3>
+  <table>
+    <tr><th>Аренда</th><th>Оценка</th><th>Комментарий</th></tr>
+    {% for f in feedback %}
+    <tr><td class="nowrap"><a href="/rentals/{{ f.rental_id }}">#{{ f.rental_id }}</a> <span class="muted">{{ f.answered_at|dmy }}</span></td>
+      <td class="nowrap"><span class="stars">{{ feedback_stars(f.score) }}</span> {{ f.score }}</td>
+      <td>{{ f.comment or '' }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
 </section>
 
 <section class="card">

@@ -146,6 +146,10 @@ class Config:
     # подпись с печатью. Бот читает их оттуда снимком с коротким TTL:
     # процессы разные, том общий.
     doc_dir: Path = Path("/doctemplates")
+    # Том снимков техники (bikefiles), общий с панелью: бот кладёт туда
+    # фото при сдаче, присланные оператором в служебный чат, и удаляет их
+    # по сроку дневным проходом. Паспортные сканы - на своём томе.
+    bike_photo_dir: Path = Path("/bikes")
     act_in_template: Path = Path("/srv/app/act_priema_template.docx")
     act_out_template: Path = Path("/srv/app/act_vozvrata_template.docx")
     # Акт о переходе права собственности: аренда с правом выкупа.
@@ -240,6 +244,7 @@ class Config:
             contract_template=Path(
                 _env("CONTRACT_TEMPLATE", "/srv/app/contract_template.docx")),
             doc_dir=Path(_env("DOC_TEMPLATE_DIR", "/doctemplates")),
+            bike_photo_dir=Path(_env("BIKE_PHOTO_DIR", "/bikes")),
             act_in_template=Path(
                 _env("ACT_IN_TEMPLATE", "/srv/app/act_priema_template.docx")),
             act_out_template=Path(

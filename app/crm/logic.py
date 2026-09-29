@@ -6871,7 +6871,21 @@ NOTICES: dict[str, dict[str, Any]] = {
                 "Площадки - в настройках отзывов.",
         "params": {"after_days": 21},
     },
+    "feedback_ask": {
+        "group": "client", "target": "client", "hour": None,
+        "title": "«Как вам аренда?» после сдачи",
+        "hint": "Оценка от 1 до 5 кнопкой, когда велосипед вернули. "
+                "Выключено - сдачи помечаются неспрошенными и после "
+                "включения не догоняются.",
+    },
     # ─ команде ─
+    "feedback_low": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Низкая оценка аренды",
+        "hint": "Клиент поставил 3 и ниже. Ждёт комментарий до 10 минут; "
+                "в сообщении имя, точка и номер аренды - без телефона и "
+                "без текста комментария, он в отчёте «Оценки».",
+    },
     "estimate_waiting": {
         "group": "team", "target": "chat", "hour": None,
         "title": "Наряд ждёт согласования",
@@ -7468,6 +7482,186 @@ def review_links(settings: Mapping[str, Any] | None = None) -> list[dict[str, st
     return out
 
 
+# ────────────────────── оценка аренды после сдачи ──────────────────────
+#
+# Отзыв на площадке - для чужих глаз, оценка - для нас: «как вам аренда?»
+# сразу после сдачи, одной кнопкой от 1 до 5. Низкая оценка - это клиент,
+# который уйдёт к конкуренту, и владелец узнаёт о ней в тот же час.
+
+FEEDBACK_SCORES = (1, 2, 3, 4, 5)
+# «Тройка» у курьера - уже недовольство: довольный ставит пять не глядя.
+FEEDBACK_LOW = 3
+FEEDBACK_COMMENT_MAX = 1000
+# Комментарий - слова клиента того же рода, что переписка «Входящих», и
+# живёт столько же (INBOX_KEEP_DAYS): потом дневной проход бота его стирает,
+# а оценка остаётся в отчёте. Ключом «Входящих» не шифруем: ключ
+# необязателен, и без него комментарий было бы негде хранить.
+FEEDBACK_COMMENT_KEEP_DAYS = 90
+# Спрашиваем только свежую сдачу: бот, лежавший неделю, не должен после
+# подъёма спросить «как вам аренда» у всех, кто сдал велосипед за неделю.
+FEEDBACK_ASK_HOURS = 48
+# Сигнал о низкой оценке ждёт комментарий: одно сообщение «2 из 5, есть
+# комментарий» лучше двух подряд.
+FEEDBACK_ALERT_WAIT_MINUTES = 10
+# Спрашиваем, только когда техника вернулась: «как вам аренда?» после
+# признания потери, выкупа или списания звучало бы издёвкой.
+FEEDBACK_RETURNED = ("available", "repair", "maintenance", "reserved")
+FEEDBACK_CHANNELS = {"tg": "Telegram", "max": "MAX"}
+_FEEDBACK_DATA = re.compile(r"^fb:(\d{1,12}):([1-5])$")
+
+
+def feedback_wanted(bike_status: Any) -> bool:
+    return str(bike_status or "") in FEEDBACK_RETURNED
+
+
+def feedback_callback(rental_id: int, score: int) -> str:
+    """Кнопка оценки. Номер аренды в ней - не секрет: оценку принимает
+    только клиент этой аренды (service.rate_rental сверяет, кто нажал)."""
+    return f"fb:{int(rental_id)}:{int(score)}"
+
+
+def parse_feedback_callback(data: Any) -> tuple[int, int] | None:
+    found = _FEEDBACK_DATA.match(str(data or ""))
+    if not found:
+        return None
+    return int(found.group(1)), int(found.group(2))
+
+
+def feedback_low(score: Any) -> bool:
+    try:
+        return 1 <= int(score) <= FEEDBACK_LOW
+    except (TypeError, ValueError):
+        return False
+
+
+def feedback_stars(score: Any) -> str:
+    try:
+        n = int(score)
+    except (TypeError, ValueError):
+        return ""
+    if not 1 <= n <= 5:
+        return ""
+    return "★" * n + "☆" * (5 - n)
+
+
+def check_feedback_comment(raw: Any) -> Check:
+    text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return Check(False, error="Напишите комментарий текстом, одним сообщением.")
+    if len(text) > FEEDBACK_COMMENT_MAX:
+        return Check(False, error=f"Комментарий длиннее {FEEDBACK_COMMENT_MAX} знаков "
+                                  "— сократите его.")
+    return Check(True, text)
+
+
+def feedback_channel(row: Mapping[str, Any], *, max_ready: bool) -> str | None:
+    """Куда спрашивать: Telegram, если клиент там есть, иначе MAX, если
+    MAX-бот подключён. Спросить некуда - None."""
+    if row.get("tg_id"):
+        return "tg"
+    if row.get("max_id") and max_ready:
+        return "max"
+    return None
+
+
+def feedback_stale(row: Mapping[str, Any], now: datetime) -> bool:
+    """Сдача давнее FEEDBACK_ASK_HOURS: спрашивать поздно."""
+    at = row.get("closed_at") or row.get("created_at")
+    if not isinstance(at, datetime):
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return now - at > timedelta(hours=FEEDBACK_ASK_HOURS)
+
+
+def feedback_skip_reason(row: Mapping[str, Any], *, enabled: bool, now: datetime,
+                         max_ready: bool) -> str | None:
+    """Почему не спрашиваем эту сдачу; None - спрашиваем."""
+    if not enabled:
+        return "выключено в настройках"
+    if feedback_stale(row, now):
+        return "сдача давнее двух суток"
+    if str(row.get("client_status") or "active") != "active":
+        return "клиент не активен"
+    if feedback_channel(row, max_ready=max_ready) is None:
+        return "клиента нет в боте"
+    return None
+
+
+def feedback_alert_text(row: Mapping[str, Any]) -> str:
+    """Сигнал о низкой оценке в служебный чат. Имя - как в соседних
+    командных уведомлениях; телефона и самого комментария нет: чат
+    читают все, а комментарий - слова клиента, его место в панели."""
+    score = int(row.get("score") or 0)
+    place = row.get("location") or "без точки"
+    bike = f" · № {row['bike_code']}" if row.get("bike_code") else ""
+    tail = ("есть комментарий — в панели" if row.get("comment")
+            else "без комментария")
+    return (f"😟 Низкая оценка аренды: {score} из 5 {feedback_stars(score)}\n"
+            f"{html.escape(str(row.get('full_name') or '—'), quote=False)}"
+            f"{html.escape(bike, quote=False)} · {html.escape(str(place), quote=False)}\n"
+            f"Аренда № {int(row.get('rental_id') or 0)} (/rentals/"
+            f"{int(row.get('rental_id') or 0)}), {tail}.")
+
+
+def _feedback_stats(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    asked = [r for r in rows if r.get("channel")]
+    scored = [int(r["score"]) for r in rows if r.get("score")]
+    dist = {s: scored.count(s) for s in FEEDBACK_SCORES}
+    avg = (Decimal(sum(scored)) / len(scored)).quantize(Decimal("0.1"), ROUND_HALF_UP) \
+        if scored else None
+    return {"asked": len(asked), "answered": len(scored),
+            "rate": round(100 * len(scored) / len(asked)) if asked else None,
+            "avg": avg, "dist": dist,
+            "low": sum(1 for s in scored if s <= FEEDBACK_LOW)}
+
+
+def feedback_report(rows: Iterable[Mapping[str, Any]], *, months: int = 12,
+                    today: date | None = None) -> dict[str, Any]:
+    """Оценки по месяцам сдачи и по точкам аренды, плюс низкие.
+
+    Месяц - по дню возврата (closed_on), точка - точка выдачи аренды, как
+    у денег в «По точкам»: иначе одна аренда жила бы в двух местах.
+    «Спросили» - только ушедшие вопросы: не спрошенные (клиента нет в
+    боте, выключено) в долю ответов не входят.
+    """
+    today = today or date.today()
+    first = today.replace(day=1)
+    scale: list[date] = []
+    for _ in range(months):
+        scale.append(first)
+        first = (first - timedelta(days=1)).replace(day=1)
+    scale.reverse()
+    by_month: dict[date, list] = {m: [] for m in scale}
+    by_point: dict[str, list] = {}
+    kept = []
+    for r in rows:
+        day = r.get("closed_on") or local_date(r.get("asked_at"))
+        if day is None or day.replace(day=1) not in by_month:
+            continue
+        kept.append(r)
+        by_month[day.replace(day=1)].append(r)
+        by_point.setdefault(str(r.get("location") or ""), []).append(r)
+    points = sorted(by_point, key=lambda p: (p == "", p.lower()))
+    low = sorted((r for r in kept if feedback_low(r.get("score"))),
+                 key=lambda r: (r.get("answered_at") or datetime.min.replace(tzinfo=UTC)),
+                 reverse=True)
+    return {
+        "months": [{"month": m, **_feedback_stats(by_month[m])} for m in reversed(scale)],
+        "points": [{"location": p or None, **_feedback_stats(by_point[p])}
+                   for p in points],
+        "total": _feedback_stats(kept),
+        "low": low,
+    }
+
+
+def feedback_avg(value: Any) -> str:
+    """Средняя оценка для экрана: «4,3» или прочерк."""
+    if value in (None, ""):
+        return "—"
+    return str(value).replace(".", ",")
+
+
 # ────────────────────── смета и счёт за ремонт ──────────────────────
 #
 # Смета - перечень работ с ценой, а не число в поле. Отправили клиенту -
@@ -7759,6 +7953,79 @@ def bike_check_state(bike: Mapping[str, Any],
             # сверку не требует: список тогда остаётся подсказкой.
             "can_commission": (not left) or not required,
             "new": str(bike.get("status") or "") == "new"}
+
+
+# ────────────────── фото при сдаче ──────────────────
+#
+# Спор «царапина была до меня» решается снимком в момент возврата, а не
+# памятью оператора. Снимки лежат на томе сверки (bikefiles): персональных
+# данных в них нет, и том с паспортами панель по-прежнему не пишет.
+
+RETURN_PHOTOS_MAX = 6
+# Столько же, сколько у снимка сверки: телефонное фото столько и весит.
+RETURN_PHOTO_MAX_BYTES = 8 * 1024 * 1024
+RETURN_PHOTO_SUFFIXES = {".jpg": ".jpg", ".jpeg": ".jpg", ".png": ".png",
+                         ".webp": ".webp"}
+RETURN_PHOTO_MIMES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+# Бот принимает фото к аренде, закрытой не раньше часа назад: карточка
+# сдачи живёт до следующей аренды, и снимок, присланный через неделю,
+# лёг бы к давно закрытой аренде как «фото при сдаче».
+RETURN_PHOTO_MINUTES = 60
+RETURN_PHOTO_DAYS = 180
+RETURN_PHOTO_DIR = "returns"
+# Имя собираем сами: имя из браузера или Telegram - чужая строка. По
+# этому же шаблону файл сверяется перед показом и удалением.
+_RETURN_PHOTO_PATH = re.compile(r"^returns/ret-\d{1,12}-[0-9a-f]{12}\.(jpg|png|webp)$")
+
+
+def return_photo_suffix(filename: Any = None, mime: Any = None) -> str | None:
+    """Расширение снимка по имени файла или типу; не картинка - None."""
+    if filename:
+        dot = str(filename).rfind(".")
+        suffix = str(filename)[dot:].lower() if dot >= 0 else ""
+        if suffix in RETURN_PHOTO_SUFFIXES:
+            return RETURN_PHOTO_SUFFIXES[suffix]
+    if mime:
+        return RETURN_PHOTO_MIMES.get(str(mime).lower())
+    return None
+
+
+def return_photo_path(rental_id: int, suffix: str, token: str) -> str:
+    """Путь снимка от корня тома: returns/ret-<аренда>-<12 hex>.<ext>."""
+    ext = RETURN_PHOTO_SUFFIXES.get(str(suffix).lower())
+    if ext is None or not re.fullmatch(r"[0-9a-f]{12}", token):
+        raise ValueError("недопустимое имя снимка")
+    return f"{RETURN_PHOTO_DIR}/ret-{int(rental_id)}-{token}{ext}"
+
+
+def is_return_photo_path(path: Any) -> bool:
+    return bool(_RETURN_PHOTO_PATH.match(str(path or "")))
+
+
+def return_photo_days(settings: Mapping[str, Any] | None = None) -> int:
+    """Сколько дней хранить фото при сдаче. Мусор в базе - умолчание."""
+    try:
+        days = int(str((settings or {}).get("return_photo_days") or RETURN_PHOTO_DAYS))
+    except ValueError:
+        return RETURN_PHOTO_DAYS
+    return days if 1 <= days <= 3650 else RETURN_PHOTO_DAYS
+
+
+def return_photo_rental(active: Mapping[str, Any] | None,
+                        last: Mapping[str, Any] | None, *, now: datetime,
+                        minutes: int = RETURN_PHOTO_MINUTES) -> Mapping[str, Any] | None:
+    """К какой аренде приложить фото из бота: идущая (сдача ещё не
+    подписана) или только что закрытая. Давно закрытой - никакой."""
+    if active is not None:
+        return active
+    if last is None or last.get("status") != "closed":
+        return None
+    closed = last.get("closed_at")
+    if not isinstance(closed, datetime):
+        return None
+    if closed.tzinfo is None:
+        closed = closed.replace(tzinfo=UTC)
+    return last if now - closed <= timedelta(minutes=minutes) else None
 
 
 # ────────────────── паспорт аккумулятора ──────────────────

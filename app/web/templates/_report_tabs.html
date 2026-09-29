@@ -18,6 +18,7 @@
   {% endif %}
   {% if can_view(staff, 'clients') %}
   <a href="/reports/channels" {% if active == 'channels' %}class="on"{% endif %}>Каналы</a>
+  <a href="/reports/feedback" {% if active == 'feedback' %}class="on"{% endif %}>Оценки</a>
   {% endif %}
   {% if can_view(staff, 'bikes') %}
   <a href="/reports/integrity" {% if active == 'integrity' %}class="on"{% endif %}>Расхождения</a>

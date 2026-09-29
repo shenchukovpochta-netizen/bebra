@@ -173,6 +173,11 @@
       <td>{{ r.started_on|dmy }}</td><td>{{ r.closed_on|dmy if r.closed_on else '' }}</td><td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
     {% else %}<tr><td colspan="5" class="muted">Ещё не выдавался.</td></tr>{% endfor %}
   </table>
+  {% if return_photos %}
+  {# Фото при сдаче - по аренде: какой он пришёл от какого клиента. #}
+  <h2>Фото при сдаче <span class="muted">· последние {{ return_photos|length }}</span></h2>
+  <p class="photos">{% for ph in return_photos %}<a href="/rentals/{{ ph.rental_id }}/photos/{{ ph.id }}" target="_blank" rel="noopener" title="аренда #{{ ph.rental_id }}{% if ph.closed_on %}, сдан {{ ph.closed_on|dmy }}{% endif %}"><img src="/rentals/{{ ph.rental_id }}/photos/{{ ph.id }}" alt="аренда #{{ ph.rental_id }}" loading="lazy"></a>{% endfor %}</p>
+  {% endif %}
 </section>
 </div>
 {% endblock %}

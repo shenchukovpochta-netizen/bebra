@@ -382,6 +382,43 @@ async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | N
         await crm.return_batteries(rental["id"], status=battery_status, by=by or "")
     except Exception:                                    # noqa: BLE001
         log.exception("батареи аренды %s не приняты обратно", rental["id"])
+    # Очередь вопроса «как вам аренда?» - здесь, а не в панели и боте по
+    # отдельности: закрытие одно на оба входа. Спрашивает процесс бота
+    # (crm/feedback.py). Сбой очереди закрытие не отменяет.
+    if logic.feedback_wanted(bike_status):
+        try:
+            await crm.queue_feedback(rental["id"], rental["client_id"])
+        except Exception:                                # noqa: BLE001
+            log.exception("оценка аренды %s не поставлена в очередь", rental["id"])
+
+
+async def rate_rental(crm: Any, rental_id: int, score: int, *, channel: str,
+                      user_id: int) -> dict:
+    """Оценка аренды кнопкой. Принимается только от клиента этой аренды и
+    только в том канале, куда ушёл вопрос: номер аренды в кнопке виден
+    всем, и чужое нажатие (пересланное сообщение, подобранный callback)
+    не должно ставить оценку за другого. Возвращает строку оценки."""
+    if score not in logic.FEEDBACK_SCORES:
+        raise ServiceError("Оценка - от 1 до 5.")
+    row = await crm.feedback_of_rental(rental_id)
+    if row is None or row.get("channel") != channel:
+        raise ServiceError("Эта кнопка устарела.")
+    owner = row.get("max_id") if channel == "max" else row.get("tg_id")
+    if owner is None or int(owner) != int(user_id):
+        raise ServiceError("Эта кнопка не для вас.")
+    if not await crm.answer_feedback(rental_id, score):
+        raise ServiceError("Оценка уже принята — спасибо!")
+    return {**row, "score": score}
+
+
+async def comment_rental(crm: Any, feedback: dict, text: Any) -> str:
+    """Комментарий к низкой оценке - один; второй ответ не переписывает."""
+    check = logic.check_feedback_comment(text)
+    if not check.ok:
+        raise ServiceError(check.error)
+    if not await crm.comment_feedback(feedback["id"], check.value):
+        raise ServiceError("Комментарий уже получили — спасибо!")
+    return check.value
 
 
 async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -> None:
