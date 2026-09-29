@@ -140,6 +140,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/intake.html',
                   'app/web/templates/readiness.html',
                   'app/web/templates/setup.html', 'app/web/templates/_company_fields.html',
+                  'app/web/templates/risk.html', 'app/web/templates/_risk.html',
                   'app/web/templates/documents.html',
                   'app/web/templates/mailing.html',
                   'app/web/templates/campaign.html',
@@ -219,7 +220,8 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_demo_extras.py', 'tests/test_demo_mode.py',
           'tests/test_demo_crawl.py', 'tests/test_readiness.py',
           'tests/test_waitlist.py', 'tests/test_battery_offer.py', 'tests/test_card_nudge.py',
-          'tests/test_backup.py', 'tests/test_health.py')
+          'tests/test_backup.py', 'tests/test_health.py',
+          'tests/test_risk.py')
 
 foreach ($f in ($root + $app + $docs + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

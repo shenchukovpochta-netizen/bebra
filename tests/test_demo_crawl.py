@@ -406,6 +406,8 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
                  "/rentals?status=all", "/rentals?status=closed", "/inbox?tab=all",
                  "/orders?location=none", "/orders?payer=client", "/bank?status=all",
                  "/clients?status=blacklist", "/map?q=МБ-1"]
+        # Фильтр по риску - форма, а не ссылка: каждый уровень отдельно.
+        pages += [f"/clients?risk={level}" for level in logic.RISK_LEVELS]
         pages += [f"/rentals?view={v}" for v in ("debt", "overdue", "search", "repair",
                                                 "nobike")]
         pages += [f"/bikes?status={s}" for s in logic.BIKE_STATUSES]

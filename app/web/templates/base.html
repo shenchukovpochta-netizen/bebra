@@ -96,7 +96,7 @@
     {% if g_setup %}<div class="blk"><div class="grp">Настройки</div>
       {% if can_view(staff, 'staff') %}<a href="/staff" {% if request.url.path.startswith('/staff') or request.url.path.startswith('/profiles') %}class="on"{% endif %}>Сотрудники</a>{% endif %}
       {% if can_view(staff, 'settings') %}<a href="/company" {% if request.url.path.startswith(('/company', '/documents', '/locations', '/models',
-                                       '/notices', '/intake')) %}class="on"{% endif %}>Настройки</a>{% endif %}
+                                       '/notices', '/intake', '/risk')) %}class="on"{% endif %}>Настройки</a>{% endif %}
     </div>{% endif %}
   </nav>
   <div class="side-bolt">{% include "_bolt.html" %}</div>

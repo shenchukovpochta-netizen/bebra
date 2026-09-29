@@ -646,6 +646,85 @@ class FakeCrm:
                          "bike_model": b["model"] if b else None})
         return sorted(rows, key=lambda r: -r["id"])[:limit]
 
+    async def risk_facts(self, client_ids=None):
+        """Как CrmDB.risk_facts: даты - местные, как created_at::date сессии.
+        Потеря - по тому, что было у аренды на руках, а не по датам; платёж -
+        днём выписки или «Я оплатил», если он раньше зачисления."""
+        wanted = set(client_ids) if client_ids is not None else None
+        log = sorted(self.status_log_, key=lambda s: (s["changed_at"], s["id"]))
+        paid = {}
+        for src in [(t["ledger_id"], t["booked_at"]) for t in self.bank_.values()] \
+                + [(p["ledger_id"], p["created_at"]) for p in self.claims_.values()]:
+            if src[0] is not None:
+                paid[src[0]] = min(paid.get(src[0], src[1]), src[1])
+
+        def local(at):
+            return at.astimezone().date()
+
+        def held(r):
+            rows = [(b["bike_id"], b["created_at"]) for b in self.rental_bikes_
+                    if b["rental_id"] == r["id"]]
+            if not rows and r["bike_id"] is not None:
+                rows = [(r["bike_id"], r["created_at"])]
+            return rows
+
+        def lost(r):
+            # Первый после выдачи выход из «в аренде» - в «потерян»; новая
+            # выдача того же велосипеда раньше выхода - уже не эта аренда.
+            for bike_id, since in held(r):
+                for s in log:
+                    if s["bike_id"] != bike_id or s["changed_at"] < since:
+                        continue
+                    if s["from_status"] == "rented":
+                        if s["to_status"] == "lost":
+                            return True
+                        break
+                    if s["to_status"] == "rented" and s["changed_at"] > since:
+                        break
+            return False
+
+        def void(r):
+            return r["status"] == "closed" and r["closed_on"] <= r["started_on"]
+
+        out = {}
+        for c in self.clients_.values():
+            if wanted is not None and c["id"] not in wanted:
+                continue
+            rentals = [r for r in self.rentals_.values() if r["client_id"] == c["id"]]
+            gone = [r for r in rentals if lost(r)]
+            real = [r for r in rentals if r in gone or not void(r)]
+            kept = [r for r in real if r["status"] == "closed" and r not in gone]
+            refs = sorted((f for f in self.referrals_.values()
+                           if f.get("client_id") == c["id"]), key=lambda f: f["id"])
+            days = {}
+            fines, fines_sum = 0, Decimal(0)
+            for x in self.ledger_:
+                if x["client_id"] != c["id"]:
+                    continue
+                day = local(min(x["created_at"], paid.get(x["id"], x["created_at"])))
+                days[day] = days.get(day, Decimal(0)) + x["amount"]
+                if x["kind"] == "fine":
+                    fines += 1
+                    fines_sum -= x["amount"]
+            out[c["id"]] = {
+                "client_id": c["id"], "status": c["status"],
+                "agent_id": refs[0]["agent_id"] if refs else None,
+                "rentals": len(real),
+                "active": sum(1 for r in rentals if r["status"] == "active"),
+                "done": len(kept), "lost": len(gone),
+                "search_now": sum(1 for r in rentals if r["status"] == "active"
+                                  and r.get("search_at") is not None),
+                "searched": sum(1 for r in kept if r.get("search_at") is not None),
+                "early": sum(1 for r in kept if r["closed_on"]
+                             < r["started_on"] + timedelta(days=r["period_days"])),
+                "rent_days": sum(max((r["closed_on"] - r["started_on"]).days, 0)
+                                 for r in rentals if r["status"] == "closed"),
+                "active_on": min((r["started_on"] for r in rentals
+                                  if r["status"] == "active"), default=None),
+                "days": sorted(days.items()), "balance": sum(days.values(), Decimal(0)),
+                "fines": fines, "fines_sum": fines_sum}
+        return out
+
     # ─── аренды ───
     def _rental_row(self, r):
         c = self.clients_[r["client_id"]]
@@ -702,7 +781,8 @@ class FakeCrm:
             location = self.bikes_[bike_id].get("location")
         rid = self._id()
         # Одна транзакция в базе - одно now() у аренды и у её «в аренде»: по
-        # нему «Тарифы» узнают выдачу, открывшую интервал.
+        # нему «Тарифы» узнают выдачу, открывшую интервал, и risk_facts на
+        # этом равенстве стоит.
         at = self._now()
         self.rentals_[rid] = {"id": rid, "client_id": client_id, "bike_id": bike_id,
                               "tariff_id": tariff_id, "tariff_name": tariff_name,
@@ -2131,12 +2211,17 @@ class FakeCrm:
 
     async def add_rental_bike(self, rental_id, *, bike_id, issued_on, mileage_start,
                               reason, created_by):
+        return self._rental_bike(rental_id, bike_id, issued_on, mileage_start, reason,
+                                 created_by, self._now())
+
+    def _rental_bike(self, rental_id, bike_id, issued_on, mileage_start, reason,
+                     created_by, at):
         row_id = self._id()
         self.rental_bikes_.append({
             "id": row_id, "rental_id": rental_id, "bike_id": bike_id,
             "issued_on": issued_on, "returned_on": None,
             "mileage_start": mileage_start, "mileage_end": None, "reason": reason,
-            "created_by": created_by, "created_at": self._now()})
+            "created_by": created_by, "created_at": at})
         return row_id
 
     async def swap_rental_bike(self, rental_id, *, old_bike_id, new_bike_id,
@@ -2147,13 +2232,13 @@ class FakeCrm:
             return False
         if rental.get("bike_id") != old_bike_id:
             return False
+        # Одно время на всю замену: в базе это одна транзакция и одно now().
+        at = self._now()
         if old_bike_id is not None:
             open_row = await self.open_rental_bike(rental_id)
             if open_row is None:
-                await self.add_rental_bike(
-                    rental_id, bike_id=old_bike_id, issued_on=rental["started_on"],
-                    mileage_start=rental.get("mileage_start"), reason="Выдача",
-                    created_by=by)
+                self._rental_bike(rental_id, old_bike_id, rental["started_on"],
+                                  rental.get("mileage_start"), "Выдача", by, at)
             for row in self.rental_bikes_:
                 if row["rental_id"] == rental_id and row["returned_on"] is None:
                     row["returned_on"] = today
@@ -2163,22 +2248,18 @@ class FakeCrm:
             bike["status"] = old_status
             if mileage_old is not None:
                 bike["mileage_km"] = max(bike.get("mileage_km") or 0, int(mileage_old))
-            at = self._now()
             if before != old_status:
                 self._log_status(old_bike_id, before, old_status, by, at)
             place = next((x for x in (swap_location, rental.get("location"))
                           if x is not None), bike.get("location"))
             self._place_bike(old_bike_id, place, by, at)
-        await self.add_rental_bike(rental_id, bike_id=new_bike_id, issued_on=today,
-                                   mileage_start=mileage_new, reason=reason,
-                                   created_by=by)
+        self._rental_bike(rental_id, new_bike_id, today, mileage_new, reason, by, at)
         new_bike = self.bikes_[new_bike_id]
         before = new_bike["status"]
         new_bike["status"] = "rented"
         if mileage_new is not None:
             new_bike["mileage_km"] = max(new_bike.get("mileage_km") or 0,
                                          int(mileage_new))
-        at = self._now()
         if before != "rented":
             self._log_status(new_bike_id, before, "rented", by, at)
         # Как в базе: у аренды был велосипед - новый встаёт на её точку,

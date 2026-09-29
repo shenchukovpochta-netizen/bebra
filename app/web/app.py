@@ -663,6 +663,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
+        RISK_LEVELS=logic.RISK_LEVELS,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
         ORDER_MANUAL_STATUSES=logic.ORDER_MANUAL_STATUSES,
@@ -1490,18 +1491,35 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── клиенты ───────────────────────
 
+    async def clients_by_risk(rows: list[dict], risk: str) -> list[dict]:
+        """Фильтр списка по уровню риска: оценка считается только когда
+        фильтр выбран - на каждом открытии списка она не нужна."""
+        if risk not in logic.RISK_LEVELS:
+            return rows
+        risks = await service.client_risks(crm, [r["id"] for r in rows],
+                                           today=date.today())
+        return [{**r, "risk": risks[r["id"]]} for r in rows
+                if r["id"] in risks and risks[r["id"]]["level"] == risk]
+
     @app.get("/clients")
     async def clients(request: Request) -> Response:
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
-        rows = await crm.clients(q=q or None, status=status or None)
+        risk = request.query_params.get("risk") or ""
+        risk = risk if risk in logic.RISK_LEVELS else ""
+        # С фильтром риска - вся база: иначе первые 500 по алфавиту
+        # молча прятали бы рискованных с фамилией на «Я».
+        rows = await clients_by_risk(
+            await crm.clients(q=q or None, status=status or None,
+                              limit=10000 if risk else 500), risk)
+        rows = rows[:500]
         for r in rows:
             rental = {"status": "active", "billed_until": r["billed_until"],
                       "price": r["price"], "period_days": r["period_days"],
                       "tariff_name": r["tariff_name"], "bike_model": r.get("bike_model"),
                       "bike_code": r.get("bike_code")} if r.get("rental_id") else None
             r["summary"] = summarize(rental, r.get("balance", 0))
-        return render(request, "clients.html", rows=rows, q=q, status=status)
+        return render(request, "clients.html", rows=rows, q=q, status=status, risk=risk)
 
     @app.get("/clients.{ext}")
     async def clients_csv(request: Request, ext: str) -> Response:
@@ -1511,8 +1529,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "finance")
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
+        risk = request.query_params.get("risk") or ""
+        found = await crm.clients(q=q or None, status=status or None, limit=10000)
+        # Выгружают то, что видят: тот же фильтр риска, что у страницы, и
+        # уровень колонкой - оценка всё равно посчитана для фильтра.
+        if risk in logic.RISK_LEVELS:
+            found = await clients_by_risk(found, risk)
+        else:
+            risks = await service.client_risks(crm, [c["id"] for c in found],
+                                               today=date.today())
+            found = [{**c, "risk": risks.get(c["id"])} for c in found]
         rows = []
-        for c in await crm.clients(q=q or None, status=status or None, limit=10000):
+        for c in found:
             rental = ({"status": "active", "billed_until": c["billed_until"],
                        "price": c["price"], "period_days": c["period_days"]}
                       if c.get("rental_id") else None)
@@ -1522,10 +1550,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                          ("есть" if c.get("tg_id") else ""),
                          logic.to_money(c.get("balance", 0)), c.get("bike_code"),
                          c.get("tariff_name"), s.get("covered_until"),
-                         c.get("contract_no"), c.get("created_at")])
+                         c.get("contract_no"), c.get("created_at"),
+                         (c.get("risk") or {}).get("label")])
         return await table(ext, "clients",
                     ["ФИО", "Телефон", "Статус", "Telegram", "Баланс", "Велосипед",
-                     "Тариф", "Оплачено до", "Договор", "Добавлен"], rows)
+                     "Тариф", "Оплачено до", "Договор", "Добавлен", "Риск"], rows)
 
     @app.get("/clients/new")
     async def client_new(request: Request) -> Response:
@@ -1615,6 +1644,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "client.html", client=client, balance=balance,
                       presets=logic.fine_presets(await crm.work_types(active_only=True)),
                       rental=rental, summary=summarize(rental, balance),
+                      risk=await service.client_risk(crm, client_id, today=date.today()),
                       ledger=await crm.ledger_of(client_id, 100),
                       rentals=await crm.client_rentals(client_id),
                       claim=await crm.pending_claim_of(client_id),
@@ -2269,7 +2299,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         bot_user = await bot_user_for(client)
         ctx.update(step=2, client=client, balance=balance, active=active, bot_user=bot_user,
                    bot_state=logic.bot_client_state(bot_user),
-                   bot_username=await bot_username())
+                   bot_username=await bot_username(),
+                   # Риск - на всех шагах до подтверждения: оператор видит
+                   # причины и залог, решает он сам, выдачу оценка не запирает.
+                   risk=await service.client_risk(crm, client["id"], today=date.today()))
         if active is not None or client.get("status") != "active":
             # Дальше идти некуда: сначала закрыть аренду или снять блокировку.
             return render(request, "issue.html", **ctx)
@@ -7112,6 +7145,39 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 await crm.set_setting(key, str(got.value), by=by)
         flash(request, "Правила ввода техники сохранены.")
         return redirect("/intake")
+
+    # ─────────────────── оценка риска клиента ───────────────────
+
+    @app.get("/risk")
+    async def risk_page(request: Request) -> Response:
+        """Правило оценки словами, залог по уровням и сколько клиентов на
+        каждом уровне: владельцу видно, кого коснётся новый залог."""
+        if not may_view(request, "settings"):
+            return denied(request, "settings")
+        counts = dict.fromkeys(logic.RISK_LEVELS, 0)
+        for got in (await service.client_risks(crm, None, today=date.today())).values():
+            counts[got["level"]] += 1
+        deposits = logic.risk_settings(await crm.settings())
+        return render(request, "risk.html", rules=logic.risk_rules(), counts=counts,
+                      deposits={k: plain_amount(v) for k, v in deposits.items()},
+                      medium=logic.RISK_MEDIUM, high=logic.RISK_HIGH)
+
+    @app.post("/risk")
+    async def risk_save(request: Request) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        data = await form(request)
+        values: dict[str, Decimal] = {}
+        for level, key in logic.RISK_DEPOSIT_KEYS.items():
+            got = cost_field(data, key)
+            if not got.ok:
+                flash(request, f"Залог «{logic.RISK_LEVELS[level]}»: {got.error}", "err")
+                return redirect("/risk")
+            values[key] = got.value
+        for key, value in values.items():
+            await crm.set_setting(key, plain_amount(value), by=who(request))
+        flash(request, "Залог по уровням риска сохранён.")
+        return redirect("/risk")
 
     # ─────────────────────── уведомления ───────────────────────
 

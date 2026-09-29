@@ -1,0 +1,11 @@
+{# Оценка риска клиента (logic.client_risk): подсказка оператору, решение
+   за ним - выдачу она не запирает. Рубли только тому, кому деньги в панели
+   показывают (money_ok), остальным причины без сумм. #}
+<div class="risk">
+  <span class="tag risk-{{ risk.level }}">{{ risk.badge }}</span>
+  {% if risk.deposit and money_ok %}<span>рекомендуемый залог <b>{{ money(risk.deposit) }}</b></span>{% endif %}
+  {% if can_view(staff, 'settings') %}<a class="muted" href="/risk">как считается</a>{% endif %}
+  <ul class="risk-why">
+    {% for r in risk.reasons %}<li class="{{ r.kind }}">{{ r.text if money_ok else r.plain }}</li>{% endfor %}
+  </ul>
+</div>

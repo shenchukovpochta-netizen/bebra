@@ -741,6 +741,135 @@ class CrmDB:
             where r.client_id = $1 order by r.id desc limit $2
             """, client_id, limit))
 
+    async def risk_facts(self, client_ids: list[int] | None = None) -> dict[int, dict]:
+        """История клиентов для оценки риска (logic.client_risk), ключ - id.
+        None - все клиенты: фильтр списка.
+
+        Журнал отдаётся суточными суммами по местной дате, а не строками:
+        просрочку считает чистая логика (logic.debt_track), ей нужен остаток
+        на конец суток. Платёж датируется днём, когда клиент заплатил, а не
+        когда его зачислили: строка выписки (`booked_at`) или «Я оплатил»
+        (`payment_claims.created_at`), если они раньше записи. Иначе оплату
+        вечером, зачисленную утром, или в пятницу, зачисленную в понедельник,
+        правило считало бы просрочкой клиента, а это задержка оператора.
+
+        Стаж - дни в арендах (`rent_days` закрытых и начало идущей
+        `active_on`), а не календарь с первой: отсутствие доверия не копит.
+
+        Потеря привязана к тому, что было у аренды на руках (журнал
+        замен, без него - велосипед аренды), а не к датам аренды: дату
+        закрытия ставят задним числом, а велосипед после замены уже не
+        `rentals.bike_id`. Аренда потеряла велосипед, если первый после
+        выдачи выход его из «в аренде» - в «потерян»: признание потери,
+        закрытие или замена со статусом «Потерян». Сдал раньше или
+        велосипед с тех пор выдавали снова - чужая потеря того же
+        велосипеда не его. Найденный потом велосипед историю не обеляет,
+        и потеря в идущей аренде (замена) считается так же.
+
+        Досрочный возврат - закрыта раньше первого оплаченного срока.
+        Закрытая в день выдачи без потери - исправление оператора, а не
+        аренда: её нет ни в закрытых, ни в стаже, иначе ошибка выдачи
+        делала бы новичка «низким риском».
+        """
+        ids = list(client_ids) if client_ids is not None else None
+        out: dict[int, dict] = {}
+        for r in await self.pool.fetch(
+            """
+            with c as (
+              select id, status from crm.clients
+               where $1::bigint[] is null or id = any($1::bigint[])
+            ), x as (
+              select y.* from crm.rentals y join c on c.id = y.client_id
+            ), p as (
+              -- что было у аренды на руках и с какого момента
+              select rb.rental_id, rb.bike_id, rb.created_at as since
+                from crm.rental_bikes rb join x on x.id = rb.rental_id
+              union all
+              select x.id, x.bike_id, x.created_at from x
+               where x.bike_id is not null and not exists (
+                 select 1 from crm.rental_bikes rb where rb.rental_id = x.id)
+            ), gone as (
+              select distinct p.rental_id from p
+               where exists (
+                 select 1 from crm.bike_status_log s
+                  where s.bike_id = p.bike_id and s.from_status = 'rented'
+                    and s.to_status = 'lost' and s.changed_at >= p.since
+                    and not exists (
+                      select 1 from crm.bike_status_log e
+                       where e.bike_id = p.bike_id and e.changed_at >= p.since
+                         and (e.changed_at, e.id) < (s.changed_at, s.id)
+                         and (e.from_status = 'rented'
+                              or (e.to_status = 'rented' and e.changed_at > p.since))))
+            ), r as (
+              select x.client_id, x.status, x.started_on, x.closed_on,
+                     x.period_days, x.search_at, g.rental_id is not null as lost,
+                     (x.status = 'closed' and g.rental_id is null
+                      and coalesce(x.closed_on <= x.started_on, false)) as void
+                from x left join gone g on g.rental_id = x.id
+            )
+            select c.id, c.status,
+                   (select f.agent_id from crm.referrals f where f.client_id = c.id
+                     order by f.id limit 1) as agent_id,
+                   count(*) filter (where not r.void) as rentals,
+                   count(*) filter (where r.status = 'active') as active,
+                   count(*) filter (where r.status = 'closed' and not r.lost
+                                      and not r.void) as done,
+                   count(*) filter (where r.lost) as lost,
+                   count(*) filter (where r.status = 'active'
+                                      and r.search_at is not null) as search_now,
+                   count(*) filter (where r.status = 'closed' and not r.lost
+                                      and not r.void
+                                      and r.search_at is not null) as searched,
+                   count(*) filter (where r.status = 'closed' and not r.lost
+                                      and not r.void
+                                      and r.closed_on < r.started_on + r.period_days)
+                     as early,
+                   coalesce(sum(greatest(r.closed_on - r.started_on, 0))
+                              filter (where r.status = 'closed'), 0) as rent_days,
+                   min(r.started_on) filter (where r.status = 'active') as active_on
+              from c left join r on r.client_id = c.id
+             group by c.id, c.status
+            """, ids):
+            out[int(r["id"])] = {
+                "client_id": int(r["id"]), "status": r["status"], "agent_id": r["agent_id"],
+                **{k: int(r[k] or 0) for k in ("rentals", "active", "done", "lost",
+                                                "search_now", "searched", "early",
+                                                "rent_days")},
+                "active_on": r["active_on"], "days": [], "balance": Decimal(0),
+                "fines": 0, "fines_sum": Decimal(0)}
+        for r in await self.pool.fetch(
+            """
+            with src as (
+              select ledger_id, booked_at as at from crm.bank_txns
+               where ledger_id is not null
+              union all
+              select ledger_id, created_at from crm.payment_claims
+               where ledger_id is not null
+            ), paid as (
+              select ledger_id, min(at) as at from src group by ledger_id
+            ), l as (
+              select l.client_id, l.kind, l.amount,
+                     least(l.created_at, p.at)::date as day
+                from crm.ledger l left join paid p on p.ledger_id = l.id
+               where $1::bigint[] is null or l.client_id = any($1::bigint[])
+            )
+            select client_id, day, sum(amount) as amount,
+                   count(*) filter (where kind = 'fine') as fines,
+                   coalesce(-sum(amount) filter (where kind = 'fine'), 0) as fines_sum
+              from l
+             group by client_id, day
+             order by client_id, day
+            """, ids):
+            row = out.get(int(r["client_id"]))
+            if row is None:
+                continue
+            amount = Decimal(r["amount"] or 0)
+            row["days"].append((r["day"], amount))
+            row["balance"] += amount
+            row["fines"] += int(r["fines"] or 0)
+            row["fines_sum"] += Decimal(r["fines_sum"] or 0)
+        return out
+
     # ─────────────────────── аренды ───────────────────────
 
     # card_nudge_at - когда бот предлагал привязать карту: «Счета» берут

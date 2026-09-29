@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Риск клиента — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>Оценка риска клиента</h1>
+  <nav class="tabs"><a href="/company">Реквизиты</a><a href="/documents">Документы</a><a href="/locations">Точки</a>
+    <a href="/models">Каталог</a><a href="/notices">Уведомления</a><a href="/intake">Ввод техники</a>
+    <a href="/risk" class="on">Риск клиента</a><a href="/readiness">Готовность</a></nav>
+</div>
+
+<div class="cols">
+<section class="card">
+  <h2>Залог по уровню</h2>
+  <fieldset {% if not can_edit(staff, 'settings') %}disabled{% endif %} class="plain">
+  <form method="post" action="/risk">
+    <div class="grid2">
+      {% for code, label in RISK_LEVELS.items() %}
+      <label>{{ 'Нет истории' if code == 'none' else 'Риск ' ~ label }}, ₽
+        <input name="risk_deposit_{{ code }}" inputmode="decimal" value="{{ deposits[code] }}"></label>
+      {% endfor %}
+    </div>
+    <p class="muted">Сумма появляется у клиента на шаге выдачи и в карточке
+      как подсказка; 0 — залог не подсказывать. Как принимать залог, решаете
+      вы: платёж в журнале — это выручка, и он попадёт в средний чек.</p>
+    <button type="submit">Сохранить</button>
+  </form>
+  </fieldset>
+</section>
+
+<section class="card">
+  <h2>Клиенты по уровням</h2>
+  <dl>
+    {% for code, label in RISK_LEVELS.items() %}
+    <dt>{{ 'Нет истории' if code == 'none' else 'Риск ' ~ label }}</dt>
+    <dd>{% if counts[code] and can_view(staff, 'clients') %}<a href="/clients?risk={{ code }}">{{ counts[code] }}</a>{% else %}{{ counts[code] }}{% endif %}</dd>
+    {% endfor %}
+  </dl>
+  <p class="muted">Оценка — подсказка оператору, а не решение: выдачу она
+    не запирает, ничего не пишет и никуда не уходит. Чёрный список и
+    блокировка по-прежнему запрещают выдачу сами — это статус карточки.</p>
+</section>
+</div>
+
+<section class="card">
+  <h2>Как считается</h2>
+  <table>
+    <tr><th>Что в истории клиента</th><th>Баллы</th></tr>
+    {% for what, points in rules %}<tr><td>{{ what }}</td><td>{{ points }}</td></tr>{% endfor %}
+  </table>
+  <p class="muted">Сумма баллов от {{ medium }} — средний риск, от
+    {{ high }} — высокий, меньше — низкий. Без закрытой аренды и месяца
+    в аренде — «нет истории», а не низкий риск: о новом клиенте мы не знаем
+    ничего; его минусы видны причинами, уровень — когда наберут средний.
+    Долг и просрочки считаются по журналу на конец суток: минус до вечера
+    в день начисления — норма, сегодняшние сутки не в счёт, платёж — днём
+    выписки или «Я оплатил», а не зачисления.
+    Снятый розыск следа не оставляет: считается аренда, закрытая в розыске.</p>
+</section>
+{% endblock %}

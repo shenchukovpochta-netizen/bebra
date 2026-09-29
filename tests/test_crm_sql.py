@@ -109,7 +109,9 @@ class TestCrmSql(unittest.TestCase):
             self.db.update_client(1, note="x", status="blocked"),
             self.db.link_client_tg(1, 2, "u"), self.db.client_balance(1),
             self.db.client_rentals(1),
-            self.db.rentals(), self.db.rentals(status="active"), self.db.rental(1),
+            # оценка риска: история одного клиента и всей базы (фильтр списка)
+            self.db.risk_facts([1, 2]), self.db.risk_facts(),
+            self.db.rentals(),self.db.rentals(status="active"), self.db.rental(1),
             self.db.active_rental_of(1), self.db.active_rentals(),
             self.db.create_rental(client_id=1, bike_id=1, tariff_id=None, tariff_name="t",
                                   period_days=7, price=d, billing="auto", started_on=today,

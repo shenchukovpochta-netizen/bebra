@@ -910,6 +910,239 @@ def tariff_tiles(tariffs: Iterable[dict]) -> list[dict]:
     return out
 
 
+# ─────────────────── оценка риска клиента на выдаче ───────────────────
+#
+# Подсказка оператору перед выдачей: насколько клиент надёжен по его же
+# истории у нас. Не решение: выдачу оценка не запирает (блокировка и
+# чёрный список - статус карточки, и правило выдачи для них прежнее),
+# ничего не пишет и никуда не уходит. Поэтому она обязана объяснять себя:
+# уровень без причин оператор проигнорирует, а с причинами - спросит о
+# долге или возьмёт залог.
+#
+# Баллы целые и простые, чтобы их можно было пересказать словами: минус
+# истории прибавляет, доверие отнимает. Нет истории - не «низкий риск»:
+# о новом клиенте мы не знаем ничего, и «надёжен» было бы враньём.
+
+RISK_LEVELS: dict[str, str] = {"none": "нет истории", "low": "низкий",
+                               "medium": "средний", "high": "высокий"}
+# С какой суммы баллов уровень средний и высокий.
+RISK_MEDIUM = 2
+RISK_HIGH = 4
+# Долг сейчас: с этой суммы три балла, меньше - два, и уровень не ниже
+# среднего при любом доверии - сначала долг, потом велосипед. Порог около
+# двух недель аренды по цели чека: неделю долга бывает и у честного курьера.
+RISK_DEBT_BIG = Decimal(7000)
+# Наибольший долг на конец суток: больше недели аренды - балл, больше
+# месяца - два. Долг до вечера в день начисления сюда не попадает.
+RISK_MAX_DEBT = (Decimal(5000), Decimal(15000))
+# Просрочки (дни в минусе на конец суток, раз ушёл в минус) на 1, 2 и 3
+# балла. Разовая задержка на день-два - не повод, привычка - повод.
+RISK_OVERDUE = ((3, None), (7, 3), (20, 6))
+# Штрафов и ремонта за счёт клиента на 1 и 2 балла; досрочных возвратов
+# на балл: взял на неделю и вернул через три дня - повод спросить, а не
+# отказать, поэтому вес малый и только за повтор.
+RISK_FINES = (1, 3)
+RISK_EARLY = 2
+# Доверие: закрытых без потерь аренд и месяцев в аренде на -1 и -2, всего
+# не больше трёх баллов - иначе старожил с привычкой к просрочкам выглядел
+# бы надёжнее новичка без них. Приглашение надёжным клиентом - ещё -1.
+# Месяцы - сумма дней его аренд, а не календарь с первой: год отсутствия
+# после недели аренды доверия не прибавляет.
+RISK_DONE = (2, 5)
+RISK_MONTHS = (6, 12)
+RISK_TRUST_CAP = 3
+# Меньше месяца в аренде и без закрытой аренды - «нет истории»: первая
+# неделя ещё ничего не говорит. Минусы новичка видны причинами, но уровень
+# ставят, только набрав средний: «риск низкий» за разовую просрочку
+# выглядел бы надёжнее чистого новичка и подсказывал бы залог меньше.
+RISK_HISTORY_DAYS = 30
+# Залог по уровню - в crm.settings, правит владелец; 0 - не брать.
+RISK_DEPOSIT_KEYS = {level: f"risk_deposit_{level}" for level in RISK_LEVELS}
+
+
+def risk_settings(raw: Mapping[str, Any] | None) -> dict[str, Decimal]:
+    """Рекомендуемый залог по уровню. Мусор и минус в настройке - ноль:
+    лучше не подсказать залог, чем подсказать неверный."""
+    raw = raw or {}
+    out: dict[str, Decimal] = {}
+    for level, key in RISK_DEPOSIT_KEYS.items():
+        value = parse_money(raw.get(key))
+        out[level] = value if value is not None and 0 < value <= MAX_AMOUNT \
+            else Decimal(0)
+    return out
+
+
+def debt_track(days: Iterable[tuple[date, Any]], *, today: date) -> dict[str, Any]:
+    """Просрочки по журналу клиента: суточные суммы -> сколько дней и раз
+    он был в минусе на конец суток, наибольший такой долг и долг сейчас.
+
+    Период начисляется вперёд целиком, и в день начисления минус до вечера
+    - норма, поэтому счёт идёт по остатку на конец суток. Сегодняшние сутки
+    не кончились: их нет ни в днях, ни в наибольшем долге. Долг сейчас -
+    по всему журналу, с сегодняшними записями; debt_days - сколько полных
+    суток он тянется.
+    """
+    per_day: dict[date, Decimal] = {}
+    for day, amount in days:
+        per_day[day] = per_day.get(day, Decimal(0)) + to_money(amount)
+    order = sorted(per_day)
+    bal = Decimal(0)
+    overdue_days = times = 0
+    max_debt = Decimal(0)
+    start: date | None = None
+    for i, day in enumerate(order):
+        bal += per_day[day]
+        if bal >= 0:
+            start = None
+            continue
+        if start is None:
+            start = day
+            if day < today:
+                times += 1
+        end = min(order[i + 1], today) if i + 1 < len(order) else today
+        overdue_days += max((end - day).days, 0)
+        if day < today:
+            max_debt = max(max_debt, -bal)
+    debt = max(-bal, Decimal(0))
+    return {"overdue_days": overdue_days, "overdue_times": times,
+            "max_debt": to_money(max_debt), "debt": to_money(debt),
+            "debt_days": max((today - start).days, 0) if debt and start else 0}
+
+
+def _risk_steps(value: Any, steps: Iterable[Any]) -> int:
+    """Сколько порогов из возрастающего ряда пройдено."""
+    return sum(1 for step in steps if value >= step)
+
+
+def client_risk(facts: Mapping[str, Any] | None, *, today: date,
+                agent_good: bool = False,
+                deposits: Mapping[str, Decimal] | None = None) -> dict[str, Any]:
+    """Уровень риска клиента с причинами и рекомендуемым залогом.
+
+    facts - история из CrmDB.risk_facts: статус карточки, аренды (закрытые,
+    потерянные, в розыске, досрочные), дни в закрытых арендах (rent_days)
+    и начало идущей (active_on), суточные суммы журнала, штрафы.
+    agent_good - клиента пригласил клиент с низким риском.
+
+    Причина - {"text", "plain", "kind"}: plain без рублей для того, кому
+    деньги в панели не показывают; kind - bad (риск выше), good (ниже).
+    Чёрный список, блокировка, потеря и розыск сейчас - высокий уровень
+    сразу: доверие такое не перевешивает.
+    """
+    f = facts or {}
+    track = debt_track(f.get("days") or (), today=today)
+    hard: list[dict] = []
+    bad: list[tuple[int, dict]] = []
+    good: list[tuple[int, dict]] = []
+
+    def why(text: str, plain: str | None = None, kind: str = "bad") -> dict:
+        return {"text": text, "plain": plain or text, "kind": kind}
+
+    status = f.get("status") or "active"
+    if status != "active":
+        hard.append(why(CLIENT_STATUSES.get(status, status).lower()))
+    lost = int(f.get("lost") or 0)
+    if lost:
+        hard.append(why(f"не вернул велосипед, признан потерянным (аренд: {lost})"))
+    if int(f.get("search_now") or 0):
+        hard.append(why("аренда сейчас в розыске"))
+    searched = int(f.get("searched") or 0)
+    if searched:
+        bad.append((3, why(f"аренда была в розыске (аренд: {searched})")))
+    debt, debt_days = track["debt"], track["debt_days"]
+    # Долг сейчас - минус, если это не сегодняшнее начисление идущей
+    # аренды: курьер платит вечером, и днём он «должник» по устройству.
+    owes = debt > 0 and (not int(f.get("active") or 0) or debt_days >= 1)
+    if owes:
+        tail = f", {debt_days} дн." if debt_days else ""
+        bad.append((3 if debt >= RISK_DEBT_BIG else 2,
+                    why(f"долг сейчас {money(debt)}{tail}", f"долг сейчас{tail}")))
+    days_, times = track["overdue_days"], track["overdue_times"]
+    points = sum(1 for d, t in RISK_OVERDUE
+                 if days_ >= d or (t is not None and times >= t))
+    if points:
+        bad.append((points, why(f"просрочек: {times}, дней в минусе: {days_}")))
+    points = _risk_steps(track["max_debt"], RISK_MAX_DEBT)
+    if points:
+        bad.append((points, why(f"наибольший долг {money(track['max_debt'])}",
+                                "был большой долг")))
+    fines = int(f.get("fines") or 0)
+    points = _risk_steps(fines, RISK_FINES)
+    if points:
+        bad.append((points, why(f"штрафы и ремонт за его счёт: {fines} на "
+                                f"{money(f.get('fines_sum'))}",
+                                f"штрафы и ремонт за его счёт: {fines}")))
+    early = int(f.get("early") or 0)
+    if early >= RISK_EARLY:
+        bad.append((1, why(f"досрочных возвратов: {early}")))
+
+    done = int(f.get("done") or 0)
+    active_on = f.get("active_on")
+    rented_days = int(f.get("rent_days") or 0) \
+        + (max((today - active_on).days, 0) if active_on else 0)
+    months = rented_days // 30
+    points = _risk_steps(done, RISK_DONE)
+    if done:
+        good.append((points, why(f"закрыто аренд без потерь: {done}", kind="good")))
+    points = _risk_steps(months, RISK_MONTHS)
+    if months:
+        good.append((points, why(f"в аренде {months} мес.", kind="good")))
+    if agent_good:
+        good.append((1, why("пришёл по приглашению надёжного клиента", kind="good")))
+    risk = sum(p for p, _ in bad)
+    trust = min(sum(p for p, _ in good), RISK_TRUST_CAP)
+    score = risk - trust
+    # История - то, на чём стоит доверие; минусы её не создают.
+    history = bool(hard or done or rented_days >= RISK_HISTORY_DAYS)
+    if hard:
+        level = "high"
+    elif score >= RISK_HIGH:
+        level = "high"
+    elif score >= RISK_MEDIUM or owes:
+        level = "medium"
+    elif not history:
+        level = "none"
+    else:
+        level = "low"
+    reasons = hard + [r for _, r in sorted(bad, key=lambda x: -x[0])]
+    if history and not hard and not bad:
+        reasons.append(why("просрочек, долгов и штрафов не было", kind="good"))
+    reasons += [r for _, r in good]
+    if level == "none":
+        reasons = [why("первая аренда, выводы рано" if f.get("rentals")
+                       else "у нас ещё не арендовал", kind="note")] + reasons
+    return {"level": level, "label": RISK_LEVELS[level],
+            "badge": "нет истории" if level == "none" else f"риск {RISK_LEVELS[level]}",
+            "score": score, "reasons": reasons,
+            "deposit": (deposits or {}).get(level, Decimal(0)), **track}
+
+
+def risk_rules() -> list[tuple[str, str]]:
+    """Правило оценки словами для страницы настроек - из тех же констант,
+    что считают: описание не разойдётся с расчётом."""
+    (o1, _), (o2, t2), (o3, t3) = RISK_OVERDUE
+    return [
+        ("Чёрный список, блокировка, потерянный велосипед, розыск сейчас",
+         "сразу высокий"),
+        ("Аренда была в розыске", "+3"),
+        ("Долг сейчас (кроме сегодняшнего начисления идущей аренды)",
+         f"+2, от {money(RISK_DEBT_BIG)} +3; уровень не ниже среднего"),
+        ("Просрочки: дни в минусе на конец суток и сколько раз",
+         f"от {o1} дн. +1, от {o2} дн. или {t2} раз +2, от {o3} дн. или {t3} раз +3"),
+        ("Наибольший долг на конец суток",
+         f"от {money(RISK_MAX_DEBT[0])} +1, от {money(RISK_MAX_DEBT[1])} +2"),
+        ("Штрафы и ремонт за счёт клиента",
+         f"от {RISK_FINES[0]} +1, от {RISK_FINES[1]} +2"),
+        ("Досрочные возвраты (раньше первого оплаченного срока)",
+         f"от {RISK_EARLY} +1"),
+        ("Закрытые аренды без потерь", f"от {RISK_DONE[0]} −1, от {RISK_DONE[1]} −2"),
+        ("Месяцев в аренде (дни всех его аренд, не календарь)",
+         f"от {RISK_MONTHS[0]} −1, от {RISK_MONTHS[1]} −2"),
+        ("Пришёл по приглашению клиента с низким риском", "−1"),
+        ("Доверие всего", f"не больше −{RISK_TRUST_CAP}"),
+    ]
+
+
 # ─────────────────────── инструменты списков ───────────────────────
 #
 # Сортировка кликом по заголовку, размер страницы и подвал с итогом -
@@ -1399,6 +1632,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/documents", "settings"),
     ("/locations", "settings"),
     ("/models", "settings"),
+    # Правило оценки риска и залог по уровням - решение владельца.
+    ("/risk", "settings"),
 )
 
 

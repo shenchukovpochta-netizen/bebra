@@ -15,6 +15,7 @@
     {% if money_ok %}<dt>Баланс</dt><dd class="{% if balance < 0 %}bad{% endif %}"><b>{{ money(balance) }}</b></dd>{% endif %}
     <dt>Аренда</dt><dd>{% if rental %}{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ rental.id }}">{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}</a>{% else %}{{ rental.bike_model or '' }} {{ rental.bike_code or '' }}{% endif %} · {{ rental.tariff_name }}{% if money_ok %} — {{ money(rental.price) }}{% endif %} / {{ rental.period_days }} дн. ({{ BILLING[rental.billing] }}){% else %}<span class="muted">нет</span>{% endif %}</dd>
     {% if money_ok %}<dt>Оплачено</dt><dd>{% include "_summary.html" %}</dd>{% endif %}
+    <dt>Риск</dt><dd>{% include "_risk.html" %}</dd>
     <dt>Телефон</dt><dd>{{ client.phone }}{% if client.phone2 or client.phone3 %} <span class="muted">· запасные {{ [client.phone2, client.phone3]|select|join(', ') }}</span>{% endif %}</dd>
     {% if client.employer or client.experience %}<dt>Работа</dt><dd>{{ EMPLOYERS.get(client.employer, '') }}{% if client.employer and client.experience %} · {% endif %}{% if client.experience %}стаж: {{ EXPERIENCE.get(client.experience, '') }}{% endif %}</dd>{% endif %}
     <dt>Telegram</dt><dd>{% if client.tg_id %}✅ ID {{ client.tg_id }}{% if client.username %} · @{{ client.username }}{% endif %}{% else %}<span class="muted">не привязан — клиент отправляет боту /cabinet и делится контактом</span>{% endif %}</dd>

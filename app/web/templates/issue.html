@@ -74,6 +74,9 @@
     {% if client.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[client.status] }}</span>{% endif %}
     <a href="/clients/{{ client.id }}">карточка</a>
   </div>
+  {# Риск по истории клиента - до выбора велосипеда и до денег: спросить
+     о долге или взять залог оператор решает сам, оформление не заперто. #}
+  {% if risk %}{% with money_ok = true %}{% include "_risk.html" %}{% endwith %}{% endif %}
   {% if not client.tg_id %}
     <p class="muted">Telegram не привязан: уведомления о сроке и оплате клиенту не уйдут.
       {% if bot_username %}Пригласите в бот — <a href="https://t.me/{{ bot_username }}?start=issue">t.me/{{ bot_username }}</a>: после /start клиент делится контактом, и кабинет привязывается по этому номеру.{% else %}Клиент отправляет боту /cabinet и делится контактом.{% endif %}</p>
@@ -203,6 +206,8 @@
     <h2>Сводка</h2>
     <dl>
       <dt>Клиент</dt><dd>{{ client.full_name }} · {{ client.phone }}</dd>
+      {% if risk %}<dt>Риск</dt><dd><span class="tag risk-{{ risk.level }}">{{ risk.badge }}</span>{% if risk.deposit %} · рекомендуемый залог <b>{{ money(risk.deposit) }}</b>{% endif %}
+        <span class="muted">подсказка по истории клиента, решение за вами</span></dd>{% endif %}
       <dt>Велосипед</dt><dd><b>№ {{ bike.code }}</b> · {{ bike.model }}{% if bike.location %} · {{ bike.location }}{% endif %}</dd>
       {# Точка аренды - снимок выдачи: по ней считаются выручка и чек точки,
          и велосипед числится на ней, пока аренда идёт. #}

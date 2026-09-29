@@ -298,6 +298,15 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 .tag.bot-none{background:var(--brand-pale);color:var(--brand-dark)}
 .tag.bot-signed,.tag.bot-renting{background:#E4F5E4;color:var(--ok)}
 .tag.bot-pending,.tag.bot-registering,.tag.bot-approved{background:#FFF3D6;color:#7A4B00}
+/* ── оценка риска клиента: выдача и карточка ── */
+.tag.risk-none{background:var(--chip);color:var(--brand-dark)}
+.tag.risk-low{background:#E4F5E4;color:var(--ok)}
+.tag.risk-medium{background:#FFF3D6;color:#7A4B00}
+.tag.risk-high{background:var(--bad);color:#fff}
+/* тёмная тема: белый на светлом --bad читается хуже среднего (2,6:1) - фон темнее, 5,8:1 */
+@media (prefers-color-scheme:dark){.tag.risk-low{background:#1F3A21}.tag.risk-medium{background:#4A3A18;color:#FFD9A0}.tag.risk-high{background:#B83A00}}
+.risk-why{margin:6px 0 0;padding-left:18px;font-size:13px}
+.risk-why li.bad{color:var(--bad)}.risk-why li.good{color:var(--ok)}.risk-why li.note{color:var(--muted)}
 
 /* ── намерение клиента: сводка и карточка аренды ── */
 .intent form{display:inline-flex;flex-wrap:wrap;gap:4px;margin:4px 0 0}

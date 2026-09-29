@@ -404,6 +404,36 @@ async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -
                             base_price=base, billing=billing)
 
 
+async def client_risks(crm: Any, client_ids: Iterable[int] | None, *,
+                       today: date) -> dict[int, dict]:
+    """Оценка риска клиентов (logic.client_risk) для выдачи, карточки и
+    списка; None - все клиенты. Только чтение: подсказка оператору, а не
+    решение, выдачу она не запирает.
+
+    Приглашение засчитывается, если сам пригласивший - клиент с низким
+    риском. Его оценка - то же правило, но без его собственного
+    приглашения: иначе цепочка друзей подтверждала бы саму себя.
+    """
+    ids = None if client_ids is None else list(client_ids)
+    if ids is not None and not ids:
+        return {}
+    facts = await crm.risk_facts(ids)
+    agents = {int(f["agent_id"]) for f in facts.values() if f.get("agent_id")}
+    missing = sorted(agents - set(facts))
+    known = {**facts, **(await crm.risk_facts(missing) if missing else {})}
+    deposits = logic.risk_settings(await crm.settings())
+    good = {a for a in agents if a in known
+            and logic.client_risk(known[a], today=today)["level"] == "low"}
+    return {cid: logic.client_risk(f, today=today, deposits=deposits,
+                                   agent_good=f.get("agent_id") in good)
+            for cid, f in facts.items()}
+
+
+async def client_risk(crm: Any, client_id: int, *, today: date) -> dict:
+    """Оценка одного клиента: карточка и мастер выдачи."""
+    got = await client_risks(crm, [client_id], today=today)
+    return got.get(client_id) or logic.client_risk(None, today=today)
+
 
 # ─────────────────────────── сервис: наряды ───────────────────────────
 
