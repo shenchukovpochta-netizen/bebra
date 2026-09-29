@@ -39,9 +39,9 @@ app.web` для панели, `python -m app.max_main` для бота в MAX. �
 | Сервис | Что делает | Как поднимается |
 |---|---|---|
 | `postgres` | `postgres:16-alpine`, единственный источник истины, схемы `bot` и `crm` | всегда, healthcheck `pg_isready` |
-| `bot` | диспетчер aiogram на long polling плюс шесть фоновых циклов | всегда, `stop_grace_period: 30s` |
+| `bot` | диспетчер aiogram на long polling плюс восемь фоновых циклов | всегда, `stop_grace_period: 30s` |
 | `crm` | веб-панель FastAPI под uvicorn, порт 8080 внутри | всегда, наружу `${CRM_BIND:-127.0.0.1}:${CRM_PORT:-8080}` |
-| `backup` | `pg_dump -Z6` раз в сутки в `./backups`, чистка старше `BACKUP_KEEP_DAYS` | всегда |
+| `backup` | `backup.sh` в своём образе (`backup.Dockerfile`: postgres:16-alpine плюс rclone из официального образа): `pg_dump -Z6` раз в сутки в `./backups`, чистка старше `BACKUP_KEEP_DAYS`, зашифрованная копия в S3 (если задан `BACKUP_S3_BUCKET`), раз в неделю проверка восстановления в одноразовую базу; итог - `crm.settings` `backup_status` | всегда, круг 10 минут |
 | `caddy` | HTTPS по домену: `CRM_DOMAIN` на `crm:8080`, `DEMO_DOMAIN` (если задан) на `crm-demo:8080`; Caddyfile собирается при старте, демо дописывается только если Caddy принял файл и адрес не совпал с панелью; предел тела и таймауты чтения | профиль `https`, сети `default` и `demo` |
 | `bot-max` | зеркало сценария в мессенджере MAX, своя база `mybike_max` | профиль `max` |
 | `postgres-demo` | `postgres:16-alpine`, база демо-стенда `mybike_demo`, свой пароль и свой том | профиль `demo`, только сеть `demo` |
@@ -49,7 +49,19 @@ app.web` для панели, `python -m app.max_main` для бота в MAX. �
 
 Панель слушает `127.0.0.1` сервера: без профиля `https` вход только через SSH-туннель. Дамп
 в `backup` пишется во временный файл и переименовывается по коду возврата `pg_dump`, без
-трубы в `gzip`: иначе оборванный дамп стал бы «удачным».
+трубы в `gzip`: иначе оборванный дамп стал бы «удачным». Облако настраивается окружением
+rclone без файла конфига, ключ шифрования уходит в `rclone obscure` через stdin (в списке
+процессов его нет), без ключа копия не уходит вовсе. Каждый шаг пишет свой кусок в
+`/backups/.state/*.json`, склейка уходит в `crm.settings` только когда поменялась, и сбой
+записи (база ещё без схемы на первом старте) повторяется следующим кругом. Пуст ли дамп
+перед выгрузкой, решает сам файл (`has_rows`: строки `COPY` ключевых таблиц), а не живая
+база: после восстановления база полна, а последним лежит дамп, снятый до него. Проверка
+восстановления идёт в кластер боевой базы и без места на две её копии не запускается.
+Временные файлы круг чистит только свои (`mybike-*.tmp`) и только на старте: в `./backups`
+пишет и `update.sh`. CRLF в `backup.sh` чинит сам образ. Сценарий - POSIX sh плюс `local`
+(busybox в alpine); `tests/test_backup.py` гоняет его с заглушками `pg_dump`, `psql`,
+`createdb`, `dropdb`, `df` и `rclone`, а формат дампа и первый круг нового сервера - на
+настоящем Postgres (pgserver).
 
 Демо-стенд изолирован намеренно: логин у него публичный, поэтому `crm-demo` получает только
 `demo_db_password` и `crm_demo_secret`, ни одного боевого секрета и тома, и ходит только в
@@ -73,7 +85,7 @@ Caddy: без профиля `demo` compose иначе не поднял бы и
    `fleet`, `moderation`, `contract`, `registration`, `faq`, `menu`. Порядок несущий, в
    `app/main.py` он прокомментирован построчно. `menu` последний: у него ловушка на любое
    сообщение.
-4. Запускает семь задач `asyncio.create_task`.
+4. Запускает восемь задач `asyncio.create_task`.
 
 | Задача | Модуль | Период |
 |---|---|---|
@@ -84,6 +96,7 @@ Caddy: без профиля `demo` compose иначе не поднял бы и
 | статусы счетов эквайринга и автосписание | `crm.paying.paying_loop` | минута |
 | отправка кампаний в Telegram и MAX | `crm.mailing.mailing_loop` | свой круг |
 | «Входящие»: ответы из панели в Telegram, MAX и Авито, сигналы о новых, опрос чатов Авито | `crm.inbox.inbox_loop` | 15 секунд, Авито — `AVITO_POLL_SECONDS` |
+| здоровье сервера: диск, отчёт `backup_status`, панель, сертификаты доменов; пульс для `/healthz/bot` | `crm.health.health_loop` | час, первая проверка через 15 минут после старта |
 
 Все фоновые опросы живут здесь, а не в панели: веб-процессов может быть несколько, и каждый
 спрашивал бы банк об одном и том же. Правило «панель в интернет не ходит» — про фоновые
@@ -161,18 +174,22 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `doctemplates` | `crm` | `bot` смонтирован `:ro` |
 | `caddydata` | caddy | caddy |
 | `pgdata_demo` | postgres-demo | postgres-demo; бэкап его не берёт, демо пересеивается каждую ночь |
+| `./backups` (каталог сервера) | `backup`: дампы и `.state/` с отчётами шагов | `backup`; остальным не монтируется - там вся база |
 
 Шаблоны `app/*.docx` попадают в образ вместе с каталогом (`COPY app ./app`), но том
 `doctemplates` кладётся поверх: свой шаблон владелец загружает в панели, и пересборка для
 этого не нужна.
 
-Секретов четырнадцать, все файлами в `secrets/`: `db_password`, `bot_token`, `pdn_key`,
+Секретов шестнадцать, все файлами в `secrets/`: `db_password`, `bot_token`, `pdn_key`,
 `crm_secret`, `crm_admin_password`, `max_bot_token`, `starline_app_secret`,
 `starline_password`, `tochka_token`, `avito_client_secret`, `inbox_key`,
-`inbox_hook_token` и два демо-стенда - `demo_db_password`, `crm_demo_secret`. Содержимое
+`inbox_hook_token`, два демо-стенда - `demo_db_password`, `crm_demo_secret` - и два
+сервиса `backup` - `backup_key` (шифрует копию в облаке) и `backup_s3_secret`. Секреты
+`backup` читает сам `backup.sh` (`/run/secrets/...`), и `consistency.py` сверяет их, как и
+переменные `.env`, с блоком сервиса. Содержимое
 окружения видно в `docker inspect` и в трейсбеках, поэтому в переменной лежит путь, а не
 значение: `_secret()` в `app/config.py` читает суффикс `*_FILE`. `bootstrap.sh` генерирует
-`db_password`, `pdn_key`, `crm_secret`, `crm_admin_password`, `inbox_key`,
+`db_password`, `pdn_key`, `crm_secret`, `crm_admin_password`, `inbox_key`, `backup_key`,
 `demo_db_password` и `crm_demo_secret` (оба демо - даже без профиля `demo`: compose
 объявляет секреты на уровне файла), требует `bot_token` руками и создаёт пустыми остальные:
 пустой файл означает «интеграции нет», и цикл просто не запускается. Ключа «Входящих» у
@@ -184,7 +201,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 
 | Файл | Строка про него |
 |---|---|
-| `app/main.py` | точка входа бота: конфиг, роутеры, шесть фоновых задач, остановка |
+| `app/main.py` | точка входа бота: конфиг, роутеры, восемь фоновых задач, остановка |
 | `app/max_main.py` | точка входа MAX: свой конфиг из `MAX_*`, создание базы, мост в CRM |
 | `app/web/__main__.py` | точка входа панели: uvicorn, первый админ |
 | `app/web/app.py` | все маршруты и формы панели |
@@ -205,6 +222,9 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | `app/crm/points.py` | открытые точки справочника снимком для процесса бота (ответы «где вы» и «часы работы»), TTL 300 с; часы в текстах про выдачу и сдачу (`hours_note`: точка аренды или заявки, иначе все открытые, без справочника - прежние 10:00–19:00) |
 | `app/crm/readiness.py` | «Готовность» установки: чистые правила по фактам, которые собирает маршрут `/readiness` (реквизиты, согласие в боте, точки, цены, сотрудники, бот, банк, трекеры, Авито, домен, бэкап) |
 | `app/crm/firstrun.py` | мастер первого запуска (`/setup`): шаги поверх строк «Готовности», своих проверок нет; кого встречать (`wanted`: владелец, установка застана свежей - `started`, не скрыт, не демо, обязательный шаг не пройден или не готов), прогресс в `crm.settings` (`setup_wizard`, `setup_steps`), строки цен и инструкции подключений |
+| `app/crm/health.py` | здоровье сервера: ежечасная проверка, память между проверками в `crm.settings`, отправка через `notices.send_team`; суждение - `logic.health_problems`, `health_step` |
+| `app/services/probes.py` | замеры для проверки: `statvfs` диска, код ответа панели, срок сертификата домена |
+| `backup.sh`, `backup.Dockerfile` | сервис `backup`: дамп, копия в облако, проверка восстановления, отчёт `backup_status` |
 | `app/crm/import_xlsx.py` | импорт рабочей таблицы «ДЕЙСТВУЮЩИЕ АРЕНДАТОРЫ» |
 | `app/crm/opsgroup.py` | рабочая группа точек: сверка форм из тем с базой, ответы про долг и трекер (бывший n8n) |
 | `app/crm/inbox.py` | «Входящие»: запись обращений из ботов, отправка ответов из очереди, опрос чатов Авито |
@@ -259,6 +279,8 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 | значок на главный экран | `web_manifest` в `app/web/app.py`, картинки - `app/web/icons.py` |
 | доступ к странице без входа | кортеж `PUBLIC` в `app/web/app.py` |
 | новое уведомление | каталог `NOTICES` в `app/crm/logic.py`, ворота `app/crm/notices.py` |
+| бэкап, копию в облаке, проверку восстановления | `backup.sh` (тесты `tests/test_backup.py`), переменные `BACKUP_*` - `.env.example`, блок `backup` в compose, `install.sh` |
+| что считается бедой сервера, пороги, повтор | `health_problems`, `backup_problems`, `health_step` в `app/crm/logic.py`; замеры `app/services/probes.py` |
 | подстановку в шаблон рассылки | `TEMPLATE_FIELDS` в `app/crm/logic.py` |
 | новый фоновый цикл | модуль в `app/crm/`, `create_task` в `app/main.py` и отмена в его `finally` |
 | новую переменную окружения | `.env.example`, `docker-compose.yml`, `app/config.py` или `app/web/config.py` |
@@ -1149,6 +1171,7 @@ python3 consistency.py
 | `banking_loop` | `app/crm/banking.py` | `cfg.tochka_poll_seconds`, 1800 с | `import_once`: выписка Точки за `STATEMENT_DAYS` = 3 дня плюс `auto_credit`, если владелец его включил |
 | `paying_loop` | `app/crm/paying.py` | `POLL_SECONDS`, 60 с | Опрашивает открытые счета эквайринга, закрывает просроченные, раз в сутки делает автосписание |
 | `mailing_loop` | `app/crm/mailing.py` | `POLL_SECONDS`, 20 с | Берёт кампании в статусе «отправляется» и шлёт порцию `BATCH` = 50 сообщений |
+| `health_loop` | `app/crm/health.py` | `CHECK_SECONDS`, час; первая через `FIRST_CHECK_SECONDS` = 15 минут | Пульс сразу на старте; `check_once`: замеры `probes`, `logic.health_problems`, `health_step`, одно сообщение `server_health` на проверку; не доставлено - память прежняя, следующий круг скажет то же |
 
 Три цикла выходят сразу, если интеграция не настроена: `tracking_loop` и `banking_loop`
 проверяют `client.ready`, `paying_loop` проверяет `acquiring.token`. Задача при этом просто
@@ -1329,8 +1352,13 @@ docx, сети не касается) и `tochka`. StarLine в коде пане
 | Выписка банка | `app/crm/banking.py` | 1800 с (`TOCHKA_POLL_SECONDS`) | `TochkaClient` |
 | Счета эквайринга и автосписание | `app/crm/paying.py` | 60 с (константа `POLL_SECONDS`) | тот же `TochkaClient` |
 | Рассылки | `app/crm/mailing.py` | свой цикл | `MaxClient` или `None` |
+| Здоровье сервера: панель по сети compose, TLS своих доменов, `statvfs` | `app/crm/health.py` | час | `app/services/probes.py` |
 
-Все четыре цикла собираются в `app/main.py` и при ненастроенном сервисе выходят сразу,
+Панель о здоровье сервера только читает: карточка «Сервер» и `/healthz/bot` берут
+`backup_status` и `server_health` из `crm.settings`, которые пишут сервис `backup` и процесс
+бота. `/healthz/bot` в демо не заведён: бота там нет.
+
+Первые четыре цикла собираются в `app/main.py` и при ненастроенном сервисе выходят сразу,
 записав строку в лог: `tracking_loop` и `banking_loop` смотрят на `client.ready`,
 `paying_loop` на `acquiring.token`. Ненастроенный сервис ничего не ломает, остальная система
 работает как раньше.

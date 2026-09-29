@@ -36,7 +36,7 @@ import random
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -2046,6 +2046,9 @@ async def _settings(conn: asyncpg.Connection, c: _Ctx) -> None:
     values = [(k, v, c.w.history_start) for k, v in SETTINGS.items()]
     values += [(k, v, c.ref_launch or c.w.history_start) for k, v in REF_SETTINGS.items()]
     values.append(("inbox_avito_state", avito, c.now))
+    # Отчёт сервиса backup: карточка «Сервер» на странице уведомлений иначе
+    # сказала бы покупателю франшизы «бэкапа ещё не было».
+    values.append((logic.BACKUP_STATUS_KEY, _backup_status(c.now), c.now))
     await conn.executemany(
         """
         insert into crm.settings (key, value, updated_by, updated_at)
@@ -2053,6 +2056,32 @@ async def _settings(conn: asyncpg.Connection, c: _Ctx) -> None:
         on conflict (key) do update set value = excluded.value,
           updated_by = excluded.updated_by, updated_at = excluded.updated_at
         """, values)
+
+
+def _backup_status(now: datetime) -> str:
+    """Как пишет backup.sh: дамп, копия в облаке следом, проверка
+    восстановления из облака - в ночь на воскресенье. Дамп - за час до
+    сида, а не в полночь: демо сбрасывается в 04:00, и полуночный дамп к
+    следующему сбросу был бы старше BACKUP_STALE - карточка «Сервер»
+    краснела бы у покупателя под утро."""
+    night = now - timedelta(hours=1)
+    sunday = night - timedelta(days=(night.weekday() + 1) % 7) + timedelta(minutes=2)
+
+    def iso(t: datetime) -> str:
+        return t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    name = f"mybike-{night.date().isoformat()}.sql.gz"
+    upload = night + timedelta(seconds=40)
+    return json.dumps({
+        "dump": {"at": iso(night), "ok": True, "error": None, "last_ok": iso(night),
+                 "file": name, "size": 48_213_504},
+        "offsite": {"enabled": True, "at": iso(upload), "ok": True, "error": None,
+                    "last_ok": iso(upload), "file": name, "prune_error": None,
+                    "target": "storage.yandexcloud.net/mybike-backup/kzn"},
+        "restore": {"at": iso(sunday), "ok": True, "error": None, "last_ok": iso(sunday),
+                    "source": "offsite",
+                    "file": f"mybike-{sunday.date().isoformat()}.sql.gz"},
+    })
 
 
 # ─────────────────────────── уведомления ───────────────────────────

@@ -21,6 +21,8 @@
   сообщения из панели не уходят. У бота свой адрес, его это не касается.</p>
 {% endif %}
 
+{% include "_server.html" %}
+
 {% set can = can_edit(staff, 'settings') %}
 {% for group, title in NOTICE_GROUPS.items() %}
 {% if groups.get(group) %}

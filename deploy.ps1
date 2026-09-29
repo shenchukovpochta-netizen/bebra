@@ -36,6 +36,7 @@ if (-not $SkipTests) {
 # не уедут на сервер по случайности.
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
           'schema.sql', 'bootstrap.sh', 'install.sh', 'update.sh', '.env.example', '.gitignore',
+          'backup.sh', 'backup.Dockerfile',
           'README.md', 'CLAUDE.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'CODE.md', 'FRANCHISE.md',
           'instrukciya-po-botu.html',
           'consistency.py')
@@ -73,7 +74,8 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/banking.py', 'app/crm/mailing.py', 'app/crm/esign.py',
          'app/crm/paying.py', 'app/crm/notices.py', 'app/crm/firstrun.py',
          'app/crm/doctemplates.py', 'app/crm/opsgroup.py', 'app/crm/inbox.py',
-         'app/crm/points.py', 'app/crm/readiness.py', 'app/crm/waitlist.py')
+         'app/crm/points.py', 'app/crm/readiness.py', 'app/crm/waitlist.py',
+         'app/crm/health.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
          'app/web/config.py', 'app/web/icons.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
@@ -146,7 +148,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/sign.html',
                   'app/web/templates/sign_agreement.html',
                   'app/web/templates/sign_missing.html',
-                  'app/web/templates/_demo_banner.html')
+                  'app/web/templates/_demo_banner.html',
+                  'app/web/templates/_server.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css',
                'app/web/static/icon-192.png', 'app/web/static/icon-512.png',
                'app/web/static/icon-maskable-512.png', 'app/web/static/apple-touch-icon.png')
@@ -173,7 +176,7 @@ $services = @('app/services/__init__.py', 'app/services/subscription.py',
               'app/services/contract.py', 'app/services/crypto.py',
               'app/services/mrz.py', 'app/services/ocr.py',
               'app/services/starline.py', 'app/services/tochka.py',
-              'app/services/avito.py',
+              'app/services/avito.py', 'app/services/probes.py',
               'app/services/tochka_ca.pem')
 $max = @('app/max/__init__.py', 'app/max/client.py', 'app/max/parse.py',
          'app/max/keyboards.py', 'app/max/handlers.py', 'app/max/runner.py')
@@ -206,12 +209,13 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_avito.py', 'tests/test_points_pg.py',
           'tests/test_point_analytics.py', 'tests/test_points_ops.py',
           'tests/test_points_web.py', 'tests/test_point_plan.py', 'tests/test_faq_points.py',
-           'tests/test_transfers.py', 'tests/test_idle_promo.py',
-           'tests/test_strict_ids.py', 'tests/test_firstrun.py',
+          'tests/test_transfers.py', 'tests/test_idle_promo.py',
+          'tests/test_strict_ids.py', 'tests/test_firstrun.py',
           'tests/test_demo_seed.py', 'tests/test_demo_service.py',
           'tests/test_demo_extras.py', 'tests/test_demo_mode.py',
           'tests/test_demo_crawl.py', 'tests/test_readiness.py',
-          'tests/test_waitlist.py', 'tests/test_battery_offer.py', 'tests/test_card_nudge.py')
+          'tests/test_waitlist.py', 'tests/test_battery_offer.py', 'tests/test_card_nudge.py',
+          'tests/test_backup.py', 'tests/test_health.py')
 
 foreach ($f in ($root + $app + $docs + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {
@@ -258,7 +262,7 @@ if ($LASTEXITCODE -ne 0) { throw 'документы на сервере не р
 
 # CRLF в .sh ломает shebang: bash ругается на «\r: команда не найдена»
 Step 'нормализую переводы строк'
-ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh update.sh .env.example schema.sql && chmod +x bootstrap.sh install.sh update.sh"
+ssh $Server "cd '$Path' && sed -i 's/\r`$//' bootstrap.sh install.sh update.sh backup.sh .env.example schema.sql && chmod +x bootstrap.sh install.sh update.sh backup.sh"
 
 Write-Host "`nФайлы на сервере. Дальше:" -ForegroundColor Green
 Write-Host "  ssh $Server"

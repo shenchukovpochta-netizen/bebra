@@ -1,0 +1,26 @@
+{# Карточка «Сервер» на странице уведомлений: бэкап, копия в облаке,
+   проверка восстановления и то, что нашла ежечасная проверка бота.
+   Отдельным файлом - страница уведомлений правится часто. #}
+<section class="card">
+  <h2>Сервер</h2>
+  <div class="table-wrap">
+  <table>
+    {# Текст - под заголовком, а не третьей колонкой: на телефоне она
+       уезжала за край карточки, и владелец видел «внимание», но не что
+       именно. Длинное слово (ошибка rclone, адрес бакета) переносится. #}
+    {% for r in server %}
+    <tr>
+      <td class="nowrap">{% if r.ok %}<span class="tag ok">в порядке</span>
+        {% elif r.ok is sameas false %}<span class="tag bad">внимание</span>
+        {% else %}<span class="tag">—</span>{% endif %}</td>
+      <td style="overflow-wrap:anywhere"><b>{{ r.title }}</b><br>
+        <span class="muted">{{ r.text }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  <p class="muted">Бот проверяет сервер раз в час и пишет уведомлением «Здоровье
+    сервера» ниже.{% if pulse_url %} Упавший бот сам о себе не напишет: поставьте
+    бесплатный внешний монитор на <code>{{ pulse_url }}</code> и на
+    <code>/healthz</code> панели (INSTALL.md, «Здоровье сервера»).{% endif %}</p>
+</section>

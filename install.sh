@@ -315,6 +315,16 @@ STARLINE_POLL_SECONDS="${STARLINE_POLL_SECONDS:-300}"
 BACKUP_KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
 CRM_TRUSTED_PROXIES="${CRM_TRUSTED_PROXIES:-}"
 
+# Бэкап вне сервера (облако S3): секрет доступа - файлом в secrets/,
+# ключ шифрования копий - secrets/backup_key. Пустой бакет - выключено.
+BACKUP_S3_ENDPOINT="${BACKUP_S3_ENDPOINT:-}"
+BACKUP_S3_REGION="${BACKUP_S3_REGION:-}"
+BACKUP_S3_BUCKET="${BACKUP_S3_BUCKET:-}"
+BACKUP_S3_PREFIX="${BACKUP_S3_PREFIX:-mybike}"
+BACKUP_S3_ACCESS_KEY="${BACKUP_S3_ACCESS_KEY:-}"
+BACKUP_S3_KEEP_DAYS="${BACKUP_S3_KEEP_DAYS:-14}"
+BACKUP_S3_KEEP_WEEKS="${BACKUP_S3_KEEP_WEEKS:-8}"
+
 # Авито: client_secret - файлом в secrets/, здесь номер приложения.
 AVITO_CLIENT_ID="${AVITO_CLIENT_ID:-}"
 AVITO_POLL_SECONDS="${AVITO_POLL_SECONDS:-60}"
@@ -375,6 +385,13 @@ if [ -n "${DEMO_DOMAIN:-}" ]; then
 else
   DEMO_LINE="Демо-стенд выключен: DEMO_DOMAIN в .env пуст."
 fi
+# Дамп только на этом сервере умирает вместе с ним - напоминаем при
+# каждой установке, пока облако не включено.
+if [ -n "${BACKUP_S3_BUCKET:-}" ]; then
+  BACKUP_LINE="Бэкап: копия каждую ночь уходит в облако, бакет ${BACKUP_S3_BUCKET}."
+else
+  BACKUP_LINE="Бэкап лежит только на этом сервере: задайте BACKUP_S3_* в .env (INSTALL.md)."
+fi
 
 bold "Готово"
 cat <<EOF
@@ -396,6 +413,9 @@ cat <<EOF
     По домену: https://${CRM_DOMAIN:-<CRM_DOMAIN не задан>} - когда A-запись
     поддомена смотрит на этот сервер (Caddy получит сертификат сам).
     ${DEMO_LINE}
+
+    ${BACKUP_LINE}
+    Ключ шифрования копий - secrets/backup_key: сохраните его вне сервера.
 
     Отправьте боту /start и пройдите сценарий целиком:
     подписка → ФИО → оферта → контакт → анкета → фото документа

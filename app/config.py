@@ -194,6 +194,11 @@ class Config:
     # рассылку тем клиентам, у кого привязан MAX. Пусто - такие получатели
     # помечаются пропущенными.
     max_bot_token: str = ""
+    # Здоровье сервера (crm/health.py): чьи сертификаты смотреть и где
+    # панель в сети compose. Пустой домен - сертификат не проверяется.
+    crm_domain: str = ""
+    demo_domain: str = ""
+    health_panel_url: str = "http://crm:8080/healthz"
     extra: dict = field(default_factory=dict)
 
     @property
@@ -286,4 +291,7 @@ class Config:
             ops_topic_gps=_int_or_none("OPS_TOPIC_GPS"),
             ops_topic_daily=_int_or_none("OPS_TOPIC_DAILY"),
             max_bot_token=_secret("MAX_BOT_TOKEN", required=False),
+            crm_domain=_env("CRM_DOMAIN"),
+            demo_domain=_env("DEMO_DOMAIN"),
+            health_panel_url=_env("HEALTH_PANEL_URL", "http://crm:8080/healthz"),
         )

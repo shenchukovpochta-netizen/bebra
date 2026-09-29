@@ -31,7 +31,7 @@ try:
     from app.crm import logic, service
     from app.crm.db import CrmDB
     from app.db import _init_connection
-    from app.demo import seed, seed_extras
+    from app.demo import runtime, seed, seed_extras
     from app.demo.world import MSK
     from app.web.app import create_app
     from app.web.config import WebConfig
@@ -457,6 +457,27 @@ class TestDemoExtras(unittest.IsolatedAsyncioTestCase):
             if r["code"] in ("rent_soon", "rent_due", "rent_overdue"):
                 per_day[(r["client_id"], r["created_at"].astimezone(MSK).date())] += 1
         self.assertLessEqual(max(per_day.values()), 1)
+
+    async def test_backup_report_is_healthy(self):
+        """Карточка «Сервер» в демо: бэкап, облако и проверка - в порядке,
+        тем же правилом, каким бот судит боевой сервер."""
+        backup = logic.parse_backup_status(
+            (await self.crm.settings()).get(logic.BACKUP_STATUS_KEY))
+        self.assertIsNotNone(backup)
+        self.assertEqual(logic.backup_problems(backup, self.now), {})
+        rows = logic.server_rows(backup, None, self.now, bot=False)
+        self.assertEqual([r["ok"] for r in rows], [True, True, True])
+        self.assertLessEqual(backup["dump"]["at"], self.now)
+
+    def test_backup_report_stays_green_until_the_next_reset(self):
+        """Сброс в 04:00, следующий - через сутки: отчёт бэкапа не стареет
+        за BACKUP_STALE до него. Полуночный дамп краснел бы с 02:06.
+        Сброс по расписанию, повтор после сбоя, первый запуск днём."""
+        for hour in (4, 6, 15, 23):
+            seeded = datetime(2026, 9, 27, hour, 0, tzinfo=MSK)
+            backup = logic.parse_backup_status(seed_extras._backup_status(seeded))
+            for moment in (seeded, runtime.next_reset(seeded) - timedelta(seconds=1)):
+                self.assertEqual(logic.backup_problems(backup, moment), {}, (hour, moment))
 
     async def test_ops_reports(self):
         rows = await self.rows("select * from crm.ops_reports order by created_at")

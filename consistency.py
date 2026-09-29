@@ -55,6 +55,8 @@ LITERAL_IN_COMPOSE = {"POSTGRES_HOST", "POSTGRES_PORT", "STORAGE_DIR",
                       # Каталоги томов: значение задано устройством
                       # контейнера, подставлять его из .env незачем.
                       "DOC_TEMPLATE_DIR", "BIKE_PHOTO_DIR",
+                      # Панель в сети compose: адрес задан устройством стека.
+                      "HEALTH_PANEL_URL",
                       "AUTO_APPROVE", "RATE_SOFT", "RATE_HARD"}
 not_passed = config_vars - compose_vars - LITERAL_IN_COMPOSE
 if not_passed:
@@ -85,6 +87,26 @@ for source, service in (("app/config.py", "bot"), ("app/web/config.py", "crm"),
             problems.append(f"секрет {path.group(1)} не смонтирован сервису {service} "
                             f"(нет в его secrets:)")
 
+# Сервис backup - не Python: его backup.sh читает /run/secrets/<имя> и
+# переменные из .env сам. Забытый в compose секрет или BACKUP_S3_* молча
+# выключили бы облако, и узнали бы об этом, когда сервер уже умер.
+backup_script = read("backup.sh")
+if backup_script:
+    block = service_block("backup")
+    listed = re.search(r"secrets:\s*\[([^\]]*)\]", block, re.S)
+    mounted = set(re.findall(r"[a-z0-9_]+", listed.group(1))) if listed else set()
+    for secret in sorted(set(re.findall(r"/run/secrets/([a-z0-9_]+)", backup_script))):
+        if secret not in mounted:
+            problems.append(f"backup.sh читает секрет {secret}, а сервису backup он "
+                            f"не смонтирован (нет в его secrets:)")
+    passed = set(re.findall(r"(?m)^      ([A-Z_][A-Z0-9_]*):", block))
+    for var in sorted(set(re.findall(r"\$\{?([A-Z_][A-Z0-9_]*)", backup_script)) & env_vars):
+        if var not in passed:
+            problems.append(f"backup.sh читает {var} из .env, а compose не передаёт его "
+                            f"сервису backup -> там будет пусто")
+    if "backup.sh" not in read("backup.Dockerfile"):
+        problems.append("backup.Dockerfile не кладёт backup.sh в образ сервиса backup")
+
 # ── 2а. демо-стенд изолирован от боевых данных ───────────────────────────
 # Логин демо публичен, а его сброс сносит схемы crm и bot целиком. Боевой
 # секрет или том, скопированный в блок демо вместе с соседним сервисом,
@@ -97,6 +119,7 @@ for source, service in (("app/config.py", "bot"), ("app/web/config.py", "crm"),
 DEMO_FORBIDDEN = ("db_password", "bot_token", "crm_secret", "crm_admin_password",
                   "tochka_token", "inbox_key", "inbox_hook_token", "pdn_key",
                   "avito_client_secret", "max_bot_token", r"starline_\w+",
+                  "backup_key", "backup_s3_secret",
                   # тома боевой панели и базы
                   "kycfiles", "bikefiles", "doctemplates", "pgdata")
 DEMO_SECRETS = {"demo_db_password": "./secrets/demo_db_password",

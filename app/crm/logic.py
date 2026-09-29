@@ -5169,6 +5169,18 @@ NOTICES: dict[str, dict[str, Any]] = {
         "hint": "Парк, аренды и наряды не сходятся между собой. "
                 "Молчит, когда всё сходится.",
     },
+    "server_health": {
+        # Сразу, а не в свой час: кончающийся ночью диск ждать утра не
+        # будет. Повтор - раз в сутки, пока беда длится (HEALTH_REPEAT).
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Здоровье сервера",
+        "hint": "Бот раз в час смотрит диск, бэкап и его копию в облаке, "
+                "проверку восстановления, панель и сертификаты доменов. "
+                "Пишет, когда что-то сломалось, раз в сутки - пока не "
+                "починено, и когда починилось. Упавший бот сам о себе не "
+                "напишет - для этого внешний монитор (INSTALL.md).",
+        "params": {"disk_pct": 10, "cert_days": 14},
+    },
     "bank_unmatched": {
         # Час, а не «сразу по событию»: строка выписки появляется молча,
         # и напоминать о ней нужно раз в день, а не на каждый круг опроса
@@ -5305,6 +5317,9 @@ NOTICE_PARAMS: dict[str, tuple[str, str, str, int, int]] = {
     "per_bike": ("Клиентов на велосипед", "не больше", "клиентов на велосипед", 1, 10),
     "from_hour": ("Час начала", "с", "ч", 0, 23),
     "to_hour": ("Час конца", "до", "ч", 1, 24),
+    # Здоровье сервера: у порога диска единица - проценты, а не дни.
+    "disk_pct": ("Порог диска", "диск: свободно меньше", "%", 1, 90),
+    "cert_days": ("Порог сертификата", "сертификат: осталось меньше", "дн.", 1, 90),
 }
 
 
@@ -5355,6 +5370,309 @@ def notice_rows(settings: Mapping[str, Mapping[str, Any]],
         row["sent"] = int(counts.get(code, 0))
         out.setdefault(item["group"], []).append(row)
     return out
+
+
+# ────────────────────── здоровье сервера ──────────────────────
+#
+# Сервис backup (backup.sh) кладёт итог своих шагов в crm.settings одной
+# строкой JSON (BACKUP_STATUS_KEY). Бот раз в час меряет диск, панель и
+# сертификаты, складывает с отчётом бэкапа и пишет владельцу уведомлением
+# server_health. Что сейчас не так и когда об этом писали - тоже в
+# crm.settings (HEALTH_KEY): перезапуск бота не должен ни повторять
+# вчерашнюю тревогу, ни терять «починилось». Отметка проверки там же -
+# пульс процесса бота: /healthz/bot панели по нему отвечает 503.
+
+BACKUP_STATUS_KEY = "backup_status"
+HEALTH_KEY = "server_health"
+BACKUP_PARTS = ("dump", "offsite", "restore")
+# Дамп раз в сутки: 26 часов - сутки и запас на долгий дамп и перезапуск.
+BACKUP_STALE = timedelta(hours=26)
+# Проверка восстановления раз в неделю; девятый день без неё - повод.
+RESTORE_STALE = timedelta(days=8)
+# Пока беда длится, о ней напоминают раз в сутки, а не каждый час:
+# ежечасное «всё ещё» перестают читать к обеду.
+HEALTH_REPEAT = timedelta(hours=24)
+# Проверка раз в час; два пропущенных круга - процесс бота стоит.
+HEALTH_PULSE = timedelta(hours=2)
+BACKUP_TITLES = {"dump": "Бэкап базы", "offsite": "Копия в облаке",
+                 "restore": "Проверка восстановления"}
+
+
+def _health_time(moment: datetime) -> str:
+    return moment.astimezone(MOSCOW).strftime("%d.%m %H:%M")
+
+
+def _bytes(n: int) -> str:
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.1f}".replace(".", ",") + " ГБ"
+    return f"{max(n, 0) / 1024 ** 2:.0f} МБ"
+
+
+def _json_map(raw: Any) -> Mapping[str, Any] | None:
+    if isinstance(raw, Mapping):
+        return raw
+    try:
+        data = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, Mapping) else None
+
+
+def parse_backup_status(raw: Any) -> dict[str, dict[str, Any]] | None:
+    """Отчёт сервиса backup. Нет строки или мусор - None: бот скажет
+    «сервис не отчитывался», а не упадёт на чужом JSON. Строку пишет
+    shell-сценарий, поэтому каждое поле проверяется на тип."""
+    data = _json_map(raw)
+    if data is None:
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for part in BACKUP_PARTS:
+        item = data.get(part)
+        item = item if isinstance(item, Mapping) else {}
+        row: dict[str, Any] = {"at": _moment(item.get("at")),
+                               "last_ok": _moment(item.get("last_ok"))}
+        ok = item.get("ok")
+        row["ok"] = ok if isinstance(ok, bool) else None
+        for key in ("error", "prune_error", "file", "source", "target"):
+            value = item.get(key)
+            row[key] = str(value)[:300] if value not in (None, "") else None
+        size = item.get("size")
+        row["size"] = (size if isinstance(size, int) and not isinstance(size, bool)
+                       and size >= 0 else None)
+        # Облако выключено, пока сервис не сказал обратного.
+        row["enabled"] = item.get("enabled") is True if part == "offsite" else True
+        tables = item.get("tables")
+        row["tables"] = {
+            str(name): (pair[0], pair[1]) for name, pair in
+            (tables.items() if isinstance(tables, Mapping) else ())
+            if isinstance(pair, list) and len(pair) == 2
+            and all(isinstance(n, int) and not isinstance(n, bool) for n in pair)}
+        out[part] = row
+    return out
+
+
+def backup_problems(backup: Mapping[str, Mapping[str, Any]] | None,
+                    now: datetime) -> dict[str, dict[str, str]]:
+    """Беды бэкапа: часть отчёта → заголовок и текст. Пусто - порядок."""
+    out: dict[str, dict[str, str]] = {}
+
+    def add(part: str, text: str) -> None:
+        out[part] = {"title": BACKUP_TITLES[part], "text": text}
+
+    def since(moment: datetime | None, what: str) -> str:
+        return f" {what} - {_health_time(moment)}." if moment else ""
+
+    if backup is None:
+        add("dump", "Сервис backup ни разу не отчитался - бэкапа может не быть "
+                    "вовсе. Проверьте: docker compose ps backup")
+        return out
+    dump = backup.get("dump") or {}
+    if dump.get("ok") is False and dump.get("at"):
+        add("dump", f"Бэкап базы не сделался {_health_time(dump['at'])}: "
+                    f"{dump.get('error') or 'причина не записана'}."
+                    + since(dump.get("last_ok"), "Последний удачный"))
+    elif dump.get("last_ok") is None:
+        add("dump", "Бэкапа базы ещё не было.")
+    elif now - dump["last_ok"] > BACKUP_STALE:
+        add("dump", f"Бэкап базы не делался с {_health_time(dump['last_ok'])}: "
+                    "сервис backup стоит? docker compose logs backup")
+    off = backup.get("offsite") or {}
+    # Облако включено, но ещё ни разу не пробовало - не беда: первая
+    # отправка идёт следом за первым дампом.
+    if off.get("enabled") and off.get("at"):
+        if off.get("ok") is False:
+            add("offsite", f"Копия в облако не ушла {_health_time(off['at'])}: "
+                           f"{off.get('error') or 'причина не записана'}."
+                           + since(off.get("last_ok"), "Последняя удачная"))
+        elif off.get("last_ok") and now - off["last_ok"] > BACKUP_STALE:
+            add("offsite", "Копия в облаке не обновлялась с "
+                           f"{_health_time(off['last_ok'])}.")
+        elif off.get("prune_error"):
+            add("offsite", "Копия в облако ушла, но старые не удаляются: "
+                           f"{off['prune_error']}. Бакет будет только расти.")
+    rest = backup.get("restore") or {}
+    where = "из облака" if rest.get("source") == "offsite" else "с диска"
+    if rest.get("ok") is False and rest.get("at"):
+        add("restore", f"Копия {where} не восстановилась {_health_time(rest['at'])}: "
+                       f"{rest.get('error') or 'причина не записана'}."
+                       + since(rest.get("last_ok"), "Последняя удачная проверка"))
+    elif rest.get("at") is None:
+        if dump.get("last_ok") is not None:
+            add("restore", "Проверка восстановления ещё ни разу не проходила.")
+    elif now - rest["at"] > RESTORE_STALE:
+        add("restore", "Проверка восстановления не проходила с "
+                       f"{_health_time(rest['at'])}.")
+    return out
+
+
+def health_problems(*, now: datetime,
+                    backup: Mapping[str, Mapping[str, Any]] | None,
+                    disk: tuple[int, int] | None = None,
+                    panel_error: str | None = None,
+                    certs: Iterable[tuple[str, datetime | None, str | None]] = (),
+                    disk_pct: int = 10, cert_days: int = 14
+                    ) -> dict[str, dict[str, str]]:
+    """Что сейчас не так на сервере: код беды → заголовок и текст.
+
+    Код - ключ памяти между проверками: тот же код через час - «всё ещё»,
+    а не новая беда. У сертификата код с именем домена, у бэкапа - часть
+    отчёта. `disk` - свободно и всего байт; None - замерить не вышло, и
+    про диск молчим, а не пугаем.
+    """
+    out: dict[str, dict[str, str]] = {}
+    if disk:
+        free, total = disk
+        if total > 0 and free * 100 < total * max(int(disk_pct), 0):
+            out["disk"] = {"title": "Диск", "text": (
+                f"Диск почти полон: свободно {_bytes(free)} из {_bytes(total)} "
+                f"({free * 100 // total} %). Кончится место - встанут база и бэкап. "
+                "Старое чистится так: docker system prune и BACKUP_KEEP_DAYS в .env.")}
+    out.update(backup_problems(backup, now))
+    if panel_error:
+        out["panel"] = {"title": "Панель",
+                        "text": f"Панель не отвечает: {panel_error}. "
+                                "docker compose ps crm"}
+    for host, until, error in certs:
+        key = f"cert:{host}"
+        if error:
+            out[key] = {"title": f"HTTPS {host}",
+                        "text": f"{host} не отвечает по HTTPS: {error}."}
+        elif until is not None and until - now < timedelta(days=max(int(cert_days), 0)):
+            left = max((until - now).days, 0)
+            out[key] = {"title": f"Сертификат {host}", "text": (
+                f"Сертификат {host} истекает {_health_time(until)} (осталось {left} дн.): "
+                "Caddy не продлил его сам. docker compose logs caddy")}
+    return out
+
+
+def parse_health_state(raw: Any) -> dict[str, Any]:
+    """Память проверки сервера. Мусор - чистый лист: лишнее сообщение
+    лучше молчания из-за битой строки."""
+    data = _json_map(raw) or {}
+    problems: dict[str, dict[str, Any]] = {}
+    stored = data.get("problems")
+    for key, item in (stored.items() if isinstance(stored, Mapping) else ()):
+        if isinstance(item, Mapping):
+            problems[str(key)] = {"title": str(item.get("title") or key),
+                                  "text": str(item.get("text") or ""),
+                                  "since": _moment(item.get("since")),
+                                  "alerted_at": _moment(item.get("alerted_at"))}
+    return {"checked_at": _moment(data.get("checked_at")), "problems": problems}
+
+
+def _health_dump(checked_at: datetime,
+                 problems: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    def iso(moment: Any) -> str | None:
+        return moment.isoformat() if isinstance(moment, datetime) else None
+    return {"checked_at": checked_at.isoformat(),
+            "problems": {key: {"title": p["title"], "text": p["text"],
+                               "since": iso(p.get("since")),
+                               "alerted_at": iso(p.get("alerted_at"))}
+                         for key, p in problems.items()}}
+
+
+def health_step(prev: Mapping[str, Any] | None,
+                problems: Mapping[str, Mapping[str, str]],
+                now: datetime) -> tuple[list[str], dict[str, Any]]:
+    """Что написать владельцу и что запомнить до следующей проверки.
+
+    Новая беда - сразу; длящаяся - раз в HEALTH_REPEAT с тем, с какого
+    момента она тянется; исчезнувшая - «снова в порядке». Состояние -
+    JSON для crm.settings.
+    """
+    old = (prev or {}).get("problems") or {}
+    lines: list[str] = []
+    keep: dict[str, dict[str, Any]] = {}
+    for key, item in problems.items():
+        was = old.get(key)
+        entry = {"title": item["title"], "text": item["text"],
+                 "since": (was or {}).get("since") or now,
+                 "alerted_at": (was or {}).get("alerted_at")}
+        if was is None:
+            lines.append(f"⚠️ {item['text']}")
+            entry["alerted_at"] = now
+        elif entry["alerted_at"] is None or now - entry["alerted_at"] >= HEALTH_REPEAT:
+            lines.append(f"⚠️ Всё ещё, с {_health_time(entry['since'])}: {item['text']}")
+            entry["alerted_at"] = now
+        keep[key] = entry
+    for key, was in old.items():
+        if key not in problems:
+            started = was.get("since")
+            lines.append(f"✅ {was.get('title') or key}: снова в порядке"
+                         + (f" (сбой тянулся с {_health_time(started)})"
+                            if isinstance(started, datetime) else ""))
+    return lines, _health_dump(now, keep)
+
+
+def health_keep(prev: Mapping[str, Any] | None, now: datetime) -> dict[str, Any]:
+    """Прежняя память с новой отметкой проверки: сообщение не доставлено,
+    и следующий круг должен сказать то же самое, а не промолчать."""
+    return _health_dump(now, (prev or {}).get("problems") or {})
+
+
+def health_message(lines: Iterable[str]) -> str:
+    """Текст для Telegram (разметка HTML): ошибки чужих программ могут
+    содержать «<», поэтому каждая строка экранируется."""
+    return "🖥 <b>Сервер</b>\n" + "\n".join(html.escape(line) for line in lines)
+
+
+def bot_alive(state: Mapping[str, Any] | None, now: datetime) -> bool:
+    checked = (state or {}).get("checked_at")
+    return isinstance(checked, datetime) and now - checked <= HEALTH_PULSE
+
+
+def server_rows(backup: Mapping[str, Mapping[str, Any]] | None,
+                state: Mapping[str, Any] | None, now: datetime, *,
+                bot: bool = True) -> list[dict[str, Any]]:
+    """Строки карточки «Сервер» в панели: ok True - в порядке, False -
+    беда, None - нечего сказать (облако выключено, ещё не проверяли).
+    Бэкап судится тем же правилом, что и сообщение владельцу. `bot` -
+    есть ли процесс бота вовсе: у демо-стенда его нет, и строка о пульсе
+    через два часа после сброса пугала бы покупателя."""
+    state = state or {}
+    checked = state.get("checked_at")
+    if not bot:
+        rows: list[dict[str, Any]] = []
+    elif not isinstance(checked, datetime):
+        rows = [{"title": "Процесс бота", "ok": None,
+                 "text": "ещё ни разу не проверял сервер"}]
+    elif bot_alive(state, now):
+        rows = [{"title": "Процесс бота", "ok": True,
+                 "text": f"на связи, проверка {_health_time(checked)}"}]
+    else:
+        rows = [{"title": "Процесс бота", "ok": False,
+                 "text": f"молчит с {_health_time(checked)}: фоновые задачи, "
+                         "начисления и уведомления стоят. docker compose ps bot"}]
+    bad = backup_problems(backup, now)
+    parts = backup or {}
+    dump = parts.get("dump") or {}
+    off = parts.get("offsite") or {}
+    rest = parts.get("restore") or {}
+    for part in BACKUP_PARTS:
+        if part in bad:
+            rows.append({"title": BACKUP_TITLES[part], "ok": False, "text": bad[part]["text"]})
+        elif part == "dump" and dump.get("last_ok"):
+            size = f", {_bytes(dump['size'])}" if dump.get("size") is not None else ""
+            rows.append({"title": BACKUP_TITLES[part], "ok": True,
+                         "text": f"{_health_time(dump['last_ok'])}{size}"})
+        elif part == "offsite" and not off.get("enabled"):
+            rows.append({"title": BACKUP_TITLES[part], "ok": None,
+                         "text": "выключена: в .env не задан BACKUP_S3_BUCKET - "
+                                 "умрёт сервер, умрут и дампы"})
+        elif part == "offsite" and off.get("last_ok"):
+            rows.append({"title": BACKUP_TITLES[part], "ok": True,
+                         "text": f"{_health_time(off['last_ok'])} → {off.get('target') or 'S3'}"})
+        elif part == "restore" and rest.get("ok"):
+            where = "из облака" if rest.get("source") == "offsite" else "с диска"
+            rows.append({"title": BACKUP_TITLES[part], "ok": True,
+                         "text": f"{_health_time(rest['at'])}, копия {where} развернулась"})
+        else:
+            rows.append({"title": BACKUP_TITLES[part], "ok": None, "text": "ещё не было"})
+    for key, item in (state.get("problems") or {}).items():
+        if key not in BACKUP_PARTS:
+            rows.append({"title": item.get("title") or key, "ok": False,
+                         "text": item.get("text") or ""})
+    return rows
 
 
 # Площадки для отзывов: кнопки в сообщении клиенту и в кабинете. Пустая

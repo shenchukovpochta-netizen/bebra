@@ -113,6 +113,27 @@ class TestScripts(unittest.TestCase):
                 self.assertRegex((Path(tmp) / "secrets" / name).read_text(),
                                  r"^[0-9a-f]{64}$")
 
+    def test_bootstrap_makes_backup_key_once(self):
+        """Ключ копий в облаке - сразу и один раз: перегенерированный ключ
+        сделал бы нечитаемыми все копии, уже лежащие в бакете. Секрет
+        доступа к бакету - пустой файл: без него compose не поднимется."""
+        text = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
+        m = re.search(r"if \[ ! -s secrets/backup_key \]; then\n(.*?)\nfi\n", text, re.S)
+        self.assertIsNotNone(m, "нет генерации secrets/backup_key")
+        empty = re.search(r"\[ -f secrets/backup_s3_secret \] \|\| : > secrets/backup_s3_secret\n",
+                          text)
+        self.assertIsNotNone(empty, "нет заглушки secrets/backup_s3_secret")
+        body = m.group().replace("say ", "echo ") + empty.group()
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _bash(f"set -euo pipefail; mkdir -p secrets; {body}", tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            key = (Path(tmp) / "secrets" / "backup_key").read_text()
+            self.assertRegex(key, r"^[A-Za-z0-9+/]{43}=$")
+            self.assertEqual((Path(tmp) / "secrets" / "backup_s3_secret").read_text(), "")
+            r = _bash(f"set -euo pipefail; {body}", tmp)
+            self.assertEqual((Path(tmp) / "secrets" / "backup_key").read_text(), key,
+                             "повторный запуск ключ не трогает")
+
     def test_bootstrap_opens_web_ports_for_demo_domain(self):
         text = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
         self.assertRegex(text, r'if \[ -n "\$\{CRM_DOMAIN:-\}" \] \|\| '
@@ -153,6 +174,9 @@ class TestScripts(unittest.TestCase):
         for name in ("bootstrap.sh", "install.sh", "update.sh"):
             r = subprocess.run(["bash", "-n", str(ROOT / name)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
+        # backup.sh работает в alpine под busybox sh: bash-измы там не пройдут.
+        r = subprocess.run(["sh", "-n", str(ROOT / "backup.sh")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_deploy_does_not_overwrite_server_documents(self):
         """deploy.ps1 - путь обновления установки из исходников. Поставочные

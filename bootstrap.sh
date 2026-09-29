@@ -150,6 +150,15 @@ fi
 # Токен хука для шлюза WhatsApp и n8n: пустой - хук выключен. Включить:
 #   openssl rand -hex 32 | tr -d '\n' > secrets/inbox_hook_token
 [ -f secrets/inbox_hook_token ] || : > secrets/inbox_hook_token
+# Бэкап вне сервера: ключ шифрования копий генерируется сразу, чтобы
+# облако можно было включить одной строкой в .env. Без ключа копия в
+# облако не уходит вовсе. Потеря ключа = потеря облачных копий.
+if [ ! -s secrets/backup_key ]; then
+  openssl rand -base64 32 | tr -d '\n' > secrets/backup_key
+  say "сгенерирован secrets/backup_key — сохраните его ВНЕ сервера (cat secrets/backup_key): без него копии из облака не расшифровать"
+fi
+# Секрет доступа к бакету S3: пустой - облако выключено.
+[ -f secrets/backup_s3_secret ] || : > secrets/backup_s3_secret
 chmod 600 secrets/* .env
 # Владелец - uid 10001, под которым работает процесс в контейнере (см. Dockerfile).
 # Вне swarm docker compose не копирует файл секрета, а подключает хостовый как

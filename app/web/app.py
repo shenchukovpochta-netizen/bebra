@@ -984,6 +984,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                             media_type="application/manifest+json",
                             headers={"Cache-Control": "no-cache"})
 
+    # Пульс процесса бота для внешнего монитора: упавший бот сам о себе не
+    # напишет, а панель видит, что его круг проверки сервера замолчал.
+    # 503 без подробностей - адрес открыт всем, как и /healthz. У демо
+    # бота нет вовсе, и адреса нет тоже.
+    if not cfg.demo:
+        @app.get("/healthz/bot")
+        async def healthz_bot() -> Response:
+            state = logic.parse_health_state((await crm.settings()).get(logic.HEALTH_KEY))
+            alive = logic.bot_alive(state, datetime.now(UTC))
+            checked = state["checked_at"]
+            return JSONResponse({"ok": alive,
+                                 "checked_at": checked.isoformat() if checked else None},
+                                status_code=200 if alive else 503)
+
     if cfg.demo:
         @app.get("/robots.txt")
         async def robots() -> Response:
@@ -6834,7 +6848,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "settings")
         state = logic.notice_settings(await crm.notices())
         counts = await crm.notice_counts(logic.NOTICE_LOG_DAYS)
+        settings = await crm.settings()
         return render(request, "notices.html",
+                      # Карточка «Сервер»: отчёт сервиса backup и память
+                      # проверки, которую раз в час пишет процесс бота.
+                      server=logic.server_rows(
+                          logic.parse_backup_status(settings.get(logic.BACKUP_STATUS_KEY)),
+                          logic.parse_health_state(settings.get(logic.HEALTH_KEY)),
+                          datetime.now(UTC), bot=not cfg.demo),
+                      pulse_url=None if cfg.demo else str(request.url_for("healthz_bot")),
                       groups=logic.notice_rows(state, counts),
                       log=await crm.notice_log(limit=50),
                       bot_ready=bot is not None, bot_state=await bot_health(),
