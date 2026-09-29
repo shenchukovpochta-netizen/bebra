@@ -258,12 +258,32 @@ def check_https(trust_proxy: bool) -> dict[str, Any]:
                 required=False)
 
 
-def check_backup() -> dict[str, Any]:
-    return item("backup", "Бэкап базы", UNKNOWN,
-                "Каталог бэкапов панели не смонтирован намеренно: дамп всей базы не "
-                "должен быть доступен процессу, который смотрит в интернет.",
-                how="На сервере: «ls -lt backups/ | head» — сверху mybike-<сегодня>.sql.gz. "
-                    "Нет его — «docker compose logs backup».", required=False)
+def check_backup(settings: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """Каталог бэкапов панели не смонтирован намеренно (дамп всей базы не
+    должен быть доступен процессу, который смотрит в интернет), поэтому
+    судим по отчёту, который сервис backup кладёт в crm.settings, - тем же
+    правилом, что карточка «Сервер» и сообщение владельцу."""
+    backup = logic.parse_backup_status(settings.get(logic.BACKUP_STATUS_KEY))
+    bad = logic.backup_problems(backup, now)
+    where = {"href": "/notices", "link": "Уведомления → Сервер", "required": False}
+    if bad:
+        first = bad[next(part for part in logic.BACKUP_PARTS if part in bad)]
+        return item("backup", "Бэкап базы", WARN, first["text"],
+                    how="«docker compose logs backup»; вручную — «docker compose exec "
+                        "backup backup.sh dump» (INSTALL.md, «Бэкап вне сервера»).",
+                    **where)
+    dump = (backup or {}).get("dump") or {}
+    if not ((backup or {}).get("offsite") or {}).get("enabled"):
+        return item("backup", "Бэкап базы", OFF,
+                    "Дамп делается, но только на этом сервере: умрёт сервер — умрут "
+                    "и дампы.", at=dump.get("last_ok"),
+                    how="Бакет S3 в России, BACKUP_S3_* в .env и секрет в "
+                        "secrets/backup_s3_secret, затем «bash bootstrap.sh»; ключ "
+                        "secrets/backup_key сохраните вне сервера (INSTALL.md, «Бэкап "
+                        "вне сервера»).", **where)
+    return item("backup", "Бэкап базы", OK,
+                "Дамп каждую ночь, зашифрованная копия уходит в облако.",
+                at=dump.get("last_ok"), **where)
 
 
 def checks(*, settings: Mapping[str, Any], consent: str,
@@ -280,7 +300,7 @@ def checks(*, settings: Mapping[str, Any], consent: str,
             check_prices(models, tariffs), check_staff(staff), check_bot(bot),
             check_acquiring(acquiring), check_bank(bank_last, now),
             check_trackers(trackers, now, settings), check_avito(settings, now),
-            check_https(https), check_backup()]
+            check_https(https), check_backup(settings, now)]
 
 
 def summary(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

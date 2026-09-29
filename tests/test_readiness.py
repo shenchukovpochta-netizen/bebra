@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -42,8 +43,20 @@ def facts(**over):
             "trackers": [{"last_seen": NOW - timedelta(minutes=5)}],
             "https": True, "now": NOW}
     base["settings"]["inbox_avito_state"] = {"ok": True, "at": NOW.isoformat()}
+    base["settings"][logic.BACKUP_STATUS_KEY] = backup_status()
     base.update(over)
     return base
+
+
+def backup_status(**parts):
+    """Отчёт сервиса backup: дамп ночью, копия в облаке, проверка прошла."""
+    night = (NOW - timedelta(hours=9)).isoformat()
+    base = {"dump": {"at": night, "ok": True, "last_ok": night, "size": 1024},
+            "offsite": {"enabled": True, "at": night, "ok": True, "last_ok": night,
+                        "target": "s3/bk"},
+            "restore": {"at": night, "ok": True, "last_ok": night, "source": "offsite"}}
+    base.update(parts)
+    return json.dumps(base)
 
 
 def by_code(items):
@@ -51,11 +64,9 @@ def by_code(items):
 
 
 class TestRules(unittest.TestCase):
-    def test_configured_install_is_all_green_but_the_backup(self):
+    def test_configured_install_is_all_green(self):
         items = by_code(readiness.checks(**facts()))
-        self.assertEqual({c for c, i in items.items() if i["state"] != readiness.OK},
-                         {"backup"}, "бэкап панель не видит - и не делает вид")
-        self.assertEqual(items["backup"]["state"], readiness.UNKNOWN)
+        self.assertEqual({c for c, i in items.items() if i["state"] != readiness.OK}, set())
         summary = readiness.summary(items.values())
         self.assertTrue(summary["ready"])
         self.assertEqual((summary["required_ok"], summary["required"]), (6, 6))
@@ -77,6 +88,25 @@ class TestRules(unittest.TestCase):
         for code, i in items.items():
             self.assertTrue(i["href"] or i["how"], code)
 
+
+    def test_backup_is_judged_by_the_service_report(self):
+        """Каталог бэкапов панели не смонтирован: судим по отчёту сервиса
+        backup в базе, тем же правилом, что карточка «Сервер»."""
+        def backup(raw):
+            settings = {**facts()["settings"], logic.BACKUP_STATUS_KEY: raw}
+            return by_code(readiness.checks(**facts(settings=settings)))["backup"]
+
+        silent = backup(None)
+        self.assertEqual(silent["state"], readiness.WARN)
+        self.assertIn("ни разу не отчитался", silent["text"])
+        local = backup(backup_status(offsite={"enabled": False}))
+        self.assertEqual(local["state"], readiness.OFF, "дамп только на этом сервере")
+        self.assertIn("BACKUP_S3_", local["how"])
+        failed = backup(backup_status(dump={"at": NOW.isoformat(), "ok": False,
+                                            "error": "No space left on device"}))
+        self.assertEqual(failed["state"], readiness.WARN)
+        self.assertIn("No space left on device", failed["text"])
+        self.assertFalse(failed["required"], "бэкап не держит обязательное")
     def test_missing_requisites_are_named(self):
         settings = {**FILLED, "company_inn": " ", "company_bik": ""}
         got = readiness.check_company(settings)
@@ -195,7 +225,7 @@ class TestPage(tw.WebCase):
         for words in ("Готовность к работе", "Без этого прокат не работает",
                       "Можно подключить позже", "Реквизиты организации",
                       'href="/company"', 'href="/locations"', 'href="/staff"',
-                      "панель не видит", "не всё настроено"):
+                      "Сервис backup ни разу не отчитался", "не всё настроено"):
             self.assertIn(words, text)
         self.assertNotIn("None", text)
 
