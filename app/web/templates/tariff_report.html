@@ -31,7 +31,7 @@
     предлагать первым.</p>
   {% else %}
   {% if money_ok and b.check %}
-  <p>Лучший чек — <b>{{ b.check.title }}</b>: {{ money(b.check.avg_check) }} за день аренды{% if b.check.avg_days is not none %}, держат в среднем {{ b.check.avg_days }} дн.{% endif %}.</p>
+  <p>Лучший чек — <b>{{ b.check.title }}</b>: {{ money(b.check.avg_check) }} за день аренды{% if b.check.avg_days is not none %}, держат в среднем {{ b.check.avg_days }} дн. на аренду{% endif %}.</p>
   {% endif %}
   {% if b.hold %}
   <p>Дольше держит — <b>{{ b.hold.title }}</b>: в среднем {{ b.hold.avg_days }} дн. на

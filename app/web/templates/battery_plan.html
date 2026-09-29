@@ -64,7 +64,7 @@
       <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
       <td>{{ b.model_title or '—' }}</td>
       <td><span class="tag {{ b.status }}">{{ BATTERY_STATUSES[b.status] }}</span></td>
-      <td class="opt">{% if b.bike_code %}<a href="/bikes/{{ b.bike_id }}">№ {{ b.bike_code }}</a>{% else %}{{ b.location or '—' }}{% endif %}</td>
+      <td class="opt">{% if b.bike_code %}<a href="/bikes/{{ b.bike_id }}"><span class="nowrap">№ {{ b.bike_code }}</span></a>{% else %}{{ b.location or '—' }}{% endif %}</td>
       <td class="num">{{ b.age_months if b.age_months is not none else '—' }} / {{ b.service_months }}{% if not b.dated %} <small class="muted" title="даты покупки нет: возраст от заведения карточки">≈</small>{% endif %}</td>
       <td class="num {% if b.cycles >= b.cycle_limit %}bad{% endif %}">{{ b.cycles }} / {{ b.cycle_limit }}</td>
       <td class="{% if b.overdue %}bad{% endif %}">{{ b.replace_on|dmy }}{% if b.overdue %} <small>· срок вышел</small>{% endif %}</td>

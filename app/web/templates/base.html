@@ -98,7 +98,7 @@
     {% if g_setup %}<div class="blk"><div class="grp">Настройки</div>
       {% if can_view(staff, 'staff') %}<a href="/staff" {% if request.url.path.startswith('/staff') or request.url.path.startswith('/profiles') %}class="on"{% endif %}>Сотрудники</a>{% endif %}
       {% if can_view(staff, 'settings') %}<a href="/company" {% if request.url.path.startswith(('/company', '/documents', '/locations', '/models',
-                                       '/notices', '/intake', '/risk')) %}class="on"{% endif %}>Настройки</a>{% endif %}
+                                       '/notices', '/intake', '/risk', '/readiness')) %}class="on"{% endif %}>Настройки</a>{% endif %}
     </div>{% endif %}
   </nav>
   <div class="side-bolt">{% include "_bolt.html" %}</div>
@@ -111,5 +111,28 @@
 {% endfor %}
 {% block content %}{% endblock %}
 </main>
+{# Суммы идут на неразрывных пробелах (logic.money): «2 107 700 ₽» не
+   рвётся, но в узкой плитке длинная сумма с копейками не влезала и
+   обрезалась. Такой плитке шрифт уменьшается, пока сумма не встанет
+   целиком; без скрипта она просто остаётся крупной. Только за входом:
+   страница входа и публичные страницы живут без скриптов. #}
+{% if staff %}
+<script>
+(function () {
+  function fit() {
+    document.querySelectorAll('.tile b').forEach(function (b) {
+      var size = parseFloat(getComputedStyle(b).fontSize);
+      while (b.scrollWidth > b.clientWidth && size > 14) {
+        size -= 1;
+        b.style.fontSize = size + 'px';
+      }
+    });
+  }
+  fit();
+  // Ширина - по настоящему шрифту: до его загрузки мерили бы запасной.
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+})();
+</script>
+{% endif %}
 </body>
 </html>

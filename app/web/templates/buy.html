@@ -36,7 +36,10 @@
 </div>
 
 <div class="card">
-<div class="table-wrap">
+{# Одиннадцать колонок: пояснения мелким - строкой ниже числа, а поля
+   ячеек уже (dense), иначе «Заявки» и «Решение» - главное на странице -
+   уезжали за прокрутку таблицы. #}
+<div class="table-wrap dense">
 <table class="cards">
   <tr><th>Модель</th><th class="num">В парке</th><th class="num">Загрузка</th>
     <th class="num">Простой</th><th class="num">Выручка<br>на велодень</th>
@@ -46,15 +49,15 @@
   {% for r in rows %}
   <tr>
     <td data-label="Модель">{{ r.model }}{% if r.names %}<br><small class="muted">в парке: {{ r.names|join(', ') }}</small>{% endif %}</td>
-    <td class="num" data-label="В парке">{{ r.fleet }}{% if r.assembly %} <small class="muted">+{{ r.assembly }} на сборке</small>{% endif %}</td>
+    <td class="num" data-label="В парке">{{ r.fleet }}{% if r.assembly %}<br><small class="muted">+{{ r.assembly }} на сборке</small>{% endif %}</td>
     <td class="num" data-label="Загрузка">{{ n(r.utilization, ' %') }}</td>
-    <td class="num {% if r.idle_percent is none %}muted{% elif r.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}" data-label="Простой">{{ n(r.idle_percent, ' %') }}{% if r.repair_percent %} <small class="muted" title="из них в ремонте и на ТО">· рем. {{ r.repair_percent }} %</small>{% endif %}</td>
+    <td class="num {% if r.idle_percent is none %}muted{% elif r.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}" data-label="Простой">{{ n(r.idle_percent, ' %') }}{% if r.repair_percent %}<br><small class="muted" title="из них в ремонте и на ТО">рем. {{ r.repair_percent }}&nbsp;%</small>{% endif %}</td>
     <td class="num" data-label="Выручка на велодень">{{ money(r.revenue_per_day) }}</td>
     <td class="num" data-label="Ремонт на велодень">{{ money(r.repair_per_day) }}</td>
     <td class="num" data-label="Цена закупки">{{ money(r.price) }}{% if r.price is not none %}<br><small class="muted">{{ r.price_no or 'по карточке' }}</small>{% endif %}</td>
     <td class="num {% if r.payback_months is not none and r.payback_months > r.service_months %}bad{% endif %}" data-label="Окупаемость">{% if r.payback_months is none %}—{% else %}{{ r.payback_months }} мес.<br><small class="muted">срок службы {{ r.service_months }}</small>{% endif %}</td>
-    <td data-label="Сутки без свободной">{% if r.zero_days %}{{ r.zero_days }}<br><small class="muted">{% for p, d in r.zero_points %}{{ p or NO_POINT_TITLE }} {{ d }}{% if not loop.last %}, {% endif %}{% endfor %}</small>{% else %}<span class="muted">—</span>{% endif %}</td>
-    <td class="num" data-label="Заявки">{{ r.bookings }}{% if r.unmet %} <small class="bad" title="на точке заявки нет свободной модели">· {{ r.unmet }} без велосипеда</small>{% endif %}</td>
+    <td data-label="Сутки без свободной">{% if r.zero_days %}{{ r.zero_days }}<br><small class="muted">{% for p, d in r.zero_points %}{{ p or NO_POINT_TITLE }}&nbsp;{{ d }}{% if not loop.last %}<br>{% endif %}{% endfor %}</small>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="num" data-label="Заявки">{{ r.bookings }}{% if r.unmet %}<br><small class="bad" title="на точке заявки нет свободной модели">{{ r.unmet }} без велосипеда</small>{% endif %}</td>
     <td data-label="Решение"><span class="tag {% if r.verdict == 'buy' %}ok{% elif r.verdict == 'skip' %}bad{% endif %}">{{ BUY_VERDICTS[r.verdict] }}{% if r.count %}: {{ r.count }} шт.{% endif %}</span><br><small class="muted">{{ r.reason }}</small></td>
   </tr>
   {% else %}

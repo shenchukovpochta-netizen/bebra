@@ -95,8 +95,11 @@
     <tr class="{% if r.stuck %}warn-row{% endif %}">
       <td><a href="/bikes/{{ r.id }}">№ {{ r.code }}</a></td>
       <td>{{ r.model }}</td>
-      <td>{% if r.order %}<span class="tag order-{{ r.order.status }}">{{ r.stage }}</span>{% else %}<span class="tag bad">Без наряда</span>{% endif %}</td>
-      <td class="num {% if r.stuck %}bad{% endif %}">{{ r.days }}{% if r.overdue %}<br><small title="срок {{ r.norm }} дн.">просрочено на {{ r.overdue }} дн.</small>{% endif %}</td>
+      {# «Просрочено» - под этапом, а не под сутками: в числовой колонке
+         строка не переносится, раздувала её, и «Жалоба» уезжала за
+         прокрутку таблицы. #}
+      <td>{% if r.order %}<span class="tag order-{{ r.order.status }}">{{ r.stage }}</span>{% else %}<span class="tag bad">Без наряда</span>{% endif %}{% if r.overdue %}<br><small class="bad" title="срок {{ r.norm }} дн.">просрочено на {{ r.overdue }} дн.</small>{% endif %}</td>
+      <td class="num {% if r.stuck %}bad{% endif %}">{{ r.days }}</td>
       {% if can_view(staff, 'finance') %}<td class="num {% if r.lost %}bad{% endif %}">{% if r.lost %}−{{ money(r.lost) }}{% else %}—{% endif %}</td>{% endif %}
       <td>{% if r.order %}<a href="/orders/{{ r.order.id }}">{{ r.order.no }}</a>{% elif can %}<a href="/orders/new?bike={{ r.id }}">открыть</a>{% else %}—{% endif %}</td>
       <td>{{ r.order.tech_name if r.order and r.order.tech_name else '—' }}</td>

@@ -100,12 +100,15 @@
 <section class="card">
   <h2>История аренд</h2>
   <table>
-    <tr><th>#</th><th>Велосипед</th><th>Тариф</th><th>С</th><th>По</th><th>Статус</th></tr>
+    {# Срок одной колонкой: «С» и «По» вдвоём не помещались в половину
+       страницы, и статус уезжал за прокрутку таблицы. #}
+    <tr><th>#</th><th>Велосипед</th><th>Тариф</th><th>Срок</th><th>Статус</th></tr>
     {% for r in rentals %}
     <tr><td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td><td>{{ r.bike_code or '—' }} {{ r.bike_model or '' }}</td>
-      <td>{{ r.tariff_name }}</td><td>{{ r.started_on|dmy }}</td><td>{{ r.closed_on|dmy if r.closed_on else '' }}</td>
+      <td>{{ r.tariff_name }}</td>
+      <td>{% if r.closed_on %}<span class="nowrap">{{ r.started_on.strftime('%d.%m') if r.started_on and r.started_on.year == r.closed_on.year else r.started_on|dmy }} –</span> <span class="nowrap">{{ r.closed_on|dmy }}</span>{% else %}<span class="nowrap">с {{ r.started_on|dmy }}</span>{% endif %}</td>
       <td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
-    {% else %}<tr><td colspan="6" class="muted">Аренд не было.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="5" class="muted">Аренд не было.</td></tr>{% endfor %}
   </table>
   {% if feedback %}
   {# Оценка после сдачи: «тройка» от постоянного клиента - повод
