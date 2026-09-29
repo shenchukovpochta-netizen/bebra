@@ -547,8 +547,9 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
         """Главная страница каждого раздела и карточка каждого вида - не
         тяжелее HEAVY_PAGE: список в каждой строке растёт вместе с парком,
         и на пустой базе тестов его не видно."""
+        # Хуки в демо закрыты (404): страницы у них нет, весить нечему.
         pages = sorted({r for r in self.routes() if "{" not in r
-                        and r not in ("/login", "/promos/new")
+                        and r not in ("/login", "/promos/new", *HOOKS_OFF)
                         and not r.startswith(OWN_CHECK)})
         span = urlencode({"since": (self.today - timedelta(days=60)).isoformat(),
                           "until": self.today.isoformat()})
