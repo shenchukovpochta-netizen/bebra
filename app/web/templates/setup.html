@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}Первый запуск — {{ app_title }}{% endblock %}
+{% block content %}
+{# Писать может тот, кому открыты настройки; в демо - никто: POST закрыт
+   стражем демо, и кнопки там были бы обещанием, которое не сработает. #}
+{% set writable = can_edit(staff, 'settings') and not demo %}
+<div class="bar"><h1>Первый запуск</h1>
+  <span class="muted">готово шагов: {{ progress.done }} из {{ progress.total }}</span>
+  {% if writable and not hidden %}<form method="post" action="/setup/dismiss"><button type="submit" class="ghost">Скрыть мастер</button></form>{% endif %}
+</div>
+
+{# Шаги - ссылки: мастер не держит за руку, любой шаг открывается сразу,
+   а «готово» - только пройденный шаг, у которого «Готовность» не против. #}
+<nav class="steps">
+  {% for s in steps %}<a href="/setup?step={{ s.code }}" class="{% if s.code == step.code %}now{% elif s.done %}done{% else %}todo{% endif %}">{{ s.n }} · {{ s.title }}</a>
+  {% endfor %}
+</nav>
+
+{% if demo %}
+<div class="card"><p>В демо мастер первого запуска выключен: стенд настроен
+  заранее, сохранение здесь закрыто. На новой установке он встречает
+  владельца после входа, пока не готово обязательное — реквизиты, точки,
+  цены и сотрудники, — и ведёт по «Готовности» шаг за шагом.</p></div>
+{% elif hidden %}
+<div class="card"><p class="muted">Мастер {{ 'пройден' if finished else 'скрыт' }}: после входа и на сводке его
+  нет. Шаги работают и так — сохраняют то же, что страницы разделов.</p>
+  {% if writable %}<form method="post" action="/setup/resume"><button type="submit" class="ghost">Показывать снова</button></form>{% endif %}</div>
+{% endif %}
+
+{% if shown %}
+<div class="card">
+  <h2>Вход для {{ shown.login }}</h2>
+  <p>{{ shown.role }}, профиль «{{ shown.profile }}». Логин <code>{{ shown.login }}</code>,
+    пароль <code>{{ shown.password }}</code></p>
+  <p class="muted">Пароль показан один раз: в базе только его хэш. Передайте
+    сотруднику лично, не в общий чат, — сменит он его в своём кабинете.
+    Потерялся — новый задаётся в «Сотрудниках».</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ step.n }}. {{ step.title }} <span class="tag{% if step.css %} {{ step.css }}{% endif %}">{{ step.label }}</span>{% if step.passed %} <span class="tag ok">пройден</span>{% endif %}</h2>
+  {% if step.text %}<p>{{ step.text }}</p>{% endif %}
+
+  {% if step.code == 'company' %}
+  {% if writable %}
+  <form method="post" action="/setup/company" class="grid2">
+    {% include "_company_fields.html" %}
+    <button type="submit">Сохранить и дальше</button>
+  </form>
+  {% else %}
+  <fieldset disabled class="plain grid2">{% include "_company_fields.html" %}</fieldset>
+  {% endif %}
+  {% if consent and consent.state != 'ok' %}<p class="muted">Согласие в боте: {{ consent.text }}{% if consent.how %} {{ consent.how }}{% endif %}</p>{% endif %}
+  <p class="muted">Реквизиты подставляются в договор, акты, согласие и политику
+    ПДн: пустое поле уйдёт клиенту прочерком. Та же форма — в
+    <a href="/company">«Реквизитах»</a>, там же шаблоны документов.</p>
+
+  {% elif step.code == 'points' %}
+  {% if points %}
+  <table class="cards">
+    <tr><th>Точка</th><th>Адрес</th><th>Режим</th><th>Телефон</th><th></th></tr>
+    {% for p in points %}
+    <tr>
+      <td data-label="Точка"><b>{{ p.name }}</b>{% if p.city %}<br><small class="muted">{{ p.city }}</small>{% endif %}</td>
+      <td data-label="Адрес">{{ p.address or '—' }}</td>
+      <td data-label="Режим">{{ p.hours or '—' }}</td>
+      <td data-label="Телефон">{{ p.phone or '—' }}</td>
+      <td data-label="Действие">{% if writable %}<form method="post" action="/setup/points"><input type="hidden" name="action" value="close"><input type="hidden" name="location_id" value="{{ p.id }}"><button type="submit" class="ghost">Закрыть</button></form>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  <p class="muted">Свежая база приезжает с двумя точками поставки (Казань):
+    закройте их здесь или переименуйте и поправьте в <a href="/locations">«Точках»</a>
+    — там же координаты, порядок и описание. Закрытая точка остаётся в
+    карточках, выдачи с неё нет.{% if closed %} Закрыты: {{ closed|join(', ') }}.{% endif %}</p>
+  {% if writable %}
+  <h3>Добавить точку</h3>
+  <form method="post" action="/setup/points" class="grid2">
+    <input type="hidden" name="action" value="add">
+    <label>Название <input name="name" required placeholder="Центр"></label>
+    <label>Город <input name="city" required></label>
+    <label class="wide">Адрес <input name="address" required></label>
+    <label>Телефон <input name="phone" required placeholder="+7 900 000-00-00"></label>
+    <label>Режим работы <input name="hours" required placeholder="пн-вс: 10:00-19:00"></label>
+    <label class="wide">Как найти (видит клиент в боте) <input name="directions" placeholder="Вход со двора, синие ворота"></label>
+    <button type="submit">Добавить</button>
+  </form>
+  <form method="post" action="/setup/pass"><input type="hidden" name="step" value="points"><button type="submit" class="ghost">Точки готовы — дальше</button></form>
+  {% endif %}
+
+  {% elif step.code == 'prices' %}
+  {% set priceable = writable and can_edit(staff, 'tariffs') %}
+  {% if priceable %}<form method="post" action="/setup/prices">{% else %}<fieldset disabled class="plain">{% endif %}
+  <table class="cards">
+    <tr><th>Модель</th><th>Сдаём</th><th>Неделя, ₽</th><th>Другие сроки</th></tr>
+    {% for r in prices %}
+    <tr>
+      <td data-label="Модель"><b>{{ r.title }}</b>{% if r.bikes %}<br><small class="muted">в парке {{ r.bikes }}</small>{% endif %}</td>
+      <td data-label="Сдаём">{% if r.model is none %}<span class="muted">—</span>{% else %}<label class="check"><input type="checkbox" name="use_{{ r.key }}" value="1" checked> да</label>{% endif %}</td>
+      <td data-label="Неделя, ₽"><input name="week_{{ r.key }}" value="{{ r.week.price if r.week else '' }}" inputmode="decimal" placeholder="{{ 'не задан' if r.model is none else 'цена недели' }}" aria-label="Цена недели: {{ r.title }}"></td>
+      <td data-label="Другие сроки">{% for t in r.other %}{{ t.name }} — {{ money(t.price) }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if priceable %}<button type="submit">Сохранить и дальше</button></form>{% else %}</fieldset>{% endif %}
+  <p class="muted">Каталог и цены свежей базы — поставочные: сверьте со своими.
+    Снятая галочка убирает модель в архив каталога — вернуть её можно в
+    <a href="/models">«Каталоге»</a>. Цена — за неделю: есть недельный тариф —
+    правится его цена, нет — заводится новый; пустое поле цену не трогает.
+    Две недели и месяц — в <a href="/tariffs">«Тарифах»</a>. Запасной тариф
+    работает для модели без своей цены.{% if archived %} В архиве: {{ archived|join(', ') }}.{% endif %}</p>
+
+  {% elif step.code == 'staff' %}
+  {% if staff_closed %}<p class="muted">Логины и имена — в разделе «Сотрудники»,
+    а ваш профиль его не открывает.</p>{% endif %}
+  {% if people %}
+  <table class="cards">
+    <tr><th>Логин</th><th>Имя</th><th>Профиль</th></tr>
+    {% for s in people %}
+    <tr><td data-label="Логин">{{ s.login }}</td><td data-label="Имя">{{ s.name or '—' }}</td><td data-label="Профиль">{{ s.profile_name or 'без профиля' }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% for r in roles %}
+  <h3>{{ r.title }}{% if r.logins %} <span class="tag ok">есть: {{ r.logins|join(', ') }}</span>{% endif %}</h3>
+  {% if r.profile and writable and can_edit(staff, 'staff') %}
+  {# Ключ формы: двойной клик не заводит второй вход и не теряет пароль первого. #}
+  <form method="post" action="/setup/staff" class="grid2">
+    <input type="hidden" name="role" value="{{ r.code }}">
+    <input type="hidden" name="once" value="{{ once() }}">
+    <label>Логин <input name="login" required autocomplete="off" placeholder="латиница, 3–32 символа"></label>
+    <label>Имя <input name="name" autocomplete="off"></label>
+    <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <button type="submit">Завести: {{ r.title|lower }}</button>
+  </form>
+  {% endif %}
+  {% if r.profile %}<p class="muted">Профиль «{{ r.profile.name }}» — права правятся в
+    <a href="/profiles/{{ r.profile.id }}">профилях доступа</a>.</p>{% endif %}
+  {% endfor %}
+  <p class="muted">Пароль придумает панель и покажет один раз. У каждого — свой
+    вход: иначе в журналах один автор на всех. Telegram для нарядов сотрудник
+    привяжет кодом из <a href="/staff">«Сотрудников»</a>.</p>
+  {% if writable %}<form method="post" action="/setup/pass"><input type="hidden" name="step" value="staff"><button type="submit" class="ghost">Сотрудники готовы — дальше</button></form>{% endif %}
+
+  {% elif step.code == 'connect' %}
+  <p class="muted">Бот, банк, трекеры, Авито и домен подключаются на сервере — в
+    <code>.env</code> и файлах <code>secrets/</code>. Через панель ключи не вводятся
+    намеренно: страница, принимающая токен банка, стала бы самой ценной
+    целью в панели. Состояние — то же, что на «Готовности».</p>
+  {% for i in connect %}
+  <h3>{{ i.title }} <span class="tag{% if i.css %} {{ i.css }}{% endif %}">{{ i.label }}</span></h3>
+  <p>{{ i.text }}</p>
+  {# Подключённое - инструкция свёрнута: пригодится, когда токен сменят. #}
+  {% if connect_how.get(i.code) %}{% if i.state == 'ok' %}<details><summary class="muted">Как подключали</summary>{% endif %}
+  <ol>{% for line in connect_how[i.code] %}<li>{{ line }}</li>{% endfor %}</ol>
+  {% if i.state == 'ok' %}</details>{% endif %}{% endif %}
+  {% endfor %}
+  {% if writable %}<form method="post" action="/setup/pass"><input type="hidden" name="step" value="connect"><button type="submit">Понятно — дальше</button></form>{% endif %}
+
+  {% else %}
+  <p>Обязательное: {{ summary.required_ok }} из {{ summary.required }}.
+    Подключено интеграций: {{ summary.optional_on }} из {{ summary.optional }}.</p>
+  <p><a class="btn" href="/readiness">Открыть «Готовность»</a></p>
+  <p class="muted">Дальше — тестовый клиент от /start до подписанного договора
+    (INSTALL.md, «Шаг 9»): в договоре должны стоять ваши реквизиты, а не
+    прочерки.</p>
+  {% if writable %}<form method="post" action="/setup/finish"><button type="submit" class="ghost">Завершить мастер</button></form>{% endif %}
+  {% endif %}
+
+  {% if step.code != 'check' %}<p><a href="/setup?step={{ skip }}">Пропустить →</a></p>{% endif %}
+</div>
+{% endblock %}

@@ -1392,6 +1392,8 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/company", "settings"),
     # Готовность установки: что не настроено - вкладка тех же настроек.
     ("/readiness", "settings"),
+    # Мастер первого запуска - та же «Готовность» по шагам.
+    ("/setup", "settings"),
     ("/notices", "settings"),
     ("/intake", "settings"),
     ("/documents", "settings"),

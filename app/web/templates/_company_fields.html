@@ -1,0 +1,15 @@
+{# Поля реквизитов - одни на «Реквизитах» и в мастере первого запуска:
+   сохранение пишет все поля разом, и поле, забытое в одной из форм,
+   стиралось бы при каждом сохранении из неё. #}
+{% set locked = not can_edit(staff, 'settings') %}
+{% for code, label in COMPANY_FIELDS.items() %}
+<label{% if code in ('company_name', 'company_address') %} class="wide"{% endif %}>{{ label }}
+  <input name="{{ code }}" value="{{ values[code] }}"{% if locked %} disabled{% endif %}></label>
+{% endfor %}
+{% for code, label in CONTACT_FIELDS.items() %}
+<label class="wide">{{ label }}
+  <input name="{{ code }}" value="{{ values[code] }}" placeholder="{{ default_contact }}"{% if locked %} disabled{% endif %}>
+  <small class="muted">Это видит клиент в боте: «напишите нам напрямую…».
+    Можно «@имя» — развернём в ссылку. Пусто — работает зашитый
+    контакт {{ default_contact }}.</small></label>
+{% endfor %}

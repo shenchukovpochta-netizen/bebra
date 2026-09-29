@@ -164,6 +164,13 @@ class TestCardStyles(unittest.TestCase):
         телефоне сортировать нечем."""
         self.assertIn("table.cards th:not(.opt):has(a){display:block", self.css)
 
+    def test_fields_stay_inside_the_card(self):
+        """Поле ширины по умолчанию в ячейке с подписью вылезало за край
+        карточки (цена недели в мастере первого запуска на 390 px)."""
+        phone = "".join(body for head, body in self.blocks()
+                        if head == "@media (max-width:640px)")
+        self.assertIn("table.cards td input,table.cards td select{max-width:100%}", phone)
+
     def test_no_scroll_hint_over_cards(self):
         """«Прокрутите вбок» под карточками - неправда."""
         self.assertIn(".table-wrap:has(>table.cards)~.scroll-hint{display:none}", self.css)

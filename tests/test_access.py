@@ -527,6 +527,8 @@ class TestSessionHardening(tw.WebCase if tw.HAVE_WEB else unittest.TestCase):
     страницы нельзя встроить в чужой сайт."""
 
     def test_backslash_next_does_not_leave_the_panel(self):
+        # Не пустая база: пустую владельца встречает мастер (test_firstrun).
+        self.seed()
         for bad in ("/\\evil.example", "//evil.example", "https://evil.example",
                     "/ok\\@evil.example"):
             r = self.client.post("/login", data={"login": "admin",

@@ -48,6 +48,7 @@ from ..crm import (
     billing,
     company,
     doctemplates,
+    firstrun,
     import_xlsx,
     logic,
     notices,
@@ -128,7 +129,9 @@ DEMO_BLOCKED_PATHS = frozenset({
     # Заодно закрыт и разбор xlsx - самый тяжёлый запрос панели.
     "/import",
 })
-DEMO_BLOCKED_PREFIXES = ("/staff", "/profiles", "/documents")
+# Мастер первого запуска в демо выключен, а его шаг «Сотрудники» завёл бы
+# вход мимо закрытого /staff.
+DEMO_BLOCKED_PREFIXES = ("/staff", "/profiles", "/documents", "/setup")
 DEMO_BLOCKED_TEXT = "В демо-версии это недоступно."
 DEMO_PHOTO_TEXT = "Снимки в демо не хранятся: файл не сохранён."
 # Фото номера при сверке в демо не требуется: снимки не хранятся, и
@@ -1025,6 +1028,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         target = logic.safe_next(data.get("next") or home, home)
         if target == "/" and home != "/":
             target = home
+        # Свежая установка: владельца вместо сводки встречает мастер первого
+        # запуска. Только вместо сводки - ссылка, по которой пришли, главнее.
+        if target == "/" and await setup_wanted(staff) is not None:
+            target = "/setup"
         return redirect(target)
 
     @app.post("/logout")
@@ -1135,7 +1142,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             transfers=(advice["transfer"] or {}).get("moves", ()),
             idle=advice["idle"], today=today)
         return render(request, "dashboard.html",
-                      tasks=tasks,
+                      tasks=tasks, setup=await setup_wanted(request.state.staff, settings),
                       inbox_waiting=(await crm.inbox_open_count()
                                      if may_view(request, "inbox") else None),
                       plan=plan, span=span, bot_state=await bot_health(),
@@ -3470,18 +3477,30 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "note": note.value, "kind": kind.value,
                 "model": (data.get("model") or "").strip() or None}
 
+    async def store_tariff(request: Request, fields: dict,
+                           tariff_id: int | None = None) -> bool:
+        """Тариф в базу: новый или правка. «Одна цена на модель и срок»
+        держит частичный уникальный индекс, здесь он переводится в слова;
+        False - отказ уже во flash. Один путь для «Тарифов» и мастера
+        первого запуска."""
+        try:
+            if tariff_id is None:
+                await crm.create_tariff(**fields)
+            else:
+                await crm.update_tariff(tariff_id, **fields)
+        except Exception as exc:                        # noqa: BLE001
+            if "unique" in type(exc).__name__.lower():
+                flash(request, "Такой срок для этой модели уже есть — исправьте цену "
+                               "в существующем тарифе." if tariff_id is None
+                      else "Такой срок для этой модели уже есть.", "err")
+                return False
+            raise
+        return True
+
     @app.post("/tariffs")
     async def tariff_create(request: Request) -> Response:
         fields = _tariff_fields(request, await form(request))
-        if fields is not None:
-            try:
-                await crm.create_tariff(**fields)
-            except Exception as exc:                    # noqa: BLE001
-                if "unique" in type(exc).__name__.lower():
-                    flash(request, "Такой срок для этой модели уже есть — "
-                                   "исправьте цену в существующем тарифе.", "err")
-                    return redirect("/tariffs")
-                raise
+        if fields is not None and await store_tariff(request, fields):
             flash(request, "Тариф добавлен.")
         return redirect("/tariffs")
 
@@ -3496,14 +3515,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Тариф " + ("включён." if not tariff["active"] else "выключен."))
             return redirect("/tariffs")
         fields = _tariff_fields(request, data)
-        if fields is not None:
-            try:
-                await crm.update_tariff(tariff_id, **fields)
-            except Exception as exc:                    # noqa: BLE001
-                if "unique" in type(exc).__name__.lower():
-                    flash(request, "Такой срок для этой модели уже есть.", "err")
-                    return redirect("/tariffs")
-                raise
+        if fields is not None and await store_tariff(request, fields, tariff_id):
             flash(request, "Тариф сохранён.")
         return redirect("/tariffs")
 
@@ -4111,32 +4123,38 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       places=await location_names(),
                       can_manage=may_edit(request, "staff"))
 
-    @app.post("/staff")
-    async def staff_create(request: Request) -> Response:
-        data = await form(request)
+    async def add_staff(request: Request, data: dict) -> dict | None:
+        """Новый вход в панель из формы: логин и профиль, None - отказ уже во
+        flash. Один путь для «Сотрудников» и мастера первого запуска."""
         login_check = logic.check_login(data.get("login"))
         password = logic.check_password(data.get("password"))
         name = logic.check_name(data.get("name") or data.get("login"), what="Имя")
         for check in (login_check, password, name):
             if not check.ok:
                 flash(request, check.error, "err")
-                return redirect("/staff")
+                return None
         profile = await by_id(crm.access_profile, data.get("profile_id"))
         if profile is None:
             flash(request, "Выберите профиль доступа.", "err")
-            return redirect("/staff")
+            return None
         place = logic.check_location(data.get("location"), await location_names())
         if not place.ok:
             flash(request, place.error, "err")
-            return redirect("/staff")
+            return None
         if await crm.staff_by_login(login_check.value) is not None:
             flash(request, "Такой логин уже есть.", "err")
-            return redirect("/staff")
+            return None
         await crm.create_staff(login_check.value, logic.hash_password(password.value),
                                name.value, role_for(profile), profile["id"],
                                location=place.value)
-        flash(request, f"Сотрудник {login_check.value} добавлен — профиль "
-                       f"«{profile['name']}».")
+        return {"login": login_check.value, "profile": profile}
+
+    @app.post("/staff")
+    async def staff_create(request: Request) -> Response:
+        added = await add_staff(request, await form(request))
+        if added is not None:
+            flash(request, f"Сотрудник {added['login']} добавлен — профиль "
+                           f"«{added['profile']['name']}».")
         return redirect("/staff")
 
     @app.post("/staff/{staff_id}/profile")
@@ -4984,16 +5002,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       default_contact=texts.SUPPORT_CONTACT_URL,
                       templates=template_rows(request))
 
-    @app.post("/company")
-    async def company_save(request: Request) -> Response:
-        """Реквизиты организации: их подставляют договор и акты.
-
-        Бот - другой процесс, он подхватывает правку снимком в течение
-        нескольких минут; в панели об этом написано прямо.
-        """
-        if not may_edit(request, "settings"):
-            return denied(request, "settings")
-        data = await form(request)
+    async def save_company(request: Request, data: dict) -> bool:
+        """Реквизиты из формы - в настройки; ошибка уже во flash, тогда False.
+        Один путь для страницы реквизитов и мастера первого запуска."""
         clean: dict[str, str] = {}
         for code, label in company.ALL_FIELDS.items():
             # Контакт менеджера проверяется строже реквизита: это ссылка,
@@ -5003,16 +5014,47 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             value, error = check(data.get(code))
             if error:
                 flash(request, f"{label}: {error}.", "err")
-                return redirect("/company")
+                return False
             clean[code] = value
         for code, value in clean.items():
             await crm.set_setting(code, value, by=who(request))
         # Панель и бот читают одни и те же настройки: снимок в этом
         # процессе обновляем сразу, чтобы не ждать своего же TTL.
         company.set_snapshot(await crm.settings())
-        flash(request, "Сохранено. Бот подхватит правку в течение "
-                       "нескольких минут.")
+        return True
+
+    @app.post("/company")
+    async def company_save(request: Request) -> Response:
+        """Реквизиты организации: их подставляют договор и акты.
+
+        Бот - другой процесс, он подхватывает правку снимком в течение
+        нескольких минут; в панели об этом написано прямо.
+        """
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if await save_company(request, await form(request)):
+            flash(request, "Сохранено. Бот подхватит правку в течение "
+                           "нескольких минут.")
         return redirect("/company")
+
+    async def readiness_facts(settings: dict | None = None) -> dict[str, Any]:
+        """Факты «Готовности» из базы - одним набором для страницы, мастера
+        первого запуска и решения, встречать ли им владельца."""
+        return {"settings": await crm.settings() if settings is None else settings,
+                "locations": await crm.locations(),
+                "models": await crm.bike_models(active_only=True),
+                "tariffs": await crm.tariffs(active_only=True, kind="bike"),
+                "staff": await crm.staff_all()}
+
+    async def readiness_items(facts: dict[str, Any]) -> list[dict]:
+        settings = facts["settings"]
+        return readiness.checks(
+            settings=settings, consent=texts.CONSENT, locations=facts["locations"],
+            models=facts["models"], tariffs=facts["tariffs"], staff=facts["staff"],
+            bot=await bot_health(), acquiring=acquiring_state(settings),
+            bank_last=next(iter(await crm.bank_txns(limit=1)), None),
+            trackers=await crm.trackers(), https=cfg.trust_proxy,
+            now=datetime.now(UTC))
 
     @app.get("/readiness")
     async def readiness_page(request: Request) -> Response:
@@ -5021,18 +5063,273 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         Только чтение и только то, что панель видит сама: база, свой конфиг
         и живость бота. О фоновых опросах бота судим по их следам в базе.
         """
-        settings = await crm.settings()
-        items = readiness.checks(
-            settings=settings, consent=texts.CONSENT, locations=await crm.locations(),
-            models=await crm.bike_models(active_only=True),
-            tariffs=await crm.tariffs(active_only=True, kind="bike"),
-            staff=await crm.staff_all(), bot=await bot_health(),
-            acquiring=acquiring_state(settings),
-            bank_last=next(iter(await crm.bank_txns(limit=1)), None),
-            trackers=await crm.trackers(), https=cfg.trust_proxy,
-            now=datetime.now(UTC))
+        items = await readiness_items(await readiness_facts())
         return render(request, "readiness.html", items=items,
                       summary=readiness.summary(items))
+
+    # ─────────────────── мастер первого запуска ───────────────────
+    #
+    # «Готовность» по шагам с формами на месте (app/crm/firstrun.py). Своих
+    # проверок и своей записи у мастера нет: состояние шага - строка
+    # «Готовности», сохраняет шаг тот же помощник, что и страница раздела
+    # (save_company, add_location, store_tariff, add_staff).
+
+    async def setup_wanted(staff: dict | None,
+                           settings: dict | None = None) -> dict | None:
+        """Встретить ли владельца мастером: прогресс для плашки, None - нет.
+
+        Отказы без запросов и дешёвые - первыми: боевая база отвечает
+        «уже работали» одним запросом. Сбой здесь не мешает ни входу, ни
+        сводке: мастер - подсказка, а не ворота.
+        """
+        if cfg.demo or not firstrun.is_owner(staff):
+            return None
+        try:
+            settings = await crm.settings() if settings is None else settings
+            if firstrun.hidden(settings):
+                return None
+            if not firstrun.started(settings):
+                if await crm.history_start() is not None:
+                    return None
+                # Свежую базу застали - решение записываем сразу: велосипед,
+                # заведённый на полпути, журнал статусов уже не пуст.
+                await crm.set_setting(firstrun.STATE_KEY, "",
+                                      by=f"staff:{(staff or {}).get('login')}")
+                settings = {**settings, firstrun.STATE_KEY: ""}
+            items = firstrun.essentials(**await readiness_facts(settings))
+            rows = firstrun.steps(items, settings)
+            if not firstrun.wanted(staff=staff, settings=settings, demo=cfg.demo,
+                                   rows=rows):
+                return None
+            return firstrun.progress(rows)
+        except Exception:                                # noqa: BLE001
+            log.exception("мастер первого запуска: установку проверить не удалось")
+            return None
+
+    # Пароль входа, заведённого мастером, - до следующей страницы мастера
+    # этого владельца: staff_id -> (когда, что показать). В памяти процесса,
+    # а не в cookie: при двойном клике второй ответ перезаписывает cookie
+    # первого, и единственная копия пароля пропадала бы вместе с ней.
+    # Процесс панели один, как и у ключей форм; дольше срока не ждём.
+    setup_issued: dict[int, tuple[float, dict]] = {}
+    SETUP_ISSUED_TTL = 600
+
+    def setup_shown(request: Request) -> dict | None:
+        staff_id = request.state.staff["id"]
+        issued = setup_issued.pop(staff_id, None)
+        if issued is None or time.monotonic() - issued[0] > SETUP_ISSUED_TTL:
+            return None
+        return issued[1]
+
+    async def setup_pass(request: Request, code: str) -> None:
+        """Шаг пройден - в настройки: прогресс переживает выход и другой
+        браузер. Повтор ничего не меняет."""
+        settings = await crm.settings()
+        await crm.set_setting(firstrun.STEPS_KEY, firstrun.with_step(settings, code),
+                              by=who(request))
+
+    @app.get("/setup")
+    async def setup_page(request: Request) -> Response:
+        """Мастер первого запуска: шаг, формы на месте и прогресс.
+
+        Страница открыта и скрытому мастеру, и в демо (только посмотреть:
+        POST там закрыт стражем демо). Сама она ничего не решает - сам
+        мастер встречает владельца только по setup_wanted.
+        """
+        facts = await readiness_facts()
+        settings = facts["settings"]
+        items = await readiness_items(facts)
+        by = {i["code"]: i for i in items}
+        rows = firstrun.steps(items, settings)
+        step = firstrun.current(rows, request.query_params.get("step"))
+        ctx: dict[str, Any] = {}
+        if step["code"] == "company":
+            ctx.update(values={code: settings.get(code, "") for code in company.ALL_FIELDS},
+                       default_contact=texts.SUPPORT_CONTACT_URL, consent=by.get("consent"))
+        elif step["code"] == "points":
+            ctx.update(points=[p for p in facts["locations"] if p.get("active", True)],
+                       closed=[p["name"] for p in facts["locations"]
+                               if not p.get("active", True)])
+        elif step["code"] == "prices":
+            ctx.update(prices=firstrun.price_rows(facts["models"], facts["tariffs"]),
+                       archived=[m["title"] for m in await crm.bike_models()
+                                 if not m.get("active", True)])
+        elif step["code"] == "staff":
+            # /setup открыт по праву на настройки, а логины и имена - раздел
+            # «Сотрудники»: без него - только число входов из «Готовности».
+            see = may_view(request, "staff")
+            profiles = {p.get("code"): p for p in await crm.access_profiles()}
+            taken = firstrun.staff_roles(facts["staff"] if see else [])
+            ctx.update(people=[s for s in facts["staff"] if see and s.get("active", True)],
+                       staff_closed=not see, places=await location_names(),
+                       roles=[{"code": role, "title": title, "logins": taken[role],
+                               "profile": profiles.get(code)}
+                              for role, (code, title) in firstrun.ROLES.items()])
+        elif step["code"] == "connect":
+            ctx["connect"] = [by[code] for code in firstrun.CONNECT if code in by]
+        return render(request, "setup.html", steps=rows, step=step,
+                      skip=firstrun.following(rows, step["code"]),
+                      progress=firstrun.progress(rows), hidden=firstrun.hidden(settings),
+                      finished=settings.get(firstrun.STATE_KEY) == "done",
+                      summary=readiness.summary(items), connect_how=firstrun.CONNECT_HOW,
+                      shown=setup_shown(request), **ctx)
+
+    @app.post("/setup/company")
+    async def setup_company(request: Request) -> Response:
+        # Раздел /setup - настройки: право на правку проверил страж.
+        if not await save_company(request, await form(request)):
+            return redirect("/setup?step=company")
+        await setup_pass(request, "company")
+        flash(request, "Реквизиты сохранены. Бот подхватит их в течение "
+                       "нескольких минут.")
+        return redirect("/setup")
+
+    @app.post("/setup/points")
+    async def setup_points(request: Request) -> Response:
+        """Своя точка - той же проверкой, что в «Точках», но с адресом, режимом
+        и телефоном обязательно: ими бот отвечает клиенту «где вы» и «до
+        скольки». Поставочную точку (Казань) можно тут же закрыть."""
+        data = await form(request)
+        back = "/setup?step=points"
+        action = data.get("action") or ""
+        if action == "close":
+            place_id = logic.parse_id(data.get("location_id"))
+            rows = [x for x in await crm.locations() if x["id"] == place_id]
+            if not rows:
+                return render(request, "missing.html", status_code=404, what="Точка")
+            # Как «Закрыть» в «Точках»: карточки на ней остаются.
+            await crm.update_location(rows[0]["id"], active=False)
+            flash(request, f"Точка «{rows[0]['name']}» закрыта: в ответах бота и "
+                           "на выдаче её больше нет, открыть снова — в «Точках».")
+        elif action == "add":
+            # Город - тоже: пустой «Точки» читают как Казань, а у
+            # франчайзи свой город.
+            missing = [label for field, label in {"city": "город",
+                                                  **readiness.POINT_FIELDS}.items()
+                       if not (data.get(field) or "").strip()]
+            if missing:
+                flash(request, "Заполните " + ", ".join(missing) + ": этими полями "
+                               "бот отвечает клиенту «где вы» и «до скольки».", "err")
+                return redirect(back)
+            name = await add_location(request, data)
+            if name is None:
+                return redirect(back)
+            flash(request, f"Точка «{name}» добавлена.")
+        await setup_pass(request, "points")
+        return redirect(back if action in ("close", "add") else "/setup")
+
+    @app.post("/setup/prices")
+    async def setup_prices(request: Request) -> Response:
+        """Модели, которые сдаём, и цена недели у каждой - тем же путём, что
+        «Тарифы» (_tariff_fields, store_tariff и уникальность «модель + срок»).
+        Есть недельный тариф - правится его цена, нет - заводится новый;
+        та же цена ничего не пишет. Снятая галочка убирает модель в архив
+        каталога, как кнопка в «Каталоге». Пустое поле - цену не трогаем."""
+        if not may_edit(request, "tariffs"):
+            return denied(request, "tariffs")
+        data = await form(request)
+        back = "/setup?step=prices"
+        rows = firstrun.price_rows(await crm.bike_models(active_only=True),
+                                   await crm.tariffs(active_only=True, kind="bike"))
+        keep = [r for r in rows if r["key"] == firstrun.ANY_MODEL
+                or data.get(f"use_{r['key']}")]
+        writes = []
+        for row in keep:
+            raw = (data.get(f"week_{row['key']}") or "").strip()
+            week = row["week"]
+            if not raw or (week is not None and logic.parse_money(raw) == week["price"]):
+                continue
+            price = logic.check_amount(raw)
+            if not price.ok:
+                flash(request, f"{row['title']}: {price.error}", "err")
+                return redirect(back)
+            fields = _tariff_fields(request, {
+                "name": week["name"] if week else "Неделя", "period_days": str(firstrun.WEEK),
+                "price": raw, "note": (week or {}).get("note") or "", "kind": "bike",
+                "model": row["model"] or ""})
+            if fields is None:
+                return redirect(back)
+            writes.append((fields, week["id"] if week else None))
+        for fields, tariff_id in writes:
+            if not await store_tariff(request, fields, tariff_id):
+                return redirect(back)
+        dropped = [r for r in rows if r not in keep]
+        for row in dropped:
+            await crm.update_bike_model(row["key"], active=False)
+        await setup_pass(request, "prices")
+        flash(request, f"Цен недели сохранено: {len(writes)}"
+                       + (f"; в архив каталога: {', '.join(r['title'] for r in dropped)}"
+                          if dropped else "") + ".")
+        return redirect("/setup")
+
+    @app.post("/setup/staff")
+    async def setup_staff(request: Request) -> Response:
+        """Оператор или механик на встроенном профиле. Пароль придумывает
+        панель и показывает один раз: в базе только хэш, повторить его
+        нечем, а забытый задаётся заново в «Сотрудниках»."""
+        if not may_edit(request, "staff"):
+            return denied(request, "staff")
+        data = await form(request)
+        back = "/setup?step=staff"
+        if not form_once(data):
+            # Двойной клик: вход завело первое нажатие, его пароль ждёт в
+            # setup_issued - страница мастера покажет его и после этого ответа.
+            flash(request, "Форма уже отправлена — повторное нажатие пропущено.")
+            return redirect(back)
+        role = firstrun.ROLES.get(data.get("role") or "")
+        if role is None:
+            form_once_release(data)
+            flash(request, "Выберите, кого заводите: оператора или механика.", "err")
+            return redirect(back)
+        profile = await crm.access_profile_by_code(role[0])
+        if profile is None:
+            form_once_release(data)
+            flash(request, "Встроенного профиля нет — заведите сотрудника в "
+                           "«Сотрудниках».", "err")
+            return redirect(back)
+        password = logic.generate_password()
+        added = await add_staff(request, {**data, "password": password,
+                                          "profile_id": str(profile["id"])})
+        if added is None:
+            form_once_release(data)
+            return redirect(back)
+        await setup_pass(request, "staff")
+        # До следующей страницы мастера, и только её: она забирает пароль,
+        # и обновление страницы его уже не покажет.
+        setup_issued[request.state.staff["id"]] = (time.monotonic(), {
+            "login": added["login"], "password": password, "role": role[1],
+            "profile": profile["name"]})
+        return redirect(back)
+
+    @app.post("/setup/pass")
+    async def setup_step_pass(request: Request) -> Response:
+        """«Дальше» без записи: точки и сотрудники такие, как есть, а
+        подключения делаются на сервере. Проверка - своей кнопкой."""
+        code = (await form(request)).get("step") or ""
+        if code in firstrun.STEPS and code != "check":
+            await setup_pass(request, code)
+        return redirect("/setup")
+
+    @app.post("/setup/finish")
+    async def setup_finish(request: Request) -> Response:
+        await setup_pass(request, "check")
+        await crm.set_setting(firstrun.STATE_KEY, "done", by=who(request))
+        flash(request, "Мастер первого запуска пройден. Что ещё не готово — здесь, "
+                       "на «Готовности».")
+        return redirect("/readiness")
+
+    @app.post("/setup/dismiss")
+    async def setup_dismiss(request: Request) -> Response:
+        """Скрыть: после входа и на сводке мастера больше нет. Работе он не
+        мешал и так - страница остаётся по ссылке с «Готовности»."""
+        await crm.set_setting(firstrun.STATE_KEY, "dismissed", by=who(request))
+        flash(request, "Мастер скрыт. Вернуться к нему — «Настройки → Готовность».")
+        return redirect("/")
+
+    @app.post("/setup/resume")
+    async def setup_resume(request: Request) -> Response:
+        await crm.set_setting(firstrun.STATE_KEY, "", by=who(request))
+        return redirect("/setup")
 
     # ───────────────── справочники: точки, модели, совместимость ─────────────────
 
@@ -5064,22 +5361,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "directions": (data.get("directions") or "").strip() or None,
                 "lat": coord("lat"), "lon": coord("lon")}
 
-    @app.post("/locations")
-    async def location_create(request: Request) -> Response:
-        if not may_edit(request, "settings"):
-            return denied(request, "settings")
-        data = await form(request)
+    async def add_location(request: Request, data: dict) -> str | None:
+        """Новая точка справочника из формы: её имя, None - ошибка уже во
+        flash. Один путь для «Точек» и мастера первого запуска."""
         name = logic.check_name(data.get("name"), what="Название точки")
         city = logic.check_name(data.get("city") or "Казань", what="Город")
         note = logic.check_note(data.get("note"))
         for check in (name, city, note):
             if not check.ok:
                 flash(request, check.error, "err")
-                return redirect("/locations")
+                return None
         if name.value.lower() == "none":
             # «none» в адресе фильтра значит «без точки».
             flash(request, "Такое название занято фильтром «без точки».", "err")
-            return redirect("/locations")
+            return None
         try:
             await crm.create_location(
                 name=name.value, city=city.value,
@@ -5088,9 +5383,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except Exception as exc:                        # noqa: BLE001
             if "unique" in type(exc).__name__.lower():
                 flash(request, "Точка с таким названием уже есть.", "err")
-                return redirect("/locations")
+                return None
             raise
-        flash(request, "Точка добавлена.")
+        return name.value
+
+    @app.post("/locations")
+    async def location_create(request: Request) -> Response:
+        if not may_edit(request, "settings"):
+            return denied(request, "settings")
+        if await add_location(request, await form(request)) is not None:
+            flash(request, "Точка добавлена.")
         return redirect("/locations")
 
     # До /locations/{location_id}: иначе «transfer» ушёл бы туда номером точки.

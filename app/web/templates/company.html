@@ -10,17 +10,7 @@
   {# Их подставляют договор и акты вместо вписанных в шаблон текстом:
      менять реквизиты должен владелец, а не тот, кто правит docx. #}
   <form method="post" action="/company" class="grid2">
-    {% for code, label in COMPANY_FIELDS.items() %}
-    <label{% if code in ('company_name', 'company_address') %} class="wide"{% endif %}>{{ label }}
-      <input name="{{ code }}" value="{{ values[code] }}"{% if not can_edit(staff, 'settings') %} disabled{% endif %}></label>
-    {% endfor %}
-    {% for code, label in CONTACT_FIELDS.items() %}
-    <label class="wide">{{ label }}
-      <input name="{{ code }}" value="{{ values[code] }}" placeholder="{{ default_contact }}"{% if not can_edit(staff, 'settings') %} disabled{% endif %}>
-      <small class="muted">Это видит клиент в боте: «напишите нам напрямую…».
-        Можно «@имя» — развернём в ссылку. Пусто — работает зашитый
-        контакт {{ default_contact }}.</small></label>
-    {% endfor %}
+    {% include "_company_fields.html" %}
     {% if can_edit(staff, 'settings') %}<button type="submit">Сохранить</button>{% endif %}
   </form>
   <p class="muted">В шаблонах эти поля доступны как <code>{{ '{{ company_name }}' }}</code>,

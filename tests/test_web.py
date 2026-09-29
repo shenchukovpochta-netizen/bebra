@@ -113,6 +113,8 @@ class TestAuth(WebCase):
         self.assertEqual(self.client.get("/healthz").status_code, 200)
 
     def test_login_and_logout(self):
+        # Не пустая база: пустую владельца встречает мастер (test_firstrun).
+        self.seed()
         r = self.login()
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/")
@@ -126,6 +128,7 @@ class TestAuth(WebCase):
         self.assertIn("Неверный логин или пароль", r.text)
 
     def test_next_must_be_local(self):
+        self.seed()
         r = self.client.post("/login", data={"login": "admin", "password": "admin-pass-123",
                                              "next": "https://evil.example/"})
         self.assertEqual(r.headers["location"], "/")

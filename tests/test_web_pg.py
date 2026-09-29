@@ -184,6 +184,48 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIn('/?month=2025-01" title="прошлый месяц"',
                       await self.get_ok("/?month=2025-02"))
 
+    async def test_first_run_wizard_on_a_fresh_schema(self):
+        """Свежая схема - как у нового франчайзи: точки и цены поставочные,
+        реквизитов и сотрудников нет. Мастер встречает владельца, шаг цен
+        правит поставочный тариф на месте (частичный уникальный индекс
+        «модель + срок» не спорит), а готовое обязательное его убирает."""
+        async def login() -> str:
+            await self.client.post("/logout")
+            r = await self.client.post("/login", data={"login": "admin",
+                                                       "password": "admin-pass-123"})
+            return r.headers["location"]
+
+        self.assertEqual(await login(), "/setup")
+        self.assertIn("Первый запуск", await self.get_ok("/setup?step=points"))
+        tariffs = await self.crm.tariffs(active_only=True, kind="bike")
+        [first, second, *_] = await self.crm.bike_models(active_only=True)
+        week = next(t for t in tariffs if t["model"] == first["title"]
+                    and t["period_days"] == 7)
+        self.assertEqual(await self.post("/setup/prices", **{
+            f"use_{first['id']}": "1", f"week_{first['id']}": "2900"}), "/setup")
+        self.assertEqual((await self.crm.tariff(week["id"]))["price"], D("2900.00"))
+        self.assertEqual(len(await self.crm.tariffs(active_only=True, kind="bike")),
+                         len(tariffs), "правка на месте, а не второй тариф на срок")
+        models = {m["id"]: m for m in await self.crm.bike_models()}
+        self.assertFalse(models[second["id"]]["active"], "без галочки - в архив")
+        await self.post("/setup/staff", role="mechanic", login="petr")
+        self.assertEqual((await self.crm.staff_by_login("petr"))["profile_code"], "tech")
+        self.assertIn("пароль <code>", await self.get_ok("/setup?step=staff"))
+        self.assertEqual(await login(), "/setup", "реквизитов ещё нет")
+        await self.post("/setup/company", **{
+            "company_name": "ООО «Тест»", "company_short": "ООО «Тест»",
+            "company_inn": "000000000019", "company_ogrn": "1000000000000",
+            "company_address": "Самара", "company_phone": "+7 900",
+            "company_bank": "Банк", "company_account": "40702810000000000000",
+            "company_bik": "044525000", "company_corr": "30101810000000000000"})
+        # «Готовность» довольна (казанские точки с адресом и телефоном), но
+        # поставочные точки мастер ещё не показал - встречает дальше.
+        self.assertEqual(await login(), "/setup", "точки не пройдены")
+        self.assertIn('class="now">2 · Точки', await self.get_ok("/setup"))
+        await self.post("/setup/pass", step="points")
+        self.assertEqual(await login(), "/", "обязательное готово - мастера нет")
+        self.assertNotIn("Продолжить настройку", await self.get_ok("/"))
+
     async def test_points_report_on_postgres(self):
         """Третья точка через панель, выдача с неё, отчёт и страница точки,
         переименование каскадом - на настоящем SQL, а не на заглушке."""
