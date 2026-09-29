@@ -701,6 +701,9 @@ class FakeCrm:
         if location is None and bike_id is not None:
             location = self.bikes_[bike_id].get("location")
         rid = self._id()
+        # Одна транзакция в базе - одно now() у аренды и у её «в аренде»: по
+        # нему «Тарифы» узнают выдачу, открывшую интервал.
+        at = self._now()
         self.rentals_[rid] = {"id": rid, "client_id": client_id, "bike_id": bike_id,
                               "tariff_id": tariff_id, "tariff_name": tariff_name,
                               "period_days": period_days, "price": Decimal(price),
@@ -714,10 +717,9 @@ class FakeCrm:
                               "intent_at": None, "snooze_until": None,
                               "mileage_start": mileage_start, "mileage_end": None,
                               "promo_code": promo_code, "location": location,
-                              "created_by": created_by, "created_at": self._now(),
-                              "updated_at": self._now()}
+                              "created_by": created_by, "created_at": at,
+                              "updated_at": at}
         if bike_id is not None:
-            at = self._now()
             self._log_status(bike_id, self.bikes_[bike_id]["status"], "rented",
                              created_by, at)
             self.bikes_[bike_id]["status"] = "rented"
@@ -756,7 +758,13 @@ class FakeCrm:
                                  note=charge_note, created_by=created_by)
 
     async def update_rental(self, rental_id, **fields):
-        self.rentals_[rental_id].update(fields)
+        r = self.rentals_[rental_id]
+        # Как триггер crm.keep_rental_issue: первая смена срока помнит выдачу.
+        if ("period_days" in fields and fields["period_days"] != r.get("period_days")
+                and r.get("issue_period_days") is None):
+            r["issue_period_days"] = r.get("period_days")
+            r["issue_base_price"] = r.get("base_price") or r.get("price")
+        r.update(fields)
 
     async def close_rental(self, rental_id, *, closed_on, note, bike_status="available",
                            closed_by=None, mileage_end=None, return_location=None):
@@ -1440,6 +1448,162 @@ class FakeCrm:
         out: dict[int, list[dict]] = {}
         for row in self.status_log_:
             out.setdefault(row["bike_id"], []).append(row)
+        return out
+
+    async def model_point_days(self, since, until):
+        """Как в базе: журнал статусов на журнале мест, по модели и суткам
+        пояса процесса (он же пояс сессии базы), последние - до «сейчас»."""
+        from datetime import time as _time
+        tz = datetime.now().astimezone().tzinfo
+        now = self._now()
+        by_model: dict[str, list[dict]] = {}
+        for row in self.status_log_:
+            bike = self.bikes_.get(row["bike_id"])
+            if bike is not None:
+                by_model.setdefault(bike["model"], []).append(row)
+        out = []
+        # До первой строки журнала суток нет: не перебирать их с 2000 года.
+        first = min((r["changed_at"] for r in self.status_log_), default=None)
+        day = max(since, first.astimezone(tz).date()) if first else until + timedelta(days=1)
+        while day <= until:
+            start = datetime.combine(day, _time.min, tzinfo=tz)
+            end = min(datetime.combine(day + timedelta(days=1), _time.min, tzinfo=tz), now)
+            if end > start:
+                for model, log in by_model.items():
+                    cells = crm_logic.days_by_status_location(log, self.location_log_,
+                                                              start, end)
+                    for location, statuses in cells.items():
+                        for status, value in statuses.items():
+                            if status in crm_logic.OPERATIONAL_STATUSES and value > 0:
+                                out.append({"model": model, "location": location,
+                                            "day": day, "status": status, "days": value})
+            day += timedelta(days=1)
+        return out
+
+    def _stint_rental(self, bike_id, began, ended):
+        """Чья выдача велосипеда (строка rental_bikes или аренда без замен)
+        заведена внутри интервала «в аренде», иначе делит с ним больше
+        суток, при равенстве - поздняя. Не задевает ни одной - None («без
+        аренды»). Как CTE rented в CrmDB.tariff_rentals."""
+        tz = datetime.now().astimezone().tzinfo
+        a, b = began.astimezone(tz).date(), ended.astimezone(tz).date()
+        swapped = {x["rental_id"] for x in self.rental_bikes_}
+        stints = [(x["rental_id"], x["issued_on"],
+                   x.get("returned_on") or self.rentals_[x["rental_id"]].get("closed_on"),
+                   x.get("created_at"))
+                  for x in self.rental_bikes_ if x["bike_id"] == bike_id]
+        stints += [(r["id"], r["started_on"], r.get("closed_on"), r.get("created_at"))
+                   for r in self.rentals_.values()
+                   if r.get("bike_id") == bike_id and r["id"] not in swapped]
+
+        def inside(s):
+            return s[3] is not None and began <= s[3] < ended
+
+        def shared(s):
+            return (min(s[2] or b, b) - max(s[1], a)).days
+
+        stints = [s for s in stints if shared(s) >= 0 or inside(s)]
+        if not stints:
+            return None
+        return max(stints, key=lambda s: (inside(s), shared(s), s[1], s[0]))[0]
+
+    async def tariff_rentals(self, since, until):
+        """Как в базе: день аренды попадает в период своей полуночью по
+        поясу сессии, деньги - правилом _entry_rental, дни в аренде - по
+        выдаче велосипеда (_stint_rental), срок и цена - при выдаче."""
+        from datetime import time as _time
+        tz = datetime.now().astimezone().tzinfo
+
+        def within(day):
+            if day is None:
+                return False
+            return since <= datetime.combine(day, _time.min, tzinfo=tz) < until
+
+        def charges(r):
+            return [x for x in self.ledger_
+                    if r and x.get("rental_id") == r["id"] and x["kind"] == "charge"
+                    and x.get("period_from") is not None]
+
+        def term(r):
+            """Последний начисленный срок, начатый до дня сдачи (или в день
+            выдачи) - как lateral term в базе."""
+            if not r or r.get("closed_on") is None:
+                return None
+            lived = [x for x in charges(r) if x["period_from"] < r["closed_on"]
+                     or x["period_from"] == r["started_on"]]
+            return max(lived, key=lambda x: x["period_from"]) if lived else None
+
+        def lost(r):
+            """Первая смена из rented у велосипеда аренды со дня закрытия."""
+            if not r or r.get("closed_on") is None or r.get("bike_id") is None:
+                return False
+            midnight = datetime.combine(r["closed_on"], _time.min, tzinfo=tz)
+            after = [x for x in self.status_log_
+                     if x["bike_id"] == r["bike_id"] and x.get("from_status") == "rented"
+                     and x["changed_at"] >= midnight]
+            first = min(after, key=lambda x: (x["changed_at"], x["id"]), default=None)
+            return first is not None and first["to_status"] == "lost"
+
+        money: dict = {}
+        for entry in self.ledger_:
+            rental = self._entry_rental(entry)
+            key = rental["id"] if rental else None
+            cell = money.setdefault(key, {"paid": Decimal(0), "charged": Decimal(0)})
+            if entry["kind"] == "payment" and since <= entry["created_at"] < until:
+                cell["paid"] += Decimal(entry["amount"])
+            if entry["kind"] in ("charge", "fine"):
+                cell["charged"] -= Decimal(entry["amount"])
+        took: dict = {}
+        now = self._now()
+        for rows in self._log_by_bike().values():
+            rows = sorted(rows, key=lambda x: (x["changed_at"], x["id"]))
+            for i, row in enumerate(rows):
+                if row["to_status"] != "rented":
+                    continue
+                began = row["changed_at"]
+                ended = rows[i + 1]["changed_at"] if i + 1 < len(rows) else now
+                if not (began < until and ended > since):
+                    continue
+                lo, hi = max(began, since), min(ended, until)
+                key = self._stint_rental(row["bike_id"], began, ended)
+                took[key] = took.get(key, Decimal(0)) + crm_logic._span_days(hi - lo)
+        keys = {r["id"] for r in self.rentals_.values()
+                if within(r["started_on"]) or within(r.get("closed_on"))}
+        keys |= {k for k, v in money.items() if v["paid"]}
+        keys |= set(took)
+        out = []
+        for key in sorted(keys, key=lambda k: (k is None, k or 0)):
+            r = self.rentals_.get(key) or {}
+            bike = self.bikes_.get(r.get("bike_id")) or {}
+            own = [x for x in self.rentals_.values() if x["client_id"] == r.get("client_id")]
+            last = max(own, key=lambda x: (x["status"] == "active", x["id"]))["id"] if own else None
+            balance = self._balance(r["client_id"]) if r else Decimal(0)
+            finished = within(r.get("closed_on"))
+            changed = r.get("issue_period_days") is not None
+            last_term = term(r)
+            out.append({
+                "id": key, "client_id": r.get("client_id"), "tariff_id": r.get("tariff_id"),
+                "tariff_name": r.get("tariff_name"),
+                "period_days": r.get("issue_period_days") if changed else r.get("period_days"),
+                "tariff_changed": changed, "price": r.get("price"),
+                "base_price": r.get("issue_base_price") if changed else r.get("base_price"),
+                "model": bike.get("model"), "started_on": r.get("started_on"),
+                "closed_on": r.get("closed_on"), "status": r.get("status"),
+                "issued": within(r.get("started_on")), "finished": finished,
+                "paid": (money.get(key) or {}).get("paid", Decimal(0)),
+                "charged": (money.get(key) or {}).get("charged", Decimal(0))
+                if finished else Decimal(0),
+                "rented_days": took.get(key, Decimal(0)),
+                "renewals": sum(1 for x in charges(r)
+                                if x["period_from"] > r["started_on"]
+                                and (r.get("closed_on") is None
+                                     or x["period_from"] < r["closed_on"])),
+                "term_from": last_term["period_from"] if last_term else None,
+                "term_to": last_term["period_to"] if last_term else None,
+                "lost": lost(r),
+                "debt": -balance if key is not None and last == key and balance < 0
+                else Decimal(0),
+            })
         return out
 
     # ─────────────────────── аналитика по точкам ───────────────────────

@@ -1792,6 +1792,31 @@ select v.name, v.model, v.period_days, v.price, v.sort, 'bike'
 alter table crm.rentals add column if not exists base_price numeric(12,2);
 update crm.rentals set base_price = price where base_price is null;
 
+-- Срок и цена велосипеда при выдаче. Смена тарифа (service.change_tariff)
+-- переписывает period_days и base_price - начисления идут по новому, а
+-- отчёт «Тарифы» считает аренду по сроку выдачи: иначе неделя, переведённая
+-- на месяц, ушла бы в строку месяца вместе со своими недельными
+-- продлениями. Первая смена срока запоминает прежние; пусто - срок не
+-- меняли (или меняли до этих колонок: то уже не восстановить). Триггером,
+-- а не в change_tariff: срок меняет любое обновление, и ни одно не должно
+-- стереть выдачу.
+alter table crm.rentals add column if not exists issue_period_days integer;
+alter table crm.rentals add column if not exists issue_base_price numeric(12,2);
+create or replace function crm.keep_rental_issue() returns trigger
+language plpgsql as $$
+begin
+  if old.issue_period_days is null and new.period_days is distinct from old.period_days then
+    new.issue_period_days := old.period_days;
+    new.issue_base_price := coalesce(old.base_price, old.price);
+  end if;
+  return new;
+end
+$$;
+drop trigger if exists rentals_keep_issue on crm.rentals;
+create trigger rentals_keep_issue
+  before update of period_days on crm.rentals
+  for each row execute function crm.keep_rental_issue();
+
 create table if not exists crm.rental_extras (
   id         bigserial primary key,
   rental_id  bigint      not null references crm.rentals (id) on delete cascade,

@@ -1893,6 +1893,224 @@ class CrmDB:
                     cell[key] = row[key]
         return out
 
+    async def model_point_days(self, since: date, until: date) -> list[dict]:
+        """Велосипеде-дни модели по точке, суткам и статусу за дни [since,
+        until]: сутки - по поясу сессии, последние идут до этой минуты.
+
+        Та же арифметика, что bike_days_by_location (журнал статусов на
+        журнале мест, первая строка мест тянется в прошлое), только ещё по
+        модели и по суткам: так видно, в какие дни на точке не было
+        свободной модели. Только операционные статусы - выбывшие к спросу
+        отношения не имеют.
+
+        Сутки порождает сам интервал, а не окно: соединение окна с
+        интервалами по неравенствам - вложенный цикл «дни × интервалы», и
+        «с» 2000 года на журнале в пару лет упиралось в предел запроса.
+        """
+        rows = await self.pool.fetch(
+            """
+            with s as (
+              select bike_id, to_status, changed_at as a,
+                     coalesce(lead(changed_at) over w, now()) as b
+                from crm.bike_status_log
+              window w as (partition by bike_id order by changed_at, id)
+            ), p as (
+              select bike_id, nullif(to_location, '') as location,
+                     case when lag(id) over w is null then '-infinity'::timestamptz
+                          else changed_at end as a,
+                     coalesce(lead(changed_at) over w, 'infinity'::timestamptz) as b
+                from crm.bike_location_log
+              window w as (partition by bike_id order by changed_at, id)
+            ), x as (
+              select s.bike_id, p.location, s.to_status as status,
+                     greatest(s.a, coalesce(p.a, s.a), $1::date::timestamptz) as a,
+                     least(s.b, coalesce(p.b, s.b), ($2::date + 1)::timestamptz) as b
+                from s
+                left join p on p.bike_id = s.bike_id and p.a < s.b and p.b > s.a
+               where s.to_status = any($3::text[])
+                 and s.a < ($2::date + 1)::timestamptz and s.b > $1::date::timestamptz
+            )
+            select k.model, x.location, d.day, x.status,
+                   sum(extract(epoch from (least(x.b, (d.day + 1)::timestamptz)
+                                           - greatest(x.a, d.day::timestamptz)))) / 86400
+                     as days
+              from x
+              join crm.bikes k on k.id = x.bike_id
+              -- Сутки, которых касается интервал: от дня начала до дня
+              -- последней его секунды (конец в полночь следующих не задевает).
+              cross join lateral (
+                select x.a::date + n as day
+                  from generate_series(0, (x.b - interval '1 microsecond')::date
+                                          - x.a::date) as n
+              ) d
+             where x.b > x.a
+             group by k.model, x.location, d.day, x.status
+             order by k.model, x.location, d.day, x.status
+            """, since, until, list(logic.OPERATIONAL_STATUSES))
+        return [{"model": r["model"], "location": r["location"], "day": r["day"],
+                 "status": r["status"], "days": Decimal(str(r["days"]))}
+                for r in rows if r["days"] and r["days"] > 0]
+
+    # ─────────────────────── выгодность тарифов ───────────────────────
+
+    async def tariff_rentals(self, since: datetime, until: datetime) -> list[dict]:
+        """Аренды для отчёта «Тарифы» за [since, until): выданные или
+        закрытые в периоде и те, у кого в нём деньги или дни в аренде.
+
+        paid - платежи периода, отнесённые к аренде правилом журнала
+        (_ledger_rentals); rented_days - дни «в аренде» периода по журналу
+        статусов: интервал отходит той выдаче велосипеда (строка
+        rental_bikes или сама аренда без замен), что заведена внутри него,
+        иначе той, чьи дни он покрывает больше всех, при равенстве -
+        поздней: выдача с датой в будущем ставит «в аренде» сразу, а день
+        выдачи - завтрашний, и по дню начала интервал ушёл бы прошлой
+        аренде, сданной сегодня. Не задевает ни одной - «без аренды»
+        (импорт ставит «в аренде» и без клиента), а не ближайшей: чужие
+        дни без платежей роняли бы её чек. Строка с id None - то, что ни к
+        одной аренде не относится: сумма строк - ровно выручка и дни в
+        аренде парка, и чек «Итого» - средний чек сводки.
+
+        period_days и base_price - при выдаче (issue_*: смена тарифа их
+        переписывает), tariff_changed - срок меняли, и нынешние название
+        и цена уже не выдачи.
+
+        У закрытой в периоде (finished) - её исход: начислено за всю жизнь
+        (charged: начисления и штрафы), продления - начисления после
+        первого срока, как в «По точкам», но начатые до дня сдачи: ночной
+        проход утром дня платежа начисляет следующий срок, и сдавший в
+        тот день иначе числился бы продлившим. term_from/term_to - тот
+        самый последний срок, в котором сдали (по нему «раньше срока»),
+        lost - при закрытии велосипед ушёл в «потерян»: это не сдача. И
+        долг клиента, если это его последняя аренда - как долг по точке,
+        целиком и один раз.
+        """
+        attr = _ledger_rentals(
+            "(l.created_at >= $1 and l.created_at < $2) or l.client_id in ("
+            "select f.client_id from crm.rentals f "
+            "where f.closed_on::timestamptz >= $1 and f.closed_on::timestamptz < $2)")
+        rows = await self.pool.fetch(
+            f"""
+            with {attr},
+            money as (
+              select a.rental_id,
+                     coalesce(sum(a.amount) filter (where a.kind = 'payment'
+                                and a.created_at >= $1 and a.created_at < $2), 0) as paid,
+                     coalesce(-sum(a.amount) filter (where a.kind in ('charge', 'fine')), 0)
+                       as charged
+                from attr a
+               group by a.rental_id
+            ), s as (
+              select id, bike_id, to_status, changed_at as a,
+                     coalesce(lead(changed_at) over w, now()) as b
+                from crm.bike_status_log
+              window w as (partition by bike_id order by changed_at, id)
+            ), stints as (
+              select rb.rental_id, rb.bike_id, rb.issued_on as a,
+                     coalesce(rb.returned_on, r.closed_on) as b, rb.created_at as c
+                from crm.rental_bikes rb
+                join crm.rentals r on r.id = rb.rental_id
+              union all
+              select r.id, r.bike_id, r.started_on, r.closed_on, r.created_at
+                from crm.rentals r
+               where r.bike_id is not null
+                 and not exists (select 1 from crm.rental_bikes rb
+                                  where rb.rental_id = r.id)
+            ), rented as (
+              select distinct on (x.id) x.id, t.rental_id,
+                     extract(epoch from (least(x.b, $2::timestamptz)
+                                         - greatest(x.a, $1::timestamptz))) / 86400 as days
+                from s x
+                -- Претенденты - выдачи, чьи сутки интервал задевает, и та, что
+                -- заведена внутри него (выдача с датой в будущем, снятая до
+                -- своего дня). Чужая далёкая дней не получает: «в аренде» без
+                -- клиента из импорта - это «без аренды», а не ближайшая аренда.
+                left join stints t
+                  on t.bike_id = x.bike_id
+                 and (least(coalesce(t.b, x.b::date), x.b::date) >= greatest(t.a, x.a::date)
+                      or (t.c >= x.a and t.c < x.b))
+               where x.to_status = 'rented'
+                 and x.a < $2::timestamptz and x.b > $1::timestamptz
+               -- Первой - заведённая внутри интервала (она его и открыла),
+               -- дальше - больше общих суток, при равенстве - поздняя.
+               order by x.id, (t.c >= x.a and t.c < x.b) desc nulls last,
+                        least(coalesce(t.b, x.b::date), x.b::date)
+                          - greatest(t.a, x.a::date) desc nulls last,
+                        t.a desc, t.rental_id desc
+            ), took as (
+              select rental_id, sum(days) as rented_days from rented group by rental_id
+            ), last as (
+              select distinct on (client_id) client_id, id
+                from crm.rentals
+               order by client_id, (status = 'active') desc, id desc
+            ), bal as (
+              select client_id, sum(amount) as balance from crm.ledger group by client_id
+            ), keys as (
+              select id as rental_id from crm.rentals
+               where (started_on::timestamptz >= $1 and started_on::timestamptz < $2)
+                  or (closed_on::timestamptz >= $1 and closed_on::timestamptz < $2)
+              union select rental_id from money where paid <> 0
+              union select rental_id from took
+            )
+            select k.rental_id as id, r.client_id, r.tariff_id, r.tariff_name,
+                   coalesce(r.issue_period_days, r.period_days) as period_days,
+                   r.issue_period_days is not null as tariff_changed, r.price,
+                   case when r.issue_period_days is null then r.base_price
+                        else r.issue_base_price end as base_price,
+                   b.model, r.started_on, r.closed_on, r.status,
+                   coalesce(r.started_on::timestamptz >= $1
+                            and r.started_on::timestamptz < $2, false) as issued,
+                   coalesce(r.closed_on::timestamptz >= $1
+                            and r.closed_on::timestamptz < $2, false) as finished,
+                   coalesce(m.paid, 0) as paid,
+                   case when r.closed_on::timestamptz >= $1
+                             and r.closed_on::timestamptz < $2
+                        then coalesce(m.charged, 0) else 0 end as charged,
+                   coalesce(t.rented_days, 0) as rented_days,
+                   (select count(*) from crm.ledger l
+                     where l.rental_id = r.id and l.kind = 'charge'
+                       and l.period_from > r.started_on
+                       and (r.closed_on is null or l.period_from < r.closed_on))
+                     as renewals,
+                   term.period_from as term_from, term.period_to as term_to,
+                   coalesce(gone.to_status = 'lost', false) as lost,
+                   case when last.id = r.id and bal.balance < 0 then -bal.balance
+                        else 0 end as debt
+              from keys k
+              left join crm.rentals r on r.id = k.rental_id
+              left join crm.bikes b on b.id = r.bike_id
+              -- Последний начисленный срок, начатый до дня сдачи (первый -
+              -- и в сам день выдачи): срок дня платежа не прожит.
+              left join lateral (
+                select l.period_from, l.period_to from crm.ledger l
+                 where l.rental_id = r.id and l.kind = 'charge' and r.closed_on is not null
+                   and (l.period_from < r.closed_on or l.period_from = r.started_on)
+                 order by l.period_from desc limit 1
+              ) term on true
+              -- Чем кончилось «в аренде» у велосипеда аренды после дня
+              -- закрытия: первая же смена из rented - это закрытие.
+              left join lateral (
+                select g.to_status from crm.bike_status_log g
+                 where g.bike_id = r.bike_id and r.closed_on is not null
+                   and g.from_status = 'rented'
+                   and g.changed_at >= r.closed_on::timestamptz
+                 order by g.changed_at, g.id limit 1
+              ) gone on true
+              left join money m on m.rental_id is not distinct from k.rental_id
+              left join took t on t.rental_id is not distinct from k.rental_id
+              left join last on last.client_id = r.client_id
+              left join bal on bal.client_id = r.client_id
+             order by k.rental_id nulls last
+            """, since, until)
+        out = []
+        for r in rows:
+            row = dict(r)
+            row["renewals"] = int(row["renewals"] or 0)
+            for key in ("paid", "charged", "debt"):
+                row[key] = Decimal(row[key] or 0)
+            row["rented_days"] = Decimal(str(row["rented_days"] or 0))
+            out.append(row)
+        return out
+
     # ─────────────────────── аналитика по точкам ───────────────────────
     #
     # Ключ - текст crm.locations.name, None - «без точки». Корзину None

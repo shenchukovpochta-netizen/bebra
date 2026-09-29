@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Тарифы — {{ app_title }}{% endblock %}
+{% block content %}
+{# Рубли - только с доступом к финансам, как в «По точкам»: удержание и
+   ранние сдачи нужны и тому, кому деньги не показывают. #}
+{% set money_ok = can_view(staff, 'finance') %}
+{% set q = ('?' ~ query) if query else '' %}
+{% set sq = ('?' ~ span.query) if span.query else '' %}
+{# Разрез - адресом страницы: период из _points_period.html его не теряет. #}
+{% set here = '/reports/tariffs/model' if by_model else '/reports/tariffs' %}
+{% macro n(v, suffix='') %}{% if v is none %}—{% else %}{{ v }}{{ suffix }}{% endif %}{% endmacro %}
+<div class="bar"><h1>Тарифы <small class="muted">· {{ span.label }}</small></h1>
+  {% with active = 'tariffs' %}{% include "_report_tabs.html" %}{% endwith %}
+</div>
+<div class="bar">
+  {% with base = here %}{% include "_points_period.html" %}{% endwith %}
+  <nav class="tabs">
+    <a href="/reports/tariffs{{ sq }}" {% if not by_model %}class="on"{% endif %}>По срокам</a>
+    <a href="/reports/tariffs/model{{ sq }}" {% if by_model %}class="on"{% endif %}>Срок и модель</a>
+  </nav>
+  <a class="btn ghost" href="/reports/tariffs.xlsx{{ q }}">Excel</a>
+  <a class="btn ghost" href="/reports/tariffs.csv{{ q }}">CSV</a>
+</div>
+
+{% set b = best %}
+{% if (money_ok and b.check) or b.hold %}
+<div class="card">
+  {% if money_ok and b.both %}
+  <p><b>{{ b.both.title }}</b> выигрывает и по чеку ({{ money(b.both.avg_check) }} за день
+    аренды), и по удержанию (держат в среднем {{ b.both.avg_days }} дн.) — его и
+    предлагать первым.</p>
+  {% else %}
+  {% if money_ok and b.check %}
+  <p>Лучший чек — <b>{{ b.check.title }}</b>: {{ money(b.check.avg_check) }} за день аренды{% if b.check.avg_days is not none %}, держат в среднем {{ b.check.avg_days }} дн.{% endif %}.</p>
+  {% endif %}
+  {% if b.hold %}
+  <p>Дольше держит — <b>{{ b.hold.title }}</b>: в среднем {{ b.hold.avg_days }} дн. на
+    аренду{% if b.hold.renewed_share is not none %}, продлили хоть раз {{ b.hold.renewed_share }} %{% endif %}{% if money_ok and b.hold.avg_check is not none %}, чек {{ money(b.hold.avg_check) }}{% endif %}.</p>
+  {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+<div class="table-wrap">
+<table class="cards">
+  <tr><th>Срок</th><th class="num">Выдано</th><th class="num">Закрыто</th>
+    <th class="num">Средний<br>срок, дн.</th><th class="num">Продлили<br>хоть раз</th>
+    <th class="num">Продлений<br>в среднем</th><th class="num">Раньше<br>срока</th>
+    {% if money_ok %}<th class="num">Цена/день<br>по тарифу</th><th class="num">Чек/день</th>
+    <th class="num">Выручка</th><th class="num">Доля<br>выручки</th>
+    <th class="num">Долг</th>{% endif %}</tr>
+  {% for r in rows %}
+  {% set out = 'muted' if r.few else '' %}
+  <tr>
+    <td data-label="Срок">{{ r.title }}
+      {% if money_ok and r.best_check %} <span class="tag ok">лучший чек</span>{% endif %}
+      {% if r.best_hold %} <span class="tag ok">дольше держит</span>{% endif %}
+      {% if r.names %}<br><small class="muted">{{ r.names|join(', ') }}</small>{% endif %}</td>
+    <td class="num" data-label="Выдано">{{ r.issued }}</td>
+    <td class="num {{ out }}" {% if r.few and r.key is not none %}title="меньше {{ TARIFF_MIN_FINISHED }} сданных аренд — исход не сравниваем"{% endif %} data-label="Закрыто">{{ r.finished }}{% if r.lost %}<br><small class="muted">потеряно {{ r.lost }}</small>{% endif %}</td>
+    <td class="num {{ out }}" data-label="Средний срок, дн.">{{ n(r.avg_days) }}</td>
+    <td class="num {{ out }}" data-label="Продлили хоть раз">{{ n(r.renewed_share, ' %') }}</td>
+    <td class="num {{ out }}" data-label="Продлений в среднем">{{ n(r.avg_renewals) }}</td>
+    <td class="num {{ out }}" data-label="Раньше срока">{{ n(r.early_share, ' %') }}</td>
+    {% if money_ok %}
+    <td class="num" data-label="Цена/день по тарифу">{{ money(r.price_per_day) }}</td>
+    <td class="num {% if r.avg_check is none or r.thin or r.prepaid %}muted{% elif r.avg_check >= CHECK_TARGET %}ok{% else %}bad{% endif %}" {% if r.prepaid %}title="срок длиннее половины периода: предоплата раздувает чек"{% endif %} data-label="Чек/день">{{ money(r.avg_check) }}</td>
+    <td class="num" data-label="Выручка">{{ money(r.paid) }}</td>
+    <td class="num" data-label="Доля выручки">{{ n(r.revenue_share, ' %') }}</td>
+    <td class="num {% if r.debt %}bad{% endif %}" data-label="Долг">{{ money(r.debt) }}{% if r.debt_share is not none and r.debt %} <small class="muted">· {{ r.debt_share }} %</small>{% endif %}</td>
+    {% endif %}
+  </tr>
+  {% else %}
+  <tr><td colspan="{{ 12 if money_ok else 7 }}" class="muted">За период нет ни аренд, ни платежей.</td></tr>
+  {% endfor %}
+  {% if rows %}{% set t = total %}
+  <tr class="total">
+    <td data-label="Срок"><b>Итого</b></td>
+    <td class="num" data-label="Выдано">{{ t.issued }}</td>
+    <td class="num" data-label="Закрыто">{{ t.finished }}{% if t.lost %}<br><small class="muted">потеряно {{ t.lost }}</small>{% endif %}</td>
+    <td class="num" data-label="Средний срок, дн.">{{ n(t.avg_days) }}</td>
+    <td class="num" data-label="Продлили хоть раз">{{ n(t.renewed_share, ' %') }}</td>
+    <td class="num" data-label="Продлений в среднем">{{ n(t.avg_renewals) }}</td>
+    <td class="num" data-label="Раньше срока">{{ n(t.early_share, ' %') }}</td>
+    {% if money_ok %}
+    <td class="num" data-label="Цена/день по тарифу">{{ money(t.price_per_day) }}</td>
+    <td class="num {% if t.avg_check is none %}muted{% elif t.avg_check >= CHECK_TARGET %}ok{% else %}bad{% endif %}" data-label="Чек/день">{{ money(t.avg_check) }}</td>
+    <td class="num" data-label="Выручка">{{ money(t.paid) }}</td>
+    <td class="num" data-label="Доля выручки">{{ n(t.revenue_share, ' %') }}</td>
+    <td class="num" data-label="Долг">{{ money(t.debt) }}{% if t.debt_share is not none and t.debt %} <small class="muted">· {{ t.debt_share }} %</small>{% endif %}</td>
+    {% endif %}
+  </tr>
+  {% endif %}
+</table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
+<p class="muted">Срок — тот, что был в аренде при выдаче: сменили тариф — аренда
+  остаётся в строке своего первого срока{% if by_model %}, модель —
+  по каталогу: велосипед аренды, названный по накладной, стоит под своим
+  клиентским именем{% endif %}. Выдано — аренды, начатые за период. Всё
+  остальное про исход — продлили, средний срок, раньше срока{% if money_ok %},
+  долг{% endif %} — считается по арендам, закрытым за период: у идущей
+  исход ещё не известен, и месяц, выданный неделю назад, выглядел бы
+  «ни разу не продлённым». Признанные потерянными закрыты, но не сданы:
+  срок, продления и «раньше срока» — только по сданным{% if money_ok %}, а
+  долг — по всем закрытым{% endif %}.</p>
+<p class="muted">Продлили хоть раз — доля сданных аренд, у которых был
+  начислен хотя бы один срок после первого и начат до дня сдачи (срок,
+  начисленный утром в день сдачи, — не продление); продлений в среднем —
+  сколько таких сроков на аренду. Раньше срока — сдали посреди последнего
+  начисленного срока: не в последний его день и не в день следующего
+  платежа. Дольше держит — срок с самым длинным средним сроком сданных
+  аренд: доля продлений тут не судья, 21 день — это два продления недели
+  и ни одного у месяца.</p>
+{% if money_ok %}
+<p class="muted">Чек/день — та же формула, что на сводке, только по срокам:
+  платежи за период, отнесённые к аренде тем же правилом, что в окупаемости
+  и «По точкам» (своя аренда записи, иначе аренда клиента в тот день, иначе
+  ближайшая), на один день аренды её велосипеда. «Итого» — сумма строк и
+  совпадает с чеком сводки за тот же период{% if rows|selectattr('key', 'none')|list %};
+  «{{ NO_RENTAL_TITLE }}» — платежи клиентов без аренд и дни в аренде, которые
+  ни к одной аренде не отнести{% endif %}. Цена по тарифу — сколько
+  велосипед стоит в день по тарифу выданных аренд; разница с чеком — скидки,
+  долги и ранние сдачи. Долг — минус клиента после закрытой аренды, если она
+  у него последняя, а рядом — доля от начисленного за всю аренду.</p>
+{% endif %}
+<p class="muted">Лучший чек сравнивается у сроков, где за период не меньше
+  {{ TARIFF_MIN_DAYS }} дней в аренде, удержание — где не меньше
+  {{ TARIFF_MIN_FINISHED }} сданных аренд; бледные цифры — данных меньше,
+  это случай, а не свойство тарифа.{% if money_ok and rows|selectattr('prepaid')|list %}
+  Срок длиннее половины периода в спор о чеке не идёт: его оплата вперёд
+  ложится в период целиком, а дни — кусками. Чтобы сравнить и его, откройте
+  период хотя бы вдвое длиннее срока.{% endif %}</p>
+</div>
+{% endblock %}

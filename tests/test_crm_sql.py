@@ -218,6 +218,10 @@ class TestCrmSql(unittest.TestCase):
             # аналитика по точкам: одно правило денег на окупаемость и точки
             self.db.model_money(datetime(2026, 9, 1, tzinfo=UTC),
                                 datetime(2026, 9, 13, tzinfo=UTC)),
+            # «Тарифы» и «Что купить»: то же правило денег, дни по моделям
+            self.db.tariff_rentals(datetime(2026, 9, 1, tzinfo=UTC),
+                                   datetime(2026, 9, 13, tzinfo=UTC)),
+            self.db.model_point_days(date(2026, 9, 1), today),
             self.db.bike_days_by_location(datetime(2026, 9, 1, tzinfo=UTC),
                                           datetime(2026, 9, 13, tzinfo=UTC)),
             # с какого момента у сети и у точки есть дни: неполные месяцы

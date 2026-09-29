@@ -23,7 +23,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -656,6 +656,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         BATTERY_WEAR_REASONS=logic.BATTERY_WEAR_REASONS,
         IDLE_TARGET_PERCENT=logic.IDLE_TARGET_PERCENT, CHECK_TARGET=logic.CHECK_TARGET,
         NO_POINT_TITLE=logic.NO_POINT_TITLE,
+        TARIFF_MIN_FINISHED=logic.TARIFF_MIN_FINISHED, TARIFF_MIN_DAYS=logic.TARIFF_MIN_DAYS,
+        NO_RENTAL_TITLE=logic.NO_RENTAL_TITLE, BUY_PERIOD_DAYS=logic.BUY_PERIOD_DAYS,
+        BUY_MIN_DAYS=logic.BUY_MIN_DAYS, BUY_VERDICTS=logic.BUY_VERDICTS,
         amortization_month=logic.amortization_month, fleet_losses=logic.fleet_losses,
         ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
         INTENTS=logic.INTENTS,
@@ -3711,6 +3714,138 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return await table(ext, name, ["Модель", "Великов", "Дней в аренде", "Чек/день",
                            "Оплачено", "Начислено", "Ремонт", "Работы клиентам",
                            "Амортизация", "Маржа", "Маржа %"], rows)
+
+    # ─────────────────────── выгодность тарифов ───────────────────────
+    #
+    # Срок аренды против чека и удержания. Период - как у «По точкам»: 30
+    # дней до этой минуты (окно сводки, и чек «Итого» совпадает с ней),
+    # месяц или свой интервал. Рубли - только с правом на финансы.
+
+    async def tariffs_data(request: Request, *, by_model: bool | None = None) -> dict:
+        span = logic.report_period(request.query_params, now=datetime.now().astimezone())
+        if by_model is None:
+            by_model = request.query_params.get("by") == "model"
+        aliases = logic.model_aliases(await crm.bike_models()) if by_model else None
+        report = logic.tariff_rows(await crm.tariff_rentals(span["start"], span["end"]),
+                                   by_model=by_model, aliases=aliases,
+                                   window_days=(span["until"] - span["since"]).days + 1)
+        # Хвост адреса: период и разрез едут в выгрузку - выгружают то, что видят.
+        query = "&".join(x for x in (span["query"], "by=model" if by_model else "") if x)
+        return {"span": span, "by_model": by_model, "query": query, **report}
+
+    @app.get("/reports/tariffs")
+    async def tariffs_report(request: Request) -> Response:
+        return render(request, "tariff_report.html", **await tariffs_data(request))
+
+    # Разрез «срок и модель» - своим адресом: переключатели периода
+    # (_points_period.html) знают только адрес страницы, и с ?by=model
+    # каждая смена месяца молча возвращала таблицу по срокам. ?by=model
+    # остаётся для старых ссылок и выгрузки.
+    @app.get("/reports/tariffs/model")
+    async def tariffs_by_model(request: Request) -> Response:
+        return render(request, "tariff_report.html",
+                      **await tariffs_data(request, by_model=True))
+
+    # Колонки выгрузки: заголовок, значение строки, денежная ли.
+    TARIFF_COLUMNS: tuple[tuple[str, Any, bool], ...] = (
+        ("Выдано", lambda r: r["issued"], False),
+        ("Закрыто", lambda r: r["finished"], False),
+        ("Из них потеряно", lambda r: r["lost"], False),
+        ("Средний срок, дн.", lambda r: r["avg_days"], False),
+        ("Продлили хоть раз, %", lambda r: r["renewed_share"], False),
+        ("Продлений в среднем", lambda r: r["avg_renewals"], False),
+        ("Сдали раньше срока, %", lambda r: r["early_share"], False),
+        ("Дней в аренде", lambda r: round(float(r["rented_days"]), 1), False),
+        ("Цена по тарифу/день", lambda r: r["price_per_day"], True),
+        ("Оплачено", lambda r: r["paid"], True),
+        ("Доля выручки, %", lambda r: r["revenue_share"], True),
+        ("Чек/день", lambda r: r["avg_check"], True),
+        ("Долг", lambda r: r["debt"], True),
+        ("Долг от начисленного, %", lambda r: r["debt_share"], True),
+    )
+
+    @app.get("/reports/tariffs.{ext}")
+    async def tariffs_table(request: Request, ext: str) -> Response:
+        if ext not in EXPORT_FORMATS:
+            raise HTTPException(status_code=404)
+        data = await tariffs_data(request)
+        columns = [c for c in TARIFF_COLUMNS if may_view(request, "finance") or not c[2]]
+        by_model = data["by_model"]
+        out = [[logic.period_title(r["period_days"]) if r["period_days"] else r["title"],
+                *([r["model"] or ""] if by_model else []),
+                *(get(r) for _, get, _ in columns)]
+               for r in (*data["rows"], data["total"])]
+        span = data["span"]
+        return await table(ext, f"tariffs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
+                           ["Срок", *(["Модель"] if by_model else []),
+                            *(title for title, _, _ in columns)], out)
+
+    # ─────────────────────── что купить следующим ───────────────────────
+    #
+    # Подсказка к партии поверх окупаемости: деньги модели - тот же
+    # model_money и payback_rows, дни и «без свободной» - журналы статусов и
+    # мест по суткам, спрос - открытые заявки. Период по умолчанию - 90 дней
+    # по сегодня: партию по одному месяцу не решают. Это рубли модели,
+    # поэтому право - как у окупаемости.
+
+    async def buy_data(request: Request) -> dict:
+        now = datetime.now().astimezone()
+        params: Any = request.query_params
+        if not any(params.get(k) for k in ("month", "since", "until")):
+            params = {"since": (now.date() - timedelta(days=logic.BUY_PERIOD_DAYS - 1))
+                      .isoformat()}
+        span = logic.report_period(params, now=now)
+        fleet = await crm.bikes(limit=10000)
+        aliases = logic.model_aliases(await crm.bike_models())
+        payback = logic.payback_rows(fleet, await crm.model_money(span["start"], span["end"]),
+                                     days=(span["until"] - span["since"]).days + 1)
+        day_rows = await crm.model_point_days(span["since"], span["until"])
+        raw = str(request.query_params.get("budget") or "").strip()
+        budget = logic.check_amount(raw) if raw else None
+        rows = logic.buy_rows(
+            payback, days=logic.model_days(day_rows, aliases=aliases),
+            zero=logic.zero_free_days(day_rows, before=now.date(), aliases=aliases),
+            prices=logic.last_purchase_prices(fleet, await crm.purchases(limit=10000),
+                                              aliases=aliases),
+            demand=logic.booking_pressure(await crm.bookings(status="new", limit=1000),
+                                          fleet, aliases=aliases),
+            bikes=fleet, presence=logic.model_presence(day_rows, now=now, aliases=aliases),
+            aliases=aliases)
+        ok = budget is not None and budget.ok
+        # Хвост адреса для выгрузки: тот же период и тот же бюджет.
+        query = urlencode({"since": span["since"].isoformat(),
+                           "until": span["until"].isoformat(),
+                           **({"budget": raw} if ok else {})})
+        return {"span": span, "rows": rows, "budget_raw": raw, "query": query,
+                "budget_error": budget.error if budget is not None and not ok else "",
+                "plan": logic.buy_plan(rows, budget=budget.value if ok else None)}
+
+    @app.get("/reports/buy")
+    async def buy_report(request: Request) -> Response:
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        return render(request, "buy.html", **await buy_data(request))
+
+    @app.get("/reports/buy.{ext}")
+    async def buy_table(request: Request, ext: str) -> Response:
+        if ext not in EXPORT_FORMATS:
+            raise HTTPException(status_code=404)
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        data = await buy_data(request)
+        rows = [[r["model"], r["fleet"], r["assembly"], r["utilization"], r["idle_percent"],
+                 r["repair_percent"], r["revenue_per_day"], r["repair_per_day"],
+                 r["avg_check"], r["price"], r["price_no"] or "", r["payback_months"],
+                 r["zero_days"], r["bookings"], r["unmet"],
+                 logic.BUY_VERDICTS[r["verdict"]], r["count"] or "", r["reason"]]
+                for r in data["rows"]]
+        span = data["span"]
+        return await table(ext, f"buy-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
+                           ["Модель", "В парке", "На сборке", "Загрузка, %", "Простой, %",
+                            "Ремонт и ТО, %", "Выручка/велодень", "Ремонт/велодень",
+                            "Чек/день", "Цена в последней закупке", "Закупка",
+                            "Окупаемость, мес.", "Суток без свободной", "Заявок",
+                            "Заявок без велосипеда", "Решение", "Сколько", "Почему"], rows)
 
     async def period_of(request: Request) -> dict:
         """Период отчёта: как в финансах - с начала месяца по сегодня."""

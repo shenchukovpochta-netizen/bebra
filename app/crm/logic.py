@@ -2125,6 +2125,529 @@ def payback_total(rows: Iterable[dict]) -> dict[str, Any]:
     return total
 
 
+# ─────────────────────── выгодность тарифов ───────────────────────
+#
+# Какой срок аренды выгоднее: чек и удержание рядом. Строка - срок тарифа
+# при выдаче (rentals.issue_period_days, а пока тариф не меняли -
+# period_days), по желанию ещё и модель каталога. Деньги - платежи
+# периода, отнесённые к аренде единым правилом журнала
+# (db._ledger_rentals); дни в аренде - журнал статусов, отнесённый к той
+# выдаче велосипеда, что тогда шла. Строки вместе со
+# строкой «без аренды» складываются в общие три числа за тот же период.
+#
+# Исход аренды - продлили ли, сдали ли раньше срока, остался ли долг -
+# берётся у закрытых за период: у идущей он ещё не известен, и месяц,
+# выданный неделю назад, иначе выглядел бы «ни разу не продлённым».
+# Признанная потерянной закрыта, но не сдана: в срок, продления и «раньше
+# срока» она не идёт (её конец - порог розыска, а не решение курьера),
+# в долг - идёт, и считается отдельно.
+
+# Меньше стольких сданных за период аренд удержание срока не сравниваем:
+# «продлили двое из двух» - это не 100 %.
+TARIFF_MIN_FINISHED = 5
+# Меньше стольких дней в аренде не сравниваем чек: неделя одного курьера -
+# это клиент, а не тариф.
+TARIFF_MIN_DAYS = 30
+NO_RENTAL_TITLE = "без аренды"
+PERIOD_TITLES: dict[int, str] = {1: "Сутки", 7: "Неделя", 14: "Две недели", 30: "Месяц"}
+_TENTH = Decimal("0.1")
+
+
+def period_title(days: Any) -> str:
+    """Срок тарифа словами: 7 - «Неделя», 21 - «21 дн.»."""
+    n = int(days or 0)
+    return PERIOD_TITLES.get(n) or f"{n} дн."
+
+
+def percent_of(part: Any, whole: Any) -> float | None:
+    """Доля в процентах с одним знаком. От нуля - None, а не 0 %: «ноль
+    из нуля» - это отсутствие данных, а не плохой результат."""
+    total = Decimal(str(whole or 0))
+    if total <= 0:
+        return None
+    return float(round(100 * Decimal(str(part or 0)) / total, 1))
+
+
+def _mean(values: Sequence[Any]) -> Decimal | None:
+    """Среднее с одним знаком; пусто - None: среднего из ничего нет."""
+    if not values:
+        return None
+    return (Decimal(sum(values)) / len(values)).quantize(_TENTH, rounding=ROUND_HALF_UP)
+
+
+def early_return(rental: Mapping[str, Any]) -> bool:
+    """Сдал посреди оплаченного срока: не в его последний день и не в день
+    следующего платежа. Потерянный не сдан вовсе.
+
+    Срок - последнее начисление, начатое до дня сдачи (term_from,
+    term_to), а не billed_until: ночной проход начисляет новый срок утром
+    в день платежа, и курьер, сдавший велосипед в тот же день, иначе
+    числился бы вернувшим его на шесть дней раньше. По начислениям, а не
+    по сроку тарифа от начала: смена тарифа сдвигает границы сроков.
+    Начислений нет (ручная аренда без них) - целые сроки тарифа от
+    начала. У суточного тарифа раньше срока не сдают по определению.
+    """
+    start, end = rental.get("started_on"), rental.get("closed_on")
+    if rental.get("lost") or start is None or end is None or end < start:
+        return False
+    term_from, term_to = rental.get("term_from"), rental.get("term_to")
+    if term_from is not None and term_to is not None:
+        return term_from <= end < term_to - timedelta(days=1)
+    period = int(rental.get("period_days") or 0)
+    if period < 2:
+        return False
+    used = (end - start).days
+    return used < period - 1 or 1 <= used % period <= period - 2
+
+
+def _tariff_row(key: Any, items: list[Mapping[str, Any]], *,
+                total_paid: Decimal) -> dict[str, Any]:
+    issued = [r for r in items if r.get("issued")]
+    finished = [r for r in items if r.get("finished")]
+    # Исход - у сданных: потерянная кончилась порогом розыска.
+    returned = [r for r in finished if not r.get("lost")]
+    count = len(returned)
+    paid = to_money(sum((to_money(r.get("paid")) for r in items), Decimal(0)))
+    rented = sum((Decimal(str(r.get("rented_days") or 0)) for r in items), Decimal(0))
+    charged = to_money(sum((to_money(r.get("charged")) for r in finished), Decimal(0)))
+    debt = to_money(sum((to_money(r.get("debt")) for r in finished), Decimal(0)))
+    renewals = [int(r.get("renewals") or 0) for r in returned]
+    renewed = sum(1 for n in renewals if n > 0)
+    early = sum(1 for r in returned if early_return(r))
+    lengths = [max((r["closed_on"] - r["started_on"]).days, 0) for r in returned
+               if r.get("closed_on") and r.get("started_on")]
+    # Цена по тарифу - велосипеда, без доп. аккумулятора (base_price), как
+    # у акций: сравниваются сроки, а не комплектация. Цена - выдачи
+    # (tariff_changed: база отдаёт issue_base_price), название тарифа -
+    # только у несменённых: у сменённого оно уже нового срока.
+    prices = [per_day(r.get("base_price") or r.get("price"), r.get("period_days"))
+              for r in issued if int(r.get("period_days") or 0) > 0]
+    if key == "total":
+        title, period, model = "Итого", None, None
+    elif key is None:
+        title, period, model = NO_RENTAL_TITLE, None, None
+    else:
+        period, model = key
+        title = period_title(period) + (f" · {model}" if model else "")
+    return {
+        "key": key, "title": title, "period_days": period, "model": model,
+        # Названия тарифов строки, если они не повторяют срок словами.
+        "names": sorted({str(r.get("tariff_name") or "").strip()
+                         for r in items
+                         if r.get("id") is not None and not r.get("tariff_changed")}
+                        - {"", period_title(period) if period else ""}),
+        "issued": len(issued), "finished": len(finished), "returned": count,
+        "lost": len(finished) - count,
+        "lost_share": percent_of(len(finished) - count, len(finished)),
+        "avg_days": _mean(lengths),
+        "renewed": renewed, "renewed_share": percent_of(renewed, count),
+        "avg_renewals": _mean(renewals),
+        "early": early, "early_share": percent_of(early, count),
+        "paid": paid, "revenue_share": percent_of(paid, total_paid),
+        "rented_days": rented,
+        # Тот же средний чек, что на сводке, - и то же правило «от одного
+        # полного велосипеде-дня».
+        "avg_check": fleet_metrics({"rented": rented}, paid)["avg_check"],
+        "charged": charged, "debt": debt,
+        "debtors": sum(1 for r in finished if to_money(r.get("debt")) > 0),
+        "debt_share": percent_of(debt, charged),
+        "price_per_day": (to_money(sum(prices, Decimal(0)) / len(prices))
+                          if prices else None),
+        "few": count < TARIFF_MIN_FINISHED, "thin": rented < TARIFF_MIN_DAYS,
+        "prepaid": False, "best_check": False, "best_hold": False,
+    }
+
+
+def tariff_rows(rentals: Iterable[Mapping[str, Any]], *, by_model: bool = False,
+                aliases: Mapping[str, str] | None = None,
+                window_days: int | None = None) -> dict[str, Any]:
+    """Сравнение сроков аренды за период: строка на срок (или срок и
+    модель каталога), «без аренды» - если в ней что-то есть, и «Итого».
+
+    rentals - ответ CrmDB.tariff_rentals: строка на аренду с деньгами и
+    днями периода и флагами issued (выдана в периоде) и finished (закрыта
+    в периоде); id None - платежи клиентов без аренд и дни «в аренде» без
+    аренды. «Итого» - сумма строк, его чек - средний чек парка.
+
+    best: check - лучший чек, hold - дольше держит (средний срок сданных,
+    при равенстве - доля продливших), both - один срок выигрывает и то и
+    другое. Не по доле продлений: 21 день - два продления недели и ни
+    одного у месяца, и доля выбирала бы самый короткий срок, даже когда
+    месячные держат вдвое дольше. Спорят только сроки с данными (few,
+    thin) и только когда их хотя бы два: «лучший из одного» ничего не
+    говорит.
+    Срок длиннее половины периода (window_days - его сутки) в спор о чеке
+    не идёт (prepaid): его оплата вперёд ложится в период целиком, а дни -
+    кусками, и месяц в окне тридцати дней выигрывал бы чек предоплатой.
+    """
+    items = list(rentals)
+    total_paid = to_money(sum((to_money(r.get("paid")) for r in items), Decimal(0)))
+    groups: dict[tuple[int, str | None], list[Mapping[str, Any]]] = {}
+    orphans = []
+    for r in items:
+        if r.get("id") is None:
+            orphans.append(r)
+            continue
+        model = (catalogue_model(r.get("model"), aliases) or "—") if by_model else None
+        groups.setdefault((int(r.get("period_days") or 0), model), []).append(r)
+    rows = [_tariff_row(key, groups[key], total_paid=total_paid)
+            for key in sorted(groups, key=lambda k: (k[0], k[1] or ""))]
+    if any(to_money(r.get("paid")) or Decimal(str(r.get("rented_days") or 0))
+           for r in orphans):
+        rows.append(_tariff_row(None, orphans, total_paid=total_paid))
+    for row in rows:
+        row["prepaid"] = bool(window_days and row["period_days"]
+                              and 2 * row["period_days"] > window_days)
+    # Есть ли число, а не правда ли оно: срок, где чек 0,00 или сдают в
+    # день выдачи, - худший в споре, а не выбывший из него.
+    checks = [r for r in rows if r["key"] is not None and not r["thin"]
+              and not r["prepaid"] and r["avg_check"] is not None]
+    holds = [r for r in rows if r["key"] is not None and not r["few"]
+             and r["avg_days"] is not None]
+    check = (max(checks, key=lambda r: (r["avg_check"], r["avg_days"] or 0))
+             if len(checks) > 1 else None)
+    hold = (max(holds, key=lambda r: (r["avg_days"], r["renewed_share"] or 0,
+                                      r["avg_check"] or 0))
+            if len(holds) > 1 else None)
+    for row in rows:
+        row["best_check"] = row is check
+        row["best_hold"] = row is hold
+    return {"rows": rows, "total": _tariff_row("total", items, total_paid=total_paid),
+            "best": {"check": check, "hold": hold,
+                     "both": check if check is not None and check is hold else None}}
+
+
+# ─────────────────────── что купить следующим ───────────────────────
+#
+# Подсказка к следующей партии: какую модель и сколько. Модель - название
+# каталога: в парке один велосипед записан по накладной, другой
+# по-клиентски, а заявка из кабинета - всегда по-клиентски. Деньги модели -
+# из окупаемости (payback_rows поверх того же model_money), дни - журнал
+# статусов на журнале мест по модели и суткам, давление спроса - сутки без
+# свободной модели на точке и открытые заявки, которым сейчас нечего
+# выдать. Брать стоит модель, которая почти не стоит (простой ниже цели) и
+# окупается быстрее срока службы; столько, чтобы при спросе периода простой
+# вышел на цель, считая парк сейчас и на сборке.
+
+# Период по умолчанию: решение о партии на месяц данных - это решение по
+# одной выдаче партии или одному празднику.
+BUY_PERIOD_DAYS = 90
+# Меньше стольких велосипеде-дней модели за период судить о ней рано:
+# два велосипеда неделю - это не статистика.
+BUY_MIN_DAYS = 30
+# Сутки «без свободной»: модель на точке ездила (в аренде хотя бы
+# полвелосипеда за сутки), а свободной её не было и половины суток -
+# пришедший за ней курьер скорее ушёл ни с чем. Единственный велосипед,
+# простоявший сутки в ремонте, сюда не попадает: это поломка, а не спрос.
+BUY_BUSY_MIN = Decimal("0.5")
+BUY_FREE_MIN = Decimal("0.5")
+BUY_VERDICTS: dict[str, str] = {"buy": "брать", "hold": "хватает", "skip": "не брать",
+                                "few": "мало данных"}
+
+
+def _buy_title(model: Any, aliases: Mapping[str, str] | None) -> str:
+    """Модель парка названием каталога; пустая - «—», как в окупаемости."""
+    return catalogue_model(model, aliases) or "—"
+
+
+def model_days(rows: Iterable[Mapping[str, Any]], *,
+               aliases: Mapping[str, str] | None = None) -> dict[str, dict[str, Decimal]]:
+    """Велосипеде-дни модели каталога по статусам за период - сумма
+    суточных строк CrmDB.model_point_days по точкам и суткам."""
+    out: dict[str, dict[str, Decimal]] = {}
+    for r in rows:
+        cell = out.setdefault(_buy_title(r["model"], aliases), {})
+        cell[r["status"]] = cell.get(r["status"], Decimal(0)) + Decimal(str(r["days"] or 0))
+    return out
+
+
+def model_presence(rows: Iterable[Mapping[str, Any]], *, now: datetime,
+                   aliases: Mapping[str, str] | None = None) -> dict[str, Decimal]:
+    """Сколько суток модель была в парке за период: сутки, где у неё есть
+    хоть кусок велосипеде-дня, - целиком, идущие - до этой минуты. Спрос
+    делится на них, а не на длину периода: модель, купленная месяц назад,
+    в окне девяноста дней иначе выглядела бы втрое менее нужной."""
+    seen: dict[str, set[date]] = {}
+    for r in rows:
+        seen.setdefault(_buy_title(r["model"], aliases), set()).add(r["day"])
+    today = now.date()
+    started = _span_days(now - datetime.combine(today, datetime.min.time(),
+                                                tzinfo=now.tzinfo))
+    return {model: sum((started if day == today else Decimal(1) for day in days),
+                       Decimal(0))
+            for model, days in seen.items()}
+
+
+def zero_free_days(rows: Iterable[Mapping[str, Any]], *, before: date | None = None,
+                   aliases: Mapping[str, str] | None = None
+                   ) -> dict[str, dict[str | None, int]]:
+    """Сутки, когда модель на точке ездила, а свободной не было: {модель:
+    {точка: суток}}. `before` - первые сутки, которые ещё идут: неполный
+    день не судим, к обеду «свободной не было и полдня» верно для любой
+    модели. Два названия одной модели складываются до порога, а не после."""
+    cells: dict[tuple[str, str | None, date], dict[str, Decimal]] = {}
+    for r in rows:
+        if before is not None and r["day"] >= before:
+            continue
+        key = (_buy_title(r["model"], aliases), r.get("location") or None, r["day"])
+        cell = cells.setdefault(key, {})
+        cell[r["status"]] = cell.get(r["status"], Decimal(0)) + Decimal(str(r["days"] or 0))
+    out: dict[str, dict[str | None, int]] = {}
+    for (model, point, _day), cell in cells.items():
+        if (cell.get("rented", Decimal(0)) >= BUY_BUSY_MIN
+                and cell.get("available", Decimal(0)) < BUY_FREE_MIN):
+            by_point = out.setdefault(model, {})
+            by_point[point] = by_point.get(point, 0) + 1
+    return out
+
+
+def last_purchase_prices(bikes: Iterable[Mapping[str, Any]],
+                         purchases: Iterable[Mapping[str, Any]], *,
+                         aliases: Mapping[str, str] | None = None) -> dict[str, dict]:
+    """Цена модели в последней закупке ЗАК, где она была: {модель: {price,
+    no, purchased_on}}. Следующая партия пойдёт по цене последней, а не по
+    средней за три года. Модель без ЗАК - цена последнего заведённого
+    велосипеда с ценой (no None: «по карточке»)."""
+    docs = {p["id"]: p for p in purchases}
+    batches: dict[tuple[str, Any], list[Mapping[str, Any]]] = {}
+    for bike in bikes:
+        if bike.get("purchase_price") is None:
+            continue
+        batches.setdefault((_buy_title(bike.get("model"), aliases), bike.get("purchase_id")),
+                           []).append(bike)
+    out: dict[str, dict] = {}
+    for model in sorted({m for m, _ in batches}):
+        own = [(docs[doc], rows) for (m, doc), rows in batches.items()
+               if m == model and doc in docs]
+        if own:
+            doc, rows = max(own, key=lambda x: (x[0].get("purchased_on") or date.min,
+                                                int(x[0]["id"])))
+            price = sum((to_money(b["purchase_price"]) for b in rows), Decimal(0)) / len(rows)
+            out[model] = {"price": to_money(price), "no": doc.get("no"),
+                          "purchased_on": doc.get("purchased_on")}
+            continue
+        loose = [b for (m, _), rows in batches.items() if m == model for b in rows]
+        bike = max(loose, key=lambda b: (b.get("purchased_on") or date.min,
+                                         int(b.get("id") or 0)))
+        out[model] = {"price": to_money(bike["purchase_price"]), "no": None,
+                      "purchased_on": bike.get("purchased_on")}
+    return out
+
+
+def booking_pressure(bookings: Iterable[Mapping[str, Any]],
+                     bikes: Iterable[Mapping[str, Any]], *,
+                     aliases: Mapping[str, str] | None = None) -> dict[str, dict[str, int]]:
+    """Открытые заявки по модели каталога: {название: {open, unmet}}.
+
+    unmet - заявке сейчас нечего выдать: на её точке нет свободной модели
+    (заявка без точки - нет нигде). Заявка велосипед не бронирует, поэтому
+    это спрос, который парк прямо сейчас не закрывает.
+    """
+    free: dict[tuple[str, str | None], int] = {}
+    for bike in bikes:
+        if bike.get("status") == "available":
+            key = (_buy_title(bike.get("model"), aliases), bike.get("location") or None)
+            free[key] = free.get(key, 0) + 1
+    out: dict[str, dict[str, int]] = {}
+    for row in bookings:
+        if (row.get("status") or "new") != "new" or not str(row.get("model") or "").strip():
+            continue
+        title = _buy_title(row.get("model"), aliases)
+        point = row.get("location_name") or None
+        have = (free.get((title, point), 0) if point
+                else sum(n for (t, _), n in free.items() if t == title))
+        cell = out.setdefault(title, {"open": 0, "unmet": 0})
+        cell["open"] += 1
+        cell["unmet"] += 0 if have else 1
+    return out
+
+
+def _usual_service_months(bikes: list[Mapping[str, Any]]) -> int:
+    """Срок службы модели - самый частый у её велосипедов (24 по умолчанию,
+    как в amortization_month)."""
+    seen: dict[int, int] = {}
+    for bike in bikes:
+        months = int(bike.get("service_months") or 24)
+        seen[months] = seen.get(months, 0) + 1
+    return max(seen, key=lambda m: (seen[m], m)) if seen else 24
+
+
+def buy_rows(payback: Iterable[Mapping[str, Any]], *,
+             days: Mapping[str, Mapping[str, Any]],
+             zero: Mapping[str, Mapping[str | None, int]],
+             prices: Mapping[str, Mapping[str, Any]],
+             demand: Mapping[str, Mapping[str, int]],
+             bikes: Iterable[Mapping[str, Any]], presence: Mapping[str, Any],
+             aliases: Mapping[str, str] | None = None) -> list[dict]:
+    """Модели каталога с решением: брать, хватает, не брать, мало данных.
+
+    payback - строки payback_rows за период (деньги модели по названию
+    парка, здесь они складываются по каталогу), days - model_days, zero -
+    zero_free_days, prices - last_purchase_prices, demand -
+    booking_pressure, bikes - парк сейчас, presence - model_presence.
+
+    Сколько брать: столько, чтобы при среднем спросе периода (дни в аренде
+    на сутки, когда модель была в парке) простой вышел на цель, считая парк
+    сейчас и на сборке, плюс заявки, которым нечего выдать. Спрос за
+    периодом упирался в парк, поэтому это нижняя оценка. Порядок - от
+    быстрее окупающейся.
+    """
+    target = Decimal(100 - IDLE_TARGET_PERCENT) / 100
+    money: dict[str, dict[str, Decimal]] = {}
+    for pay in payback:
+        cell = money.setdefault(_buy_title(pay["model"], aliases),
+                                {"paid": Decimal(0), "works": Decimal(0),
+                                 "repair_cost": Decimal(0)})
+        for key in cell:
+            cell[key] += to_money(pay.get(key))
+    fleet: dict[str, list[Mapping[str, Any]]] = {}
+    for bike in bikes:
+        fleet.setdefault(_buy_title(bike.get("model"), aliases), []).append(bike)
+    out = []
+    for model in sorted(set(money) | set(days) | set(demand)):
+        own = fleet.get(model, [])
+        cash = money.get(model) or {}
+        wanted = demand.get(model) or {}
+        now = sum(1 for b in own if b.get("status") in OPERATIONAL_STATUSES)
+        assembly = sum(1 for b in own if b.get("status") == "new")
+        paid = to_money(cash.get("paid"))
+        metrics = fleet_metrics(days.get(model) or {}, paid)
+        op = metrics["operational_days"]
+        if not (now or assembly or op or wanted.get("open")):
+            continue            # модель ушла из парка, и спроса на неё нет
+        idle = metrics["idle_percent"]
+        broken = sum((metrics["idle_breakdown"].get(s, Decimal(0))
+                      for s in ("repair", "maintenance")), Decimal(0))
+        repair = to_money(cash.get("repair_cost"))
+        net = (paid + to_money(cash.get("works")) - repair) / op if op >= 1 else None
+        price = (prices.get(model) or {}).get("price")
+        months = _usual_service_months(
+            [b for b in own if b.get("status") in OPERATIONAL_STATUSES] or own)
+        payback_months = (
+            (to_money(price) / (net * DAYS_IN_MONTH)).quantize(_TENTH, rounding=ROUND_HALF_UP)
+            if price and net is not None and net > 0 else None)
+        points = sorted(((p, n) for p, n in (zero.get(model) or {}).items() if n),
+                        key=lambda x: (-x[1], x[0] or ""))
+        row = {
+            "model": model,
+            # Как модель записана в парке, если иначе, чем в каталоге.
+            "names": sorted({str(b.get("model") or "").strip() for b in own}
+                            - {model, ""}),
+            "fleet": now, "assembly": assembly,
+            "operational_days": op, "rented_days": metrics["rented_days"],
+            "utilization": percent_of(metrics["rented_days"], op),
+            "idle_percent": idle, "repair_percent": percent_of(broken, op),
+            "avg_check": metrics["avg_check"],
+            "revenue_per_day": to_money(paid / op) if op >= 1 else None,
+            "repair_per_day": to_money(repair / op) if op >= 1 else None,
+            "net_per_day": to_money(net) if net is not None else None,
+            "price": to_money(price) if price is not None else None,
+            "price_no": (prices.get(model) or {}).get("no"),
+            "service_months": months, "payback_months": payback_months,
+            "zero_days": sum(n for _, n in points), "zero_points": points,
+            "bookings": int(wanted.get("open") or 0),
+            "unmet": int(wanted.get("unmet") or 0), "count": 0,
+            "present_days": Decimal(str(presence.get(model) or 0)),
+        }
+        row["verdict"], row["reason"] = _buy_verdict(row, target=target)
+        out.append(row)
+    order = {"buy": 0, "hold": 1, "few": 2, "skip": 3}
+    out.sort(key=lambda r: (order[r["verdict"]],
+                            r["payback_months"] if r["payback_months"] is not None
+                            else Decimal("Infinity"),
+                            -(r["utilization"] or 0), r["model"]))
+    return out
+
+
+def _buy_verdict(row: dict[str, Any], *, target: Decimal) -> tuple[str, str]:
+    """Решение по модели и его причина одной строкой; row["count"] -
+    сколько брать. Простой - первым: это число, ради которого система."""
+    op = row["operational_days"]
+    if op < BUY_MIN_DAYS:
+        if not row["fleet"] and not op:
+            head = (f"{row['assembly']} на сборке, в прокате ещё нет" if row["assembly"]
+                    else "в парке нет")
+            return "few", head + (f"; заявок: {row['bookings']}" if row["bookings"] else "")
+        return "few", f"мало данных: {int(op)} велосипеде-дней за период"
+    idle = row["idle_percent"] or 0
+    if idle >= IDLE_TARGET_PERCENT:
+        tail = (f", из них ремонт и ТО {row['repair_percent']} %"
+                if (row["repair_percent"] or 0) * 2 >= idle else "")
+        return "skip", f"простой {idle} %{tail}"
+    if row["net_per_day"] is not None and row["net_per_day"] <= 0:
+        return "skip", "не окупается: ремонт съедает выручку"
+    if row["payback_months"] is not None and row["payback_months"] > row["service_months"]:
+        return "skip", (f"окупится за {row['payback_months']} мес. — дольше срока службы "
+                        f"({row['service_months']} мес.)")
+    # Спрос периода в велосипедах, которые держали бы простой на цели.
+    # Сотые - чтобы хвост деления не превращался в лишний велосипед.
+    span = row["present_days"]
+    need = row["rented_days"] / target / span if span > 0 else Decimal(0)
+    need = (need + row["unmet"] - row["fleet"] - row["assembly"]).quantize(CENT)
+    row["count"] = math.ceil(need) if need > 0 else 0
+    signs = [f"простой {idle} %"]
+    if row["zero_days"]:
+        signs.append(f"{row['zero_days']} сут. без свободной")
+    if row["unmet"]:
+        signs.append(f"заявок без велосипеда: {row['unmet']}")
+    if row["price"] is None:
+        signs.append("цена закупки неизвестна")
+    if not row["count"]:
+        coming = f" и {row['assembly']} на сборке" if row["assembly"] else ""
+        return "hold", f"{signs[0]}, в парке {row['fleet']}{coming} — спрос закрыт"
+    return "buy", ", ".join(signs)
+
+
+def buy_plan(rows: Iterable[Mapping[str, Any]], *,
+             budget: Decimal | None = None) -> dict[str, Any]:
+    """Партия по решениям buy_rows: без бюджета - сколько просит спрос, с
+    бюджетом - сколько на него влезает по цене последней ЗАК, начиная с
+    быстрее окупающейся. Больше спроса бюджет не тратит: остаток денег
+    лучше велосипеда, который будет стоять. lines - рекомендация словами."""
+    rows = list(rows)
+    items: list[dict[str, Any]] = []
+    left = budget
+    for row in rows:
+        if row["verdict"] != "buy":
+            continue
+        count, price = row["count"], row["price"]
+        priced = price is not None and price > 0
+        if left is not None:
+            count = min(count, int(left // price)) if priced else 0
+        cost = to_money(price * count) if priced else None
+        if left is not None and cost is not None:
+            left = to_money(left - cost)
+        items.append({"model": row["model"], "count": count, "wanted": row["count"],
+                      "price": price if priced else None, "cost": cost})
+    taken = [x for x in items if x["count"]]
+    # Без цены бюджет в штуки не переводится: ни ЗАК, ни цены в карточке.
+    unpriced = [x for x in items if budget is not None and x["price"] is None]
+    short = [x for x in items if x["count"] < x["wanted"] and x["price"] is not None]
+    skips = [r for r in rows if r["verdict"] == "skip"]
+    lines = []
+    if taken:
+        head = f"На {money(budget)}: " if budget is not None else "Следующая партия: "
+        lines.append(head + ", ".join(f"{x['model']} — {x['count']} шт." for x in taken)
+                     + (f"; остаток {money(left)}." if budget is not None and left else ""))
+    if short:
+        lines.append("Не влезло в бюджет: " + ", ".join(
+            f"{x['model']} — ещё {x['wanted'] - x['count']} шт. по {money(x['price'])}"
+            for x in short) + ".")
+    if unpriced:
+        lines.append("Цена закупки неизвестна: " + ", ".join(
+            f"{x['model']} — {x['wanted']} шт." for x in unpriced))
+    if not items:
+        lines.append("Докупать сейчас нечего: у моделей простой выше цели, спрос "
+                     "закрыт парком или данных мало.")
+    if skips:
+        lines.append("Не брать: " + "; ".join(f"{r['model']} — {r['reason']}"
+                                              for r in skips) + ".")
+    spent = to_money(sum((x["cost"] or Decimal(0) for x in taken), Decimal(0)))
+    return {"items": items, "taken": taken, "skips": skips, "lines": lines,
+            "budget": budget, "left": left, "spent": spent,
+            "count": sum(x["count"] for x in taken)}
+
+
 # ─────────────────────── реферальная программа ───────────────────────
 
 REF_STATUSES: dict[str, str] = {

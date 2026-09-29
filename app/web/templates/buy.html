@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Что купить — {{ app_title }}{% endblock %}
+{% block content %}
+{% macro n(v, suffix='') %}{% if v is none %}—{% else %}{{ v }}{{ suffix }}{% endif %}{% endmacro %}
+<div class="bar"><h1>Что купить <small class="muted">· {{ span.label }}</small></h1>
+  {% with active = 'buy' %}{% include "_report_tabs.html" %}{% endwith %}
+</div>
+<div class="bar">
+  {# Бюджет - по желанию: без него партия - сколько просит спрос, с ним -
+     сколько влезает по цене последней закупки. #}
+  <form method="get" action="/reports/buy" class="search">
+    <input type="date" name="since" value="{{ span.since|iso }}" aria-label="с">
+    <input type="date" name="until" value="{{ span.until|iso }}" aria-label="по">
+    <input type="text" name="budget" value="{{ budget_raw }}" inputmode="decimal"
+           placeholder="бюджет, ₽" aria-label="бюджет, ₽">
+    <button type="submit">Показать</button>
+  </form>
+  <a class="btn ghost" href="/reports/buy">{{ BUY_PERIOD_DAYS }} дней</a>
+  <a class="btn ghost" href="/reports/buy.xlsx?{{ query }}">Excel</a>
+  <a class="btn ghost" href="/reports/buy.csv?{{ query }}">CSV</a>
+</div>
+{% if budget_error %}<p class="bad">Бюджет не принят. {{ budget_error }}</p>{% endif %}
+
+<div class="card">
+  <h2>Рекомендация</h2>
+  {% for line in plan.lines %}<p>{% if loop.first %}<b>{{ line }}</b>{% else %}{{ line }}{% endif %}</p>{% endfor %}
+  {% if plan.budget is not none and plan.taken %}
+  <p class="muted">Потрачено {{ money(plan.spent) }} из {{ money(plan.budget) }}.</p>
+  {% endif %}
+  <p class="muted">Почему так: брать стоит модель, у которой простой ниже цели
+    {{ IDLE_TARGET_PERCENT }} % и которая окупает свою цену быстрее срока службы.
+    Сколько — чтобы при спросе этого периода простой вышел на цель, за вычетом
+    парка и того, что на сборке, плюс заявки, которым сейчас нечего выдать.
+    Спрос упирался в парк, поэтому это нижняя оценка; где именно упирался,
+    показывают сутки без свободной.</p>
+</div>
+
+<div class="card">
+<div class="table-wrap">
+<table class="cards">
+  <tr><th>Модель</th><th class="num">В парке</th><th class="num">Загрузка</th>
+    <th class="num">Простой</th><th class="num">Выручка<br>на велодень</th>
+    <th class="num">Ремонт<br>на велодень</th><th class="num">Цена<br>закупки</th>
+    <th class="num">Окупаемость</th><th>Сутки без<br>свободной</th>
+    <th class="num">Заявки</th><th>Решение</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td data-label="Модель">{{ r.model }}{% if r.names %}<br><small class="muted">в парке: {{ r.names|join(', ') }}</small>{% endif %}</td>
+    <td class="num" data-label="В парке">{{ r.fleet }}{% if r.assembly %} <small class="muted">+{{ r.assembly }} на сборке</small>{% endif %}</td>
+    <td class="num" data-label="Загрузка">{{ n(r.utilization, ' %') }}</td>
+    <td class="num {% if r.idle_percent is none %}muted{% elif r.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}" data-label="Простой">{{ n(r.idle_percent, ' %') }}{% if r.repair_percent %} <small class="muted" title="из них в ремонте и на ТО">· рем. {{ r.repair_percent }} %</small>{% endif %}</td>
+    <td class="num" data-label="Выручка на велодень">{{ money(r.revenue_per_day) }}</td>
+    <td class="num" data-label="Ремонт на велодень">{{ money(r.repair_per_day) }}</td>
+    <td class="num" data-label="Цена закупки">{{ money(r.price) }}{% if r.price is not none %}<br><small class="muted">{{ r.price_no or 'по карточке' }}</small>{% endif %}</td>
+    <td class="num {% if r.payback_months is not none and r.payback_months > r.service_months %}bad{% endif %}" data-label="Окупаемость">{% if r.payback_months is none %}—{% else %}{{ r.payback_months }} мес.<br><small class="muted">срок службы {{ r.service_months }}</small>{% endif %}</td>
+    <td data-label="Сутки без свободной">{% if r.zero_days %}{{ r.zero_days }}<br><small class="muted">{% for p, d in r.zero_points %}{{ p or NO_POINT_TITLE }} {{ d }}{% if not loop.last %}, {% endif %}{% endfor %}</small>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="num" data-label="Заявки">{{ r.bookings }}{% if r.unmet %} <small class="bad" title="на точке заявки нет свободной модели">· {{ r.unmet }} без велосипеда</small>{% endif %}</td>
+    <td data-label="Решение"><span class="tag {% if r.verdict == 'buy' %}ok{% elif r.verdict == 'skip' %}bad{% endif %}">{{ BUY_VERDICTS[r.verdict] }}{% if r.count %}: {{ r.count }} шт.{% endif %}</span><br><small class="muted">{{ r.reason }}</small></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="11" class="muted">В парке нет ни одной модели с днями за период.</td></tr>
+  {% endfor %}
+</table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
+<p class="muted">Модель — по каталогу: велосипеды, записанные по накладной и
+  по-клиентски, считаются вместе. Загрузка — доля дней в аренде в днях
+  операционного парка модели, простой — та же формула, что на сводке.
+  Выручка и ремонт (работа и запчасти) — из окупаемости за тот же период,
+  на один велосипеде-день модели. Окупаемость — за сколько месяцев велосипед
+  возвращает цену последней закупки ЗАК (без ЗАК — цену из карточки), если
+  будет приносить столько же за вычетом ремонта.</p>
+<p class="muted">Сутки без свободной — модель на точке ездила, а свободной её
+  там не было и половины суток: курьер, пришедший за ней, скорее ушёл ни с
+  чем. Сегодняшние сутки не считаются — они ещё идут. Заявки — открытые
+  заявки из кабинета на модель; без велосипеда — на их точке свободной
+  модели нет прямо сейчас. Меньше {{ BUY_MIN_DAYS }} велосипеде-дней за
+  период — мало данных, решения нет.</p>
+</div>
+{% endblock %}

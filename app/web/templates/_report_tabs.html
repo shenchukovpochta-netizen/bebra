@@ -3,8 +3,10 @@
 <nav class="tabs">
   <a href="/reports" {% if active == 'reports' %}class="on"{% endif %}>Отчёты</a>
   <a href="/reports/points" {% if active == 'points' %}class="on"{% endif %}>По точкам</a>
+  <a href="/reports/tariffs" {% if active == 'tariffs' %}class="on"{% endif %}>Тарифы</a>
   {% if can_view(staff, 'finance') %}
   <a href="/reports/payback" {% if active == 'payback' %}class="on"{% endif %}>Окупаемость</a>
+  <a href="/reports/buy" {% if active == 'buy' %}class="on"{% endif %}>Что купить</a>
   <a href="/reports/referrals" {% if active == 'referrals' %}class="on"{% endif %}>Приглашения</a>
   {% endif %}
   {% if can_view(staff, 'service') %}
