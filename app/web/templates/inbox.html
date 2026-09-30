@@ -10,6 +10,7 @@
     <button type="submit">Найти</button>
   </form>
 </div>
+{% with active = 'message' %}{% include "_incoming_tabs.html" %}{% endwith %}
 {# Одна лента на всех, кто написал сам: бот в Telegram и MAX, Авито,
    WhatsApp через шлюз. Раздел по умолчанию только у «Владельца». #}
 <div class="tiles">

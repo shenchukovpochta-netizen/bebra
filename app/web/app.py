@@ -22,6 +22,7 @@ import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -51,6 +52,7 @@ from ..crm import (
     firstrun,
     franchise,
     import_xlsx,
+    incoming,
     learning,
     logic,
     mytasks,
@@ -702,6 +704,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
+        CLIENT_GROUPS=logic.CLIENT_GROUPS,
         RISK_LEVELS=logic.RISK_LEVELS,
         BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
@@ -1722,25 +1725,51 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return [{**r, "risk": risks[r["id"]]} for r in rows
                 if r["id"] in risks and risks[r["id"]]["level"] == risk]
 
+    # Колонки сортировки списка клиентов; денежные - только с «Финансами».
+    CLIENT_SORTS = {"name": "full_name", "rentals": "rentals_count", "days": "rented_days",
+                    "since": "first_on", "last": "last_on", "paid": "paid_total",
+                    "balance": "balance"}
+    CLIENT_MONEY_SORTS = ("paid", "balance")
+
+    async def clients_found(request: Request) -> dict:
+        """Клиенты за всё время: плитки по всей базе и строки выбранной
+        группы с поиском и риском - одно на страницу и её выгрузку."""
+        p = request.query_params
+        q = p.get("q") or ""
+        status = p.get("status") or ""
+        risk = p.get("risk") or ""
+        risk = risk if risk in logic.RISK_LEVELS else ""
+        group = p.get("group") if p.get("group") in logic.CLIENT_GROUPS else "all"
+        everyone = await crm.clients(limit=100000)
+        found = (everyone if not (q or status) else
+                 await crm.clients(q=q or None, status=status or None, limit=100000))
+        found = [r for r in found if logic.client_in_group(r, group)]
+        # С фильтром риска - по всей группе: иначе первые по алфавиту молча
+        # прятали бы рискованных с фамилией на «Я».
+        found = await clients_by_risk(found, risk)
+        return {"q": q, "status": status, "risk": risk, "group": group,
+                "tiles": logic.client_tiles(everyone), "found": found}
+
     @app.get("/clients")
     async def clients(request: Request) -> Response:
-        q = request.query_params.get("q") or ""
-        status = request.query_params.get("status") or ""
-        risk = request.query_params.get("risk") or ""
-        risk = risk if risk in logic.RISK_LEVELS else ""
-        # С фильтром риска - вся база: иначе первые 500 по алфавиту
-        # молча прятали бы рискованных с фамилией на «Я».
-        rows = await clients_by_risk(
-            await crm.clients(q=q or None, status=status or None,
-                              limit=10000 if risk else 500), risk)
-        rows = rows[:500]
-        for r in rows:
+        """Сводка всех клиентов за всё время и действующих: плитки по группам
+        (действующие, бывшие, ни разу не брали, должники), вкладка группы и
+        по каждому - сколько аренд, дней с велосипедом, когда был, сколько
+        заплатил. Рубли - только с правом на «Финансы»."""
+        data = await clients_found(request)
+        allowed = (CLIENT_SORTS if may_view(request, "finance") else
+                   {k: v for k, v in CLIENT_SORTS.items() if k not in CLIENT_MONEY_SORTS})
+        tools = list_tools(request, data["found"], allowed=allowed)
+        for r in tools["rows"]:
             rental = {"status": "active", "billed_until": r["billed_until"],
                       "price": r["price"], "period_days": r["period_days"],
                       "tariff_name": r["tariff_name"], "bike_model": r.get("bike_model"),
                       "bike_code": r.get("bike_code")} if r.get("rental_id") else None
             r["summary"] = summarize(rental, r.get("balance", 0))
-        return render(request, "clients.html", rows=rows, q=q, status=status, risk=risk)
+        return render(request, "clients.html", rows=tools["rows"], tools=tools,
+                      q=data["q"], status=data["status"], risk=data["risk"],
+                      group=data["group"], tiles=data["tiles"],
+                      views=await views_of(request, "/clients"))
 
     @app.get("/clients.{ext}")
     async def clients_csv(request: Request, ext: str) -> Response:
@@ -1748,15 +1777,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # на финансы обязательно - на самой странице баланс тоже скрыт.
         if not may_view(request, "finance"):
             return denied(request, "finance")
-        q = request.query_params.get("q") or ""
-        status = request.query_params.get("status") or ""
-        risk = request.query_params.get("risk") or ""
-        found = await crm.clients(q=q or None, status=status or None, limit=10000)
-        # Выгружают то, что видят: тот же фильтр риска, что у страницы, и
-        # уровень колонкой - оценка всё равно посчитана для фильтра.
-        if risk in logic.RISK_LEVELS:
-            found = await clients_by_risk(found, risk)
-        else:
+        data = await clients_found(request)
+        found = data["found"]
+        # Выгружают то, что видят: та же группа, поиск и фильтр риска, что
+        # у страницы, и уровень колонкой - оценка всё равно посчитана.
+        if not data["risk"]:
             risks = await service.client_risks(crm, [c["id"] for c in found],
                                                today=date.today())
             found = [{**c, "risk": risks.get(c["id"])} for c in found]
@@ -1771,11 +1796,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                          ("есть" if c.get("tg_id") else ""),
                          logic.to_money(c.get("balance", 0)), c.get("bike_code"),
                          c.get("tariff_name"), s.get("covered_until"),
+                         c.get("rentals_count") or 0, c.get("rented_days") or 0,
+                         c.get("first_on"), c.get("last_on"),
+                         logic.to_money(c.get("paid_total") or 0),
                          c.get("contract_no"), c.get("created_at"),
                          (c.get("risk") or {}).get("label")])
         return await table(ext, "clients",
                     ["ФИО", "Телефон", "Статус", "Telegram", "Баланс", "Велосипед",
-                     "Тариф", "Оплачено до", "Договор", "Добавлен", "Риск"], rows)
+                     "Тариф", "Оплачено до", "Аренд", "Дней с велосипедом",
+                     "Первая аренда", "Последний день", "Оплатил за всё время",
+                     "Договор", "Добавлен", "Риск"], rows)
 
     @app.get("/clients/new")
     async def client_new(request: Request) -> Response:
@@ -2934,6 +2964,32 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       avito=await inbox_avito(), keyed=inbox_vault is not None,
                       hook_on=bool(getattr(cfg, "inbox_hook_token", "")),
                       views=await views_of(request, "/inbox"))
+
+    @app.get("/incoming")
+    async def incoming_page(request: Request) -> Response:
+        """Всё, что клиент прислал сам, одной лентой (app/crm/incoming.py):
+        сообщения, заявки на аренду, «Я оплатил». Раздела у ленты нет - она
+        открыта всем, а каждая её часть читается, только если открыт её
+        раздел; без всех трёх - отказ."""
+        kinds = incoming.visible_kinds(request.state.staff)
+        if not kinds:
+            return denied(request, "issue")
+        threads: list[dict] = []
+        if "message" in kinds:
+            threads = logic.inbox_rows(await crm.inbox_threads(statuses=logic.INBOX_OPEN,
+                                                               limit=2000))
+            for row in threads:
+                row["preview"] = logic.inbox_preview(
+                    service.inbox_open(inbox_vault, row.get("last_body_enc")),
+                    row.get("last_kind"))
+        rows = incoming.incoming_rows(
+            threads=threads,
+            bookings=await crm.bookings(status="new") if "booking" in kinds else (),
+            claims=await crm.pending_claims() if "claim" in kinds else (),
+            today=date.today(), money_ok=may_view(request, "finance"),
+            booking_url=booking_issue_url if may_edit(request, "issue") else None)
+        return render(request, "incoming.html", rows=rows,
+                      incoming_counts=incoming.counts(rows))
 
     @app.get("/inbox/{thread_id}")
     async def inbox_card(request: Request, thread_id: int) -> Response:
@@ -4204,7 +4260,48 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         since_year = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         for _ in range(11):
             since_year = (since_year - timedelta(days=1)).replace(day=1)
+        # Одно окно: сводные таблицы всех отчётов за один период. Каждый
+        # блок считается тем же построителем, что его полный отчёт, и за тот
+        # же период - в одном окне не бывает двух разных «выручек за
+        # сентябрь». Блок - только с правом на свой полный отчёт.
+        span = logic.report_period(request.query_params, now=now,
+                                   floor=await history_floor(now.date()))
+        window = SimpleNamespace(query_params={"since": span["since"].isoformat(),
+                                               "until": span["until"].isoformat()})
+        money_ok = may_view(request, "finance")
+        summary: dict[str, Any] = {
+            "span": span, "base": "/reports",
+            "q": "?since=" + span["since"].isoformat() + "&until="
+                 + span["until"].isoformat(),
+            "metrics": await period_metrics(since=span["start"], until=span["end"]),
+            "points": (await points_data(window))["report"],
+            "tariffs": (await tariffs_data(window))["rows"]}
+        if money_ok:
+            summary["money"] = await crm.ledger_totals(since=span["since"],
+                                                       until=span["until"])
+            summary["payback"] = (await payback_data(window))["rows"]
+            summary["buy"] = [r for r in (await buy_data(window))["rows"]
+                              if r.get("verdict") == "buy"][:5]
+        if may_view(request, "service"):
+            techs = logic.tech_rows(await crm.tech_work(span["start"], span["end"]))
+            summary["techs"] = {"rows": techs, "total": logic.tech_total(techs)}
+            summary["model_parts"] = logic.model_parts_rows(
+                await crm.model_parts(span["start"], span["end"]), fleet_rows,
+                days=span["days"])[:6]
+        if may_view(request, "inventory"):
+            summary["spend"] = logic.spend_rows(
+                await crm.part_spend(span["start"], span["end"]))[:6]
+        if may_view(request, "clients"):
+            summary["channels"] = logic.channel_totals(
+                await crm.clients_since(span["start"]), since=span["since"],
+                until=span["until"])
+            summary["feedback"] = logic.feedback_stats(
+                [r for r in await crm.feedback_rows(span["since"])
+                 if r.get("closed_on") is None or r["closed_on"] <= span["until"]])
+        if may_view(request, "bikes"):
+            summary["integrity"] = logic.integrity_summary(await integrity_data())
         return render(request, "reports.html", months=await crm.revenue_by_month(12),
+                      summary=summary,
                       bikes=bikes_by, fleet=fleet, rented=rented,
                       utilization=(round(100 * rented / fleet) if fleet else 0),
                       months_metrics=months_metrics,

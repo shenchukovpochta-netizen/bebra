@@ -767,11 +767,25 @@ class CrmDB:
             f"""
             select c.*,
                    coalesce(l.balance, 0) as balance,
+                   coalesce(l.paid, 0) as paid_total,
+                   coalesce(ra.rentals, 0) as rentals_count,
+                   coalesce(ra.days, 0) as rented_days,
+                   ra.first_on, ra.last_on,
                    r.id as rental_id, r.billed_until, r.price, r.period_days,
                    r.tariff_name, b.code as bike_code, b.model as bike_model
             from crm.clients c
-            left join (select client_id, sum(amount) as balance
+            left join (select client_id, sum(amount) as balance,
+                              sum(amount) filter (where kind = 'payment') as paid
                        from crm.ledger group by client_id) l on l.client_id = c.id
+            -- История за всё время: сколько аренд, сколько дней с велосипедом
+            -- (идущая - по сегодня), первая и последняя. Сводка «все клиенты
+            -- за всё время и действующие» строится по ней (logic.CLIENT_GROUPS).
+            left join (select client_id, count(*) as rentals,
+                              sum(greatest(coalesce(closed_on, current_date)
+                                           - started_on, 0)) as days,
+                              min(started_on) as first_on,
+                              max(coalesce(closed_on, current_date)) as last_on
+                       from crm.rentals group by client_id) ra on ra.client_id = c.id
             left join crm.rentals r on r.client_id = c.id and r.status = 'active'
             left join crm.bikes b on b.id = r.bike_id
             {where}

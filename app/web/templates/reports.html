@@ -4,10 +4,131 @@
 {# Отчёты по ремонту нужны механику, деньги парка - нет: денежные блоки
    и колонки открыты только с доступом к разделу «Финансы». #}
 {% set money_ok = can_view(staff, 'finance') %}
-<div class="bar"><h1>Отчёты</h1>
+<div class="bar"><h1>Отчёты <small class="muted">всё в одном окне</small></h1>
   {% with active = 'reports' %}{% include "_report_tabs.html" %}{% endwith %}
   {% if money_ok %}<a class="btn ghost" href="/assets">Основные средства</a>{% endif %}
 </div>
+{# Одно окно: сводная таблица каждого отчёта за один выбранный период.
+   Числа - те же построители, что у полных отчётов (вкладки выше), поэтому
+   «подробнее» открывает те же цифры с разбивкой. Блок есть, только если
+   открыт его полный отчёт. #}
+{% set sm = summary %}{% set m = sm.metrics %}
+<section class="card">
+  <div class="three-head"><h2>За период · {{ sm.span.label }}</h2><span class="muted">{{ sm.span.since|dmy }} — {{ sm.span.until|dmy }}</span></div>
+  {% with span = sm.span, base = sm.base %}{% include "_points_period.html" %}{% endwith %}
+  <div class="tiles">
+    <div class="tile {% if m.idle_percent is none %}{% elif m.idle_ok %}good{% else %}warn{% endif %}"><b>{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</b><span>простой парка<br><small class="muted">цель &lt; {{ IDLE_TARGET_PERCENT }} %</small></span></div>
+    {% if money_ok %}
+    <div class="tile {% if m.avg_check is none %}{% elif m.check_ok %}good{% else %}warn{% endif %}"><b>{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</b><span>средний чек в день<br><small class="muted">цель {{ money(CHECK_TARGET) }}</small></span></div>
+    <div class="tile"><b>{{ money(sm.money.get('payment', 0)) }}</b><span>поступило от клиентов</span></div>
+    {% endif %}
+    <div class="tile"><b>{{ sm.points.total.issued }}</b><span>выдач · {{ sm.points.total.renewals }} продлений</span></div>
+    {% if sm.techs %}<div class="tile"><b>{{ sm.techs.total.orders }}</b><span>нарядов закрыто</span></div>{% endif %}
+    {% if sm.channels is defined %}<div class="tile"><b>{{ sm.channels|sum(attribute=1) }}</b><span>новых клиентов</span></div>{% endif %}
+  </div>
+</section>
+<div class="cols">
+{% if money_ok %}
+<section class="card">
+  <h2>Деньги за период <a class="muted" href="/finance{{ sm.q }}">журнал →</a></h2>
+  <table>
+    <tr><th>Вид</th><th class="num">Сумма</th></tr>
+    {% for code, label in KINDS.items() %}{% if sm.money.get(code) %}
+    <tr><td>{{ label }}</td><td class="num {% if code == 'payment' %}ok{% endif %}">{{ money(sm.money.get(code)) }}</td></tr>
+    {% endif %}{% endfor %}
+    {% if not sm.money %}<tr><td colspan="2" class="muted">Движений за период нет.</td></tr>{% endif %}
+  </table>
+</section>
+{% endif %}
+<section class="card">
+  <h2>По точкам <a class="muted" href="/reports/points{{ sm.q }}">подробнее →</a></h2>
+  <div class="table-wrap"><table>
+    <tr><th>Точка</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th><th class="num">Выручка</th>{% endif %}<th class="num">Выдач</th></tr>
+    {% for r in sm.points.rows + [sm.points.total] %}{% set pm = r.metrics %}
+    <tr {% if r.total %}class="total"{% endif %}><td>{% if r.total %}Итого{% else %}{{ r.title }}{% endif %}</td>
+      <td class="num {% if pm.idle_percent is none %}muted{% elif pm.idle_ok %}ok{% else %}bad{% endif %}">{% if pm.idle_percent is none %}—{% else %}{{ pm.idle_percent }} %{% endif %}</td>
+      {% if money_ok %}<td class="num {% if pm.avg_check is none %}muted{% elif pm.check_ok %}ok{% else %}bad{% endif %}">{% if pm.avg_check is none %}—{% else %}{{ money(pm.avg_check) }}{% endif %}</td><td class="num">{{ money(r.paid) }}</td>{% endif %}
+      <td class="num">{{ r.issued }}</td></tr>
+    {% endfor %}
+  </table></div>
+</section>
+<section class="card">
+  <h2>Тарифы <a class="muted" href="/reports/tariffs{{ sm.q }}">подробнее →</a></h2>
+  <div class="table-wrap"><table>
+    <tr><th>Срок</th><th class="num">Выдано</th><th class="num">Средний срок</th><th class="num">Продлили</th>{% if money_ok %}<th class="num">Чек/день</th>{% endif %}</tr>
+    {% for r in sm.tariffs %}
+    <tr><td>{{ r.title }}</td><td class="num">{{ r.issued }}</td>
+      <td class="num">{{ r.avg_days if r.avg_days is not none else '—' }}</td>
+      <td class="num">{% if r.renewed_share is none %}—{% else %}{{ r.renewed_share }} %{% endif %}</td>
+      {% if money_ok %}<td class="num">{{ money(r.avg_check) if r.avg_check is not none else '—' }}</td>{% endif %}</tr>
+    {% else %}<tr><td colspan="5" class="muted">Выдач за период не было.</td></tr>{% endfor %}
+  </table></div>
+</section>
+{% if money_ok %}
+<section class="card">
+  <h2>Окупаемость по моделям <a class="muted" href="/reports/payback{{ sm.q }}">подробнее →</a></h2>
+  <div class="table-wrap"><table>
+    <tr><th>Модель</th><th class="num">Шт.</th><th class="num">Чек/день</th><th class="num" title="доход (аренда и работы) минус ремонт и амортизация">Маржа</th></tr>
+    {% for r in sm.payback %}
+    <tr><td>{{ r.model }}</td><td class="num">{{ r.bikes }}</td>
+      <td class="num">{% if r.check_per_day is none %}—{% else %}{{ money(r.check_per_day) }}{% endif %}</td>
+      <td class="num {% if r.margin > 0 %}ok{% else %}bad{% endif %}">{{ money(r.margin) }}{% if r.margin_percent is not none %}<br><small class="muted">{{ r.margin_percent }} % от дохода</small>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="4" class="muted">За период нет ни денег, ни парка.</td></tr>{% endfor %}
+  </table></div>
+</section>
+{% endif %}
+{% if money_ok %}
+<section class="card">
+  <h2>Что купить <a class="muted" href="/reports/buy">подробнее →</a></h2>
+  {% for r in sm.buy %}<p><span class="tag ok">{{ r.model }}{% if r.count %}: {{ r.count }} шт.{% endif %}</span> <small class="muted">{{ r.reason }}</small></p>
+  {% else %}<p class="muted">Докупать сейчас нечего: у моделей нет устойчивой нехватки при окупаемости в срок службы.</p>{% endfor %}
+</section>
+{% endif %}
+{% if sm.channels is defined %}
+<section class="card">
+  <h2>Клиенты <a class="muted" href="/reports/channels">каналы →</a> <a class="muted" href="/reports/feedback">оценки →</a></h2>
+  <table>
+    <tr><th>Откуда новые клиенты</th><th class="num">Сколько</th></tr>
+    {% for code, count in sm.channels %}<tr><td>{{ channel_label(code) if code else 'не спросили' }}</td><td class="num">{{ count }}</td></tr>
+    {% else %}<tr><td colspan="2" class="muted">Новых клиентов за период нет.</td></tr>{% endfor %}
+  </table>
+  {% set fb = sm.feedback %}
+  <p>Оценка аренды: {% if fb.avg is none %}<span class="muted">ответов нет</span>{% else %}<b>{{ feedback_avg(fb.avg) }}</b> из 5 · ответили {{ fb.answered }} из {{ fb.asked }}{% if fb.low %} · <span class="bad">низких {{ fb.low }}</span>{% endif %}{% endif %}</p>
+</section>
+{% endif %}
+{% if sm.techs %}
+<section class="card">
+  <h2>Сервис: техники <a class="muted" href="/reports/techs{{ sm.q }}">подробнее →</a></h2>
+  <table>
+    <tr><th>Техник</th><th class="num">Нарядов</th><th class="num">Суток в среднем</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}</tr>
+    {% for r in sm.techs.rows %}<tr><td>{{ r.tech }}</td><td class="num">{{ r.orders }}</td><td class="num">{{ r.avg_days }}</td>{% if money_ok %}<td class="num">{{ money(r.total) }}</td>{% endif %}</tr>
+    {% else %}<tr><td colspan="4" class="muted">За период нет закрытых нарядов.</td></tr>{% endfor %}
+  </table>
+</section>
+<section class="card">
+  <h2>Траты по моделям <a class="muted" href="/reports/model-parts{{ sm.q }}">подробнее →</a></h2>
+  <table>
+    <tr><th>Модель</th><th class="num">Нарядов</th><th class="num">Запчасти</th><th class="num">На велосипед</th></tr>
+    {% for r in sm.model_parts %}<tr><td>{{ r.model }}</td><td class="num">{{ r.orders }}</td><td class="num">{{ money(r.cost) }}</td><td class="num">{% if r.per_bike is none %}—{% else %}{{ money(r.per_bike) }}{% endif %}</td></tr>
+    {% else %}<tr><td colspan="4" class="muted">Запчасти в наряды не уходили.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+{% if sm.spend is defined %}
+<section class="card">
+  <h2>Расход склада <a class="muted" href="/reports/spend{{ sm.q }}">подробнее →</a></h2>
+  <table>
+    <tr><th>Позиция</th><th class="num">Ушло</th><th class="num">Себестоимость</th></tr>
+    {% for r in sm.spend %}<tr><td>{{ r.title }}</td><td class="num">{{ r.qty }} {{ r.unit }}</td><td class="num">{{ money(r.cost) }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">Со склада ничего не уходило.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+</div>
+{% if sm.integrity is defined %}
+<p class="{% if sm.integrity.total %}flash err{% else %}muted{% endif %}">Расхождения в парке, арендах и нарядах: {% if sm.integrity.total %}<b>{{ sm.integrity.total }}</b> — {% for code, label in INTEGRITY_KINDS.items() %}{% if sm.integrity.get(code) %}{{ label }}: {{ sm.integrity[code] }}{% if not loop.last %}; {% endif %}{% endif %}{% endfor %} <a href="/reports/integrity">разобрать →</a>{% else %}нет.{% endif %}</p>
+{% endif %}
+<h2 class="block-sep">Сейчас и по месяцам</h2>
 <div class="tiles">
   <div class="tile"><b>{{ utilization }}%</b><span>сейчас в аренде: {{ rented }} из {{ fleet }} операционных</span></div>
   <div class="tile"><b>{{ bikes.get('repair', 0) + bikes.get('maintenance', 0) }}</b><span>в ремонте и на ТО</span></div>

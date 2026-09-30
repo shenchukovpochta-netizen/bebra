@@ -60,16 +60,16 @@
     {% if g_main %}<div class="blk"><div class="grp">Главное</div>
       <a href="/my" {% if request.url.path == '/my' %}class="on"{% endif %}>Мои задачи</a>
       {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
-      {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
-      <a href="/bookings" {% if request.url.path.startswith('/bookings') %}class="on"{% endif %}>Брони</a>{% endif %}
-      {% if can_view(staff, 'inbox') %}<a href="/inbox" {% if request.url.path.startswith('/inbox') %}class="on"{% endif %}>Входящие</a>{% endif %}
+      {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>{% endif %}
+      {# Сообщения, заявки на аренду и «Я оплатил» - один пункт: для точки
+         это одно и то же - клиент ждёт ответа (app/crm/incoming.py). #}
+      {% if can_view(staff, 'inbox') or can_view(staff, 'issue') or can_view(staff, 'claims') %}<a href="/incoming" {% if request.url.path.startswith(('/incoming', '/inbox', '/bookings', '/claims')) %}class="on"{% endif %}>Входящие</a>{% endif %}
     </div>{% endif %}
 
     {% if g_client %}<div class="blk"><div class="grp">Клиенты</div>
       {% if can_view(staff, 'clients') %}<a href="/clients" {% if request.url.path.startswith('/clients') %}class="on"{% endif %}>Клиенты</a>{% endif %}
       {% if can_view(staff, 'rentals') %}<a href="/rentals" {% if request.url.path.startswith('/rentals') %}class="on"{% endif %}>Аренды</a>
       <a href="/ops" {% if request.url.path.startswith('/ops') %}class="on"{% endif %}>Группа точек</a>{% endif %}
-      {% if can_view(staff, 'claims') %}<a href="/claims" {% if request.url.path.startswith('/claims') %}class="on"{% endif %}>Заявки</a>{% endif %}
       {% if can_view(staff, 'mailing') %}<a href="/mailing" {% if request.url.path.startswith('/mailing') %}class="on"{% endif %}>Рассылки</a>{% endif %}
       {% if can_view(staff, 'promos') %}<a href="/promos" {% if request.url.path.startswith('/promos') %}class="on"{% endif %}>Акции</a>{% endif %}
     </div>{% endif %}

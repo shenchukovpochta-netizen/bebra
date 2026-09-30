@@ -1,0 +1,9 @@
+{# «Входящие» - один раздел меню на всё, что клиент прислал сам: лента и
+   три полных экрана (app/crm/incoming.py). Вкладка видна только с правом
+   на свой раздел: переписка по умолчанию - только владельцу. #}
+<nav class="tabs incoming-tabs">
+  <a href="/incoming" {% if active == 'all' %}class="on"{% endif %}>Все{% if incoming_counts %} · {{ incoming_counts.all }}{% endif %}</a>
+  {% if can_view(staff, 'inbox') %}<a href="/inbox" {% if active == 'message' %}class="on"{% endif %}>Сообщения{% if incoming_counts %} · {{ incoming_counts.message }}{% endif %}</a>{% endif %}
+  {% if can_view(staff, 'issue') %}<a href="/bookings" {% if active == 'booking' %}class="on"{% endif %}>Заявки на аренду{% if incoming_counts %} · {{ incoming_counts.booking }}{% endif %}</a>{% endif %}
+  {% if can_view(staff, 'claims') %}<a href="/claims" {% if active == 'claim' %}class="on"{% endif %}>«Я оплатил»{% if incoming_counts %} · {{ incoming_counts.claim }}{% endif %}</a>{% endif %}
+</nav>

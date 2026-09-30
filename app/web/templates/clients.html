@@ -1,8 +1,13 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
+{% block title %}Клиенты — {{ app_title }}{% endblock %}
 {% block content %}
+{% set money_ok = can_view(staff, 'finance') %}
+{% set keep = 'q=' ~ (q|urlencode) ~ '&status=' ~ (status|urlencode) ~ '&risk=' ~ (risk|urlencode) %}
 <div class="bar">
   <h1>Клиенты</h1>
   <form method="get" class="search">
+    <input type="hidden" name="group" value="{{ group }}">
     <input name="q" value="{{ q }}" placeholder="ФИО, телефон, договор">
     <select name="status"><option value="">все статусы</option>
       {% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
@@ -11,24 +16,57 @@
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'clients') %}<a class="btn" href="/clients/new">+ Клиент</a>{% endif %}
-  {% if can_view(staff, 'finance') %}<a class="btn ghost" href="/clients.xlsx?q={{ q|urlencode }}&status={{ status|urlencode }}&risk={{ risk|urlencode }}">Excel</a>
-  <a class="btn ghost" href="/clients.csv?q={{ q|urlencode }}&status={{ status|urlencode }}&risk={{ risk|urlencode }}">CSV</a>{% endif %}
+  {% if money_ok %}<a class="btn ghost" href="/clients.xlsx?{{ keep|safe }}&group={{ group }}">Excel</a>
+  <a class="btn ghost" href="/clients.csv?{{ keep|safe }}&group={{ group }}">CSV</a>{% endif %}
 </div>
+{# Сводка всех клиентов за всё время и действующих: плитки считаются по всей
+   базе, а не по найденному, - это ответ «сколько у нас клиентов вообще».
+   Плитка - ссылка на свою группу. #}
+<div class="tiles">
+  <a class="tile" href="/clients?group=all"><b>{{ tiles.all }}</b><span>клиентов за всё время</span></a>
+  <a class="tile good" href="/clients?group=active"><b>{{ tiles.active }}</b><span>действующих — сейчас в аренде</span></a>
+  <a class="tile" href="/clients?group=former"><b>{{ tiles.former }}</b><span>бывших — брали, сейчас без велосипеда</span></a>
+  <a class="tile" href="/clients?group=never"><b>{{ tiles.never }}</b><span>ни разу не брали</span></a>
+  <a class="tile {% if tiles.debt %}warn{% endif %}" href="/clients?group=debt"><b>{{ tiles.debt }}</b><span>должников{% if money_ok %}<br><small class="muted">на {{ money(tiles.debt_sum) }}</small>{% endif %}</span></a>
+  {% if money_ok %}<div class="tile"><b>{{ money(tiles.paid) }}</b><span>оплатили за всё время<br><small class="muted">{{ '{:,}'.format(tiles.days)|replace(',', ' ') }} дней с велосипедом</small></span></div>{% endif %}
+</div>
+<nav class="tabs">
+  {% for code, label in CLIENT_GROUPS.items() %}<a href="/clients?{{ keep|safe }}&group={{ code }}" {% if group == code %}class="on"{% endif %}>{{ label }} · {{ tiles[code] }}</a>{% endfor %}
+</nav>
 <div class="card">
+{{ list.views(views, '/clients', tools, staff) }}
+<div class="table-wrap">
 <table class="cards">
-  {% set money_ok = can_view(staff, 'finance') %}
-  <tr><th>Клиент</th><th>Телефон</th><th>Telegram</th><th>Аренда</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}</tr>
+  <tr>
+    {{ list.th('Клиент', 'name', tools) }}
+    <th>Телефон</th>
+    <th>Сейчас</th>
+    {{ list.th('Аренд', 'rentals', tools, 'num') }}
+    {{ list.th('Дней', 'days', tools, 'num') }}
+    {{ list.th('С нами с', 'since', tools) }}
+    {{ list.th('Последний день', 'last', tools) }}
+    {% if money_ok %}{{ list.th('Оплатил всего', 'paid', tools, 'num') }}{{ list.th('Баланс', 'balance', tools, 'num') }}{% endif %}
+  </tr>
   {% for c in rows %}
   <tr>
     <td data-label="Клиент"><a href="/clients/{{ c.id }}">{{ c.full_name }}</a>
-      {% if c.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[c.status] }}</span>{% endif %}</td>
-    <td data-label="Телефон">{{ c.phone }}</td>
-    <td data-label="Telegram">{% if c.tg_id %}✅{% if c.username %} @{{ c.username }}{% endif %}{% else %}<span class="muted">не привязан</span>{% endif %}</td>
-    <td data-label="Аренда">{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
-    <td data-label="Оплачено">{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}</td>
-    {% if money_ok %}<td class="num {% if c.balance < 0 %}bad{% endif %}" data-label="Баланс">{{ money(c.balance) }}</td>{% endif %}
+      {% if c.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[c.status] }}</span>{% endif %}
+      {% if c.tg_id %}<br><small class="muted">Telegram{% if c.username %} @{{ c.username }}{% endif %}</small>{% endif %}</td>
+    <td data-label="Телефон"><a href="tel:{{ c.phone }}">{{ c.phone }}</a></td>
+    <td data-label="Сейчас">{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a><br>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">без велосипеда</span>{% endif %}</td>
+    <td class="num" data-label="Аренд">{{ c.rentals_count or 0 }}</td>
+    <td class="num" data-label="Дней">{{ c.rented_days or 0 }}</td>
+    <td data-label="С нами с">{{ c.first_on|dmy if c.first_on else '—' }}</td>
+    <td data-label="Последний день">{% if c.rental_id %}<span class="muted">в аренде</span>{% elif c.last_on %}{{ c.last_on|dmy }}{% else %}—{% endif %}</td>
+    {% if money_ok %}
+    <td class="num" data-label="Оплатил всего">{{ money(c.paid_total or 0) }}</td>
+    <td class="num {% if c.balance < 0 %}bad{% endif %}" data-label="Баланс">{{ money(c.balance) }}</td>
+    {% endif %}
   </tr>
-  {% else %}<tr><td colspan="6" class="muted">Никого не найдено.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="{{ 9 if money_ok else 7 }}" class="muted">Никого не найдено.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/clients', 9 if money_ok else 7) }}
 </table>
+</div>
+<p class="muted">Действующие — с идущей арендой, бывшие — брали велосипед, но сейчас без него, должники — с минусом на балансе (и действующие, и бывшие). «Дней» — сколько дней клиент был с велосипедом за все аренды, идущая — по сегодня.</p>
 </div>
 {% endblock %}

@@ -641,7 +641,19 @@ class FakeCrm:
                 continue
             r = self._active(c["id"])
             b = self.bikes_.get(r["bike_id"]) if r and r["bike_id"] else None
+            mine = [x for x in self.rentals_.values() if x["client_id"] == c["id"]]
+            today = date.today()
             rows.append({**c, "balance": self._balance(c["id"]),
+                         "paid_total": sum((e["amount"] for e in self.ledger_
+                                            if e["client_id"] == c["id"]
+                                            and e["kind"] == "payment"), Decimal(0)),
+                         "rentals_count": len(mine),
+                         "rented_days": sum(max(((x.get("closed_on") or today)
+                                                 - x["started_on"]).days, 0)
+                                            for x in mine),
+                         "first_on": min((x["started_on"] for x in mine), default=None),
+                         "last_on": max(((x.get("closed_on") or today) for x in mine),
+                                        default=None),
                          "rental_id": r["id"] if r else None,
                          "billed_until": r["billed_until"] if r else None,
                          "price": r["price"] if r else None,

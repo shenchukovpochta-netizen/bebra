@@ -541,6 +541,42 @@ def check_staff_term(term: Any, until: Any, *, today: date | None = None,
     return Check(True, datetime.combine(day, time(23, 59, 59)).astimezone())
 
 
+# Сводка клиентов за всё время: группа - вкладка списка «Клиенты».
+# Должники - поперёк остальных: должен и тот, кто сейчас в аренде, и тот,
+# кто давно сдал велосипед.
+CLIENT_GROUPS: dict[str, str] = {
+    "all": "Все за всё время", "active": "Действующие", "former": "Бывшие",
+    "never": "Ни разу не брали", "debt": "Должники",
+}
+
+
+def client_in_group(row: Mapping[str, Any], group: str) -> bool:
+    """Клиент в группе: действующий - с идущей арендой, бывший - брал, но
+    сейчас без велосипеда, «ни разу» - карточка без единой аренды."""
+    if group == "active":
+        return bool(row.get("rental_id"))
+    if group == "former":
+        return not row.get("rental_id") and int(row.get("rentals_count") or 0) > 0
+    if group == "never":
+        return int(row.get("rentals_count") or 0) == 0 and not row.get("rental_id")
+    if group == "debt":
+        return to_money(row.get("balance") or 0) < 0
+    return True
+
+
+def client_tiles(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Плитки сводки: сколько в каждой группе, сколько заплатили за всё
+    время и сколько должны сейчас."""
+    rows = list(rows)
+    out: dict[str, Any] = {g: sum(1 for r in rows if client_in_group(r, g))
+                           for g in CLIENT_GROUPS}
+    out["paid"] = sum((to_money(r.get("paid_total") or 0) for r in rows), Decimal(0))
+    out["debt_sum"] = sum((-to_money(r.get("balance") or 0) for r in rows
+                           if to_money(r.get("balance") or 0) < 0), Decimal(0))
+    out["days"] = sum(int(r.get("rented_days") or 0) for r in rows)
+    return out
+
+
 def check_login(raw: Any) -> Check:
     text = str(raw or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9_.-]{3,32}", text):
@@ -3819,6 +3855,21 @@ def check_channel(raw: Any) -> Check:
     if not value:
         return Check(True, None)
     return check_choice(value, CLIENT_CHANNELS, what="Канал привлечения")
+
+
+def channel_totals(clients: Iterable[dict], *, since: date,
+                   until: date) -> list[tuple[str, int]]:
+    """Новые клиенты за период по каналам, больше - выше. Тот же ключ
+    канала, что у отчёта «Каналы»: без канала - «не спросили» (пустой)."""
+    totals: dict[str, int] = {}
+    for client in clients:
+        day = local_date(client.get("created_at"))
+        if day is None or not since <= day <= until:
+            continue
+        channel = str(client.get("channel") or "")
+        channel = channel if channel in CLIENT_CHANNELS else ""
+        totals[channel] = totals.get(channel, 0) + 1
+    return sorted(totals.items(), key=lambda x: (-x[1], x[0]))
 
 
 def channel_rows(clients: Iterable[dict], *, months: int = 12,
@@ -7734,6 +7785,12 @@ def _feedback_stats(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
             "rate": round(100 * len(scored) / len(asked)) if asked else None,
             "avg": avg, "dist": dist,
             "low": sum(1 for s in scored if s <= FEEDBACK_LOW)}
+
+
+def feedback_stats(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Итог оценок по набору сдач: спросили, ответили, средняя, низких.
+    Для сводного окна отчётов - за его период, а не по месяцам."""
+    return _feedback_stats(list(rows))
 
 
 def feedback_report(rows: Iterable[Mapping[str, Any]], *, months: int = 12,

@@ -158,8 +158,17 @@ class TestInboxAccess(InboxCase):
                 self.as_(f"user{n}", code)
                 page = self.get_ok("/")
                 self.assertNotIn('href="/inbox"', page, "ссылки в меню и плитки нет")
-                self.assertNotIn("Входящие", page)
                 self.assertNotIn("входящих ждут ответа", page)
+                # «Входящие» в меню - общая лента (сообщения, заявки на
+                # аренду, «Я оплатил»); переписки в ней без права нет вовсе.
+                if code == "manager":
+                    feed = self.get_ok("/incoming")
+                    self.assertNotIn('href="/inbox', feed)
+                    self.assertNotIn("Иван Курьеров", feed)
+                    self.assertNotIn("Когда можно забрать", feed)
+                else:
+                    self.assertNotIn("Входящие", page, "механику ленты нет вовсе")
+                    self.assertEqual(self.client.get("/incoming").status_code, 403)
                 for path in ("/inbox", "/inbox?tab=all", "/inbox?channel=wa&q=Азиз",
                              f"/inbox/{self.tg}", f"/inbox/{self.wa}", "/inbox/999999"):
                     r = self.client.get(path)

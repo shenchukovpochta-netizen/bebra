@@ -513,3 +513,6 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
 .my-items .tel{white-space:nowrap;font-size:13px}
 .term-date{font-size:12px}.term-date summary{cursor:pointer;color:var(--muted)}
 .term-date input{margin-top:4px}
+
+/* ── отчёты одним окном: разделитель «за период» и «сейчас и по месяцам» ── */
+.block-sep{margin:24px 0 12px}

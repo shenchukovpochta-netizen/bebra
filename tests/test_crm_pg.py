@@ -292,6 +292,35 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await self.crm.rental(rid2))["mileage_end"])
         self.assertEqual((await self.crm.bike(self.bike_id))["mileage_km"], 4586)
 
+    async def test_clients_summary_all_time(self):
+        """Сводка клиентов: аренд, дней с велосипедом, первый и последний
+        день, оплачено - за всё время; баллы оплатой не считаются."""
+        await self.seed()
+        today = date.today()
+        rid = await self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D("3000"), billing="auto",
+            started_on=today - timedelta(days=30), contract_no=None, created_by="t")
+        await self.crm.close_rental(rid, closed_on=today - timedelta(days=20), note=None)
+        await self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D("3000"), billing="auto",
+            started_on=today - timedelta(days=5), contract_no=None, created_by="t")
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("3000"))
+        await self.crm.add_ledger(client_id=self.client_id, kind="bonus", amount=D("300"))
+        await self.crm.create_client(full_name="Ни разу", phone="+79990000009")
+        rows = {r["full_name"]: r for r in await self.crm.clients(limit=100)}
+        me = rows["Иванов Иван"]
+        self.assertEqual((me["rentals_count"], me["rented_days"]), (2, 15))
+        self.assertEqual((me["first_on"], me["last_on"]), (today - timedelta(days=30), today))
+        self.assertEqual(me["paid_total"], D("3000.00"))
+        self.assertIsNotNone(me["rental_id"])
+        never = rows["Ни разу"]
+        self.assertFalse(never["rentals_count"])
+        self.assertFalse(never["paid_total"])
+        self.assertTrue(logic.client_in_group(never, "never"))
+        self.assertTrue(logic.client_in_group(me, "active"))
+
     async def test_lists_reports_and_links(self):
         await self.seed()
         await self.crm.add_ledger(client_id=self.client_id, kind="charge", amount=D("-500"))
