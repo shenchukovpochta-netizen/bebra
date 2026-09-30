@@ -888,7 +888,12 @@ async def cb_book_when(callback: CallbackQuery, bot: Bot, cfg: Config, user: dic
     lang = i18n.user_lang(user)
     _, _, _, model_id, tariff_id, loc_id, day = str(callback.data).split(":")
     model = await _book_model(crm, int(model_id))
-    tariff = await crm.tariff(int(tariff_id))
+    # Тариф - из тех, что шаг срока предлагает этой модели сейчас: кнопка
+    # суточной давности несёт снятый тариф или цену, которую у модели
+    # сменили, а подделанная - чужую модель или тариф аккумулятора.
+    tariff = (next((t for t in await _book_tariffs(crm, model)
+                    if int(t["id"]) == int(tariff_id)), None)
+              if model is not None else None)
     wanted = crm_logic.booking_when(day, today=date.today())
     found = await _book_point(crm, int(loc_id))
     if model is None or tariff is None or wanted is None or found is None:

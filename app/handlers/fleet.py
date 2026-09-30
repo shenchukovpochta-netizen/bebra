@@ -138,7 +138,15 @@ async def cb_status(callback: CallbackQuery, bot: Bot, cfg: Config, crm: Any = N
         await callback.answer(texts.FLEET_SAME_STATUS.format(status=label))
         return
     who = _who(callback.from_user)
-    await crm.update_bike(bike["id"], by=f"tg:{callback.from_user.id}", status=status)
+    # Проверки выше - для внятного ответа, а запрет - в самом UPDATE: выдача,
+    # прошедшая между чтением карточки и нажатием, иначе снималась бы кнопкой.
+    if await crm.update_bike(bike["id"], by=f"tg:{callback.from_user.id}",
+                             not_status=("rented", "new"), status=status) is None:
+        fresh = await crm.bike(bike["id"])
+        await callback.answer(texts.FLEET_NEW_LOCK
+                              if fresh is not None and fresh.get("status") == "new"
+                              else texts.FLEET_RENTED_LOCK, show_alert=True)
+        return
     await crm.add_bike_log(bike["id"], "status", f"{label} (из чата)", None,
                            f"tg:{callback.from_user.id}")
     await callback.answer(label)

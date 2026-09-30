@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, tzinfo
 from typing import Any
 
 from aiogram.exceptions import TelegramAPIError
@@ -22,6 +23,12 @@ INTERVAL_SECONDS = 6 * 3600
 # Напоминания проверяются чаще ретеншена: пропущенный из-за перезапуска
 # час не должен стоить клиенту целого дня молчания.
 REMIND_INTERVAL_SECONDS = 900
+# Память дневного прохода «что сегодня уже делали» в crm.settings: код
+# уведомления -> местная дата. В переменных цикла её обнулял перезапуск,
+# и бот, поднятый после часа сводки, слал сводки и пост о свободных
+# велосипедах второй раз. Отметка прохода самого бота - ключом BOT_MARK.
+DONE_KEY = "notice_done"
+BOT_MARK = "bot_remind"
 
 # Ссылки на живые фоновые задачи. Без них сборщик мусора вправе уничтожить
 # задачу на середине: событийный цикл держит только слабую ссылку. Симптом -
@@ -193,14 +200,65 @@ async def remind_once(bot: Any, db: Database, cfg: Config, *,
     return sent, logic.deadline_digest(rows, today=today)
 
 
-def due_today(now: datetime, last_run_on: date | None, hour: int) -> bool:
+def due_today(now: datetime, last_run_on: date | None, hour: int,
+              tz: tzinfo | None = None) -> bool:
     """Пора ли делать дневной проход напоминаний.
 
     Не «ровно в этот час», а «в этот час или позже, если сегодня ещё
     не делали»: бота перезапускают среди дня, и привязка к одному часу
     молча съедала бы напоминания за целые сутки.
+
+    Час в настройке - по UTC (REMIND_HOUR_UTC), а сутки - местные
+    (Europe/Moscow, `tz` - для тестов): по дате UTC перезапуск между
+    00:00 и 03:00 по Москве видел «вчера, час уже прошёл» и делал проход
+    ночью.
     """
-    return now.hour >= hour and last_run_on != now.date()
+    if not 0 <= hour <= 23:
+        return False
+    local = now.astimezone(tz)
+    start = datetime.combine(local.date(), time(hour), tzinfo=UTC).astimezone(tz).hour
+    return local.hour >= start and last_run_on != local.date()
+
+
+def parse_done(raw: str | None) -> dict[str, date]:
+    """Память прохода из crm.settings; мусор отбрасывается, а не роняет круг."""
+    try:
+        data = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    out: dict[str, date] = {}
+    if isinstance(data, dict):
+        for code, day in data.items():
+            try:
+                out[str(code)] = date.fromisoformat(str(day))
+            except ValueError:
+                continue
+    return out
+
+
+def dump_done(done: dict[str, date], bot_done_on: date | None) -> str:
+    marks = {code: day.isoformat() for code, day in done.items()}
+    if bot_done_on is not None:
+        marks[BOT_MARK] = bot_done_on.isoformat()
+    return json.dumps(marks, sort_keys=True)
+
+
+async def _remember(crm: Any, done: dict[str, date], bot_done_on: date | None,
+                    saved: str) -> str:
+    """Записать память прохода, если она изменилась. Возвращает записанное.
+
+    Сбой записи круг не валит: память в переменных остаётся, повтор
+    грозит только после перезапуска - как раньше.
+    """
+    value = dump_done(done, bot_done_on)
+    if crm is None or value == saved:
+        return saved
+    try:
+        await crm.set_setting(DONE_KEY, value, by="bot")
+    except Exception:                                   # noqa: BLE001
+        log.warning("память дневного прохода не записана", exc_info=True)
+        return saved
+    return value
 
 
 async def reminders_loop(bot: Any, db: Database, cfg: Config,
@@ -221,10 +279,20 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
     # у каждого свой час, и «сводка в 20:00» не должна ждать, пока
     # напоминание в 09:00 отработает.
     crm_done: dict[str, date] = {}
+    # Обе памяти переживают перезапуск в crm.settings (DONE_KEY). Пока
+    # она не прочитана, проход не идёт: с пустой памятью сводки ушли бы
+    # второй раз. Без CRM читать неоткуда - память только в цикле.
+    recalled = crm is None
+    saved = ""
     while True:
         try:
+            if not recalled:
+                saved = (await crm.settings()).get(DONE_KEY) or ""
+                crm_done = parse_done(saved)
+                bot_done_on = crm_done.pop(BOT_MARK, None)
+                recalled = True
             now = datetime.now(UTC)
-            today = now.date()
+            today = logic.local_date(now)
             if due_today(now, bot_done_on, cfg.remind_hour_utc):
                 try:
                     sent, digest = await remind_once(bot, db, cfg, today=today,
@@ -239,6 +307,7 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                     if digest:
                         await _send_digest(bot, cfg, digest, today)
                     bot_done_on = today
+                    saved = await _remember(crm, crm_done, bot_done_on, saved)
                 except asyncio.CancelledError:
                     raise
                 except Exception:                       # noqa: BLE001
@@ -250,8 +319,11 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                 # чистки внутри всё так же раз в сутки.
                 from .crm import billing, waitlist
                 local = datetime.now()
-                await billing.run_daily(bot, db, crm, cfg, today=local.date(),
-                                        now=local, done=crm_done)
+                try:
+                    await billing.run_daily(bot, db, crm, cfg, today=local.date(),
+                                            now=local, done=crm_done)
+                finally:
+                    saved = await _remember(crm, crm_done, bot_done_on, saved)
                 # Лист ожидания - каждый круг, а не раз в сутки: велосипед
                 # освобождается когда угодно, и звать к нему надо в тот же
                 # день. Свой try: сбой сверки не должен отменять проход.

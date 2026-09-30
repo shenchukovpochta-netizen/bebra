@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+import types
 import unittest
 from datetime import date, timedelta
 from decimal import Decimal
@@ -279,6 +280,61 @@ class TestMailingPanel(tw.WebCase):
         self.assertEqual(counts["sent"], 1)
         sends = {s["channel"]: s for s in tw.run(crm.campaign_sends(campaign_id))}
         self.assertEqual(sends["max"]["status"], "skipped", "второй адресат не получил")
+
+    def test_lost_result_does_not_send_twice(self):
+        """Сообщение ушло, а итог не записался (сбой базы): следующий круг
+        второй раз его не шлёт - строка взята в отправку до неё."""
+        campaign_id = int(self.make().headers["location"].rsplit("/", 1)[1])
+        self.client.post(f"/mailing/{campaign_id}/start")
+        mark = self.crm.mark_send
+
+        async def broken(*a, **kw):
+            raise RuntimeError("база недоступна")
+
+        self.crm.mark_send = broken
+        with self.assertRaises(RuntimeError):
+            tw.run(mailing.run_campaign(self.bot, self.crm,
+                                        tw.run(self.crm.campaign(campaign_id)),
+                                        max_client=self.MaxClient(), pause=0))
+        self.crm.mark_send = mark
+        self.assertEqual(len(self.bot.sent), 1)
+        max_client = self.MaxClient()
+        tw.run(mailing.run_campaign(self.bot, self.crm,
+                                    tw.run(self.crm.campaign(campaign_id)),
+                                    max_client=max_client, pause=0))
+        self.assertEqual(len(self.bot.sent), 1, "клиенту второй раз не ушло")
+        self.assertEqual(len(max_client.sent), 1, "остальная очередь ушла")
+        sends = {s["channel"]: s for s in tw.run(self.crm.campaign_sends(campaign_id))}
+        self.assertEqual(sends["tg"]["status"], "sending")
+        # зависшее «отправляется» - «не доставлено», а не обратно в очередь
+        self.assertEqual(tw.run(self.crm.fail_stuck_sends()), 1)
+        sends = {s["channel"]: s for s in tw.run(self.crm.campaign_sends(campaign_id))}
+        self.assertEqual(sends["tg"]["status"], "failed")
+        self.assertIn("неизвестно", sends["tg"]["error"])
+
+    def test_restart_sweeps_interrupted_sends(self):
+        """Бот остановили посреди отправки: на старте такая строка -
+        «не доставлено», и круг её не повторяет."""
+        import asyncio
+        from unittest import mock
+        campaign_id = int(self.make().headers["location"].rsplit("/", 1)[1])
+        self.client.post(f"/mailing/{campaign_id}/start")
+        first = tw.run(self.crm.campaign_sends(campaign_id))[0]
+        self.assertTrue(tw.run(self.crm.claim_send(first["id"])))
+        self.assertFalse(tw.run(self.crm.claim_send(first["id"])), "второй раз не берётся")
+
+        async def stop(_):
+            raise asyncio.CancelledError
+
+        max_client = self.MaxClient()
+        with mock.patch.object(mailing.asyncio, "sleep", stop), \
+                self.assertRaises(asyncio.CancelledError):
+            tw.run(mailing.mailing_loop(self.bot, self.crm, types.SimpleNamespace(pay_url=""),
+                                        max_client=max_client))
+        sends = {s["id"]: s for s in tw.run(self.crm.campaign_sends(campaign_id))}
+        self.assertEqual(sends[first["id"]]["status"], "failed")
+        self.assertEqual(len(self.bot.sent) + len(max_client.sent), 1,
+                         "прерванному второй раз не ушло, остальным - ушло")
 
     def test_cancel_clears_the_queue_only(self):
         campaign_id = int(self.make().headers["location"].rsplit("/", 1)[1])

@@ -26,7 +26,7 @@ from tests.plain import plain  # noqa: E402
 try:
     from aiogram import Bot, Dispatcher
     from aiogram.client.session.base import BaseSession
-    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
     from aiogram.methods import (
         AnswerCallbackQuery,
         EditMessageCaption,
@@ -128,6 +128,9 @@ class FakeSession(BaseSession):
         # Чат, отправка фото в который должна падать: так проверяется
         # поведение бота, когда чек до оператора не дошёл.
         self.fail_photo_to: int | None = None
+        # Чат, документ в который не доходит (клиент заблокировал бота):
+        # подпись в базе, а фиксация и оплата обязаны идти дальше.
+        self.fail_document_to: int | None = None
 
     async def close(self) -> None:
         pass
@@ -152,6 +155,10 @@ class FakeSession(BaseSession):
         if (isinstance(method, SendPhoto)
                 and method.chat_id == self.fail_photo_to):
             raise TelegramBadRequest(method=method, message="chat not found")
+        if (isinstance(method, SendDocument)
+                and method.chat_id == self.fail_document_to):
+            raise TelegramForbiddenError(method=method,
+                                         message="bot was blocked by the user")
         if isinstance(method, GetMe):
             return User(id=1, is_bot=True, first_name="bot", username="testbot")
         if isinstance(method, GetChatMember):
@@ -1248,6 +1255,37 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(to_fix, "акт приёма не в чате фиксации")
         self.assertEqual(to_fix[0].message_thread_id, FIX_TOPIC)
 
+    async def test_undelivered_signed_contract_does_not_strand_the_client(self):
+        """Клиент заблокировал бота в момент подписи: экземпляр не дошёл, но
+        подпись уже в базе - фиксация, форма и карточка оплаты уходят."""
+        await self.submit()
+        await self.approve_fully()
+        self.session.fail_document_to = USER_ID
+        await self.feed(cb("sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.WAIT_PAYMENT)
+        to_fix = [m for m in self.session.documents() if m.chat_id == FIX_CHAT]
+        self.assertTrue(to_fix, "подписанный договор не ушёл в чат фиксации")
+        forms = [m for m in self.session.sent_to(ADMIN_CHAT)
+                 if isinstance(m, SendMessage) and (m.text or "").startswith("1. ФИО:")]
+        self.assertEqual(len(forms), 1, "форма фиксации не ушла")
+        self.assertIsNotNone(row["pay_message_id"], "карточка оплаты не ушла")
+
+    async def test_undelivered_signed_act_still_fixes_and_invites_return(self):
+        await self.submit()
+        await self.approve_fully()
+        await self.feed(cb("sign"))
+        await self.confirm_pay()
+        self.session.fail_document_to = USER_ID
+        await self.feed(cb("act_sign"))
+        row = self.db.users[USER_ID]
+        self.assertEqual(row["state"], logic.APPROVED)
+        to_fix = [m for m in self.session.documents()
+                  if m.chat_id == FIX_CHAT and "Акт приёма" in (m.caption or "")]
+        self.assertTrue(to_fix, "акт приёма не в чате фиксации")
+        self.assertIsNotNone(row["return_message_id"],
+                             "приглашение возврата не отправлено")
+
     CLOSE_FORM = ("когда: 07.08\n"
                   "адрес: адоратского\n"
                   "принял: ирик\n"
@@ -1275,6 +1313,16 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         row = self.db.users[USER_ID]
         self.assertEqual(row["state"], logic.APPROVED)
         self.assertIsNotNone(row["act_out_signed_at"])
+        to_fix = [m for m in self.session.documents()
+                  if m.chat_id == FIX_CHAT and "Акт возврата" in (m.caption or "")]
+        self.assertTrue(to_fix, "акт возврата не в чате фиксации")
+
+    async def test_undelivered_return_act_still_reaches_fix_chat(self):
+        await self.register_fully()
+        await self.provide_return()
+        self.session.fail_document_to = USER_ID
+        await self.feed(cb("return_sign"))
+        self.assertEqual(self.db.users[USER_ID]["state"], logic.APPROVED)
         to_fix = [m for m in self.session.documents()
                   if m.chat_id == FIX_CHAT and "Акт возврата" in (m.caption or "")]
         self.assertTrue(to_fix, "акт возврата не в чате фиксации")

@@ -543,12 +543,14 @@ class FakeCrm:
         return bid
 
     async def update_bike(self, bike_id, *, by=None, keep_rented_location=False,
-                          from_location=None, **fields):
+                          from_location=None, not_status=(), **fields):
         if bike_id not in self.bikes_:
             return None
         if from_location is not None and self.bikes_[bike_id].get("location") != from_location:
             # Как условие в WHERE: велосипед уже не на точке отправления.
             return None
+        if self.bikes_[bike_id]["status"] in not_status:
+            return None             # как условие в WHERE: строка не записана
         before = self.bikes_[bike_id]["status"]
         place = self.bikes_[bike_id].get("location")
         if keep_rented_location and before == "rented":
@@ -3101,7 +3103,7 @@ class FakeCrm:
             self.sends_[send_id] = {"id": send_id, "campaign_id": campaign_id,
                                     "client_id": client_id, "channel": channel,
                                     "status": "queued", "error": None,
-                                    "sent_at": None}
+                                    "sent_at": None, "claimed_at": None}
             added += 1
         return added
 
@@ -3123,6 +3125,23 @@ class FakeCrm:
         send = self.sends_.get(send_id)
         if send is not None:
             send.update(status=status, error=error, sent_at=self._now())
+
+    async def claim_send(self, send_id):
+        send = self.sends_.get(send_id)
+        if send is None or send["status"] != "queued":
+            return False
+        send.update(status="sending", claimed_at=self._now())
+        return True
+
+    async def fail_stuck_sends(self, *, older_minutes=None):
+        now = self._now()
+        stuck = [s for s in self.sends_.values() if s["status"] == "sending"
+                 and (older_minutes is None or s.get("claimed_at") is None
+                      or s["claimed_at"] < now - timedelta(minutes=older_minutes))]
+        for send in stuck:
+            send.update(status="failed", sent_at=now,
+                        error="неизвестно, ушло ли: отправка прервалась")
+        return len(stuck)
 
     async def set_campaign_status(self, campaign_id, status):
         campaign = self.campaigns_.get(campaign_id)

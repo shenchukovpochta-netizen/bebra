@@ -444,7 +444,9 @@ class TestWaitlistInTheLoop(unittest.IsolatedAsyncioTestCase):
             raise asyncio.CancelledError
 
         cfg = mock.Mock(remind_hour_utc=24)
-        crm = object()
+        # Память дневного прохода цикл читает из crm.settings до работы.
+        crm = mock.Mock(settings=mock.AsyncMock(return_value={}),
+                        set_setting=mock.AsyncMock())
         with mock.patch.object(waitlist, "run_once", fake_run), \
                 mock.patch("app.crm.billing.run_daily", mock.AsyncMock()) as daily, \
                 mock.patch.object(tasks.asyncio, "sleep", stop), \

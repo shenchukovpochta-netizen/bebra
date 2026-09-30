@@ -899,6 +899,34 @@ class TestReminderSchedule(unittest.TestCase):
     def test_once_a_day(self):
         self.assertFalse(self.due(9, date(2026, 8, 12)))
 
+    def test_night_restart_in_moscow_waits_for_the_morning(self):
+        """Час в UTC, сутки местные: по дате UTC перезапуск в 00:30 по
+        Москве (21:30 UTC прошлых суток) делал проход ночью."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app import tasks
+        msk = ZoneInfo("Europe/Moscow")
+        night = datetime(2026, 8, 12, 21, 30, tzinfo=UTC)     # 00:30 13.08 МСК
+        self.assertFalse(tasks.due_today(night, None, 7, tz=msk))
+        self.assertFalse(tasks.due_today(night, date(2026, 8, 12), 7, tz=msk))
+        morning = datetime(2026, 8, 13, 7, 30, tzinfo=UTC)    # 10:30 13.08 МСК
+        self.assertTrue(tasks.due_today(morning, date(2026, 8, 12), 7, tz=msk))
+        self.assertFalse(tasks.due_today(morning, date(2026, 8, 13), 7, tz=msk))
+        early = datetime(2026, 8, 13, 6, 30, tzinfo=UTC)      # 09:30 МСК
+        self.assertFalse(tasks.due_today(early, None, 7, tz=msk))
+
+    def test_memory_round_trip_drops_junk(self):
+        from app import tasks
+        raw = tasks.dump_done({"free_bikes": date(2026, 8, 12)}, date(2026, 8, 11))
+        back = tasks.parse_done(raw)
+        self.assertEqual(back, {"free_bikes": date(2026, 8, 12),
+                                tasks.BOT_MARK: date(2026, 8, 11)})
+        self.assertEqual(tasks.parse_done('{"a": "вчера", "b": "2026-08-12"}'),
+                         {"b": date(2026, 8, 12)})
+        self.assertEqual(tasks.parse_done("не json"), {})
+        self.assertEqual(tasks.parse_done("[1]"), {})
+
 
 class TestTelegramLimits(unittest.TestCase):
     """Лимиты на длину: превышение - это не обрезка, а недоставка целиком."""

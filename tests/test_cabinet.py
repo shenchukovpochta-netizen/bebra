@@ -683,6 +683,26 @@ class TestBooking(CabinetCase):
         await self.feed(cb(f"cab:book:p:{self.loc1}"))
         self.assertEqual(self.alerts()[-1], texts.CAB_BOOK_STALE)
 
+    async def test_day_button_rechecks_the_tariff(self):
+        """Кнопка дня несёт тариф: пока клиент выбирал, его сняли, а
+        подделанная кнопка несёт тариф другой модели или аккумулятора.
+        Заявку с таким тарифом не пишем - просим выбрать заново."""
+        today = date.today().strftime("%Y%m%d")
+        other = await self.crm.create_tariff("Неделя", 7, D(4500), None, model="Monster")
+        battery = await self.crm.create_tariff("АКБ неделя", 7, D(500), None,
+                                               kind="battery")
+        for tariff_id in (other, battery, 999):
+            await self.feed(cb(f"cab:book:d:{self.model_id}:{tariff_id}:{self.loc1}:{today}"))
+            self.assertEqual(self.alerts()[-1], texts.CAB_BOOK_STALE, tariff_id)
+        await self.crm.update_tariff(self.tariff_id, active=False)
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{self.tariff_id}:{self.loc1}:{today}"))
+        self.assertEqual(self.alerts()[-1], texts.CAB_BOOK_STALE, "снятый тариф")
+        self.assertIsNone(await self.crm.open_booking_of(self.client["id"]))
+        fresh = await self.crm.create_tariff("Неделя", 7, D(3200), None)
+        await self.feed(cb(f"cab:book:d:{self.model_id}:{fresh}:{self.loc1}:{today}"))
+        self.assertEqual((await self.crm.open_booking_of(self.client["id"]))["tariff_id"],
+                         fresh)
+
     async def test_without_a_directory_the_old_hours_stay(self):
         for loc in (self.loc1, self.loc2):
             await self.crm.update_location(loc, active=False)
@@ -995,3 +1015,27 @@ class TestBlacklistOnCard(CabinetCase):
         await self.crm_client()
         await self.submit()
         self.assertNotIn("⛔", self.card_caption())
+
+
+class TestServiceButtonsPastTheGate(CabinetCase):
+    """Бывший подписчик уходит из канала вместе с арендой: ответ на смету,
+    «Беру» из листа ожидания и проверка оплаты доходят до обработчиков, а
+    не до «подпишитесь». Обычное сообщение гейт держит как прежде."""
+
+    async def test_service_buttons_skip_the_subscription_gate(self):
+        self.approved_user()
+        await self.crm_client(tg_id=USER_ID)
+        self.session.subscribed = False
+        for data, answer in (("est:ok:999:100", "Наряд не найден"),
+                             ("wl:999:1", texts.CAB_BOOK_STALE),
+                             ("cab:paycheck:999", None)):
+            with self.subTest(data):
+                self.session.calls.clear()
+                await self.feed(cb(data))
+                self.assertNotIn("не подписаны", " ".join(self.session.sent()))
+                answers = [m.text for m in self.session.calls
+                           if isinstance(m, AnswerCallbackQuery)]
+                self.assertEqual(answers, [answer], "ответил обработчик, а не гейт")
+        self.session.calls.clear()
+        await self.feed(msg("привет"))
+        self.assertIn("не подписаны", " ".join(self.session.sent()))

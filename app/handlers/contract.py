@@ -65,6 +65,22 @@ def _context(cfg: Config, data: dict, anketa: dict, *, number: str,
     return ctx
 
 
+async def _to_client(bot: Bot, tg_id: int, doc: BufferedInputFile, what: str,
+                     number: str, **kwargs: Any) -> bool:
+    """Подписанный экземпляр клиенту.
+
+    Подпись уже в базе и файл на диске: блокировка бота или сбой сети
+    (TelegramNetworkError - потомок TelegramAPIError) не должны обрывать
+    обработчик до фиксации и оплаты. В журнал - номер и id, без ПДн.
+    """
+    try:
+        await bot.send_document(tg_id, doc, **kwargs)
+        return True
+    except TelegramAPIError as exc:
+        log.warning("%s %s не доставлен клиенту %s: %s", what, number, tg_id, exc)
+        return False
+
+
 def _filename(number: str) -> str:
     return f"dogovor-{number}.docx"
 
@@ -246,15 +262,18 @@ async def cb_sign(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         # подписи живёт в чате сутками, а у старого сообщения Telegram отдаёт
         # недоступный объект без метода answer - подпись уже зафиксирована в базе,
         # и падение здесь оставило бы человека без экземпляра договора.
-        await bot.send_document(
-            tg_id,
+        # Недоставка клиенту не обрывает фиксацию и этап оплаты ниже.
+        await _to_client(
+            bot, tg_id,
             BufferedInputFile(sog, filename=_soglasie_filename(number)),
+            "согласие", number,
             caption=i18n.t(lang, "SOGLASIE_SIGNED_CAPTION").format(
                 number=logic.esc(number), signed_at=stamp),
         )
-        await bot.send_document(
-            tg_id,
+        await _to_client(
+            bot, tg_id,
             BufferedInputFile(pdf, filename=_filename(number)),
+            "подписанный договор", number,
             caption=i18n.t(lang, "CONTRACT_SIGNED_USER").format(
                 number=logic.esc(number), signed_at=stamp,
                 video_url=logic.esc(cfg.video_url)),
@@ -685,8 +704,10 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
         await crm_sync.on_rental_started(crm, data,
                                          today=logic.local_date(signed_at))
 
-    await bot.send_document(
-        tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
+    # Недоставка клиенту не отменяет фиксацию и приглашение возврата.
+    await _to_client(
+        bot, tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
+        "акт приёма", number,
         caption=i18n.t(lang, "ACT_IN_SIGNED").format(
             number=logic.esc(number), signed_at=stamp,
             video_url=logic.esc(cfg.video_url)),
@@ -846,8 +867,9 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
         "closed_at": closed.get("closed_at") or stamp[:5],
     })
 
-    await bot.send_document(
-        tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
+    await _to_client(
+        bot, tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
+        "акт возврата", number,
         caption=i18n.t(lang, "RETURN_SIGNED").format(number=logic.esc(number),
                                                      signed_at=stamp),
         reply_markup=kb.main_menu(lang),
@@ -1003,8 +1025,9 @@ async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
         await crm_sync.on_buyout_signed(crm, {**data, "tg_id": tg_id},
                                         today=logic.local_date(signed_at))
 
-    await bot.send_document(
-        tg_id, BufferedInputFile(docx, filename=_act_filename("vykup", number)),
+    await _to_client(
+        bot, tg_id, BufferedInputFile(docx, filename=_act_filename("vykup", number)),
+        "акт выкупа", number,
         caption=i18n.t(lang, "BUYOUT_SIGNED").format(
             number=logic.esc(number), signed_at=stamp),
         reply_markup=kb.main_menu(lang),

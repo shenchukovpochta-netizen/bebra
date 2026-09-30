@@ -501,6 +501,7 @@ class CrmDB:
     async def update_bike(self, bike_id: int, *, by: str | None = None,
                           keep_rented_location: bool = False,
                           from_location: str | None = None,
+                          not_status: tuple[str, ...] = (),
                           **fields: Any) -> dict | None:
         """by - кто меняет: триггер журнала статусов читает его из
         set_config('crm.actor') в той же транзакции.
@@ -515,6 +516,11 @@ class CrmDB:
 
         from_location - переброска: писать, только если велосипед всё ещё
         на этой точке, тем же приёмом в WHERE. Уехал - None, строки нет.
+
+        not_status - статусы, которых правка не трогает (кнопка из чата:
+        «в аренде» снимает только аренда, «на сборке» - ввод). Тоже в WHERE:
+        выдача между чтением карточки и записью иначе снималась бы кнопкой.
+        Велосипед в таком статусе - None.
         """
         _, values = _set_clause(fields, BIKE_FIELDS, 2)
         sets = ", ".join(
@@ -525,6 +531,9 @@ class CrmDB:
         if from_location is not None:
             values = [*values, from_location]
             where += f" and location = ${len(values) + 1}"
+        if not_status:
+            values = [*values, list(not_status)]
+            where += f" and status <> all(${len(values) + 1}::text[])"
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
             return _row(await conn.fetchrow(
@@ -4663,6 +4672,24 @@ class CrmDB:
         await self.pool.execute(
             "update crm.campaign_sends set status = $2, error = $3, "
             "sent_at = now() where id = $1", send_id, status, error)
+
+    async def claim_send(self, send_id: int) -> bool:
+        """Взять сообщение рассылки в отправку: queued -> sending одним
+        UPDATE до отправки. False - его уже сняли отменой или взяли: не слать."""
+        return await self.pool.fetchval(
+            "update crm.campaign_sends set status = 'sending', claimed_at = now() "
+            "where id = $1 and status = 'queued' returning id", send_id) is not None
+
+    async def fail_stuck_sends(self, *, older_minutes: int | None = None) -> int:
+        """«Отправляется» после перезапуска (или дольше older_minutes - итог
+        не записался): неизвестно, ушло ли. Повторять нельзя - второе
+        сообщение человеку."""
+        return len(await self.pool.fetch(
+            "update crm.campaign_sends set status = 'failed', "
+            "error = 'неизвестно, ушло ли: отправка прервалась', sent_at = now() "
+            "where status = 'sending' and ($1::int is null or claimed_at is null "
+            "or claimed_at < now() - make_interval(mins => $1::int)) returning id",
+            older_minutes))
 
     async def set_campaign_status(self, campaign_id: int, status: str) -> None:
         await self.pool.execute(

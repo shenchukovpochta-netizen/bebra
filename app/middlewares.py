@@ -45,6 +45,20 @@ def _is_staff_link(inner: Any) -> bool:
             and str(inner.text or "").strip().lower().startswith("/staff"))
 
 
+# Служебные кнопки клиента, которые приходят не в начале пути, а после
+# него: оценка после сдачи (fb:), ответ на смету (est:), «Беру» из листа
+# ожидания (wl:), проверка оплаты счёта (cab:paycheck:). Бывший подписчик
+# отписался от канала вместе с арендой - гейт отвечал бы ему «подпишитесь»
+# вместо оценки, согласия на ремонт или чека. Права проверяет сам
+# обработчик: оценку и смету - по клиенту аренды или наряда.
+SERVICE_CALLBACKS = ("fb:", "est:", "wl:", "cab:paycheck:")
+
+
+def _is_service_callback(inner: Any) -> bool:
+    return (isinstance(inner, CallbackQuery)
+            and (inner.data or "").startswith(SERVICE_CALLBACKS))
+
+
 def _describe(update: Update) -> tuple[int | None, int | None, str, dict]:
     """(user_id, chat_id, kind, безопасный слепок для журнала).
 
@@ -199,8 +213,14 @@ class PipelineMiddleware(BaseMiddleware):
         # вопросов идёт МИМО гейта: это справка (адреса, тарифы, график),
         # и ночной лид должен получить её до подписки на канал -
         # регистрация при этом остаётся за гейтом, как и была.
-        if not _is_faq(inner) and not _is_staff_link(inner) and \
-                not await check_subscription(data["bot"], self.cfg.channel_id, user_id):
+        # Служебные ответы клиента (оценка, смета, лист ожидания, чек) -
+        # тоже мимо: они приходят после аренды, когда канал ему уже не нужен.
+        # Комментарий к оценке узнаётся по базе, и спрашиваем её только у
+        # неподписанного: остальным лишний запрос ни к чему.
+        if not _is_faq(inner) and not _is_staff_link(inner) \
+                and not _is_service_callback(inner) \
+                and not await check_subscription(data["bot"], self.cfg.channel_id, user_id) \
+                and not await self._is_feedback_reply(inner):
             lang = i18n.user_lang(user)
             await self._reply(
                 data["bot"], user_id,
@@ -214,6 +234,24 @@ class PipelineMiddleware(BaseMiddleware):
             return None
 
         return await handler(event, data)
+
+    async def _is_feedback_reply(self, inner: Any) -> bool:
+        """Ответ в личке на просьбу о комментарии к своей оценке - та же
+        сверка по базе, что у фильтра handlers/feedback.FeedbackReply."""
+        if self.crm is None or not isinstance(inner, Message):
+            return False
+        replied = inner.reply_to_message
+        if (replied is None or inner.from_user is None or inner.chat.type != "private"
+                or not (replied.from_user and replied.from_user.is_bot)):
+            return False
+        try:
+            row = await self.crm.feedback_by_prompt("tg", str(replied.message_id),
+                                                    inner.from_user.id)
+        except Exception:                               # noqa: BLE001
+            log.exception("оценка по ответу клиента %s не прочитана",
+                          inner.from_user.id)
+            return False
+        return row is not None
 
     @staticmethod
     async def _reply(bot: Any, tg_id: int, text: str, markup: Any = None) -> None:
