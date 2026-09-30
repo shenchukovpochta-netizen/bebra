@@ -403,6 +403,67 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((again["name"], again["perms"]),
                          ("Точка", {"sections": {"issue": "view"}}))
 
+    async def test_staff_profiles_are_seeded_once(self):
+        """Менеджер и механик не встроенные: подтягивание на каждом старте
+        возвращало удалённый профиль, а свой профиль владельца с именем
+        «Менеджер» ронял всю схему на unique (name) - система не стартовала."""
+        self.assertEqual((await self.crm.settings()).get("staff_profiles_seeded"), "1")
+        manager = await self.crm.access_profile_by_code("manager")
+        self.assertTrue(await self.crm.delete_access_profile(manager["id"]))
+        own = await self.crm.create_access_profile(
+            "Менеджер", {"sections": {"rentals": "view"}, "actions": {}})
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIsNone(await self.crm.access_profile_by_code("manager"),
+                          "удалённый не возвращается")
+        self.assertEqual((await self.crm.access_profile(own))["name"], "Менеджер")
+
+        # Живая установка до отметки: прежняя схема клала профили каждым
+        # стартом, так что чего нет - удалил владелец. Отметка ставится,
+        # удалённый не возвращается, свой одноимённый схему не роняет.
+        tech = await self.crm.access_profile_by_code("tech")
+        self.assertTrue(await self.crm.delete_access_profile(tech["id"]))
+        await self.pool.execute(
+            "delete from crm.settings where key = 'staff_profiles_seeded'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIsNone(await self.crm.access_profile_by_code("tech"))
+        self.assertIsNone(await self.crm.access_profile_by_code("manager"))
+        self.assertEqual((await self.crm.settings()).get("staff_profiles_seeded"), "1")
+        self.assertIsNotNone(await self.crm.access_profile_by_code("owner"))
+
+    async def test_locations_are_seeded_once(self):
+        """Точки владельца ложатся один раз: сид на каждом старте ставил
+        рядом с переименованной «Павлюхина» новую, а coalesce возвращал
+        стёртые владельцем телефон и часы."""
+        self.assertEqual((await self.crm.settings()).get("locations_seeded"), "1")
+        points = {p["name"]: p for p in await self.crm.locations()}
+        self.assertEqual(set(points), {"Павлюхина", "Адоратского"})
+        self.assertEqual(points["Павлюхина"]["phone"], "+7 (904) 676-49-26")
+        self.assertAlmostEqual(points["Адоратского"]["lon"], 49.147018, places=5)
+        self.assertEqual(await self.crm.rename_location(points["Павлюхина"]["id"],
+                                                        "Павлюхина 97А"), "ok")
+        await self.crm.update_location(points["Адоратского"]["id"], phone=None,
+                                       hours=None, lat=None, lon=None, public_title=None)
+        await Database(self.pool).apply_schema(SCHEMA)
+
+        def shape(rows):
+            return sorted((p["name"], p["phone"], p["hours"], p["lat"], p["public_title"])
+                          for p in rows)
+
+        after = await self.crm.locations()
+        self.assertEqual([p["name"] for p in after], ["Павлюхина 97А", "Адоратского"],
+                         "фантома «Павлюхина» нет")
+        adoratsky = next(p for p in after if p["name"] == "Адоратского")
+        self.assertEqual((adoratsky["phone"], adoratsky["hours"], adoratsky["lat"],
+                          adoratsky["public_title"]), (None, None, None, None),
+                         "стёртое владельцем не возвращается")
+
+        # Живая установка до отметки: точки в справочнике есть - только
+        # отметка, ни фантома, ни контактов поверх стёртых.
+        await self.pool.execute("delete from crm.settings where key = 'locations_seeded'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual(shape(await self.crm.locations()), shape(after))
+        self.assertEqual((await self.crm.settings()).get("locations_seeded"), "1")
+
     async def test_staff_term_is_stored(self):
         until = datetime(2030, 1, 1, 23, 59, 59, tzinfo=UTC)
         sid = await self.crm.create_staff("temp", logic.hash_password("password-1"),
@@ -2076,6 +2137,62 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                 complaint="ещё и руль", object_note=None, tech_id=None,
                 estimate=D("0"), created_by="t")
 
+    async def test_one_open_order_index_waits_for_old_duplicates(self):
+        """Старый индекс без `approve` пускал второй наряд к велосипеду на
+        согласовании. На такой базе новый индекс не строится, и сбой
+        откатывал всю схему - сервисы не поднимались после обновления.
+        Наряды схема не трогает: пока пара есть, стоит прежний индекс и
+        уходит предупреждение с номерами; разобрали - встаёт новый."""
+        await self.seed()
+        await self.pool.execute("drop index crm.work_orders_one_open")
+        await self.pool.execute(
+            "create unique index work_orders_one_open on crm.work_orders (bike_id) "
+            "where bike_id is not null and status in ('new', 'in_work', 'waiting')")
+        await self.pool.execute(
+            "insert into crm.work_orders (no, bike_id, status) values "
+            "('РЕМ-000001', $1, 'approve'), ('РЕМ-000002', $1, 'new')", self.bike_id)
+
+        async def index():
+            return await self.pool.fetchval(
+                "select indexdef from pg_indexes where schemaname = 'crm' "
+                "and indexname = 'work_orders_one_open'")
+
+        # Тот же текст, что у apply_schema, но на соединении, которое
+        # слушает сообщения сервера: предупреждение уходит в журнал.
+        warnings = []
+
+        def listen(_conn, msg):
+            warnings.append(msg)
+
+        async with self.pool.acquire() as conn:
+            conn.add_log_listener(listen)
+            try:
+                async with conn.transaction():
+                    await conn.execute("select pg_advisory_xact_lock(7331)")
+                    await conn.execute(SCHEMA.read_text(encoding="utf-8"))
+                await asyncio.sleep(0.05)
+            finally:
+                conn.remove_log_listener(listen)
+        found = [str(m) for m in warnings if m.severity_en == "WARNING"]
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("РЕМ-000001, РЕМ-000002", found[0])
+        self.assertNotIn("approve", await index(), "прежний индекс на месте")
+        self.assertEqual(await self.pool.fetchval(
+            "select string_agg(status, ',' order by id) from crm.work_orders"),
+            "approve,new", "наряды схема не закрывает")
+        await Database(self.pool).apply_schema(SCHEMA)       # и старт не падает
+
+        await self.pool.execute(
+            "update crm.work_orders set status = 'cancelled' where no = 'РЕМ-000002'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIn("approve", await index())
+        await Database(self.pool).apply_schema(SCHEMA)
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_work_order(
+                bike_id=self.bike_id, payer="own", client_id=None,
+                complaint="ещё и руль", object_note=None, tech_id=None,
+                estimate=D("0"), created_by="t")
+
     async def test_disabled_tariff_is_not_resurrected_by_the_seed(self):
         """Сид цен опирался на частичный индекс `where active`, из которого
         выключенный тариф выпадает: следующий старт контейнера вставлял его
@@ -2092,6 +2209,35 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             "'Monster Truck + (Два АКБ)' and period_days = 7")
         self.assertEqual(len(again), 1, "перезапуск не вставил вторую строку")
         self.assertFalse(again[0]["active"], "выключил владелец - выключенным и остаётся")
+
+    async def test_edited_tariff_is_not_resurrected_by_the_seed(self):
+        """Сид смотрел на связку «вид + модель + срок»: тариф, которому
+        владелец сменил срок или модель, освобождал её, и следующий старт
+        возвращал старую цену активной."""
+        self.assertEqual((await self.crm.settings()).get("tariffs_seeded"), "1")
+        seeded = await self.crm.tariffs()
+        self.assertEqual(len(seeded), 12)
+        month = next(t for t in seeded if t["model"] == "Monster Truck + (Два АКБ)"
+                     and t["period_days"] == 30)
+        week = next(t for t in seeded if t["model"] == "Kugoo V3 Pro (Два АКБ)"
+                    and t["period_days"] == 7)
+        await self.crm.update_tariff(month["id"], period_days=28)
+        await self.crm.update_tariff(week["id"], model="Kugoo V3")
+        await Database(self.pool).apply_schema(SCHEMA)
+
+        def shape(rows):
+            return sorted((t["id"], t["model"], t["period_days"], t["active"])
+                          for t in rows)
+
+        after = await self.crm.tariffs()
+        self.assertEqual(len(after), 12, "старые связки не вернулись")
+        self.assertFalse([t for t in after if t["model"] == "Monster Truck + (Два АКБ)"
+                          and t["period_days"] == 30])
+        # Живая установка до отметки: тарифы есть - только отметка.
+        await self.pool.execute("delete from crm.settings where key = 'tariffs_seeded'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual(shape(await self.crm.tariffs()), shape(after))
+        self.assertEqual((await self.crm.settings()).get("tariffs_seeded"), "1")
 
     async def test_document_numbers_come_from_the_last_number(self):
         """Номер считался как count(*) + 1: удалённая смена сдвигала
@@ -2479,6 +2625,37 @@ class TestOpsAndFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
                 pg = [b["code"] for b in await self.crm.bikes(q=query)]
                 self.assertEqual(pg, want)
                 self.assertEqual([b["code"] for b in await fake.bikes(q=query)], pg)
+
+    async def test_tech_work_groups_by_tech_like_the_fake(self):
+        """Выработка техников: SQL группирует по имени и id, и два техника
+        с одним именем - две строки. Заглушка склеивала их в одну."""
+        from tests.fake_crm import FakeCrm
+
+        fake = FakeCrm()
+        now = datetime.now(UTC)
+        got = {}
+        for crm in (self.crm, fake):
+            techs = [await crm.create_staff(login, logic.hash_password("password-1"),
+                                            "Хомяков И.", "manager")
+                     for login in ("h1", "h2")]
+            for n, (tech_id, total) in enumerate(((techs[0], D("1000")),
+                                                  (techs[1], D("500")),
+                                                  (techs[1], D("700")),
+                                                  (None, D("100")))):
+                bike = await crm.create_bike(code=f"T-{n}", model="Truck+",
+                                             frame_no=f"TF{n}")
+                order = await crm.create_work_order(
+                    bike_id=bike, payer="own", client_id=None, complaint="стук",
+                    object_note=None, tech_id=tech_id, estimate=D("0"), created_by="t")
+                await crm.update_work_order(order, status="done", total=total,
+                                            cost=D("0"), closed_at=now)
+            rows = await crm.tech_work(now - timedelta(days=1), now + timedelta(days=1))
+            got[crm is fake] = sorted((r["tech"], r["tech_id"] is None, int(r["orders"]),
+                                       D(r["total"])) for r in rows)
+        self.assertEqual(got[False], [("Хомяков И.", False, 1, D("1000")),
+                                      ("Хомяков И.", False, 2, D("1200")),
+                                      ("не назначен", True, 1, D("100"))])
+        self.assertEqual(got[True], got[False])
 
     async def test_bike_by_vin_normalises_like_logic(self):
         await self.seed()

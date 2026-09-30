@@ -168,6 +168,19 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
                      f"/issue?client={huge}", f"/orders/new?bike={huge}"):
             await self.get_ok(path)
 
+    async def test_rental_form_lists_clients_past_the_500th(self):
+        """Форма новой аренды брала клиентов пределом по умолчанию - 500 по
+        имени: курьер дальше пятисотого в выпадающий список не попадал."""
+        await self.pool.execute(
+            "insert into crm.clients (full_name, phone) "
+            "select 'Аа ' || lpad(n::text, 3, '0'), '+7999' || lpad(n::text, 7, '0') "
+            "  from generate_series(1, 500) n")
+        last = await self.crm.create_client(full_name="Яковлев Яков", phone="+79880000001")
+        page = await self.get_ok("/rentals/new")
+        # assertTrue, а не assertIn: провал печатал бы всю страницу.
+        self.assertTrue(f'<option value="{last}"' in page and "Яковлев Яков" in page,
+                        "клиента за пятисотым нет в списке")
+
     async def test_history_start_is_the_earliest_record(self):
         """Начало истории - самая ранняя запись журнала статусов или денег:
         с него стрелка «прошлый месяц» кончается."""

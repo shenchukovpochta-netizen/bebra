@@ -359,15 +359,30 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit","franchise":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true),
-  ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
-  ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit","franchise":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
   -- их матрицу правит владелец, и перезапись затирала бы его настройку.
   perms = case when crm.access_profiles.built_in then excluded.perms
                else crm.access_profiles.perms end,
   built_in = excluded.built_in;
+
+-- Менеджер и механик не встроенные: владелец правит и удаляет их, как
+-- свои, поэтому кладутся один раз на установку (settings.staff_profiles_seeded,
+-- отметка - сразу после таблицы настроек). Подтягивание на каждом старте
+-- возвращало удалённый профиль, а свой профиль владельца с тем же именем
+-- ронял всю схему на unique (name). Первый раз - пустая база: таблицы
+-- настроек здесь ещё нет. Живой установке прежняя схема клала их каждым
+-- стартом, так что чего в ней нет - удалил владелец: там только отметка.
+do $$
+begin
+  if to_regclass('crm.settings') is null then
+    insert into crm.access_profiles (code, name, perms, built_in) values
+      ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+      ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
+    on conflict do nothing;
+  end if;
+end $$;
 
 alter table crm.staff add column if not exists profile_id bigint
   references crm.access_profiles (id);
@@ -708,17 +723,41 @@ create index if not exists work_orders_tech_idx on crm.work_orders (tech_id, sta
 -- смете, открывался второй наряд, и индекс этого не замечал. Старый
 -- индекс сносим по имени: предикат у частичного индекса не меняется
 -- на месте, а `if not exists` увидел бы имя и ничего не сделал.
+--
+-- Старый индекс пускал второй наряд к велосипеду на согласовании, и на
+-- живой базе такие пары могли остаться: новый индекс на них не строится,
+-- а сбой откатил бы всю схему, и сервисы не поднялись бы. Закрывать
+-- лишний наряд схемой нельзя: за ним смета клиенту или работа техника, и
+-- какой из двух настоящий, решает человек. Поэтому пока пары есть -
+-- остаётся прежний индекс (он держит остальные статусы), а в журнал
+-- Postgres уходит предупреждение с номерами; разберут - следующий старт
+-- поставит новый.
 do $$
+declare
+  dups text;
 begin
   if exists (select 1 from pg_indexes
               where schemaname = 'crm' and indexname = 'work_orders_one_open'
-                and indexdef not like '%approve%') then
-    execute 'drop index crm.work_orders_one_open';
+                and indexdef like '%approve%') then
+    return;
   end if;
+  select string_agg(o.no, ', ' order by o.bike_id, o.id) into dups
+    from crm.work_orders o
+   where o.bike_id is not null
+     and o.status in ('new', 'in_work', 'approve', 'waiting')
+     and exists (select 1 from crm.work_orders q
+                  where q.bike_id = o.bike_id and q.id <> o.id
+                    and q.status in ('new', 'in_work', 'approve', 'waiting'));
+  if dups is not null then
+    raise warning 'work_orders_one_open не обновлён: у велосипеда два открытых наряда (%)',
+      dups;
+    return;
+  end if;
+  drop index if exists crm.work_orders_one_open;
+  create unique index work_orders_one_open on crm.work_orders (bike_id)
+    where bike_id is not null
+      and status in ('new', 'in_work', 'approve', 'waiting');
 end $$;
-create unique index if not exists work_orders_one_open on crm.work_orders (bike_id)
-  where bike_id is not null
-    and status in ('new', 'in_work', 'approve', 'waiting');
 
 create table if not exists crm.work_order_items (
   id           bigserial primary key,
@@ -833,6 +872,10 @@ create table if not exists crm.settings (
   updated_at timestamptz not null default now(),
   updated_by text
 );
+-- Менеджер и механик уже легли или удалены владельцем (см. профили доступа).
+insert into crm.settings (key, value, updated_by)
+values ('staff_profiles_seeded', '1', 'schema')
+on conflict (key) do nothing;
 
 -- ─────────────────── сотрудник и его Telegram ───────────────────
 --
@@ -1053,11 +1096,9 @@ create table if not exists crm.locations (
   sort       integer     not null default 100,
   created_at timestamptz not null default now()
 );
-
-insert into crm.locations (name, city, sort) values
-  ('Павлюхина', 'Казань', 10),
-  ('Адоратского', 'Казань', 20)
-on conflict (name) do nothing;
+-- Две точки владельца кладутся ниже, один раз и сразу с контактами
+-- (settings.locations_seeded): переименованную точку и стёртый владельцем
+-- телефон каждый старт возвращал бы обратно.
 
 -- Каталог моделей: у клиента одно название, на раме другое. Заводское
 -- держим отдельно, чтобы поиск по накладной находил, а клиент читал
@@ -1488,20 +1529,31 @@ alter table crm.locations add column if not exists hours        text;
 alter table crm.locations add column if not exists lat          double precision;
 alter table crm.locations add column if not exists lon          double precision;
 
-update crm.locations set
-  public_title = coalesce(public_title, 'Май Байк — сервис и аренда, Павлюхина'),
-  address = coalesce(address, 'г. Казань, ул. Павлюхина, 97А'),
-  phone = coalesce(phone, '+7 (904) 676-49-26'),
-  hours = coalesce(hours, 'пн-вс: 10:00-19:00'),
-  lat = coalesce(lat, 55.766900), lon = coalesce(lon, 49.148580)
- where name = 'Павлюхина';
-update crm.locations set
-  public_title = coalesce(public_title, 'Май Байк — сервис и аренда, Адоратского'),
-  address = coalesce(address, 'г. Казань, ул. Адоратского, 11А'),
-  phone = coalesce(phone, '+7 (904) 676-49-26'),
-  hours = coalesce(hours, 'пн-вс: 10:00-19:00'),
-  lat = coalesce(lat, 55.824319), lon = coalesce(lon, 49.147018)
- where name = 'Адоратского';
+-- Две точки владельца - один раз на установку (settings.locations_seeded)
+-- и сразу с контактами. Сид с coalesce на каждом старте возвращал стёртые
+-- владельцем телефон, часы и координаты, а переименованную «Павлюхина» -
+-- второй, пустой точкой. Живой установке прежняя схема клала точки каждым
+-- стартом: есть в справочнике хоть одна строка - только отметка, иначе
+-- рядом с переименованной встал бы фантом.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'locations_seeded') then
+    if not exists (select 1 from crm.locations) then
+      insert into crm.locations (name, city, sort, public_title, address, phone,
+                                 hours, lat, lon) values
+        ('Павлюхина', 'Казань', 10, 'Май Байк — сервис и аренда, Павлюхина',
+         'г. Казань, ул. Павлюхина, 97А', '+7 (904) 676-49-26',
+         'пн-вс: 10:00-19:00', 55.766900, 49.148580),
+        ('Адоратского', 'Казань', 20, 'Май Байк — сервис и аренда, Адоратского',
+         'г. Казань, ул. Адоратского, 11А', '+7 (904) 676-49-26',
+         'пн-вс: 10:00-19:00', 55.824319, 49.147018)
+      on conflict do nothing;
+    end if;
+    insert into crm.settings (key, value, updated_by)
+    values ('locations_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
 
 -- Каталог моделей и цены - из таблицы владельца. on conflict do nothing:
 -- правки в панели важнее сида, перезаписывать их при каждом старте нельзя.
@@ -1762,33 +1814,43 @@ drop index if exists crm.tariffs_model_period_idx;
 create unique index if not exists tariffs_kind_model_period_idx
   on crm.tariffs (kind, coalesce(model, ''), period_days) where active;
 
--- Цены владельца: один раз на пустое место и больше никогда.
+-- Цены владельца: один раз на установку (settings.tariffs_seeded) и
+-- больше никогда.
 --
 -- `on conflict do nothing` здесь не годится: уникальный индекс частичный
 -- (`where active`), и выключенный владельцем тариф из него выпадает - при
 -- следующем старте контейнера сид вставлял его заново, уже активным, и
--- выключенная цена снова предлагалась на выдаче. Поэтому «уже есть»
--- считаем по строке любой активности.
-insert into crm.tariffs (name, model, period_days, price, sort, kind)
-select v.name, v.model, v.period_days, v.price, v.sort, 'bike'
-  from (values
-    ('Неделя', 'Monster Truck + (Два АКБ)', 7, 3000, 10),
-    ('Две недели', 'Monster Truck + (Два АКБ)', 14, 5400, 20),
-    ('Месяц', 'Monster Truck + (Два АКБ)', 30, 11000, 30),
-    ('Неделя', 'Monster Truck + с задними амортизаторами', 7, 3300, 11),
-    ('Две недели', 'Monster Truck + с задними амортизаторами', 14, 5900, 21),
-    ('Месяц', 'Monster Truck + с задними амортизаторами', 30, 12000, 31),
-    ('Неделя', 'Kugoo V3 Pro (Два АКБ)', 7, 3500, 12),
-    ('Две недели', 'Kugoo V3 Pro (Два АКБ)', 14, 6000, 22),
-    ('Месяц', 'Kugoo V3 Pro (Два АКБ)', 30, 12500, 32),
-    ('Неделя', 'Kugoo V3 Pro + (Два АКБ)', 7, 3500, 13),
-    ('Две недели', 'Kugoo V3 Pro + (Два АКБ)', 14, 6000, 23),
-    ('Месяц', 'Kugoo V3 Pro + (Два АКБ)', 30, 12500, 33)
-       ) as v(name, model, period_days, price, sort)
- where not exists (select 1 from crm.tariffs t
-                    where t.kind = 'bike'
-                      and coalesce(t.model, '') = v.model
-                      and t.period_days = v.period_days);
+-- выключенная цена снова предлагалась на выдаче. «Уже есть» по связке
+-- «вид + модель + срок» тоже не годится: тариф, которому владелец сменил
+-- срок или модель, освобождал связку, и старая цена возвращалась живой.
+-- Поэтому отметка. Живой установке прежняя схема клала цены каждым
+-- стартом: есть хоть один тариф - только отметка, без вставки.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'tariffs_seeded') then
+    if not exists (select 1 from crm.tariffs) then
+      insert into crm.tariffs (name, model, period_days, price, sort, kind)
+      select v.name, v.model, v.period_days, v.price, v.sort, 'bike'
+        from (values
+          ('Неделя', 'Monster Truck + (Два АКБ)', 7, 3000, 10),
+          ('Две недели', 'Monster Truck + (Два АКБ)', 14, 5400, 20),
+          ('Месяц', 'Monster Truck + (Два АКБ)', 30, 11000, 30),
+          ('Неделя', 'Monster Truck + с задними амортизаторами', 7, 3300, 11),
+          ('Две недели', 'Monster Truck + с задними амортизаторами', 14, 5900, 21),
+          ('Месяц', 'Monster Truck + с задними амортизаторами', 30, 12000, 31),
+          ('Неделя', 'Kugoo V3 Pro (Два АКБ)', 7, 3500, 12),
+          ('Две недели', 'Kugoo V3 Pro (Два АКБ)', 14, 6000, 22),
+          ('Месяц', 'Kugoo V3 Pro (Два АКБ)', 30, 12500, 32),
+          ('Неделя', 'Kugoo V3 Pro + (Два АКБ)', 7, 3500, 13),
+          ('Две недели', 'Kugoo V3 Pro + (Два АКБ)', 14, 6000, 23),
+          ('Месяц', 'Kugoo V3 Pro + (Два АКБ)', 30, 12500, 33)
+             ) as v(name, model, period_days, price, sort);
+    end if;
+    insert into crm.settings (key, value, updated_by)
+    values ('tariffs_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
 
 -- Цена велосипеда на момент выдачи. `rentals.price` - цена периода
 -- целиком, вместе с позициями; вычитать их обратно каждый раз, когда
