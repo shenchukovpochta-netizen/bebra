@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Обучение — {{ app_title }}{% endblock %}
+{% block content %}
+{% if state %}
+<div class="bar"><h1>Обучение: {{ state.title|lower }}
+    <small class="muted">{{ state.done }} из {{ state.total }}</small></h1></div>
+{% for title in state.fresh %}<p class="learn-fresh">✓ Засчитано: {{ title }}</p>{% endfor %}
+{% if state.finished %}
+{# Итог - то, что новичок показывает руководителю: снимок этой страницы.
+   Учебный вход живёт до ночного сброса демо, поэтому итог - здесь, а не
+   в боевой панели: у неё с демо нет общей базы. #}
+<section class="card learn-done">
+  <h2>Обучение пройдено</h2>
+  <p>Маршрут «{{ state.title }}»: все {{ state.total }} шагов сделаны своими руками на
+    демо-стенде.</p>
+  <dl>
+    <dt>Учебный вход</dt><dd><code>{{ state.login }}</code></dd>
+    {% if state.started_at %}<dt>Начато</dt><dd>{{ state.started_at|dmy }}</dd>{% endif %}
+    {% if state.done_at %}<dt>Пройдено</dt><dd>{{ state.done_at|dmy }}</dd>{% endif %}
+  </dl>
+  <p class="muted">Сделайте снимок экрана и отправьте руководителю. Ночью демо
+    обновляется, и учебный вход вместе со всеми его записями исчезает.</p>
+</section>
+{% else %}
+<p class="muted">{{ state.lead }}</p>
+{% endif %}
+<section class="card">
+  <h2>Шаги</h2>
+  <ol class="learn-steps">
+    {% for s in state.steps %}
+    <li class="{% if s.done %}done{% elif s.now %}now{% else %}todo{% endif %}">
+      <div class="learn-step-head">
+        <span class="learn-mark">{% if s.done %}✓{% else %}{{ s.no }}{% endif %}</span>
+        <b>{{ s.title }}</b>
+        {% if s.done %}<span class="tag available">сделано</span>{% elif s.now %}<span class="tag rented">сейчас</span>{% endif %}
+      </div>
+      <p>{{ s.how }}</p>
+      <p class="muted">Зачем: {{ s.why }}</p>
+      {% if not s.done %}<a class="btn{% if not s.now %} ghost{% endif %}" href="{{ s.url }}">Перейти</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="muted">Шаг отмечается сам, когда в системе появляется ваша запись: клиент,
+    аренда, платёж, наряд. Делать можно и не по порядку — сделанное раньше срока
+    засчитывается сразу. Всё здесь вымышленное: ни клиенты, ни деньги не настоящие.</p>
+</section>
+{% else %}
+<div class="bar"><h1>Обучение новых сотрудников</h1></div>
+<section class="card">
+  <p>Новичок сам проходит путь своей работы на демо-стенде: заводит клиента, выдаёт
+    велосипед, принимает оплату, записывает ТО, открывает и закрывает наряд. Каждый шаг
+    отмечается сам, когда в системе появляется его запись. Клиенты, деньги и наряды там
+    вымышленные: у демо своя база, в журнал проката и в три числа они не попадают, а
+    ночью стенд возвращается к исходному.</p>
+  <div class="learn-tracks">
+    {% for code, t in LEARN_TRACKS.items() %}
+    <div class="kind">
+      <b>{{ t.title }}</b>
+      <small>{{ t.lead }}</small>
+      <ol class="learn-list">{% for s in t.steps %}<li>{{ s.title }}</li>{% endfor %}</ol>
+      {% if demo %}
+      <form method="post" action="/learn/start">
+        <input type="hidden" name="track" value="{{ code }}">
+        <button type="submit">Начать обучение</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% if demo %}
+  <p class="muted">«Начать обучение» заводит личный учебный вход и сразу впускает под
+    ним: текущий вход в демо на этом устройстве закроется.</p>
+  {% elif demo_url %}
+  <p>Ссылка для новичка: <a href="{{ demo_url }}/learn" rel="noopener">{{ demo_url }}/learn</a>.
+    Он выбирает маршрут и получает свой учебный вход — заводить его здесь не нужно.</p>
+  {% else %}
+  <p class="muted">Обучение живёт на демо-стенде, а он на этом сервере не поднят.
+    Как включить — INSTALL.md, раздел «Демо-стенд для франшизы»: адрес вида
+    demo.ваш-домен и строка DEMO_DOMAIN в .env. После этого здесь появится ссылка
+    для новичков.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

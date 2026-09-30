@@ -24,7 +24,7 @@ from typing import Any
 
 import asyncpg
 
-from ..crm import logic
+from ..crm import learning, logic
 from ..crm.db import CrmDB
 from . import core, seed_extras, seed_franchise, seed_service
 from .people import People
@@ -226,6 +226,14 @@ async def _reference(conn: asyncpg.Connection, w: World) -> None:
             lat=float(row["lat"]), lon=float(row["lon"]), opened_on=opened,
             phone=row["phone"] or "", hours=row["hours"] or "", sort=row["sort"])
 
+    # Профили учебных входов (app/crm/learning.py): кнопка «Обучение» на
+    # входе заводит сотрудника с одним из них. jsonb - текстом: сид не
+    # зависит от кодека соединения.
+    for code, (title, perms) in learning.PROFILES.items():
+        await conn.execute(
+            "insert into crm.access_profiles (code, name, perms) "
+            "values ($1, $2, ($3::text)::jsonb) on conflict (code) do nothing",
+            code, title, json.dumps(perms, ensure_ascii=False))
     profiles = {r["code"]: r["id"] for r in
                 await conn.fetch("select id, code from crm.access_profiles")}
     for login, name, profile, role, point, demo in STAFF:

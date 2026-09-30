@@ -51,6 +51,7 @@ from ..crm import (
     firstrun,
     franchise,
     import_xlsx,
+    learning,
     logic,
     notices,
     notify,
@@ -182,9 +183,16 @@ DEMO_LOGINS = (("demo", "demo", "Владелец — видит всё"),
                ("mechanic", "demo", "Механик"))
 # Демо не должно попадать в поиск: вымышленные люди с телефонами под
 # брендом проката выглядели бы как утечка.
-DEMO_PUBLIC = ("/robots.txt",)
+DEMO_PUBLIC = ("/robots.txt", "/learn/start")
 ROBOTS_TAG = "noindex, nofollow"
 ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
+# Телефон клиента в демо - только из вымышленного ряда +7 000: демо
+# открыто всем, и настоящий номер, набранный новичком на обучении или
+# посетителем «для проверки», до ночи висел бы у всех на виду. Кода,
+# начинающегося с нуля, в плане нумерации нет - номер ничей.
+DEMO_PHONE_PREFIX = "+7000"
+DEMO_PHONE_TEXT = ("В демо телефоны только вымышленные: +7 000 …, например "
+                   "+7 000 012-34-56.")
 MAINTENANCE_TEXT = "Демо обновляется, минуту"
 MAINTENANCE_PAGE = (
     '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
@@ -737,6 +745,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         home_for=logic.home_for,
         today=date.today, bot_enabled=bot is not None,
         demo=cfg.demo, DEMO_LOGINS=DEMO_LOGINS,
+        LEARN_TRACKS=learning.TRACKS,
         # Одноразовый ключ денежной формы: двойной клик по «Принять»
         # записывал два платежа и слал клиенту два «зачислено».
         once=lambda: secrets.token_urlsafe(12),
@@ -750,7 +759,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         messages = list(request.session.get("flash") or [])
         if messages:
             request.session["flash"] = []
-        ctx.update(staff=getattr(request.state, "staff", None), flash=messages)
+        ctx.update(staff=getattr(request.state, "staff", None), flash=messages,
+                   learn=getattr(request.state, "learn", None))
         page = templates.TemplateResponse(request, name, ctx, status_code=status_code)
         # Страницы панели не кэшируются вовсе: на них баланс клиента, его
         # телефон и статус аренды, а кнопка «назад» после выхода не должна
@@ -782,6 +792,29 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         staff = getattr(request.state, "staff", None)
         return f"staff:{staff['login']}" if staff else "staff:?"
 
+    async def learn_state(request: Request, staff: dict) -> dict:
+        """Прогресс ученика для карточки обучения (app/crm/learning.py).
+
+        В сессии - шаги, отмеченные на прошлой странице: выполненные с тех
+        пор показываются строкой «Готово». Сессии без отметки (вход с
+        другого устройства) не показывают ничего: иначе новичок увидел бы
+        разом весь прежний прогресс как новость.
+        """
+        track = learning.track_of(staff) or ""
+        state = learning.progress(
+            track, await crm.learn_facts(learning.actor(staff), int(staff["id"])))
+        codes = learning.done_codes(state["steps"])
+        seen = request.session.get("learn_seen")
+        state["fresh"] = [] if seen is None else learning.fresh(state["steps"], seen)
+        if seen != codes:
+            request.session["learn_seen"] = codes
+        if state["finished"] and not request.session.get("learn_done_at"):
+            request.session["learn_done_at"] = datetime.now(UTC).isoformat()
+        done_at = request.session.get("learn_done_at") if state["finished"] else None
+        state.update(login=staff["login"], started_at=staff.get("created_at"),
+                     done_at=datetime.fromisoformat(done_at) if done_at else None)
+        return state
+
     def may_view(request: Request, code: str) -> bool:
         return logic.can_view(getattr(request.state, "staff", None), code)
 
@@ -810,6 +843,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if request.state.staff is None and not path.startswith(public):
             target = path + (f"?{request.url.query}" if request.url.query else "")
             return secured(redirect("/login?next=" + quote(target, safe="")))
+        request.state.learn = None
+        if (request.state.staff is not None and request.method == "GET"
+                and learning.track_of(request.state.staff)
+                and not path.startswith(("/static", "/healthz", "/manifest"))):
+            request.state.learn = await learn_state(request, request.state.staff)
         if cfg.demo and demo_blocked(request.method, path):
             flash(request, DEMO_BLOCKED_TEXT, "err")
             return secured(redirect(same_origin_back(request)))
@@ -1078,7 +1116,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         request.session.clear()
         request.session["staff_id"] = staff["id"]
         request.session["pw"] = logic.session_mark(staff.get("password_hash"))
-        home = logic.home_for(staff)
+        # Ученик возвращается к своим шагам, а не на сводку.
+        home = "/learn" if learning.track_of(staff) else logic.home_for(staff)
         target = logic.safe_next(data.get("next") or home, home)
         if target == "/" and home != "/":
             target = home
@@ -1117,6 +1156,103 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         request.session["pw"] = logic.session_mark(new_hash)
         flash(request, "Пароль изменён.")
         return redirect("/me")
+
+    # ─────────────────────── обучение ───────────────────────
+    #
+    # Личный учебный вход на демо-стенде (app/crm/learning.py). Боевая
+    # панель страницу /learn тоже показывает - что в обучении и где оно
+    # живёт, - но учебных входов не заводит: её база настоящая.
+
+    learn_starts: dict[str, list[float]] = {}
+
+    @app.get("/learn")
+    async def learn_page(request: Request) -> Response:
+        return render(request, "learn.html", state=getattr(request.state, "learn", None),
+                      demo_url=cfg.demo_url)
+
+    @app.post("/learn/start")
+    async def learn_start(request: Request) -> Response:
+        """Завести учебного сотрудника маршрута и сразу впустить его.
+
+        Только в демо: там адрес открыт без входа (DEMO_PUBLIC), а база
+        вымышленная. Пароль показывается один раз - flash на первой
+        странице; в базе он, как у всех, только хэшем.
+        """
+        if not cfg.demo:
+            return render(request, "missing.html", status_code=404, what="Адрес")
+        # Адрес открыт без входа, и форма с чужого сайта заводила бы
+        # учебные входы руками его посетителей - с тысяч адресов, мимо
+        # предела на адрес, пока стенд не заполнится до ночи. Браузер
+        # пишет Origin у каждого POST с чужой страницы.
+        origin = request.headers.get("origin")
+        if origin and urlsplit(origin).netloc != request.url.netloc:
+            return PlainTextResponse("Обучение начинается со страницы входа демо.",
+                                     status_code=403)
+        data = await form(request)
+        spec = learning.TRACKS.get(data.get("track") or "")
+        if spec is None:
+            flash(request, "Выберите, чему учиться: администратор точки или мастер.",
+                  "err")
+            return redirect("/login")
+        ip, now = client_ip(request), time.monotonic()
+        if len(learn_starts) > LOGIN_KEYS_SWEEP:
+            for stale in [k for k, ts in learn_starts.items()
+                          if not ts or now - ts[-1] > 86400]:
+                learn_starts.pop(stale, None)
+        recent = [t for t in learn_starts.get(ip, []) if now - t < 86400]
+        if (len(recent) >= learning.PER_ADDRESS
+                or await crm.learn_count() >= learning.PER_DAY):
+            flash(request, "Новых учебных входов сегодня больше не будет — войдите "
+                           "под прежним или вернитесь завтра.", "err")
+            return redirect("/login")
+        profile = await crm.access_profile_by_code(spec.profile)
+        if profile is None:
+            flash(request, "Обучение на этом стенде не настроено.", "err")
+            return redirect("/login")
+        places = [p["name"] for p in await crm.locations() if p.get("active")]
+        password = "".join(secrets.choice(learning.PASSWORD_ALPHABET)
+                           for _ in range(learning.PASSWORD_LEN))
+        password_hash = await asyncio.to_thread(logic.hash_password, password)
+        staff_id = login = None
+        for _ in range(5):
+            number = 10000 + secrets.randbelow(90000)
+            login = f"{learning.LOGIN_PREFIX}{number}"
+            if await crm.staff_by_login(login) is not None:
+                continue
+            try:
+                staff_id = await crm.create_staff(
+                    login, password_hash, learning.trainee_name(number),
+                    "manager", profile["id"], location=places[0] if places else None)
+            except Exception as exc:                    # noqa: BLE001
+                # Два новичка вытянули одно число разом: следующая попытка.
+                if "unique" not in type(exc).__name__.lower():
+                    raise
+                continue
+            break
+        if staff_id is None:
+            flash(request, "Не удалось завести учебный вход — нажмите ещё раз.", "err")
+            return redirect("/login")
+        learn_starts[ip] = [*recent, now]
+        # Свой велосипед на своей точке: свободных в демо с десяток, и без
+        # него выдача и наряд упирались бы в чужие аренды и посетителей.
+        # Не завёлся - обучение идёт на свободных из парка.
+        try:
+            await crm.create_bike(
+                by=f"staff:{login}", code=learning.kit_code(login or ""),
+                model=learning.kit_model(await crm.tariffs(active_only=True),
+                                         await crm.bike_models()),
+                status="available", location=places[0] if places else None,
+                mileage_km=learning.KIT_MILEAGE, note=learning.KIT_NOTE)
+        except Exception:                               # noqa: BLE001
+            log.warning("учебный велосипед для %s не заведён", login, exc_info=True)
+        request.session.clear()
+        request.session["staff_id"] = staff_id
+        request.session["pw"] = logic.session_mark(password_hash)
+        request.session["learn_seen"] = []
+        flash(request, f"Ваш учебный вход: логин {login}, пароль {password}. Запишите "
+                       "его, если будете продолжать с другого устройства: он "
+                       "работает до ночного обновления демо.")
+        return redirect("/learn")
 
     # ─────────────────────── дашборд ───────────────────────
 
@@ -1618,6 +1754,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if phone is None:
             flash(request, "Телефон: не похоже на номер. Пример: +7 900 123-45-67.", "err")
             return None
+        if cfg.demo and not phone.startswith(DEMO_PHONE_PREFIX):
+            flash(request, DEMO_PHONE_TEXT, "err")
+            return None
         # Запасные телефоны: необязательны, но если вписаны - это номера.
         spare: dict[str, str | None] = {}
         for key in ("phone2", "phone3"):
@@ -1628,6 +1767,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             normal = bot_logic.normalize_phone(raw)
             if normal is None:
                 flash(request, f"Запасной телефон «{raw}»: не похоже на номер.", "err")
+                return None
+            if cfg.demo and not normal.startswith(DEMO_PHONE_PREFIX):
+                flash(request, DEMO_PHONE_TEXT, "err")
                 return None
             spare[key] = normal
         other = await crm.client_by_phone(phone)
@@ -1657,7 +1799,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return redirect("/clients/new")
         client_id = await crm.create_client(full_name=fields["full_name"],
                                             phone=fields["phone"], note=fields["note"],
-                                            contract_no=fields["contract_no"])
+                                            contract_no=fields["contract_no"],
+                                            created_by=who(request))
         patch = {key: fields[key] for key in ("channel",) if fields.get(key)}
         if fields["status"] != "active":
             patch["status"] = fields["status"]
@@ -2477,7 +2620,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         client_id = await crm.create_client(
             full_name=fields["full_name"], phone=fields["phone"], note=fields["note"],
             tg_id=tg_id, username=(user or {}).get("username") if tg_id else None,
-            contract_no=fields["contract_no"] or (user or {}).get("contract_no"))
+            contract_no=fields["contract_no"] or (user or {}).get("contract_no"),
+            created_by=who(request))
         if tg_id:
             await service.ref_signed(crm, await crm.client(client_id) or {})
         flash(request, "Клиент добавлен." + (" Telegram подхвачен из бота." if tg_id else ""))
@@ -2613,7 +2757,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             # Платёж после начисления первого периода: баланс сразу честный,
             # и уведомление клиенту уходит с верной датой «оплачено до».
             await service.add_entry(crm, client, kind="payment", amount=pay.value,
-                                    method=method, note=f"При выдаче № {bike['code']}",
+                                    method=method,
+                                    note=logic.ISSUE_PAY_NOTE.format(code=bike["code"]),
                                     by=who(request), rental_id=rental_id)
             await referral_bonus(client, pay.value, who(request))
         if booking_id is not None:
@@ -4643,7 +4788,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "staff.html", rows=await crm.staff_all(),
                       profiles=await profile_choices(),
                       places=await location_names(),
-                      can_manage=may_edit(request, "staff"))
+                      can_manage=may_edit(request, "staff"), demo_url=cfg.demo_url)
 
     async def add_staff(request: Request, data: dict) -> dict | None:
         """Новый вход в панель из формы: логин и профиль, None - отказ уже во

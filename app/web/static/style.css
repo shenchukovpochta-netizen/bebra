@@ -479,3 +479,23 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
 .login-box .demo-logins button{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;
   justify-content:space-between;text-align:left;padding:8px 12px;font-weight:500}
 .demo-logins code{font-size:13px}
+
+/* ── обучение новичка: карточка шага на каждой странице и список шагов ── */
+.card.learn{border-left:4px solid var(--brand)}
+.learn-head{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;margin-bottom:8px}
+.learn-head a{margin-left:auto;font-size:13px}
+.learn p{margin:0 0 8px}
+.learn-now{font-size:15px}
+.learn-fresh{margin:0 0 8px;padding:6px 10px;border-radius:9px;background:#E4F5E4;color:var(--ok);font-weight:600}
+.learn-steps{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.learn-steps li{border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.learn-steps li.now{border-color:var(--brand);box-shadow:inset 4px 0 0 var(--brand)}
+.learn-steps li.done{opacity:.8}
+.learn-steps p{margin:6px 0}
+.learn-step-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+.learn-mark{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;background:var(--chip);font-weight:700;font-size:13px}
+.learn-steps li.done .learn-mark{background:#E4F5E4;color:var(--ok)}
+.learn-tracks{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:12px 0}
+.learn-list{margin:4px 0 8px;padding-left:20px;font-size:13px}
+.learn-tracks form{margin:0}
+@media (prefers-color-scheme:dark){.learn-fresh,.learn-steps li.done .learn-mark{background:#1F3A21}}

@@ -74,6 +74,9 @@ class WebConfig:
     # логинов, запрет опасных POST. Из окружения не читается намеренно -
     # включает его только свой вход, у которого нет боевых секретов.
     demo: bool = False
+    # Адрес демо-стенда (https://DEMO_DOMAIN) - для ссылки на обучение
+    # новичков из боевой панели. Пусто - демо не поднят.
+    demo_url: str = ""
 
     @classmethod
     def load(cls) -> WebConfig:
@@ -107,4 +110,14 @@ class WebConfig:
             inbox_hook_token=_secret("INBOX_HOOK_TOKEN", required=False),
             metrics_token=_secret("METRICS_TOKEN", required=False),
             franchise_key=_secret("FRANCHISE_KEY", required=False),
+            demo_url=demo_url(_env("DEMO_DOMAIN", "")),
         )
+
+
+def demo_url(domain: str) -> str:
+    """https://домен демо-стенда; пусто или не похоже на домен - пусто.
+    Имя идёт в ссылку на странице, и лишнее в нём ей не нужно."""
+    domain = domain.strip().lower().rstrip("/")
+    if not domain or not all(c.isalnum() or c in ".-" for c in domain):
+        return ""
+    return "https://" + domain

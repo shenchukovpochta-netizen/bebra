@@ -1,0 +1,18 @@
+{# Карточка обучения на каждой странице ученика, кроме /learn: текущий шаг,
+   как его сделать и куда идти. Шаг отмечается сам по записи в базе -
+   кнопки «я сделал» нет намеренно (app/crm/learning.py). #}
+<section class="card learn" aria-label="Обучение">
+  <div class="learn-head">
+    <b>Обучение: {{ learn.title|lower }}</b>
+    <span class="muted">· {{ learn.done }} из {{ learn.total }}</span>
+    <a href="/learn">все шаги</a>
+  </div>
+  {% for title in learn.fresh %}<p class="learn-fresh">✓ Засчитано: {{ title }}</p>{% endfor %}
+  {% if learn.current %}
+  <p class="learn-now"><b>Шаг {{ learn.current.no }}. {{ learn.current.title }}</b></p>
+  <p>{{ learn.current.how }}</p>
+  {% if request.url.path != learn.current.url.split('?')[0] %}<a class="btn" href="{{ learn.current.url }}">Перейти</a>{% endif %}
+  {% else %}
+  <p class="learn-now"><b>Обучение пройдено.</b> <a href="/learn">Итог</a> можно показать руководителю.</p>
+  {% endif %}
+</section>

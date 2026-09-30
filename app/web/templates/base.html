@@ -55,6 +55,7 @@
     <small>{{ ROLES.get(staff.role, staff.role) }}</small>
   </a>
   <nav>
+    {% if learn %}<div class="blk"><a href="/learn" {% if request.url.path == '/learn' %}class="on"{% endif %}>Обучение · {{ learn.done }}/{{ learn.total }}</a></div>{% endif %}
     {% if g_main %}<div class="blk"><div class="grp">Главное</div>
       {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
       {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
@@ -109,6 +110,7 @@
 {% for kind, text in flash %}
   <div class="flash {{ kind }}">{{ text }}</div>
 {% endfor %}
+{% if learn and request.url.path != '/learn' %}{% include "_learn_card.html" %}{% endif %}
 {% block content %}{% endblock %}
 </main>
 {# Суммы идут на неразрывных пробелах (logic.money): «2 107 700 ₽» не

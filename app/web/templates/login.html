@@ -27,6 +27,17 @@
       </form>
       {% endfor %}
     </div>
+    {# Обучение новичка: личный учебный вход и шаги своей работы. Кнопка -
+       форма без скрипта, как и входы под ролями выше. #}
+    <div class="demo-logins">
+      <p class="muted">Новый сотрудник? Пройдите обучение на своём учебном входе:</p>
+      {% for code, t in LEARN_TRACKS.items() %}
+      <form method="post" action="/learn/start">
+        <input type="hidden" name="track" value="{{ code }}">
+        <button type="submit" class="ghost"><span>Обучение: {{ t.title|lower }}</span> <span class="muted">{{ t.steps|length }} шагов</span></button>
+      </form>
+      {% endfor %}
+    </div>
     {% else %}
     <p class="muted">Клиенты, парк, аренды и деньги проката. Доступ выдаёт администратор.</p>
     {% endif %}

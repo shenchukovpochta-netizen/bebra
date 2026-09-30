@@ -15,7 +15,7 @@ from typing import Any
 
 import asyncpg
 
-from . import logic
+from . import learning, logic
 
 # Белые списки колонок для UPDATE: имена подставляются в SQL текстом.
 BIKE_FIELDS = frozenset({
@@ -224,6 +224,88 @@ class CrmDB:
         принял наличные, не открыв своей."""
         await self.pool.execute(
             "update crm.staff set location = $2 where id = $1", staff_id, location)
+
+    # ─────────────────────── обучение ───────────────────────
+
+    async def learn_facts(self, actor: str, staff_id: int) -> dict:
+        """Что учебный сотрудник уже сделал - шаги learning.TRACKS по
+        записям от его имени, и его последние клиент, аренда и наряд и
+        учебный велосипед для ссылок шагов. Одним запросом: карточка обучения считает его на
+        каждой странице ученика.
+
+        Пополнение - платёж не с мастера выдачи (там своя заметка);
+        плановое ТО - закрытый наряд со строкой прайса категории «ТО»;
+        приём - любая аренда, закрытая им (велосипед вышел из rented его
+        рукой); ТО мастера - велосипед, поставленный им на ТО и им же
+        снятый с ТО.
+        """
+        row = await self.pool.fetchrow(
+            """
+            with my_rental as (
+              select id, bike_id from crm.rentals where created_by = $1
+              order by (status = 'active') desc, id desc limit 1
+            ), my_order as (
+              select id from crm.work_orders where created_by = $1 or tech_id = $2
+              order by (status in ('new', 'in_work', 'approve', 'waiting')) desc,
+                       id desc
+              limit 1
+            )
+            select
+              exists (select 1 from crm.clients where created_by = $1) as client,
+              exists (select 1 from crm.rentals where created_by = $1) as issue,
+              exists (select 1 from crm.ledger where created_by = $1
+                        and kind = 'payment'
+                        and coalesce(note, '') not like $3) as topup,
+              exists (select 1 from crm.rentals where intent_by = $1) as intent,
+              exists (select 1 from crm.work_orders o
+                       where o.created_by = $1 and o.status = 'done'
+                         and exists (select 1 from crm.work_order_items i
+                                     join crm.work_types t on t.id = i.work_type_id
+                                     where i.order_id = o.id and t.category = $4))
+                as to_order,
+              exists (select 1 from crm.bike_status_log
+                       where changed_by = $1 and from_status = 'rented') as returned,
+              exists (select 1 from crm.work_orders
+                       where created_by = $1 and bike_id is not null) as opened,
+              exists (select 1 from crm.work_orders
+                       where tech_id = $2 and status not in ('new', 'cancelled')) as take,
+              exists (select 1 from crm.work_order_items i
+                       join crm.work_orders o on o.id = i.order_id
+                       where i.work_type_id is not null
+                         and (o.created_by = $1 or o.tech_id = $2)) as work,
+              exists (select 1 from crm.part_moves
+                       where created_by = $1 and kind = 'order') as part,
+              exists (select 1 from crm.work_orders
+                       where status = 'done' and (created_by = $1 or tech_id = $2))
+                as closed,
+              (exists (select 1 from crm.bike_status_log
+                        where changed_by = $1 and to_status = 'maintenance')
+               and exists (select 1 from crm.bike_status_log
+                            where changed_by = $1 and from_status = 'maintenance'))
+                as to_status,
+              exists (select 1 from crm.part_moves
+                       where created_by = $1 and kind = 'receipt') as receipt,
+              (select id from crm.clients where created_by = $1
+                order by id desc limit 1) as client_id,
+              (select id from my_rental) as rental_id,
+              (select bike_id from my_rental) as bike_id,
+              (select id from my_order) as order_id,
+              (select id from crm.bikes where code = $5) as kit_id
+            """, actor, staff_id, logic.ISSUE_PAY_NOTE.split("{")[0] + "%",
+            learning.TO_CATEGORY, learning.kit_code(actor.partition(":")[2]))
+        facts = dict(row) if row else {}
+        # «return», «order» и «close» - слова SQL: в запросе у них свои имена.
+        for code, column in (("return", "returned"), ("order", "opened"),
+                             ("close", "closed")):
+            facts[code] = facts.pop(column, False)
+        return facts
+
+    async def learn_count(self) -> int:
+        """Учебных сотрудников на стенде: предел до ночного сброса."""
+        return int(await self.pool.fetchval(
+            "select count(*) from crm.staff s join crm.access_profiles p "
+            "on p.id = s.profile_id where p.code = any($1::text[])",
+            list(learning.PROFILES)) or 0)
 
     # ─────────────────────── профили доступа ───────────────────────
 
@@ -705,13 +787,15 @@ class CrmDB:
     async def create_client(self, *, full_name: str, phone: str,
                             tg_id: int | None = None, username: str | None = None,
                             note: str | None = None, source: str = "manual",
-                            contract_no: str | None = None) -> int:
+                            contract_no: str | None = None,
+                            created_by: str | None = None) -> int:
         return int(await self.pool.fetchval(
             """
             insert into crm.clients (full_name, phone, tg_id, username, note,
-                                     source, contract_no)
-            values ($1, $2, $3, $4, $5, $6, $7) returning id
-            """, full_name, phone, tg_id, username, note, source, contract_no))
+                                     source, contract_no, created_by)
+            values ($1, $2, $3, $4, $5, $6, $7, $8) returning id
+            """, full_name, phone, tg_id, username, note, source, contract_no,
+            created_by))
 
     async def update_client(self, client_id: int, **fields: Any) -> None:
         sets, values = _set_clause(fields, CLIENT_FIELDS, 2)

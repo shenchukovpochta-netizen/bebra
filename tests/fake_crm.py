@@ -155,6 +155,64 @@ class FakeCrm:
         rows = sorted(self.staff.values(), key=lambda s: (not s["active"], s["id"]))
         return [self._staff_row(s) for s in rows]
 
+    # ─── обучение ───
+    async def learn_facts(self, actor, staff_id):
+        from app.crm import learning
+        prefix = crm_logic.ISSUE_PAY_NOTE.split("{")[0]
+        mine = [r for r in self.rentals_.values() if r.get("created_by") == actor]
+        rental = max(mine, key=lambda r: (r["status"] == "active", r["id"]), default=None)
+        orders = [o for o in self.orders_.values()
+                  if o.get("created_by") == actor or o.get("tech_id") == staff_id]
+        order = max(orders, key=lambda o: (o["status"] in crm_logic.ORDER_OPEN, o["id"]),
+                    default=None)
+        to_types = {t["id"] for t in self.work_types_.values()
+                    if t.get("category") == learning.TO_CATEGORY}
+
+        def items_of(oid):
+            return [i for i in self.order_items_ if i["order_id"] == oid]
+
+        log = [x for x in self.status_log_ if x.get("changed_by") == actor]
+        moves = [m for m in self.part_moves_ if m.get("created_by") == actor]
+        clients = [c["id"] for c in self.clients_.values() if c.get("created_by") == actor]
+        return {
+            "client": bool(clients),
+            "issue": bool(mine),
+            "topup": any(e["kind"] == "payment" and e.get("created_by") == actor
+                         and not (e.get("note") or "").startswith(prefix)
+                         for e in self.ledger_),
+            "intent": any(r.get("intent_by") == actor for r in self.rentals_.values()),
+            "to_order": any(o.get("created_by") == actor and o["status"] == "done"
+                            and any(i.get("work_type_id") in to_types
+                                    for i in items_of(o["id"]))
+                            for o in self.orders_.values()),
+            "return": any(x["from_status"] == "rented" for x in log),
+            "order": any(o.get("created_by") == actor and o.get("bike_id")
+                         for o in self.orders_.values()),
+            "take": any(o.get("tech_id") == staff_id
+                        and o["status"] not in ("new", "cancelled")
+                        for o in self.orders_.values()),
+            "work": any(i.get("work_type_id") is not None
+                        for o in orders for i in items_of(o["id"])),
+            "part": any(m["kind"] == "order" for m in moves),
+            "close": any(o["status"] == "done" for o in orders),
+            "to_status": (any(x["to_status"] == "maintenance" for x in log)
+                          and any(x["from_status"] == "maintenance" for x in log)),
+            "receipt": any(m["kind"] == "receipt" for m in moves),
+            "client_id": max(clients, default=None),
+            "rental_id": rental["id"] if rental else None,
+            "bike_id": rental.get("bike_id") if rental else None,
+            "order_id": order["id"] if order else None,
+            "kit_id": next((b["id"] for b in self.bikes_.values()
+                            if b.get("code") == learning.kit_code(actor.partition(":")[2])),
+                           None),
+        }
+
+    async def learn_count(self):
+        from app.crm import learning
+        return sum(1 for s in self.staff.values()
+                   if (self.profiles_.get(s.get("profile_id")) or {}).get("code")
+                   in learning.PROFILES)
+
     async def create_staff(self, login, password_hash, name, role, profile_id=None,
                            location=None):
         if any(s["login"] == login for s in self.staff.values()):
@@ -598,7 +656,8 @@ class FakeCrm:
         return next((dict(c) for c in self.clients_.values() if c["phone"] == phone), None)
 
     async def create_client(self, *, full_name, phone, tg_id=None, username=None,
-                            note=None, source="manual", contract_no=None):
+                            note=None, source="manual", contract_no=None,
+                            created_by=None):
         if any(c["phone"] == phone for c in self.clients_.values()):
             raise UniqueError("phone")
         if tg_id is not None and any(c["tg_id"] == tg_id for c in self.clients_.values()):
@@ -611,6 +670,7 @@ class FakeCrm:
                               "invited_by": None, "invited_at": None,
                               "phone2": None, "phone3": None,
                               "employer": None, "experience": None,
+                              "created_by": created_by,
                               "created_at": self._now(), "updated_at": self._now()}
         return cid
 

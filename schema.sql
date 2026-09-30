@@ -2751,3 +2751,10 @@ create index if not exists return_photos_rental_idx on crm.return_photos (rental
 create index if not exists return_photos_bike_idx on crm.return_photos (bike_id, id desc)
   where bike_id is not null;
 create index if not exists return_photos_age_idx on crm.return_photos (created_at);
+
+-- Кто завёл карточку клиента в панели: «staff:логин». У остальных записей
+-- автор был всегда (аренда, журнал, наряд), у карточки - только источник
+-- (manual|bot|import). По автору обучение на демо-стенде видит, что
+-- новичок зарегистрировал своего клиента (app/crm/learning.py). Старые
+-- карточки остаются без автора: восстанавливать его не из чего.
+alter table crm.clients add column if not exists created_by text;

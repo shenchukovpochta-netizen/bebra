@@ -282,6 +282,9 @@ class TestCrmSql(unittest.TestCase):
             self.db.return_photos(rental_id=1), self.db.return_photos(bike_id=1),
             self.db.return_photo(1), self.db.old_return_photos(180),
             self.db.drop_return_photos([1, 2]),
+            # обучение на демо-стенде: шаги ученика по его записям
+            self.db.learn_facts("staff:learn-12345", 7), self.db.learn_count(),
+            self.db.create_client(full_name="a", phone="+7", created_by="staff:me"),
         ]
 
     def test_placeholders_match_arguments(self):
