@@ -46,6 +46,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .. import logic as bot_logic
 from .. import texts
 from ..crm import (
+    banking,
     billing,
     company,
     doctemplates,
@@ -2670,6 +2671,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         pay_due = logic.issue_payment_default(tariff["price"], balance)
         if not preview["deferred"]:
             pay_due = max(pay_due - discount, Decimal(0))
+        # Доп. аккумулятор отмечают на этом же шаге, без перезагрузки:
+        # сумму к оплате вместе с ним пересчитывает скрипт страницы по тем
+        # же слагаемым - плюс на балансе и скидка с цены велосипеда.
+        ctx.update(pay_credit=max(logic.to_money(balance), Decimal(0)),
+                   pay_off=Decimal(0) if preview["deferred"] else discount)
         ctx.update(step=4, started_on=start,
                    ends_on=start + timedelta(days=int(tariff["period_days"])),
                    per_day=logic.per_day(tariff["price"], tariff["period_days"]),
@@ -5769,11 +5775,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         order = await crm.work_order(order_id)
         if order is None:
             return render(request, "missing.html", status_code=404, what="Наряд")
-        if order["payer"] != "client":
-            flash(request, "Свой ремонт клиент не оплачивает.", "err")
+        method = (await form(request)).get("method") or None
+        try:
+            shift_id = await service.mark_repair_paid(crm, order, method=method,
+                                                      by=who(request))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
             return redirect(f"/orders/{order_id}")
-        await crm.update_work_order(order_id, paid_at=datetime.now(UTC))
-        flash(request, "Отмечено как оплаченный.")
+        if method == "cash" and shift_id is None:
+            flash(request, "Отмечено как оплаченный. Открытой смены нет — наличные "
+                           "в кассу не записаны: откройте смену и внесите их.", "err")
+        elif method == "cash":
+            flash(request, "Отмечено как оплаченный: наличные внесены в кассу смены.")
+        else:
+            flash(request, "Отмечено как оплаченный.")
         return redirect(f"/orders/{order_id}")
 
     # ─────────────────────── сервис: виды работ ───────────────────────
@@ -7588,9 +7603,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         status = request.query_params.get("status") or "new"
         settings = await crm.settings()
         clients = await crm.clients(limit=10000)
-        rows = logic.bank_rows(
-            await crm.bank_txns(status=None if status == "all" else status, limit=200),
-            clients, settings=settings)
+        txns = await crm.bank_txns(status=None if status == "all" else status, limit=200)
+        # Те же деньги, уже зачисленные заявкой или счётом, - в подсказке:
+        # автозачисление такую строку не трогает, решает оператор.
+        rows = logic.bank_rows(txns, clients, settings=settings,
+                               credits=await banking.credited_around(crm, txns))
         if status == "new":
             # Списания в «не разобрано» не показываем: разбирать в них
             # нечего, они никому не зачисляются и висели бы вечно.
@@ -8213,6 +8230,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                      who(request))
             flash(request, f"{logic.money(order['amount'])} зачислено "
                            f"по счёту {order['no']}.")
+            # Наличные за ремонт идут в ящик движением смены (в журнал -
+            # нет); смены нет - деньги в кассе ничем не объяснены.
+            if (order.get("work_order_id") is not None and action == "cash"
+                    and await service.cash_shift_id(crm, action, who(request)) is None):
+                flash(request, "Открытой смены нет — наличные за ремонт в кассу не "
+                               "записаны: откройте смену и внесите их.", "err")
             return redirect(back)
         if action == "drop_card":
             await crm.drop_card(order["client_id"])

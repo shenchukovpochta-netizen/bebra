@@ -311,13 +311,33 @@ class TestMoneyFixes(tw.WebCase):
             battery_id=None, by="test"))
         self.assertEqual(tw.run(self.crm.rental(rental_id))["price"], D("4170.00"))
         two_weeks = tw.run(self.crm.create_tariff("Две недели", 14, D(5500), None))
+        # Позиция - за срок аренды: на двухнедельном тарифе батарея стоит
+        # по своему тарифу на 14 дней, а не недельные 1 170.
+        tw.run(self.crm.create_tariff("АКБ · две недели", 14, D(2000), None,
+                                      kind="battery"))
         self.client.post(f"/rentals/{rental_id}/tariff",
                          data={"tariff_id": two_weeks, "billing": "auto"})
         rental = tw.run(self.crm.rental(rental_id))
         self.assertEqual(rental["base_price"], D("5500.00"),
                          "цена велосипеда - это новый тариф")
-        self.assertEqual(rental["price"], D("6670.00"),
-                         "цена периода - тариф плюс доп. аккумулятор")
+        self.assertEqual(rental["price"], D("7500.00"),
+                         "цена периода - тариф плюс доп. аккумулятор за новый срок")
+
+    def test_rental_closed_during_the_pass_gets_no_period(self):
+        """Проход читает аренды заранее: закрытая за это время аренда
+        нового периода долгом клиенту не получает."""
+        rental_id = tw.run(service.open_rental(
+            self.crm, client=tw.run(self.crm.client(self.client_id)),
+            bike=tw.run(self.crm.bike(self.bike_id)),
+            tariff=tw.run(self.crm.tariff(self.tariff_id)),
+            started_on=date(2026, 9, 1), contract_no="АВ-1", by="test"))
+        stale = tw.run(self.crm.rental(rental_id))
+        before = tw.run(self.crm.client_balance(self.client_id))
+        tw.run(service.close_rental(self.crm, stale, closed_on=date(2026, 9, 20),
+                                    note=None, by="test"))
+        self.assertEqual(tw.run(service.charge_due(self.crm, rental=stale,
+                                                   today=stale["billed_until"])), 0)
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), before)
 
     def test_removing_a_stocked_line_puts_the_part_back(self):
         """Списание в наряд и строка наряда рождаются одним действием -

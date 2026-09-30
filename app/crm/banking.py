@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from . import logic, notices, notify, service
@@ -99,18 +99,35 @@ async def tell_credited(bot: Any, db: Any, crm: Any, client: dict, amount: Any, 
         await notify.referral_bonus(bot, db, bonus["agent"], client, bonus["bonus"])
 
 
+async def credited_around(crm: Any, txns: list[dict]) -> list[dict]:
+    """Платежи, уже зачисленные заявкой или счётом, за время неразобранных
+    строк выписки (с запасом `logic.BANK_TWICE_DAYS`): с ними строка
+    сверяется, прежде чем назваться «уверенной»."""
+    moments = [t["booked_at"] for t in txns
+               if t.get("status") == "new" and isinstance(t.get("booked_at"), datetime)]
+    if not moments:
+        return []
+    return await crm.credits_since(min(moments) - timedelta(days=logic.BANK_TWICE_DAYS))
+
+
 async def auto_credit(crm: Any, *, by: str = "bank", bot: Any = None,
                       db: Any = None) -> int:
     """Зачислить то, в чём нет сомнений: номер договора в назначении.
 
     Выключено, пока владелец не включит `bank_auto_credit` в настройках:
     по умолчанию деньги на баланс кладёт человек, и это осознанно.
+
+    Номер договора стоит и в назначении перевода, по которому клиент нажал
+    «Я оплатил», и у счёта, закрытого переводом: такие деньги уже в
+    журнале. Строка с платежом той же суммы тому же клиенту рядом по дате
+    не зачисляется сама - её разбирает человек (`logic.bank_credited_before`).
     """
     settings = await crm.settings()
     if not logic.bank_settings(settings)["auto_credit"]:
         return 0
-    rows = logic.bank_rows(await crm.bank_txns(status="new", limit=200),
-                           await crm.clients(limit=10000))
+    txns = await crm.bank_txns(status="new", limit=200)
+    rows = logic.bank_rows(txns, await crm.clients(limit=10000),
+                           credits=await credited_around(crm, txns))
     done = 0
     for row in rows:
         if not row.get("sure"):

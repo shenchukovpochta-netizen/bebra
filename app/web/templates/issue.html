@@ -225,22 +225,23 @@
   <section class="card">
     <h2>Оплата при выдаче</h2>
     <p>Баланс сейчас <b class="{% if balance < 0 %}bad{% endif %}">{{ money(balance) }}</b>.
-      Первый период начислится сразу: <b>{{ money(tariff.price) }}</b>.
+      Первый период начислится сразу: <b id="first-charge">{{ money(tariff.price) }}</b>.
       {% if balance < 0 %}Долг {{ money(-balance) }} остаётся на балансе и виден в карточке.{% endif %}</p>
     {# Акция - до денег: оператор называет сумму со скидкой, а не объясняет
        баллы после оплаты. Скидка ляжет баллами следом за начислением. #}
     {% if promo and promo_deferred %}
     <p class="flash">Акция «{{ promo.title }}»: скидка <b>{{ money(promo_discount) }}</b>
       начислится баллами {{ started_on|dmy }}, в день начала, если акция ещё будет действовать.
-      К оплате сейчас <b>{{ money(pay_due) }}</b> — баллы зачтутся в следующий период.</p>
+      К оплате сейчас <b class="pay-due-text">{{ money(pay_due) }}</b> — баллы зачтутся в следующий период.</p>
     {% elif promo %}
     <p class="flash">Акция «{{ promo.title }}»: скидка <b>{{ money(promo_discount) }}</b>
-      с цены велосипеда начислится баллами — к оплате <b>{{ money(pay_due) }}</b>{% if balance > 0 %} с учётом баланса{% endif %}.
+      с цены велосипеда начислится баллами — к оплате <b class="pay-due-text">{{ money(pay_due) }}</b>{% if balance > 0 %} с учётом баланса{% endif %}.
       <span class="muted">Доп. аккумулятор в скидку не входит.</span></p>
     {% endif %}
     {% if promo_note %}<p class="muted">{{ promo_note }}</p>{% endif %}
     {% if promo_error %}<p class="flash err">{{ promo_error }}</p>{% endif %}
-    <label>Принять сейчас, ₽ <input name="pay_amount" inputmode="decimal" value="{{ pay_default }}"></label>
+    <label>Принять сейчас, ₽ <input name="pay_amount" id="pay-amount" inputmode="decimal" value="{{ pay_default }}"
+      data-credit="{{ pay_credit }}" data-off="{{ pay_off }}"></label>
     <label>Способ <select name="pay_method">{% for code, label in METHODS.items() %}<option value="{{ code }}" {% if code == 'sbp' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <label>Промокод <input name="promo_code" value="{{ promo_code }}" placeholder="если клиент назвал" style="max-width:220px;text-transform:uppercase"></label>
     <p class="muted">0 — выдать без оплаты: клиент получит уведомление с долгом и ссылкой на оплату из кабинета (если Telegram привязан).
@@ -299,14 +300,26 @@
 </form>
 {# Итог за период считается на месте: оператор при живом клиенте должен
    видеть сумму до нажатия, а не после. Без скрипта строка показывает
-   цену велосипеда, а цены позиций подписаны у каждой галочки. #}
+   цену велосипеда, а цены позиций подписаны у каждой галочки.
+   Первый период начисляется целиком, вместе с доп. аккумулятором, - и
+   сумма «принять сейчас» идёт за ним: иначе клиент уходил с долгом ровно
+   на цену батареи. Сумму, которую оператор поправил руками, скрипт не
+   трогает. Слагаемые те же, что у сервера: минус плюс на балансе и
+   скидка с цены велосипеда (на батарею она не идёт). #}
 <script>
 (function () {
   var total = document.getElementById('period-total');
   if (!total) return;
   var boxes = document.querySelectorAll('.extra-battery');
+  var first = document.getElementById('first-charge');
+  var dueTexts = document.querySelectorAll('.pay-due-text');
+  var pay = document.getElementById('pay-amount');
+  var shown = pay ? pay.value : null;
   function ruble(value) {
     return value.toLocaleString('ru-RU', {minimumFractionDigits: 0}) + ' \u20BD';
+  }
+  function plain(value) {
+    return (Math.round(value * 100) / 100).toFixed(2).replace(/\.?0+$/, '');
   }
   function recount() {
     var sum = parseFloat(total.dataset.base || '0') || 0;
@@ -314,6 +327,15 @@
       if (box.checked) sum += parseFloat(box.dataset.price || '0') || 0;
     });
     total.textContent = ruble(sum);
+    if (first) first.textContent = ruble(sum);
+    if (!pay) return;
+    var due = Math.max(sum - (parseFloat(pay.dataset.credit || '0') || 0)
+                           - (parseFloat(pay.dataset.off || '0') || 0), 0);
+    dueTexts.forEach(function (el) { el.textContent = ruble(due); });
+    if (pay.value === shown) {
+      shown = plain(due);
+      pay.value = shown;
+    }
   }
   boxes.forEach(function (box) { box.addEventListener('change', recount); });
   recount();

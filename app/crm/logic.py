@@ -6305,20 +6305,71 @@ def normalize_name(raw: Any) -> str:
 
 
 def bank_rows(txns: Iterable[dict], clients: Iterable[dict] | None = None,
-              *, settings: Mapping[str, Any] | None = None) -> list[dict]:
-    """Выписка с догадкой, кому зачислить. Неразобранные - первыми."""
+              *, settings: Mapping[str, Any] | None = None,
+              credits: Iterable[Mapping[str, Any]] = ()) -> list[dict]:
+    """Выписка с догадкой, кому зачислить. Неразобранные - первыми.
+
+    `credits` - платежи, уже зачисленные заявкой «Я оплатил» или счётом
+    (`CrmDB.credits_since`): совпадение с ними снимает «уверенно» -
+    строку разбирает человек, причина в подсказке.
+    """
     clients = list(clients or [])
+    credits = list(credits)
     prepared = prepare_clients(clients)
     rows = []
     for txn in txns:
         guess = (match_payment(txn, clients, prepared=prepared)
                  if txn.get("status") == "new" and clients else None)
-        rows.append({**txn, "guess": guess,
-                     "guess_reason": MATCH_REASONS.get((guess or {}).get("reason", ""), ""),
-                     "sure": bool(guess) and guess["reason"] == MATCH_SURE})
+        reason = MATCH_REASONS.get((guess or {}).get("reason", ""), "")
+        twice = (bank_credited_before(txn, guess["client"].get("id"), credits)
+                 if guess and credits else None)
+        if twice is not None:
+            reason = f"{reason}; {twice['note']}"
+        rows.append({**txn, "guess": guess, "guess_reason": reason, "twice": twice,
+                     "sure": bool(guess) and guess["reason"] == MATCH_SURE
+                     and twice is None})
     rows.sort(key=lambda t: t.get("booked_at"), reverse=True)
     rows.sort(key=lambda t: t.get("status") != "new")
     return rows
+
+
+# Сколько суток вокруг даты операции в выписке искать тот же платёж, уже
+# зачисленный другим путём: «Я оплатил» подтверждают и до выписки, и
+# после, а перевод доходит до неё за день-два, в выходные дольше.
+BANK_TWICE_DAYS = 3
+
+
+def bank_credited_before(txn: Mapping[str, Any], client_id: Any,
+                         credits: Iterable[Mapping[str, Any]], *,
+                         days: int = BANK_TWICE_DAYS) -> dict[str, Any] | None:
+    """Те же деньги уже в журнале? Платёж той же суммы тому же клиенту,
+    зачисленный заявкой «Я оплатил» или счётом, в пределах `days` суток от
+    операции. None - такого нет.
+
+    Номер договора в назначении стоит и у перевода, по которому клиент
+    нажал «Я оплатил»: автозачисление положило бы те же деньги второй раз.
+    Совпадение - не приговор (клиент мог заплатить дважды), поэтому
+    строка не зачисляется сама, а уходит человеку с причиной.
+    """
+    if client_id is None or txn.get("direction") != "credit":
+        return None
+    amount = to_money(txn.get("amount"))
+    booked = txn.get("booked_at")
+    for row in credits:
+        if row.get("client_id") is None or int(row["client_id"]) != int(client_id):
+            continue
+        if to_money(row.get("amount")) != amount:
+            continue
+        paid = row.get("paid_at")
+        if isinstance(booked, datetime) and isinstance(paid, datetime) \
+                and abs(paid - booked) > timedelta(days=days):
+            continue
+        what = (f"счёт {row.get('ref')}" if row.get("source") == "order"
+                else f"заявка «Я оплатил» {row.get('ref')}")
+        when = f" {paid:%d.%m}" if isinstance(paid, datetime) else ""
+        return {**row, "note": f"{money(amount)} уже зачислено ({what}{when}) — "
+                               "сверьте, не те же ли это деньги"}
+    return None
 
 
 def bank_summary(rows: Iterable[dict]) -> dict[str, Any]:
@@ -6707,6 +6758,17 @@ PAY_LINK_HOURS = 24
 # заваливается запросами про мёртвые счета.
 PAY_RECHECK_DAYS = 8
 PAY_RECHECK_MINUTES = 30
+# Счёт, закрытый руками (наличные, перевод), спрашивают у банка, пока жива
+# его ссылка, и час сверху - на опрос, который увидит оплату последней
+# минуты: оплата по ней после кассы - деньги дважды.
+PAY_TWICE_HOURS = PAY_LINK_HOURS + 1
+PAY_TWICE_NOTE = ("банк: оплачен ещё и по ссылке — деньги пришли дважды, "
+                  "второй раз не зачислено; верните клиенту или зачтите руками")
+# Банк не ответил на списание с карты (таймаут, 5xx, мусор вместо ответа):
+# списал он или нет - неизвестно. Счёт остаётся открытым и держит клиента
+# вне автосписания, пока человек не сверит операцию в Точке.
+AUTOCHARGE_UNKNOWN_NOTE = ("банк не ответил на списание: прошло ли оно, неизвестно. "
+                           "Сверьте операцию в Точке и снимите счёт или примите оплату")
 # Автосписание пробуем в этот час - после утреннего напоминания, чтобы
 # клиент успел положить деньги сам, и задолго до конца рабочего дня.
 AUTOCHARGE_HOUR = 12
@@ -6772,8 +6834,14 @@ def card_title(card: Mapping[str, Any] | None) -> str:
 
 
 def pay_expired(order: Mapping[str, Any], *, now: datetime | None = None) -> bool:
-    """Ссылка протухла: банк её уже не примет, опрашивать нечего."""
-    if order.get("status") not in PAY_OPEN:
+    """Ссылка протухла: банк её уже не примет, опрашивать нечего.
+
+    У автосписания ссылки нет: его операция живёт у банка своим сроком, и
+    закрытие «по часам» освобождало клиента для нового списания, пока
+    первое ещё могло пройти, - с карты уходило бы вдвое. Такой счёт
+    закрывает ответ банка или человек.
+    """
+    if order.get("status") not in PAY_OPEN or order.get("kind") == "auto":
         return False
     created = order.get("created_at")
     if not isinstance(created, datetime):
@@ -6861,6 +6929,35 @@ def autocharge_due(rentals: Iterable[Mapping[str, Any]],
                     "amount": to_money(-debt)})
     due.sort(key=lambda r: -r["amount"])
     return due
+
+
+def autocharge_busy(orders: Iterable[Mapping[str, Any]],
+                    claims: Iterable[Mapping[str, Any]] = ()) -> set[int]:
+    """Кого автосписание сегодня не трогает: деньги у них уже в пути.
+
+    Открытый счёт с операцией банка (ссылка, неподтверждённое списание),
+    списание, на которое банк не ответил (счёт «new» без операции: списал
+    он или нет, неизвестно), и «Я оплатил», которую ещё не разобрал
+    оператор: долг в журнале у всех прежний, и списание взяло бы ту же
+    сумму второй раз. Ссылка, которую банк так и не выдал, - не в счёт:
+    оплатить её нечем.
+    """
+    busy = {int(o["client_id"]) for o in orders
+            if o.get("status") in PAY_OPEN
+            and (o.get("operation_id") or o.get("kind") == "auto")}
+    busy |= {int(c["client_id"]) for c in claims
+             if (c.get("status") or "pending") == "pending"}
+    return busy
+
+
+def autocharge_time(settings: Mapping[str, Any] | None, now: datetime) -> bool:
+    """Пора ли дневному проходу автосписания: час настал, а сегодня (по
+    местным часам) прохода ещё не было. Отметка - в crm.settings
+    (`autocharge_done_on`), а не в памяти цикла: перезапуск бота после
+    часа списания иначе прогонял бы проход второй раз за день."""
+    if now.hour < pay_settings(settings)["autocharge_hour"]:
+        return False
+    return str((settings or {}).get("autocharge_done_on") or "") != now.date().isoformat()
 
 
 # Как часто можно предложить одному клиенту привязать карту: платит он
@@ -7080,6 +7177,19 @@ NOTICES: dict[str, dict[str, Any]] = {
         "group": "team", "target": "chat", "hour": None,
         "title": "Оплачен счёт",
         "hint": "Оператор ждёт этого сообщения, чтобы выдать велосипед.",
+    },
+    "pay_twice": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Счёт оплачен дважды",
+        "hint": "Счёт закрыли наличными или переводом, а клиент оплатил и "
+                "ссылку. Второй раз в журнал не зачислено: верните деньги "
+                "или зачтите их руками.",
+    },
+    "autocharge_unknown": {
+        "group": "team", "target": "chat", "hour": None,
+        "title": "Банк не ответил на автосписание",
+        "hint": "Прошло ли списание, неизвестно: счёт остаётся открытым, и "
+                "клиенту больше не списываем, пока операцию не сверят в Точке.",
     },
     "ref_spike": {
         "group": "team", "target": "chat", "hour": 20,

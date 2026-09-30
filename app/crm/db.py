@@ -1410,6 +1410,15 @@ class CrmDB:
         `bonus["granted"]`; отказ в скидке начисление не отменяет.
         """
         async with self.pool.acquire() as conn, conn.transaction():
+            # Сперва строка аренды - под замок и только идущая: проход
+            # начислений читает список аренд заранее, и закрытая за это
+            # время аренда иначе получала бы новый период долгом клиенту.
+            # Закрытие ждёт этот замок, а после него условие перечитывается.
+            if await conn.fetchval(
+                    "update crm.rentals set billed_until = greatest(billed_until, $2), "
+                    "updated_at = now() where id = $1 and status = 'active' "
+                    "returning id", rental_id, period_to) is None:
+                return False
             try:
                 await conn.execute(
                     """
@@ -1420,10 +1429,9 @@ class CrmDB:
                     """, client_id, rental_id, amount, period_from, period_to,
                     note, created_by, created_at)
             except asyncpg.UniqueViolationError:
+                # Повтор периода: транзакция откатывается целиком, вместе
+                # со сдвигом billed_until выше.
                 return False
-            await conn.execute(
-                "update crm.rentals set billed_until = greatest(billed_until, $2), "
-                "updated_at = now() where id = $1", rental_id, period_to)
             if bonus and _money(bonus.get("amount")):
                 bonus["granted"] = await self._grant_period_bonus(
                     conn, client_id=client_id, rental_id=rental_id,
@@ -1874,6 +1882,29 @@ class CrmDB:
         sets, values = _set_clause(fields, ORDER_FIELDS, 2)
         await self.pool.execute(
             f"update crm.work_orders set {sets} where id = $1", order_id, *values)
+
+    async def mark_order_paid(self, order_id: int, *, shift_id: int | None,
+                              amount: Decimal, reason: str, by: str) -> bool:
+        """Оплата клиентского ремонта руками. False - уже отмечена.
+
+        Наличные легли в ящик смены: движение смены пишется в той же
+        транзакции, что и отметка, - иначе касса на закрытии показала бы
+        излишек, а двойное нажатие внесло бы деньги дважды. В crm.ledger
+        не пишется ничего: журнал это аренда (красная линия).
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            if await conn.fetchval(
+                    "update crm.work_orders set paid_at = now() "
+                    "where id = $1 and paid_at is null returning id", order_id) is None:
+                return False
+            if shift_id is not None and amount > 0:
+                await conn.execute(
+                    """
+                    insert into crm.cash_moves (shift_id, kind, amount, reason,
+                                                created_by)
+                    values ($1, 'in', $2, $3, $4)
+                    """, shift_id, amount, reason, by)
+            return True
 
     async def close_work_order(self, order_id: int, *, total: Decimal,
                                cost: Decimal, closed_at: datetime,
@@ -3419,6 +3450,38 @@ class CrmDB:
                 kind == "battery")
             return extra_id
 
+    async def change_rental_tariff(self, rental_id: int, *, tariff_id: int | None,
+                                   tariff_name: str, period_days: int,
+                                   base_price: Decimal, billing: str,
+                                   extra_prices: Mapping[int, Decimal]) -> None:
+        """Новый тариф, новые цены позиций и цена периода - одной транзакцией.
+
+        Цена позиции - за срок аренды: недельная батарея на месячном
+        тарифе стоила бы по-прежнему неделю. Порознь сбой между запросами
+        оставил бы месячный срок с недельной ценой позиции. Строка аренды
+        берётся под замок: позиция, добавленная в ту же секунду, иначе
+        встала бы в цену по старому сроку.
+        """
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "select id from crm.rentals where id = $1 for update", rental_id)
+            for extra_id, price in extra_prices.items():
+                await conn.execute(
+                    "update crm.rental_extras set price = $2 "
+                    "where id = $1 and rental_id = $3 and removed_at is null",
+                    int(extra_id), price, rental_id)
+            await conn.execute(
+                """
+                update crm.rentals set tariff_id = $2, tariff_name = $3,
+                       period_days = $4, base_price = $5, billing = $6,
+                       updated_at = now()
+                 where id = $1
+                """, rental_id, tariff_id, tariff_name, period_days, base_price,
+                billing)
+            await conn.execute(
+                "update crm.rentals set price = $2 where id = $1", rental_id,
+                await self._period_price(conn, rental_id))
+
     async def drop_rental_extra(self, extra_id: int, *, by: str | None) -> bool:
         async with self.pool.acquire() as conn, conn.transaction():
             rental_id = await conn.fetchval(
@@ -4528,6 +4591,26 @@ class CrmDB:
                 txn_id, ledger_id)
             return ledger_id
 
+    async def credits_since(self, since: datetime) -> list[dict]:
+        """Платежи, зачисленные мимо выписки - заявкой «Я оплатил» или
+        счётом (наличные, перевод, эквайринг), - и ни к одной строке
+        выписки не привязанные. По ним автозачисление узнаёт перевод,
+        который уже лежит в журнале: зачислить его второй раз - деньги
+        клиента дважды на балансе."""
+        return _rows(await self.pool.fetch(
+            """
+            select 'claim' as source, '#' || p.id::text as ref, p.client_id,
+                   l.amount, l.created_at as paid_at
+              from crm.payment_claims p join crm.ledger l on l.id = p.ledger_id
+             where p.status = 'confirmed' and l.created_at >= $1
+               and not exists (select 1 from crm.bank_txns t where t.ledger_id = l.id)
+            union all
+            select 'order', o.no, o.client_id, l.amount, l.created_at
+              from crm.pay_orders o join crm.ledger l on l.id = o.ledger_id
+             where o.status = 'paid' and l.created_at >= $1
+               and not exists (select 1 from crm.bank_txns t where t.ledger_id = l.id)
+            """, since))
+
     async def last_bank_txn_at(self) -> datetime | None:
         return await self.pool.fetchval("select max(booked_at) from crm.bank_txns")
 
@@ -4844,7 +4927,18 @@ class CrmDB:
                     order["work_order_id"])
                 await conn.execute(
                     "update crm.pay_orders set status = 'paid', paid_at = now(), "
-                    "checked_at = now(), error = null where id = $1", order_id)
+                    "checked_at = now(), error = null, paid_method = $2 "
+                    "where id = $1", order_id, method)
+                # Наличные за ремонт легли в ящик: без движения смены касса
+                # на закрытии показала бы излишек. В журнал - по-прежнему нет.
+                if method == "cash" and shift_id is not None:
+                    await conn.execute(
+                        """
+                        insert into crm.cash_moves (shift_id, kind, amount, reason,
+                                                    created_by)
+                        values ($1, 'in', $2, $3, $4)
+                        """, shift_id, order["amount"],
+                        f"{order['purpose']} · счёт {order['no']}", by)
                 # 0, а не None: счёт закрыт этим вызовом, просто без записи
                 # в журнале. None значит «уже был оплачен» - по нему второй
                 # опрос понимает, что сообщать об оплате не ему.
@@ -4858,9 +4952,29 @@ class CrmDB:
                 method, f"Счёт {order['no']}", by or "эквайринг", shift_id))
             await conn.execute(
                 "update crm.pay_orders set status = 'paid', paid_at = now(), "
-                "checked_at = now(), ledger_id = $2, error = null where id = $1",
-                order_id, ledger_id)
+                "checked_at = now(), ledger_id = $2, error = null, paid_method = $3 "
+                "where id = $1", order_id, ledger_id, method)
             return ledger_id
+
+    async def mark_pay_twice(self, order_id: int, *, error: str) -> bool:
+        """Банк сказал «оплачено» по счёту, закрытому руками: деньги пришли
+        дважды. В журнал второй раз не пишем - отметка и текст на счёте.
+        True - отметил этот вызов (сигнал команде - ровно один раз)."""
+        return await self.pool.fetchval(
+            """
+            update crm.pay_orders set bank_paid_at = now(), checked_at = now(),
+                   error = $2
+             where id = $1 and status = 'paid' and bank_paid_at is null
+               and coalesce(paid_method, 'card') <> 'card'
+            returning id
+            """, order_id, error[:500]) is not None
+
+    async def note_pay_order(self, order_id: int, *, error: str) -> None:
+        """Текст на открытом счёте без смены статуса: исход списания
+        неизвестен, и счёт остаётся открытым, пока его не разберёт человек."""
+        await self.pool.execute(
+            "update crm.pay_orders set error = $2, checked_at = now() "
+            "where id = $1 and status in ('new', 'sent')", order_id, error[:500])
 
     async def mark_pay_failed(self, order_id: int, *, error: str) -> None:
         await self.pool.execute(
@@ -4914,6 +5028,11 @@ class CrmDB:
         принимает, и клиент, заплативший по старой ссылке, иначе остался
         бы с деньгами мимо журнала. Их спрашивают реже - раз в полчаса -
         и неделю: столько жили ссылки, выданные без срока.
+
+        Так же - оплаченный руками (наличные, перевод): ссылка у банка
+        жива, и оплата по ней после кассы - деньги дважды. Зачислять их
+        второй раз нельзя, молчать тоже: опрос отмечает счёт
+        (`mark_pay_twice`) и зовёт команду.
         """
         return _rows(await self.pool.fetch(
             f"""
@@ -4921,8 +5040,13 @@ class CrmDB:
               from crm.pay_orders p join crm.clients c on c.id = p.client_id
              where p.operation_id is not null
                and (p.status in ('new', 'sent')
-                    or (p.status in ('failed', 'cancelled') and p.ledger_id is null
-                        and p.created_at > now() - interval '{logic.PAY_RECHECK_DAYS} days'
+                    or (((p.status in ('failed', 'cancelled') and p.ledger_id is null
+                          and p.created_at > now() - interval
+                              '{logic.PAY_RECHECK_DAYS} days')
+                         or (p.status = 'paid' and p.bank_paid_at is null
+                             and coalesce(p.paid_method, 'card') <> 'card'
+                             and p.created_at > now() - interval
+                                 '{logic.PAY_TWICE_HOURS} hours'))
                         and (p.checked_at is null
                              or p.checked_at < now() - interval
                                 '{logic.PAY_RECHECK_MINUTES} minutes')))

@@ -284,9 +284,12 @@ async def promo_for_period(crm: Any, *, rental: dict, period_from: date,
         return None
     # Номер периода - сколько уже начислено плюс этот.
     period_index = await crm.rental_charge_count(rental["id"]) + 1
+    # Срок акции - на начало периода, а не на день прохода: проход,
+    # догоняющий пропущенные дни, иначе отдавал период акции, начавшейся
+    # позже него, и отнимал - у той, что кончилась, пока он стоял.
     ctx = await promo_context(crm, client_id=rental["client_id"], rental_id=rental["id"],
                               period_index=period_index, period_from=period_from,
-                              today=today, code=rental.get("promo_code"),
+                              today=min(today, period_from), code=rental.get("promo_code"),
                               model=rental.get("bike_model"),
                               location=rental.get("location"))
     base = logic.to_money(rental.get("base_price") or rental["price"])
@@ -323,9 +326,11 @@ async def preview_promo(crm: Any, *, client: dict, tariff: dict, started_on: dat
                                                 started_on=started_on)
         except ServiceError as exc:
             out.update(error=str(exc), code="")
+    # Срок акции - на день начала, как у начисления первого периода
+    # (promo_for_period): и выдача в будущем, и выдача задним числом.
     ctx = await promo_context(crm, client_id=client["id"], rental_id=None,
                               period_index=1, period_from=started_on,
-                              today=max(today, started_on), code=out["code"],
+                              today=started_on, code=out["code"],
                               model=model, location=location)
     if code_promo is not None and not logic.promo_fits(code_promo, ctx):
         out.update(error=f"Промокод {out['code']} действует, но этому клиенту не "
@@ -421,7 +426,8 @@ async def comment_rental(crm: Any, feedback: dict, text: Any) -> str:
     return check.value
 
 
-async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -> None:
+async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str,
+                        tariffs: Iterable[dict] | None = None) -> None:
     """Сменить тариф с ближайшего неначисленного периода.
 
     Цена периода - это велосипед плюс живые позиции (доп. аккумулятор), и
@@ -429,16 +435,35 @@ async def change_tariff(crm: Any, rental: dict, tariff: dict, *, billing: str) -
     писалась голая цена тарифа: доп. аккумулятор переставал начисляться,
     а снятие позиции возвращало аренду к цене СТАРОГО тарифа, потому что
     `base_price` оставался прежним.
+
+    Цена позиции - за срок аренды, поэтому новый срок переоценивает её
+    тарифом аккумулятора на этот срок, как выдача: недельная батарея на
+    месячном тарифе иначе стоила бы неделю в месяц. Нет такого тарифа -
+    отказ, а не бесплатная батарея. Срок прежний - цены позиций не
+    трогаем: клиент брал батарею по ним.
     """
     if billing not in logic.BILLING:
         raise ServiceError("Недопустимый режим начисления.")
     base = logic.to_money(tariff["price"])
-    extras = await crm.rental_extras(rental["id"], live_only=True)
-    await crm.update_rental(rental["id"], tariff_id=tariff.get("id"),
-                            tariff_name=tariff["name"],
-                            period_days=int(tariff["period_days"]),
-                            price=logic.period_price(base, extras),
-                            base_price=base, billing=billing)
+    days = int(tariff["period_days"])
+    prices: dict[int, Decimal] = {}
+    if days != int(rental.get("period_days") or 0):
+        extras = [e for e in await crm.rental_extras(rental["id"], live_only=True)
+                  if e.get("kind") == "battery"]
+        if extras and tariffs is None:
+            tariffs = await crm.tariffs(active_only=True)
+        for extra in extras:
+            model = extra.get("battery_model")
+            price = logic.battery_extra_price(tariffs or [], {"model_title": model}, days)
+            if price is None:
+                raise ServiceError(
+                    f"Нет тарифа на аккумулятор «{model or '—'}» на {days} дн. — "
+                    "заведите цену в тарифах или снимите доп. аккумулятор.")
+            prices[int(extra["id"])] = price
+    await crm.change_rental_tariff(rental["id"], tariff_id=tariff.get("id"),
+                                   tariff_name=tariff["name"], period_days=days,
+                                   base_price=base, billing=billing,
+                                   extra_prices=prices)
 
 
 async def client_risks(crm: Any, client_ids: Iterable[int] | None, *,
@@ -1637,19 +1662,35 @@ async def check_pay_order(crm: Any, order: dict, *, acquiring: Any) -> str:
 
     Оплату записываем один раз: `mark_pay_paid` сам отказывается писать
     в журнал повторно, поэтому лишний опрос ничего не ломает.
+
+    "paid_twice" - банк подтвердил оплату по ссылке счёта, который уже
+    закрыли руками (наличные, перевод): деньги пришли дважды. Второй раз
+    в журнал не пишем, а говорить об этом команде - дело опроса
+    (`paying.poll_once`): у сервиса нет ни бота, ни чата.
     """
+    # Ответ «без перемен» для счёта, оплаченного раньше: не «paid», иначе
+    # опрос счёл бы оплатой этого круга перепроверку закрытого руками.
+    was = str(order.get("status") or "")
+    unchanged = "paid_before" if was == "paid" else was
     operation = str(order.get("operation_id") or "")
     if not operation or acquiring is None:
-        return str(order.get("status") or "")
+        return unchanged
     try:
         state = await acquiring.payment_status(operation)
     except Exception:                                   # noqa: BLE001
         log.warning("статус счёта %s не получен", order.get("no"), exc_info=True)
         await crm.touch_pay_order(order["id"])
-        return str(order.get("status") or "")
+        return unchanged
     if state.get("state") == "paid":
         closed = await crm.mark_pay_paid(order["id"], method="card", by="эквайринг")
         await _remember_card(crm, order, state.get("card") or {})
+        if closed is None:
+            # Закрыт раньше. Банком (второй опрос, кнопка в кабинете) - это
+            # тот же платёж; руками - это второй платёж по тому же счёту.
+            fresh = await crm.pay_order(order["id"]) or order
+            if (fresh.get("status") == "paid" and not fresh.get("bank_paid_at")
+                    and (fresh.get("paid_method") or "card") != "card"):
+                return "paid_twice"
         # «Оплачено» - только тому, кто счёт и закрыл: кнопка «Проверить
         # оплату» в кабинете и минутный опрос спрашивают банк одновременно,
         # и оба слали бы клиенту «зачислено», а команде - карточку.
@@ -1663,7 +1704,7 @@ async def check_pay_order(crm: Any, order: dict, *, acquiring: Any) -> str:
     # Закрытый у нас счёт, который банк ещё не оплатил, остаётся как был:
     # «снял оператор» не должно превращаться в «отказ банка».
     await crm.touch_pay_order(order["id"])
-    return str(order.get("status") or "")
+    return unchanged
 
 
 async def _remember_card(crm: Any, order: dict, card: dict) -> None:
@@ -1694,13 +1735,23 @@ async def credit_pay_order(crm: Any, order: dict, *, by: str,
 
     Тот же счёт, тот же номер в назначении - но подтверждает человек, и
     в журнале это видно по способу оплаты.
+
+    Счёт, прочитанный открытым, мог за эту секунду закрыть опрос банка:
+    тогда `mark_pay_paid` ничего не пишет и возвращает None - и это отказ,
+    а не «зачислено»: иначе оператор взял бы деньги, которых в журнале
+    нет, при уже оплаченном по ссылке счёте.
     """
     if order.get("status") == "paid":
         raise ServiceError("Счёт уже оплачен")
     if order.get("status") == "cancelled":
         raise ServiceError("Счёт снят, оплачивать нечего")
-    return await crm.mark_pay_paid(order["id"], method=method, by=by,
+    done = await crm.mark_pay_paid(order["id"], method=method, by=by,
                                    shift_id=await cash_shift_id(crm, method, by))
+    if done is None:
+        raise ServiceError("Счёт уже оплачен — банк подтвердил оплату по ссылке. "
+                           "Второй раз не зачислено: деньги не принимайте, а если "
+                           "уже взяли — верните клиенту.")
+    return done
 
 
 async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
@@ -1715,17 +1766,23 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
     today = today or date.today()
     settings = logic.pay_settings(await crm.settings())
     if not settings["autocharge"]:
-        return {"charged": 0, "failed": 0, "pending": 0,
+        return {"charged": 0, "failed": 0, "pending": 0, "unknown": [],
                 "skipped": "выключено"}
     cards = {int(c["client_id"]): c for c in await crm.cards()}
     if not cards:
-        return {"charged": 0, "failed": 0, "pending": 0,
+        return {"charged": 0, "failed": 0, "pending": 0, "unknown": [],
                 "skipped": "нет привязанных карт"}
-    busy = {int(o["client_id"]) for o in await crm.open_pay_orders(limit=1000)
-            if o.get("status") in logic.PAY_OPEN}
+    # Деньги в пути - не долг: открытый счёт, списание без ответа банка
+    # (счёт «new» без операции - опрос его не видит) и «Я оплатил», которую
+    # ещё не разобрали.
+    busy = logic.autocharge_busy(
+        [*await crm.open_pay_orders(limit=1000),
+         *await crm.pay_orders(status="new", limit=1000)],
+        await crm.pending_claims())
     due = logic.autocharge_due(await crm.active_rentals(), today=today, cards=cards,
                                busy=busy)
     charged = failed = pending = 0
+    unknown: list[dict] = []
     for item in due[:limit]:
         card = cards[item["client_id"]]
         client = await crm.client(item["client_id"])
@@ -1744,6 +1801,15 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
                 purpose=purpose, client_phone=client.get("phone"),
                 client_email=client.get("email"))
         except Exception as err:                        # noqa: BLE001
+            if not getattr(err, "refused", False):
+                # Таймаут, 5xx, мусор вместо ответа: списал банк или нет,
+                # неизвестно. «Отказ» здесь освободил бы клиента для завтрашнего
+                # списания той же суммы, а карту - для штрафного очка. Счёт
+                # остаётся открытым (клиент занят), команде - сверить в Точке.
+                log.warning("автосписание клиенту %s: банк не ответил, исход "
+                            "неизвестен", item["client_id"], exc_info=True)
+                unknown.append(await _charge_unknown(crm, order_id, str(err)))
+                continue
             log.warning("автосписание клиенту %s не прошло", item["client_id"],
                         exc_info=True)
             await crm.mark_pay_failed(order_id, error=str(err))
@@ -1768,13 +1834,29 @@ async def autocharge_once(crm: Any, *, acquiring: Any, bot: Any = None,
             await crm.set_pay_link(order_id, link="",
                                    operation_id=state["operation_id"])
             pending += 1
+        elif state.get("state") == "pending":
+            # Банк ответил, но ни статуса, ни номера операции не дал: опросу
+            # нечего спрашивать, а «отказ» мог бы оказаться списанием.
+            log.warning("автосписание клиенту %s: ответ банка без операции",
+                        item["client_id"])
+            unknown.append(await _charge_unknown(crm, order_id,
+                                                 state.get("status") or "нет статуса"))
         else:
             reason = f"банк: {state.get('status') or 'списание не прошло'}"
             await crm.mark_pay_failed(order_id, error=reason)
             await _card_failed(crm, bot, client, card, item["amount"], reason)
             failed += 1
     return {"charged": charged, "failed": failed, "pending": pending,
-            "skipped": ""}
+            "unknown": unknown, "skipped": ""}
+
+
+async def _charge_unknown(crm: Any, order_id: int, reason: str) -> dict:
+    """Исход списания неизвестен: счёт остаётся открытым (клиент «занят»,
+    `logic.autocharge_busy`) с пояснением, карта штрафа не получает.
+    Сигнал команде шлёт цикл (`paying.report_unknown`)."""
+    await crm.note_pay_order(order_id,
+                             error=f"{logic.AUTOCHARGE_UNKNOWN_NOTE} ({reason})")
+    return {**(await crm.pay_order(order_id) or {}), "reason": reason}
 
 
 async def _card_failed(crm: Any, bot: Any, client: dict, card: dict,
@@ -1938,6 +2020,34 @@ async def invoice_order(crm: Any, order: dict, *, by: str,
     await crm.set_pay_link(order_id, link=got.get("link") or "",
                            operation_id=got.get("operation_id"))
     return await crm.pay_order(order_id)
+
+
+async def mark_repair_paid(crm: Any, order: dict, *, method: str | None,
+                           by: str) -> int | None:
+    """Клиент оплатил ремонт на месте. Возвращает смену, в ящик которой
+    легли наличные; None - не наличные или открытой смены нет.
+
+    Деньги ремонта в crm.ledger не идут (журнал это аренда), но наличные
+    лежат в ящике: без движения смены касса на закрытии показала бы
+    излишек, которого никто не объяснит. Смена - принявшего, как у
+    наличных платежей (`cash_shift_id`). Способ не указан (форма старше
+    этой правки) - как раньше, только отметка.
+    """
+    if order.get("payer") != "client":
+        raise ServiceError("Свой ремонт клиент не оплачивает.")
+    if order.get("paid_at"):
+        raise ServiceError("Оплата ремонта уже отмечена.")
+    if method is not None and method not in logic.METHODS:
+        raise ServiceError("Выберите способ оплаты.")
+    amount = logic.to_money(order.get("total"))
+    shift_id = await cash_shift_id(crm, method, by) if amount > 0 else None
+    what = (f"№ {order['bike_code']}" if order.get("bike_code")
+            else (order.get("object_note") or "техника"))
+    if not await crm.mark_order_paid(
+            int(order["id"]), shift_id=shift_id, amount=amount, by=by,
+            reason=f"Ремонт {what}, наряд {order.get('no') or ''}".strip()):
+        raise ServiceError("Оплата ремонта уже отмечена.")
+    return shift_id
 
 
 # ────────────── ввод техники в эксплуатацию ──────────────

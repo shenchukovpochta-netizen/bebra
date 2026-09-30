@@ -41,11 +41,20 @@ async def poll_once(crm: Any, acquiring: Any, *, limit: int = 100) -> dict:
     now = datetime.now().astimezone()
     orders = await crm.open_pay_orders(limit=limit)
     paid: list[dict] = []
+    twice: list[dict] = []
     failed = expired = 0
     for order in orders:
         state = await service.check_pay_order(crm, order, acquiring=acquiring)
         if state == "paid":
             paid.append(order)
+            continue
+        if state == "paid_twice":
+            # Закрыт руками, а клиент оплатил и ссылку. Отметка - до
+            # сообщения и ровно одна: следующий круг этот счёт уже не видит.
+            if await crm.mark_pay_twice(order["id"], error=logic.PAY_TWICE_NOTE):
+                log.warning("счёт %s оплачен дважды: руками и по ссылке",
+                            order.get("no"))
+                twice.append(order)
             continue
         if state == "paid_before":
             continue                 # закрыл другой: сообщает тоже он
@@ -57,7 +66,7 @@ async def poll_once(crm: Any, acquiring: Any, *, limit: int = 100) -> dict:
             await crm.mark_pay_failed(
                 order["id"], error="ссылка просрочена, оплата не поступила")
             expired += 1
-    return {"seen": len(orders), "paid": paid, "failed": failed,
+    return {"seen": len(orders), "paid": paid, "twice": twice, "failed": failed,
             "expired": expired}
 
 
@@ -75,6 +84,35 @@ async def report_paid(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
     # send_team, а не прямой send: получателя этого уведомления владелец
     # задаёт в панели, и отправка мимо него сделала бы настройку пустой.
     return await notices.send_team(crm, bot, "pay_paid", text.strip(),
+                                   cfg.contract_chat_id,
+                                   client_id=order.get("client_id"))
+
+
+async def report_twice(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
+    """Счёт закрыли руками, а клиент оплатил и ссылку: деньги дважды.
+
+    В журнал второй раз не пишем - решает человек: вернуть клиенту или
+    зачесть. Молчать нельзя: иначе вторые деньги лежат на счёте ничьими.
+    """
+    text = (f"⚠️ Счёт {order.get('no')} оплачен дважды — "
+            f"{logic.money(order.get('amount'))}\n"
+            "Закрыт наличными или переводом, а клиент оплатил и ссылку. Второй раз "
+            "не зачислено: верните деньги или зачтите руками.\n"
+            + logic.html.escape(f"{order.get('full_name') or 'клиент'} · "
+                                f"{order.get('purpose') or ''}", quote=False))
+    return await notices.send_team(crm, bot, "pay_twice", text.strip(),
+                                   cfg.contract_chat_id,
+                                   client_id=order.get("client_id"))
+
+
+async def report_unknown(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
+    """Банк не ответил на списание с карты: прошло ли оно - неизвестно."""
+    text = (f"❓ Автосписание {order.get('no')} — {logic.money(order.get('amount'))}: "
+            "банк не ответил, прошло ли списание, неизвестно.\n"
+            "Сверьте операцию в Точке и закройте счёт в панели. До этого клиенту "
+            "больше не списываем.\n"
+            + logic.html.escape(f"{order.get('full_name') or 'клиент'}", quote=False))
+    return await notices.send_team(crm, bot, "autocharge_unknown", text.strip(),
                                    cfg.contract_chat_id,
                                    client_id=order.get("client_id"))
 
@@ -157,7 +195,6 @@ async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
     if acquiring is None or not getattr(acquiring, "token", ""):
         log.info("эквайринг Точки не настроен, счета не опрашиваются")
         return
-    charged_on: date | None = None
     while True:
         try:
             result = await poll_once(crm, acquiring)
@@ -166,23 +203,30 @@ async def paying_loop(bot: Any, crm: Any, cfg: Any, acquiring: Any, *,
                 # платёж это или счёт за ремонт.
                 fresh = await crm.pay_order(order["id"]) or order
                 await tell_paid(bot, db, crm, cfg, fresh)
-            today = date.today()
-            hour = logic.pay_settings(await crm.settings())["autocharge_hour"]
-            if charged_on != today and datetime.now().hour >= hour:
+            for order in result.get("twice") or []:
+                await report_twice(bot, crm, cfg, order)
+            now = datetime.now()
+            if logic.autocharge_time(await crm.settings(), now):
                 # Отметка ставится в finally: одна попытка в сутки при любом
                 # исходе. Ставить её до прохода нельзя - сбой базы отменял бы
                 # списание молча; не ставить вовсе тоже нельзя - при сбое
-                # банка круг повторялся бы каждую минуту до полуночи.
+                # банка круг повторялся бы каждую минуту до полуночи. Живёт
+                # она в crm.settings, а не в памяти: перезапуск бота после
+                # часа списания иначе прогонял бы проход второй раз.
                 try:
                     charge = await autocharge_daily(crm, acquiring, bot=bot,
-                                                    today=today)
+                                                    today=now.date())
                     if (charge.get("charged") or charge.get("failed")
-                            or charge.get("pending")):
+                            or charge.get("pending") or charge.get("unknown")):
                         log.info("автосписание: списано %s, отказов %s, "
-                                 "ждут банк %s", charge["charged"],
-                                 charge["failed"], charge.get("pending", 0))
+                                 "ждут банк %s, без ответа банка %s",
+                                 charge["charged"], charge["failed"],
+                                 charge.get("pending", 0), len(charge.get("unknown") or []))
+                    for order in charge.get("unknown") or []:
+                        await report_unknown(bot, crm, cfg, order)
                 finally:
-                    charged_on = today
+                    await crm.set_setting("autocharge_done_on", now.date().isoformat(),
+                                          by="автосписание")
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

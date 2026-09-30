@@ -267,6 +267,25 @@ class TestPromoFlow(tw.WebCase):
         self.assertIn(logic.period_label(date.today(), date.today() + timedelta(days=7)),
                       bonus["note"])
 
+    def test_caught_up_period_is_judged_by_its_start(self):
+        """Проход, догоняющий пропущенные дни, сверяет срок акции с началом
+        периода, а не с днём прохода: сезон кончился вчера - период,
+        начавшийся в сезон, скидку получает; сезон начался сегодня - период
+        позавчерашний её не получает."""
+        today = date.today()
+        self.make("season", percent=10, starts_on=today - timedelta(days=30),
+                  ends_on=today - timedelta(days=1))
+        self.make("season", percent=20, starts_on=today, ends_on=None)
+        rid = _run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=D(3000), billing="auto",
+            started_on=today - timedelta(days=3), contract_no=None, created_by="t"))
+        applied = []
+        self.assertEqual(_run(service.charge_due(self.crm, rental=_run(self.crm.rental(rid)),
+                                                 today=today, applied=applied)), 1)
+        self.assertEqual([a["amount"] for a in applied], [D(300)],
+                         "10 % действовавшего в начале периода сезона, а не 20 % нового")
+
     def test_discount_is_taken_from_the_bike_price_not_the_extras(self):
         """Доп. аккумулятор - отдельная позиция: скидка считается от цены
         велосипеда, ровно той, что оператор видел на шаге выдачи."""

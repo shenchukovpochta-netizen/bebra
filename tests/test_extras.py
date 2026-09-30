@@ -244,6 +244,35 @@ class TestExtrasOnTheRentalCard(tw.WebCase):
         self.assertEqual(self.price_of(), D(3000),
                          "аренда не переоценивается задним числом")
 
+    def test_new_period_reprices_the_battery(self):
+        """Цена позиции - за срок аренды: неделя 1 170 на месячном тарифе
+        оставалась бы 1 170 в месяц."""
+        _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
+                                    model="Аккумулятор 70 Ач", kind="battery"))
+        _run(self.crm.create_tariff("АКБ · месяц", 30, D(4000), None,
+                                    model="Аккумулятор 70 Ач", kind="battery"))
+        self.add()
+        month = _run(self.crm.create_tariff("Месяц", 30, D(11000), None))
+        self.client.post(f"/rentals/{self.rental_id}/tariff",
+                         data={"tariff_id": month, "billing": "auto"})
+        self.assertEqual(self.price_of(), D(15000))
+        extra = _run(self.crm.rental_extras(self.rental_id, live_only=True))[0]
+        self.assertEqual(logic.to_money(extra["price"]), D(4000))
+
+    def test_no_battery_price_for_the_new_period_keeps_the_tariff(self):
+        """Нет цены батареи на новый срок - отказ, как на выдаче: иначе
+        батарея ехала бы по цене чужого срока или бесплатно."""
+        _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
+                                    model="Аккумулятор 70 Ач", kind="battery"))
+        self.add()
+        month = _run(self.crm.create_tariff("Месяц", 30, D(11000), None))
+        self.client.post(f"/rentals/{self.rental_id}/tariff",
+                         data={"tariff_id": month, "billing": "auto"})
+        rental = _run(self.crm.rental(self.rental_id))
+        self.assertEqual((rental["period_days"], self.price_of()), (7, D(4170)))
+        self.assertIn("Нет тарифа на аккумулятор",
+                      self.get_ok(f"/rentals/{self.rental_id}"))
+
     def test_more_than_the_limit_is_refused(self):
         _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
                                     model="Аккумулятор 70 Ач", kind="battery"))

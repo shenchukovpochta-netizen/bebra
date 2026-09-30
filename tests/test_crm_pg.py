@@ -1490,6 +1490,73 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                     closed_by="test")
         self.assertEqual(await self.crm.rental_extras(rental_id, live_only=True), [])
 
+    async def test_new_period_reprices_the_extra_on_postgres(self):
+        """Смена срока переоценивает доп. аккумулятор тарифом нового срока -
+        позиция, цена периода и база одной транзакцией; срок выдачи помнит
+        триггер, как и раньше."""
+        await self.seed()
+        model_id = await self.crm.create_battery_model(
+            title="Аккумулятор 70 Ач", brand=None, voltage=60, capacity=D("70"),
+            price=D("12000"), service_months=15, note=None)
+        battery_id = await self.crm.create_battery(
+            code="9510001", model_id=model_id, status="available")
+        await self.crm.create_tariff("АКБ · неделя", 7, D("700"), None,
+                                     model="Аккумулятор 70 Ач", kind="battery")
+        rental_id = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no="АВ-1", by="test")
+        await service.add_battery_extra(
+            self.crm, await self.crm.rental(rental_id), await self.crm.battery(battery_id),
+            tariffs=await self.crm.tariffs(active_only=True), by="test")
+        month = await self.crm.tariff(
+            await self.crm.create_tariff("Месяц", 30, D("11000"), None))
+        with self.assertRaises(service.ServiceError):
+            await service.change_tariff(self.crm, await self.crm.rental(rental_id), month,
+                                        billing="auto")
+        rental = await self.crm.rental(rental_id)
+        self.assertEqual((rental["period_days"], rental["price"]), (7, D("3700.00")),
+                         "нет цены батареи на месяц - тариф не меняется вовсе")
+        await self.crm.create_tariff("АКБ · месяц", 30, D("2500"), None,
+                                     model="Аккумулятор 70 Ач", kind="battery")
+        await service.change_tariff(self.crm, rental, month, billing="auto")
+        rental = await self.crm.rental(rental_id)
+        self.assertEqual((rental["period_days"], rental["base_price"], rental["price"]),
+                         (30, D("11000.00"), D("13500.00")))
+        extra = (await self.crm.rental_extras(rental_id, live_only=True))[0]
+        self.assertEqual(extra["price"], D("2500.00"), "недельные 700 на месяц не остались")
+        kept = await self.pool.fetchrow(
+            "select issue_period_days, issue_base_price from crm.rentals where id = $1",
+            rental_id)
+        self.assertEqual(tuple(kept), (7, D("3000.00")))
+
+    async def test_closed_rental_gets_no_new_period(self):
+        """Проход начислений читает аренды заранее: закрытая за это время
+        аренда нового периода не получает - отказывает сам SQL."""
+        await self.seed()
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no="АВ-1", by="test")
+        stale = await self.crm.rental(rid)
+        # Повтор периода откатывает и сдвиг billed_until: он в той же транзакции.
+        self.assertFalse(await self.crm.charge_period(
+            rid, self.client_id, period_from=stale["started_on"],
+            period_to=stale["started_on"] + timedelta(days=30), amount=D("-3000"),
+            note="dup"))
+        self.assertEqual((await self.crm.rental(rid))["billed_until"],
+                         stale["billed_until"])
+        await service.close_rental(self.crm, stale, closed_on=date.today(), note=None,
+                                   by="test")
+        self.assertEqual(await service.charge_due(
+            self.crm, rental=stale, today=stale["billed_until"]), 0)
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("-3000.00"),
+                         "начислен только первый период")
+        self.assertEqual((await self.crm.rental(rid))["billed_until"],
+                         stale["billed_until"])
+
     async def test_tariff_kind_survives_reapply(self):
         """Схема идемпотентна: вид тарифа и позиции переживают повтор."""
         await self.seed()
@@ -2500,6 +2567,112 @@ class TestOpsAndFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.pool.execute("update crm.pay_orders set created_at = now() - "
                                 "interval '9 days' where id = $1", order_id)
         self.assertEqual(await self.crm.open_pay_orders(), [], "неделя прошла")
+
+    async def test_hand_paid_link_is_watched_while_it_lives(self):
+        """Счёт закрыт наличными, а ссылка у банка жива: его спрашивают до
+        конца её срока, и оплата по ней - отметка «дважды», а не второй
+        платёж в журнале."""
+        await self.seed()
+        order_id = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("3000"),
+            purpose="Аренда", created_by="t")
+        await self.crm.set_pay_link(order_id, link="https://pay/1", operation_id="op-8")
+        self.assertIsNotNone(await self.crm.mark_pay_paid(order_id, method="cash",
+                                                          by="staff:op"))
+        self.assertEqual((await self.crm.pay_order(order_id))["paid_method"], "cash")
+        self.assertEqual(await self.crm.open_pay_orders(), [], "полчаса после кассы")
+        await self.pool.execute("update crm.pay_orders set checked_at = now() - "
+                                "interval '1 hour' where id = $1", order_id)
+        self.assertEqual([o["id"] for o in await self.crm.open_pay_orders()], [order_id])
+        # Банк: оплачено. Журнал - прежний, отметка - одна.
+        self.assertIsNone(await self.crm.mark_pay_paid(order_id, method="card"))
+        self.assertTrue(await self.crm.mark_pay_twice(order_id, error="дважды"))
+        self.assertFalse(await self.crm.mark_pay_twice(order_id, error="дважды"))
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("3000.00"))
+        self.assertEqual(await self.crm.open_pay_orders(), [], "отмеченный больше не нужен")
+        # Ссылка отжила - закрытый руками счёт больше не спрашиваем.
+        other = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("100"),
+            purpose="Аренда", created_by="t")
+        await self.crm.set_pay_link(other, link="https://pay/2", operation_id="op-9")
+        await self.crm.mark_pay_paid(other, method="transfer", by="staff:op")
+        await self.pool.execute(
+            "update crm.pay_orders set checked_at = null, "
+            f"created_at = now() - interval '{logic.PAY_TWICE_HOURS + 1} hours' "
+            "where id = $1", other)
+        self.assertEqual(await self.crm.open_pay_orders(), [])
+        # Оплаченный банком - не «дважды» и не опрашивается.
+        card = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("200"),
+            purpose="Аренда", created_by="t")
+        await self.crm.set_pay_link(card, link="https://pay/3", operation_id="op-10")
+        await self.crm.mark_pay_paid(card, method="card")
+        await self.pool.execute("update crm.pay_orders set checked_at = null "
+                                "where id = $1", card)
+        self.assertEqual(await self.crm.open_pay_orders(), [])
+        self.assertFalse(await self.crm.mark_pay_twice(card, error="x"))
+
+    async def test_repair_cash_lands_in_the_shift_not_in_the_ledger(self):
+        """Наличные за ремонт - движением смены в той же транзакции, что и
+        оплата; в журнал аренды - ничего (красная линия)."""
+        await self.seed()
+        shift_id = await self.crm.create_shift(location="Павлюхина", opening=D(0),
+                                               note=None, by="staff:op")
+        order_id = await self.crm.create_work_order(
+            bike_id=self.bike_id, payer="client", client_id=self.client_id,
+            complaint="стук", object_note=None, tech_id=None,
+            estimate=D(0), created_by="staff:t")
+        await self.crm.update_work_order(order_id, status="done", total=D("1500"))
+        invoice = await service.invoice_order(
+            self.crm, await self.crm.work_order(order_id), by="staff:op", acquiring=None)
+        self.assertEqual(await service.credit_pay_order(
+            self.crm, invoice, by="staff:op", method="cash"), 0)
+        [move] = await self.crm.cash_moves(shift_id)
+        self.assertEqual((move["kind"], move["amount"]), ("in", D("1500.00")))
+        self.assertIn(invoice["no"], move["reason"])
+        self.assertEqual(await self.crm.ledger_of(self.client_id), [])
+        # Отметка на наряде руками: второй раз - не отмечается и не вносит.
+        second = await self.crm.create_work_order(
+            bike_id=None, payer="client", client_id=self.client_id,
+            complaint="самокат", object_note="самокат", tech_id=None,
+            estimate=D(0), created_by="staff:t")
+        await self.crm.update_work_order(second, status="done", total=D("800"))
+        self.assertEqual(await service.mark_repair_paid(
+            self.crm, await self.crm.work_order(second), method="cash",
+            by="staff:op"), shift_id)
+        with self.assertRaises(service.ServiceError):
+            await service.mark_repair_paid(self.crm, await self.crm.work_order(second),
+                                           method="cash", by="staff:op")
+        self.assertFalse(await self.crm.mark_order_paid(
+            second, shift_id=shift_id, amount=D("800"), reason="x", by="staff:op"))
+        self.assertEqual([m["amount"] for m in await self.crm.cash_moves(shift_id)],
+                         [D("1500.00"), D("800.00")])
+        self.assertEqual(await self.crm.ledger_of(self.client_id), [])
+
+    async def test_credits_since_on_postgres(self):
+        """Что уже зачислено мимо выписки: заявка и счёт - да, строка выписки
+        и платёж руками без заявки - нет."""
+        await self.seed()
+        claim_id = await self.crm.create_claim(self.client_id, D("3000"))
+        await service.credit_claim(self.crm, await self.crm.claim(claim_id), D("3000"),
+                                   by="staff:op")
+        order_id = await self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D("500"),
+            purpose="Аренда", created_by="t")
+        await self.crm.mark_pay_paid(order_id, method="transfer", by="staff:op")
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                  amount=D("700"), method="cash")
+        txn = await self.crm.save_bank_txn({
+            "txn_id": "T-5", "booked_at": datetime.now(UTC), "amount": D("900"),
+            "direction": "credit", "purpose": "оплата"})
+        await self.crm.credit_bank_txn(txn, client_id=self.client_id, amount=D("900"),
+                                       method="transfer", note="в", created_by="t")
+        rows = await self.crm.credits_since(datetime.now(UTC) - timedelta(days=1))
+        self.assertEqual(sorted((r["source"], r["amount"]) for r in rows),
+                         [("claim", D("3000.00")), ("order", D("500.00"))])
+        self.assertEqual({r["ref"] for r in rows}, {f"#{claim_id}", "СЧТ-000001"})
+        self.assertEqual(await self.crm.credits_since(datetime.now(UTC)
+                                                      + timedelta(minutes=1)), [])
 
     async def test_ignore_does_not_touch_a_credited_row(self):
         await self.seed()

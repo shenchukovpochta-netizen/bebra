@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess
 import sys
 import unittest
 from datetime import UTC, date, datetime, timedelta
@@ -291,6 +295,69 @@ class TestIssueWizard(tw.WebCase):
                                              "bike_id": ""})
         self.assertEqual(r.status_code, 303)
         self.assertIn("Выберите клиента, тариф и велосипед", self.get_ok(r.headers["location"]))
+
+    # ─── сумма к оплате с доп. аккумулятором ───
+
+    def battery_step(self):
+        model = self.run_(self.crm.create_battery_model(
+            title="Аккумулятор 70 Ач", brand=None, voltage=60, capacity=D(70),
+            price=D(12000), service_months=15, note=None))
+        self.run_(self.crm.create_battery(code="951", model_id=model, status="available"))
+        self.run_(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None, kind="battery"))
+        # Плюс на балансе вычитается из суммы к оплате - и на сервере, и в скрипте.
+        self.run_(self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                      amount=D(500), method="cash"))
+        return self.issue(client=self.client_id, tariff=self.tariff_id, bike=self.bike_id)
+
+    def test_pay_amount_knows_what_the_extra_battery_adds_to(self):
+        """Первый период начисляется целиком, с доп. аккумулятором. Сумма
+        «принять сейчас» считалась от одного велосипеда, и клиент уходил с
+        долгом на цену батареи. Скрипт шага пересчитывает её по тем же
+        слагаемым, что сервер."""
+        page = self.battery_step()
+        self.assertIn('value="2500"', page, "без батареи: 3 000 минус 500 на балансе")
+        self.assertIn('id="pay-amount"', page)
+        self.assertIn('data-credit="500.00"', page)
+        self.assertIn('data-off="0"', page)
+        self.assertIn('data-price="1170', page)
+        self.assertIn('id="first-charge"', page)
+
+    @unittest.skipUnless(shutil.which("node"), "node не установлен")
+    def test_page_script_moves_the_pay_amount_with_the_extra(self):
+        page = self.battery_step()
+        script = next(s for s in re.findall(r"<script>(.*?)</script>", page, re.S)
+                      if "period-total" in s)
+        harness = """
+const listeners = [];
+const box = {dataset: {price: '1170.00'}, checked: false,
+             addEventListener: (e, f) => listeners.push(f)};
+const els = {
+  'period-total': {dataset: {base: '3000.00'}, textContent: ''},
+  'first-charge': {textContent: ''},
+  'pay-amount': {dataset: {credit: '500.00', off: '0'}, value: '2500'},
+};
+const due = [{textContent: ''}];
+global.document = {
+  getElementById: (id) => els[id] || null,
+  querySelectorAll: (sel) => sel === '.extra-battery' ? [box] : due,
+};
+""" + script + """
+const out = [els['pay-amount'].value];
+box.checked = true; listeners.forEach((f) => f());
+out.push(els['pay-amount'].value, els['first-charge'].textContent, due[0].textContent);
+els['pay-amount'].value = '1000';
+box.checked = false; listeners.forEach((f) => f());
+out.push(els['pay-amount'].value);
+console.log(JSON.stringify(out));
+"""
+        got = subprocess.run(["node", "-e", harness], capture_output=True, text=True,
+                             timeout=30, check=True)
+        start, checked, first, due_text, edited = json.loads(got.stdout)
+        self.assertEqual((start, checked), ("2500", "3670"),
+                         "с батареей: 3 000 + 1 170 − 500")
+        self.assertIn("4", first.replace(" ", " "), "первый период - с батареей")
+        self.assertIn("670", due_text.replace(" ", " "))
+        self.assertEqual(edited, "1000", "сумму, поправленную руками, скрипт не трогает")
 
 
 if __name__ == "__main__":
