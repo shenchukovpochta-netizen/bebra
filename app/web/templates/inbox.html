@@ -20,6 +20,8 @@
 </div>
 {% if not keyed %}<p class="flash err">Не задан ключ <code>secrets/inbox_key</code>: обращения пишутся без текста, ответить из панели нельзя. Ключ создаёт <code>bootstrap.sh</code>.</p>{% endif %}
 {% if avito.configured and not avito.live %}<p class="flash err">Авито: опрос не работает{% if avito.error %} — {{ avito.error }}{% endif %}{% if avito.at %} (последняя отметка {{ avito.at|dmy }}){% endif %}. Ответить в Авито из панели сейчас нельзя.</p>{% endif %}
+{% if wazzup.configured and not wazzup.live %}<p class="flash err">WhatsApp (Wazzup): связи нет{% if wazzup.error %} — {{ wazzup.error }}{% endif %}{% if wazzup.at %} (последняя отметка {{ wazzup.at|dmy }}){% endif %}. Ответить в WhatsApp из панели сейчас нельзя.</p>
+{% elif wazzup.live and wazzup.hook_error %}<p class="flash err">WhatsApp (Wazzup): ответы уходят, но входящие не придут — {{ wazzup.hook_error }}.</p>{% endif %}
 <nav class="tabs">
   {% for code, label in (('open', 'Открытые'), ('new', 'Новые'), ('work', 'В работе'), ('done', 'Разобранные'), ('spam', 'Спам'), ('all', 'Все')) %}
   <a href="/inbox?tab={{ code }}{% if channel %}&channel={{ channel }}{% endif %}" class="{% if tab == code %}on{% endif %}">{{ label }}</a>
@@ -54,7 +56,8 @@
 </div>
 <p class="muted">Сюда попадают: вопросы в поддержку и заявки из Telegram- и MAX-бота,
   гости, нажавшие тему, где нужен человек, чаты Авито (когда подключён API) и WhatsApp
-  через шлюз{% if not hook_on %} (хук выключен: пустой <code>secrets/inbox_hook_token</code>){% endif %}.
+  через Wazzup{% if wazzup.live %} — номера {% for c in wazzup.channels %}{{ c.phone or '—' }}{% if not c.active %} (не в сети){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}, ответ прямо отсюда{% endif %}
+  или другой шлюз{% if not hook_on %} (хук выключен: пустой <code>secrets/inbox_hook_token</code>){% endif %}.
   Переписка хранится {{ INBOX_KEEP_DAYS }} дней в зашифрованном виде.</p>
 </div>
 {% endblock %}

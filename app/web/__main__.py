@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -47,10 +48,25 @@ async def build():
     return create_app(crm=crm, db=db, cfg=cfg, bot=bot), cfg, db, bot
 
 
+class HideHookToken(logging.Filter):
+    """Wazzup шлёт вебхук на /hook/inbox/<токен>: в журнал запросов адрес
+    идёт без токена - журналы контейнеров читают шире, чем секреты."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], hide_hook_token(args[2]), *args[3:])
+        return True
+
+
+def hide_hook_token(path: str) -> str:
+    return re.sub(r"^(/hook/inbox/)[^?\s]+", r"\1***", path)
+
+
 def make_server(app: Any, cfg: WebConfig) -> uvicorn.Server:
     """uvicorn панели. Общий с демо-стендом (app.demo): доверие к прокси
     у них должно быть одинаковым, а не переписанным дважды."""
-    return uvicorn.Server(uvicorn.Config(
+    server = uvicorn.Server(uvicorn.Config(
         app, host="0.0.0.0", port=cfg.port, log_level="info", proxy_headers=True,
         # Без этого uvicorn верит заголовкам только от 127.0.0.1, а Caddy
         # приходит из сети compose - адрес клиента терялся бы. Но и «верить
@@ -59,6 +75,11 @@ def make_server(app: Any, cfg: WebConfig) -> uvicorn.Server:
         # заголовок, подставил бы в протокол подписи выдуманный адрес.
         # Поэтому доверяем сетям, из которых приходит прокси, а не всем.
         forwarded_allow_ips=cfg.trusted_proxies if cfg.trust_proxy else None))
+    # Фильтр - после Config: он настраивает журналы uvicorn заново.
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, HideHookToken) for f in access.filters):
+        access.addFilter(HideHookToken())
+    return server
 
 
 def setup_logging() -> None:

@@ -2400,6 +2400,10 @@ create index if not exists inbox_threads_announce_idx
 -- сообщением её не переписывает (общий номер у родственников).
 alter table crm.inbox_threads add column if not exists client_manual boolean
   not null default false;
+-- WhatsApp через Wazzup: через какой наш номер (канал Wazzup, uuid) пришло
+-- обращение. Ответ уходит тем же номером: у точек их может быть два, и
+-- ответ с чужого номера клиент примет за другую компанию.
+alter table crm.inbox_threads add column if not exists ext_channel text;
 
 -- Лента обращения: входящие, события («анкета на проверке») и ответы.
 -- Ответ из панели - это и есть очередь процесса бота. Текст - шифротекст

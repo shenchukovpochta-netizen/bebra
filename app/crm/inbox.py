@@ -6,7 +6,8 @@ best-effort: сбой CRM не должен стоить человеку отв
 
 Ответ из панели - строка в очереди `crm.inbox_messages`. Панель в
 интернет не ходит, отправляет процесс бота этим циклом: Telegram - своим
-ботом, MAX - клиентом MAX, Авито - через API. Застрявшее «отправляется»
+ботом, MAX - клиентом MAX, Авито - через API, WhatsApp - через Wazzup
+(`wazzup_once` раз в час сверяет номера и подписку хука). Застрявшее «отправляется»
 (перезапуск, не записанный итог) само не повторяется, а становится
 «не ушло»: отправка не идемпотентна, и повтор после таймаута - второе
 сообщение человеку. Повторяет человек кнопкой.
@@ -25,6 +26,7 @@ from .. import faq_i18n, i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
 from ..services.avito import AvitoError
+from ..services.wazzup import WazzupError
 from . import company, logic, mailing, notices, service
 
 log = logging.getLogger(__name__)
@@ -54,6 +56,11 @@ STUCK_MINUTES = 10
 ANNOUNCE_LIMIT = 50
 ANNOUNCE_BURST = 3
 ANNOUNCE_TRIES = 3
+# Wazzup: номера и подписка хука - раз в час, сбой - повтор через 10 минут,
+# подписку освежаем раз в сутки (Wazzup мог её сбросить).
+WAZZUP_EVERY = 3600
+WAZZUP_RETRY = 600
+WAZZUP_RESUBSCRIBE = timedelta(hours=24)
 
 
 async def record(crm: Any, cfg: Any, **fields: Any) -> dict | None:
@@ -112,7 +119,8 @@ def _tg_body(text: str, user: dict | None, lang: str) -> str:
 
 
 async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
-                    max_client: Any = None, avito: Any = None) -> bool:
+                    max_client: Any = None, avito: Any = None,
+                    wazzup: Any = None) -> bool:
     """Отправить один ответ из очереди. False - очередь пуста."""
     message = await crm.claim_inbox_out()
     if message is None:
@@ -156,6 +164,25 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
                 status, sent_id = "sent", str(got.get("id") or "") or None
             except Exception as exc:                    # noqa: BLE001
                 error = f"Авито: {str(exc)[:180]}"
+    elif channel == "wa" and origin == "hook" and wazzup is not None and wazzup.ready:
+        # Номер - тот, через который писал человек; старое обращение без
+        # номера - единственным живым номером WhatsApp в Wazzup.
+        state = logic.wazzup_state(await crm.settings())
+        own = logic.wazzup_pick_channel(message.get("thread_ext_channel"), state["channels"])
+        if own is None:
+            error = "WhatsApp: неизвестно, с какого нашего номера отвечать"
+        else:
+            try:
+                # crmMessageId - номер строки очереди: повтор той же строки
+                # Wazzup второй раз не отправит, а ответит «уже было».
+                got = await wazzup.send_text(
+                    own, message.get("thread_phone") or ext, text,
+                    crm_message_id=f"mybike-inbox-{message['id']}")
+                status, sent_id = "sent", str(got.get("messageId") or "") or None
+            except Exception as exc:                    # noqa: BLE001
+                error = f"Wazzup: {str(exc)[:180]}"
+    elif channel == "wa":
+        error = "в WhatsApp бот не пишет: Wazzup не подключён"
     else:
         error = "в этот канал бот не пишет"
     if status == "skipped":
@@ -355,10 +382,52 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
     return counts
 
 
+async def wazzup_once(crm: Any, wazzup: Any, cfg: Any, *,
+                      now: datetime | None = None) -> dict:
+    """Сверить Wazzup: живой ли ключ, какие номера WhatsApp, подписан ли хук.
+
+    Подписка - на `https://<CRM_DOMAIN>/hook/inbox/<токен>`: Wazzup, как
+    подключённый своим ключом API, шлёт вебхук без заголовка авторизации.
+    Подписываем, когда адрес сменился или сутки не подписывали. В настройку
+    ложится отпечаток адреса, а не адрес: в нём токен хука.
+    """
+    now = now or datetime.now(UTC)
+    prev = logic._json_dict((await crm.settings()).get("inbox_wazzup_state"))
+    state: dict[str, Any] = {"ok": False, "at": now.isoformat(), "error": "",
+                             "channels": prev.get("channels") or [],
+                             "hook": prev.get("hook"), "hooked_at": prev.get("hooked_at"),
+                             "hook_error": prev.get("hook_error") or ""}
+    try:
+        state["channels"] = await wazzup.channels()
+        state["ok"] = True
+    except WazzupError as exc:
+        state["error"] = str(exc)[:300]
+    url = logic.wazzup_hook_url(getattr(cfg, "crm_domain", ""),
+                                getattr(cfg, "inbox_hook_token", ""))
+    if state["ok"] and url is None:
+        state["hook"], state["hook_error"] = None, (
+            "нет домена панели (CRM_DOMAIN) или токена хука "
+            "(secrets/inbox_hook_token): входящие WhatsApp не придут")
+    elif state["ok"] and url is not None:
+        mark = logic.wazzup_fingerprint(url)
+        hooked = logic._moment(prev.get("hooked_at"))
+        if (prev.get("hook") != mark or prev.get("hook_error") or hooked is None
+                or now - hooked >= WAZZUP_RESUBSCRIBE):
+            try:
+                await wazzup.set_webhook(url)
+                state.update(hook=mark, hooked_at=now.isoformat(), hook_error="")
+            except WazzupError as exc:
+                state["hook_error"] = f"подписка хука: {str(exc)[:250]}"
+    await crm.set_setting("inbox_wazzup_state", json.dumps(state, ensure_ascii=False),
+                          by="wazzup")
+    return state
+
+
 async def inbox_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
-                     max_client: Any = None, avito: Any = None,
+                     max_client: Any = None, avito: Any = None, wazzup: Any = None,
                      interval: int = INTERVAL) -> None:
-    """Фоновый круг «Входящих»: ответы из очереди, сигналы, опрос Авито."""
+    """Фоновый круг «Входящих»: ответы из очереди, сигналы, опрос Авито,
+    сверка Wazzup."""
     try:
         stuck = await crm.fail_stuck_inbox_out()
         if stuck:
@@ -374,7 +443,12 @@ async def inbox_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
             await crm.set_setting("inbox_avito_state", "", by="avito")
         except Exception:                               # noqa: BLE001
             log.warning("входящие: отметка Авито не сброшена")
-    next_avito = 0.0
+    if wazzup is None or not wazzup.ready:
+        try:
+            await crm.set_setting("inbox_wazzup_state", "", by="wazzup")
+        except Exception:                               # noqa: BLE001
+            log.warning("входящие: отметка Wazzup не сброшена")
+    next_avito = next_wazzup = 0.0
     while True:
         try:
             # Итог отправки не записался даже с повтором - строка висит
@@ -383,7 +457,7 @@ async def inbox_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
                 log.warning("входящие: зависшие ответы помечены «не ушло»")
             for _ in range(SEND_BATCH):
                 if not await send_once(bot, crm, cfg, db=db, max_client=max_client,
-                                       avito=avito):
+                                       avito=avito, wazzup=wazzup):
                     break
             await announce_once(bot, crm, cfg)
             if avito is not None and avito.ready and time.monotonic() >= next_avito:
@@ -397,6 +471,12 @@ async def inbox_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
                     if exc.status == 402:
                         next_avito = time.monotonic() + AVITO_PAUSE_ON_402
                     log.warning("Авито: %s", exc)
+            if wazzup is not None and wazzup.ready and time.monotonic() >= next_wazzup:
+                state = await wazzup_once(crm, wazzup, cfg)
+                bad = state["error"] or state["hook_error"]
+                next_wazzup = time.monotonic() + (WAZZUP_RETRY if bad else WAZZUP_EVERY)
+                if bad:
+                    log.warning("Wazzup: %s", bad)
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

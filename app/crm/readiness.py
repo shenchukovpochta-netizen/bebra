@@ -245,6 +245,31 @@ def check_avito(settings: Mapping[str, Any], now: datetime) -> dict[str, Any]:
                 href="/inbox", link="Входящие", required=False)
 
 
+def check_wazzup(settings: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    state = logic.wazzup_state(settings, now=now)
+    if not state["configured"]:
+        return item("wazzup", "WhatsApp (Wazzup)", OFF,
+                    "Сообщения WhatsApp во «Входящие» не приходят, ответ - только "
+                    "с телефона.",
+                    how="ключ «Интеграции → API» Wazzup в secrets/wazzup_api_key, "
+                        "токен хука и домен панели (INSTALL.md, «Входящие: Авито и "
+                        "WhatsApp»).",
+                    href="/inbox", link="Входящие", required=False)
+    if not state["live"]:
+        return item("wazzup", "WhatsApp (Wazzup)", WARN,
+                    "Wazzup не отвечает" + (f": {state['error']}" if state["error"]
+                                            else "") + ".",
+                    at=state["at"], href="/inbox", link="Входящие", required=False)
+    if state["hook_error"]:
+        return item("wazzup", "WhatsApp (Wazzup)", WARN,
+                    f"Ответы уходят, входящие - нет: {state['hook_error']}.",
+                    at=state["at"], href="/inbox", link="Входящие", required=False)
+    numbers = ", ".join(c["phone"] or "—" for c in state["channels"]) or "номеров нет"
+    return item("wazzup", "WhatsApp (Wazzup)", OK,
+                f"Сообщения приходят, ответ - из «Входящих». Номера: {numbers}.",
+                at=state["at"], href="/inbox", link="Входящие", required=False)
+
+
 def check_https(trust_proxy: bool) -> dict[str, Any]:
     if trust_proxy:
         return item("https", "Домен и HTTPS", OK,
@@ -300,7 +325,7 @@ def checks(*, settings: Mapping[str, Any], consent: str,
             check_prices(models, tariffs), check_staff(staff), check_bot(bot),
             check_acquiring(acquiring), check_bank(bank_last, now),
             check_trackers(trackers, now, settings), check_avito(settings, now),
-            check_https(https), check_backup(settings, now)]
+            check_wazzup(settings, now), check_https(https), check_backup(settings, now)]
 
 
 def summary(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

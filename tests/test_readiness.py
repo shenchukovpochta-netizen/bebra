@@ -43,6 +43,10 @@ def facts(**over):
             "trackers": [{"last_seen": NOW - timedelta(minutes=5)}],
             "https": True, "now": NOW}
     base["settings"]["inbox_avito_state"] = {"ok": True, "at": NOW.isoformat()}
+    base["settings"]["inbox_wazzup_state"] = {
+        "ok": True, "at": NOW.isoformat(), "hook": "abc", "hook_error": "",
+        "channels": [{"id": "b96a999e-06f5-4cac-8413-ba999993f981",
+                      "phone": "+79991110000", "active": True}]}
     base["settings"][logic.BACKUP_STATUS_KEY] = backup_status()
     base.update(over)
     return base
@@ -80,7 +84,7 @@ class TestRules(unittest.TestCase):
         for code in ("company", "consent", "points", "prices", "staff", "bot"):
             self.assertEqual(items[code]["state"], readiness.TODO, code)
             self.assertTrue(items[code]["required"], code)
-        for code in ("acquiring", "bank", "trackers", "avito", "https"):
+        for code in ("acquiring", "bank", "trackers", "avito", "wazzup", "https"):
             self.assertEqual(items[code]["state"], readiness.OFF, code)
             self.assertFalse(items[code]["required"], code)
         self.assertFalse(readiness.summary(items.values())["ready"])

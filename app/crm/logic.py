@@ -10641,12 +10641,14 @@ def inbox_links(thread: Mapping[str, Any]) -> dict[str, str | None]:
     }
 
 
-def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool) -> tuple[bool, str]:
+def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool,
+                    wa: Mapping[str, Any] | None = None) -> tuple[bool, str]:
     """(можно ли ответить из панели, почему нет).
 
     В Telegram и MAX бот может написать только тому, кто сам писал боту:
-    обращение, заведённое хуком, этого не доказывает. WhatsApp - только
-    вне панели: отправка через шлюз не подключена.
+    обращение, заведённое хуком, этого не доказывает. WhatsApp - через
+    Wazzup (`wa` - wazzup_state), когда известно, с какого нашего номера
+    отвечать; без Wazzup - вне панели.
     """
     channel = thread.get("channel")
     if thread.get("status") == "spam":
@@ -10668,6 +10670,14 @@ def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool) -> tuple[bool,
         if not avito_ok:
             return False, ("Опрос Авито не работает - ответ уйдёт некуда. "
                            "Ответьте в приложении Авито.")
+        return True, ""
+    if channel == "wa" and wa and wa.get("live"):
+        if not thread.get("phone") and not thread.get("ext_id"):
+            return False, "У обращения нет телефона WhatsApp."
+        if wazzup_pick_channel(thread.get("ext_channel"), wa.get("channels")) is None:
+            return False, ("В Wazzup несколько номеров WhatsApp, а с какого писал "
+                           "человек - неизвестно. Ответьте в WhatsApp и отметьте "
+                           "«ответил вне панели».")
         return True, ""
     return False, ("WhatsApp: ответьте по ссылке wa.me и отметьте "
                    "«ответил вне панели».")
@@ -10731,11 +10741,11 @@ def _wa_phone(raw: Any) -> str | None:
 def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = None,
                   phone: Any = None, text: Any = None, kind: str = "text",
                   subject: Any = None, subject_url: Any = None,
-                  at: Any = None) -> dict | None:
+                  at: Any = None, ext_channel: Any = None) -> dict | None:
     ext = _cut(ext_id, 100)
     if channel not in HOOK_CHANNELS or not ext:
         return None
-    return {
+    item = {
         "channel": channel, "ext_id": ext, "msg_id": _cut(msg_id, 100),
         "name": _cut(name, INBOX_NAME_MAX),
         "phone": bot_logic.normalize_phone(str(phone)) if phone else None,
@@ -10745,6 +10755,11 @@ def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = 
         "subject_url": safe_avito_url(subject_url),
         "at": _moment(at),
     }
+    # Номер канала Wazzup: через какой наш WhatsApp писал человек.
+    own = wazzup_channel(ext_channel) if channel == "wa" else None
+    if own:
+        item["ext_channel"] = own
+    return item
 
 
 # Реакция, правка, удаление, голос в опросе - события к уже записанному
@@ -10760,6 +10775,13 @@ _GREEN_KINDS = {"textMessage": "text", "extendedTextMessage": "text",
 _WAZZUP_KINDS = {"text": "text", "image": "image", "audio": "voice",
                  "document": "file", "missing_call": "call"}
 _WAZZUP_CHANNELS = {"whatsapp": "wa", "whatsgroup": None, "avito": "avito"}
+_WAZZUP_CHANNEL_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def wazzup_channel(value: Any) -> str | None:
+    """Номер канала Wazzup (uuid) из чужого JSON - или None."""
+    text = str(value or "").strip()
+    return text if _WAZZUP_CHANNEL_ID.fullmatch(text) else None
 
 
 def _dict(value: Any) -> Mapping[str, Any]:
@@ -10823,7 +10845,7 @@ def _wazzup(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
             msg_id=message.get("messageId"), name=contact.get("name"), phone=phone,
             text=message.get("text"),
             kind=_WAZZUP_KINDS.get(str(message.get("type") or ""), "other"),
-            at=message.get("dateTime"))
+            at=message.get("dateTime"), ext_channel=message.get("channelId"))
         if item is None:
             skipped += 1
         else:
@@ -10972,6 +10994,82 @@ def avito_state(settings: Mapping[str, Any], *,
     live = bool(data.get("ok")) and at is not None and (now - at) <= stale
     return {"configured": bool(data), "ok": bool(data.get("ok")), "live": live,
             "at": at, "error": str(data.get("error") or "")[:300]}
+
+
+# Wazzup: бот раз в час сверяет номера и подписку. Отметка старше трёх
+# кругов - процесс бота не работает, и ответ из панели повиснет в очереди.
+WAZZUP_STALE_HOURS = 3
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if raw:
+        try:
+            loaded = json.loads(str(raw))
+            return loaded if isinstance(loaded, dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+def wazzup_state(settings: Mapping[str, Any], *,
+                 now: datetime | None = None) -> dict[str, Any]:
+    """Состояние Wazzup из settings.inbox_wazzup_state (пишет процесс бота).
+
+    ok - API ответил и ключ принят, live - и это было недавно; hook - адрес
+    хука подписан (в настройке лежит отпечаток адреса, не сам адрес: в нём
+    токен). channels - номера WhatsApp из кабинета Wazzup.
+    """
+    data = _json_dict(settings.get("inbox_wazzup_state"))
+    at = _moment(data.get("at"))
+    now = now or datetime.now(UTC)
+    live = (bool(data.get("ok")) and at is not None
+            and now - at <= timedelta(hours=WAZZUP_STALE_HOURS))
+    channels = []
+    for item in data.get("channels") if isinstance(data.get("channels"), list) else []:
+        if isinstance(item, dict) and wazzup_channel(item.get("id")):
+            channels.append({"id": wazzup_channel(item.get("id")),
+                             "phone": str(item.get("phone") or "")[:20] or None,
+                             "state": str(item.get("state") or "")[:40],
+                             "active": bool(item.get("active"))})
+    return {"configured": bool(data), "ok": bool(data.get("ok")), "live": live, "at": at,
+            "error": str(data.get("error") or "")[:300], "channels": channels,
+            "hook": bool(data.get("hook")) and not data.get("hook_error"),
+            "hook_error": str(data.get("hook_error") or "")[:300],
+            "hooked_at": _moment(data.get("hooked_at"))}
+
+
+def wazzup_hook_url(domain: Any, token: Any) -> str | None:
+    """Адрес хука для подписки Wazzup: https://<домен>/hook/inbox/<токен>.
+
+    Без домена панели или токена хука подписывать нечего: Wazzup стучится
+    снаружи, а пустой токен - это выключенный хук (404)."""
+    host = str(domain or "").strip().lower()
+    host = re.sub(r"^https?://", "", host).strip("/")
+    secret = str(token or "").strip()
+    if not host or not secret or not re.fullmatch(r"[a-z0-9.-]+(:\d+)?", host):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", secret):
+        return None
+    url = f"https://{host}/hook/inbox/{secret}"
+    return url if len(url) <= 200 else None
+
+
+def wazzup_fingerprint(url: str) -> str:
+    """Отпечаток адреса хука: по нему видно, что подписка актуальна, а
+    токен в базу не попадает."""
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def wazzup_pick_channel(own: Any, channels: Any) -> str | None:
+    """С какого нашего номера отвечать: тем, через который писал человек;
+    не знаем - единственным живым номером WhatsApp, иначе никаким."""
+    mine = wazzup_channel(own)
+    if mine:
+        return mine
+    alive = [c for c in channels or [] if isinstance(c, Mapping) and c.get("active")]
+    return wazzup_channel(alive[0].get("id")) if len(alive) == 1 else None
 
 
 def inbox_preview(text: str | None, kind: str | None, *, limit: int = 90) -> str:

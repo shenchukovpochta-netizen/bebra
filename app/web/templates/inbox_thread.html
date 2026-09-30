@@ -62,7 +62,7 @@
   {% if can_reply %}
   <form method="post" action="/inbox/{{ t.id }}/reply">
     <input type="hidden" name="once" value="{{ once() }}">
-    <textarea name="text" rows="4" maxlength="{{ reply_limit }}" required placeholder="Ответ уйдёт в {{ t.channel_label }} от имени бота">{{ draft or '' }}</textarea>
+    <textarea name="text" rows="4" maxlength="{{ reply_limit }}" required placeholder="{% if t.channel == 'wa' %}Ответ уйдёт в WhatsApp с нашего номера через Wazzup{% else %}Ответ уйдёт в {{ t.channel_label }} от имени бота{% endif %}">{{ draft or '' }}</textarea>
     <button type="submit">Ответить</button>
   </form>
   {% else %}

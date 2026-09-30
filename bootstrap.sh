@@ -141,6 +141,8 @@ fi
 [ -f secrets/tochka_token ] || : > secrets/tochka_token
 # Авито - тоже: пустой секрет значит «интеграция выключена».
 [ -f secrets/avito_client_secret ] || : > secrets/avito_client_secret
+# WhatsApp через Wazzup - тоже: ключ из «Интеграции → API» кабинета Wazzup.
+[ -f secrets/wazzup_api_key ] || : > secrets/wazzup_api_key
 # «Входящие»: ключ переписки генерируется сразу - без него обращения
 # пишутся без текста. Смена ключа делает старую переписку нечитаемой.
 if [ ! -s secrets/inbox_key ]; then

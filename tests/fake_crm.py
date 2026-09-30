@@ -4172,7 +4172,7 @@ class FakeCrm:
     async def inbox_record(self, *, channel, origin, ext_id, direction, kind="text",
                            msg_id=None, body_enc=None, author=None, name=None,
                            username=None, phone=None, subject=None, subject_url=None,
-                           client_id=None, at=None, announce=True):
+                           client_id=None, at=None, announce=True, ext_channel=None):
         assert channel in crm_logic.INBOX_CHANNELS and origin in crm_logic.INBOX_ORIGINS
         assert direction in ("in", "out", "event") and kind in crm_logic.INBOX_KINDS
         now = self._now()
@@ -4189,12 +4189,13 @@ class FakeCrm:
                 "note": None, "waiting_since": None, "last_in_at": None,
                 "last_out_at": None, "announced_at": None if announce else now,
                 "ext_cursor": None, "handled_by": None, "handled_at": None,
-                "created_at": now, "updated_at": now}
+                "ext_channel": ext_channel, "created_at": now, "updated_at": now}
         else:
             if thread["origin"] != origin:
                 return None             # чужое обращение: хук в чат опроса Авито
             for key, value in (("name", name), ("username", username), ("phone", phone),
-                               ("subject", subject), ("subject_url", subject_url)):
+                               ("subject", subject), ("subject_url", subject_url),
+                               ("ext_channel", ext_channel)):
                 if value is not None:
                     thread[key] = value
             if thread["client_id"] is None and not thread.get("client_manual"):
@@ -4310,7 +4311,8 @@ class FakeCrm:
         t = self.inbox_threads_[m["thread_id"]]
         return {**m, "channel": t["channel"], "origin": t["origin"],
                 "thread_ext_id": t["ext_id"], "client_id": t["client_id"],
-                "thread_status": t["status"]}
+                "thread_status": t["status"], "thread_ext_channel": t.get("ext_channel"),
+                "thread_phone": t.get("phone")}
 
     async def finish_inbox_out(self, message_id, *, ok, error=None, ext_id=None):
         m = self.inbox_messages_.get(message_id)

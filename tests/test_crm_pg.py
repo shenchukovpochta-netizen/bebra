@@ -2847,6 +2847,23 @@ class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
         fields.setdefault("origin", "hook")
         return await self.crm.inbox_record(ext_id=ext_id, direction=direction, **fields)
 
+    async def test_wazzup_channel_rides_with_thread_and_queue(self):
+        """Номер канала Wazzup: пишется с первым сообщением, последний
+        пришедший главнее, пустой не затирает; очередь отдаёт его и телефон."""
+        ch1 = "b96a999e-06f5-4cac-8413-ba999993f981"
+        ch2 = "0f0e0d0c-0b0a-4909-8807-060504030201"
+        got = await self.say(msg_id="w1", ext_channel=ch1, phone="+79990000001")
+        thread = await self.crm.inbox_thread(got["thread_id"])
+        self.assertEqual(thread["ext_channel"], ch1)
+        await self.say(msg_id="w2")
+        self.assertEqual((await self.crm.inbox_thread(got["thread_id"]))["ext_channel"], ch1)
+        await self.say(msg_id="w3", ext_channel=ch2)
+        self.assertEqual((await self.crm.inbox_thread(got["thread_id"]))["ext_channel"], ch2)
+        mid = await self.crm.queue_inbox_reply(got["thread_id"], body_enc="x", author="t")
+        claimed = await self.crm.claim_inbox_out()
+        self.assertEqual((claimed["id"], claimed["thread_ext_channel"],
+                          claimed["thread_phone"]), (mid, ch2, "+79990000001"))
+
     async def test_event_signal_is_limited_to_one_per_12_hours(self):
         """«Нужен человек» (событие с сигналом) ожидания не ставит: без предела
         каждая новая тема кнопки давала бы новый сигнал в чат. Не чаще раза

@@ -2935,6 +2935,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def inbox_avito() -> dict:
         return logic.avito_state(await crm.settings())
 
+    async def inbox_wazzup() -> dict:
+        return logic.wazzup_state(await crm.settings())
+
     async def inbox_or_404(request: Request, thread_id: int) -> dict | None:
         return await crm.inbox_thread(thread_id)
 
@@ -2961,7 +2964,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                                             limit=5000))
         return render(request, "inbox.html", rows=tools["rows"], tools=tools, tab=tab,
                       channel=channel or "", q=q, counts=counts,
-                      avito=await inbox_avito(), keyed=inbox_vault is not None,
+                      avito=await inbox_avito(), wazzup=await inbox_wazzup(),
+                      keyed=inbox_vault is not None,
                       hook_on=bool(getattr(cfg, "inbox_hook_token", "")),
                       views=await views_of(request, "/inbox"))
 
@@ -3005,7 +3009,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for m in await crm.inbox_messages(thread_id):
             messages.append({**m, "text": service.inbox_open(inbox_vault, m.get("body_enc"))})
         avito = await inbox_avito()
-        can_reply, why = logic.inbox_can_reply(thread, avito_ok=avito["live"])
+        can_reply, why = logic.inbox_can_reply(thread, avito_ok=avito["live"],
+                                               wa=await inbox_wazzup())
         bot_state = None
         tg_id = logic.parse_id(thread["ext_id"]) if thread["channel"] == "tg" else None
         if tg_id is not None and db is not None:
@@ -3034,7 +3039,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         try:
             await service.inbox_reply(crm, inbox_vault, thread, data.get("text"),
                                       by=who(request),
-                                      avito_ok=(await inbox_avito())["live"])
+                                      avito_ok=(await inbox_avito())["live"],
+                                      wa=await inbox_wazzup())
         except service.ServiceError as exc:
             # Страница сразу, а не редирект: набранный ответ остаётся в поле.
             # В сессию его не положить - cookie не вместит 3500 знаков.
@@ -3113,11 +3119,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         адреса, тело больше лимита - 413. Запрос ничего не шлёт наружу и
         не пишет в лог содержимого: только счётчики.
         """
+        header = request.headers.get("authorization") or ""
+        given = header[7:].strip() if header[:7].lower() == "bearer " else ""
+        return await inbox_hook_in(request, given)
+
+    @app.post("/hook/inbox/{given}")
+    async def inbox_hook_path(request: Request, given: str) -> Response:
+        """Тот же хук с токеном в адресе: Wazzup, подключённый своим ключом
+        API, шлёт вебхук без заголовка авторизации - подписывать ему нечем.
+        Адрес с токеном знает только Wazzup (подписку ставит бот)."""
+        return await inbox_hook_in(request, given.strip())
+
+    async def inbox_hook_in(request: Request, given: str) -> Response:
         token = str(getattr(cfg, "inbox_hook_token", "") or "")
         if not token:
             return JSONResponse({"ok": False}, status_code=404)
-        header = request.headers.get("authorization") or ""
-        given = header[7:].strip() if header[:7].lower() == "bearer " else ""
         valid = bool(given) and hmac.compare_digest(given.encode(), token.encode())
         if not valid:
             # Счёт неудач - только неверным токенам: шлюзы WhatsApp шлют с
@@ -3158,7 +3174,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     ext_id=item["ext_id"], kind=item["kind"], text=item["text"],
                     msg_id=item["msg_id"], name=item["name"], phone=item["phone"],
                     subject=item["subject"], subject_url=item["subject_url"],
-                    at=item["at"], announce=True)
+                    at=item["at"], announce=True, ext_channel=item.get("ext_channel"))
             except (service.ServiceError, UnicodeError, ValueError, DataError):
                 # Негодное сообщение - в пропущенные, пачка идёт дальше.
                 # Сбой базы - наоборот 500: шлюз повторит доставку, а уже

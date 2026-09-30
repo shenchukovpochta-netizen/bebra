@@ -34,6 +34,8 @@ secrets:
     file: ./secrets/inbox_key
   inbox_hook_token:
     file: ./secrets/inbox_hook_token
+  wazzup_api_key:
+    file: ./secrets/wazzup_api_key
   # Франшиза. franchise_key - ключ, которым франчайзер шифрует токены
   # своих франчайзи (генерирует bootstrap.sh, в бэкап - отдельно от базы).
   # metrics_token - токен адреса /hook/metrics этой копии для франчайзера
@@ -130,7 +132,7 @@ services:
         condition: service_healthy
     secrets: [db_password, bot_token, pdn_key, starline_app_secret,
               starline_password, tochka_token, max_bot_token, avito_client_secret,
-              inbox_key, franchise_key]
+              inbox_key, franchise_key, wazzup_api_key, inbox_hook_token]
     environment:
       # Секреты - через файлы: содержимое окружения видно в docker inspect,
       # в дампах процесса и в трейсбеках при падении.
@@ -142,6 +144,10 @@ services:
       TOCHKA_TOKEN_FILE: /run/secrets/tochka_token
       AVITO_CLIENT_SECRET_FILE: /run/secrets/avito_client_secret
       INBOX_KEY_FILE: /run/secrets/inbox_key
+      # WhatsApp через Wazzup: ответы из «Входящих» и подписка хука панели
+      # (адрес с токеном хука). Пустой ключ - выключено.
+      WAZZUP_API_KEY_FILE: /run/secrets/wazzup_api_key
+      INBOX_HOOK_TOKEN_FILE: /run/secrets/inbox_hook_token
       # Опрос франчайзи раз в сутки: токены лежат в базе шифротекстом.
       FRANCHISE_KEY_FILE: /run/secrets/franchise_key
       # Нужен ровно для рассылок: тем клиентам, у кого привязан MAX.

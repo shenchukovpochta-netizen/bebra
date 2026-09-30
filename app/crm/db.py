@@ -5705,8 +5705,12 @@ class CrmDB:
                            name: str | None = None, username: str | None = None,
                            phone: str | None = None, subject: str | None = None,
                            subject_url: str | None = None, client_id: int | None = None,
-                           at: datetime | None = None, announce: bool = True) -> dict:
+                           at: datetime | None = None, announce: bool = True,
+                           ext_channel: str | None = None) -> dict:
         """Сообщение в обращение - одной транзакцией.
+
+        `ext_channel` - номер канала Wazzup, через который писал человек:
+        последний пришедший главнее, ответ уходит тем же номером.
 
         Обращение одно на собеседника в канале (channel, ext_id): повтор
         не заводит второе, а дополняет пустые поля. Сообщение с тем же
@@ -5728,11 +5732,13 @@ class CrmDB:
                 """
                 insert into crm.inbox_threads (channel, origin, ext_id, name, username,
                                                phone, subject, subject_url, client_id,
-                                               announced_at)
+                                               announced_at, ext_channel)
                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                        case when $10::boolean then null else now() end)
+                        case when $10::boolean then null else now() end, $11)
                 on conflict (channel, ext_id) do update
                    set name = coalesce(excluded.name, crm.inbox_threads.name),
+                       ext_channel = coalesce(excluded.ext_channel,
+                                              crm.inbox_threads.ext_channel),
                        username = coalesce(excluded.username, crm.inbox_threads.username),
                        phone = coalesce(excluded.phone, crm.inbox_threads.phone),
                        subject = coalesce(excluded.subject, crm.inbox_threads.subject),
@@ -5746,7 +5752,7 @@ class CrmDB:
                  where crm.inbox_threads.origin = excluded.origin
                 returning id, (xmax = 0) as created
                 """, channel, origin, ext_id, name, username, phone, subject,
-                subject_url, client_id, announce)
+                subject_url, client_id, announce, ext_channel)
             if thread is None:
                 return None
             thread_id = int(thread["id"])
@@ -5885,7 +5891,8 @@ class CrmDB:
               from next, crm.inbox_threads t
              where m.id = next.id and t.id = m.thread_id
             returning m.*, t.channel, t.origin, t.ext_id as thread_ext_id,
-                      t.client_id, t.status as thread_status
+                      t.client_id, t.status as thread_status,
+                      t.ext_channel as thread_ext_channel, t.phone as thread_phone
             """))
 
     async def finish_inbox_out(self, message_id: int, *, ok: bool,

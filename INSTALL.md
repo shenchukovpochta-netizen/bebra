@@ -716,16 +716,29 @@ Telegram и MAX сам, без настройки. Авито и WhatsApp под
    (секрет читается при старте). Если
    опрос не работает, во «Входящих» висит красная плашка с причиной;
    «402» — тариф без API сообщений.
-3. **WhatsApp** — через шлюз (Green-API или Wazzup) или n8n. Нужен домен
-   панели (`CRM_DOMAIN`, профиль https).
-   ```bash
-   openssl rand -hex 32 > secrets/inbox_hook_token
-   docker compose restart crm
-   ```
-   В шлюзе: адрес `https://<CRM_DOMAIN>/hook/inbox`, токен — содержимое
-   `secrets/inbox_hook_token` (шлюз пришлёт его заголовком
-   `Authorization: Bearer`). Отвечают в WhatsApp в самом мессенджере,
-   в панели — кнопка «Ответил вне панели».
+3. **WhatsApp через Wazzup** — входящие и ответ прямо из «Входящих». Нужен
+   домен панели (`CRM_DOMAIN`, профиль https): Wazzup стучится снаружи.
+   1. В кабинете Wazzup подключите номер WhatsApp точки (QR-код с
+      телефона) — номеров может быть несколько, ответ уходит с того, на
+      который писал человек.
+   2. Там же «Интеграции → API» → создать ключ API.
+   3. На сервере:
+      ```bash
+      nano secrets/wazzup_api_key          # вставить ключ API, сохранить
+      [ -s secrets/inbox_hook_token ] || openssl rand -hex 32 > secrets/inbox_hook_token
+      docker compose up -d crm bot && docker compose restart crm bot
+      ```
+   Остальное бот делает сам в течение минуты: узнаёт номера WhatsApp и
+   подписывает на новые сообщения адрес
+   `https://<CRM_DOMAIN>/hook/inbox/<токен>` (раз в час сверяет, раз в
+   сутки освежает подписку). Итог — во «Входящих» (номера внизу страницы
+   или красная плашка с причиной) и в «Готовности», строка «WhatsApp
+   (Wazzup)». Ключ никому не пересылайте: с ним пишут от вашего номера.
+
+   **Другой шлюз** (Green-API) или n8n — только входящие: адрес
+   `https://<CRM_DOMAIN>/hook/inbox`, токен — содержимое
+   `secrets/inbox_hook_token` заголовком `Authorization: Bearer`. Отвечают
+   тогда в самом WhatsApp, в панели — кнопка «Ответил вне панели».
 
 Подробности и формат для n8n — CRM.md, раздел «Входящие».
 

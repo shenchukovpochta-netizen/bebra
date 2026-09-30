@@ -34,6 +34,7 @@ from .services.contract import load_template
 from .services.crypto import Vault
 from .services.starline import StarlineClient
 from .services.tochka import TochkaClient
+from .services.wazzup import WazzupClient
 
 log = logging.getLogger("mybike")
 
@@ -138,8 +139,12 @@ async def run() -> None:
     # отправляет ответы в Telegram и MAX.
     avito = AvitoClient(client_id=cfg.avito_client_id,
                         client_secret=cfg.avito_client_secret)
+    # WhatsApp через Wazzup: входящие приходят хуком в панель, отсюда - ответы
+    # и раз в час сверка номеров и подписки хука. Пустой ключ - выключено.
+    wazzup = WazzupClient(api_key=cfg.wazzup_api_key)
     inbox_task = asyncio.create_task(
-        inbox.inbox_loop(bot, crm, cfg, db=db, max_client=max_client, avito=avito))
+        inbox.inbox_loop(bot, crm, cfg, db=db, max_client=max_client, avito=avito,
+                         wazzup=wazzup))
     # Здоровье сервера: диск, отчёт сервиса backup, панель, сертификаты -
     # раз в час, владельцу через уведомление server_health.
     health_task = asyncio.create_task(health.health_loop(bot, crm, cfg))

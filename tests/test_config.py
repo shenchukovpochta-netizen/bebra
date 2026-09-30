@@ -194,9 +194,15 @@ class TestInboxSecrets(unittest.TestCase):
         self.assertEqual(load(INBOX_KEY="").inbox_key, "",
                          "compose подставляет пустую строку - это «не задан»")
 
-    def test_bot_has_no_hook_token(self):
-        """Хук принимает панель: боту токен знать незачем."""
-        self.assertNotIn("inbox_hook_token", {f.name for f in dataclasses.fields(Config)})
+    def test_bot_hook_token_only_from_file(self):
+        """Хук принимает панель, а бот токен знает ради одного: подписать у
+        Wazzup адрес /hook/inbox/<токен>. Только из файла, пусто - «нет»."""
+        self.assertEqual(load().inbox_hook_token, "")
+        cfg = load(INBOX_HOOK_TOKEN="из-окружения",
+                   INBOX_HOOK_TOKEN_FILE=self.secret_file("tok", "из-файла"))
+        self.assertEqual(cfg.inbox_hook_token, "из-файла")
+        self.assertEqual(load(WAZZUP_API_KEY_FILE=self.secret_file("wz", "k-1"))
+                         .wazzup_api_key, "k-1")
 
     def test_missing_inbox_key_file_names_the_fix(self):
         with self.assertRaises(RuntimeError) as ctx:

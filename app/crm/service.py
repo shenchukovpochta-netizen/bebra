@@ -2198,7 +2198,7 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
                    username: str | None = None, phone: str | None = None,
                    subject: str | None = None, subject_url: str | None = None,
                    author: str | None = None, at: datetime | None = None,
-                   announce: bool = True) -> dict:
+                   announce: bool = True, ext_channel: str | None = None) -> dict:
     """Записать сообщение во «Входящие» и найти карточку клиента.
 
     Карточка ищется по tg_id, по аккаунту MAX и по телефону - привязка
@@ -2228,16 +2228,17 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
         username=logic._cut(str(username or "").lstrip("@"), 64), phone=norm,
         subject=logic._cut(subject, logic.INBOX_SUBJECT_MAX),
         subject_url=logic.safe_avito_url(subject_url),
-        client_id=client["id"] if client else None, at=at, announce=announce)
+        client_id=client["id"] if client else None, at=at, announce=announce,
+        ext_channel=logic.wazzup_channel(ext_channel) if channel == "wa" else None)
     if got is None:
         raise ServiceError("Это обращение заведено другим источником того же канала.")
     return got
 
 
 async def inbox_reply(crm: Any, vault: Vault | None, thread: dict, text: Any, *,
-                      by: str, avito_ok: bool) -> int:
+                      by: str, avito_ok: bool, wa: dict | None = None) -> int:
     """Ответ из панели - строкой в очередь; отправляет процесс бота."""
-    ok, why = logic.inbox_can_reply(thread, avito_ok=avito_ok)
+    ok, why = logic.inbox_can_reply(thread, avito_ok=avito_ok, wa=wa)
     if not ok:
         raise ServiceError(why)
     if vault is None:
