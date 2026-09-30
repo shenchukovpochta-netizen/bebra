@@ -454,3 +454,75 @@ class TestMaxInboxWhenRecordFails(_MaxFlowSurvivesInbox, MaxInboxCase):
         for secret in ("Баумана", "Иванов", "+7999"):
             self.assertNotIn(secret, joined)
         self.assertEqual(await self.crm.inbox_threads(), [])
+
+
+class TestNoPhoneInLogs(MaxInboxCase):
+    """Телефон в журнал процесса не пишется: журнал живёт дольше анкеты и
+    уходит в сторонние сборщики. Вместо номера - id."""
+
+    async def test_unlinked_max_account_logs_the_id_not_the_phone(self):
+        from app.max import handlers
+        with self.assertLogs("app.max.handlers", "INFO") as logs:
+            await handlers.link_crm_account(self.ctx, "+79991571094", MAX_USER)
+        joined = "\n".join(logs.output)
+        self.assertIn(str(MAX_USER), joined)
+        self.assertNotIn("9991571094", joined)
+
+    async def test_phone_of_another_telegram_logs_ids_only(self):
+        from app.crm import sync
+        client_id = await self.crm.create_client(full_name="Иванов Иван",
+                                                 phone="+79991571094", tg_id=777)
+        user = {"tg_id": 5001, "phone": "+79991571094", "full_name": "Иванов Иван"}
+        with self.assertLogs("app.crm.sync", "WARNING") as logs:
+            self.assertIsNone(await sync.client_from_bot(self.crm, user))
+        joined = "\n".join(logs.output)
+        self.assertIn("5001", joined)
+        self.assertIn(str(client_id), joined)
+        self.assertNotIn("9991571094", joined)
+
+
+class TestMaxFeedbackPastTheGate(MaxInboxCase):
+    """Оценка после сдачи в MAX: бывший подписчик жмёт цифру и отвечает на
+    просьбу о комментарии - гейт подписки его не останавливает."""
+
+    async def test_former_subscriber_rates_and_comments(self):
+        from datetime import date, datetime, timedelta
+        from decimal import Decimal
+
+        from app.crm import feedback, service
+        from app.max import runner
+
+        async def not_member(channel_id, user_id):
+            return False
+
+        self.cl.is_member = not_member
+        client_id = await self.crm.create_client(full_name="Иванов Иван",
+                                                 phone="+79991571094")
+        await self.crm.update_client(client_id, max_id=MAX_USER)
+        bike = await self.crm.create_bike(code="МБ-7", model="Kugoo V3")
+        rid = await self.crm.create_rental(
+            client_id=client_id, bike_id=bike, tariff_id=None, tariff_name="Неделя",
+            period_days=7, price=Decimal(3000), billing="manual",
+            started_on=date.today() - timedelta(days=7), contract_no=None,
+            created_by="t")
+        await service.close_rental(self.crm, await self.crm.rental(rid),
+                                   closed_on=date.today(), note=None, by="staff:t")
+        noon = datetime.combine(date.today(), datetime.min.time()).replace(hour=12)
+        await feedback.ask_once(None, self.crm, max_client=self.cl,
+                                now=noon.astimezone())
+        self.user(rl_count=0)
+
+        await runner._dispatch_dialog(self.ctx, {}, {
+            "kind": "callback", "user_id": MAX_USER, "username": "u42",
+            "callback_id": "c1", "payload_cb": f"fb:{rid}:2"})
+        row = await self.crm.feedback_of_rental(rid)
+        self.assertEqual(row["score"], 2)
+        await runner._dispatch_dialog(self.ctx, {}, {
+            "kind": "message", "user_id": MAX_USER, "username": "u42",
+            "text": "тормоза", "reply_to_mid": row["prompt_msg"]})
+        self.assertEqual((await self.crm.feedback_of_rental(rid))["comment"], "тормоза")
+        self.assertFalse([m for m in self.cl.sent
+                          if "не подписаны" in (m.get("text") or "")])
+        await runner._dispatch_dialog(self.ctx, {}, {
+            "kind": "message", "user_id": MAX_USER, "username": "u42", "text": "привет"})
+        self.assertIn("не подписаны", self.cl.sent[-1]["text"], "остальное - за гейтом")

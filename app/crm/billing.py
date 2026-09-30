@@ -450,8 +450,6 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
     # одному, и шлём только то, чей час настал.
     due_codes = {code for code in REMIND_CODE.values() if due(code)}
     if due_codes:
-        for code in due_codes:
-            notices.mark(done, code, today)
         try:
             sent, digest = await remind_once(bot, db, crm, cfg, today=today,
                                              state=state,
@@ -461,6 +459,11 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
         except Exception:                                # noqa: BLE001
             log.exception("CRM: проход напоминаний не удался")
             return
+        # Отметка - после прохода, как у начислений: сбой базы посреди
+        # него иначе съедал напоминания до завтра. Повтор безвреден -
+        # каждую аренду отсекает notified_on, поставленный до отправки.
+        for code in due_codes:
+            notices.mark(done, code, today)
 
     if due("search_digest"):
         notices.mark(done, "search_digest", today)

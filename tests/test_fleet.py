@@ -16,7 +16,7 @@ from tests.plain import plain  # noqa: E402
 
 try:
     from aiogram import Bot, Dispatcher
-    from aiogram.methods import EditMessageText, SendMessage
+    from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 
     from app import logic, texts
     from app.crm import logic as crm_logic
@@ -207,6 +207,33 @@ class TestFleetChat(unittest.IsolatedAsyncioTestCase):
         await self.feed(cb(f"bk:{self.bike_id}:repair", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
                            chat_type="supergroup"))
         self.assertEqual((await self.crm.bike(self.bike_id))["status"], "rented")
+
+    async def test_rental_between_read_and_press_is_not_undone(self):
+        """Карточку прочитали свободной, а выдача прошла раньше записи:
+        запрет стоит в самом UPDATE, и кнопка аренду не снимает."""
+        real = self.crm.bike
+        stale = await real(self.bike_id)
+        cid = await self.crm.create_client(full_name="Иванов", phone="+79990000000")
+        await self.crm.create_rental(client_id=cid, bike_id=self.bike_id, tariff_id=None,
+                                     tariff_name="t", period_days=7, price=D(3000),
+                                     billing="manual", started_on=date.today(),
+                                     contract_no=None, created_by="t")
+        reads = []
+
+        async def bike(bike_id):
+            reads.append(bike_id)
+            return stale if len(reads) == 1 else await real(bike_id)
+
+        self.crm.bike = bike
+        before = len(await self.crm.bike_status_log(self.bike_id))
+        await self.feed(cb(f"bk:{self.bike_id}:repair", chat_id=ADMIN_CHAT, user_id=ADMIN_ID,
+                           chat_type="supergroup"))
+        self.assertEqual((await real(self.bike_id))["status"], "rented")
+        self.assertEqual(len(await self.crm.bike_status_log(self.bike_id)), before)
+        self.assertEqual(await self.crm.bike_log(self.bike_id), [], "записи «из чата» нет")
+        alerts = [m.text for m in self.session.calls
+                  if isinstance(m, AnswerCallbackQuery) and m.show_alert]
+        self.assertEqual(alerts, [texts.FLEET_RENTED_LOCK])
 
     async def test_not_admin_and_not_service_chat(self):
         await self.feed(msg("/bike B-03", chat_id=ADMIN_CHAT, user_id=USER_ID,

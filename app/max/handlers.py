@@ -202,8 +202,9 @@ async def link_crm_account(ctx: Ctx, phone: str, max_id: int) -> None:
         log.warning("MAX-аккаунт %s не связан с карточкой", max_id, exc_info=True)
         return
     if linked is None:
-        log.info("карточки с телефоном %s в CRM нет - MAX-аккаунт не связан",
-                 phone)
+        # Телефон в журнал не пишем: журнал живёт дольше анкеты.
+        log.info("карточки с телефоном MAX-аккаунта %s в CRM нет - не связан",
+                 max_id)
 
 
 async def st_contact(ctx: Ctx, user: dict, attachments: list) -> None:

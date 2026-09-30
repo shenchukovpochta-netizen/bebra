@@ -26,6 +26,9 @@ POLL_SECONDS = 20
 # Сколько сообщений берём за один круг: рассылка не должна занимать
 # процесс бота целиком - у него есть и живые клиенты.
 BATCH = 50
+# «Отправляется» дольше этого - итог не записался: строка уходит в «не
+# доставлено», а не обратно в очередь (отправка не идемпотентна).
+STUCK_MINUTES = 10
 
 
 async def send_one(bot: Any, max_client: Any, send: dict, text: str, *,
@@ -91,8 +94,14 @@ async def run_campaign(bot: Any, crm: Any, campaign: dict, *,
         body = campaign.get("body") or ""
         if send["channel"] == "max":
             body = campaign.get("body_max") or logic.plain_text(body)
-        status, error = await send_one(bot, max_client, send,
-                                       logic.render_template(body, values))
+        text = logic.render_template(body, values)
+        # Отметка «отправляется» - до отправки, одним UPDATE: сбой базы или
+        # остановка бота между отправкой и итогом оставляли строку в
+        # очереди, и следующий круг слал человеку второй раз. Не взялась -
+        # её уже сняли отменой.
+        if not await crm.claim_send(send["id"]):
+            continue
+        status, error = await send_one(bot, max_client, send, text)
         await crm.mark_send(send["id"], status=status, error=error or None)
         counts[status] = counts.get(status, 0) + 1
         await asyncio.sleep(pause)
@@ -102,8 +111,21 @@ async def run_campaign(bot: Any, crm: Any, campaign: dict, *,
 async def mailing_loop(bot: Any, crm: Any, cfg: Any, *, max_client: Any = None,
                        interval: int = POLL_SECONDS) -> None:
     """Фоновая отправка: кампании, которые оператор пустил в дело."""
+    # Отправляет только этот процесс: «отправляется» на старте - прерванная
+    # отправка прошлого запуска. Ушло ли - неизвестно, повторять нельзя.
+    try:
+        stuck = await crm.fail_stuck_sends()
+        if stuck:
+            log.warning("рассылка: %s сообщений «отправляется» после перезапуска - "
+                        "помечены «не доставлено»", stuck)
+    except Exception:                                   # noqa: BLE001
+        log.exception("рассылка: очередь не проверена при старте")
     while True:
         try:
+            # Итог отправки не записался (сбой базы) - строка висит
+            # «отправляется»; не ждём перезапуска.
+            if await crm.fail_stuck_sends(older_minutes=STUCK_MINUTES):
+                log.warning("рассылка: зависшие сообщения помечены «не доставлено»")
             for row in await crm.sending_campaigns():
                 campaign = await crm.campaign(row["id"])
                 if campaign is None:

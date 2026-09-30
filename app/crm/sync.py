@@ -41,8 +41,9 @@ async def client_from_bot(crm: Any, user: dict) -> dict | None:
     if client is None and phone:
         client = await crm.client_by_phone(phone)
         if client is not None and client.get("tg_id") not in (None, tg_id):
-            log.warning("телефон %s уже привязан к другому Telegram (клиент %s)",
-                        phone, client["id"])
+            # Телефон в журнал не пишем - хватает id: журнал живёт дольше анкеты.
+            log.warning("телефон пользователя %s уже привязан к другому Telegram "
+                        "(клиент %s)", tg_id, client["id"])
             return None
         if client is not None:
             await crm.link_client_tg(client["id"], tg_id, user.get("username"))

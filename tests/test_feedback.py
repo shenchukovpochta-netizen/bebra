@@ -783,6 +783,22 @@ class TestThroughTheDispatcher(unittest.IsolatedAsyncioTestCase):
         self.assertIn("уже получили", self.texts()[-1])
         self.assertEqual(self.menus()[-1], menu, "и на повторный ответ")
 
+    async def test_former_subscriber_rates_and_comments(self):
+        """Из канала ушли вместе с арендой: оценка и комментарий к ней идут
+        мимо гейта подписки, остальное гейт держит."""
+        tf = self.tf
+        self.session.subscribed = False
+        await self.feed(tf.cb(f"fb:{self.rid}:2"))
+        row = await self.crm.feedback_of_rental(self.rid)
+        self.assertEqual(row["score"], 2)
+        self.assertNotIn("не подписаны", " ".join(self.texts()))
+        await self.feed(tf.msg("Тормоза скрипели", reply_to=int(row["prompt_msg"])))
+        self.assertEqual((await self.crm.feedback_of_rental(self.rid))["comment"],
+                         "Тормоза скрипели")
+        self.assertEqual(self.texts()[-1], "Спасибо, передали руководителю.")
+        await self.feed(tf.msg("Тормоза скрипели", reply_to=999))
+        self.assertIn("не подписаны", self.texts()[-1], "чужой ответ - за гейтом")
+
     def menus(self):
         return [m.reply_markup for m in self.session.sent_to(self.tf.USER_ID)
                 if isinstance(m, self.tf.SendMessage)]

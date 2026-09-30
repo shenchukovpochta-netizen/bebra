@@ -1380,7 +1380,7 @@ create table if not exists crm.campaign_sends (
   campaign_id bigint      not null references crm.campaigns (id) on delete cascade,
   client_id   bigint      not null references crm.clients (id),
   channel     text        not null,          -- tg|max
-  status      text        not null default 'queued',  -- queued|sent|failed|skipped
+  status      text        not null default 'queued',  -- queued|sending|sent|failed|skipped
   error       text,
   sent_at     timestamptz
 );
@@ -1390,6 +1390,11 @@ create unique index if not exists campaign_sends_one
   on crm.campaign_sends (campaign_id, client_id);
 create index if not exists campaign_sends_queue
   on crm.campaign_sends (campaign_id, status);
+-- Когда строку взяли в отправку (queued -> sending до отправки). Сбой базы
+-- или остановка бота между отправкой и итогом оставляли строку в очереди, и
+-- следующий круг слал человеку второй раз; зависшее «отправляется» круг
+-- рассылки помечает «не доставлено» - неизвестно, ушло ли, повторять нельзя.
+alter table crm.campaign_sends add column if not exists claimed_at timestamptz;
 
 -- MAX-аккаунт клиента. Телеграм-аккаунт лежит в tg_id с самого начала;
 -- MAX появился позже и живёт в своей базе, поэтому связь заводится

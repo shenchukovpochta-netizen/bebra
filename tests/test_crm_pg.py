@@ -131,6 +131,29 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.claim(pid))["status"], "confirmed")
         self.assertEqual(await self.crm.pending_claims(), [])
 
+    async def test_status_guard_is_in_the_update(self):
+        """not_status - условие в WHERE: велосипед в аренде и «на сборке»
+        кнопка из чата не переписывает, журнал статусов молчит. Зеркало
+        ведёт себя так же."""
+        async def story(crm):
+            client = await crm.create_client(full_name="И", phone="+79990000001")
+            rented = await crm.create_bike(code="G-1", model="MT")
+            await crm.create_rental(client_id=client, bike_id=rented, tariff_id=None,
+                                    tariff_name="t", period_days=7, price=D(1000),
+                                    billing="manual", started_on=date.today(),
+                                    contract_no=None, created_by="bot")
+            fresh = await crm.create_bike(code="G-2", model="MT", status="new")
+            free = await crm.create_bike(code="G-3", model="MT")
+            guard = ("rented", "new")
+            got = [await crm.update_bike(b, by="tg:1", not_status=guard, status="repair")
+                   for b in (rented, fresh, free)]
+            return (got, [(await crm.bike(b))["status"] for b in (rented, fresh, free)],
+                    [len(await crm.bike_status_log(b)) for b in (rented, fresh, free)])
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        self.assertEqual(real[0][:2], [None, None])
+        self.assertEqual(real[1], ["rented", "new", "repair"])
+
     async def test_status_log_is_written_by_trigger(self):
         await self.seed()
         log = await self.crm.bike_status_log(self.bike_id)
@@ -1056,6 +1079,15 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             0)
 
         sends = await self.crm.campaign_sends(created["id"])
+        # В отправку строка берётся один раз; зависшая «отправляется» -
+        # «не доставлено», свежая до срока не трогается.
+        self.assertTrue(await self.crm.claim_send(sends[0]["id"]))
+        self.assertFalse(await self.crm.claim_send(sends[0]["id"]))
+        self.assertEqual(await self.crm.fail_stuck_sends(older_minutes=10), 0)
+        self.assertEqual(await self.crm.fail_stuck_sends(), 1)
+        self.assertEqual((await self.crm.campaign_sends(created["id"],
+                                                        status="failed"))[0]["id"],
+                         sends[0]["id"])
         await self.crm.mark_send(sends[0]["id"], status="sent")
         await self.crm.mark_send(sends[1]["id"], status="failed", error="заблокировал")
         progress = logic.campaign_progress(await self.crm.campaign_sends(created["id"]))

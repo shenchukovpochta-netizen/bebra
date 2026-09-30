@@ -6362,7 +6362,7 @@ CAMPAIGN_STATUSES: dict[str, str] = {
     "done": "Отправлена", "cancelled": "Отменена",
 }
 SEND_STATUSES: dict[str, str] = {
-    "queued": "В очереди", "sent": "Доставлено",
+    "queued": "В очереди", "sending": "Отправляется", "sent": "Доставлено",
     "failed": "Не доставлено", "skipped": "Пропущен",
 }
 SEND_CHANNELS: dict[str, str] = {"tg": "Telegram", "max": "MAX"}

@@ -101,6 +101,9 @@ class TestCrmSql(unittest.TestCase):
             self.db.bike_by_frame("f"), self.db.bike_by_code("c"),
             self.db.create_bike(code="c", model="m", frame_no=None),
             self.db.update_bike(1, status="repair", note="x"), self.db.bike_counts(),
+            self.db.update_bike(1, status="repair", not_status=("rented", "new"), by="me"),
+            self.db.update_bike(1, location="Павлюхина", from_location="Адоратского",
+                                not_status=("rented",)),
             self.db.bike_log(1), self.db.add_bike_log(1, "note", "x", d, "me"),
             self.db.bike_rentals(1),
             self.db.clients(), self.db.clients(q="и", status="active"), self.db.client(1),
@@ -151,6 +154,9 @@ class TestCrmSql(unittest.TestCase):
             self.db.finish_inbox_out(1, ok=True, ext_id="e1"),
             self.db.finish_inbox_out(1, ok=False, error="boom"),
             self.db.fail_stuck_inbox_out(), self.db.inbox_retry(1, author="me"),
+            # рассылка: отметка до отправки и зависшие после перезапуска
+            self.db.mark_send(1, status="sent"), self.db.claim_send(1),
+            self.db.fail_stuck_sends(), self.db.fail_stuck_sends(older_minutes=10),
             self.db.inbox_to_announce(), self.db.purge_inbox(30),
             # точки: журнал мест, точка аренды и наряда, каскад, касса
             self.db.create_staff("b", "h", "n", "manager", location="Павлюхина"),

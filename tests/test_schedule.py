@@ -16,6 +16,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -176,6 +177,103 @@ class TestChargeMarkAfterWork(ScheduleCase):
         self.assertEqual(done["charge"], self.today)
         charges = [x for x in self.crm.ledger_ if x["kind"] == "charge"]
         self.assertTrue(charges, "начисление догналось следующим кругом")
+
+
+class TestReminderMarkAfterWork(ScheduleCase):
+    def test_failed_reminder_pass_is_retried_on_the_next_round(self):
+        """Отметка rent_* ставилась до прохода: сбой базы посреди него
+        съедал напоминания до завтра."""
+        self.rental(billed_offset=6, balance=D(3000))      # просрочка
+        done: dict = {}
+        alive = self.crm.active_rentals
+
+        async def fail(*a, **kw):
+            raise RuntimeError("база недоступна")
+
+        self.crm.active_rentals = fail
+        self.pass_at(8, done)
+        self.assertNotIn("rent_overdue", done, "сбойный проход сделанным не считается")
+        self.assertEqual(self.to_client(), [])
+
+        self.crm.active_rentals = alive
+        self.pass_at(8, done)
+        self.assertTrue(any("не оплачена" in t for t in self.to_client()),
+                        "напоминание догналось следующим кругом")
+        self.assertEqual(done["rent_overdue"], self.today)
+        self.pass_at(9, done)
+        self.assertEqual(len(self.to_client()), 1, "второй раз за сутки не уходит")
+
+
+class _LoopDB:
+    """База бота для круга напоминаний: считает проходы самого бота."""
+
+    def __init__(self) -> None:
+        self.passes = 0
+
+    async def active_rentals(self):
+        self.passes += 1
+        return []
+
+    async def get_user(self, tg_id):
+        return None
+
+
+class TestMemorySurvivesRestart(ScheduleCase):
+    """Память «что сегодня уже делали» жила в переменных цикла: бот,
+    перезапущенный после часа сводки, слал её второй раз."""
+
+    def loop_round(self, db, *, hour: int) -> None:
+        from app import tasks
+        from app.crm import waitlist
+        local = datetime.combine(self.today, datetime.min.time()).replace(hour=hour,
+                                                                          minute=5)
+
+        class Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return local if tz is None else local.astimezone(tz)
+
+        async def stop(_):
+            raise asyncio.CancelledError
+
+        cfg = types.SimpleNamespace(contract_chat_id=CHAT, remind_before_days=2,
+                                    remind_hour_utc=0)
+        with mock.patch.object(tasks, "datetime", Frozen), \
+                mock.patch.object(waitlist, "run_once", mock.AsyncMock(return_value=0)), \
+                mock.patch.object(tasks.asyncio, "sleep", stop), \
+                self.assertRaises(asyncio.CancelledError):
+            run(tasks.reminders_loop(self.bot, db, cfg, None, self.crm))
+
+    def test_restart_after_the_digest_hour_does_not_repeat_it(self):
+        from app import tasks
+        self.rental(billed_offset=-3, balance=D(6000))
+        db = _LoopDB()
+        self.loop_round(db, hour=20)
+        digests = [t for t in self.to_chat() if "Сводка по оплатам" in t]
+        self.assertEqual(len(digests), 1)
+        self.assertEqual(db.passes, 1)
+        memory = tasks.parse_done(self.crm.settings_[tasks.DONE_KEY])
+        self.assertEqual(memory["daily_digest"], self.today)
+        self.assertIn(tasks.BOT_MARK, memory)
+
+        self.loop_round(db, hour=21)                 # перезапуск бота
+        digests = [t for t in self.to_chat() if "Сводка по оплатам" in t]
+        self.assertEqual(len(digests), 1, "сводка после перезапуска второй раз не уходит")
+        self.assertEqual(db.passes, 1, "проход бота после перезапуска не повторяется")
+
+    def test_unreadable_memory_holds_the_pass(self):
+        """Память не прочитана - проход ждёт: с пустой сводки ушли бы снова."""
+        self.rental(billed_offset=-3, balance=D(6000))
+
+        async def fail():
+            raise RuntimeError("база недоступна")
+
+        self.crm.settings = fail
+        db = _LoopDB()
+        with self.assertLogs("app.tasks", "ERROR"):
+            self.loop_round(db, hour=20)
+        self.assertEqual(self.to_chat(), [])
+        self.assertEqual(db.passes, 0)
 
 
 if __name__ == "__main__":
