@@ -209,11 +209,18 @@ class CrmDB:
 
     async def create_staff(self, login: str, password_hash: str, name: str,
                            role: str, profile_id: int | None = None,
-                           location: str | None = None) -> int:
+                           location: str | None = None,
+                           expires_at: datetime | None = None) -> int:
         return int(await self.pool.fetchval(
             "insert into crm.staff (login, password_hash, name, role, profile_id, "
-            "location) values ($1, $2, $3, $4, $5, $6) returning id",
-            login, password_hash, name, role, profile_id, location))
+            "location, expires_at) values ($1, $2, $3, $4, $5, $6, $7) returning id",
+            login, password_hash, name, role, profile_id, location, expires_at))
+
+    async def set_staff_expires(self, staff_id: int, expires_at: datetime | None) -> None:
+        """Срок доступа: None - бессрочно. Прошедший срок страж входа
+        читает с той же строки сотрудника - сессии выбиваются сразу."""
+        await self.pool.execute(
+            "update crm.staff set expires_at = $2 where id = $1", staff_id, expires_at)
 
     async def set_staff_profile(self, staff_id: int, profile_id: int | None) -> None:
         await self.pool.execute(
@@ -4147,6 +4154,7 @@ class CrmDB:
             f"""
             select a.*, t.device_id, t.alias, t.blocked as tracker_blocked,
                    b.code as bike_code, b.model as bike_model,
+                   b.location as bike_location,
                    c.full_name as client_name, r.id as rental_id
               from crm.tracker_alerts a
               join crm.trackers t on t.id = a.tracker_id

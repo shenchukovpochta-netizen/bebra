@@ -121,7 +121,8 @@ class FakeCrm:
 
     def _seed_profiles(self) -> None:
         """Те же встроенные профили, что кладёт schema.sql."""
-        for code, name, perms, built_in in crm_logic.BUILT_IN_PROFILES:
+        for code, name, perms, built_in in (*crm_logic.BUILT_IN_PROFILES,
+                                            *crm_logic.TASK_PROFILES):
             pid = self._profile_id()
             self.profiles_[pid] = {"id": pid, "code": code, "name": name,
                                    "perms": dict(perms), "built_in": built_in,
@@ -214,7 +215,7 @@ class FakeCrm:
                    in learning.PROFILES)
 
     async def create_staff(self, login, password_hash, name, role, profile_id=None,
-                           location=None):
+                           location=None, expires_at=None):
         if any(s["login"] == login for s in self.staff.values()):
             raise UniqueError("login")
         sid = self._id()
@@ -222,8 +223,13 @@ class FakeCrm:
                            "name": name, "role": role, "active": True,
                            "profile_id": profile_id, "tg_id": None,
                            "tg_username": None, "link_code": None, "linked_at": None,
-                           "location": location, "created_at": self._now()}
+                           "location": location, "expires_at": expires_at,
+                           "created_at": self._now()}
         return sid
+
+    async def set_staff_expires(self, staff_id, expires_at):
+        if staff_id in self.staff:
+            self.staff[staff_id]["expires_at"] = expires_at
 
     async def staff_by_tg(self, tg_id):
         return next((self._staff_row(s) for s in self.staff.values()
@@ -3426,6 +3432,7 @@ class FakeCrm:
             rows.append({**alert, "device_id": tracker.get("device_id"),
                          "alias": tracker.get("alias"), "bike_code": bike.get("code"),
                          "bike_model": bike.get("model"),
+                         "bike_location": bike.get("location"),
                          "tracker_blocked": bool(tracker.get("blocked")),
                          "rental_id": (rental or {}).get("id"),
                          "client_name": client.get("full_name")})

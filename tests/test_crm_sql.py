@@ -284,6 +284,10 @@ class TestCrmSql(unittest.TestCase):
             self.db.drop_return_photos([1, 2]),
             # обучение на демо-стенде: шаги ученика по его записям
             self.db.learn_facts("staff:learn-12345", 7), self.db.learn_count(),
+            # срок доступа сотрудника
+            self.db.create_staff("t", "h", "n", "manager", 1, location="П",
+                                 expires_at=datetime(2026, 10, 1, tzinfo=UTC)),
+            self.db.set_staff_expires(1, None),
             self.db.create_client(full_name="a", phone="+7", created_by="staff:me"),
         ]
 

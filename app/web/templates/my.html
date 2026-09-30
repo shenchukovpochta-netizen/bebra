@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Мои задачи — {{ app_title }}{% endblock %}
+{% block content %}
+{# Задачи этого сотрудника (app/crm/mytasks.py): наряды - по технику,
+   аренды, заявки и тревоги - по его точке. Группа есть, только когда её
+   раздел открыт профилем; строка ведёт в карточку записи. #}
+<div class="bar"><h1>Мои задачи
+    <small class="muted">{{ today.strftime('%d.%m') }} · {% if point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
+  {% if can_view(staff, 'dashboard') %}<a class="btn ghost" href="/">Сводка</a>{% endif %}</div>
+{% if not point %}
+<p class="muted">Своя точка не задана — показаны задачи всех точек.
+  {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
+{% endif %}
+{% for g in groups %}
+<section class="card my-group {{ g.level }}">
+  <h2>{{ g.title }} <span class="muted">· {{ g.count }}</span></h2>
+  <ul class="my-items">
+    {% for i in g.rows %}
+    <li class="{% if i.hot %}hot{% endif %}">
+      <a href="{{ i.url }}"><b>{{ i.title }}</b>{% if i.sub %}<small class="muted">{{ i.sub }}</small>{% endif %}</a>
+      {% if i.phone %}<a class="tel" href="tel:{{ i.phone }}">{{ i.phone }}</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if g.more %}<p class="muted">и ещё {{ g.more }} — <a href="{{ g.url }}">весь список</a></p>{% endif %}
+</section>
+{% else %}
+<section class="card">
+  <p>На сегодня задач нет: нарядов на вас нет, заявок на выдачу, просрочек и
+    новых тревог{% if point %} на «{{ point }}»{% endif %} тоже.</p>
+</section>
+{% endfor %}
+{% endblock %}

@@ -324,14 +324,40 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         кладёт её в базу, logic.BUILT_IN_PROFILES - в заглушку для тестов.
         Разойдутся - панель будет пускать не туда, где её проверяли."""
         rows = {p["code"]: p for p in await self.crm.access_profiles()}
-        self.assertEqual(list(rows), ["owner", "manager", "tech"])
-        for code, name, perms, built_in in logic.BUILT_IN_PROFILES:
+        self.assertEqual(set(rows), {"owner", "manager", "tech", "tasks_operator",
+                                     "tasks_tech"})
+        self.assertEqual(next(iter(rows)), "owner", "встроенный - первым")
+        for code, name, perms, built_in in (*logic.BUILT_IN_PROFILES,
+                                            *logic.TASK_PROFILES):
             row = rows[code]
             self.assertEqual(row["name"], name, code)
             self.assertEqual(row["built_in"], built_in, code)
             self.assertEqual(logic.normalize_perms(row["perms"]),
                              logic.normalize_perms(perms), code)
             self.assertEqual(row["staff_count"], 0)
+
+    async def test_task_profiles_are_seeded_once(self):
+        """Профили «только задачи» не встроенные: владелец правит и удаляет
+        их, как свои, и повторное применение схемы (каждый старт) удалённый
+        не возвращает, а правку не затирает."""
+        tech = await self.crm.access_profile_by_code("tasks_tech")
+        oper = await self.crm.access_profile_by_code("tasks_operator")
+        self.assertTrue(await self.crm.delete_access_profile(tech["id"]))
+        await self.crm.update_access_profile(oper["id"], name="Точка",
+                                             perms={"sections": {"issue": "view"}})
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertIsNone(await self.crm.access_profile_by_code("tasks_tech"))
+        again = await self.crm.access_profile_by_code("tasks_operator")
+        self.assertEqual((again["name"], again["perms"]),
+                         ("Точка", {"sections": {"issue": "view"}}))
+
+    async def test_staff_term_is_stored(self):
+        until = datetime(2030, 1, 1, 23, 59, 59, tzinfo=UTC)
+        sid = await self.crm.create_staff("temp", logic.hash_password("password-1"),
+                                          "Подменный", "manager", expires_at=until)
+        self.assertEqual((await self.crm.staff_by_id(sid))["expires_at"], until)
+        await self.crm.set_staff_expires(sid, None)
+        self.assertIsNone((await self.crm.staff_by_id(sid))["expires_at"])
 
     async def test_profile_crud_and_staff_backfill(self):
         owner = await self.crm.access_profile_by_code("owner")

@@ -53,6 +53,7 @@ from ..crm import (
     import_xlsx,
     learning,
     logic,
+    mytasks,
     notices,
     notify,
     photos,
@@ -746,6 +747,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         today=date.today, bot_enabled=bot is not None,
         demo=cfg.demo, DEMO_LOGINS=DEMO_LOGINS,
         LEARN_TRACKS=learning.TRACKS,
+        STAFF_TERMS=logic.STAFF_TERMS, staff_expired=logic.staff_expired,
         # Одноразовый ключ денежной формы: двойной клик по «Принять»
         # записывал два платежа и слал клиенту два «зачислено».
         once=lambda: secrets.token_urlsafe(12),
@@ -836,7 +838,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             staff = await crm.staff_by_id(int(staff_id))
             # Пароль сменили - сессии, открытые со старым, больше не
             # действуют: cookie подписан, но сам по себе живёт две недели.
-            if (staff and staff.get("active") and request.session.get("pw")
+            # Срок доступа прошёл - сессия умирает на следующем же запросе,
+            # а не через две недели жизни cookie.
+            if (staff and staff.get("active") and not logic.staff_expired(staff)
+                    and request.session.get("pw")
                     == logic.session_mark(staff.get("password_hash"))):
                 request.state.staff = staff
         path = request.url.path
@@ -1113,6 +1118,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           error="Неверный логин или пароль.",
                           next=data.get("next") or "/")
         login_failures.pop(login_key, None)
+        if logic.staff_expired(staff):
+            # Только после верного пароля: иначе форма входа отвечала бы
+            # на вопрос «есть ли такой логин» кому угодно.
+            return render(request, "login.html", status_code=403,
+                          error="Срок доступа истёк. Продлить его может владелец "
+                                "в «Сотрудниках».", next=data.get("next") or "/")
         request.session.clear()
         request.session["staff_id"] = staff["id"]
         request.session["pw"] = logic.session_mark(staff.get("password_hash"))
@@ -1253,6 +1264,44 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                        "его, если будете продолжать с другого устройства: он "
                        "работает до ночного обновления демо.")
         return redirect("/learn")
+
+    # ─────────────────────── мои задачи ───────────────────────
+
+    @app.get("/my")
+    async def my_tasks_page(request: Request) -> Response:
+        """Задачи этого сотрудника на сегодня (app/crm/mytasks.py): наряды
+        по технику, аренды, заявки и тревоги - по его точке. Открыта всем:
+        раздела у неё нет, а группа - тому, кто по ней действует
+        (mytasks). Источник читается, только если его группа будет видна."""
+        staff = request.state.staff
+        today = date.today()
+        settings = await crm.settings()
+        expiring: list[dict] = []
+        search = None
+        if may_edit(request, "rentals"):
+            rentals = await crm.active_rentals()
+            rows = [{**r, "summary": summarize(r, r.get("balance", 0))} for r in rentals]
+            expiring = logic.expiring(rows, today=today,
+                                      before_days=cfg.remind_before_days)
+            search = logic.search_rows(rentals, settings=logic.search_settings(settings),
+                                       today=today)
+        point = staff.get("location") or None
+        shift_open = None
+        if point and may_edit(request, "cash"):
+            shift_open = await crm.open_shift_at(point) is not None
+        groups = mytasks.my_tasks(
+            staff, expiring=expiring, search=search,
+            orders=(await crm.work_orders(open_only=True, limit=500)
+                    if may_view(request, "service") else ()),
+            bookings=(await crm.bookings(status="new")
+                      if may_edit(request, "issue") else ()),
+            alerts=(await crm.tracker_alerts(open_only=True, limit=500)
+                    if may_view(request, "trackers") else ()),
+            claims=await crm.pending_claims() if may_edit(request, "claims") else (),
+            shift_open=shift_open, today=today,
+            repair_norm=logic.repair_norm_default(settings),
+            booking_url=booking_issue_url)
+        return render(request, "my.html", groups=groups, point=point, today=today)
 
     # ─────────────────────── дашборд ───────────────────────
 
@@ -4794,9 +4843,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Новый вход в панель из формы: логин и профиль, None - отказ уже во
         flash. Один путь для «Сотрудников» и мастера первого запуска."""
         login_check = logic.check_login(data.get("login"))
-        password = logic.check_password(data.get("password"))
+        # Пустой пароль - придумывает панель и показывает один раз: владелец
+        # не изобретает пароль стажёру и не пересылает свой любимый.
+        generated = not (data.get("password") or "")
+        password = (logic.Check(True, logic.generate_password(12)) if generated
+                    else logic.check_password(data.get("password")))
         name = logic.check_name(data.get("name") or data.get("login"), what="Имя")
-        for check in (login_check, password, name):
+        term = logic.check_staff_term(data.get("term"), data.get("until"))
+        for check in (login_check, password, name, term):
             if not check.ok:
                 flash(request, check.error, "err")
                 return None
@@ -4813,15 +4867,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return None
         await crm.create_staff(login_check.value, logic.hash_password(password.value),
                                name.value, role_for(profile), profile["id"],
-                               location=place.value)
-        return {"login": login_check.value, "profile": profile}
+                               location=place.value, expires_at=term.value)
+        return {"login": login_check.value, "profile": profile,
+                "password": password.value if generated else None,
+                "expires_at": term.value}
 
     @app.post("/staff")
     async def staff_create(request: Request) -> Response:
         added = await add_staff(request, await form(request))
         if added is not None:
+            until = (f", доступ до {_dmy(added['expires_at'])}"
+                     if added["expires_at"] else "")
             flash(request, f"Сотрудник {added['login']} добавлен — профиль "
-                           f"«{added['profile']['name']}».")
+                           f"«{added['profile']['name']}»{until}.")
+            if added["password"]:
+                flash(request, f"Пароль для {added['login']}: {added['password']} — "
+                               "передайте сотруднику. Больше он нигде не покажется.")
         return redirect("/staff")
 
     @app.post("/staff/{staff_id}/profile")
@@ -4893,14 +4954,40 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/staff/{staff_id}/password")
     async def staff_password(request: Request, staff_id: int) -> Response:
         data = await form(request)
-        password = logic.check_password(data.get("password"))
+        generated = not (data.get("password") or "")
+        password = (logic.Check(True, logic.generate_password(12)) if generated
+                    else logic.check_password(data.get("password")))
         if not password.ok:
             flash(request, password.error, "err")
             return redirect("/staff")
-        if await crm.staff_by_id(staff_id) is None:
+        target = await crm.staff_by_id(staff_id)
+        if target is None:
             return render(request, "missing.html", status_code=404, what="Сотрудник")
         await crm.set_staff_password(staff_id, logic.hash_password(password.value))
-        flash(request, "Пароль обновлён.")
+        flash(request, "Пароль обновлён." if not generated else
+              f"Новый пароль для {target['login']}: {password.value} — передайте "
+              "сотруднику. Больше он нигде не покажется.")
+        return redirect("/staff")
+
+    @app.post("/staff/{staff_id}/term")
+    async def staff_term(request: Request, staff_id: int) -> Response:
+        """Срок доступа: продлить, укоротить или снять. Прошедший срок
+        выбивает сессии сотрудника на следующем его запросе."""
+        target = await crm.staff_by_id(staff_id)
+        if target is None:
+            return render(request, "missing.html", status_code=404, what="Сотрудник")
+        if target["id"] == request.state.staff["id"]:
+            flash(request, "Свой срок доступа не меняют — иначе можно запереться.",
+                  "err")
+            return redirect("/staff")
+        data = await form(request)
+        term = logic.check_staff_term(data.get("term"), data.get("until"))
+        if not term.ok:
+            flash(request, term.error, "err")
+            return redirect("/staff")
+        await crm.set_staff_expires(staff_id, term.value)
+        flash(request, f"{target['login']}: доступ "
+                       + (f"до {_dmy(term.value)}." if term.value else "бессрочный."))
         return redirect("/staff")
 
     @app.post("/staff/{staff_id}/toggle")

@@ -48,7 +48,9 @@ async def _may_swap(crm: Any, cfg: Config, user_id: int) -> bool:
     if is_operator(cfg, user_id):
         return True
     staff = await crm.staff_by_tg(user_id)
-    if not staff or not staff.get("active", True):
+    # Срок доступа прошёл - как отключённый: подменный оператор после
+    # своей смены не меняет аренды и из группы.
+    if not staff or not staff.get("active", True) or crm_logic.staff_expired(staff):
         return False
     return staff.get("role") == "admin" or crm_logic.can_edit(staff, "rentals")
 

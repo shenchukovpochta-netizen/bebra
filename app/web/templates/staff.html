@@ -4,6 +4,7 @@
 <div class="bar"><h1>Сотрудники</h1>
   <a class="btn ghost" href="/profiles">Профили доступа</a></div>
 <section class="card">
+  <div class="table-wrap">
   <table>
     <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Своя точка</th><th>Доступ</th><th>Telegram</th><th>Новый пароль</th><th></th></tr>
     {% for s in rows %}
@@ -28,7 +29,17 @@
         </form>
         {% else %}{{ s.location or '—' }}{% endif %}
       </td>
-      <td>{{ 'да' if s.active else 'нет' }}</td>
+      <td data-label="Доступ">
+        {% if not s.active %}<span class="muted">отключён</span>{% elif s.expires_at %}{% if staff_expired(s) %}<span class="bad">истёк {{ s.expires_at|dmy }}</span>{% else %}до {{ s.expires_at|dmy }}{% endif %}{% else %}<span class="muted">бессрочно</span>{% endif %}
+        {% if can_manage and s.id != staff.id %}
+        <form method="post" action="/staff/{{ s.id }}/term" class="inline-form">
+          <select name="term"><option value="">—</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}{% if s.expires_at %}<option value="none">бессрочно</option>{% endif %}</select>
+          <button type="submit" class="ghost">Срок</button>
+          {# Дата - под раскрытием: строка таблицы не вырастает в три этажа. #}
+          <details class="term-date"><summary>до даты…</summary><input name="until" type="date" title="до даты включительно"></details>
+        </form>
+        {% endif %}
+      </td>
       <td>{{ staff_tg_label(s) }}
         {% if can_manage %}
         <form method="post" action="/staff/{{ s.id }}/telegram" class="inline-form">
@@ -37,11 +48,12 @@
         </form>
         {% endif %}
       </td>
-      <td>{% if can_manage %}<form method="post" action="/staff/{{ s.id }}/password" class="inline-form"><input name="password" type="password" size="10" autocomplete="new-password"><button type="submit" class="ghost">Задать</button></form>{% endif %}</td>
+      <td>{% if can_manage %}<form method="post" action="/staff/{{ s.id }}/password" class="inline-form"><input name="password" type="password" size="10" autocomplete="new-password" placeholder="пусто — придумает панель"><button type="submit" class="ghost">Задать</button></form>{% endif %}</td>
       <td>{% if can_manage and s.id != staff.id %}<form method="post" action="/staff/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'Отключить' if s.active else 'Включить' }}</button></form>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
+  </div>
   <p class="muted">Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале статусов и в записях по деньгам.
     Telegram нужен технику, чтобы наряды приходили ему в бот: нажмите «Код»
     и передайте его сотруднику — он отправит боту «/staff КОД».
@@ -53,12 +65,16 @@
   <form method="post" action="/staff" class="grid2">
     <label>Логин <input name="login" required></label>
     <label>Имя <input name="name"></label>
-    <label>Пароль <input name="password" type="password" autocomplete="new-password" required></label>
+    <label>Пароль <input name="password" type="password" autocomplete="new-password" placeholder="пусто — придумает панель и покажет один раз"></label>
     <label>Профиль доступа <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {% if p.code == 'manager' %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select></label>
     <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Срок доступа <select name="term"><option value="">бессрочно</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+    <label>или до даты <input name="until" type="date"></label>
     <button type="submit">Добавить</button>
   </form>
-  <p class="muted">Профиль решает, какие разделы человек увидит. Свой профиль сменить нельзя — чтобы не остаться без доступа к этой странице.</p>
+  <p class="muted">Профиль решает, какие разделы человек увидит. Свой профиль сменить нельзя — чтобы не остаться без доступа к этой странице.
+    Профили «Оператор: только задачи» и «Механик: только задачи» открывают «Мои задачи» и карточки, в которые они ведут, — без сводки, денег и отчётов; задачи оператора берутся по его точке.
+    Срок доступа — для подменных и стажёров: после него вход не пускает, а открытые сессии закрываются.</p>
 </section>
 {% endif %}
 <section class="card narrow">

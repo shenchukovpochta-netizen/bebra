@@ -2758,3 +2758,28 @@ create index if not exists return_photos_age_idx on crm.return_photos (created_a
 -- новичок зарегистрировал своего клиента (app/crm/learning.py). Старые
 -- карточки остаются без автора: восстанавливать его не из чего.
 alter table crm.clients add column if not exists created_by text;
+
+-- Срок доступа сотрудника: подменный оператор, стажёр, сезонный механик.
+-- После него вход не пускает, а открытые сессии выбиваются тем же
+-- стражем, что проверяет «активен» (logic.staff_expired). Пусто - бессрочно.
+-- Не «отключить по расписанию»: отключённый остаётся отключённым, а срок
+-- продлевается одной правкой, и кто когда что делал, видно по-прежнему.
+alter table crm.staff add column if not exists expires_at timestamptz;
+
+-- Профили «только задачи»: сотрудник видит свои задачи (/my) и карточки,
+-- в которые они ведут, но не сводку, деньги, отчёты и настройки. Не
+-- встроенные - владелец правит их, как любые свои; кладутся один раз на
+-- установку (settings.task_profiles_seeded): удалённый владельцем профиль
+-- при следующем старте не возвращается.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'task_profiles_seeded') then
+    insert into crm.access_profiles (code, name, perms, built_in) values
+      ('tasks_operator', 'Оператор: только задачи', '{"sections":{"issue":"edit","clients":"edit","rentals":"edit","cash":"edit","claims":"edit","bikes":"view","batteries":"view","trackers":"view"},"actions":{}}'::jsonb, false),
+      ('tasks_tech', 'Механик: только задачи', '{"sections":{"service":"edit","bikes":"edit","batteries":"edit","inventory":"edit","trackers":"view"},"actions":{}}'::jsonb, false)
+    on conflict do nothing;
+    insert into crm.settings (key, value, updated_by)
+    values ('task_profiles_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;

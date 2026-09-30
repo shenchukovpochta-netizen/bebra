@@ -29,7 +29,7 @@ import secrets
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote, unquote_plus, urlsplit
@@ -494,6 +494,51 @@ def check_choice(raw: Any, choices: dict[str, str] | Iterable[str],
     if value not in set(choices):
         return Check(False, error=f"{what}: недопустимое значение.")
     return Check(True, value)
+
+
+# Срок доступа в форме сотрудника: код выбора -> дней от сегодня (0 -
+# до конца сегодняшнего дня). Конец дня, а не «через 24 часа»: подменному
+# оператору дают смену, а не сутки от минуты, когда владелец нажал кнопку.
+STAFF_TERMS: dict[str, tuple[str, int]] = {
+    "day": ("до конца дня", 0),
+    "week": ("на неделю", 7),
+    "month": ("на месяц", 30),
+}
+
+
+def staff_expired(staff: Mapping[str, Any] | None, *, now: datetime | None = None) -> bool:
+    """Срок доступа прошёл. Без срока - бессрочно."""
+    until = (staff or {}).get("expires_at")
+    if not isinstance(until, datetime):
+        return False
+    now = now or datetime.now(UTC)
+    if until.tzinfo is None:
+        until = until.astimezone()
+    return until <= now
+
+
+def check_staff_term(term: Any, until: Any, *, today: date | None = None,
+                     keep_empty: bool = False) -> Check:
+    """Срок доступа из формы: дата «до» (включительно) главнее кнопки
+    срока. Пусто - бессрочно (Check(True, None)); «none» - снять срок.
+    Конец дня - по часам сервера (Europe/Moscow), как и вся система."""
+    today = today or date.today()
+    raw = str(until or "").strip()
+    if raw:
+        try:
+            day = date.fromisoformat(raw)
+        except ValueError:
+            return Check(False, error="Срок доступа: дата вида 2026-10-31.")
+        if day < today:
+            return Check(False, error="Срок доступа: дата уже прошла.")
+    else:
+        code = str(term or "").strip()
+        if code in ("", "none"):
+            return Check(True, None)
+        if code not in STAFF_TERMS:
+            return Check(False, error="Срок доступа: выберите из списка.")
+        day = today + timedelta(days=STAFF_TERMS[code][1])
+    return Check(True, datetime.combine(day, time(23, 59, 59)).astimezone())
 
 
 def check_login(raw: Any) -> Check:
@@ -2334,9 +2379,13 @@ def visible_sections(staff: dict | None) -> list[str]:
 
 def home_for(staff: dict | None) -> str:
     """Куда вести после входа. Профиль без сводки не должен упираться
-    в «нет доступа» на первом же экране."""
+    в «нет доступа» на первом же экране. Без сводки, но с задачами (выдача,
+    аренды, сервис, тревоги, касса) - «Мои задачи»: сотруднику точки
+    нужен свой список на сегодня, а не первый раздел меню."""
     if can_view(staff, "dashboard"):
         return "/"
+    if any(can_view(staff, code) for code in TASK_SECTIONS):
+        return "/my"
     first = next((code for code in visible_sections(staff) if code != "dashboard"), None)
     if first is None:
         return "/me"
@@ -2361,6 +2410,25 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
                    "batteries": "edit", "trackers": "view"},
       "actions": {}}, False),
 )
+
+
+# Профили «только задачи» (schema.sql кладёт их один раз, не встроенные):
+# сотрудник видит «Мои задачи» и карточки, куда они ведут, но не сводку,
+# деньги, отчёты и настройки. Без «dashboard» вход ведёт на /my (home_for).
+TASK_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
+    ("tasks_operator", "Оператор: только задачи",
+     {"sections": {"issue": "edit", "clients": "edit", "rentals": "edit", "cash": "edit",
+                   "claims": "edit", "bikes": "view", "batteries": "view",
+                   "trackers": "view"},
+      "actions": {}}, False),
+    ("tasks_tech", "Механик: только задачи",
+     {"sections": {"service": "edit", "bikes": "edit", "batteries": "edit",
+                   "inventory": "edit", "trackers": "view"},
+      "actions": {}}, False),
+)
+# Разделы, по которым у сотрудника бывают свои задачи (app/crm/mytasks.py).
+TASK_SECTIONS: tuple[str, ...] = ("issue", "rentals", "service", "trackers", "claims",
+                                  "cash")
 
 
 def check_profile_name(raw: Any) -> Check:

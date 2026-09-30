@@ -29,7 +29,8 @@
    оператор не упирался в «нет доступа» там, где для него ничего нет.
    Заголовок группы считается заранее: у механика половина групп пуста,
    и подпись над пустотой выглядела бы как поломка. #}
-{% set g_main = can_view(staff, 'dashboard') or can_view(staff, 'issue') or can_view(staff, 'inbox') %}
+{# «Мои задачи» открыты всем: раздела у них нет, группы режет профиль. #}
+{% set g_main = true %}
 {% set g_fleet = can_view(staff, 'bikes') or can_view(staff, 'batteries')
                  or can_view(staff, 'trackers') %}
 {% set g_client = can_view(staff, 'clients') or can_view(staff, 'rentals')
@@ -57,6 +58,7 @@
   <nav>
     {% if learn %}<div class="blk"><a href="/learn" {% if request.url.path == '/learn' %}class="on"{% endif %}>Обучение · {{ learn.done }}/{{ learn.total }}</a></div>{% endif %}
     {% if g_main %}<div class="blk"><div class="grp">Главное</div>
+      <a href="/my" {% if request.url.path == '/my' %}class="on"{% endif %}>Мои задачи</a>
       {% if can_view(staff, 'dashboard') %}<a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Сводка</a>{% endif %}
       {% if can_view(staff, 'issue') %}<a href="/issue" {% if request.url.path.startswith('/issue') %}class="on"{% endif %}>Выдача</a>
       <a href="/bookings" {% if request.url.path.startswith('/bookings') %}class="on"{% endif %}>Брони</a>{% endif %}
