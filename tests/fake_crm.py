@@ -2977,7 +2977,8 @@ class FakeCrm:
             "id": request_id, "no": number, "client_id": client_id,
             "rental_id": rental_id, "token": token, "docs": list(docs),
             "agreement": agreement, "code_hash": None, "code_at": None,
-            "attempts": 0, "status": "new", "expires_at": expires_at,
+            "attempts": 0, "wrong_total": 0, "status": "new",
+            "expires_at": expires_at,
             "signed_at": None, "signed_ip": None, "signed_agent": None,
             "note": None, "created_by": by, "created_at": self._now()}
         await self.log_sign_event(request_id, kind="created", note=by)
@@ -2989,15 +2990,30 @@ class FakeCrm:
             request["agreement"] = agreement
             request["docs"] = list(docs)
 
-    async def set_sign_code(self, request_id, *, code_hash):
+    async def set_sign_code(self, request_id, *, code_hash, gap_seconds=0,
+                            unlock=False):
         request = self.signs_.get(request_id)
-        if request is not None and request["status"] in ("new", "code"):
-            request.update(code_hash=code_hash, code_at=self._now(), attempts=0,
-                           status="code")
+        if request is None or request["status"] not in ("new", "code"):
+            return False
+        now = self._now()
+        if (request["code_at"] is not None
+                and request["code_at"] > now - timedelta(seconds=gap_seconds)):
+            return False
+        request.update(code_hash=code_hash, code_at=now, attempts=0,
+                       status="code")
+        if unlock:
+            request["wrong_total"] = 0
+        return True
+
+    async def sign_codes_since(self, request_id, since):
+        return sum(1 for e in self.sign_events_
+                   if e["request_id"] == request_id and e["kind"] == "code_sent"
+                   and e["at"] >= since)
 
     async def bump_sign_attempt(self, request_id):
         request = self.signs_[request_id]
         request["attempts"] += 1
+        request["wrong_total"] = request.get("wrong_total", 0) + 1
         return request["attempts"]
 
     async def mark_signed(self, request_id, *, ip, agent):

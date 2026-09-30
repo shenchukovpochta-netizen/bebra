@@ -4777,17 +4777,36 @@ class CrmDB:
             "update crm.sign_requests set agreement = $2, docs = $3 "
             "where id = $1", request_id, agreement, docs)
 
-    async def set_sign_code(self, request_id: int, *, code_hash: str) -> None:
+    async def set_sign_code(self, request_id: int, *, code_hash: str,
+                            gap_seconds: int = 0, unlock: bool = False) -> bool:
         """Новый код обнуляет счётчик попыток: старые промахи к нему
-        отношения не имеют."""
-        await self.pool.execute(
-            "update crm.sign_requests set code_hash = $2, code_at = now(), "
-            "attempts = 0, status = 'code' where id = $1 and status in ('new', 'code')",
-            request_id, code_hash)
+        отношения не имеют. Общий счёт неверных (`wrong_total`) - нет,
+        его снимает только `unlock` (код выдал оператор). False - заявка
+        закрыта или прошлый код моложе `gap_seconds`: условие в самом
+        UPDATE, и из двух запросов разом код получит один."""
+        return await self.pool.fetchval(
+            """
+            update crm.sign_requests
+               set code_hash = $2, code_at = now(), attempts = 0, status = 'code',
+                   wrong_total = case when $4::boolean then 0 else wrong_total end
+             where id = $1 and status in ('new', 'code')
+               and (code_at is null
+                    or code_at <= now() - $3::int * interval '1 second')
+            returning id
+            """, request_id, code_hash, gap_seconds, unlock) is not None
+
+    async def sign_codes_since(self, request_id: int, since: datetime) -> int:
+        """Сколько кодов выдано по заявке с `since` - предел в час."""
+        return int(await self.pool.fetchval(
+            "select count(*) from crm.sign_events "
+            "where request_id = $1 and kind = 'code_sent' and at >= $2",
+            request_id, since) or 0)
 
     async def bump_sign_attempt(self, request_id: int) -> int:
+        """Промах: минус попытка у кода и плюс один к общему счёту заявки."""
         return int(await self.pool.fetchval(
-            "update crm.sign_requests set attempts = attempts + 1 "
+            "update crm.sign_requests set attempts = attempts + 1, "
+            "wrong_total = wrong_total + 1 "
             "where id = $1 returning attempts", request_id))
 
     async def mark_signed(self, request_id: int, *, ip: str | None,

@@ -370,6 +370,105 @@ class TestAccessInPanel(tw.WebCase):
         self.assertEqual(r.status_code, 403)
         self.assertIn("Паспортные документы", r.text)
 
+    def test_sign_link_needs_client_docs(self):
+        """Ссылка подписи открывает тот же договор, что /signings/{id}/doc:
+        без `client_docs` её не показывают, а вошедшему без права файл по
+        ней не отдают. Клиент без входа в панель получает его как раньше."""
+        import os
+        import tempfile
+        with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as f:
+            f.write(b"%PDF-1.4 contract")
+        self.addCleanup(os.unlink, f.name)
+        req = tw.run(self.crm.create_sign_request(
+            client_id=self.client_id, rental_id=None, token="tok-link",
+            docs=[{"title": "Договор", "path": f.name, "sha256": "x"}],
+            agreement="соглашение",
+            expires_at=datetime.now(UTC) + timedelta(days=1), by="admin"))
+        self.assertIn("/sign/tok-link", self.get_ok(f"/signings/{req['id']}"),
+                      "владельцу ссылка видна")
+        self.add("ivan", "manager")
+        self.as_("ivan")
+        page = self.get_ok(f"/signings/{req['id']}")
+        self.assertNotIn("tok-link", page)
+        self.assertIn("Паспортные документы клиента", page)
+        r = self.client.get("/sign/tok-link/doc/0")
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("Паспортные документы", r.text)
+        self.client.post("/logout")
+        r = self.client.get("/sign/tok-link/doc/0")
+        self.assertEqual(r.status_code, 200, "клиент в панель не входит")
+        self.assertEqual(r.content, b"%PDF-1.4 contract")
+
+    def test_issue_docs_step_hides_the_link_without_client_docs(self):
+        rental_id = tw.run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=tw.D(3000), billing="auto",
+            started_on=tw.date.today(), contract_no=None, created_by="t"))
+        self.add("ivan", "manager")
+        self.as_("ivan")
+        page = self.get_ok(f"/issue/docs?rental={rental_id}")
+        token = tw.run(self.crm.sign_requests(client_id=self.client_id))[0]["token"]
+        self.assertNotIn(token, page)
+        self.assertIn("с правом на документы клиента", page)
+        self.as_("admin", "admin-pass-123")
+        self.assertIn(f"/sign/{token}", self.get_ok(f"/issue/docs?rental={rental_id}"))
+
+    def narrow(self, login, sections):
+        """Сотрудник на своём профиле без «Финансов»."""
+        pid = tw.run(self.crm.create_access_profile(
+            f"Профиль {login}", {"sections": sections, "actions": {}}))
+        tw.run(self.crm.create_staff(login, logic.hash_password("password-1"), login,
+                                     "manager", pid))
+        self.as_(login)
+
+    def test_client_card_without_finance_hides_bonus_and_invoice_sums(self):
+        tw.run(self.crm.grant_bonus(client_id=self.client_id, kind="manual",
+                                    amount=tw.D(777), note="за терпение", by="t"))
+        tw.run(self.crm.create_pay_order(client_id=self.client_id, rental_id=None,
+                                         amount=tw.D(4321), purpose="долг"))
+        page = self.get_ok(f"/clients/{self.client_id}")
+        self.assertIn("777", page)
+        self.assertIn("4 321", page)
+        self.narrow("olga", {"clients": "edit"})
+        page = self.get_ok(f"/clients/{self.client_id}")
+        self.assertIn("Баллы", page, "повод баллов виден и без денег")
+        self.assertIn("Счета", page)
+        self.assertNotIn("777", page)
+        self.assertNotIn("4 321", page)
+
+    def test_order_card_without_finance_hides_invoice_sums(self):
+        order_id = tw.run(self.crm.create_work_order(
+            bike_id=None, payer="client", client_id=self.client_id,
+            complaint="не едет", object_note="самокат клиента", tech_id=None,
+            estimate=tw.D(0), created_by="t"))
+        tw.run(self.crm.update_work_order(order_id, status="done", total=tw.D(4567),
+                                          closed_at=datetime.now(UTC)))
+        tw.run(self.crm.create_pay_order(client_id=self.client_id, rental_id=None,
+                                         amount=tw.D(4567), purpose="ремонт",
+                                         work_order_id=order_id))
+        self.assertIn("Отметить оплату 4 567", self.get_ok(f"/orders/{order_id}"))
+        self.add("petr", "tech")
+        self.as_("petr")
+        page = self.get_ok(f"/orders/{order_id}")
+        self.assertIn("Отметить оплату", page, "отметку механик ставит")
+        self.assertNotIn("4 567", page)
+
+    def test_rental_extras_without_finance_show_no_prices(self):
+        rental_id = tw.run(self.crm.create_rental(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_id=self.tariff_id,
+            tariff_name="Неделя", period_days=7, price=tw.D(3000), billing="auto",
+            started_on=tw.date.today(), contract_no=None, created_by="t"))
+        tw.run(self.crm.add_rental_extra(rental_id, kind="battery",
+                                         title="Доп. аккумулятор", price=tw.D(1170),
+                                         battery_id=None, by="t"))
+        page = self.get_ok(f"/rentals/{rental_id}")
+        self.assertIn("1 170", page)
+        self.narrow("olga", {"rentals": "edit", "clients": "view"})
+        page = self.get_ok(f"/rentals/{rental_id}")
+        self.assertIn("Доп. аккумулятор", page, "позиция видна, цены нет")
+        for money in ("1 170", "3 000", "4 170", "Итого за период"):
+            self.assertNotIn(money, page, money)
+
     # ─── управление профилями ───
 
     def test_owner_edits_a_profile_and_rights_apply_at_once(self):

@@ -91,15 +91,21 @@ PUBLIC = ("/login", "/static", "/healthz", "/sign/", "/hook/", "/manifest.webman
 # Свой кабинет доступен любому сотруднику, каким бы урезанным ни был профиль.
 ALWAYS_OPEN = ("/logout", "/me", "/me/password")
 SESSION_DAYS = 14
-# Перебор пароля: после LOGIN_LIMIT неудач по одному логину вход в него
-# закрыт на LOGIN_WINDOW секунд; отдельный, более щедрый предел на адрес
-# (LOGIN_IP_LIMIT) - против перебора логинов. За Caddy и SSH-туннелем все
-# запросы приходят с одного адреса, поэтому основной ключ - логин: иначе
-# чужие десять попыток закрывали бы вход всем сотрудникам. Память
-# процесса, без базы: панель одна, и рестарт, обнуляющий счётчик,
-# атакующему ничего не даёт.
-LOGIN_LIMIT, LOGIN_IP_LIMIT, LOGIN_WINDOW = 10, 100, 15 * 60
+# Перебор пароля: после LOGIN_LIMIT неудач по логину с одного адреса вход
+# в этот логин с этого адреса закрыт на LOGIN_WINDOW секунд. Ключ - пара
+# «логин + адрес»: по одному логину чужие десять ошибок с другого адреса
+# запирали бы владельца, а по одному адресу за SSH-туннелем (все с
+# 127.0.0.1) - всех сотрудников. Перебор с многих адресов держит
+# отдельный, более щедрый предел на логин (LOGIN_ACCOUNT_LIMIT), перебор
+# логинов - предел на адрес (LOGIN_IP_LIMIT). Память процесса, без базы:
+# панель одна, и рестарт, обнуляющий счётчик, атакующему ничего не даёт.
+LOGIN_LIMIT, LOGIN_ACCOUNT_LIMIT, LOGIN_IP_LIMIT = 10, 50, 100
+LOGIN_WINDOW = 15 * 60
 LOGIN_KEYS_SWEEP = 500
+# Хэш-приманка для входа под несуществующим или отключённым логином:
+# scrypt той же цены идёт и по нему, иначе по времени ответа видно, какой
+# логин есть. Нули не совпадут ни с одним паролем.
+DECOY_PASSWORD_HASH = f"scrypt${'0' * 32}${'0' * 64}"
 # Учётная таблица проката - сотни строк, единицы мегабайт.
 IMPORT_MAX_BYTES = 20 * 1024 * 1024
 # Предел тела любого запроса - до разбора формы и до входа. Starlette
@@ -1098,11 +1104,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.post("/login")
     async def login(request: Request) -> Response:
         data = await form(request)
-        login_key = "login:" + (data.get("login") or "").strip().lower()[:64]
+        name = (data.get("login") or "").strip().lower()[:64]
+        login_key = "login:" + name
+        # Адрес - последним, после «|»: в адресе этого знака нет, и
+        # выдуманный логин не склеится с чужой парой.
+        pair_key = f"pair:{name}|{client_ip(request)}"
         ip_key = "ip:" + client_ip(request)
         # В демо логин общий на всех: десять чужих ошибок заперли бы его
         # каждому посетителю. Остаётся предел на адрес - против перебора.
-        login_limited = not cfg.demo and login_throttled(login_key, LOGIN_LIMIT)
+        login_limited = not cfg.demo and (
+            login_throttled(pair_key, LOGIN_LIMIT)
+            or login_throttled(login_key, LOGIN_ACCOUNT_LIMIT))
         if login_limited or login_throttled(ip_key, LOGIN_IP_LIMIT):
             return render(request, "login.html", status_code=429,
                           error="Слишком много попыток входа. Подождите 15 минут.",
@@ -1110,17 +1122,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         login_check = logic.check_login(data.get("login"))
         staff = await crm.staff_by_login(login_check.value) if login_check.ok else None
         # scrypt - десятки миллисекунд процессора: в потоке, иначе поток
-        # входов (в демо пароль известен всем) останавливал бы панель.
-        if (staff is None or not staff.get("active")
-                or not await asyncio.to_thread(logic.verify_password,
-                                               data.get("password") or "",
-                                               staff.get("password_hash"))):
-            for key in (ip_key,) if cfg.demo else (login_key, ip_key):
+        # входов (в демо пароль известен всем) останавливал бы панель. И
+        # всегда, даже без логина: по быстрому отказу видно, что его нет.
+        stored = (staff or {}).get("password_hash") or DECOY_PASSWORD_HASH
+        password_ok = await asyncio.to_thread(logic.verify_password,
+                                              data.get("password") or "", stored)
+        if staff is None or not staff.get("active") or not password_ok:
+            for key in (ip_key,) if cfg.demo else (pair_key, login_key, ip_key):
                 login_failures.setdefault(key, []).append(time.monotonic())
             return render(request, "login.html", status_code=401,
                           error="Неверный логин или пароль.",
                           next=data.get("next") or "/")
-        login_failures.pop(login_key, None)
+        login_failures.pop(pair_key, None)
         if logic.staff_expired(staff):
             # Только после верного пароля: иначе форма входа отвечала бы
             # на вопрос «есть ли такой логин» кому угодно.
@@ -2924,7 +2937,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "issue.html", step=5, client=client, rental=rental,
                       req=row, problem=problem,
                       state=logic.sign_state(row) if row else None,
-                      link=sign_link(request, row["token"]) if row else "",
+                      link=sign_link_for(request, row) if row else "",
                       code=(code or {}).get("code")
                       if row and (code or {}).get("id") == row["id"] else None,
                       bot_state=logic.bot_client_state(await bot_user_for(client)),
@@ -3820,8 +3833,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/rentals/{rental_id}")
-        flash(request, f"Доп. аккумулятор № {battery['code']} выдан: "
-                       f"+{logic.money(price)} к периоду со следующего начисления.")
+        flash(request, f"Доп. аккумулятор № {battery['code']} выдан"
+                       + (f": +{logic.money(price)} к периоду со следующего начисления."
+                          if may_view(request, "finance") else "."))
         return redirect(f"/rentals/{rental_id}")
 
     @app.post("/rentals/{rental_id}/extras/{extra_id}")
@@ -3834,9 +3848,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if rental is None or extra is None:
             return render(request, "missing.html", status_code=404, what="Позиция")
         data = await form(request)
+        # Статус проверяет сервис: «у клиента» и «на сборке» руками не
+        # ставятся, и подменённая форма получает отказ, а не их.
         status = data.get("status") or "available"
-        if status not in logic.BATTERY_STATUSES:
-            status = "available"
         try:
             await service.drop_battery_extra(crm, rental, extra, by=who(request),
                                              status=status)
@@ -4793,14 +4807,19 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         span = await period_of(request)
         rows = logic.tech_rows(await crm.tech_work(span["start"], span["end"]))
         total = logic.tech_total(rows)
+        # Суммы нарядов - деньги: без «Финансов» выгрузка без них, как и
+        # страница, а не только без плиток на экране.
+        money_ok = may_view(request, "finance")
+        header = ["Техник", "Нарядов", "Из них клиентских", "Средн. суток"]
+        money_keys = ("total", "cost", "works", "avg_total")
+        if money_ok:
+            header += ["Сумма", "Запчасти", "Работы", "Средний наряд"]
         data = [[r["tech"], r["orders"], r["client_orders"], r["avg_days"],
-                 r["total"], r["cost"], r["works"], r["avg_total"]] for r in rows]
+                 *((r[k] for k in money_keys) if money_ok else ())] for r in rows]
         data.append(["ИТОГО", total["orders"], total["client_orders"], "",
-                     total["total"], total["cost"], total["works"],
-                     total["avg_total"]])
+                     *((total[k] for k in money_keys) if money_ok else ())])
         return await table(ext, f"techs-{span['since']:%Y%m%d}-{span['until']:%Y%m%d}",
-                    ["Техник", "Нарядов", "Из них клиентских", "Средн. суток",
-                     "Сумма", "Запчасти", "Работы", "Средний наряд"], data)
+                           header, data)
 
     @app.get("/reports/model-parts")
     async def model_parts_report(request: Request) -> Response:
@@ -6967,6 +6986,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Ссылка для клиента - абсолютная: её отправляют в мессенджер."""
         return str(request.base_url).rstrip("/") + f"/sign/{token}"
 
+    def sign_link_for(request: Request, row: dict) -> str:
+        """Ссылка - только с правом `client_docs`: по ней открывается тот же
+        договор с паспортными данными, что /signings/{id}/doc, и в чужом
+        окне без входа право уже никто не спросит."""
+        if not logic.can_act(request.state.staff, "client_docs"):
+            return ""
+        return sign_link(request, row["token"])
+
     async def sign_company() -> dict:
         settings = await crm.settings()
         return {code: settings.get(code, "") for code in company.COMPANY_FIELDS}
@@ -7010,7 +7037,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Заявка")
         return render(request, "signing.html", req=row,
                       state=logic.sign_state(row),
-                      link=sign_link(request, row["token"]),
+                      link=sign_link_for(request, row),
                       digest=logic.sign_docs_digest(row.get("docs") or []),
                       events=await crm.sign_events(request_id))
 
@@ -7050,7 +7077,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if row is None:
             return render(request, "missing.html", status_code=404, what="Заявка")
         try:
-            code = await service.issue_sign_code(crm, row, ip=client_ip(request))
+            code = await service.issue_sign_code(crm, row, ip=client_ip(request),
+                                                 by=who(request))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/signings/{request_id}")
@@ -7117,6 +7145,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def sign_doc(request: Request, token: str, index: int) -> Response:
         """Файл из пакета. Отдаём только то, что лежит в самой заявке:
         путь приходит не из запроса, а из её списка документов."""
+        # Клиент в панель не входит, и файл ему отдаётся по токену. Вошедший
+        # сотрудник без `client_docs` - нет: иначе ссылка из заявки
+        # открывала бы ему договор мимо права.
+        staff = request.state.staff
+        if staff is not None and not logic.can_act(staff, "client_docs"):
+            return denied(request, "client_docs")
         row = await sign_by_token(token)
         if row is None or not sign_link_alive(row):
             return render(request, "sign_missing.html", status_code=404)
@@ -7781,8 +7815,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     flash(request, "Включённый шаблон не удаляется: "
                                    "сначала верните наш.", "err")
                 else:
-                    (Path(cfg.doc_dir) / str(dropped["filename"])).unlink(
-                        missing_ok=True)
+                    # Файл - только ничей: прежняя нумерация отдавала одно
+                    # имя двум строкам, и удаление архивной стирало файл
+                    # включённой.
+                    if not any(r["filename"] == dropped["filename"]
+                               for r in await crm.doc_templates()):
+                        (Path(cfg.doc_dir) / str(dropped["filename"])).unlink(
+                            missing_ok=True)
                     flash(request, "Шаблон убран из архива.")
             return redirect("/documents")
         upload = data.get("template")
@@ -7797,11 +7836,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, str(exc), "err")
             return redirect("/documents")
         folder = Path(cfg.doc_dir)
-        number = len(await crm.doc_templates(kind)) + 1
-        name = logic.doc_filename(kind, number)
+        first = logic.doc_next_number(
+            kind, [r["filename"] for r in await crm.doc_templates(kind)])
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            (folder / name).write_bytes(raw)
+            # Только новый файл («x»): имя, занятое на диске (две загрузки
+            # разом, файл без строки), не затирается - берётся следующее.
+            for number in range(first, first + 100):
+                name = logic.doc_filename(kind, number)
+                try:
+                    with (folder / name).open("xb") as out:
+                        out.write(raw)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise OSError("нет свободного имени файла")
         except OSError as err:
             log.warning("шаблон не сохранён: %s", err)
             flash(request, "Шаблон не сохранился — попробуйте ещё раз.", "err")

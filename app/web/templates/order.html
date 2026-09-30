@@ -139,11 +139,11 @@
   </h2>
   {% if invoices %}
   <table>
-    <tr><th>Счёт</th><th class="num">Сумма</th><th>Состояние</th></tr>
+    <tr><th>Счёт</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}<th>Состояние</th></tr>
     {% for v in invoices %}
     <tr>
       <td><a href="/payments/{{ v.id }}">{{ v.no }}</a></td>
-      <td class="num">{{ money(v.amount) }}</td>
+      {% if money_ok %}<td class="num">{{ money(v.amount) }}</td>{% endif %}
       <td>{% if v.status == 'paid' %}<span class="tag ok">оплачен</span>{% else %}{{ PAY_STATUSES.get(v.status, '—') }}{% endif %}</td>
     </tr>
     {% endfor %}
@@ -175,7 +175,7 @@
 {% if order.payer == 'client' and order.status == 'done' and not order.paid_at and can %}
 <section class="card narrow">
   <form method="post" action="/orders/{{ order.id }}/paid">
-    <button type="submit">Отметить оплату {{ money(order.total) }}</button>
+    <button type="submit">Отметить оплату{% if money_ok %} {{ money(order.total) }}{% endif %}</button>
   </form>
 </section>
 {% endif %}

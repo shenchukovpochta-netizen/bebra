@@ -14,7 +14,9 @@
   <dl>
     <dt>Клиент</dt><dd><a href="/clients/{{ req.client_id }}">{{ req.full_name }}</a> · {{ req.phone }}</dd>
     <dt>Telegram</dt><dd>{% if req.tg_id %}привязан — код уйдёт в бот{% else %}<span class="muted">не привязан — код диктует оператор</span>{% endif %}</dd>
-    <dt>Ссылка</dt><dd><input value="{{ link }}" readonly onclick="this.select()" style="width:100%"></dd>
+    {# Ссылка открывает договор с паспортными данными: без права на
+       документы клиента её не показываем (sign_link_for). #}
+    <dt>Ссылка</dt><dd>{% if link %}<input value="{{ link }}" readonly onclick="this.select()" style="width:100%">{% else %}<span class="muted">видна с правом «Паспортные документы клиента»</span>{% endif %}</dd>
     <dt>Срок ссылки</dt><dd>{{ req.expires_at|dmy }}</dd>
     <dt>Хэш пакета</dt><dd><code class="hash">{{ digest }}</code></dd>
     {% if req.signed_at %}
@@ -34,6 +36,10 @@
   {% if state.code_valid %}
   <p class="muted">Код выдан, осталось ≈ {{ state.code_left }} мин,
     попыток у клиента: {{ state.attempts_left }}.</p>
+  {% endif %}
+  {% if state.locked %}
+  <p class="warn">Неверных кодов — {{ req.wrong_total }}: ссылка кодов больше
+    не выдаёт. «Выдать код» снимет замок.</p>
   {% endif %}
   {% endif %}
 </section>

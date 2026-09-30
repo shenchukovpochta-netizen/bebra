@@ -156,22 +156,22 @@
   {% if bonuses %}
   <h3>Баллы</h3>
   <table>
-    <tr><th>Когда</th><th>За что</th><th class="num">Сумма</th></tr>
+    <tr><th>Когда</th><th>За что</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}</tr>
     {% for b in bonuses %}
     <tr><td class="nowrap muted">{{ b.created_at|dmy }}</td>
       <td>{{ BONUS_KINDS.get(b.kind, b.kind) }}</td>
-      <td class="num">{{ money(b.amount) }}</td></tr>
+      {% if money_ok %}<td class="num">{{ money(b.amount) }}</td>{% endif %}</tr>
     {% endfor %}
   </table>
   {% endif %}
   {% if pay_orders %}
   <h3>Счета</h3>
   <table>
-    <tr><th>Счёт</th><th class="num">Сумма</th><th>Состояние</th></tr>
+    <tr><th>Счёт</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}<th>Состояние</th></tr>
     {% for r in pay_orders %}
     <tr>
       <td><a href="/payments/{{ r.id }}">{{ r.no }}</a></td>
-      <td class="num">{{ money(r.amount) }}</td>
+      {% if money_ok %}<td class="num">{{ money(r.amount) }}</td>{% endif %}
       <td>{% if r.status == 'paid' %}<span class="tag ok">оплачен</span>{% else %}{{ PAY_STATUSES.get(r.status, '—') }}{% endif %}</td>
     </tr>
     {% endfor %}

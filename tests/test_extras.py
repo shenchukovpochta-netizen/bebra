@@ -232,6 +232,24 @@ class TestExtrasOnTheRentalCard(tw.WebCase):
         self.assertEqual(_run(self.crm.battery(self.battery_id))["status"],
                          "available")
 
+    def test_dropping_into_rented_or_new_is_refused(self):
+        """«У клиента» ставит и снимает только выдача, «на сборке» - только
+        ввод в эксплуатацию: подменённая форма получает отказ."""
+        _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
+                                    model="Аккумулятор 70 Ач", kind="battery"))
+        self.add()
+        extra = _run(self.crm.rental_extras(self.rental_id, live_only=True))[0]
+        for status in ("rented", "new", "выдумка"):
+            r = self.client.post(f"/rentals/{self.rental_id}/extras/{extra['id']}",
+                                 data={"status": status})
+            self.assertEqual(r.status_code, 303, status)
+            self.assertEqual(
+                len(_run(self.crm.rental_extras(self.rental_id, live_only=True))), 1,
+                f"{status}: позиция не снята")
+            self.assertEqual(_run(self.crm.battery(self.battery_id))["status"],
+                             "rented", status)
+        self.assertIn("Недопустимый статус", self.get_ok(f"/rentals/{self.rental_id}"))
+
     def test_price_does_not_follow_a_later_tariff_change(self):
         """Базовая цена аренды - цена на выдаче, а не сегодняшний тариф."""
         _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
