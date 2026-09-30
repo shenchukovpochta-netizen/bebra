@@ -521,6 +521,8 @@ def check_staff_term(term: Any, until: Any, *, today: date | None = None,
                      keep_empty: bool = False) -> Check:
     """Срок доступа из формы: дата «до» (включительно) главнее кнопки
     срока. Пусто - бессрочно (Check(True, None)); «none» - снять срок.
+    `keep_empty` - форма правки срока: там пусто значит «ничего не выбрал»,
+    и это отказ, а не снятие срока - снимает только явное «бессрочно».
     Конец дня - по часам сервера (Europe/Moscow), как и вся система."""
     today = today or date.today()
     raw = str(until or "").strip()
@@ -533,6 +535,8 @@ def check_staff_term(term: Any, until: Any, *, today: date | None = None,
             return Check(False, error="Срок доступа: дата уже прошла.")
     else:
         code = str(term or "").strip()
+        if code == "" and keep_empty:
+            return Check(False, error="Срок доступа: выберите срок или дату.")
         if code in ("", "none"):
             return Check(True, None)
         if code not in STAFF_TERMS:
@@ -8809,25 +8813,33 @@ def report_period(params: Mapping[str, Any], *, now: datetime,
             "days": POINTS_PERIOD_DAYS, "passed": POINTS_PERIOD_DAYS}
 
 
-def report_prev_span(span: Mapping[str, Any]) -> dict[str, Any]:
-    """Прошлый период той же длины - для колонки «прошлый» в «Главном».
+def report_prev_span(span: Mapping[str, Any], *,
+                     now: datetime | None = None) -> dict[str, Any]:
+    """Прошлый период для колонки «прошлый» в «Главном».
 
-    Месяц - прошлый календарный месяц с первого числа и той же длины:
-    текущий месяц по сегодня сравнивается с тем же числом дней прошлого,
-    а не с целым месяцем (иначе «стало хуже» каждый месяц до 30-го).
-    Окно дней и свой интервал - такой же отрезок прямо перед ним.
+    Сравнивается равное с равным. Идущий период (конец позже `now`) - с
+    тем же прошедшим временем прошлого: сегодня до 15:00 - со вчера до
+    15:00, сентябрь по 30-е 15:00 - с августом по 30-е 15:00, а не с
+    целым: иначе суммы «падали» бы каждый день до конца периода.
+    Закончившийся месяц - с целым прошлым месяцем (сентябрь против всего
+    августа, март против всего февраля). Окно дней и свои даты - с таким
+    же отрезком прямо перед ними.
     """
     start, end = span["start"], span["end"]
+    now = now or end
+    elapsed = min(end, now) - start
     if span.get("kind") == "month":
         first = span["since"]
         prev_first = (first - timedelta(days=1)).replace(day=1)
         prev_start = start.replace(year=prev_first.year, month=prev_first.month, day=1)
-        prev_end = min(prev_start + (end - start), start)
-        label = prev_first.strftime("%m.%Y")
+        prev_end = start if end < now else min(prev_start + elapsed, start)
     else:
-        prev_start, prev_end = start - (end - start), start
-        label = f"{prev_start:%d.%m} — {(prev_end - timedelta(seconds=1)):%d.%m}"
+        prev_start = start - (end - start)
+        prev_end = prev_start + elapsed
     last = (prev_end - timedelta(seconds=1)).date()
+    whole_month = span.get("kind") == "month" and prev_end == start
+    label = (prev_start.strftime("%m.%Y") if whole_month
+             else f"{prev_start:%d.%m} — {max(last, prev_start.date()):%d.%m}")
     return {"start": prev_start, "end": prev_end, "since": prev_start.date(),
             "until": max(last, prev_start.date()), "label": label,
             "days": span_days(prev_start, prev_end)}
@@ -10747,7 +10759,7 @@ def safe_avito_url(url: Any) -> str | None:
 def inbox_links(thread: Mapping[str, Any]) -> dict[str, str | None]:
     """Куда ответить вне панели: t.me по @, wa.me по цифрам телефона."""
     username = str(thread.get("username") or "").lstrip("@")
-    phone = bot_logic.normalize_phone(thread.get("phone"))
+    phone = inbox_phone(thread.get("channel"), thread.get("phone"))
     digits = re.sub(r"\D", "", phone or "")
     # Логин MAX - не логин Telegram: t.me по нему вёл бы к постороннему.
     is_tg = thread.get("channel") in (None, "tg")
@@ -10848,6 +10860,30 @@ def _plausible(moment: datetime) -> datetime | None:
     return moment if 2000 <= moment.year <= 2100 else None
 
 
+def wa_intl(raw: Any) -> str | None:
+    """Номер из шлюза WhatsApp («84912345678@c.us», «79001234567») - уже
+    международный: цифры с плюсом как есть. Восьмёрка впереди здесь - код
+    страны (Вьетнам +84), а не «8» российского набора: перевод в +7 отдал
+    бы ответ чужому человеку. Десять цифр с девятки - номер без кода РФ."""
+    digits = re.sub(r"\D", "", str(raw or "").split("@", 1)[0])
+    if 11 <= len(digits) <= 15:
+        return "+" + digits
+    if len(digits) == 10 and digits[0] == "9":
+        return "+7" + digits
+    return None
+
+
+def inbox_phone(channel: Any, phone: Any) -> str | None:
+    """Телефон обращения. У WhatsApp номер с плюсом - международный из
+    шлюза (wa_intl); набранное человеком (n8n, форма) - как везде."""
+    text = str(phone or "").strip()
+    if not text:
+        return None
+    if channel == "wa" and text.startswith("+"):
+        return wa_intl(text)
+    return bot_logic.normalize_phone(text)
+
+
 def _wa_phone(raw: Any) -> str | None:
     """«79001234567@c.us» или «79001234567» -> +79001234567."""
     digits = re.sub(r"\D", "", str(raw or "").split("@", 1)[0])
@@ -10866,7 +10902,7 @@ def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = 
     item = {
         "channel": channel, "ext_id": ext, "msg_id": _cut(msg_id, 100),
         "name": _cut(name, INBOX_NAME_MAX),
-        "phone": bot_logic.normalize_phone(str(phone)) if phone else None,
+        "phone": inbox_phone(channel, phone),
         "text": _cut(text, INBOX_TEXT_MAX),
         "kind": kind if kind in INBOX_KINDS else "other",
         "subject": _cut(subject, INBOX_SUBJECT_MAX),
@@ -10913,7 +10949,7 @@ def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
     sender = payload.get("senderData") or payload.get("from") or {}
     if kind_hook == "incomingCall":
         chat = str(payload.get("from") or "")
-        phone = _wa_phone(chat)
+        phone = wa_intl(chat)
         item = _inbound_item("wa", phone, msg_id=payload.get("idMessage"), phone=phone,
                              kind="call", at=payload.get("timestamp"))
         return ([item], 0) if item else ([], 1)
@@ -10931,7 +10967,7 @@ def _green(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
     text = (_dict(data.get("textMessageData")).get("textMessage")
             or _dict(data.get("extendedTextMessageData")).get("text")
             or _dict(data.get("fileMessageData")).get("caption"))
-    phone = _wa_phone(chat)
+    phone = wa_intl(chat)
     item = _inbound_item(
         "wa", phone, msg_id=payload.get("idMessage"),
         name=sender.get("senderName") or sender.get("chatName")
@@ -10957,7 +10993,7 @@ def _wazzup(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
         channel = _WAZZUP_CHANNELS.get(str(message.get("chatType") or ""))
         contact = message.get("contact") if isinstance(message.get("contact"), dict) else {}
         chat = message.get("chatId")
-        phone = _wa_phone(chat) if channel == "wa" else None
+        phone = wa_intl(chat) if channel == "wa" else None
         item = _inbound_item(
             channel or "", phone if channel == "wa" else chat,
             msg_id=message.get("messageId"), name=contact.get("name"), phone=phone,

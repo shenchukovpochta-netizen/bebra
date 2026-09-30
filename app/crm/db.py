@@ -263,7 +263,8 @@ class CrmDB:
               exists (select 1 from crm.ledger where created_by = $1
                         and kind = 'payment'
                         and coalesce(note, '') not like $3) as topup,
-              exists (select 1 from crm.rentals where intent_by = $1) as intent,
+              exists (select 1 from crm.rental_intent_log
+                       where created_by = $1) as intent,
               exists (select 1 from crm.work_orders o
                        where o.created_by = $1 and o.status = 'done'
                          and exists (select 1 from crm.work_order_items i
@@ -1182,6 +1183,12 @@ class CrmDB:
         await self.pool.execute(
             f"update crm.rentals set {sets}, updated_at = now() where id = $1",
             rental_id, *values)
+
+    async def log_rental_intent(self, rental_id: int, intent: str, by: str | None) -> None:
+        """Отметка «что ответил клиент» - в журнал, который только дописывается."""
+        await self.pool.execute(
+            "insert into crm.rental_intent_log (rental_id, intent, created_by) "
+            "values ($1, $2, $3)", rental_id, intent, by)
 
     async def close_rental(self, rental_id: int, *, closed_on: date,
                            note: str | None, bike_status: str = "available",

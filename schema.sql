@@ -2787,3 +2787,17 @@ begin
     on conflict (key) do nothing;
   end if;
 end $$;
+
+-- Журнал отметок «что ответил клиент» (продлит / сдаёт): кто и когда. На
+-- аренде лежит только последняя отметка, и её правит или снимает любой;
+-- журнал только дописывается. По нему обучение на демо засчитывает шаг
+-- новичка: чужая отметка той же аренды на общем стенде его не отменяет.
+create table if not exists crm.rental_intent_log (
+  id         bigserial primary key,
+  rental_id  bigint      not null references crm.rentals (id) on delete cascade,
+  intent     text        not null,
+  created_by text,
+  created_at timestamptz not null default now()
+);
+create index if not exists rental_intent_log_by_idx
+  on crm.rental_intent_log (created_by);

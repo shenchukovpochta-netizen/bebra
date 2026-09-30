@@ -34,7 +34,11 @@ class TestIncomingRows(unittest.TestCase):
                       "channel_label": "WhatsApp", "waiting_since": at(1),
                       "waiting_hours": 0},
                      {"id": 2, "who": "Олег", "preview": "есть велосипед?", "status": "new",
-                      "channel_label": "Авито", "waiting_since": at(0)}],
+                      "channel_label": "Авито", "waiting_since": at(0)},
+                     # отвечен три дня назад: в ленте, но ниже всех и без «ждёт с»
+                     {"id": 3, "who": "Отвечен", "preview": "спасибо", "status": "work",
+                      "channel_label": "Telegram", "waiting_since": None,
+                      "last_in_at": at(3)}],
             bookings=[{"id": 5, "client_id": 3, "full_name": "Заявкин", "status": "new",
                        "wanted_on": TODAY, "created_at": at(2), "model": "Kugoo"},
                       {"id": 6, "client_id": 4, "full_name": "Завтра", "status": "new",
@@ -45,13 +49,14 @@ class TestIncomingRows(unittest.TestCase):
                      "created_at": at(0)}],
             today=TODAY, booking_url=lambda b: f"/issue?booking={b['id']}")
         self.assertEqual([(r["kind"], r["who"]) for r in rows],
-                         [("booking", "Заявкин"), ("message", "Олег"),
-                          ("claim", "Платил"), ("booking", "Завтра"),
-                          ("message", "Азиз")])
+                         [("booking", "Заявкин"), ("message", "Азиз"),
+                          ("message", "Олег"), ("claim", "Платил"),
+                          ("booking", "Завтра"), ("message", "Отвечен")])
         self.assertEqual(rows[0]["url"], "/issue?booking=5")
-        self.assertNotIn("₽", rows[2]["what"], "сумма - только с «Финансами»")
+        self.assertNotIn("₽", rows[3]["what"], "сумма - только с «Финансами»")
+        self.assertIsNone(rows[-1]["since"], "отвеченный не «ждёт»")
         self.assertEqual(incoming.counts(rows),
-                         {"message": 2, "booking": 2, "claim": 1, "all": 5})
+                         {"message": 3, "booking": 2, "claim": 1, "all": 6})
         with_money = incoming.incoming_rows(
             claims=[{"id": 9, "full_name": "Платил", "amount_hint": D(3500)}],
             money_ok=True, today=TODAY)
@@ -96,21 +101,33 @@ class TestClientGroups(unittest.TestCase):
 class TestHeadline(unittest.TestCase):
     TZ = timezone(timedelta(hours=3))
 
-    def span(self, **params):
-        now = datetime(2026, 9, 30, 15, tzinfo=self.TZ)
-        return logic.report_prev_span(logic.report_period(params, now=now))
+    def span(self, now=None, **params):
+        now = now or datetime(2026, 9, 30, 15, tzinfo=self.TZ)
+        return logic.report_prev_span(logic.report_period(params, now=now), now=now)
 
     def test_prev_span(self):
-        cur = self.span(month="2026-09")          # идущий месяц - то же число дней
-        self.assertEqual((cur["since"], cur["until"], cur["label"]),
-                         (date(2026, 8, 1), date(2026, 8, 30), "08.2026"))
-        full = self.span(month="2026-03")         # короткий февраль не вылезает в март
-        self.assertEqual((full["since"], full["until"]), (date(2026, 2, 1), date(2026, 2, 28)))
+        # идущий месяц - то же прошедшее время прошлого, а не целый август
+        cur = self.span(month="2026-09")
+        self.assertEqual((cur["start"], cur["end"], cur["label"]),
+                         (datetime(2026, 8, 1, tzinfo=self.TZ),
+                          datetime(2026, 8, 30, 15, tzinfo=self.TZ), "01.08 — 30.08"))
+        # закончившийся месяц - целый прошлый: сентябрь против всего августа
+        done = self.span(month="2026-09", now=datetime(2026, 10, 5, 12, tzinfo=self.TZ))
+        self.assertEqual((done["since"], done["until"], done["label"]),
+                         (date(2026, 8, 1), date(2026, 8, 31), "08.2026"))
+        full = self.span(month="2026-03")         # весь февраль, в март не вылезает
+        self.assertEqual((full["since"], full["until"], full["label"]),
+                         (date(2026, 2, 1), date(2026, 2, 28), "02.2026"))
         days = self.span()
         self.assertEqual(days["until"], date(2026, 8, 31))
         self.assertAlmostEqual(days["days"], 30)
         own = self.span(since="2026-09-01", until="2026-09-10")
         self.assertEqual((own["since"], own["until"]), (date(2026, 8, 22), date(2026, 8, 31)))
+        # «сегодня до 15:00» - со «вчера до 15:00», а не со всеми вчерашними сутками
+        today = self.span(since="2026-09-30", until="2026-09-30")
+        self.assertEqual((today["start"], today["end"]),
+                         (datetime(2026, 9, 29, tzinfo=self.TZ),
+                          datetime(2026, 9, 29, 15, tzinfo=self.TZ)))
 
     def figures(self, idle, check, revenue, **extra):
         return {"metrics": {"idle_percent": idle, "avg_check": check, "revenue": revenue,
@@ -252,6 +269,9 @@ class TestOneWindowPages(WebCase):
         page = self.get_ok("/clients")
         self.assertNotIn("оплатили за всё время", page)
         self.assertNotIn("Оплатил всего", page)
+        self.assertNotIn("должник", page.lower(), "долг - это деньги")
+        debt = self.get_ok("/clients?group=debt")
+        self.assertIn("Новенький", debt, "без «Финансов» группа должников - просто все")
         self.assertIn("Бывший Клиент", self.get_ok("/clients?sort=rentals&dir=desc"))
 
     def test_reports_one_window(self):
@@ -281,8 +301,12 @@ class TestOneWindowPages(WebCase):
         self.assertEqual(paid.group(1).strip(), "3 000 ₽")
         month = date.today().strftime("%Y-%m")
         page = self.get_ok(f"/reports?month={month}")
-        prev = (date.today().replace(day=1) - timedelta(days=1)).strftime("%m.%Y")
-        self.assertIn(f"Прошлый · {prev}", page)
+        prev = date.today().replace(day=1) - timedelta(days=1)
+        self.assertIn(f"Прошлый · 01.{prev:%m} — ", page, "идущий месяц - по сегодняшнее")
+        past = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        before = (prev.replace(day=1) - timedelta(days=1)).strftime("%m.%Y")
+        self.assertIn(f"Прошлый · {before}", self.get_ok(f"/reports?month={past}"),
+                      "закончившийся месяц - против целого прошлого")
 
     def test_reports_one_window_follows_rights(self):
         self.as_profile("mech", "tech")

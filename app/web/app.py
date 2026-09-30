@@ -1214,13 +1214,27 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           if not ts or now - ts[-1] > 86400]:
                 learn_starts.pop(stale, None)
         recent = [t for t in learn_starts.get(ip, []) if now - t < 86400]
-        if (len(recent) >= learning.PER_ADDRESS
-                or await crm.learn_count() >= learning.PER_DAY):
+        full = len(recent) >= learning.PER_ADDRESS
+        if not full:
+            # Место занимается сразу, до первого await: параллельные запросы
+            # с того же адреса иначе видели бы один и тот же старый счёт и
+            # все проходили предел. Не завели вход - место возвращается.
+            learn_starts[ip] = [*recent, now]
+
+        def release() -> None:
+            left = learn_starts.get(ip, [])
+            if now in left:
+                left.remove(now)
+
+        if full or await crm.learn_count() >= learning.PER_DAY:
+            if not full:
+                release()
             flash(request, "Новых учебных входов сегодня больше не будет — войдите "
                            "под прежним или вернитесь завтра.", "err")
             return redirect("/login")
         profile = await crm.access_profile_by_code(spec.profile)
         if profile is None:
+            release()
             flash(request, "Обучение на этом стенде не настроено.", "err")
             return redirect("/login")
         places = [p["name"] for p in await crm.locations() if p.get("active")]
@@ -1244,9 +1258,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 continue
             break
         if staff_id is None:
+            release()
             flash(request, "Не удалось завести учебный вход — нажмите ещё раз.", "err")
             return redirect("/login")
-        learn_starts[ip] = [*recent, now]
         # Свой велосипед на своей точке: свободных в демо с десяток, и без
         # него выдача и наряд упирались бы в чужие аренды и посетителей.
         # Не завёлся - обучение идёт на свободных из парка.
@@ -1739,7 +1753,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         status = p.get("status") or ""
         risk = p.get("risk") or ""
         risk = risk if risk in logic.RISK_LEVELS else ""
-        group = p.get("group") if p.get("group") in logic.CLIENT_GROUPS else "all"
+        # Должники - это деньги: без «Финансов» группы нет (как и сортировки
+        # по балансу), и ?group=debt - это просто все.
+        groups = client_groups(request)
+        group = p.get("group") if p.get("group") in groups else "all"
         everyone = await crm.clients(limit=100000)
         found = (everyone if not (q or status) else
                  await crm.clients(q=q or None, status=status or None, limit=100000))
@@ -1749,6 +1766,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         found = await clients_by_risk(found, risk)
         return {"q": q, "status": status, "risk": risk, "group": group,
                 "tiles": logic.client_tiles(everyone), "found": found}
+
+    def client_groups(request: Request) -> dict[str, str]:
+        if may_view(request, "finance"):
+            return logic.CLIENT_GROUPS
+        return {k: v for k, v in logic.CLIENT_GROUPS.items() if k != "debt"}
 
     @app.get("/clients")
     async def clients(request: Request) -> Response:
@@ -1769,6 +1791,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "clients.html", rows=tools["rows"], tools=tools,
                       q=data["q"], status=data["status"], risk=data["risk"],
                       group=data["group"], tiles=data["tiles"],
+                      groups=client_groups(request),
                       views=await views_of(request, "/clients"))
 
     @app.get("/clients.{ext}")
@@ -3872,6 +3895,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                     intent_until=summary["covered_until"],
                                     intent_by=who(request), intent_at=datetime.now(UTC),
                                     snooze_until=None)
+            await crm.log_rental_intent(rental_id, action, who(request))
             flash(request, f"{name}: {logic.INTENTS[action]}.")
         elif action == "snooze":
             await crm.update_rental(rental_id, snooze_until=date.today() + timedelta(days=1))
@@ -4338,7 +4362,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             summary["integrity"] = logic.integrity_summary(await integrity_data())
         # «Главное»: те же числа за выбранный период и за прошлый такой же -
         # тем же построителем, что и блоки ниже, чтобы строки сходились.
-        prev = logic.report_prev_span(span)
+        prev = logic.report_prev_span(span, now=now)
         total = summary["points"]["total"]
         now_figures: dict[str, Any] = {
             "metrics": summary["metrics"], "issued": total["issued"],
@@ -5144,7 +5168,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   "err")
             return redirect("/staff")
         data = await form(request)
-        term = logic.check_staff_term(data.get("term"), data.get("until"))
+        term = logic.check_staff_term(data.get("term"), data.get("until"),
+                                      keep_empty=True)
         if not term.ok:
             flash(request, term.error, "err")
             return redirect("/staff")

@@ -205,6 +205,20 @@ class TestRules(unittest.TestCase):
         self.assertEqual([(i["ext_id"], i.get("ext_channel")) for i in items],
                          [("+79001234567", CH1), ("+79005550000", None)])
 
+    def test_foreign_number_stays_foreign(self):
+        """chatId WhatsApp - международный: «84…» - Вьетнам, а не «8» набора РФ.
+        Перевод в +7 отдал бы ответ чужому человеку."""
+        [item], _ = logic.parse_inbound({"messages": [
+            {"messageId": "m9", "channelId": CH1, "chatType": "whatsapp",
+             "chatId": "84912345678", "type": "text", "text": "Xin chào"}]})
+        self.assertEqual((item["ext_id"], item["phone"]), ("+84912345678", "+84912345678"))
+        self.assertEqual(logic.inbox_phone("wa", "+84912345678"), "+84912345678")
+        self.assertEqual(logic.inbox_phone("wa", "89001234567"), "+79001234567",
+                         "набранное руками (n8n) - как везде")
+        self.assertEqual(logic.inbox_links({"channel": "wa", "phone": "+84912345678"})["wa"],
+                         "https://wa.me/84912345678")
+        self.assertEqual(wz.chat_id("+84912345678"), "84912345678")
+
     def test_readiness_row(self):
         off = readiness.check_wazzup({}, NOW)
         self.assertEqual(off["state"], readiness.OFF)
@@ -284,8 +298,12 @@ class TestBotSide(unittest.IsolatedAsyncioTestCase):
         _, mid = await self.queued(ext_channel=CH2)
         fake = FakeWazzup()
         await inbox.send_once(None, self.crm, cfg(), wazzup=fake)
-        self.assertEqual(fake.sent, [(CH2, "+79001234567", "Да, свободен",
-                                      f"mybike-inbox-{mid}")])
+        [sent] = fake.sent
+        self.assertEqual(sent[:3], (CH2, "+79001234567", "Да, свободен"))
+        created = self.crm.inbox_messages_[mid]["created_at"]
+        self.assertEqual(sent[3], f"mybike-inbox-{mid}-{int(created.timestamp() * 1000)}",
+                         "номер строки и миг её создания: после восстановления базы "
+                         "номера строк повторяются")
         message = self.crm.inbox_messages_[mid]
         self.assertEqual((message["status"], message["ext_id"]), ("sent", "wz-9"))
 

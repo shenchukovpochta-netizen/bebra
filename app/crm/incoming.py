@@ -54,14 +54,18 @@ def incoming_rows(*, threads: Iterable[Mapping[str, Any]] = (),
     today = today or date.today()
     rows: list[dict[str, Any]] = []
     for t in threads:
-        since = _moment(t.get("waiting_since") or t.get("last_in_at") or t.get("created_at"))
-        waiting = t.get("waiting_hours")
+        # Ждёт тот, у кого есть «ждёт с» (или новое обращение): ответ из
+        # панели или из чата его снимает. Отвеченное «в работе» остаётся в
+        # ленте, но ниже ждущих и без времени ожидания - иначе разговор,
+        # отвеченный три дня назад, стоял бы над тем, кто пишет сейчас.
+        waiting = t.get("waiting_since") is not None or t.get("status") == "new"
+        since = (_moment(t.get("waiting_since") or t.get("last_in_at") or t.get("created_at"))
+                 if waiting else None)
         rows.append({
             "kind": "message", "tag": t.get("channel_label") or TAGS["message"],
             "who": t.get("who") or "—",
             "what": t.get("preview") or t.get("subject") or "",
-            "since": since, "url": f"/inbox/{t['id']}",
-            "hot": t.get("status") == "new" or (waiting is not None and waiting >= 1),
+            "since": since, "url": f"/inbox/{t['id']}", "hot": waiting,
             "state": t.get("status_label") or ""})
     for b in bookings:
         if b.get("status", "new") != "new":

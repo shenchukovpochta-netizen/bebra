@@ -21,6 +21,7 @@ class FakeCrm:
         self.bikes_: dict[int, dict] = {}
         self.clients_: dict[int, dict] = {}
         self.rentals_: dict[int, dict] = {}
+        self.intent_log_: list[dict] = []
         self.ledger_: list[dict] = []
         self.claims_: dict[int, dict] = {}
         self.bike_log_: list[dict] = []
@@ -181,7 +182,7 @@ class FakeCrm:
             "topup": any(e["kind"] == "payment" and e.get("created_by") == actor
                          and not (e.get("note") or "").startswith(prefix)
                          for e in self.ledger_),
-            "intent": any(r.get("intent_by") == actor for r in self.rentals_.values()),
+            "intent": any(e["created_by"] == actor for e in self.intent_log_),
             "to_order": any(o.get("created_by") == actor and o["status"] == "done"
                             and any(i.get("work_type_id") in to_types
                                     for i in items_of(o["id"]))
@@ -931,6 +932,10 @@ class FakeCrm:
         await self.charge_period(rental_id, client_id, period_from=period_from,
                                  period_to=period_to, amount=-Decimal(amount),
                                  note=charge_note, created_by=created_by)
+
+    async def log_rental_intent(self, rental_id, intent, by):
+        self.intent_log_.append({"rental_id": rental_id, "intent": intent,
+                                 "created_by": by, "created_at": self._now()})
 
     async def update_rental(self, rental_id, **fields):
         r = self.rentals_[rental_id]

@@ -272,6 +272,25 @@ class TestTraineeEntry(LearnCase):
             self.client_from("10.0.0.7").post("/learn/start", data={"track": "tech"})
             self.assertEqual(len(self.crm.staff), before)
 
+    def test_parallel_starts_keep_the_address_limit(self):
+        """Параллельные запросы с одного адреса не обходят предел: место
+        занимается до первого ожидания, а не после заведения входа."""
+        import asyncio
+
+        import httpx
+
+        async def burst():
+            transport = httpx.ASGITransport(app=self.app, client=("10.0.0.9", 50000))
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://testserver") as web:
+                return await asyncio.gather(*(
+                    web.post("/learn/start", data={"track": "admin"})
+                    for _ in range(learning.PER_ADDRESS * 2)))
+
+        before = len(self.crm.staff)
+        asyncio.run(burst())
+        self.assertEqual(len(self.crm.staff) - before, learning.PER_ADDRESS)
+
     def test_step_is_counted_once_and_shown_once(self):
         _, web = self.start("admin")
         web.get("/learn")

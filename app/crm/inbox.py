@@ -173,11 +173,13 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
             error = "WhatsApp: неизвестно, с какого нашего номера отвечать"
         else:
             try:
-                # crmMessageId - номер строки очереди: повтор той же строки
-                # Wazzup второй раз не отправит, а ответит «уже было».
+                # crmMessageId - строка очереди: повтор той же строки Wazzup
+                # второй раз не отправит, а ответит «уже было». Время создания
+                # в номере: после восстановления базы из копии номера строк
+                # идут заново, и новый ответ с номером старого «ушёл» бы молча.
                 got = await wazzup.send_text(
                     own, message.get("thread_phone") or ext, text,
-                    crm_message_id=f"mybike-inbox-{message['id']}")
+                    crm_message_id=wazzup_message_id(message))
                 status, sent_id = "sent", str(got.get("messageId") or "") or None
             except Exception as exc:                    # noqa: BLE001
                 error = f"Wazzup: {str(exc)[:180]}"
@@ -380,6 +382,13 @@ async def avito_once(crm: Any, avito: Any, cfg: Any) -> dict:
         await crm.set_setting("inbox_avito_since", since.isoformat(), by="avito")
     await _avito_state(crm, ok=True, every=_poll_every(cfg))
     return counts
+
+
+def wazzup_message_id(message: dict) -> str:
+    """crmMessageId ответа: номер строки очереди и миг её создания."""
+    created = message.get("created_at")
+    stamp = int(created.timestamp() * 1000) if isinstance(created, datetime) else 0
+    return f"mybike-inbox-{message['id']}-{stamp}"
 
 
 async def wazzup_once(crm: Any, wazzup: Any, cfg: Any, *,

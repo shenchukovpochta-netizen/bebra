@@ -91,7 +91,7 @@ Claude Code читает этот файл в начале каждой сесс
 `message_templates`, `campaigns`, `campaign_sends`, `sign_requests`,
 `sign_events`, `pay_orders`, `card_tokens`, `notices`, `notice_log`,
 `bonuses`, `doc_templates`, `company_marks`, `saved_views`,
-`inbox_threads`, `inbox_messages`, `clients`, `rentals`,
+`inbox_threads`, `inbox_messages`, `clients`, `rentals`, `rental_intent_log`,
 `rental_bikes`, `rental_extras`, `ledger`, `payment_claims`, `ops_reports`,
 `franchisees`, `franchise_snapshots`, `franchise_months`, `feedback`,
 `return_photos`.

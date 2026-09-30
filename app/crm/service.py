@@ -2217,7 +2217,7 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
         client = await crm.client_by_tg(int(ext))
     elif channel == "max" and ext.isdigit():
         client = await crm.client_by_max(int(ext))
-    norm = bot_logic.normalize_phone(phone) if phone else None
+    norm = logic.inbox_phone(channel, phone)
     if client is None and norm:
         client = await crm.client_by_phone(norm)
     got = await crm.inbox_record(

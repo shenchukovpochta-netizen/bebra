@@ -202,6 +202,11 @@ class TestLearningOnDemo(unittest.IsolatedAsyncioTestCase):
         await self.post_ok(web, f"/rentals/{other['id']}/intent",
                            {"intent": "renew", "next": "/"})
         self.assertIn("intent", await self.done(staff))
+        # Стенд общий: другой посетитель снял отметку с той же аренды -
+        # шаг новичка остаётся засчитанным (журнал отметок, а не поле аренды).
+        await self.crm.update_rental(other["id"], intent=None, intent_until=None,
+                                     intent_by=None, intent_at=None)
+        self.assertIn("intent", await self.done(staff))
 
         where = await self.post_ok(web, "/orders", {
             "bike_id": bike["id"], "payer": "own", "complaint": "плановое ТО"})

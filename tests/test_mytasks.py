@@ -208,6 +208,10 @@ class TestProfilesAndTerms(unittest.TestCase):
         for term, until in (("year", ""), ("", "вчера"), ("", "2026-09-29")):
             self.assertFalse(logic.check_staff_term(term, until, today=TODAY).ok,
                              (term, until))
+        # форма правки: пусто - «ничего не выбрал», а не «снять срок»
+        self.assertFalse(logic.check_staff_term("", "", today=TODAY, keep_empty=True).ok)
+        self.assertIsNone(logic.check_staff_term("none", "", today=TODAY,
+                                                 keep_empty=True).value)
 
     def test_expired(self):
         now = datetime(2026, 9, 30, 12, tzinfo=UTC)
@@ -335,6 +339,11 @@ class TestStaffTerm(WebCase):
                                                         + timedelta(days=3)).isoformat())
         self.assertEqual(staff["expires_at"].date(), date.today() + timedelta(days=3))
         self.assertIn("до ", self.get_ok("/staff"))
+        # «—» и пустая дата - ничего не выбрано: срок остаётся, а не снимается
+        self.client.post(f"/staff/{staff['id']}/term", data={"term": "", "until": ""})
+        self.assertIn("выберите срок или дату", self.get_ok("/staff"))
+        self.assertEqual(run(self.crm.staff_by_id(staff["id"]))["expires_at"].date(),
+                         date.today() + timedelta(days=3))
         self.client.post(f"/staff/{staff['id']}/term", data={"term": "none"})
         self.assertIsNone(run(self.crm.staff_by_id(staff["id"]))["expires_at"])
         self.client.post(f"/staff/{staff['id']}/term", data={"until": "2000-01-01"})
