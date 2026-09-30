@@ -147,6 +147,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/learn.html', 'app/web/templates/_learn_card.html',
                   'app/web/templates/my.html',
                   'app/web/templates/incoming.html', 'app/web/templates/_incoming_tabs.html',
+                  'app/web/templates/report_months.html',
                   'app/web/templates/risk.html', 'app/web/templates/_risk.html',
                   'app/web/templates/documents.html',
                   'app/web/templates/mailing.html',

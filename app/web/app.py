@@ -4254,16 +4254,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── отчёты ───────────────────────
 
-    @app.get("/reports")
-    async def reports(request: Request) -> Response:
-        bikes_by = await crm.bike_counts()
-        fleet_rows = await crm.bikes(limit=10000)
-        fleet = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
-        rented = bikes_by.get("rented", 0)
-        # Три числа по месяцам: текущий и пять прошлых. Неполный месяц -
-        # текущий или тот, где начался журнал статусов, - помечен: платежи
-        # месяца на несколько дней аренды раздувают чек.
-        now = datetime.now().astimezone()
+    async def months_data(now: datetime) -> dict:
+        """Три числа и деньги по месяцам - одно на свёрнутый блок отчётов и
+        полную страницу /reports/months: там обязаны стоять те же числа.
+        Неполный месяц - текущий или тот, где начался журнал статусов, -
+        помечен: платежи месяца на несколько дней аренды раздувают чек."""
         started = (await crm.history_starts())["status"]
         months_metrics = []
         for m in logic.month_windows(now, 6):
@@ -4271,8 +4266,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "month": m["month"],
                 **await period_metrics(since=m["since"], until=m["until"]),
                 "coverage": logic.month_coverage(m["since"], m["until"], start=started)})
+        return {"months_metrics": months_metrics,
+                "months": await crm.revenue_by_month(12)}
+
+    @app.get("/reports/months")
+    async def reports_months(request: Request) -> Response:
+        """Полная история по месяцам: все колонки, которые в сводке отчётов
+        свёрнуты до главных (потери, КПД, дни, возвраты)."""
+        return render(request, "report_months.html",
+                      **await months_data(datetime.now().astimezone()))
+
+    @app.get("/reports")
+    async def reports(request: Request) -> Response:
+        bikes_by = await crm.bike_counts()
+        fleet_rows = await crm.bikes(limit=10000)
+        fleet = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
+        rented = bikes_by.get("rented", 0)
+        now = datetime.now().astimezone()
         # Ровно 12 календарных месяцев, включая текущий: тем же шагом,
-        # что и таблица выше, а не «минус 335 дней».
+        # что и таблица по месяцам, а не «минус 335 дней».
         since_year = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         for _ in range(11):
             since_year = (since_year - timedelta(days=1)).replace(day=1)
@@ -4280,8 +4292,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # блок считается тем же построителем, что его полный отчёт, и за тот
         # же период - в одном окне не бывает двух разных «выручек за
         # сентябрь». Блок - только с правом на свой полный отчёт.
-        span = logic.report_period(request.query_params, now=now,
-                                   floor=await history_floor(now.date()))
+        floor = await history_floor(now.date())
+        span = logic.report_period(request.query_params, now=now, floor=floor)
+        if span["kind"] == "days":
+            # «30 дней» - целыми сутками по сегодня: полные отчёты сервиса и
+            # окупаемости считают период календарными днями, и блок обязан
+            # совпадать со своим «подробнее», а «Главное» - с блоками.
+            days = logic.report_period(
+                {"since": (now.date() - timedelta(days=logic.POINTS_PERIOD_DAYS - 1))
+                 .isoformat(), "until": now.date().isoformat()}, now=now, floor=floor)
+            span = {**days, "kind": "days", "label": span["label"], "query": ""}
         window = SimpleNamespace(query_params={"since": span["since"].isoformat(),
                                                "until": span["until"].isoformat()})
         money_ok = may_view(request, "finance")
@@ -4316,11 +4336,41 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                  if r.get("closed_on") is None or r["closed_on"] <= span["until"]])
         if may_view(request, "bikes"):
             summary["integrity"] = logic.integrity_summary(await integrity_data())
-        return render(request, "reports.html", months=await crm.revenue_by_month(12),
+        # «Главное»: те же числа за выбранный период и за прошлый такой же -
+        # тем же построителем, что и блоки ниже, чтобы строки сходились.
+        prev = logic.report_prev_span(span)
+        total = summary["points"]["total"]
+        now_figures: dict[str, Any] = {
+            "metrics": summary["metrics"], "issued": total["issued"],
+            "renewals": total["renewals"],
+            "days": logic.span_days(span["start"], min(span["end"], now)),
+            "debt": total.get("debt") if money_ok else None,
+            "debtors": total.get("debtors")}
+        prev_rentals = await crm.rentals_by_location(prev["start"], prev["end"])
+        prev_figures: dict[str, Any] = {
+            "metrics": await period_metrics(since=prev["start"], until=prev["end"]),
+            "issued": sum(int(r.get("issued") or 0) for r in prev_rentals.values()),
+            "renewals": sum(int(r.get("renewals") or 0) for r in prev_rentals.values()),
+            "days": prev["days"]}
+        if "techs" in summary:
+            now_figures["orders"] = summary["techs"]["total"]["orders"]
+            prev_figures["orders"] = logic.tech_total(logic.tech_rows(
+                await crm.tech_work(prev["start"], prev["end"])))["orders"]
+        if "channels" in summary:
+            now_figures["new_clients"] = sum(n for _, n in summary["channels"])
+            prev_figures["new_clients"] = sum(n for _, n in logic.channel_totals(
+                await crm.clients_since(prev["start"]), since=prev["since"],
+                until=prev["until"]))
+        if "integrity" in summary:
+            now_figures["integrity"] = summary["integrity"]["total"]
+        summary["prev"] = prev
+        summary["headline"] = logic.report_headline(
+            now_figures, prev_figures, can=lambda section: may_view(request, section))
+        return render(request, "reports.html",
                       summary=summary,
                       bikes=bikes_by, fleet=fleet, rented=rented,
                       utilization=(round(100 * rented / fleet) if fleet else 0),
-                      months_metrics=months_metrics,
+                      **await months_data(now),
                       amortization=logic.amortization_total(
                           fleet_rows, await crm.batteries(limit=10000)),
                       priced=sum(1 for b in fleet_rows

@@ -27,7 +27,7 @@ import random
 import re
 import secrets
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -8807,6 +8807,124 @@ def report_period(params: Mapping[str, Any], *, now: datetime,
             "prev_key": this_month["prev_key"], "next_key": None, "query": "",
             "label": f"последние {POINTS_PERIOD_DAYS} дней",
             "days": POINTS_PERIOD_DAYS, "passed": POINTS_PERIOD_DAYS}
+
+
+def report_prev_span(span: Mapping[str, Any]) -> dict[str, Any]:
+    """Прошлый период той же длины - для колонки «прошлый» в «Главном».
+
+    Месяц - прошлый календарный месяц с первого числа и той же длины:
+    текущий месяц по сегодня сравнивается с тем же числом дней прошлого,
+    а не с целым месяцем (иначе «стало хуже» каждый месяц до 30-го).
+    Окно дней и свой интервал - такой же отрезок прямо перед ним.
+    """
+    start, end = span["start"], span["end"]
+    if span.get("kind") == "month":
+        first = span["since"]
+        prev_first = (first - timedelta(days=1)).replace(day=1)
+        prev_start = start.replace(year=prev_first.year, month=prev_first.month, day=1)
+        prev_end = min(prev_start + (end - start), start)
+        label = prev_first.strftime("%m.%Y")
+    else:
+        prev_start, prev_end = start - (end - start), start
+        label = f"{prev_start:%d.%m} — {(prev_end - timedelta(seconds=1)):%d.%m}"
+    last = (prev_end - timedelta(seconds=1)).date()
+    return {"start": prev_start, "end": prev_end, "since": prev_start.date(),
+            "until": max(last, prev_start.date()), "label": label,
+            "days": span_days(prev_start, prev_end)}
+
+
+def span_days(start: datetime, end: datetime) -> float:
+    """Длина отрезка в сутках, дробно: делитель «парка в среднем» - месяц,
+    который ещё идёт, делится на прошедшее, а не на все его дни."""
+    return max((end - start).total_seconds() / 86400, 0.0)
+
+
+# Строки «Главного»: код, подпись, что лучше (меньше/больше), чьё право.
+HEADLINE_ROWS: tuple[tuple[str, str, str, str], ...] = (
+    ("fleet", "Парк в работе, в среднем", "more", ""),
+    ("idle", "Простой", "less", ""),
+    ("check", "Средний чек в день", "more", "finance"),
+    ("paid", "Поступило от клиентов", "more", "finance"),
+    ("issued", "Выдач / продлений", "more", ""),
+    ("clients", "Новых клиентов", "more", "clients"),
+    ("orders", "Нарядов закрыто", "more", "service"),
+    ("debt", "Долг клиентов сейчас", "less", "finance"),
+    ("integrity", "Расхождений в учёте", "less", "bikes"),
+)
+
+
+def _headline_value(code: str, figures: Mapping[str, Any] | None) -> tuple[Any, str]:
+    """(число для сравнения, строка для глаз) одной строки «Главного»."""
+    if not figures:
+        return None, "—"
+    m = figures.get("metrics") or {}
+    if code == "fleet":
+        days = figures.get("days") or 0
+        op = m.get("operational_days")
+        if not days or op is None:
+            return None, "—"
+        value = int((Decimal(str(op)) / Decimal(str(days))).quantize(Decimal(1)))
+        return value, f"{value} шт."
+    if code == "idle":
+        value = m.get("idle_percent")
+        return value, "—" if value is None else f"{value} %"
+    if code == "check":
+        value = m.get("avg_check")
+        return value, "—" if value is None else money(value)
+    if code == "paid":
+        value = m.get("revenue")
+        return value, "—" if value is None else money(value)
+    if code == "issued":
+        issued, renewals = figures.get("issued"), figures.get("renewals")
+        if issued is None:
+            return None, "—"
+        return issued, f"{issued} / {renewals or 0}"
+    if code == "debt":
+        value = figures.get("debt")
+        if value is None:
+            return None, "—"
+        count = figures.get("debtors")
+        return value, money(value) + (f" · {count} чел." if count else "")
+    key = {"clients": "new_clients", "orders": "orders", "integrity": "integrity"}[code]
+    value = figures.get(key)
+    return value, "—" if value is None else str(value)
+
+
+def report_headline(now: Mapping[str, Any], prev: Mapping[str, Any] | None, *,
+                    can: Callable[[str], bool]) -> list[dict[str, Any]]:
+    """Таблица «Главное» отчётов: строка - показатель, колонки - выбранный
+    период, прошлый такой же и цель; стрелка - стало лучше или хуже.
+
+    Строка есть, только если её число вообще посчитано (None в `now` -
+    раздел закрыт или данных нет) и открыт её раздел (`can`). Долг и
+    расхождения - «сейчас»: прошлого значения у них нет.
+    """
+    rows = []
+    for code, title, better, section in HEADLINE_ROWS:
+        if section and not can(section):
+            continue
+        value, shown = _headline_value(code, now)
+        if code in ("clients", "orders", "integrity", "debt") and value is None:
+            continue
+        before, before_shown = _headline_value(code, prev)
+        if code in ("debt", "integrity"):
+            before, before_shown = None, ""
+        trend = up = None
+        if value is not None and before is not None and value != before:
+            up = value > before
+            trend = up == (better == "more")
+        goal, ok = "", None
+        if code == "idle":
+            goal = f"< {IDLE_TARGET_PERCENT} %"
+            ok = None if value is None else value < IDLE_TARGET_PERCENT
+        elif code == "check":
+            goal = money(CHECK_TARGET)
+            ok = None if value is None else value >= CHECK_TARGET
+        elif code in ("debt", "integrity") and value is not None:
+            ok = not value
+        rows.append({"code": code, "title": title, "now": shown, "prev": before_shown,
+                     "goal": goal, "ok": ok, "better": trend, "up": up})
+    return rows
 
 
 def plan_month(span: Mapping[str, Any], *, today: date) -> dict[str, Any]:

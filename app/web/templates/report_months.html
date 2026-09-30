@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% import "_coverage.html" as coverage %}
+{% block title %}По месяцам — {{ app_title }}{% endblock %}
+{% block content %}
+{# Полная история по месяцам: в сводке отчётов эти таблицы свёрнуты до
+   четырёх колонок, здесь - все. Числа - тот же months_data. #}
+{% set money_ok = can_view(staff, 'finance') %}
+<div class="bar"><h1>По месяцам</h1>
+  {% with active = 'reports' %}{% include "_report_tabs.html" %}{% endwith %}
+</div>
+<section class="card">
+  <h2>Три числа по месяцам</h2>
+  <div class="table-wrap"><table>
+    <tr><th>Месяц</th><th>Простой</th>{% if money_ok %}<th>Чек/день</th><th>Потери</th><th>КПД</th>{% endif %}<th>Дней аренды</th><th>Дней парка</th></tr>
+    {% for m in months_metrics %}{% set l = fleet_losses(m) %}
+    <tr><td>{{ m.month.strftime('%m.%Y') }}{{ coverage.mark(m.coverage) }}</td>
+      <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+      {% if money_ok %}
+      <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
+      <td class="num {% if not m.operational_days %}muted{% elif l.lost %}bad{% else %}ok{% endif %}">{% if not m.operational_days %}—{% else %}{{ money(l.lost) }}{% endif %}</td>
+      <td class="num">{% if l.efficiency_percent is none %}—{% else %}{{ l.efficiency_percent }} %{% endif %}</td>
+      {% endif %}
+      <td class="num">{{ m.rented_days|round(0)|int }}</td><td class="num">{{ m.operational_days|round(0)|int }}</td></tr>
+    {% endfor %}
+  </table></div>
+  <p class="muted">Простой — доля велосипеде-дней вне аренды (свободен, бронь, ремонт, ТО) в днях операционного парка; цель меньше {{ IDLE_TARGET_PERCENT }} %.{% if money_ok %} Чек — платежи клиентов за месяц на один день аренды; цель {{ money(CHECK_TARGET) }}. Потери — дни простоя × цель чека: столько не заработано, пока велосипеды стояли. КПД — поступившие деньги к потенциалу «каждый день парка по цели».{% endif %} История статусов ведётся с момента появления велосипеда в CRM: импортированные из таблицы считаются с даты импорта. «Неполный» — месяц, который ещё идёт, или тот, где история началась: формулы те же, но дней в счёте меньше{% if money_ok %}, и предоплата за неделю на несколько дней аренды завышает чек — с полными месяцами его сравнивают осторожно{% endif %}.</p>
+</section>
+{% if money_ok %}
+<section class="card">
+  <h2>Деньги по месяцам</h2>
+  <div class="table-wrap"><table>
+    <tr><th>Месяц</th><th>Поступило</th><th>Начислено</th><th>Возвраты</th><th>Ремонт</th></tr>
+    {% for m in months %}
+    <tr><td>{{ m.month.strftime('%m.%Y') }}</td><td class="num ok">{{ money(m.paid) }}</td>
+      <td class="num">{{ money(m.charged) }}</td><td class="num">{{ money(m.refunded) }}</td><td class="num">{{ money(m.repairs) }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Данных пока нет.</td></tr>{% endfor %}
+  </table></div>
+  <p class="muted">«Поступило» — реальные деньги; «Начислено» — заработанное по тарифам и штрафам. Разница между ними накапливается в балансах клиентов.</p>
+</section>
+{% endif %}
+<p><a href="/reports">← к отчётам</a></p>
+{% endblock %}

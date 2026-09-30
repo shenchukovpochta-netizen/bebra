@@ -516,3 +516,21 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
 
 /* ── отчёты одним окном: разделитель «за период» и «сейчас и по месяцам» ── */
 .block-sep{margin:24px 0 12px}
+/* Отчёты: «Главное» и свёрнутые блоки */
+details.fold{padding:0;margin-bottom:10px}
+details.fold>summary{cursor:pointer;padding:14px 18px;font-weight:600;list-style:none}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary::before{content:"▸";display:inline-block;width:1.1em;color:var(--muted)}
+details.fold[open]>summary::before{content:"▾"}
+details.fold>summary small{font-weight:400}
+details.fold>:not(summary){margin-left:18px;margin-right:18px}
+details.fold>:last-child{margin-bottom:14px}
+table.headline td b{font-size:15px}
+/* «Главное» на телефоне: строка - подпись, под ней «сейчас · прошлый ·
+   цель» в одну строку, а не столбик из четырёх подписей. */
+@media (max-width:640px){
+  table.headline.cards tr{padding:6px 12px;margin-bottom:6px}
+  table.headline.cards td[data-label]{display:inline-block;width:auto;padding-left:0;margin-right:14px}
+  table.headline.cards td[data-label]::before{float:none;display:inline;width:auto;margin:0 4px 0 0}
+  table.headline.cards td:empty{display:none}
+}

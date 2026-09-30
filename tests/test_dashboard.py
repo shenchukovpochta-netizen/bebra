@@ -267,7 +267,10 @@ class TestExpiringWidget(tw.WebCase):
         self.assertIn("не идёт", self.get_ok("/"))
 
     def test_reports_show_losses_column(self):
-        page = self.get_ok("/reports")
+        # В сводке отчётов - четыре главные колонки, КПД и дни - на полной
+        # странице по месяцам.
+        self.assertIn("<th>Потери</th>", self.get_ok("/reports"))
+        page = self.get_ok("/reports/months")
         self.assertIn("<th>Потери</th>", page)
         self.assertIn("<th>КПД</th>", page)
 

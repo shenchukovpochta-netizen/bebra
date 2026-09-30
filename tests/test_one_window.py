@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 import sys
 import unittest
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -91,6 +91,56 @@ class TestClientGroups(unittest.TestCase):
                           tiles["debt"]), (4, 2, 1, 1, 2))
         self.assertEqual((tiles["paid"], tiles["debt_sum"], tiles["days"]),
                          (D(12000), D(600), 39))
+
+
+class TestHeadline(unittest.TestCase):
+    TZ = timezone(timedelta(hours=3))
+
+    def span(self, **params):
+        now = datetime(2026, 9, 30, 15, tzinfo=self.TZ)
+        return logic.report_prev_span(logic.report_period(params, now=now))
+
+    def test_prev_span(self):
+        cur = self.span(month="2026-09")          # идущий месяц - то же число дней
+        self.assertEqual((cur["since"], cur["until"], cur["label"]),
+                         (date(2026, 8, 1), date(2026, 8, 30), "08.2026"))
+        full = self.span(month="2026-03")         # короткий февраль не вылезает в март
+        self.assertEqual((full["since"], full["until"]), (date(2026, 2, 1), date(2026, 2, 28)))
+        days = self.span()
+        self.assertEqual(days["until"], date(2026, 8, 31))
+        self.assertAlmostEqual(days["days"], 30)
+        own = self.span(since="2026-09-01", until="2026-09-10")
+        self.assertEqual((own["since"], own["until"]), (date(2026, 8, 22), date(2026, 8, 31)))
+
+    def figures(self, idle, check, revenue, **extra):
+        return {"metrics": {"idle_percent": idle, "avg_check": check, "revenue": revenue,
+                            "operational_days": D(4800)}, "days": 30,
+                "issued": 200, "renewals": 400, **extra}
+
+    def test_rows_and_trend(self):
+        now = self.figures(9.1, D(520), D(2400000), debt=D(70000), debtors=9,
+                           new_clients=70, orders=90, integrity=2)
+        prev = self.figures(11.0, D(500), D(2300000), new_clients=75, orders=90)
+        rows = {r["code"]: r for r in logic.report_headline(now, prev, can=lambda s: True)}
+        self.assertEqual(rows["fleet"]["now"], "160 шт.")
+        idle = rows["idle"]
+        self.assertEqual((idle["now"], idle["prev"], idle["goal"]), ("9.1 %", "11.0 %", "< 10 %"))
+        self.assertEqual((idle["up"], idle["better"], idle["ok"]), (False, True, True),
+                         "простой упал - это лучше")
+        self.assertEqual((rows["clients"]["up"], rows["clients"]["better"]), (False, False))
+        self.assertIsNone(rows["orders"]["up"], "без изменений - без стрелки")
+        self.assertEqual(rows["issued"]["now"], "200 / 400")
+        self.assertEqual((rows["debt"]["prev"], rows["debt"]["ok"]), ("", False))
+        self.assertIn("9 чел.", rows["debt"]["now"])
+        self.assertEqual(rows["integrity"]["now"], "2")
+
+    def test_rows_follow_rights(self):
+        now = self.figures(9.1, D(520), D(1), debt=D(0))
+        rows = logic.report_headline(now, None, can=lambda s: s != "finance")
+        codes = [r["code"] for r in rows]
+        self.assertEqual(codes, ["fleet", "idle", "issued"],
+                         "деньги - с «Финансами», закрытых разделов нет")
+        self.assertTrue(all(r["prev"] == "—" for r in rows))
 
 
 class TestReportHelpers(unittest.TestCase):
@@ -194,7 +244,11 @@ class TestOneWindowPages(WebCase):
     def test_clients_summary_hides_money(self):
         self.as_profile("oper", "manager")
         manager = run(self.crm.access_profile_by_code("manager"))
-        self.crm.profiles_[manager["id"]]["perms"]["sections"].pop("finance", None)
+        # Копия прав, а не правка на месте: словарь встроенного профиля общий
+        # на процесс, и вырезанные «Финансы» уехали бы в соседние тесты.
+        stored = self.crm.profiles_[manager["id"]]
+        sections = {k: v for k, v in stored["perms"]["sections"].items() if k != "finance"}
+        stored["perms"] = {**stored["perms"], "sections": sections}
         page = self.get_ok("/clients")
         self.assertNotIn("оплатили за всё время", page)
         self.assertNotIn("Оплатил всего", page)
@@ -203,21 +257,45 @@ class TestOneWindowPages(WebCase):
     def test_reports_one_window(self):
         self.login()
         page = self.get_ok("/reports")
-        for block in ("всё в одном окне", "За период", "Деньги за период", "По точкам",
+        for block in ("всё в одном окне", "Главное", "Деньги за период", "По точкам",
                       "Тарифы", "Окупаемость по моделям", "Что купить", "Клиенты",
-                      "Сервис: техники", "Расход склада", "Сейчас и по месяцам"):
+                      "Сервис: техники", "Расход склада", "Три числа по месяцам",
+                      "Должники"):
             self.assertIn(block, page, block)
         self.assertIn("/reports/points?since=", page, "подробнее - тот же период")
+        head = page.split('class="headline')[1].split("</table>")[0]
+        for row in ("Простой", "Средний чек в день", "Поступило от клиентов",
+                    "Выдач / продлений", "Новых клиентов", "Долг клиентов сейчас"):
+            self.assertIn(row, head, row)
+        self.assertIn("&lt; 10 %", head)
+        # свёрнутые блоки - не больше четырёх колонок
+        for block in page.split("<details")[1:]:
+            for table in block.split("<table")[1:]:
+                header = table.split("</tr>")[0]
+                self.assertLessEqual(header.count("<th"), 4, header[:200])
+        # «Главное» и «Итого» по точкам - одно окно и одна выручка
+        paid = re.search(r"Поступило от клиентов</td>\s*<td[^>]*><b>([^<]+)</b>", page)
+        total = re.search(r'<tr class="total"><td>Итого</td>.*?<td class="num">([^<]+)</td>'
+                          r"\s*</tr>", page, re.S)
+        self.assertEqual(paid.group(1).strip(), total.group(1).strip())
+        self.assertEqual(paid.group(1).strip(), "3 000 ₽")
         month = date.today().strftime("%Y-%m")
-        self.assertIn("За период", self.get_ok(f"/reports?month={month}"))
+        page = self.get_ok(f"/reports?month={month}")
+        prev = (date.today().replace(day=1) - timedelta(days=1)).strftime("%m.%Y")
+        self.assertIn(f"Прошлый · {prev}", page)
 
     def test_reports_one_window_follows_rights(self):
         self.as_profile("mech", "tech")
         page = self.get_ok("/reports")
         self.assertIn("Сервис: техники", page)
-        for money_block in ("Деньги за период", "Окупаемость по моделям", "Что купить"):
+        self.assertIn("Нарядов закрыто", page)
+        for money_block in ("Деньги за период", "Окупаемость по моделям", "Что купить",
+                            "Средний чек", "Поступило", "Долг клиентов"):
             self.assertNotIn(money_block, page, money_block)
         self.assertNotIn("Откуда новые клиенты", page)
+        months = self.get_ok("/reports/months")
+        self.assertIn("Дней аренды", months)
+        self.assertNotIn("КПД", months)
 
 
 if __name__ == "__main__":
