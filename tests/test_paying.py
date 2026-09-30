@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sys
+import types
 import unittest
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -65,8 +68,11 @@ class FakeAcquiring:
     async def charge_saved_card(self, *, token, amount, purpose,
                                 client_email=None, client_phone=None):
         self.calls.append(("charge", token, amount))
+        if isinstance(self.charge, Exception):
+            raise self.charge
         if self.charge is None:
-            raise tochka.TochkaError("рекуррентные платежи не подключены")
+            # Банк отклонил запрос (4xx): отказ наверняка.
+            raise tochka.TochkaError("рекуррентные платежи не подключены", refused=True)
         return self.charge
 
 
@@ -149,6 +155,34 @@ class TestPayLogic(unittest.TestCase):
         self.assertEqual(logic.autocharge_due(rentals, cards={}), [],
                          "без карты списывать нечем")
 
+    def test_money_on_the_way_makes_the_client_busy(self):
+        orders = [
+            {"client_id": 1, "status": "sent", "kind": "link", "operation_id": "op"},
+            {"client_id": 2, "status": "new", "kind": "auto", "operation_id": None},
+            {"client_id": 3, "status": "new", "kind": "link", "operation_id": None},
+            {"client_id": 4, "status": "failed", "kind": "auto", "operation_id": None},
+        ]
+        claims = [{"client_id": 5, "status": "pending"}]
+        self.assertEqual(logic.autocharge_busy(orders, claims), {1, 2, 5},
+                         "ссылка без операции оплатить нечем, отказ - не в пути")
+
+    def test_autocharge_day_mark_is_local_and_persistent(self):
+        now = datetime(2026, 9, 30, 13, 0)
+        self.assertTrue(logic.autocharge_time({"autocharge_hour": "12"}, now))
+        self.assertFalse(logic.autocharge_time(
+            {"autocharge_hour": "12", "autocharge_done_on": "2026-09-30"}, now),
+            "сегодня уже было - перезапуск не повторяет")
+        self.assertTrue(logic.autocharge_time(
+            {"autocharge_hour": "12", "autocharge_done_on": "2026-09-29"}, now))
+        self.assertFalse(logic.autocharge_time({"autocharge_hour": "14"}, now))
+
+    def test_auto_order_has_no_link_to_expire(self):
+        old = datetime.now(UTC) - timedelta(hours=30)
+        self.assertFalse(logic.pay_expired({"status": "sent", "kind": "auto",
+                                            "created_at": old}))
+        self.assertTrue(logic.pay_expired({"status": "sent", "kind": "link",
+                                           "created_at": old}))
+
 
 class TestTochkaPing(unittest.TestCase):
     """Проверка подключения: один лёгкий запрос, ответ банка как есть."""
@@ -160,6 +194,8 @@ class TestTochkaPing(unittest.TestCase):
                 self.status = status
 
             async def json(self, content_type=None):
+                if isinstance(payload, Exception):
+                    raise payload                # тело не JSON
                 return payload
 
         class Session:
@@ -193,6 +229,21 @@ class TestTochkaPing(unittest.TestCase):
         with self.assertRaises(tochka.TochkaError) as ctx:
             tw.run(client.ping())
         self.assertIn("401", str(ctx.exception))
+
+    def test_refusal_is_told_apart_from_silence(self):
+        """4xx - банк отклонил запрос наверняка; 5xx и непонятный ответ -
+        операция могла и пройти. По этому автосписание решает, отказ это
+        или «исход неизвестен»."""
+        for status, payload, refused in (
+                (400, {"errors": [{"message": "recurrent off"}]}, True),
+                (403, ValueError("html"), True),
+                (502, {"message": "bad gateway"}, False),
+                (200, ValueError("html"), False)):
+            client, _ = self.client(status, payload)
+            with self.subTest(status=status), \
+                    self.assertRaises(tochka.TochkaError) as ctx:
+                tw.run(client.ping())
+            self.assertEqual(ctx.exception.refused, refused, status)
 
 
 class TestTochkaParsing(unittest.TestCase):
@@ -498,6 +549,147 @@ class TestPayFlow(tw.WebCase):
         self.assertEqual(order["kind"], "auto")
         self.assertIn("рекуррентные", order["error"])
         self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(-3000))
+
+    # ─── деньги мимо журнала и дважды ───
+
+    TEAM = types.SimpleNamespace(contract_chat_id="-100500")
+
+    def debt(self):
+        _run(self.crm.set_setting("autocharge", "1", by="тест"))
+        _run(self.crm.save_card_token(client_id=self.client_id, token="tk"))
+        rental_id = self.rent()
+        _run(self.crm.add_ledger(client_id=self.client_id, rental_id=rental_id,
+                                 kind="charge", amount=D(-3000)))
+        return rental_id
+
+    def test_hand_credit_after_the_bank_won_is_refused(self):
+        """Оператор открыл счёт, пока клиент платил по ссылке: опрос закрыл
+        его первым. «Зачислено» здесь было бы неправдой - денег от
+        оператора в журнале нет, а наличные он бы взял."""
+        acq = FakeAcquiring(answers=[{"state": "paid", "status": "APPROVED", "card": {}}])
+        order = self.order(acquiring=acq)
+        stale = _run(self.crm.pay_order(order["id"]))
+        self.assertEqual(_run(service.check_pay_order(self.crm, stale, acquiring=acq)),
+                         "paid")
+        with self.assertRaises(service.ServiceError) as ctx:
+            _run(service.credit_pay_order(self.crm, stale, by="оператор", method="cash"))
+        self.assertIn("уже оплачен", str(ctx.exception))
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(3000))
+        r = self.client.post(f"/payments/{order['id']}", data={"action": "cash"})
+        self.assertEqual(r.status_code, 303)
+        self.assertNotIn("зачислено по счёту", self.get_ok(f"/payments/{order['id']}"))
+
+    def test_link_paid_after_cash_is_flagged_not_credited(self):
+        """Счёт закрыли наличными, а клиент оплатил и ссылку: второй раз в
+        журнал не пишем, но и молчать нельзя - отметка и сигнал команде."""
+        acq = FakeAcquiring()
+        order = self.order(acquiring=acq)
+        _run(service.credit_pay_order(self.crm, _run(self.crm.pay_order(order["id"])),
+                                      by="оператор", method="cash"))
+        self.assertEqual(_run(paying.poll_once(self.crm, acq))["seen"], 0,
+                         "полчаса после кассы банк не спрашиваем")
+        self.crm.pay_orders_[order["id"]]["checked_at"] = None
+        acq.answers = [{"state": "pending"}]
+        result = _run(paying.poll_once(self.crm, acq))
+        self.assertEqual((result["seen"], result["paid"], result["twice"]), (1, [], []),
+                         "ссылка ещё не оплачена - это не «оплачено» этого круга")
+        self.crm.pay_orders_[order["id"]]["checked_at"] = None
+        acq.answers = [{"state": "paid", "status": "APPROVED", "card": {}}]
+        result = _run(paying.poll_once(self.crm, acq))
+        self.assertEqual(result["paid"], [])
+        self.assertEqual([o["id"] for o in result["twice"]], [order["id"]])
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(3000),
+                         "в журнале один платёж - наличные")
+        fresh = _run(self.crm.pay_order(order["id"]))
+        self.assertIsNotNone(fresh["bank_paid_at"])
+        self.assertIn("дважды", fresh["error"])
+        self.bot.sent.clear()
+        self.assertTrue(_run(paying.report_twice(self.bot, self.crm, self.TEAM,
+                                                 result["twice"][0])))
+        self.assertIn("оплачен дважды", self.bot.sent[-1][1])
+        self.crm.pay_orders_[order["id"]]["checked_at"] = None
+        self.assertEqual(_run(paying.poll_once(self.crm, acq))["seen"], 0,
+                         "отмеченный счёт больше не опрашивается")
+
+    def test_autocharge_skips_a_pending_claim(self):
+        """Клиент нажал «Я оплатил», оператор ещё не зачислил: долг в журнале
+        прежний, но деньги уже в пути - списывать нельзя."""
+        self.debt()
+        _run(self.crm.create_claim(self.client_id, D(3000)))
+        acq = FakeAcquiring(charge={"state": "paid", "status": "APPROVED"})
+        got = _run(service.autocharge_once(self.crm, acquiring=acq,
+                                           today=date(2026, 9, 8)))
+        self.assertEqual(got["charged"], 0)
+        self.assertEqual([c for c in acq.calls if c[0] == "charge"], [])
+
+    def test_autocharge_without_a_bank_answer_is_not_a_refusal(self):
+        """Таймаут на списании: прошло ли оно, неизвестно. Счёт остаётся
+        открытым, клиент занят, карта без штрафа, команде - сверить."""
+        self.debt()
+        acq = FakeAcquiring(charge=TimeoutError("банк молчит"))
+        got = _run(service.autocharge_once(self.crm, acquiring=acq,
+                                           today=date(2026, 9, 8)))
+        self.assertEqual((got["failed"], len(got["unknown"])), (0, 1))
+        order = _run(self.crm.pay_orders(client_id=self.client_id))[0]
+        self.assertEqual((order["kind"], order["status"]), ("auto", "new"))
+        self.assertIn("неизвестно", order["error"])
+        self.assertEqual(_run(self.crm.card_of(self.client_id))["fails"], 0)
+        acq.charge = {"state": "paid", "status": "APPROVED"}
+        _run(service.autocharge_once(self.crm, acquiring=acq, today=date(2026, 9, 9)))
+        self.assertEqual(len([c for c in acq.calls if c[0] == "charge"]), 1,
+                         "назавтра та же сумма второй раз не списывается")
+        self.bot.sent.clear()
+        self.assertTrue(_run(paying.report_unknown(self.bot, self.crm, self.TEAM,
+                                                   got["unknown"][0])))
+        self.assertIn("банк не ответил", self.bot.sent[-1][1])
+
+    def test_bank_answer_without_an_operation_is_not_a_refusal(self):
+        """Банк ответил, но ни статуса, ни операции: опросу нечего
+        спрашивать, а «отказ» мог оказаться списанием."""
+        self.debt()
+        acq = FakeAcquiring(charge={"state": "pending", "status": ""})
+        got = _run(service.autocharge_once(self.crm, acquiring=acq,
+                                           today=date(2026, 9, 8)))
+        self.assertEqual((got["failed"], got["pending"], len(got["unknown"])), (0, 0, 1))
+        order = _run(self.crm.pay_orders(client_id=self.client_id))[0]
+        self.assertEqual(order["status"], "new")
+        self.assertEqual(_run(self.crm.card_of(self.client_id))["fails"], 0)
+
+    def test_auto_order_is_not_closed_by_the_link_clock(self):
+        """У списания нет ссылки: сутки без ответа банка не делают его
+        «просроченным» - иначе назавтра списали бы ещё раз."""
+        self.debt()
+        acq = FakeAcquiring(charge={"state": "pending", "operation_id": "op-9"})
+        _run(service.autocharge_once(self.crm, acquiring=acq, today=date(2026, 9, 8)))
+        order = _run(self.crm.pay_orders(client_id=self.client_id))[0]
+        self.crm.pay_orders_[order["id"]]["created_at"] = (
+            datetime.now(UTC) - timedelta(hours=30))
+        result = _run(paying.poll_once(self.crm, acq))
+        self.assertEqual(result["expired"], 0)
+        self.assertEqual(_run(self.crm.pay_order(order["id"]))["status"], "sent")
+        _run(service.autocharge_once(self.crm, acquiring=acq, today=date(2026, 9, 9)))
+        self.assertEqual(len([c for c in acq.calls if c[0] == "charge"]), 1)
+
+    def test_restart_does_not_repeat_the_daily_autocharge(self):
+        """Отметка прохода - в базе: бот, перезапущенный после часа
+        списания, в тот же день второй раз не списывает."""
+        self.debt()
+        _run(self.crm.set_setting("autocharge_hour", "0", by="тест"))
+        acq = FakeAcquiring(charge=None)      # отказ: клиент не «занят» счётом
+
+        async def spin():
+            task = asyncio.create_task(paying.paying_loop(
+                self.bot, self.crm, self.TEAM, acq, interval=0.01))
+            await asyncio.sleep(0.1)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        _run(spin())
+        _run(spin())                          # перезапуск бота
+        self.assertEqual(len([c for c in acq.calls if c[0] == "charge"]), 1)
+        self.assertEqual(_run(self.crm.settings())["autocharge_done_on"],
+                         date.today().isoformat())
 
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")

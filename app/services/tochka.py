@@ -62,7 +62,16 @@ DEAD = ("EXPIRED", "DECLINED", "REJECTED", "CANCELLED", "FAILED", "ERROR")
 
 
 class TochkaError(Exception):
-    """Банк ответил ошибкой или чем-то неожиданным."""
+    """Банк ответил ошибкой или чем-то неожиданным.
+
+    `refused` - отказ наверняка: банк отклонил запрос (4xx) или запрос не
+    уходил вовсе. Без него (5xx, непонятный ответ) операция могла и
+    пройти: списание с карты с таким исходом нельзя считать отказом.
+    """
+
+    def __init__(self, message: str = "", *, refused: bool = False) -> None:
+        super().__init__(message)
+        self.refused = refused
 
 
 def _money(value: Any) -> Decimal | None:
@@ -177,10 +186,16 @@ class TochkaClient:
         response = await session.request(
             method, f"{self.api_url}/{path}",
             headers={"Authorization": f"Bearer {self.token}"}, **kwargs)
-        data = await response.json(content_type=None)
+        try:
+            data = await response.json(content_type=None)
+        except ValueError:
+            # Не JSON (страница шлюза вместо ответа): судим по коду - 4xx это
+            # отказ наверняка, остальное - «ответ не разобрать».
+            data = None
         status = getattr(response, "status", 200)
         if status >= 400:
-            raise TochkaError(f"{path}: банк ответил {status} ({_error(data)})")
+            raise TochkaError(f"{path}: банк ответил {status} ({_error(data)})",
+                              refused=status < 500)
         if not isinstance(data, dict):
             raise TochkaError(f"{path}: ответ не разобрать")
         return data
@@ -319,9 +334,9 @@ class TochkaClient:
         текст отказа он покажет в банк и включит.
         """
         if not self.token or not self.customer_code:
-            raise TochkaError("эквайринг Точки не настроен")
+            raise TochkaError("эквайринг Точки не настроен", refused=True)
         if not token:
-            raise TochkaError("карта клиента не сохранена")
+            raise TochkaError("карта клиента не сохранена", refused=True)
         session = self._session()
         try:
             data = await self._json(

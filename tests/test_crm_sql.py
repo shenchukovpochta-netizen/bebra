@@ -223,6 +223,17 @@ class TestCrmSql(unittest.TestCase):
             # позиция-батарея снимает просьбу тем же UPDATE, что и цену
             self.db.add_rental_extra(1, kind="battery", title="Доп. АКБ", price=d,
                                      battery_id=None, by="t"),
+            # смена срока переоценивает позиции в той же транзакции
+            self.db.change_rental_tariff(1, tariff_id=2, tariff_name="Месяц",
+                                         period_days=30, base_price=d, billing="auto",
+                                         extra_prices={3: d}),
+            # счета: способ закрытия, «дважды», исход списания неизвестен
+            self.db.mark_pay_paid(1, method="cash", by="me", shift_id=2),
+            self.db.open_pay_orders(), self.db.mark_pay_twice(1, error="x"),
+            self.db.note_pay_order(1, error="x"),
+            # уже зачисленное мимо выписки и наличные ремонта в смену
+            self.db.credits_since(datetime(2026, 9, 1, tzinfo=UTC)),
+            self.db.mark_order_paid(1, shift_id=2, amount=d, reason="x", by="me"),
             # аналитика по точкам: одно правило денег на окупаемость и точки
             self.db.model_money(datetime(2026, 9, 1, tzinfo=UTC),
                                 datetime(2026, 9, 13, tzinfo=UTC)),

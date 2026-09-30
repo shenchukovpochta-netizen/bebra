@@ -174,9 +174,16 @@
 {% endif %}
 {% if order.payer == 'client' and order.status == 'done' and not order.paid_at and can %}
 <section class="card narrow">
-  <form method="post" action="/orders/{{ order.id }}/paid">
+  <form method="post" action="/orders/{{ order.id }}/paid" class="inline-form">
+    {# Наличные лягут в ящик смены движением «внесение»: без него касса на
+       закрытии показала бы излишек. В журнал аренды - ничего. #}
+    <select name="method" required>
+      <option value="">способ оплаты</option>
+      {% for code, label in METHODS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+    </select>
     <button type="submit">Отметить оплату{% if money_ok %} {{ money(order.total) }}{% endif %}</button>
   </form>
+  <p class="muted">Наличные попадут в кассу вашей открытой смены.</p>
 </section>
 {% endif %}
 {% endblock %}

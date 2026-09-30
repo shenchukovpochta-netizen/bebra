@@ -1116,6 +1116,9 @@ class FakeCrm:
     async def charge_period(self, rental_id, client_id, *, period_from, period_to,
                             amount, note, created_by="billing", created_at=None,
                             bonus=None):
+        # Как условие в UPDATE базы: закрытой аренде период не начисляется.
+        if (self.rentals_.get(rental_id) or {}).get("status") != "active":
+            return False
         if any(x["kind"] == "charge" and x["rental_id"] == rental_id
                and x["period_from"] == period_from for x in self.ledger_):
             return False
@@ -1433,6 +1436,16 @@ class FakeCrm:
     async def update_work_order(self, order_id, **fields):
         if fields:
             self.orders_[order_id].update(fields)
+
+    async def mark_order_paid(self, order_id, *, shift_id, amount, reason, by):
+        order = self.orders_.get(order_id)
+        if order is None or order.get("paid_at"):
+            return False
+        order["paid_at"] = self._now()
+        if shift_id is not None and Decimal(amount) > 0:
+            await self.add_cash_move(shift_id, kind="in", amount=amount, reason=reason,
+                                     by=by)
+        return True
 
     async def order_items(self, order_id):
         return [dict(i) for i in self.order_items_ if i["order_id"] == order_id]
@@ -2876,7 +2889,9 @@ class FakeCrm:
         for row in rows:
             battery = self.batteries_.get(row.get("battery_id"))
             row["battery_code"] = (battery or {}).get("code")
-            row["battery_model"] = (battery or {}).get("model_title")
+            # Как джойн в базе: модель - из каталога по model_id батареи.
+            model = self.battery_models_.get((battery or {}).get("model_id")) or {}
+            row["battery_model"] = model.get("title")
         return sorted(rows, key=lambda e: e["id"])
 
     async def rental_extra(self, extra_id):
@@ -2899,6 +2914,18 @@ class FakeCrm:
         if kind == "battery" and rental_id in self.rentals_:
             self.rentals_[rental_id]["battery_asked_at"] = None
         return eid
+
+    async def change_rental_tariff(self, rental_id, *, tariff_id, tariff_name,
+                                   period_days, base_price, billing, extra_prices):
+        for extra_id, price in extra_prices.items():
+            row = self.rental_extras_.get(int(extra_id))
+            if row is not None and row["rental_id"] == rental_id \
+                    and row["removed_at"] is None:
+                row["price"] = Decimal(price)
+        await self.update_rental(rental_id, tariff_id=tariff_id, tariff_name=tariff_name,
+                                 period_days=period_days, base_price=Decimal(base_price),
+                                 billing=billing)
+        self._reprice(rental_id)
 
     async def drop_rental_extra(self, extra_id, *, by):
         row = self.rental_extras_.get(extra_id)
@@ -3355,6 +3382,24 @@ class FakeCrm:
                    handled_at=self._now(), handled_by=created_by)
         return ledger_id
 
+    async def credits_since(self, since):
+        linked = {t.get("ledger_id") for t in self.bank_.values() if t.get("ledger_id")}
+        entries = {x["id"]: x for x in self.ledger_}
+        out = []
+        for source, rows, ok in (
+                ("claim", self.claims_.values(), "confirmed"),
+                ("order", self.pay_orders_.values(), "paid")):
+            for row in rows:
+                entry = entries.get(row.get("ledger_id"))
+                if (row["status"] != ok or entry is None or entry["id"] in linked
+                        or entry["created_at"] < since):
+                    continue
+                out.append({"source": source,
+                            "ref": f"#{row['id']}" if source == "claim" else row["no"],
+                            "client_id": row["client_id"], "amount": entry["amount"],
+                            "paid_at": entry["created_at"]})
+        return out
+
     async def last_bank_txn_at(self):
         moments = [t["booked_at"] for t in self.bank_.values()]
         return max(moments) if moments else None
@@ -3586,7 +3631,8 @@ class FakeCrm:
             "work_order_id": work_order_id,
             "operation_id": None, "link": None, "error": None, "ledger_id": None,
             "created_by": created_by, "created_at": self._now(),
-            "sent_at": None, "paid_at": None, "checked_at": None}
+            "sent_at": None, "paid_at": None, "checked_at": None,
+            "paid_method": None, "bank_paid_at": None}
         return oid
 
     async def set_pay_link(self, order_id, *, link, operation_id):
@@ -3610,7 +3656,12 @@ class FakeCrm:
             if work is not None:
                 work["paid_at"] = self._now()
             order.update(status="paid", paid_at=self._now(),
-                         checked_at=self._now(), error=None)
+                         checked_at=self._now(), error=None, paid_method=method)
+            # Наличные за ремонт - движением смены, как в той же транзакции базы.
+            if method == "cash" and shift_id is not None:
+                await self.add_cash_move(shift_id, kind="in", amount=order["amount"],
+                                         reason=f"{order['purpose']} · счёт {order['no']}",
+                                         by=by)
             return 0
         ledger_id = await self.add_ledger(
             client_id=order["client_id"], rental_id=order["rental_id"],
@@ -3618,8 +3669,21 @@ class FakeCrm:
             note=f"Счёт {order['no']}", created_by=by or "эквайринг",
             shift_id=shift_id)
         order.update(status="paid", paid_at=self._now(), checked_at=self._now(),
-                     ledger_id=ledger_id, error=None)
+                     ledger_id=ledger_id, error=None, paid_method=method)
         return ledger_id
+
+    async def mark_pay_twice(self, order_id, *, error):
+        order = self.pay_orders_.get(order_id)
+        if (order is None or order["status"] != "paid" or order.get("bank_paid_at")
+                or (order.get("paid_method") or "card") == "card"):
+            return False
+        order.update(bank_paid_at=self._now(), checked_at=self._now(), error=error[:500])
+        return True
+
+    async def note_pay_order(self, order_id, *, error):
+        order = self.pay_orders_.get(order_id)
+        if order is not None and order["status"] in ("new", "sent"):
+            order.update(error=error[:500], checked_at=self._now())
 
     async def mark_pay_failed(self, order_id, *, error):
         order = self.pay_orders_.get(order_id)
@@ -3659,9 +3723,15 @@ class FakeCrm:
         now = self._now()
 
         def recheck(o):
-            if o["status"] not in ("failed", "cancelled") or o.get("ledger_id"):
+            if o["status"] in ("failed", "cancelled") and not o.get("ledger_id"):
+                window = timedelta(days=crm_logic.PAY_RECHECK_DAYS)
+            elif (o["status"] == "paid" and not o.get("bank_paid_at")
+                  and (o.get("paid_method") or "card") != "card"):
+                # Закрыт руками, а ссылка у банка жива: оплата по ней - дважды.
+                window = timedelta(hours=crm_logic.PAY_TWICE_HOURS)
+            else:
                 return False
-            if o["created_at"] <= now - timedelta(days=crm_logic.PAY_RECHECK_DAYS):
+            if o["created_at"] <= now - window:
                 return False
             checked = o.get("checked_at")
             return checked is None or checked < now - timedelta(

@@ -1698,6 +1698,15 @@ alter table crm.pay_orders add column if not exists work_order_id bigint
 create index if not exists pay_orders_work_idx
   on crm.pay_orders (work_order_id) where work_order_id is not null;
 
+-- Как закрыт счёт: card - подтвердил банк, cash/transfer - принял человек.
+-- Закрытый руками счёт со ссылкой банк ещё принимает: клиент может
+-- оплатить его и по ссылке, и эти деньги пришли бы мимо журнала молча.
+-- Такой счёт опрашивается, пока ссылка жива; bank_paid_at - банк сказал
+-- «оплачено» по счёту, уже закрытому руками: второй раз в журнал не
+-- пишем, команде - сигнал вернуть или зачесть.
+alter table crm.pay_orders add column if not exists paid_method text;
+alter table crm.pay_orders add column if not exists bank_paid_at timestamptz;
+
 -- ────────────────────── баллы и отзывы ──────────────────────
 --
 -- Баллы - не деньги, а наша скидка. В журнале они живут записью вида

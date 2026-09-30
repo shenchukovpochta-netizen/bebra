@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -74,6 +74,24 @@ class TestCashLogic(unittest.TestCase):
 
 
 class TestBankLogic(unittest.TestCase):
+    def test_credited_before_looks_a_few_days_around(self):
+        """Те же деньги уже в журнале - та же сумма тому же клиенту рядом
+        по дате. Другой клиент, другая сумма, давний платёж - не они."""
+        booked = datetime(2026, 9, 10, 12, tzinfo=UTC)
+        txn = {"direction": "credit", "amount": D(3000), "booked_at": booked}
+        near = {"source": "claim", "ref": "#7", "client_id": 1, "amount": D(3000),
+                "paid_at": booked - timedelta(days=2)}
+        got = logic.bank_credited_before(txn, 1, [near])
+        self.assertIn("«Я оплатил» #7", plain(got["note"]))
+        self.assertIsNone(logic.bank_credited_before(txn, 2, [near]), "другой клиент")
+        self.assertIsNone(logic.bank_credited_before(txn, 1, [{**near, "amount": D(2999)}]))
+        self.assertIsNone(logic.bank_credited_before(
+            txn, 1, [{**near, "paid_at": booked - timedelta(days=5)}]), "давний")
+        rows = logic.bank_rows([{**self.txn(), "purpose": "по договору АВ-2026-000042"}],
+                               self.clients(), credits=[near | {"paid_at": None}])
+        self.assertFalse(rows[0]["sure"], "совпадение - человеку, не автозачислению")
+        self.assertIn("уже зачислено", plain(rows[0]["guess_reason"]))
+
     def clients(self):
         return [{"id": 1, "full_name": "Иванов Иван Иванович", "phone": "+79990000001",
                  "contract_no": "АВ-2026-000042", "status": "active"},
@@ -754,6 +772,56 @@ class TestCashPanel(tw.WebCase):
         self.assertIn("Смена закрыта", self.get_ok(f"/cash/{shift_id}"))
         self.assertEqual(tw.run(self.crm.cash_moves(shift_id)), [])
 
+    def repair_order(self, total="1500"):
+        order_id = tw.run(self.crm.create_work_order(
+            bike_id=None, payer="client", client_id=self.client_id, complaint="не едет",
+            object_note="самокат", tech_id=None, estimate=D(0), created_by="t"))
+        tw.run(self.crm.update_work_order(order_id, status="done", total=D(total)))
+        return order_id
+
+    def test_repair_paid_in_cash_is_in_the_drawer_not_in_the_ledger(self):
+        """Наличные за ремонт лежат в ящике: движение смены, а не запись в
+        журнале аренды (красная линия). Иначе закрытие показало бы излишек."""
+        shift_id = self.open_shift(opening="0")
+        order_id = self.repair_order()
+        r = self.client.post(f"/orders/{order_id}/paid", data={"method": "cash"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("внесены в кассу", self.get_ok(f"/orders/{order_id}"))
+        [move] = tw.run(self.crm.cash_moves(shift_id))
+        self.assertEqual((move["kind"], move["amount"]), ("in", D(1500)))
+        self.assertIn("самокат", move["reason"])
+        self.assertEqual(tw.run(self.crm.ledger_of(self.client_id)), [])
+        state = logic.shift_state(tw.run(self.crm.cash_shift(shift_id)),
+                                  tw.run(self.crm.shift_payments(shift_id)),
+                                  tw.run(self.crm.cash_moves(shift_id)))
+        self.assertEqual(state["expected"], D(1500))
+        self.client.post(f"/orders/{order_id}/paid", data={"method": "cash"})
+        self.assertEqual(len(tw.run(self.crm.cash_moves(shift_id))), 1,
+                         "второе нажатие денег в ящик не добавляет")
+
+    def test_repair_invoice_closed_in_cash_goes_to_the_shift(self):
+        shift_id = self.open_shift(opening="0")
+        order_id = self.repair_order(total="2000")
+        invoice = tw.run(service.invoice_order(self.crm, tw.run(self.crm.work_order(order_id)),
+                                               by="t", acquiring=None))
+        self.client.post(f"/payments/{invoice['id']}", data={"action": "cash"})
+        [move] = tw.run(self.crm.cash_moves(shift_id))
+        self.assertEqual((move["kind"], move["amount"]), ("in", D(2000)))
+        self.assertIn(invoice["no"], move["reason"])
+        self.assertEqual(tw.run(self.crm.ledger_of(self.client_id)), [])
+        self.assertIsNotNone(tw.run(self.crm.work_order(order_id))["paid_at"])
+
+    def test_repair_cash_without_a_shift_says_so(self):
+        order_id = self.repair_order()
+        self.client.post(f"/orders/{order_id}/paid", data={"method": "cash"})
+        self.assertIsNotNone(tw.run(self.crm.work_order(order_id))["paid_at"])
+        self.assertIn("Открытой смены нет", self.get_ok(f"/orders/{order_id}"))
+        transfer = self.repair_order()
+        shift_id = self.open_shift(opening="0")
+        self.client.post(f"/orders/{transfer}/paid", data={"method": "transfer"})
+        self.assertEqual(tw.run(self.crm.cash_moves(shift_id)), [],
+                         "перевод в ящик не попадает")
+
     def test_missing_shift_is_a_404(self):
         self.assertEqual(self.client.get("/cash/999").status_code, 404)
 
@@ -842,6 +910,39 @@ class TestBankPanel(tw.WebCase):
         self.assertEqual(tw.run(banking.auto_credit(self.crm)), 0)
         self.client.post("/bank/settings", data={})
         self.assertIn("Автозачисление выключено", self.get_ok("/bank"))
+
+    def test_claim_already_credited_is_left_to_a_person(self):
+        """Клиент перевёл по договору и нажал «Я оплатил», заявку
+        зачислили. Строка выписки с тем же номером договора - те же деньги:
+        автозачисление их второй раз не кладёт, оператор видит почему."""
+        tw.run(self.crm.set_setting("bank_auto_credit", "1", by="t"))
+        claim = tw.run(self.crm.create_claim(self.client_id, D(3000)))
+        tw.run(service.credit_claim(self.crm, tw.run(self.crm.claim(claim)), D(3000),
+                                    by="оператор"))
+        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 0)
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
+        self.assertEqual(tw.run(self.crm.bank_txn(self.txn_id))["status"], "new")
+        page = self.get_ok("/bank")
+        self.assertIn("уже зачислено", page)
+        self.assertIn(f"«Я оплатил» #{claim}", page)
+
+    def test_invoice_closed_by_transfer_is_not_credited_again(self):
+        tw.run(self.crm.set_setting("bank_auto_credit", "1", by="t"))
+        order = tw.run(self.crm.create_pay_order(
+            client_id=self.client_id, rental_id=None, amount=D(3000), purpose="Аренда"))
+        tw.run(service.credit_pay_order(self.crm, tw.run(self.crm.pay_order(order)),
+                                        by="оператор", method="transfer"))
+        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 0)
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
+        self.assertIn("счёт СЧТ-000001", self.get_ok("/bank"))
+
+    def test_other_amount_is_still_credited(self):
+        tw.run(self.crm.set_setting("bank_auto_credit", "1", by="t"))
+        claim = tw.run(self.crm.create_claim(self.client_id, D(1000)))
+        tw.run(service.credit_claim(self.crm, tw.run(self.crm.claim(claim)), D(1000),
+                                    by="оператор"))
+        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 1)
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(4000))
 
     def test_import_is_idempotent(self):
         class Client:

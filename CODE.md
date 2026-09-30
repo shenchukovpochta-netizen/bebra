@@ -861,7 +861,7 @@ service.charge_all(crm, *, today: date) -> int                                  
 |---|---|---|
 | Ремонт чужой техники | `work_orders.total`, `work_orders.paid_at` | журнал это аренда, средний чек считается по нему и чужой самокат его завысил бы |
 | Выставленный счёт | `crm.pay_orders` | счёт это намерение, журнал это факт. В `ledger` он превращается один раз, при подтверждённой оплате, и `pay_orders.ledger_id` это фиксирует |
-| Оплаченный счёт за ремонт | `work_orders.paid_at` | та же красная линия |
+| Оплаченный счёт за ремонт | `work_orders.paid_at`; наличные - движением смены `cash_moves` в той же транзакции | та же красная линия |
 
 Красная линия реализована в `CrmDB.mark_pay_paid` (`app/crm/db.py`): если у счёта есть
 `work_order_id`, функция ставит наряду `paid_at`, закрывает счёт и возвращает `None`, не
@@ -895,7 +895,8 @@ service.credit_claim(crm, claim, amount: Decimal, *, by, method="sbp") -> int | 
 # service.py строка выписки Точки; уже разобранная - ServiceError,
 #              вставка платежа и отметка строки одной транзакцией
 service.credit_bank_txn(crm, txn, client, *, by, method="transfer") -> int
-# service.py счёт закрыт наличными или переводом
+# service.py счёт закрыт наличными или переводом; счёт, который за эту
+#            секунду закрыл опрос банка, - ServiceError, а не «зачислено»
 service.credit_pay_order(crm, order, *, by, method="cash") -> int | None
 # service.py  баллы руками, никогда не платёж
 service.grant_manual_bonus(crm, client, amount: Decimal, *, note, by) -> Decimal
@@ -1302,7 +1303,7 @@ notices.record(crm, code, *, status, client_id=None, detail=None) -> None
 | `rent_soon`, `rent_due`, `rent_overdue` | `billing.run_daily` | После удачного `remind_once` | Сбой базы посреди прохода иначе съедал напоминания до завтра; повтор отсекает `notified_on` каждой аренды |
 | Напоминание конкретной аренде | `billing.remind_once` | До отправки, `crm.mark_notified` | Заблокировавший бота клиент не должен дёргать систему весь день |
 | Выключенное напоминание | `billing.remind_once` | Всё равно помечается отправленным | Иначе обратное включение тумблера обрушит на клиента всё накопленное |
-| `charged_on` автосписания | `paying.paying_loop` | В `finally` | Одна попытка в сутки при любом исходе: до прохода нельзя (сбой отменит списание молча), не ставить вовсе тоже нельзя |
+| `autocharge_done_on` автосписания (`crm.settings`, местная дата) | `paying.paying_loop` | В `finally` | Одна попытка в сутки при любом исходе: до прохода нельзя (сбой отменит списание молча), не ставить вовсе тоже нельзя; в базе, а не в памяти - перезапуск после часа списания не повторяет проход |
 | `bot_done_on` | `tasks.reminders_loop` | После удачного прохода | Сбой Telegram в назначенный час иначе стоил бы клиентам суток молчания |
 
 ### Как сбой одного круга не ломает остальные
