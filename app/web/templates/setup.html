@@ -30,7 +30,7 @@
 {% if shown %}
 <div class="card">
   <h2>Вход для {{ shown.login }}</h2>
-  <p>{{ shown.role }}, профиль «{{ shown.profile }}». Логин <code>{{ shown.login }}</code>,
+  <p>Роль «{{ shown.profile }}». Логин <code>{{ shown.login }}</code>,
     пароль <code>{{ shown.password }}</code></p>
   <p class="muted">Пароль показан один раз: в базе только его хэш. Передайте
     сотруднику лично, не в общий чат, — сменит он его в своём кабинете.
@@ -114,12 +114,12 @@
 
   {% elif step.code == 'staff' %}
   {% if staff_closed %}<p class="muted">Логины и имена — в разделе «Сотрудники»,
-    а ваш профиль его не открывает.</p>{% endif %}
+    а ваша роль его не открывает.</p>{% endif %}
   {% if people %}
   <table class="cards">
-    <tr><th>Логин</th><th>Имя</th><th>Профиль</th></tr>
+    <tr><th>Логин</th><th>Имя</th><th>Роль</th></tr>
     {% for s in people %}
-    <tr><td data-label="Логин">{{ s.login }}</td><td data-label="Имя">{{ s.name or '—' }}</td><td data-label="Профиль">{{ s.profile_name or 'без профиля' }}</td></tr>
+    <tr><td data-label="Логин">{{ s.login }}</td><td data-label="Имя">{{ s.name or '—' }}</td><td data-label="Роль">{{ s.profile_name or 'без роли' }}</td></tr>
     {% endfor %}
   </table>
   {% endif %}
@@ -130,14 +130,14 @@
   <form method="post" action="/setup/staff" class="grid2">
     <input type="hidden" name="role" value="{{ r.code }}">
     <input type="hidden" name="once" value="{{ once() }}">
-    <label>Логин <input name="login" required autocomplete="off" placeholder="латиница, 3–32 символа"></label>
-    <label>Имя <input name="name" autocomplete="off"></label>
+    <label>ФИО <input name="name" required autocomplete="off" placeholder="Кузнецов Тимур"></label>
+    <label>Логин <input name="login" autocomplete="off" placeholder="пусто — соберём из ФИО"></label>
     <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
     <button type="submit">Завести: {{ r.title|lower }}</button>
   </form>
   {% endif %}
-  {% if r.profile %}<p class="muted">Профиль «{{ r.profile.name }}» — права правятся в
-    <a href="/profiles/{{ r.profile.id }}">профилях доступа</a>.</p>{% endif %}
+  {% if r.profile %}<p class="muted">Роль «{{ r.profile.name }}» — что она видит и меняет, правится в
+    <a href="/profiles/{{ r.profile.id }}">ролях</a>.</p>{% endif %}
   {% endfor %}
   <p class="muted">Пароль придумает панель и покажет один раз. У каждого — свой
     вход: иначе в журналах один автор на всех. Telegram для нарядов сотрудник

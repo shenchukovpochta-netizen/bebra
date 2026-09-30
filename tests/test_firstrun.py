@@ -441,7 +441,7 @@ class TestWizard(tw.WebCase):
         # тот же логин - отказ, второго входа нет
         self.client.post("/setup/staff", data={"role": "mechanic", "login": "olga"})
         self.assertEqual(len(tw.run(self.crm.staff_all())), 2)
-        self.assertIn("Такой логин уже есть", self.get_ok("/setup?step=staff"))
+        self.assertIn("Логин olga уже занят", self.get_ok("/setup?step=staff"))
         self.client.post("/setup/staff", data={"role": "admin", "login": "root"})
         self.assertIsNone(tw.run(self.crm.staff_by_login("root")))
         self.client.post("/setup/staff", data={"role": "mechanic", "login": "petr"})
@@ -466,7 +466,7 @@ class TestWizard(tw.WebCase):
         self.assertEqual(len(tw.run(self.crm.staff_all())), 2, "второго входа нет")
         text = self.get_ok("/setup?step=staff")
         self.assertIn("повторное нажатие пропущено", text)
-        self.assertNotIn("Такой логин уже есть", text)
+        self.assertNotIn("уже занят", text)
         password = re.search(r"пароль <code>([^<]+)</code>", text).group(1)
         self.assertTrue(logic.verify_password(
             password, tw.run(self.crm.staff_by_login("olga"))["password_hash"]))
@@ -490,13 +490,13 @@ class TestWizard(tw.WebCase):
         text = self.get_ok("/setup?step=staff")
         for secret in ("secretboss", "Иван Секретов", "есть: "):
             self.assertNotIn(secret, text)
-        self.assertIn("ваш профиль его не открывает", text)
+        self.assertIn("ваша роль его не открывает", text)
         self.assertIn("Активных входов: 3", text, "число - из «Готовности»")
         self.as_("admin", "admin-pass-123")
         text = self.get_ok("/setup?step=staff")
         self.assertIn("Иван Секретов", text)
         self.assertIn("есть: secretboss", text)
-        self.assertNotIn("ваш профиль его не открывает", text)
+        self.assertNotIn("ваша роль его не открывает", text)
 
     def test_connect_step_takes_no_secrets(self):
         self.login()

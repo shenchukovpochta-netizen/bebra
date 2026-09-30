@@ -110,7 +110,6 @@ CLIENT_STATUSES = {
 }
 RENTAL_STATUSES = {"active": "Идёт", "closed": "Закрыта"}
 BILLING = {"auto": "по тарифу", "manual": "вручную"}
-ROLES = {"admin": "Администратор", "manager": "Менеджер"}
 
 MAX_AMOUNT = Decimal("10000000")
 MAX_PERIOD_DAYS = 366
@@ -586,6 +585,56 @@ def check_login(raw: Any) -> Check:
     if not re.fullmatch(r"[a-z0-9_.-]{3,32}", text):
         return Check(False, error="Логин: 3–32 символа, латиница, цифры, точка, дефис.")
     return Check(True, text)
+
+
+# Латиница для логина из ФИО. Своя таблица, а не библиотека: букв три
+# десятка, и логин «kuznetsov.t» читается одинаково у всех, кто его
+# набирает. Татарские буквы - к ближайшей русской: в Казани они в ФИО есть.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya", "ә": "a", "ө": "o", "ү": "u", "җ": "zh", "ң": "n", "һ": "h",
+}
+LOGIN_FALLBACK = "staff"
+
+
+def translit(text: str) -> str:
+    """Кириллица - латиницей, прочее, кроме латиницы и цифр, выпадает."""
+    out = []
+    for ch in str(text or "").lower():
+        if ch in _TRANSLIT:
+            out.append(_TRANSLIT[ch])
+        elif "a" <= ch <= "z" or "0" <= ch <= "9":
+            out.append(ch)
+    return "".join(out)
+
+
+def login_from_name(name: Any, taken: Iterable[str] = ()) -> str:
+    """Логин из ФИО, когда его не задали: «Кузнецов Тимур» -> kuznetsov.t.
+
+    Фамилия и первая буква имени - так логины в панели понятны без
+    справочника. Занятый получает номер (kuznetsov.t2); из ФИО без
+    единой буквы выходит «staff» с номером. Ответ всегда проходит
+    check_login: форму с ним не придётся исправлять второй раз.
+    """
+    # Первая буква имени - латиницей целиком: «Юлия» -> yu, а не y.
+    words = [(translit(w), translit(w[:1])) for w in str(name or "").split()]
+    words = [(w, first or w[0]) for w, first in words if w]
+    base = words[0][0][:24] if words else ""
+    if base and len(words) > 1:
+        base += "." + words[1][1]
+    if len(base) < 3:
+        base = (base + "." if base else "") + LOGIN_FALLBACK
+    busy = {str(t).lower() for t in taken}
+    if base not in busy:
+        return base
+    for n in range(2, 1000):
+        candidate = f"{base[:29]}{n}"
+        if candidate not in busy:
+            return candidate
+    return f"{LOGIN_FALLBACK}{secrets.randbelow(10 ** 6)}"
 
 
 def check_password(raw: Any) -> Check:
@@ -2436,7 +2485,7 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
     ("owner", "Владелец",
      {"sections": dict.fromkeys(SECTIONS, "edit"),
       "actions": dict.fromkeys(ACTIONS, True)}, True),
-    ("manager", "Менеджер",
+    ("manager", "Администратор",
      {"sections": {"dashboard": "view", "issue": "edit", "clients": "edit",
                    "rentals": "edit", "bikes": "view", "service": "view",
                    "claims": "edit", "finance": "view", "tariffs": "view",
@@ -2444,7 +2493,7 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
                    "trackers": "view", "cash": "edit", "mailing": "view",
                    "promos": "view"},
       "actions": {}}, False),
-    ("tech", "Механик",
+    ("tech", "Мастер",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
                    "rentals": "view", "reports": "view", "inventory": "edit",
                    "batteries": "edit", "trackers": "view"},
@@ -2456,12 +2505,12 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
 # сотрудник видит «Мои задачи» и карточки, куда они ведут, но не сводку,
 # деньги, отчёты и настройки. Без «dashboard» вход ведёт на /my (home_for).
 TASK_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
-    ("tasks_operator", "Оператор: только задачи",
+    ("tasks_operator", "Администратор: только задачи",
      {"sections": {"issue": "edit", "clients": "edit", "rentals": "edit", "cash": "edit",
                    "claims": "edit", "bikes": "view", "batteries": "view",
                    "trackers": "view"},
       "actions": {}}, False),
-    ("tasks_tech", "Механик: только задачи",
+    ("tasks_tech", "Мастер: только задачи",
      {"sections": {"service": "edit", "bikes": "edit", "batteries": "edit",
                    "inventory": "edit", "trackers": "view"},
       "actions": {}}, False),
@@ -2472,7 +2521,35 @@ TASK_SECTIONS: tuple[str, ...] = ("issue", "rentals", "service", "trackers", "cl
 
 
 def check_profile_name(raw: Any) -> Check:
-    return check_name(raw, what="Название профиля")
+    return check_name(raw, what="Название роли")
+
+
+def role_title(staff: dict | None) -> str:
+    """Роль сотрудника словами - название его профиля доступа («Мастер»).
+
+    Под именем в меню стоит именно она. Старая колонка staff.role знает
+    только admin/manager и мастеру писала «Менеджер»: права давно решает
+    профиль, и подпись должна говорить то же, что права.
+    """
+    staff = staff or {}
+    name = str(staff.get("profile_name") or "").strip()
+    if name:
+        return name
+    return "Владелец" if staff.get("role") == "admin" else "Без роли"
+
+
+def role_summary(perms: Any, *, limit: int = 4) -> str:
+    """Что роль делает, одной строкой для выбора роли: разделы, где она
+    меняет, по порядку меню; хвост - числом. Пусто - «только смотрит»."""
+    sections = normalize_perms(perms)["sections"]
+    edit = [SECTIONS[c] for c in SECTIONS if sections.get(c) == "edit"]
+    view = [c for c in SECTIONS if sections.get(c) == "view"]
+    if not edit:
+        return "только смотрит" if view else "ничего не открыто"
+    short = [label.split(":")[0].lower() for label in edit[:limit]]
+    short[0] = short[0][:1].upper() + short[0][1:]
+    tail = len(edit) - limit
+    return ", ".join(short) + (f" и ещё {tail}" if tail > 0 else "")
 
 
 # ─────────────────────────── сервис: наряды ───────────────────────────

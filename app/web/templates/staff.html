@@ -1,82 +1,127 @@
 {% extends "base.html" %}
 {% block title %}Сотрудники — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="bar"><h1>Сотрудники</h1>
-  <a class="btn ghost" href="/profiles">Профили доступа</a></div>
+<div class="bar"><h1>Сотрудники <small class="muted">{{ rows|selectattr('active')|list|length }} с доступом</small></h1>
+  <a class="btn ghost" href="/profiles">Роли</a>
+  {% if can_manage %}<button type="button" onclick="document.getElementById('add-staff').showModal()">+ Добавить сотрудника</button>{% endif %}
+</div>
+{% if demo %}
+<p class="note">В демо сотрудников не добавить и не изменить: вход здесь общий для всех посетителей.
+  На вашей панели кнопка «Добавить сотрудника» стоит справа вверху.</p>
+{% endif %}
 <section class="card">
-  <div class="table-wrap">
-  <table>
-    <tr><th>Логин</th><th>Имя</th><th>Профиль</th><th>Своя точка</th><th>Доступ</th><th>Telegram</th><th>Новый пароль</th><th></th></tr>
+  {# Без .table-wrap: прокрутка вбок обрезала бы меню «⋯» строки, а шесть
+     колонок в ширину панели помещаются, на телефоне строка - карточка. #}
+  <div class="staff-wrap">
+  <table class="cards staff-table">
+    <tr><th>Сотрудник</th><th>Роль</th><th>Своя точка</th><th>Доступ</th><th>Telegram</th><th></th></tr>
     {% for s in rows %}
     <tr class="{% if not s.active %}muted{% endif %}">
-      <td>{{ s.login }}</td><td>{{ s.name }}</td>
-      <td>
+      <td data-label="Сотрудник"><b>{{ s.name or s.login }}</b>{% if s.id == staff.id %} <span class="tag">вы</span>{% endif %}
+        <br><small class="muted">логин {{ s.login }}</small></td>
+      <td data-label="Роль">
         {% if can_manage and s.id != staff.id %}
+        {# Смена роли - выбором в списке, без отдельной кнопки: скрипт
+           отправляет форму сам, без него остаётся кнопка. #}
         <form method="post" action="/staff/{{ s.id }}/profile" class="inline-form">
-          <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {% if p.id == s.profile_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
-          <button type="submit" class="ghost">Сменить</button>
+          <select name="profile_id" aria-label="Роль" onchange="this.form.submit()">{% for p in profiles %}<option value="{{ p.id }}" {% if p.id == s.profile_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
+          <noscript><button type="submit" class="ghost">Сменить</button></noscript>
         </form>
         {% else %}
-        <a href="/profiles/{{ s.profile_id }}">{{ s.profile_name or 'без профиля' }}</a>{% if s.id == staff.id %} <small class="muted">(вы)</small>{% endif %}
+        <a href="/profiles/{{ s.profile_id }}">{{ s.profile_name or 'без роли' }}</a>
         {% endif %}
       </td>
-      <td>
+      <td data-label="Своя точка">
         {% if can_manage %}
         <form method="post" action="/staff/{{ s.id }}/location" class="inline-form">
           {# Закрытая точка остаётся в строке: список без неё сбросил бы её при первом сохранении. #}
-          <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location }}</option>{% endif %}</select>
-          <button type="submit" class="ghost">Задать</button>
+          <select name="location" aria-label="Своя точка" onchange="this.form.submit()"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location }}</option>{% endif %}</select>
+          <noscript><button type="submit" class="ghost">Задать</button></noscript>
         </form>
         {% else %}{{ s.location or '—' }}{% endif %}
       </td>
       <td data-label="Доступ">
-        {% if not s.active %}<span class="muted">отключён</span>{% elif s.expires_at %}{% if staff_expired(s) %}<span class="bad">истёк {{ s.expires_at|dmy }}</span>{% else %}до {{ s.expires_at|dmy }}{% endif %}{% else %}<span class="muted">бессрочно</span>{% endif %}
-        {% if can_manage and s.id != staff.id %}
-        <form method="post" action="/staff/{{ s.id }}/term" class="inline-form">
-          <select name="term"><option value="">—</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}{% if s.expires_at %}<option value="none">бессрочно</option>{% endif %}</select>
-          <button type="submit" class="ghost">Срок</button>
-          {# Дата - под раскрытием: строка таблицы не вырастает в три этажа. #}
-          <details class="term-date"><summary>до даты…</summary><input name="until" type="date" title="до даты включительно"></details>
-        </form>
-        {% endif %}
+        {% if not s.active %}<span class="tag closed">отключён</span>
+        {% elif s.expires_at %}{% if staff_expired(s) %}<span class="tag bad">истёк {{ s.expires_at|dmy }}</span>{% else %}<span class="tag warn">до {{ s.expires_at|dmy }}</span>{% endif %}
+        {% else %}<span class="tag ok">активен</span>{% endif %}
       </td>
-      <td>{{ staff_tg_label(s) }}
+      <td data-label="Telegram">
+        {% if s.tg_id %}<span class="tag ok">{{ staff_tg_label(s) }}</span>{% else %}<span class="muted">не привязан</span>{% endif %}
         {% if can_manage %}
         <form method="post" action="/staff/{{ s.id }}/telegram" class="inline-form">
           {% if s.tg_id %}<input type="hidden" name="unlink" value="1">{% endif %}
-          <button type="submit" class="ghost">{{ 'Отвязать' if s.tg_id else 'Код' }}</button>
+          <button type="submit" class="ghost small">{{ 'Отвязать' if s.tg_id else 'Код привязки' }}</button>
         </form>
         {% endif %}
       </td>
-      <td>{% if can_manage %}<form method="post" action="/staff/{{ s.id }}/password" class="inline-form"><input name="password" type="password" size="10" autocomplete="new-password" placeholder="пусто — придумает панель"><button type="submit" class="ghost">Задать</button></form>{% endif %}</td>
-      <td>{% if can_manage and s.id != staff.id %}<form method="post" action="/staff/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'Отключить' if s.active else 'Включить' }}</button></form>{% endif %}</td>
+      <td class="actions">
+        {% if can_manage %}
+        {# Редкие действия - в меню строки: новый пароль, срок, отключение.
+           Раньше они стояли кнопками в каждой ячейке, и строка сотрудника
+           была выше экрана телефона. #}
+        <details class="menu">
+          <summary aria-label="Действия" title="Действия">⋯</summary>
+          <div class="menu-body">
+            <form method="post" action="/staff/{{ s.id }}/password">
+              <label>Новый пароль <input name="password" type="password" autocomplete="new-password" placeholder="пусто — придумает панель"></label>
+              <button type="submit" class="ghost">Задать пароль</button>
+            </form>
+            {% if s.id != staff.id %}
+            <form method="post" action="/staff/{{ s.id }}/term">
+              <label>Срок доступа <select name="term"><option value="">—</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}{% if s.expires_at %}<option value="none">бессрочно</option>{% endif %}</select></label>
+              <label>или до даты <input name="until" type="date" title="до даты включительно"></label>
+              <button type="submit" class="ghost">Задать срок</button>
+            </form>
+            <form method="post" action="/staff/{{ s.id }}/toggle">
+              <button type="submit" class="ghost {% if s.active %}danger{% endif %}">{{ 'Отключить доступ' if s.active else 'Включить доступ' }}</button>
+            </form>
+            {% endif %}
+          </div>
+        </details>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </table>
   </div>
   <p class="muted">Уволился — отключите доступ, не удаляйте: его имя остаётся в журнале статусов и в записях по деньгам.
-    Telegram нужен технику, чтобы наряды приходили ему в бот: нажмите «Код»
-    и передайте его сотруднику — он отправит боту «/staff КОД».
-    Своя точка нужна кассе: наличные, принятые без своей открытой смены, ложатся в смену его точки, а не в самую раннюю.</p>
+    Telegram нужен мастеру, чтобы наряды приходили ему в бот: нажмите «Код привязки»
+    и передайте код сотруднику — он отправит боту «/staff КОД».
+    Своя точка нужна кассе: наличные, принятые без своей открытой смены, ложатся в смену его точки.</p>
 </section>
+
 {% if can_manage %}
-<section class="card narrow">
-  <h2>Добавить</h2>
-  <form method="post" action="/staff" class="grid2">
-    <label>Логин <input name="login" required></label>
-    <label>Имя <input name="name"></label>
-    <label>Пароль <input name="password" type="password" autocomplete="new-password" placeholder="пусто — придумает панель и покажет один раз"></label>
-    <label>Профиль доступа <select name="profile_id">{% for p in profiles %}<option value="{{ p.id }}" {% if p.code == 'manager' %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select></label>
-    <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
-    <label>Срок доступа <select name="term"><option value="">бессрочно</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
-    <label>или до даты <input name="until" type="date"></label>
-    <button type="submit">Добавить</button>
+<dialog id="add-staff" class="modal" aria-labelledby="add-staff-title">
+  <form method="post" action="/staff">
+    <div class="modal-head"><h2 id="add-staff-title">Добавить сотрудника</h2>
+      <button type="button" class="icon" aria-label="Закрыть" onclick="this.closest('dialog').close()">×</button></div>
+    {% if add_error %}<div class="flash err">{{ add_error }}</div>{% endif %}
+    <label>ФИО <span class="req">*</span> <input name="name" required autocomplete="off" value="{{ add_form.name }}" placeholder="Иванов Иван Иванович"></label>
+    <fieldset class="role-pick"><legend>Роль <span class="req">*</span></legend>
+      {% set picked = add_form.profile_id or (default_role|string) %}
+      {% for p in role_choices %}
+      <label class="choice"><input type="radio" name="profile_id" value="{{ p.id }}" required {% if picked == p.id|string %}checked{% endif %}>
+        <b>{{ p.name }}</b><small>{{ role_summary(p.perms) }}</small></label>
+      {% endfor %}
+    </fieldset>
+    <div class="grid2">
+      <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if add_form.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+      <label>Срок доступа <select name="term"><option value="">бессрочно</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}" {% if add_form.term == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      <label>Логин <input name="login" autocomplete="off" value="{{ add_form.login }}" placeholder="пусто — соберём из ФИО"></label>
+      <label>Пароль <input name="password" type="password" autocomplete="new-password" placeholder="пусто — придумает панель"></label>
+    </div>
+    <details class="term-date"><summary>доступ до даты…</summary><input name="until" type="date" value="{{ add_form.until }}"></details>
+    <p class="muted small">Логин — латиницей; пустой соберётся из ФИО (kuznetsov.t). Пароль, если его не задать, панель придумает и покажет один раз.
+      Срок доступа — для подменных и стажёров: после него вход не пускает.</p>
+    <div class="modal-foot">
+      <button type="button" class="ghost" onclick="this.closest('dialog').close()">Отмена</button>
+      <button type="submit">Добавить</button>
+    </div>
   </form>
-  <p class="muted">Профиль решает, какие разделы человек увидит. Свой профиль сменить нельзя — чтобы не остаться без доступа к этой странице.
-    Профили «Оператор: только задачи» и «Механик: только задачи» открывают «Мои задачи» и карточки, в которые они ведут, — без сводки, денег и отчётов; задачи оператора берутся по его точке.
-    Срок доступа — для подменных и стажёров: после него вход не пускает, а открытые сессии закрываются.</p>
-</section>
+</dialog>
+{% if add_error %}<script>document.getElementById('add-staff').showModal()</script>{% endif %}
 {% endif %}
+
 <section class="card narrow">
   <h2>Обучение новичков</h2>
   <p>Администратор точки и мастер проходят свою работу руками на демо-стенде: клиент,

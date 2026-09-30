@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 {% block title %}{{ profile.name }} — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="bar"><h1>{{ profile.name }}{% if profile.built_in %} <span class="tag">встроенный</span>{% endif %}</h1>
-  <a class="btn ghost" href="/profiles">Все профили</a></div>
+<div class="bar"><h1><small class="muted">Роль</small> {{ profile.name }}{% if profile.built_in %} <span class="tag">встроенная</span>{% endif %}</h1>
+  <a class="btn ghost" href="/profiles">Все роли</a></div>
 
 {% if profile.built_in %}
-<p class="flash">Профиль «Владелец» открыт весь и не меняется — иначе панель можно было бы закрыть от самого себя без пути назад.</p>
+<p class="flash">Роль «Владелец» открыта вся и не меняется — иначе панель можно было бы закрыть от самого себя без пути назад.</p>
 {% endif %}
 
 <form method="post" action="/profiles/{{ profile.id }}">
   <section class="card">
-    <label style="max-width:420px">Название <input name="name" value="{{ profile.name }}" {% if profile.built_in or not can_manage %}disabled{% endif %} required></label>
+    <label style="max-width:420px">Название роли <input name="name" value="{{ profile.name }}" {% if profile.built_in or not can_manage %}disabled{% endif %} required></label>
     <h2>Разделы</h2>
     <table class="perms">
       <tr><th>Раздел</th>{% for level in LEVEL_ORDER %}<th>{{ LEVELS[level] }}</th>{% endfor %}</tr>
@@ -36,7 +36,7 @@
 </form>
 
 <section class="card">
-  <h2>Кто на этом профиле <small class="muted">({{ staff_on_it|length }})</small></h2>
+  <h2>Кто в этой роли <small class="muted">({{ staff_on_it|length }})</small></h2>
   {% if staff_on_it %}
   <p>{% for s in staff_on_it %}<a href="/staff">{{ s.name or s.login }}</a>{% if not s.active %} <span class="muted">(отключён)</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</p>
   <p class="muted">Смена прав подхватится у них на следующем же клике.</p>
@@ -44,8 +44,8 @@
   <p class="muted">Пока никого. Назначается в <a href="/staff">списке сотрудников</a>.</p>
   {% endif %}
   {% if can_manage and not profile.built_in and not staff_on_it %}
-  <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Удалить профиль «{{ profile.name }}»?')">
-    <button type="submit" class="ghost">Удалить профиль</button>
+  <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Удалить роль «{{ profile.name }}»?')">
+    <button type="submit" class="ghost">Удалить роль</button>
   </form>
   {% endif %}
 </section>

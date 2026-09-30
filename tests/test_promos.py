@@ -496,11 +496,12 @@ class TestPromoPages(tw.WebCase):
         self.login()
         self.seed()
 
-    def test_menu_has_the_section_in_blocks(self):
+    def test_menu_has_the_section_in_groups(self):
         page = self.get_ok("/promos")
         self.assertIn('href="/promos"', page)
-        self.assertIn('class="blk"', page, "группы меню - блоками")
-        self.assertEqual(page.count('class="blk"'), 7)
+        self.assertIn("Акции", self.menu_labels(page))
+        # Главное, Клиенты, Парк, Сервис, Склад, Деньги, Отчёты, Система.
+        self.assertEqual(page.count('class="nav-group"'), 8, "группы меню с подписью")
 
     def test_templates_become_promos(self):
         page = self.get_ok("/promos")

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import types
 import unittest
@@ -79,6 +80,13 @@ class WebCase(unittest.TestCase):
 
     def login(self, login="admin", password="admin-pass-123"):
         return self.client.post("/login", data={"login": login, "password": password})
+
+    @staticmethod
+    def menu_labels(page):
+        """Пункты бокового меню страницы (app/web/nav.py) - подписи ссылок
+        и раскрывающихся групп, по порядку."""
+        return re.findall(r'class="nav-link[^"]*"[^>]*>(?:<svg[^>]*>.*?</svg>)?'
+                          r'<span>([^<]+)</span>', page)
 
     def get_ok(self, path):
         """Страница с обычными пробелами в суммах (tests/plain.py): тексты

@@ -367,7 +367,7 @@ on conflict (code) do update set
                else crm.access_profiles.perms end,
   built_in = excluded.built_in;
 
--- Менеджер и механик не встроенные: владелец правит и удаляет их, как
+-- Администратор (manager) и мастер (tech) не встроенные: владелец правит и удаляет их, как
 -- свои, поэтому кладутся один раз на установку (settings.staff_profiles_seeded,
 -- отметка - сразу после таблицы настроек). Подтягивание на каждом старте
 -- возвращало удалённый профиль, а свой профиль владельца с тем же именем
@@ -378,8 +378,8 @@ do $$
 begin
   if to_regclass('crm.settings') is null then
     insert into crm.access_profiles (code, name, perms, built_in) values
-      ('manager', 'Менеджер', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
-      ('tech',    'Механик',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
+      ('manager', 'Администратор', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
+      ('tech',    'Мастер',   '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
     on conflict do nothing;
   end if;
 end $$;
@@ -872,7 +872,7 @@ create table if not exists crm.settings (
   updated_at timestamptz not null default now(),
   updated_by text
 );
--- Менеджер и механик уже легли или удалены владельцем (см. профили доступа).
+-- Администратор и мастер уже легли или удалены владельцем (см. роли).
 insert into crm.settings (key, value, updated_by)
 values ('staff_profiles_seeded', '1', 'schema')
 on conflict (key) do nothing;
@@ -2855,11 +2855,32 @@ do $$
 begin
   if not exists (select 1 from crm.settings where key = 'task_profiles_seeded') then
     insert into crm.access_profiles (code, name, perms, built_in) values
-      ('tasks_operator', 'Оператор: только задачи', '{"sections":{"issue":"edit","clients":"edit","rentals":"edit","cash":"edit","claims":"edit","bikes":"view","batteries":"view","trackers":"view"},"actions":{}}'::jsonb, false),
-      ('tasks_tech', 'Механик: только задачи', '{"sections":{"service":"edit","bikes":"edit","batteries":"edit","inventory":"edit","trackers":"view"},"actions":{}}'::jsonb, false)
+      ('tasks_operator', 'Администратор: только задачи', '{"sections":{"issue":"edit","clients":"edit","rentals":"edit","cash":"edit","claims":"edit","bikes":"view","batteries":"view","trackers":"view"},"actions":{}}'::jsonb, false),
+      ('tasks_tech', 'Мастер: только задачи', '{"sections":{"service":"edit","bikes":"edit","batteries":"edit","inventory":"edit","trackers":"view"},"actions":{}}'::jsonb, false)
     on conflict do nothing;
     insert into crm.settings (key, value, updated_by)
     values ('task_profiles_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
+
+-- Роли одними словами с обучением и формами точек: «Менеджер» -> «Администратор»,
+-- «Механик» -> «Мастер». Один раз на установку (settings.role_names_v2) и
+-- только имя, которое владелец не трогал: своё название он выбрал сам, а
+-- занятое новое имя упало бы на unique (name). Права и код роли те же.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'role_names_v2') then
+    update crm.access_profiles p set name = v.new_name, updated_at = now()
+      from (values ('manager', 'Менеджер', 'Администратор'),
+                   ('tech', 'Механик', 'Мастер'),
+                   ('tasks_operator', 'Оператор: только задачи', 'Администратор: только задачи'),
+                   ('tasks_tech', 'Механик: только задачи', 'Мастер: только задачи'))
+           as v(code, old_name, new_name)
+     where p.code = v.code and p.name = v.old_name
+       and not exists (select 1 from crm.access_profiles q where q.name = v.new_name);
+    insert into crm.settings (key, value, updated_by)
+    values ('role_names_v2', '1', 'schema')
     on conflict (key) do nothing;
   end if;
 end $$;

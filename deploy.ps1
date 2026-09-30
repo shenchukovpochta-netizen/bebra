@@ -80,7 +80,7 @@ $crm = @('app/crm/__init__.py', 'app/crm/logic.py', 'app/crm/db.py',
          'app/crm/photos.py', 'app/crm/learning.py', 'app/crm/mytasks.py',
          'app/crm/incoming.py')
 $web = @('app/web/__init__.py', 'app/web/__main__.py', 'app/web/app.py',
-         'app/web/config.py', 'app/web/icons.py')
+         'app/web/config.py', 'app/web/icons.py', 'app/web/nav.py')
 $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.html',
                   'app/web/templates/_logo.html', 'app/web/templates/_bolt.html',
                   'app/web/templates/login.html', 'app/web/templates/missing.html',
@@ -166,7 +166,8 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
                   'app/web/templates/franchise_royalty.html')
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css',
                'app/web/static/icon-192.png', 'app/web/static/icon-512.png',
-               'app/web/static/icon-maskable-512.png', 'app/web/static/apple-touch-icon.png')
+               'app/web/static/icon-maskable-512.png', 'app/web/static/apple-touch-icon.png',
+               'app/web/static/icons.svg')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
              'app/web/static/fonts/onest-400-latin.woff2',
@@ -209,7 +210,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_import.py', 'tests/test_review.py', 'tests/test_scripts.py',
           'tests/test_fleet.py', 'tests/test_web_pg.py', 'tests/test_bot_review.py',
           'tests/test_issue.py', 'tests/test_dashboard.py', 'tests/test_mileage.py',
-          'tests/test_access.py', 'tests/test_mrz.py', 'tests/test_service.py',
+          'tests/test_access.py', 'tests/test_nav.py', 'tests/test_mrz.py', 'tests/test_service.py',
           'tests/test_service_norms.py',
           'tests/test_stock_take.py', 'tests/test_payback.py',
           'tests/test_referrals.py', 'tests/test_staff_link.py',

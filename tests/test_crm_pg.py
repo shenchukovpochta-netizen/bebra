@@ -2084,6 +2084,33 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["rental_started"], date.today() - timedelta(days=3))
         self.assertEqual(logic.battery_rows([row])[0]["rental_days"], 3)
 
+    async def test_roles_renamed_once_and_only_untouched(self):
+        """Менеджер -> Администратор, Механик -> Мастер: один раз и только
+        имя, которое владелец не трогал. Своё название остаётся, занятое
+        новое имя схему не роняет."""
+        names = {r["code"]: r["name"] for r in await self.crm.access_profiles()}
+        self.assertEqual((names["manager"], names["tech"]), ("Администратор", "Мастер"))
+        # живая установка до переименования: старые имена, отметки нет
+        await self.pool.execute(
+            "update crm.access_profiles set name = case code "
+            "when 'manager' then 'Менеджер' when 'tech' then 'Механик на Адоратского' "
+            "when 'tasks_operator' then 'Оператор: только задачи' "
+            "when 'tasks_tech' then 'Механик: только задачи' else name end")
+        await self.pool.execute("insert into crm.access_profiles (name) values ('Мастер')")
+        await self.pool.execute("delete from crm.settings where key = 'role_names_v2'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        names = {r["code"]: r["name"] for r in await self.crm.access_profiles()}
+        self.assertEqual(names["manager"], "Администратор")
+        self.assertEqual(names["tech"], "Механик на Адоратского", "своё имя владельца")
+        self.assertEqual(names["tasks_operator"], "Администратор: только задачи")
+        self.assertEqual(names["tasks_tech"], "Мастер: только задачи")
+        # второй старт ничего не трогает: переименовал владелец - так и остаётся
+        await self.pool.execute(
+            "update crm.access_profiles set name = 'Менеджер' where code = 'manager'")
+        await Database(self.pool).apply_schema(SCHEMA)
+        manager = await self.crm.access_profile_by_code("manager")
+        self.assertEqual(manager["name"], "Менеджер")
+
     async def test_mileage_column_survives_reapply(self):
         """schema.sql идемпотентен: повторный старт не теряет колонку."""
         await Database(self.pool).apply_schema(SCHEMA)

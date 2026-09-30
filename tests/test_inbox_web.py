@@ -130,7 +130,7 @@ class TestInboxAccess(InboxCase):
         self.login()
         page = self.get_ok("/")
         self.assertIn('href="/inbox"', page)
-        self.assertIn(">Входящие</a>", page)
+        self.assertIn("Входящие", self.menu_labels(page))
         self.assertIn("входящих ждут ответа", page)
         self.assertIn('<a class="tile hot" href="/inbox"><b>3</b>', page,
                       "ждут трое: разобранное из MAX не в счёт")

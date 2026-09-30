@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.crm import logic  # noqa: E402
 
+ROOT = Path(__file__).resolve().parent.parent
+
 try:
     import test_web as tw
     HAVE_WEB = tw.HAVE_WEB
@@ -137,11 +139,58 @@ class TestAccessLogic(unittest.TestCase):
         self.assertEqual(logic.home_for(staff(finance="view")), "/finance")
         self.assertEqual(logic.home_for(staff()), "/me", "профиль пуст - свой кабинет")
 
+    def test_login_from_name(self):
+        f = logic.login_from_name
+        self.assertEqual(f("Кузнецов Тимур Ринатович"), "kuznetsov.t")
+        self.assertEqual(f("  Щукина   Юлия "), "shchukina.yu")
+        self.assertEqual(f("Хәбибуллин Җәмил"), "khabibullin.zh", "татарские буквы")
+        self.assertEqual(f("Smith John"), "smith.j")
+        self.assertEqual(f("Кузнецов Тимур", ["kuznetsov.t"]), "kuznetsov.t2")
+        self.assertEqual(f("Кузнецов Тимур", ["KUZNETSOV.T", "kuznetsov.t2"]), "kuznetsov.t3")
+        self.assertEqual(f("Ян"), "yan")
+        self.assertEqual(f("Я"), "ya.staff")
+        self.assertEqual(f("!!!"), "staff")
+        self.assertEqual(f(""), "staff")
+        long = f("Абвгдеёжзийклмнопрстуфхцчшщъыьэюя Иван", ["x"])
+        for got in (long, f("Ян"), f("Я"), f("Кузнецов Тимур", ["kuznetsov.t"])):
+            self.assertTrue(logic.check_login(got).ok, got)
+
+    def test_role_title_is_the_profile_name(self):
+        """Под именем - роль из профиля. Старая колонка role знает только
+        admin/manager и мастеру писала «Менеджер»."""
+        self.assertEqual(logic.role_title({"role": "manager", "profile_name": "Мастер"}),
+                         "Мастер")
+        self.assertEqual(logic.role_title({"role": "admin"}), "Владелец")
+        self.assertEqual(logic.role_title({"role": "manager"}), "Без роли")
+        self.assertEqual(logic.role_title(None), "Без роли")
+
+    def test_role_names_are_the_same_everywhere(self):
+        names = {code: name for code, name, *_ in (*logic.BUILT_IN_PROFILES,
+                                                   *logic.TASK_PROFILES)}
+        self.assertEqual(names, {"owner": "Владелец", "manager": "Администратор",
+                                 "tech": "Мастер",
+                                 "tasks_operator": "Администратор: только задачи",
+                                 "tasks_tech": "Мастер: только задачи"})
+        schema = (ROOT / "schema.sql").read_text(encoding="utf-8")
+        for name in names.values():
+            self.assertIn(f"'{name}'", schema, name)
+        from app.crm import firstrun
+        self.assertEqual([title for _code, title in firstrun.ROLES.values()],
+                         ["Администратор", "Мастер"])
+
+    def test_role_summary(self):
+        tech = logic.BUILT_IN_PROFILES[2][2]
+        self.assertEqual(logic.role_summary(tech), "Парк, батареи, сервис, склад")
+        self.assertEqual(logic.role_summary({"sections": {"reports": "view"}}), "только смотрит")
+        self.assertEqual(logic.role_summary({}), "ничего не открыто")
+        owner = logic.BUILT_IN_PROFILES[0][2]
+        self.assertTrue(logic.role_summary(owner).endswith(f"и ещё {len(logic.SECTIONS) - 4}"))
+
     def test_profile_name_is_checked(self):
-        self.assertEqual(logic.check_profile_name("  Механик  ").value, "Механик")
+        self.assertEqual(logic.check_profile_name("  Мастер  ").value, "Мастер")
         bad = logic.check_profile_name("")
         self.assertFalse(bad.ok)
-        self.assertIn("Название профиля", bad.error)
+        self.assertIn("Название роли", bad.error)
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
@@ -169,9 +218,9 @@ class TestAccessInPanel(tw.WebCase):
     # ─── страж разделов ───
 
     def test_owner_sees_everything(self):
-        page = self.get_ok("/")
-        for label in ("Клиенты", "Финансы", "Импорт", "Сотрудники"):
-            self.assertIn(f">{label}</a>", page)
+        menu = self.menu_labels(self.get_ok("/"))
+        for label in ("Клиенты", "Финансы", "Импорт", "Сотрудники", "Роли", "Склад"):
+            self.assertIn(label, menu)
         self.get_ok("/staff")
         self.get_ok("/profiles")
         self.get_ok("/import")
@@ -180,9 +229,12 @@ class TestAccessInPanel(tw.WebCase):
         self.add("petr", "tech")
         self.as_("petr")
         page = self.get_ok("/")
-        self.assertIn(">Парк</a>", page)
-        for label in ("Клиенты", "Финансы", "Импорт", "Сотрудники", "Выдача"):
-            self.assertNotIn(f">{label}</a>", page, label)
+        menu = self.menu_labels(page)
+        self.assertIn("Велосипеды", menu)
+        self.assertIn("Наряды", menu, "подпункты сервиса - в меню")
+        for label in ("Клиенты", "Финансы", "Импорт", "Сотрудники", "Роли", "Выдача"):
+            self.assertNotIn(label, menu, label)
+        self.assertIn("<small>Мастер</small>", page, "под именем - роль, а не «Менеджер»")
         self.get_ok("/bikes")
         for path in ("/clients", "/clients.csv", "/finance", "/finance.csv",
                      "/import", "/staff", "/profiles", "/issue"):
@@ -194,7 +246,7 @@ class TestAccessInPanel(tw.WebCase):
         r = self.client.get("/finance")
         self.assertEqual(r.status_code, 403)
         self.assertIn("Финансы", r.text)
-        self.assertIn("Механик", r.text)
+        self.assertIn("Роль <b>Мастер</b>", r.text)
 
     def test_view_only_section_refuses_post(self):
         self.add("ivan", "manager")
@@ -209,7 +261,7 @@ class TestAccessInPanel(tw.WebCase):
         petr = self.add("petr", "tech")
         self.as_("petr")
         page = self.get_ok("/me")
-        self.assertIn("Механик", page)
+        self.assertIn("Мастер", page)
         self.assertIn("Сменить свой пароль", page)
         self.assertIn("нет доступа", page, "закрытые разделы тоже видны списком")
         r = self.client.post("/me/password", data={"old": "password-1",
@@ -534,8 +586,12 @@ class TestAccessInPanel(tw.WebCase):
     def test_new_staff_needs_a_profile(self):
         r = self.client.post("/staff", data={"login": "anna", "password": "password-1",
                                              "name": "Анна"})
-        self.assertEqual(r.status_code, 303)
-        self.assertIn("Выберите профиль доступа", self.get_ok("/staff"))
+        # Отказ - та же страница с открытым окном и ошибкой в нём, а не
+        # редирект с сообщением наверху: поля набраны, их не теряем.
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Выберите роль.", r.text)
+        self.assertIn('value="Анна"', r.text)
+        self.assertIn("showModal()</script>", r.text)
         self.assertIsNone(tw.run(self.crm.staff_by_login("anna")))
         r = self.client.post("/staff", data={"login": "anna", "password": "password-1",
                                              "name": "Анна",
@@ -543,6 +599,56 @@ class TestAccessInPanel(tw.WebCase):
         anna = tw.run(self.crm.staff_by_login("anna"))
         self.assertEqual(anna["profile_code"], "tech")
         self.assertEqual(anna["role"], "manager")
+
+    def test_login_is_built_from_the_name(self):
+        """Логин необязателен: пусто - из ФИО латиницей, занятый - с номером.
+        Кириллический логин - понятный отказ в окне, а не молчание."""
+        tech = self.profile("tech")["id"]
+        self.client.post("/staff", data={"name": "Кузнецов Тимур Ринатович",
+                                         "profile_id": tech})
+        first = tw.run(self.crm.staff_by_login("kuznetsov.t"))
+        self.assertEqual((first["name"], first["profile_code"]),
+                         ("Кузнецов Тимур Ринатович", "tech"))
+        self.client.post("/staff", data={"name": "Кузнецов Тарас", "profile_id": tech})
+        self.assertIsNotNone(tw.run(self.crm.staff_by_login("kuznetsov.t2")))
+        page = self.get_ok("/staff")
+        self.assertIn("логин kuznetsov.t2", page)
+        self.assertIn("Пароль для kuznetsov.t2:", page)
+        r = self.client.post("/staff", data={"name": "Иван", "login": "иван",
+                                             "profile_id": tech})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("латиница", r.text)
+        self.assertIn("Оставьте поле пустым", r.text)
+        r = self.client.post("/staff", data={"name": "Ещё", "login": "kuznetsov.t",
+                                             "profile_id": tech})
+        self.assertIn("Логин kuznetsov.t уже занят", r.text)
+        # Два добавления разом: список логинов ещё не видит чужой - база
+        # отвечает уникальностью, и это «ещё раз», а не 500.
+        real = self.crm.staff_all
+
+        async def stale():
+            return []
+        self.crm.staff_all = stale
+        try:
+            r = self.client.post("/staff", data={"name": "Кузнецов Тимофей",
+                                                 "profile_id": tech})
+        finally:
+            self.crm.staff_all = real
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("только что заняли", r.text)
+
+    def test_staff_page_speaks_of_roles(self):
+        page = self.get_ok("/staff")
+        self.assertIn("+ Добавить сотрудника", page)
+        self.assertIn('<a class="btn ghost" href="/profiles">Роли</a>', page)
+        self.assertNotIn("Профиль доступа", page)
+        # в окне добавления - роли с тем, что они делают; администратор первым
+        picks = re.findall(r'name="profile_id" value="\d+" required[^>]*>\s*<b>([^<]+)</b>', page)
+        self.assertEqual(picks[:2], ["Администратор", "Мастер"])
+        self.assertEqual(picks[-1], "Владелец")
+        roles = self.get_ok("/profiles")
+        self.assertIn("<h1>Роли", roles)
+        self.assertIn("Что делает", roles)
 
     def test_owner_profile_sets_the_admin_role(self):
         self.client.post("/staff", data={"login": "boss2", "password": "password-1",
@@ -561,7 +667,7 @@ class TestAccessInPanel(tw.WebCase):
         me = tw.run(self.crm.staff_by_login("admin"))
         self.client.post(f"/staff/{me['id']}/profile",
                          data={"profile_id": self.profile("tech")["id"]})
-        self.assertIn("Свой профиль менять нельзя", self.get_ok("/staff"))
+        self.assertIn("Свою роль менять нельзя", self.get_ok("/staff"))
         self.assertEqual(tw.run(self.crm.staff_by_id(me["id"]))["profile_code"], "owner")
 
     def test_first_admin_gets_the_owner_profile(self):

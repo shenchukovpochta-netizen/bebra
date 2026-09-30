@@ -102,6 +102,18 @@ class TestBannerAndLogins(DemoCase):
         self.assertEqual(r.status_code, 404)
         self.assertIn(BANNER, r.text)
 
+    def test_staff_page_is_read_only_and_says_why(self):
+        """В демо запись в «Сотрудники» закрыта - и форма добавления не
+        притворяется рабочей: вместо кнопки пояснение."""
+        self.login()
+        page = self.get_ok("/staff")
+        self.assertIn("В демо сотрудников не добавить", page)
+        self.assertNotIn("+ Добавить сотрудника", page)
+        self.assertNotIn('action="/staff"', page)
+        self.assertNotIn("/profile\"", page)
+        self.assertIn("Мастер", page, "роли - новыми словами")
+        self.assertIn("Администратор", page)
+
     def test_login_page_offers_three_roles_without_script(self):
         text = self.get_ok("/login")
         forms = re.findall(r'<form method="post" action="/login">(.*?)</form>', text, re.S)

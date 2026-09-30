@@ -65,6 +65,7 @@ from ..crm import (
 )
 from ..services import contract as contract_service
 from ..services import tochka
+from . import nav
 from .config import WebConfig
 
 # Ошибка данных базы (строка, которую не принял кодек) - это негодное
@@ -189,8 +190,8 @@ DEMO_EXPORT_ROWS = 3000
 # Показанные на входе. Должны совпадать с app.demo.seed.STAFF (тест
 # test_demo_mode сверяет): панель пакет демо не импортирует.
 DEMO_LOGINS = (("demo", "demo", "Владелец — видит всё"),
-               ("operator", "demo", "Оператор точки"),
-               ("mechanic", "demo", "Механик"))
+               ("operator", "demo", "Администратор точки"),
+               ("mechanic", "demo", "Мастер"))
 # Демо не должно попадать в поиск: вымышленные люди с телефонами под
 # брендом проката выглядели бы как утечка.
 DEMO_PUBLIC = ("/robots.txt", "/learn/start")
@@ -713,7 +714,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
         CLIENT_GROUPS=logic.CLIENT_GROUPS,
         RISK_LEVELS=logic.RISK_LEVELS,
-        BILLING=logic.BILLING, ROLES=logic.ROLES, app_title=cfg.title,
+        BILLING=logic.BILLING, role_title=logic.role_title,
+        role_summary=logic.role_summary, app_title=cfg.title,
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
         ORDER_MANUAL_STATUSES=logic.ORDER_MANUAL_STATUSES,
         ORDER_OPEN=logic.ORDER_OPEN,
@@ -771,8 +773,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         messages = list(request.session.get("flash") or [])
         if messages:
             request.session["flash"] = []
-        ctx.update(staff=getattr(request.state, "staff", None), flash=messages,
+        staff = getattr(request.state, "staff", None)
+        ctx.update(staff=staff, flash=messages,
                    learn=getattr(request.state, "learn", None))
+        if staff is not None:
+            # Меню и крошки - из одного дерева (app/web/nav.py): права те же,
+            # что у стража маршрутов, счётчики собрал страж на входе.
+            path = request.url.path
+            ctx.update(nav_menu=nav.menu(staff, path,
+                                         getattr(request.state, "nav_counts", None)),
+                       crumbs=nav.trail(path, staff))
         page = templates.TemplateResponse(request, name, ctx, status_code=status_code)
         # Страницы панели не кэшируются вовсе: на них баланс клиента, его
         # телефон и статус аренды, а кнопка «назад» после выхода не должна
@@ -840,6 +850,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       what=logic.SECTIONS.get(code) or logic.ACTIONS.get(code, code))
 
     public = PUBLIC + DEMO_PUBLIC if cfg.demo else PUBLIC
+    nav_cache = nav.CountsCache()
+
+    async def nav_counts() -> dict[str, Any]:
+        """Счётчики меню из кэша процесса. Сбой - меню без чисел, но
+        страница открывается: число в меню не стоит упавшей страницы."""
+        cached = nav_cache.fresh()
+        if cached is not None:
+            return cached
+        try:
+            value = await nav.gather_counts(crm, today=date.today())
+        except Exception:                                   # noqa: BLE001
+            log.exception("счётчики меню не собрались")
+            value = {}
+        return nav_cache.put(value)
 
     async def auth(request: Request, call_next: Any) -> Response:
         request.state.staff = None
@@ -878,7 +902,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Номер длиннее bigint: записи с ним нет, а база ответила бы 500.
         if request.state.staff is not None and not logic.path_ids_ok(path):
             return secured(render(request, "missing.html", status_code=404, what="Адрес"))
-        return secured(await call_next(request))
+        request.state.nav_counts = None
+        if (request.state.staff is not None and request.method == "GET"
+                and nav.is_page(path)):
+            request.state.nav_counts = await nav_counts()
+        response = await call_next(request)
+        if request.method not in ("GET", "HEAD"):
+            # Запись могла сдвинуть число в меню: следующая страница
+            # посчитает заново, а не покажет старое ещё полминуты.
+            nav_cache.drop()
+        return secured(response)
 
     @app.exception_handler(RequestValidationError)
     async def not_a_number(request: Request, exc: RequestValidationError) -> Response:
@@ -5046,57 +5079,102 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         решает профиль, role лишь повторяет его крупным планом."""
         return "admin" if (profile or {}).get("code") == "owner" else "manager"
 
+    async def staff_page_response(request: Request, *, add_form: dict | None = None,
+                                  add_error: str | None = None,
+                                  status_code: int = 200) -> Response:
+        """Сотрудники. С отказом добавления - та же страница с открытым окном
+        «Добавить», ошибкой в нём и набранными полями: после редиректа
+        сообщение уезжало наверх страницы, а форма оставалась пустой, и
+        казалось, что кнопка просто не сработала."""
+        profiles = await profile_choices()
+        default_role = next((p["id"] for p in profiles if p.get("code") == "manager"),
+                            profiles[0]["id"] if profiles else None)
+        # В окне добавления - кого заводят чаще: администратор, мастер, их
+        # «только задачи», свои роли; «Владелец» последним.
+        order = {"manager": 0, "tech": 1, "tasks_operator": 2, "tasks_tech": 3,
+                 "owner": 9}
+        role_choices = sorted(profiles, key=lambda p: (order.get(p.get("code"), 5),
+                                                       p.get("name") or ""))
+        return render(request, "staff.html", rows=await crm.staff_all(),
+                      profiles=profiles, default_role=default_role,
+                      role_choices=role_choices,
+                      places=await location_names(),
+                      can_manage=may_edit(request, "staff") and not cfg.demo,
+                      add_form=add_form or {}, add_error=add_error,
+                      demo_url=cfg.demo_url, status_code=status_code)
+
     @app.get("/staff")
     async def staff_page(request: Request) -> Response:
-        return render(request, "staff.html", rows=await crm.staff_all(),
-                      profiles=await profile_choices(),
-                      places=await location_names(),
-                      can_manage=may_edit(request, "staff"), demo_url=cfg.demo_url)
+        return await staff_page_response(request)
 
-    async def add_staff(request: Request, data: dict) -> dict | None:
-        """Новый вход в панель из формы: логин и профиль, None - отказ уже во
-        flash. Один путь для «Сотрудников» и мастера первого запуска."""
-        login_check = logic.check_login(data.get("login"))
+    async def add_staff(request: Request, data: dict) -> dict | str:
+        """Новый вход в панель из формы: словарь - заведён, строка - отказ
+        словами. Один путь для «Сотрудников» и мастера первого запуска.
+
+        Логин необязателен: пусто - собирается из ФИО (kuznetsov.t), и
+        занятый получает номер. Латинский логин с кириллической клавиатуры
+        - самая частая причина, по которой сотрудник «не добавлялся».
+        """
+        name = logic.check_name(data.get("name") or data.get("login"), what="ФИО")
+        if not name.ok:
+            return name.error or "ФИО: заполните поле."
+        raw_login = (data.get("login") or "").strip()
+        if raw_login:
+            login_check = logic.check_login(raw_login)
+            if not login_check.ok:
+                return (f"{login_check.error} Оставьте поле пустым — логин "
+                        "соберётся из ФИО латиницей.")
+            login = login_check.value
+            if await crm.staff_by_login(login) is not None:
+                return f"Логин {login} уже занят — оставьте поле пустым или впишите другой."
+        else:
+            login = logic.login_from_name(
+                name.value, [s["login"] for s in await crm.staff_all()])
         # Пустой пароль - придумывает панель и показывает один раз: владелец
         # не изобретает пароль стажёру и не пересылает свой любимый.
         generated = not (data.get("password") or "")
         password = (logic.Check(True, logic.generate_password(12)) if generated
                     else logic.check_password(data.get("password")))
-        name = logic.check_name(data.get("name") or data.get("login"), what="Имя")
         term = logic.check_staff_term(data.get("term"), data.get("until"))
-        for check in (login_check, password, name, term):
+        for check in (password, term):
             if not check.ok:
-                flash(request, check.error, "err")
-                return None
+                return check.error or "Проверьте поля формы."
         profile = await by_id(crm.access_profile, data.get("profile_id"))
         if profile is None:
-            flash(request, "Выберите профиль доступа.", "err")
-            return None
+            return "Выберите роль."
         place = logic.check_location(data.get("location"), await location_names())
         if not place.ok:
-            flash(request, place.error, "err")
-            return None
-        if await crm.staff_by_login(login_check.value) is not None:
-            flash(request, "Такой логин уже есть.", "err")
-            return None
-        await crm.create_staff(login_check.value, logic.hash_password(password.value),
-                               name.value, role_for(profile), profile["id"],
-                               location=place.value, expires_at=term.value)
-        return {"login": login_check.value, "profile": profile,
+            return place.error or "Такой точки нет."
+        try:
+            await crm.create_staff(login, logic.hash_password(password.value),
+                                   name.value, role_for(profile), profile["id"],
+                                   location=place.value, expires_at=term.value)
+        except Exception as exc:                           # noqa: BLE001
+            # Два добавления разом с одним собранным логином: второе
+            # упирается в уникальный логин - это не 500, а «ещё раз».
+            if "unique" not in type(exc).__name__.lower():
+                raise
+            return f"Логин {login} только что заняли — нажмите «Добавить» ещё раз."
+        return {"login": login, "profile": profile,
                 "password": password.value if generated else None,
                 "expires_at": term.value}
 
     @app.post("/staff")
     async def staff_create(request: Request) -> Response:
-        added = await add_staff(request, await form(request))
-        if added is not None:
-            until = (f", доступ до {_dmy(added['expires_at'])}"
-                     if added["expires_at"] else "")
-            flash(request, f"Сотрудник {added['login']} добавлен — профиль "
-                           f"«{added['profile']['name']}»{until}.")
-            if added["password"]:
-                flash(request, f"Пароль для {added['login']}: {added['password']} — "
-                               "передайте сотруднику. Больше он нигде не покажется.")
+        data = await form(request)
+        added = await add_staff(request, data)
+        if isinstance(added, str):
+            kept = {k: str(data.get(k) or "") for k in
+                    ("name", "login", "profile_id", "location", "term", "until")}
+            return await staff_page_response(request, add_form=kept, add_error=added,
+                                             status_code=400)
+        until = (f", доступ до {_dmy(added['expires_at'])}"
+                 if added["expires_at"] else "")
+        flash(request, f"Сотрудник добавлен: логин {added['login']}, роль "
+                       f"«{added['profile']['name']}»{until}.")
+        if added["password"]:
+            flash(request, f"Пароль для {added['login']}: {added['password']} — "
+                           "передайте сотруднику. Больше он нигде не покажется.")
         return redirect("/staff")
 
     @app.post("/staff/{staff_id}/profile")
@@ -5108,15 +5186,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if target["id"] == request.state.staff["id"]:
             # Иначе владелец одним движением снимает с себя доступ к этой же
             # странице и чинить это придётся руками в базе.
-            flash(request, "Свой профиль менять нельзя — попросите другого "
+            flash(request, "Свою роль менять нельзя — попросите другого "
                            "сотрудника с доступом к разделу.", "err")
             return redirect("/staff")
         profile = await by_id(crm.access_profile, data.get("profile_id"))
         if profile is None:
-            flash(request, "Такого профиля нет.", "err")
+            flash(request, "Такой роли нет.", "err")
             return redirect("/staff")
         await crm.set_staff_profile(staff_id, profile["id"])
-        flash(request, f"{target['login']}: профиль «{profile['name']}».")
+        flash(request, f"{target['login']}: роль «{profile['name']}».")
         return redirect("/staff")
 
     @app.post("/staff/{staff_id}/location")
@@ -5240,7 +5318,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def profile_page(request: Request, profile_id: int) -> Response:
         profile = await crm.access_profile(profile_id)
         if profile is None:
-            return render(request, "missing.html", status_code=404, what="Профиль")
+            return render(request, "missing.html", status_code=404, what="Роль")
         staff_on_it = [s for s in await crm.staff_all()
                        if s.get("profile_id") == profile_id]
         return render(request, "profile.html", profile=profile,
@@ -5259,9 +5337,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except Exception as exc:                           # noqa: BLE001
             if not name_taken(exc):
                 raise
-            flash(request, "Профиль с таким названием уже есть.", "err")
+            flash(request, "Роль с таким названием уже есть.", "err")
             return redirect("/profiles")
-        flash(request, f"Профиль «{name.value}» создан — отметьте разделы.")
+        flash(request, f"Роль «{name.value}» создана — отметьте разделы.")
         return redirect(f"/profiles/{profile_id}")
 
     @app.post("/profiles/{profile_id}")
@@ -5269,9 +5347,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         profile = await crm.access_profile(profile_id)
         if profile is None:
-            return render(request, "missing.html", status_code=404, what="Профиль")
+            return render(request, "missing.html", status_code=404, what="Роль")
         if profile["built_in"]:
-            flash(request, "Профиль «Владелец» не меняется: это запасной ключ "
+            flash(request, "Роль «Владелец» не меняется: это запасной ключ "
                            "от панели.", "err")
             return redirect(f"/profiles/{profile_id}")
         name = logic.check_profile_name(data.get("name"))
@@ -5281,7 +5359,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         perms = perms_from_form(data)
         me = request.state.staff
         if me.get("profile_id") == profile_id and perms["sections"].get("staff") != "edit":
-            flash(request, "Это ваш профиль: доступ к разделу «Сотрудники» "
+            flash(request, "Это ваша роль: доступ к разделу «Сотрудники» "
                            "снимать нельзя — некому будет его вернуть.", "err")
             return redirect(f"/profiles/{profile_id}")
         try:
@@ -5289,7 +5367,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         except Exception as exc:                           # noqa: BLE001
             if not name_taken(exc):
                 raise
-            flash(request, "Профиль с таким названием уже есть.", "err")
+            flash(request, "Роль с таким названием уже есть.", "err")
             return redirect(f"/profiles/{profile_id}")
         # Сотрудники подхватят новые права со следующего запроса: права
         # читаются из базы на каждом, а не кладутся в сессию при входе.
@@ -5300,12 +5378,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def profile_delete(request: Request, profile_id: int) -> Response:
         profile = await crm.access_profile(profile_id)
         if profile is None:
-            return render(request, "missing.html", status_code=404, what="Профиль")
+            return render(request, "missing.html", status_code=404, what="Роль")
         if not await crm.delete_access_profile(profile_id):
-            flash(request, "Профиль встроенный или на нём ещё есть сотрудники — "
-                           "сначала переведите их.", "err")
+            flash(request, "Роль встроенная или на ней ещё есть сотрудники — "
+                           "сначала переведите их на другую.", "err")
             return redirect(f"/profiles/{profile_id}")
-        flash(request, f"Профиль «{profile['name']}» удалён.")
+        flash(request, f"Роль «{profile['name']}» удалена.")
         return redirect("/profiles")
 
     # ─────────────────────── сервис: наряды ───────────────────────
@@ -6306,7 +6384,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/setup/staff")
     async def setup_staff(request: Request) -> Response:
-        """Оператор или механик на встроенном профиле. Пароль придумывает
+        """Администратор или мастер на своей роли. Пароль придумывает
         панель и показывает один раз: в базе только хэш, повторить его
         нечем, а забытый задаётся заново в «Сотрудниках»."""
         if not may_edit(request, "staff"):
@@ -6321,19 +6399,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         role = firstrun.ROLES.get(data.get("role") or "")
         if role is None:
             form_once_release(data)
-            flash(request, "Выберите, кого заводите: оператора или механика.", "err")
+            flash(request, "Выберите, кого заводите: администратора или мастера.", "err")
             return redirect(back)
         profile = await crm.access_profile_by_code(role[0])
         if profile is None:
             form_once_release(data)
-            flash(request, "Встроенного профиля нет — заведите сотрудника в "
+            flash(request, "Такой роли в панели нет — заведите сотрудника в "
                            "«Сотрудниках».", "err")
             return redirect(back)
         password = logic.generate_password()
         added = await add_staff(request, {**data, "password": password,
                                           "profile_id": str(profile["id"])})
-        if added is None:
+        if isinstance(added, str):
             form_once_release(data)
+            flash(request, added, "err")
             return redirect(back)
         await setup_pass(request, "staff")
         # До следующей страницы мастера, и только её: она забирает пароль,

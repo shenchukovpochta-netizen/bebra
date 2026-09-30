@@ -3,8 +3,8 @@
 {% block content %}
 <div class="card narrow">
   <h1>Нет доступа</h1>
-  <p>Профиль <b>{{ staff.profile_name or 'без профиля' }}</b> не открывает: <b>{{ what }}</b>.</p>
-  <p class="muted">Права выдаёт владелец в разделе «Сотрудники» → «Профили доступа».
+  <p>Роль <b>{{ role_title(staff) }}</b> не открывает: <b>{{ what }}</b>.</p>
+  <p class="muted">Права выдаёт владелец в разделе «Сотрудники» → «Роли».
     Что открыто вам — видно в <a href="/me">своём кабинете</a>.</p>
   <a class="btn ghost" href="{{ home_for(staff) }}">Назад в панель</a>
 </div>

@@ -216,7 +216,8 @@ class TestTraineeEntry(LearnCase):
         service = web.get("/service").text
         self.assertIn("Обучение: мастер", service)
         self.assertIn("Шаг 1. Примите велосипед в ремонт", service)
-        self.assertRegex(service, r'href="/learn"\s*>Обучение · 0/7<')
+        self.assertRegex(service, r'href="/learn">.*?<span>Обучение</span>'
+                                  r'<em class="badge soft">0/7</em>')
         # Вход под учебным логином снова ведёт к шагам.
         other = self.client_from("10.0.0.9")
         r = other.post("/login", data={"login": login, "password": password})
