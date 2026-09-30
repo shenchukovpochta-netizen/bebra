@@ -1265,6 +1265,10 @@ async def drop_battery_extra(crm: Any, rental: dict, extra: dict, *, by: str,
     """
     if int(extra.get("rental_id") or 0) != int(rental["id"]):
         raise ServiceError("Позиция не от этой аренды.")
+    # rented ставит и снимает только выдача, new - только ввод в
+    # эксплуатацию: снятая батарея «у клиента» висела бы ни у кого.
+    if status not in logic.BATTERY_MANUAL_STATUSES:
+        raise ServiceError("Недопустимый статус снятой батареи.")
     if not await crm.drop_rental_extra(int(extra["id"]), by=by):
         raise ServiceError("Позиция уже снята.")
     if extra.get("battery_id"):
@@ -1545,18 +1549,44 @@ async def start_signing(crm: Any, *, client: dict, rental: dict | None,
 
 
 async def issue_sign_code(crm: Any, request: dict, *, ip: str | None = None,
-                          agent: str | None = None,
+                          agent: str | None = None, by: str | None = None,
                           now: datetime | None = None) -> str:
     """Выдать код подтверждения. Возвращает сам код - его увидит только
-    клиент в сообщении и оператор в панели, в базе останется лишь хэш."""
+    клиент в сообщении и оператор в панели, в базе останется лишь хэш.
+
+    По ссылке (`by` пуст) - не чаще раза в минуту, не больше
+    SIGN_CODES_PER_HOUR в час и не после SIGN_MAX_WRONG неверных: иначе
+    «код + пять попыток» по кругу перебирали бы код без предела.
+    Оператор (`by` - кто) пределов не знает и снимает замок: код он
+    видит сам, перебирать через него нечего.
+    """
+    now = now or datetime.now(UTC)
     state = logic.sign_state(request, now=now)
     if not state["open"]:
         raise ServiceError("Ссылка недействительна: подписано, отменено "
                            "или истёк срок.")
+    staff = by is not None
+    if not staff:
+        if state["locked"]:
+            raise ServiceError("Слишком много неверных кодов. Позвоните "
+                               "оператору — он выдаст код.")
+        if state["code_wait"]:
+            raise ServiceError(f"Новый код можно получить через "
+                               f"{state['code_wait']} с.")
+        sent = await crm.sign_codes_since(request["id"], now - timedelta(hours=1))
+        if sent >= logic.SIGN_CODES_PER_HOUR:
+            raise ServiceError("Кодов за час слишком много. Позвоните "
+                               "оператору — он выдаст код.")
     code = logic.make_sign_code()
-    await crm.set_sign_code(request["id"],
-                            code_hash=logic.hash_sign_code(request["token"], code))
-    await crm.log_sign_event(request["id"], kind="code_sent", ip=ip, agent=agent)
+    # Минута между кодами держится и в самом UPDATE: два запроса разом
+    # проходят проверку выше оба, а код выдаст только один.
+    if not await crm.set_sign_code(
+            request["id"], code_hash=logic.hash_sign_code(request["token"], code),
+            gap_seconds=0 if staff else logic.SIGN_CODE_GAP_SECONDS,
+            unlock=staff):
+        raise ServiceError("Код уже выдан — подождите минуту.")
+    await crm.log_sign_event(request["id"], kind="code_sent", ip=ip, agent=agent,
+                             note=by)
     return code
 
 
@@ -1573,6 +1603,9 @@ async def verify_sign(crm: Any, request: dict, raw_code: str, *,
         raise ServiceError("Документы уже подписаны.")
     if not state["open"]:
         raise ServiceError("Ссылка недействительна: отменено или истёк срок.")
+    if state["locked"]:
+        raise ServiceError("Слишком много неверных кодов. Позвоните "
+                           "оператору — он выдаст код.")
     if not request.get("code_hash"):
         raise ServiceError("Сначала получите код.")
     if not state["code_valid"]:
@@ -1585,6 +1618,9 @@ async def verify_sign(crm: Any, request: dict, raw_code: str, *,
         await crm.log_sign_event(request["id"], kind="code_wrong", ip=ip,
                                  agent=agent,
                                  note=f"попытка {left}")
+        if int(request.get("wrong_total") or 0) + 1 >= logic.SIGN_MAX_WRONG:
+            raise ServiceError("Неверный код. Попытки кончились — позвоните "
+                               "оператору, он выдаст код.")
         raise ServiceError(
             f"Неверный код. Осталось попыток: "
             f"{max(logic.SIGN_MAX_ATTEMPTS - left, 0)}.")

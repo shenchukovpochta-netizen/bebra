@@ -535,10 +535,22 @@ class TestNormalModeUnchanged(DemoCase):
         self.app.state.maintenance = True
         self.get_ok("/login")
 
-    def test_login_lock_is_per_login(self):
-        for i in range(web_app.LOGIN_LIMIT):
-            self.login(password="nope", client=self.client_from(f"10.0.5.{i}"))
-        r = self.login(client=self.client_from("10.0.6.1"))
+    def test_stranger_does_not_lock_the_owner_out(self):
+        """Десять чужих ошибок с другого адреса владельца не запирают:
+        ключ - пара «логин + адрес». Сам чужой адрес заперт."""
+        stranger = self.client_from("10.0.5.1")
+        for _ in range(web_app.LOGIN_LIMIT):
+            self.assertEqual(self.login(password="nope", client=stranger).status_code,
+                             401)
+        self.assertEqual(self.login(client=stranger).status_code, 429)
+        self.assertEqual(self.login(client=self.client_from("10.0.6.1")).status_code,
+                         303)
+
+    def test_login_lock_holds_against_many_addresses(self):
+        """Перебор с многих адресов упирается в предел на логин."""
+        for i in range(web_app.LOGIN_ACCOUNT_LIMIT):
+            self.login(password="nope", client=self.client_from(f"10.0.7.{i}"))
+        r = self.login(client=self.client_from("10.0.9.1"))
         self.assertEqual(r.status_code, 429)
 
     def test_password_and_staff_forms_work(self):

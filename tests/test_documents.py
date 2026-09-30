@@ -80,6 +80,14 @@ class TestDocLogic(unittest.TestCase):
 
 
 class TestUploadChecks(unittest.TestCase):
+    def test_next_number_is_past_the_largest(self):
+        """Не «строк плюс один»: после удаления строки такой номер совпадал
+        с именем живого файла."""
+        self.assertEqual(logic.doc_next_number("contract", []), 1)
+        self.assertEqual(logic.doc_next_number(
+            "contract", ["contract-0002.docx", "contract-0007.docx",
+                         "act_in-0009.docx", None, "чужое.docx"]), 8)
+
     def test_only_docx(self):
         with self.assertRaises(contract.TemplateProblem):
             doctemplates.check_upload(a_docx(), "договор.pdf")
@@ -255,6 +263,47 @@ class TestDocPages(tw.WebCase):
                          data={"action": "drop", "template_id": str(row["id"])})
         self.assertIsNone(_run(self.crm.doc_template(row["id"])))
         self.assertFalse(path.exists())
+
+    def test_upload_after_a_drop_does_not_overwrite_a_live_file(self):
+        """Удалили архивную строку - новая загрузка брала номер «строк + 1»,
+        то есть имя живого файла, и затирала его."""
+        self.upload(name="первый.docx")
+        self.upload(data=a_docx("Второй {{ fio }} {{ signature }}"), name="второй.docx")
+        rows = _run(self.crm.doc_templates("contract"))
+        first = next(r for r in rows if r["original"] == "первый.docx")
+        self.client.post("/documents/contract",
+                         data={"action": "drop", "template_id": str(first["id"])})
+        self.upload(data=a_docx("Третий {{ fio }} {{ signature }}"), name="третий.docx")
+        rows = _run(self.crm.doc_templates("contract"))
+        names = [r["filename"] for r in rows]
+        self.assertEqual(len(set(names)), len(names), names)
+        second = next(r for r in rows if r["original"] == "второй.docx")
+        self.assertEqual((self.folder / second["filename"]).read_bytes(),
+                         a_docx("Второй {{ fio }} {{ signature }}"))
+
+    def test_file_on_disk_without_a_row_is_not_overwritten(self):
+        (self.folder / "contract-0001.docx").write_bytes(b"old")
+        self.upload()
+        row = _run(self.crm.active_doc_template("contract"))
+        self.assertEqual(row["filename"], "contract-0002.docx")
+        self.assertEqual((self.folder / "contract-0001.docx").read_bytes(), b"old")
+
+    def test_shared_file_survives_dropping_one_of_its_rows(self):
+        """Прежняя нумерация отдавала одно имя двум строкам: удаление
+        архивной не должно стирать файл включённой."""
+        (self.folder / "contract-0002.docx").write_bytes(a_docx())
+        old = _run(self.crm.add_doc_template(
+            kind="contract", filename="contract-0002.docx", original="old.docx",
+            size_bytes=1, sha256=None))
+        live = _run(self.crm.add_doc_template(
+            kind="contract", filename="contract-0002.docx", original="live.docx",
+            size_bytes=1, sha256=None))
+        _run(self.crm.enable_doc_template(live))
+        self.client.post("/documents/contract",
+                         data={"action": "drop", "template_id": str(old)})
+        self.assertIsNone(_run(self.crm.doc_template(old)))
+        self.assertTrue((self.folder / "contract-0002.docx").is_file(),
+                        "файл включённой строки на месте")
 
     def test_esign_cannot_be_uploaded(self):
         r = self.upload(kind="esign")

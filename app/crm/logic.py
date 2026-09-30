@@ -6581,6 +6581,15 @@ SIGN_DOC_KINDS: dict[str, str] = {
 SIGN_CODE_MINUTES = 10
 # Попыток на код. Пять - это опечатка и ещё четыре, дальше нужен новый.
 SIGN_MAX_ATTEMPTS = 5
+# Новый код по ссылке - не чаще раза в минуту и не больше пяти в час:
+# каждый код - ещё пять догадок, и «код + пять попыток» по кругу иначе
+# перебирали бы шесть цифр без предела.
+SIGN_CODE_GAP_SECONDS = 60
+SIGN_CODES_PER_HOUR = 5
+# Неверных кодов на заявку всего, сколько бы кодов ни выдали: дальше
+# ссылка кодов не даёт и не принимает, код выдаёт только оператор из
+# панели - он же снимает замок.
+SIGN_MAX_WRONG = 20
 # Ссылка живёт неделю: оператор отправляет её заранее, клиент подписывает
 # на точке. Дольше держать открытую дверь незачем.
 SIGN_LINK_DAYS = 7
@@ -6621,15 +6630,23 @@ def sign_state(request: Mapping[str, Any], *,
     if code_at is not None:
         code_left = SIGN_CODE_MINUTES - (now - code_at).total_seconds() / 60
     attempts = int(request.get("attempts") or 0)
+    locked = int(request.get("wrong_total") or 0) >= SIGN_MAX_WRONG
+    # Сколько секунд ждать следующего кода по ссылке.
+    code_wait = 0
+    if code_at is not None:
+        code_wait = max(math.ceil(SIGN_CODE_GAP_SECONDS
+                                  - (now - code_at).total_seconds()), 0)
     signed = request.get("status") == "signed"
     cancelled = request.get("status") == "cancelled"
     expired = expires is not None and now >= expires
     return {
         "signed": signed, "cancelled": cancelled, "expired": expired,
         "open": not (signed or cancelled or expired),
+        "locked": locked,
         "code_valid": code_left is not None and code_left > 0
-        and attempts < SIGN_MAX_ATTEMPTS,
+        and attempts < SIGN_MAX_ATTEMPTS and not locked,
         "code_left": round(code_left) if code_left is not None else None,
+        "code_wait": code_wait,
         "attempts_left": max(SIGN_MAX_ATTEMPTS - attempts, 0),
         "docs": list(request.get("docs") or []),
     }
@@ -8377,6 +8394,18 @@ def doc_filename(kind: str, number: int) -> str:
     """Имя файла на диске собираем сами: имя из браузера - чужая строка,
     и «../../» в ней не шутка."""
     return f"{kind}-{int(number):04d}{DOC_SUFFIX}"
+
+
+def doc_next_number(kind: str, filenames: Iterable[Any]) -> int:
+    """Номер следующего файла вида: больший из занятых плюс один.
+
+    Не «строк плюс один»: архивную строку удаляют, и такой номер
+    совпадал с именем живого файла - загрузка затирала чужой шаблон,
+    а удаление той строки потом стирало включённый."""
+    pattern = re.compile(rf"{re.escape(kind)}-([0-9]+){re.escape(DOC_SUFFIX)}")
+    taken = [int(m.group(1)) for name in filenames
+             if (m := pattern.fullmatch(str(name or "")))]
+    return max(taken, default=0) + 1
 
 
 def mark_filename(kind: str) -> str:

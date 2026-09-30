@@ -2787,3 +2787,9 @@ begin
     on conflict (key) do nothing;
   end if;
 end $$;
+
+-- Неверные коды подписи по заявке всего. attempts - на один код, и новый
+-- код его обнуляет: «запросить код + пять попыток» по кругу перебирали
+-- шесть цифр без предела. Этот счёт новый код по ссылке не трогает: после
+-- logic.SIGN_MAX_WRONG заявку отпирает только код, выданный оператором.
+alter table crm.sign_requests add column if not exists wrong_total integer not null default 0;

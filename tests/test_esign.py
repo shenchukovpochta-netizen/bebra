@@ -88,6 +88,18 @@ class TestSignLogic(unittest.TestCase):
         self.assertTrue(done["signed"])
         self.assertFalse(done["open"])
 
+    def test_state_counts_the_wait_and_the_lock(self):
+        fresh = logic.sign_state(request(code_at=NOW - timedelta(seconds=15)), now=NOW)
+        self.assertEqual(fresh["code_wait"], logic.SIGN_CODE_GAP_SECONDS - 15)
+        self.assertEqual(logic.sign_state(request(), now=NOW)["code_wait"], 0,
+                         "код двухминутной давности - новый можно")
+        self.assertEqual(logic.sign_state(request(code_at=None), now=NOW)["code_wait"], 0)
+        self.assertFalse(logic.sign_state(request(), now=NOW)["locked"])
+        locked = logic.sign_state(request(wrong_total=logic.SIGN_MAX_WRONG), now=NOW)
+        self.assertTrue(locked["locked"])
+        self.assertFalse(locked["code_valid"], "замок гасит и живой код")
+        self.assertTrue(locked["open"], "ссылка жива: документы клиент видит")
+
     def test_package_digest_changes_with_any_document(self):
         one = logic.sign_docs_digest(request()["docs"])
         same = logic.sign_docs_digest(request()["docs"])
@@ -161,6 +173,14 @@ class TestSigningFlow(tw.WebCase):
         self.assertEqual(r.status_code, 303)
         request_id = int(r.headers["location"].rsplit("/", 1)[1])
         return request_id, tw.run(self.crm.sign_request(request_id))
+
+    def age_code(self, request_id):
+        """Прошлый код старше минуты: раньше новый по ссылке не дают."""
+        self.crm.signs_[request_id]["code_at"] -= timedelta(
+            seconds=logic.SIGN_CODE_GAP_SECONDS + 1)
+
+    def last_code(self):
+        return "".join(ch for ch in self.bot.sent[-1][1] if ch.isdigit())[:6]
 
     def test_package_includes_agreement_and_bot_documents(self):
         request_id, row = self.start()
@@ -255,8 +275,86 @@ class TestSigningFlow(tw.WebCase):
         self.assertIn("больше не действует", page)
         self.assertEqual(tw.run(self.crm.sign_request(request_id))["status"], "code")
         # Новый код обнуляет счётчик: старые промахи к нему не относятся.
+        self.age_code(request_id)
         self.client.post(f"/sign/{row['token']}/code")
         self.assertEqual(tw.run(self.crm.sign_request(request_id))["attempts"], 0)
+
+    def test_new_code_by_link_waits_a_minute(self):
+        request_id, row = self.start()
+        self.client.post(f"/sign/{row['token']}/code")
+        first = tw.run(self.crm.sign_request(request_id))["code_hash"]
+        self.client.post(f"/sign/{row['token']}/code")
+        self.assertIn("Новый код можно получить через",
+                      self.client.get(f"/sign/{row['token']}").text)
+        self.assertEqual(tw.run(self.crm.sign_request(request_id))["code_hash"], first)
+        self.assertEqual(len(self.bot.sent), 1)
+        self.age_code(request_id)
+        self.client.post(f"/sign/{row['token']}/code")
+        self.assertNotEqual(tw.run(self.crm.sign_request(request_id))["code_hash"],
+                            first)
+        self.assertEqual(len(self.bot.sent), 2)
+
+    def test_gap_holds_in_the_update_itself(self):
+        """Два запроса разом проходят проверку снимка оба - код выдаёт один."""
+        request_id, row = self.start()
+        tw.run(service.issue_sign_code(self.crm, row))
+        with self.assertRaises(service.ServiceError):
+            tw.run(service.issue_sign_code(self.crm, row))   # снимок без code_at
+
+    def test_codes_per_hour_are_capped(self):
+        request_id, row = self.start()
+        for _ in range(logic.SIGN_CODES_PER_HOUR):
+            self.client.post(f"/sign/{row['token']}/code")
+            self.age_code(request_id)
+        self.assertEqual(len(self.bot.sent), logic.SIGN_CODES_PER_HOUR)
+        self.client.post(f"/sign/{row['token']}/code")
+        self.assertIn("Кодов за час слишком много",
+                      self.client.get(f"/sign/{row['token']}").text)
+        self.assertEqual(len(self.bot.sent), logic.SIGN_CODES_PER_HOUR)
+        # Час прошёл - по ссылке снова можно.
+        for event in self.crm.sign_events_:
+            event["at"] -= timedelta(hours=1, minutes=1)
+        self.client.post(f"/sign/{row['token']}/code")
+        self.assertEqual(len(self.bot.sent), logic.SIGN_CODES_PER_HOUR + 1)
+
+    def test_wrong_codes_add_up_and_lock_the_link_until_the_operator(self):
+        """«Код + пять попыток» по кругу: общий счёт промахов новый код по
+        ссылке не обнуляет, на пределе ссылка заперта, отпирает оператор."""
+        request_id, row = self.start()
+        token = row["token"]
+        self.client.post(f"/sign/{token}/code")
+        for _ in range(logic.SIGN_MAX_ATTEMPTS):
+            self.client.post(f"/sign/{token}", data={"code": "000000"})
+        self.age_code(request_id)
+        self.client.post(f"/sign/{token}/code")
+        stored = tw.run(self.crm.sign_request(request_id))
+        self.assertEqual(stored["attempts"], 0, "попытки - на один код")
+        self.assertEqual(stored["wrong_total"], logic.SIGN_MAX_ATTEMPTS,
+                         "общий счёт новый код не обнуляет")
+        live = self.last_code()
+
+        self.crm.signs_[request_id]["wrong_total"] = logic.SIGN_MAX_WRONG - 1
+        self.client.post(f"/sign/{token}", data={"code": "000000"})
+        page = self.client.get(f"/sign/{token}").text
+        self.assertIn("Попытки кончились", page)
+        self.assertIn("Слишком много неверных кодов", page)
+        # Ни нового кода по ссылке, ни подписи даже верным кодом.
+        self.age_code(request_id)
+        sent = len(self.bot.sent)
+        self.client.post(f"/sign/{token}/code")
+        self.assertEqual(len(self.bot.sent), sent)
+        self.client.post(f"/sign/{token}", data={"code": live})
+        self.assertEqual(tw.run(self.crm.sign_request(request_id))["status"], "code")
+        self.assertIn("ссылка кодов больше", self.get_ok(f"/signings/{request_id}"))
+
+        # Оператор выдаёт код из панели - замок снят, клиент подписывает.
+        self.client.post(f"/signings/{request_id}/code")
+        self.assertEqual(tw.run(self.crm.sign_request(request_id))["wrong_total"], 0)
+        self.client.post(f"/sign/{token}", data={"code": self.last_code()})
+        self.assertEqual(tw.run(self.crm.sign_request(request_id))["status"], "signed")
+        notes = [e["note"] for e in tw.run(self.crm.sign_events(request_id))
+                 if e["kind"] == "code_sent"]
+        self.assertEqual(notes[-1], "staff:admin", "кто выдал код - в журнале")
 
     def test_signing_without_a_code_is_refused(self):
         _, row = self.start()

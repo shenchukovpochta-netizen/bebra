@@ -1111,6 +1111,39 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_token["id"], created["id"])
         self.assertEqual(by_token["full_name"], "Иванов Иван")
 
+    async def test_sign_code_limits_on_postgres(self):
+        """Минута между кодами - в самом UPDATE, общий счёт промахов новый
+        код по ссылке не обнуляет, код оператора его снимает."""
+        await self.seed()
+        created = await service.start_signing(
+            self.crm, client=await self.crm.client(self.client_id), rental=None,
+            company={}, bot_user=None, by="staff:t")
+        row = await self.crm.sign_request(created["id"])
+        self.assertEqual(row["wrong_total"], 0)
+        await service.issue_sign_code(self.crm, row)
+        self.assertFalse(await self.crm.set_sign_code(
+            created["id"], code_hash="x", gap_seconds=logic.SIGN_CODE_GAP_SECONDS))
+        with self.assertRaises(service.ServiceError):
+            await service.issue_sign_code(self.crm, row)       # снимок без code_at
+        stored = await self.crm.sign_request(created["id"])
+        with self.assertRaises(service.ServiceError):
+            await service.verify_sign(self.crm, stored, "000000")
+        await self.pool.execute(
+            "update crm.sign_requests set code_at = code_at - interval '2 minutes' "
+            "where id = $1", created["id"])
+        self.assertTrue(await self.crm.set_sign_code(
+            created["id"], code_hash="y", gap_seconds=logic.SIGN_CODE_GAP_SECONDS))
+        stored = await self.crm.sign_request(created["id"])
+        self.assertEqual((stored["attempts"], stored["wrong_total"]), (0, 1))
+        self.assertEqual(await self.crm.sign_codes_since(
+            created["id"], datetime.now(UTC) - timedelta(hours=1)), 1,
+            "set_sign_code напрямую событий не пишет")
+        await service.issue_sign_code(self.crm, stored, by="staff:t")
+        stored = await self.crm.sign_request(created["id"])
+        self.assertEqual(stored["wrong_total"], 0, "код оператора снимает замок")
+        self.assertEqual(await self.crm.sign_codes_since(
+            created["id"], datetime.now(UTC) - timedelta(hours=1)), 2)
+
     async def test_catalog_and_prices_from_the_owner_table(self):
         """Каталог, цены и пункты приезжают со схемой и не двоятся."""
         models = {m["title"]: m for m in await self.crm.bike_models()}

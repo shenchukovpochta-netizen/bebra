@@ -177,6 +177,29 @@ class TestReportPages(tw.WebCase):
         self.assertIn("Хомяков И.", r.text)
         self.assertIn("ИТОГО", r.text)
 
+    def test_techs_hide_money_without_finance(self):
+        """Суммы нарядов - деньги: с одним «Сервисом» видны наряды и
+        сутки, но не рубли - ни на странице, ни в выгрузке."""
+        self.closed_order(total=D(2345), cost=D(500))
+        self.assertIn("Сумма", self.client.get("/reports/techs.csv").text)
+        profile = _run(self.crm.create_access_profile(
+            "Сервис без денег", {"sections": {"service": "view", "reports": "view"}}))
+        _run(self.crm.create_staff("master", logic.hash_password("master-pass-1"),
+                                   name="Мастер", role="tech", profile_id=profile))
+        self.client.post("/logout")
+        self.login("master", "master-pass-1")
+        text = self.get_ok("/reports/techs")
+        self.assertIn("Хомяков И.", text)
+        for money in ("₽", "средний наряд", "<th>Сумма</th>", "<th>Работы</th>"):
+            self.assertNotIn(money, text, money)
+        for ext in ("csv", "xlsx"):
+            r = self.client.get(f"/reports/techs.{ext}")
+            self.assertEqual(r.status_code, 200, ext)
+        csv_text = self.client.get("/reports/techs.csv").content.decode("utf-8-sig")
+        self.assertIn("Хомяков И.", csv_text)
+        for money in ("Сумма", "Запчасти", "Работы", "Средний наряд", "2345", "1845"):
+            self.assertNotIn(money, csv_text, money)
+
     def test_model_parts_and_spend(self):
         order_id = self.closed_order()
         _run(self.crm.add_part_move(part_id=self.part_id, kind="order", qty=-3,

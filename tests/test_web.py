@@ -636,6 +636,31 @@ class TestExtras(WebCase):
         self.assertEqual(self.login("ivan", "password-1").status_code, 429)
         self.assertEqual(self.login().status_code, 303)
 
+    def test_unknown_or_disabled_login_costs_the_same_scrypt(self):
+        """Без логина отказ приходил без scrypt - быстрее в десятки раз, и
+        по времени ответа было видно, какой логин есть."""
+        from unittest import mock
+
+        from app.web import app as web_app
+        run(self.crm.create_staff("gone", logic.hash_password("password-1"), "Ушёл",
+                                  "manager"))
+        gone = run(self.crm.staff_by_login("gone"))
+        run(self.crm.set_staff_active(gone["id"], False))
+        seen = []
+        real = logic.verify_password
+
+        def spy(password, stored):
+            seen.append(stored)
+            return real(password, stored)
+
+        with mock.patch.object(web_app.logic, "verify_password", spy):
+            self.assertEqual(self.login("nobody", "password-1").status_code, 401)
+            self.assertEqual(self.login("gone", "password-1").status_code, 401)
+        self.assertEqual(seen[0], web_app.DECOY_PASSWORD_HASH)
+        self.assertEqual(seen[1], gone["password_hash"],
+                         "отключённый проверяется своим хэшем, отказ - после")
+        self.assertFalse(real("", web_app.DECOY_PASSWORD_HASH))
+
     def test_successful_login_clears_failures(self):
         self.assertEqual(self.login(password="nope").status_code, 401)
         self.assertEqual(self.login().status_code, 303)

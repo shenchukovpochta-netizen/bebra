@@ -31,7 +31,9 @@
     собственноручной подписи (ст. 160 ГК РФ, 63-ФЗ).</p>
 </div>
 
-{% if state.open %}
+{% if state.open and state.locked %}
+<div class="card"><p>Слишком много неверных кодов. Позвоните на точку — оператор выдаст код.</p></div>
+{% elif state.open %}
 <div class="card">
   <h2>Подпись</h2>
   <form method="post" action="/sign/{{ req.token }}/code">

@@ -347,14 +347,16 @@
     <form method="post" action="/signings/{{ req.id }}/code" class="inline-form">
       <button type="submit">Отправить код клиенту в Telegram</button>
     </form>
-    {% else %}
+    {% elif link %}
     <span class="muted">Клиент не в боте — продиктуйте ссылку или откройте её на его телефоне.</span>
+    {% else %}
+    <span class="muted">Клиент не в боте — ссылку ему даст сотрудник с правом на документы клиента.</span>
     {% endif %}
     <span class="spacer"></span>
     <a class="btn ghost" href="/signings/{{ req.id }}">Карточка подписания</a>
     <a class="btn" href="/rentals/{{ rental.id }}">Готово → аренда</a>
   </div>
-  <p class="muted">Ссылка для клиента: <code>{{ link }}</code></p>
+  {% if link %}<p class="muted">Ссылка для клиента: <code>{{ link }}</code></p>{% endif %}
   {% if code %}<p class="flash">Код отправлен клиенту: <b>{{ code }}</b> — действует {{ SIGN_CODE_MINUTES }} мин.</p>{% endif %}
   <p class="muted">Подписывать необязательно прямо сейчас: ссылка живёт
     {{ SIGN_LINK_DAYS }} дн., и заявка ждёт в разделе «Подписания».
