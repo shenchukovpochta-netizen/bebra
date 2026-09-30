@@ -1640,7 +1640,8 @@ class FakeCrm:
                 continue
             staff = self.staff.get(order.get("tech_id")) or {}
             name = staff.get("name") or staff.get("login") or "не назначен"
-            cell = by_tech.setdefault(name, {
+            # Как group by 1, 2 в SQL: два техника с одним именем - две строки.
+            cell = by_tech.setdefault((name, order.get("tech_id")), {
                 "tech": name, "tech_id": order.get("tech_id"), "orders": 0,
                 "client_orders": 0, "total": Decimal(0), "cost": Decimal(0),
                 "days": 0.0})

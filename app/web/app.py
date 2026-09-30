@@ -3562,7 +3562,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def rental_new(request: Request) -> Response:
         if not may_edit(request, "rentals"):
             return denied(request, "rentals")
-        clients_all = await crm.clients(status="active")
+        # Весь список, как у /clients: по умолчанию 500 по имени, и
+        # клиенты дальше пятисотого в выпадающий список не попадали.
+        clients_all = await crm.clients(status="active", limit=100000)
         free_clients = [c for c in clients_all if not c.get("rental_id")]
         client_id = request.query_params.get("client")
         bike_id = request.query_params.get("bike")
