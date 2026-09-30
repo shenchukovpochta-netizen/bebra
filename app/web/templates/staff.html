@@ -46,7 +46,9 @@
         {% else %}<span class="tag ok">активен</span>{% endif %}
       </td>
       <td data-label="Telegram">
-        {% if s.tg_id %}<span class="tag ok">{{ staff_tg_label(s) }}</span>{% else %}<span class="muted">не привязан</span>{% endif %}
+        {# Выданный код, который ещё не отправили боту, - «Ждёт кода»:
+           владелец видит, что сотрудник до бота не дошёл. #}
+        {% if s.tg_id %}<span class="tag ok">{{ staff_tg_label(s) }}</span>{% elif s.link_code %}<span class="tag warn">{{ staff_tg_label(s) }}</span>{% else %}<span class="muted">не привязан</span>{% endif %}
         {% if can_manage %}
         <form method="post" action="/staff/{{ s.id }}/telegram" class="inline-form">
           {% if s.tg_id %}<input type="hidden" name="unlink" value="1">{% endif %}

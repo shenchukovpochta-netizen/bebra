@@ -529,8 +529,8 @@ class TestTariffAndBuyInPanel(tw.WebCase):
         month = date.today().strftime("%Y-%m")
         def period(page):
             """Переключатели периода - от «30 дней» до формы дат."""
-            return page[page.rindex("<nav", 0, page.index(">30 дней<")):
-                        page.index("</form>")]
+            start = page.rindex("<nav", 0, page.index(">30 дней<"))
+            return page[start:page.index("</form>", start)]
 
         for url in (f"/reports/tariffs/model?month={month}", "/reports/tariffs?by=model"):
             page = self.get_ok(url)

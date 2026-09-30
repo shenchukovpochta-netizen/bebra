@@ -140,13 +140,13 @@ class TestFranchiseSection(tw.WebCase):
         tw.run(service.franchise_store(self.crm, fid, parsed.value, today=now.date()))
 
     def test_only_owner_sees_the_section(self):
-        self.assertIn(">Франчайзи</a>", self.get_ok("/"))
+        self.assertIn("Франчайзи", self.menu_labels(self.get_ok("/")))
         manager = tw.run(self.crm.access_profile_by_code("manager"))
         tw.run(self.crm.create_staff("anna", logic.hash_password("password-1"), "Анна",
                                      "manager", manager["id"]))
         self.client.post("/logout")
         self.login("anna", "password-1")
-        self.assertNotIn(">Франчайзи</a>", self.get_ok("/"))
+        self.assertNotIn("Франчайзи", self.menu_labels(self.get_ok("/")))
         for path in ("/franchisees", "/franchisees/royalty", "/franchisees/royalty.csv",
                      "/franchisees/new"):
             self.assertEqual(self.client.get(path).status_code, 403, path)
