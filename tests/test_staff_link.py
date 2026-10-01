@@ -108,11 +108,11 @@ class TestStaffLinkInPanel(tw.WebCase):
         self.assertEqual(len(self.bot.menus), 1, "включение кнопку не ставит: /crm")
 
     def test_panel_pages_carry_the_telegram_bridge(self):
-        """Вход и страницы за входом - со скриптом Mini App: с них панель
-        и открывается внутри Telegram."""
+        """Страницы за входом - со скриптом Mini App; страница входа живёт
+        без скриптов, как и была."""
         self.assertIn('src="/static/tg.js', self.get_ok("/"))
         self.client.post("/logout")
-        self.assertIn('src="/static/tg.js', self.get_ok("/login"))
+        self.assertNotIn("<script", self.get_ok("/login"))
         script = self.client.get("/static/tg.js")
         self.assertEqual(script.status_code, 200)
         self.assertIn("web_app_expand", script.text)

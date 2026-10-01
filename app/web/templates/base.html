@@ -23,8 +23,9 @@
 <meta name="apple-mobile-web-app-title" content="{{ app_short }}">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 {# Панель внутри Telegram (кнопка бота /crm): готовность и полный экран.
-   Свой файл, а не скрипт Telegram; вне Telegram ничего не делает. Страница
-   входа ставит его сама - с неё Mini App и начинается. #}
+   Свой файл, а не скрипт Telegram; вне Telegram ничего не делает. Только
+   за входом: страница входа живёт без скриптов, её Telegram показывает
+   как есть, а разворачивает первая страница после входа. #}
 {% block tgapp %}{% if staff %}<script src="/static/tg.js?v={{ static_v }}"></script>{% endif %}{% endblock %}
 </head>
 <body class="{% if staff %}with-side{% endif %}">

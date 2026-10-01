@@ -18,6 +18,7 @@ import unittest
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -677,6 +678,15 @@ class TestPayFlow(tw.WebCase):
         _run(self.crm.set_setting("autocharge_hour", "0", by="тест"))
         acq = FakeAcquiring(charge=None)      # отказ: клиент не «занят» счётом
 
+        class Noon(datetime):
+            """Полдень сегодня: после 21:00 проход списания ждёт утра
+            (logic.too_late_for_clients), и по настенным часам тест падал
+            вечером."""
+            @classmethod
+            def now(cls, tz=None):
+                noon = datetime.combine(date.today(), datetime.min.time()).replace(hour=12)
+                return noon.replace(tzinfo=tz) if tz else noon
+
         async def spin():
             task = asyncio.create_task(paying.paying_loop(
                 self.bot, self.crm, self.TEAM, acq, interval=0.01))
@@ -685,8 +695,9 @@ class TestPayFlow(tw.WebCase):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        _run(spin())
-        _run(spin())                          # перезапуск бота
+        with mock.patch.object(paying, "datetime", Noon):
+            _run(spin())
+            _run(spin())                      # перезапуск бота
         self.assertEqual(len([c for c in acq.calls if c[0] == "charge"]), 1)
         self.assertEqual(_run(self.crm.settings())["autocharge_done_on"],
                          date.today().isoformat())
