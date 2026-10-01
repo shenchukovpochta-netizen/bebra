@@ -322,6 +322,114 @@ class TestExtrasOnTheRentalCard(tw.WebCase):
         self.assertIn("Доп. аккумулятор", text)
         self.assertIn("Итого за период", text)
 
+    # ─── проверка кода: гонка выдачи и замена чужой батареи ───
+
+    def other_rental(self, battery_status="rented"):
+        """Вторая аренда - другой клиент, другой велосипед, своя батарея."""
+        from app.crm import service
+        client = _run(self.crm.create_client(full_name="Петров Пётр",
+                                             phone="+79990000002"))
+        bike = _run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
+        rental_id = _run(service.open_rental(
+            self.crm, client=_run(self.crm.client(client)), bike=_run(self.crm.bike(bike)),
+            tariff=_run(self.crm.tariff(self.tariff_id)), started_on=date.today(),
+            contract_no=None, by="t"))
+        battery = _run(self.crm.create_battery(code="9510077", model_id=self.model_id,
+                                               status="available"))
+        _run(self.crm.issue_batteries(rental_id, battery_ids=[battery], bike_id=bike,
+                                      by="t"))
+        return rental_id, battery
+
+    def test_battery_taken_meanwhile_is_neither_priced_nor_issued(self):
+        """Карточка показала батарею свободной, а соседний оператор успел её
+        выдать: позиция и цена не встают, экран не говорит «выдан»."""
+        from app.crm import service
+        _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
+                                    model="Аккумулятор 70 Ач", kind="battery"))
+        stale = _run(self.crm.battery(self.battery_id))
+        _run(self.crm.update_battery(self.battery_id, status="rented", rental_id=999))
+        with self.assertRaises(service.ServiceError) as err:
+            _run(service.add_battery_extra(
+                self.crm, _run(self.crm.rental(self.rental_id)), stale,
+                tariffs=_run(self.crm.tariffs(active_only=True)), by="t"))
+        self.assertIn("только что выдали", str(err.exception))
+        self.assertEqual(self.price_of(), D(3000), "цена не поднялась")
+        self.assertEqual(_run(self.crm.rental_extras(self.rental_id)), [])
+        self.assertEqual(_run(self.crm.battery(self.battery_id))["rental_id"], 999)
+
+    def test_issue_drops_an_extra_whose_battery_was_taken(self):
+        """Выдача: занятая за секунду батарея не остаётся в цене периода и в
+        первом начислении, а вызывающий узнаёт о ней из `missed`."""
+        from app.crm import service
+        _, taken = self.other_rental()
+        client = _run(self.crm.create_client(full_name="Сидоров", phone="+79990000003"))
+        bike = _run(self.crm.create_bike(code="B-3", model="Kugoo V3"))
+        missed: list = []
+        rental_id = _run(service.open_rental(
+            self.crm, client=_run(self.crm.client(client)), bike=_run(self.crm.bike(bike)),
+            tariff=_run(self.crm.tariff(self.tariff_id)), started_on=date.today(),
+            contract_no=None, by="t", missed=missed,
+            extras=[{"kind": "battery", "battery_id": taken, "title": "Доп. АКБ",
+                     "price": D(1170)},
+                    {"kind": "battery", "battery_id": self.battery_id,
+                     "title": "Доп. АКБ", "price": D(1170)}]))
+        self.assertEqual([m["battery_id"] for m in missed], [taken])
+        rental = _run(self.crm.rental(rental_id))
+        self.assertEqual(logic.to_money(rental["price"]), D(4170), "велосипед и одна батарея")
+        self.assertEqual(_run(self.crm.client_balance(client)), D(-4170),
+                         "первый период - без чужой батареи")
+        live = _run(self.crm.rental_extras(rental_id, live_only=True))
+        self.assertEqual([e["battery_id"] for e in live], [self.battery_id])
+        self.assertEqual(_run(self.crm.battery(self.battery_id))["rental_id"], rental_id,
+                         "своя ушла клиенту вместе с позицией")
+        self.assertNotEqual(_run(self.crm.battery(taken))["rental_id"], rental_id)
+
+    def test_swap_moves_the_extra_to_the_new_battery(self):
+        """Замена платной батареи: позиция едет на новую, и её снятие
+        возвращает в парк ту, что у клиента, а не снятую в ремонт."""
+        _run(self.crm.create_tariff("АКБ · неделя", 7, D(1170), None,
+                                    model="Аккумулятор 70 Ач", kind="battery"))
+        self.add()
+        fresh = _run(self.crm.create_battery(code="9510055", model_id=self.model_id,
+                                             status="available"))
+        r = self.client.post(f"/rentals/{self.rental_id}/battery",
+                             data={"old_id": str(self.battery_id),
+                                   "battery_id": str(fresh), "old_status": "repair"})
+        self.assertEqual(r.status_code, 303)
+        extra = _run(self.crm.rental_extras(self.rental_id, live_only=True))[0]
+        self.assertEqual(extra["battery_id"], fresh)
+        self.assertEqual(self.price_of(), D(4170), "цена та же: замена - не покупка")
+        self.client.post(f"/rentals/{self.rental_id}/extras/{extra['id']}",
+                         data={"status": "available"})
+        self.assertEqual(_run(self.crm.battery(fresh))["status"], "available")
+        self.assertEqual(_run(self.crm.battery(self.battery_id))["status"], "repair")
+
+    def test_swap_cannot_take_a_battery_of_another_rental(self):
+        """Номер снимаемой батареи - из формы: чужая аренда свою не теряет,
+        а потерянная и «на сборке» не встают в свободные."""
+        _, foreign = self.other_rental()
+        lost = _run(self.crm.create_battery(code="9510066", model_id=self.model_id,
+                                            status="lost"))
+        for old in (foreign, lost):
+            before = _run(self.crm.battery(old))
+            r = self.client.post(f"/rentals/{self.rental_id}/battery",
+                                 data={"old_id": str(old),
+                                       "battery_id": str(self.battery_id)})
+            self.assertEqual(r.status_code, 303)
+            after = _run(self.crm.battery(old))
+            self.assertEqual((after["status"], after["rental_id"]),
+                             (before["status"], before["rental_id"]), old)
+            self.assertEqual(_run(self.crm.battery(self.battery_id))["status"],
+                             "available", "новая не ушла")
+        self.assertIn("не у этой аренды", self.get_ok(f"/rentals/{self.rental_id}"))
+
+    def test_return_battery_is_bound_to_its_rental(self):
+        other, foreign = self.other_rental()
+        self.assertFalse(_run(self.crm.return_battery(foreign, rental_id=self.rental_id,
+                                                      by="t")))
+        self.assertEqual(_run(self.crm.battery(foreign))["status"], "rented")
+        self.assertTrue(_run(self.crm.return_battery(foreign, rental_id=other, by="t")))
+
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
 class TestTariffPage(tw.WebCase):

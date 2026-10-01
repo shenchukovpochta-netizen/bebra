@@ -572,6 +572,189 @@ class TestReviewFixes(WebCase):
         self.assertEqual(r.headers["location"], "/login?next=%2Fclients%3Fq%3Dabc")
 
 
+class TestOperatorInput(WebCase):
+    """Проверка кода: ввод, на котором панель отвечала 500, - нулевой байт,
+    номер несуществующей записи в форме, переименование в занятое имя,
+    слова и бесконечность в числах, дата в десятитысячном году. На
+    заглушке база не падает, поэтому проверяется, что до неё не доходит:
+    ничего не записано и оператору сказано, что не так."""
+
+    def setUp(self):
+        super().setUp()
+        self.login()
+        self.seed()
+
+    def test_nul_byte_is_cut_from_query_and_form(self):
+        """Postgres не хранит \\x00 в тексте: `%00` в поиске давал 500."""
+        page = self.get_ok("/clients?q=Ива%00нов")
+        self.assertIn("Иванов Иван", page, "поиск получил «Иванов», а не с нулём")
+        self.get_ok("/bikes?q=B%00-1&status=%00")
+        self.client.post("/bikes", data={"code": "N-1", "model": "Kugoo V3",
+                                         "note": "до\x00бавлен"})
+        bike = run(self.crm.bike_by_code("N-1"))
+        self.assertEqual(bike["note"], "добавлен")
+        self.assertEqual(self.client.get("/sign/ab%00cd").status_code, 404)
+
+    def test_unknown_technician_is_refused(self):
+        r = self.client.post("/orders", data={"payer": "own", "bike_id": str(self.bike_id),
+                                              "tech_id": "999999", "complaint": "стук"})
+        self.assertEqual(r.headers["location"], "/orders/new")
+        self.assertIn("Такого сотрудника нет", self.get_ok("/orders/new"))
+        self.assertEqual(run(self.crm.work_orders()), [])
+        self.client.post("/orders", data={"payer": "own", "bike_id": str(self.bike_id),
+                                          "complaint": "стук"})
+        order = run(self.crm.work_orders())[0]
+        self.client.post(f"/orders/{order['id']}/edit",
+                         data={"status": order["status"], "tech_id": "999999"})
+        self.assertIsNone(run(self.crm.work_order(order["id"]))["tech_id"])
+        self.assertIn("Такого сотрудника нет", self.get_ok(f"/orders/{order['id']}"))
+
+    def test_unknown_catalogue_and_supplier_ids_are_refused(self):
+        # модель АКБ в карточке батареи
+        self.client.post("/batteries", data={"code": "9510001", "model_id": "999999",
+                                             "service_months": "15", "cycles": "0"})
+        self.assertIsNone(run(self.crm.battery_by_code("9510001")))
+        self.assertIn("такой нет в каталоге", self.get_ok("/batteries"))
+        # клетка совместимости
+        battery_model = run(self.crm.create_battery_model(
+            title="48V", brand=None, voltage=48, capacity=None, price=D(0),
+            service_months=15, note=None))
+        self.client.post("/models/compat", data={"bike_model_id": "999999",
+                                                 "battery_model_id": str(battery_model),
+                                                 "mode": "fits"})
+        self.assertEqual(run(self.crm.compat_pairs()), [])
+        # поставщик закупки, прихода и заказа
+        self.client.post("/assets", data={"codes": "Z-1", "model": "Kugoo V3",
+                                          "supplier_id": "999999"})
+        self.assertEqual(run(self.crm.purchases()), [])
+        part = run(self.crm.create_part(title="Камера", node=None, unit="шт",
+                                        cost=D(300), price=D(600), min_stock=0,
+                                        model=None, note=None))
+        for data in ({"supplier_id": "999999", "part_id_0": str(part), "qty_0": "2"},
+                     {"part_id_0": "999999", "qty_0": "2"}):
+            self.client.post("/parts/receipts", data=data)
+            self.assertEqual(run(self.crm.part_docs(kind="receipt")), [], data)
+        self.assertIn("обновите страницу", self.get_ok("/parts/receipts"))
+        self.client.post("/part-orders/items", data={"part_id": str(part), "qty": "1"})
+        order = run(self.crm.open_part_order())
+        self.client.post(f"/part-orders/{order['id']}/status",
+                         data={"status": "ordered", "supplier_id": "999999"})
+        self.assertEqual(run(self.crm.part_order(order["id"]))["status"], order["status"],
+                         "заказ не ушёл неизвестному поставщику")
+
+    def test_rename_to_a_taken_name_is_a_message(self):
+        run(self.crm.create_part(title="Камера", node=None, unit="шт", cost=D(1),
+                                 price=D(1), min_stock=0, model=None, note=None))
+        b = run(self.crm.create_part(title="Покрышка", node=None, unit="шт", cost=D(1),
+                                     price=D(1), min_stock=0, model=None, note=None))
+        r = self.client.post(f"/parts/{b}/edit", data={"title": "Камера", "unit": "шт",
+                                                       "active": "1"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(run(self.crm.part(b))["title"], "Покрышка")
+        self.assertIn("уже есть", self.get_ok(f"/parts/{b}"))
+        types = [t for t in run(self.crm.work_types()) if t["active"]][:2]
+        r = self.client.post(f"/work-types/{types[1]['id']}",
+                             data={"title": types[0]["title"], "minutes": "10"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("уже есть", self.get_ok("/work-types"))
+        run(self.crm.create_battery(code="A-1", by="t"))
+        second = run(self.crm.create_battery(code="A-2", by="t"))
+        r = self.client.post(f"/batteries/{second}/edit",
+                             data={"code": "A-1", "service_months": "15", "cycles": "0"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(run(self.crm.battery(second))["code"], "A-2")
+        self.assertIn("уже есть", self.get_ok(f"/batteries/{second}"))
+
+    def test_words_and_overflow_in_numbers_are_a_message(self):
+        run(self.crm.create_bike_model(title="Kugoo V3", brand=None, factory_title=None,
+                                       battery_slots=1, note=None, speed_kmh=45))
+        model = run(self.crm.bike_models())[0]
+        r = self.client.post(f"/models/bikes/{model['id']}",
+                             data={"weight_kg": "25 кг", "note": ""})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("Вес, кг: только число", self.get_ok("/models"))
+        self.client.post(f"/models/bikes/{model['id']}",
+                         data={"speed_kmh": "99999999999", "note": ""})
+        self.assertIn("Скорость, км/ч: число от 0", self.get_ok("/models"))
+        self.assertEqual(run(self.crm.bike_model(model["id"]))["speed_kmh"], 45,
+                         "отказ не стирает записанное")
+        self.client.post("/models/batteries", data={"title": "60V", "capacity": "9999999"})
+        self.assertNotIn("60V", [m["title"] for m in run(self.crm.battery_models())])
+        self.client.post("/batteries", data={"code": "9510002", "volts": "inf",
+                                             "service_months": "15", "cycles": "0"})
+        self.assertIsNone(run(self.crm.battery_by_code("9510002")))
+
+    def test_dates_in_year_9999_are_refused(self):
+        """Дата закрытия в 9999 году ложилась бесконечностью и ломала
+        клиентов и риск, дата покупки - план замены и карточку батареи."""
+        rental_id = run(service.open_rental(
+            self.crm, client=run(self.crm.client(self.client_id)),
+            bike=run(self.crm.bike(self.bike_id)),
+            tariff=run(self.crm.tariff(self.tariff_id)), started_on=date.today(),
+            contract_no=None, by="t"))
+        self.client.post(f"/rentals/{rental_id}/close",
+                         data={"closed_on": "31.12.9999", "bike_status": "available"})
+        self.assertEqual(run(self.crm.rental(rental_id))["status"], "active")
+        self.assertIn("ещё не наступила", self.get_ok(f"/rentals/{rental_id}"))
+        self.client.post("/batteries", data={"code": "9510003",
+                                             "purchased_on": "31.12.9998",
+                                             "service_months": "15", "cycles": "0"})
+        self.assertIsNone(run(self.crm.battery_by_code("9510003")))
+        self.client.post("/bikes", data={"code": "N-2", "model": "Kugoo V3",
+                                         "purchased_on": "31.12.9998"})
+        self.assertIsNone(run(self.crm.bike_by_code("N-2")))
+        self.client.post("/assets", data={"codes": "Z-2", "model": "Kugoo V3",
+                                          "purchased_on": "31.12.9998"})
+        self.assertEqual(run(self.crm.purchases()), [])
+        self.get_ok("/batteries/plan")
+
+    def test_check_photo_field_is_checked_before_the_disk(self):
+        """Поле сверки - из формы и стоит в имени файла: «../x» писало
+        снимок мимо папки раньше, чем сервис отказывал полю."""
+        import dataclasses
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "bikes"
+            app = create_app(crm=self.crm, db=self.db, bot=self.bot,
+                             cfg=dataclasses.replace(self.cfg, bike_photo_dir=folder))
+            client = TestClient(app, follow_redirects=False)
+            client.post("/login", data={"login": "admin", "password": "admin-pass-123"})
+            for field in ("../../escape", "nope"):
+                r = client.post(f"/bikes/{self.bike_id}/check",
+                                data={"field": field, "action": "check"},
+                                files={"photo": ("a.jpg", b"\xff\xd8 jpeg", "image/jpeg")})
+                self.assertEqual(r.status_code, 303, field)
+            written = [p.name for p in Path(tmp).rglob("*") if p.is_file()]
+            self.assertEqual(written, [])
+            self.assertIn("Неизвестное поле паспорта", plain(client.get("/").text))
+
+    def test_role_name_cannot_break_out_of_the_confirm(self):
+        """Название роли шло внутрь confirm('…') в атрибуте: HTML-экранирование
+        апострофа браузер снимает до JS, и «x');alert(1);//» становилось кодом."""
+        pid = run(self.crm.create_access_profile(
+            "x');alert(1);//", {"sections": {"bikes": "view"}, "actions": {}}))
+        page = self.client.get(f"/profiles/{pid}").text
+        self.assertNotIn("confirm('", page)
+        self.assertIn('data-confirm="Удалить роль «x&#39;);alert(1);//»?"', page)
+        self.assertIn('onsubmit="return confirm(this.dataset.confirm)"', page)
+
+    def test_issue_leaves_another_clients_booking_alone(self):
+        other = run(self.crm.create_client(full_name="Петров", phone="+79990000002"))
+        booking = run(self.crm.create_booking(client_id=other, model="Kugoo V3",
+                                              tariff_id=self.tariff_id, location_id=None,
+                                              wanted_on=date.today()))
+        r = self.client.post("/issue", data={"client_id": self.client_id,
+                                             "tariff_id": self.tariff_id,
+                                             "bike_id": self.bike_id,
+                                             "booking_id": str(booking),
+                                             "started_on": date.today().isoformat(),
+                                             "pay_amount": "0", "mileage": "10"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIsNotNone(run(self.crm.active_rental_of(self.client_id)))
+        self.assertEqual(run(self.crm.booking(booking))["status"], "new",
+                         "чужая заявка не закрыта этой выдачей")
+
+
 class TestFleetMetricsPages(WebCase):
     """Три числа на сводке и в отчётах, амортизация, ремонт по узлам,
     точки, новые статусы."""

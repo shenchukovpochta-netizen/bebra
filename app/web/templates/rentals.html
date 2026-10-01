@@ -31,7 +31,8 @@
 {% set qs = ('&q=' ~ (q|urlencode) if q else '') ~ lq %}
 <nav class="tabs">
   <a href="/rentals?status={{ status }}{{ qs }}" class="{% if not view %}on{% endif %}">Все</a>
-  <a href="/rentals?status={{ status }}&view=debt{{ qs }}" class="{% if view == 'debt' %}on{% endif %}">Долг{% if counts.debt %} · {{ counts.debt }}{% endif %}</a>
+  {# Должники - это деньги: без «Финансов» вкладки нет, как и группы на «Клиентах». #}
+  {% if can_view(staff, 'finance') %}<a href="/rentals?status={{ status }}&view=debt{{ qs }}" class="{% if view == 'debt' %}on{% endif %}">Долг{% if counts.debt %} · {{ counts.debt }}{% endif %}</a>{% endif %}
   <a href="/rentals?status={{ status }}&view=overdue{{ qs }}" class="{% if view == 'overdue' %}on{% endif %}">Просрочка{% if counts.overdue %} · {{ counts.overdue }}{% endif %}</a>
   <a href="/rentals?status={{ status }}&view=repair{{ qs }}" class="{% if view == 'repair' %}on{% endif %}">В ремонте{% if counts.repair %} · {{ counts.repair }}{% endif %}</a>
   <a href="/rentals?status={{ status }}&view=nobike{{ qs }}" class="{% if view == 'nobike' %}on{% endif %}">Без техники{% if counts.nobike %} · {{ counts.nobike }}{% endif %}</a>

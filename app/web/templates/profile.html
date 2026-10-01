@@ -44,7 +44,7 @@
   <p class="muted">Пока никого. Назначается в <a href="/staff">списке сотрудников</a>.</p>
   {% endif %}
   {% if can_manage and not profile.built_in and not staff_on_it %}
-  <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Удалить роль «{{ profile.name }}»?')">
+  <form method="post" action="/profiles/{{ profile.id }}/delete" data-confirm="Удалить роль «{{ profile.name }}»?" onsubmit="return confirm(this.dataset.confirm)">
     <button type="submit" class="ghost">Удалить роль</button>
   </form>
   {% endif %}

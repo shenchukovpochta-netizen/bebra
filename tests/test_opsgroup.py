@@ -438,6 +438,8 @@ class TestReturn(OpsCase):
         self.assertEqual((out.reaction, out.reply), ("👍", None))
 
     def test_old_closure_is_not_this_return(self):
+        # Возврат не раньше начала аренды: давняя сдача - у давней аренды.
+        run(self.crm.update_rental(self.rental_id, started_on=TODAY - timedelta(days=40)))
         self.close(days_ago=30)
         out = self.handle("return", return_text())
         self.assertEqual(out.reaction, "👎")

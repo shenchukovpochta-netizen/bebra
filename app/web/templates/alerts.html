@@ -75,7 +75,7 @@
         {# Едет без аренды или сработала метка - блокировка прямо отсюда.
            Сработает после остановки, команду относит опрос. #}
         {% if a.kind in BLOCKABLE_ALERTS and not a.tracker_blocked %}
-        <form method="post" action="/trackers/{{ a.tracker_id }}/command" class="inline-form" onsubmit="return confirm('Заблокировать мотор? Сработает после остановки велосипеда.')">
+        <form method="post" action="/trackers/{{ a.tracker_id }}/command" class="inline-form" data-confirm="Заблокировать мотор? Сработает после остановки велосипеда." onsubmit="return confirm(this.dataset.confirm)">
           <input type="hidden" name="next" value="/alerts?view={{ view }}">
           <input type="hidden" name="command" value="block">
           <input type="hidden" name="alert_id" value="{{ a.id }}">

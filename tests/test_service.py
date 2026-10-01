@@ -189,7 +189,10 @@ class TestServiceInPanel(tw.WebCase):
         self.client.post("/work-types", data={"title": "Замена мотор-колеса",
                                               "category": "Электрика", "minutes": "90",
                                               "price": "1500", "node": ""})
-        row = tw.run(self.crm.work_types())[0]
+        # Своя строка, а не первая в прайсе: название уникально, и
+        # переименование чужой строки в занятое база отбивает.
+        row = next(t for t in tw.run(self.crm.work_types())
+                   if t["title"] == "Замена мотор-колеса")
         r = self.client.post(f"/work-types/{row['id']}", data={
             "title": "Замена мотор-колеса", "minutes": "90", "price": "1500",
             "category": "Ходовая", "node": "motor_wheel"})

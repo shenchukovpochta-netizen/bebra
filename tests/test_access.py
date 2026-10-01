@@ -521,6 +521,43 @@ class TestAccessInPanel(tw.WebCase):
         for money in ("1 170", "3 000", "4 170", "Итого за период"):
             self.assertNotIn(money, page, money)
 
+    def test_rentals_do_not_rank_debtors_without_finance(self):
+        """Вид «Долг», сортировка по балансу и выгрузка с ?view=debt - это
+        список должников по сумме: без «Финансов» вид - просто все аренды,
+        сортировка по балансу не действует."""
+        from app.crm import service
+        tariff = tw.run(self.crm.tariff(self.tariff_id))
+        debtor = tw.run(service.open_rental(
+            self.crm, client=tw.run(self.crm.client(self.client_id)),
+            bike=tw.run(self.crm.bike(self.bike_id)), tariff=tariff,
+            started_on=tw.date.today(), contract_no=None, by="t"))
+        payer = tw.run(self.crm.create_client(full_name="Аккуратов Павел",
+                                              phone="+79990000009"))
+        bike = tw.run(self.crm.create_bike(code="B-9", model="Kugoo V3"))
+        tw.run(service.open_rental(
+            self.crm, client=tw.run(self.crm.client(payer)),
+            bike=tw.run(self.crm.bike(bike)), tariff=tariff,
+            started_on=tw.date.today(), contract_no=None, by="t"))
+        tw.run(self.crm.add_ledger(client_id=payer, kind="payment", amount=tw.D(9000),
+                                   method="cash", note="вперёд", created_by="t"))
+        owner = self.get_ok("/rentals?view=debt")
+        self.assertIn(f"/rentals/{debtor}", owner)
+        self.assertNotIn("Аккуратов", owner, "владельцу вид «Долг» - должники")
+
+        self.narrow("olga", {"rentals": "view"})
+        page = self.get_ok("/rentals?view=debt")
+        self.assertIn("Аккуратов", page, "без «Финансов» ?view=debt - это все")
+        self.assertNotRegex(page, r'class="[^"]*">Долг', "и вкладки «Долг» нет")
+        self.assertRegex(owner, r'class="[^"]*">Долг')
+        csv_text = self.client.get("/rentals.csv?view=debt").content.decode("utf-8-sig")
+        self.assertIn("Аккуратов", csv_text)
+        self.assertIn("Иванов", csv_text)
+
+        def order(direction):
+            text = self.get_ok(f"/rentals?sort=debt&dir={direction}")
+            return [n for n in re.findall(r"(Аккуратов|Иванов Иван)", text)]
+        self.assertEqual(order("asc"), order("desc"), "по балансу не сортирует")
+
     # ─── управление профилями ───
 
     def test_owner_edits_a_profile_and_rights_apply_at_once(self):

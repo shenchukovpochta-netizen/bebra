@@ -506,6 +506,46 @@ def rental_start_problem(started: date, today: date) -> str | None:
     return None
 
 
+def rental_close_problem(closed: date, started: date | None, today: date) -> str | None:
+    """Почему эту дату возврата не принять; None - дата годится.
+
+    Возврат - не позже сегодня и не раньше начала аренды. Опечатка в годе
+    (31.12.9999) ложилась в базу бесконечностью, и разность «возврат минус
+    начало» в списке клиентов, риске и выписке падала на каждом открытии.
+    Аренду с началом в будущем (выдача по заявке) отменяют сегодняшним
+    днём: другой даты у неё нет.
+    """
+    if closed > today:
+        return f"Дата возврата {closed:%d.%m.%Y} ещё не наступила — проверьте год."
+    if started is not None and closed < min(started, today):
+        return (f"Дата возврата {closed:%d.%m.%Y} раньше начала аренды "
+                f"{started:%d.%m.%Y}.")
+    return None
+
+
+# Дата покупки техники: раньше 2000 года в парке ничего нет, а дата в
+# будущем - опечатка в годе. 31.12.9998 роняла план замены и карточку:
+# срок службы от неё уходил за 9999 год.
+PURCHASE_FLOOR = date(2000, 1, 1)
+
+
+def check_purchase_date(raw: Any, *, today: date,
+                        default: date | None = None) -> Check:
+    """Дата покупки из формы: пусто - `default` (None - «не знаем»)."""
+    if not str(raw or "").strip():
+        return Check(True, default)
+    got = check_date(raw)
+    if not got.ok:
+        return Check(False, error="Дата покупки: в виде ДД.ММ.ГГГГ.")
+    if got.value > today:
+        return Check(False, error=f"Дата покупки {got.value:%d.%m.%Y} ещё не "
+                                  "наступила — проверьте год.")
+    if got.value < PURCHASE_FLOOR:
+        return Check(False, error=f"Дата покупки: не раньше "
+                                  f"{PURCHASE_FLOOR:%d.%m.%Y} — проверьте год.")
+    return Check(True, got.value)
+
+
 def parse_id(raw: Any) -> int | None:
     """Номер записи из адреса или формы: только ASCII-цифры, в bigint.
 
@@ -8639,7 +8679,9 @@ def check_volts(raw: Any) -> Check:
         return Check(True, None)
     try:
         value = int(float(text))
-    except ValueError:
+    # «inf» и «1e309» float читает бесконечностью, и int() на ней падает
+    # OverflowError - это тоже не напряжение, а не повод для 500.
+    except (ValueError, OverflowError):
         return Check(False, error="Напряжение: только число, вольты.")
     if not 24 <= value <= 96:
         return Check(False, error="Напряжение: от 24 до 96 В.")
@@ -8655,9 +8697,53 @@ def check_amp_hours(raw: Any) -> Check:
         value = Decimal(text)
     except (InvalidOperation, ValueError):
         return Check(False, error="Ёмкость: только число, ампер-часы.")
-    if not Decimal(1) <= value <= Decimal(500):
+    # NaN сравнение «меньше-больше» не переносит (InvalidOperation).
+    if not value.is_finite() or not Decimal(1) <= value <= Decimal(500):
         return Check(False, error="Ёмкость: от 1 до 500 А·ч.")
     return Check(True, value.quantize(Decimal("0.01")))
+
+
+# Числа характеристик модели: подпись и предел колонки каталога
+# (numeric(6,2), numeric(4,1), integer) с числом знаков после запятой.
+# Сверх колонки база отвечала ошибкой, то есть 500 вместо формы.
+MODEL_SPEC_NUMBERS: dict[str, tuple[str, Decimal, int]] = {
+    "weight_kg": ("Вес, кг", Decimal("9999.99"), 2),
+    "speed_kmh": ("Скорость, км/ч", Decimal(999), 0),
+    "range_km": ("Запас хода, км", Decimal(9999), 0),
+    "charge_hours": ("Зарядка, ч", Decimal("999.9"), 1),
+    "motor_watt": ("Мотор, Вт", Decimal(99999), 0),
+    "max_load_kg": ("Нагрузка, кг", Decimal(9999), 0),
+}
+
+
+def check_model_specs(data: Mapping[str, Any]) -> Check:
+    """Числа характеристик модели из формы. Пустое поле - «не знаем»
+    (None), а не ноль. «25 кг», бесконечность и число сверх колонки -
+    отказ с названием поля: раньше Decimal("25 кг") ронял сохранение 500,
+    а целое сверх integer - запрос в базу."""
+    out: dict[str, Any] = {}
+    for name, (what, most, places) in MODEL_SPEC_NUMBERS.items():
+        text = str(data.get(name) or "").strip().replace(",", ".")
+        if not text:
+            out[name] = None
+            continue
+        try:
+            value = Decimal(text)
+        except (InvalidOperation, ValueError):
+            return Check(False, error=f"{what}: только число.")
+        if not value.is_finite() or not Decimal(0) <= value <= most:
+            return Check(False, error=f"{what}: число от 0 до {most}.")
+        if places == 0:
+            if value != value.to_integral_value():
+                return Check(False, error=f"{what}: целое число.")
+            out[name] = int(value)
+            continue
+        # Округление - после предела: 9999,999 округлилось бы за колонку.
+        value = value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        if value > most:
+            return Check(False, error=f"{what}: число от 0 до {most}.")
+        out[name] = value
+    return Check(True, out)
 
 
 def check_plate(raw: Any) -> Check:

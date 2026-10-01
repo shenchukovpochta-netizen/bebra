@@ -127,6 +127,13 @@ class TestPlateChecks(unittest.TestCase):
         self.assertFalse(logic.check_amp_hours("0").ok, "ноль - не ёмкость")
         self.assertFalse(logic.check_amp_hours("много").ok)
 
+    def test_infinity_and_nan_are_refused_not_raised(self):
+        """float читает «inf» и «1e309» бесконечностью, int() на ней -
+        OverflowError; NaN не сравнивается - InvalidOperation. Оба были 500."""
+        for raw in ("inf", "-inf", "1e309", "nan", "Infinity"):
+            self.assertFalse(logic.check_volts(raw).ok, raw)
+            self.assertFalse(logic.check_amp_hours(raw).ok, raw)
+
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
 class TestBatteryIntakePages(tw.WebCase):

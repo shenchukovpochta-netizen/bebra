@@ -3489,7 +3489,8 @@ class CrmDB:
 
     async def add_rental_extra(self, rental_id: int, *, kind: str, title: str,
                                price: Decimal, battery_id: int | None,
-                               by: str | None) -> int:
+                               by: str | None, issue: bool = False,
+                               bike_id: int | None = None) -> int | None:
         """Позиция и новая цена периода - одной транзакцией.
 
         Цена аренды складывается из велосипеда и позиций. Записать позицию
@@ -3499,8 +3500,26 @@ class CrmDB:
         Доп. аккумулятор выполняет просьбу клиента из кабинета - отметка
         снимается тем же UPDATE: иначе после снятия позиции старая просьба
         снова встала бы плашкой в карточке аренды.
+
+        `issue` - батарея позиции уходит клиенту в той же транзакции.
+        Порознь батарею, которую соседний оператор забрал секундой раньше,
+        выдача молча пропускала, а позиция уже стояла в цене: клиент
+        платил за аккумулятор, которого у него нет. None - батарея уже не
+        свободна, не записано ничего.
         """
         async with self.pool.acquire() as conn, conn.transaction():
+            if issue and battery_id is not None:
+                await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+                taken = await conn.fetchval(
+                    """
+                    update crm.batteries
+                       set status = 'rented', rental_id = $2,
+                           bike_id = coalesce($3, bike_id), updated_at = now()
+                     where id = $1 and status = 'available'
+                    returning id
+                    """, battery_id, rental_id, bike_id)
+                if taken is None:
+                    return None
             extra_id = int(await conn.fetchval(
                 """
                 insert into crm.rental_extras (rental_id, kind, battery_id,
@@ -4098,16 +4117,28 @@ class CrmDB:
         return {r["status"]: int(r["n"]) for r in rows}
 
     async def issue_batteries(self, rental_id: int, *, battery_ids: list[int],
-                              bike_id: int | None, by: str) -> None:
+                              bike_id: int | None, by: str) -> int:
         """Выдать батареи вместе с арендой - одной транзакцией.
 
         Батарея уходит к клиенту так же, как велосипед: статус, привязка
         к аренде и журнал - вместе, иначе выданная батарея останется
         «свободной» и уедет второму клиенту.
+
+        Всё или ничего, ответ - сколько выдано. Свободность проверена
+        вызывающим раньше, и батарею за это время мог забрать соседний
+        оператор: молчаливое «выдал две из трёх» оставляло на экране
+        «выдан» без батареи у клиента. Строки берутся под замок, и если
+        хоть одна уже не свободна - не пишется ничего, ответ 0.
         """
-        if not battery_ids:
-            return
+        wanted = sorted({int(i) for i in battery_ids})
+        if not wanted:
+            return 0
         async with self.pool.acquire() as conn, conn.transaction():
+            free = await conn.fetch(
+                "select id from crm.batteries where id = any($1::bigint[]) "
+                "and status = 'available' order by id for update", wanted)
+            if len(free) != len(wanted):
+                return 0
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
             await conn.execute(
                 """
@@ -4115,7 +4146,55 @@ class CrmDB:
                    set status = 'rented', rental_id = $2, bike_id = coalesce($3, bike_id),
                        updated_at = now()
                  where id = any($1::bigint[]) and status = 'available'
-                """, battery_ids, rental_id, bike_id)
+                """, wanted, rental_id, bike_id)
+            return len(wanted)
+
+    async def swap_battery(self, rental_id: int, *, old_id: int | None, new_id: int,
+                           bike_id: int | None, old_status: str, by: str) -> bool:
+        """Замена батареи у клиента - одной транзакцией.
+
+        Снимается только батарея этой аренды и только «у клиента»: номер
+        старой приходит из формы, и без условия чужая аренда теряла бы
+        свою батарею, а потерянная или проданная вставала бы в свободные.
+        Позиция доп. аккумулятора переезжает на новую батарею: платная
+        строка иначе указывала бы на батарею, которой у клиента уже нет, и
+        её снятие вернуло бы в парк не ту. False - что-то из этого не так
+        (или новую успели выдать), не записано ничего.
+        """
+        wanted = sorted({int(new_id), *([int(old_id)] if old_id is not None else [])})
+        async with self.pool.acquire() as conn, conn.transaction():
+            rows = {int(r["id"]): r for r in await conn.fetch(
+                "select id, status, rental_id from crm.batteries "
+                "where id = any($1::bigint[]) order by id for update", wanted)}
+            new = rows.get(int(new_id))
+            if new is None or new["status"] != "available":
+                return False
+            if old_id is not None:
+                old = rows.get(int(old_id))
+                if (old is None or old["status"] != "rented"
+                        or old["rental_id"] is None or int(old["rental_id"]) != rental_id):
+                    return False
+            await conn.execute("select set_config('crm.actor', $1, true)", by or "")
+            if old_id is not None:
+                await conn.execute(
+                    """
+                    update crm.batteries
+                       set status = $3, rental_id = null, cycles = cycles + 1,
+                           updated_at = now()
+                     where id = $1 and rental_id = $2 and status = 'rented'
+                    """, int(old_id), rental_id, old_status)
+                await conn.execute(
+                    "update crm.rental_extras set battery_id = $3 "
+                    "where rental_id = $1 and battery_id = $2 and removed_at is null",
+                    rental_id, int(old_id), int(new_id))
+            await conn.execute(
+                """
+                update crm.batteries
+                   set status = 'rented', rental_id = $2, bike_id = coalesce($3, bike_id),
+                       updated_at = now()
+                 where id = $1 and status = 'available'
+                """, int(new_id), rental_id, bike_id)
+            return True
 
     async def return_batteries(self, rental_id: int, *, status: str = "available",
                                by: str) -> int:
@@ -4132,19 +4211,23 @@ class CrmDB:
                 """, rental_id, status)
             return len(rows)
 
-    async def return_battery(self, battery_id: int, *, status: str = "available",
-                             by: str) -> bool:
-        """Принять одну батарею: снятие доп. аккумулятора среди аренды."""
+    async def return_battery(self, battery_id: int, *, rental_id: int,
+                             status: str = "available", by: str) -> bool:
+        """Принять одну батарею: снятие доп. аккумулятора среди аренды.
+
+        Только у своей аренды: позиция могла пережить замену батареи, и
+        без условия снятие вернуло бы в парк батарею, которая сейчас у
+        другого клиента."""
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
             row = await conn.fetchrow(
                 """
                 update crm.batteries
-                   set status = $2, rental_id = null, cycles = cycles + 1,
+                   set status = $3, rental_id = null, cycles = cycles + 1,
                        updated_at = now()
-                 where id = $1 and status = 'rented'
+                 where id = $1 and rental_id = $2 and status = 'rented'
                 returning id
-                """, battery_id, status)
+                """, battery_id, rental_id, status)
             return row is not None
 
     # ─────────────────────────── трекеры ───────────────────────────
@@ -4289,10 +4372,17 @@ class CrmDB:
 
     async def tracker_alerts(self, *, open_only: bool = True,
                              level: str | None = None, kind: str | None = None,
+                             tracker_id: int | None = None,
                              limit: int = 200) -> list[dict]:
+        """`tracker_id` - тревоги одного трекера: предел берётся уже после
+        отбора, иначе на карточке видны были бы только те из полусотни
+        тревог всего парка, что пришлись на этот трекер."""
         conds, args = [], []
         if open_only:
             conds.append("a.handled_at is null")
+        if tracker_id is not None:
+            args.append(tracker_id)
+            conds.append(f"a.tracker_id = ${len(args)}")
         if level:
             args.append(level)
             conds.append(f"a.level = ${len(args)}")
@@ -5028,12 +5118,27 @@ class CrmDB:
             "where request_id = $1 and kind = 'code_sent' and at >= $2",
             request_id, since) or 0)
 
-    async def bump_sign_attempt(self, request_id: int) -> int:
-        """Промах: минус попытка у кода и плюс один к общему счёту заявки."""
-        return int(await self.pool.fetchval(
-            "update crm.sign_requests set attempts = attempts + 1, "
-            "wrong_total = wrong_total + 1 "
-            "where id = $1 returning attempts", request_id))
+    async def claim_sign_attempt(self, request_id: int, *, code_hash: str,
+                                 max_attempts: int, max_wrong: int) -> dict | None:
+        """Попытка ввода кода: взять её и сверить код - одним UPDATE.
+
+        Пределы попыток проверялись по строке, прочитанной в начале
+        запроса, а промах прибавлялся безусловно: сто параллельных
+        запросов видели «попыток 0» и сверяли сто кодов вместо пяти.
+        Здесь попытка берётся под замком строки и только в пределах, а
+        промахом считается сразу, если хэш не совпал с тем, что лежит в
+        строке сейчас. None - попыток не осталось, код сменился или заявка
+        закрыта; иначе {attempts, wrong_total, ok}."""
+        return _row(await self.pool.fetchrow(
+            """
+            update crm.sign_requests
+               set attempts = attempts + 1,
+                   wrong_total = wrong_total
+                                 + case when code_hash = $2 then 0 else 1 end
+             where id = $1 and status in ('new', 'code') and code_hash is not null
+               and attempts < $3 and wrong_total < $4
+            returning attempts, wrong_total, code_hash = $2 as ok
+            """, request_id, code_hash, max_attempts, max_wrong))
 
     async def mark_signed(self, request_id: int, *, ip: str | None,
                           agent: str | None) -> bool:

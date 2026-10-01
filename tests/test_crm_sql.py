@@ -223,6 +223,17 @@ class TestCrmSql(unittest.TestCase):
             # позиция-батарея снимает просьбу тем же UPDATE, что и цену
             self.db.add_rental_extra(1, kind="battery", title="Доп. АКБ", price=d,
                                      battery_id=None, by="t"),
+            # позиция и выдача её батареи - одной транзакцией
+            self.db.add_rental_extra(1, kind="battery", title="Доп. АКБ", price=d,
+                                     battery_id=2, by="t", issue=True, bike_id=3),
+            # батареи: выдача всё или ничего, замена и возврат - своей аренды
+            self.db.issue_batteries(1, battery_ids=[2, 3], bike_id=4, by="t"),
+            self.db.swap_battery(1, old_id=2, new_id=3, bike_id=4, old_status="repair",
+                                 by="t"),
+            self.db.return_battery(2, rental_id=1, status="available", by="t"),
+            # тревоги одного трекера и попытка кода подписи под замком строки
+            self.db.tracker_alerts(open_only=False, tracker_id=1, limit=50),
+            self.db.claim_sign_attempt(1, code_hash="h", max_attempts=5, max_wrong=20),
             # смена срока переоценивает позиции в той же транзакции
             self.db.change_rental_tariff(1, tariff_id=2, tariff_name="Месяц",
                                          period_days=30, base_price=d, billing="auto",

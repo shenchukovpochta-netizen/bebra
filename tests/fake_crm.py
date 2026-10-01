@@ -1379,6 +1379,11 @@ class FakeCrm:
         return tid
 
     async def update_work_type(self, type_id, **fields):
+        # Уникальное название - как у вставки: переименование в занятое
+        # база отбивает тем же индексом.
+        if "title" in fields and any(t["title"] == fields["title"] and tid != type_id
+                                     for tid, t in self.work_types_.items()):
+            raise UniqueError("title")
         if fields:
             self.work_types_[type_id].update(fields)
 
@@ -2291,6 +2296,10 @@ class FakeCrm:
         return pid
 
     async def update_part(self, part_id, **fields):
+        if "title" in fields and any(
+                p["title"].lower() == str(fields["title"]).lower() and pid != part_id
+                for pid, p in self.parts_.items()):
+            raise UniqueError("part title")
         if part_id in self.parts_:
             self.parts_[part_id].update(fields)
 
@@ -2854,6 +2863,9 @@ class FakeCrm:
         return battery_id
 
     async def update_battery(self, battery_id, *, by=None, **fields):
+        if "code" in fields and any(b["code"] == fields["code"] and bid != battery_id
+                                    for bid, b in self.batteries_.items()):
+            raise UniqueError("battery code")
         before = self.batteries_[battery_id]["status"]
         self.batteries_[battery_id].update(fields)
         if "status" in fields and fields["status"] != before:
@@ -2877,12 +2889,34 @@ class FakeCrm:
         return out
 
     async def issue_batteries(self, rental_id, *, battery_ids, bike_id, by):
-        for battery_id in battery_ids:
-            battery = self.batteries_.get(battery_id)
-            if battery is None or battery["status"] != "available":
-                continue
+        # Всё или ничего, как под замком строк в базе.
+        wanted = sorted({int(i) for i in battery_ids})
+        if not wanted or any((self.batteries_.get(i) or {}).get("status") != "available"
+                             for i in wanted):
+            return 0
+        for battery_id in wanted:
+            battery = self.batteries_[battery_id]
             await self.update_battery(battery_id, status="rented", rental_id=rental_id,
                                       bike_id=bike_id or battery.get("bike_id"), by=by)
+        return len(wanted)
+
+    async def swap_battery(self, rental_id, *, old_id, new_id, bike_id, old_status, by):
+        new = self.batteries_.get(int(new_id))
+        if new is None or new["status"] != "available":
+            return False
+        if old_id is not None:
+            old = self.batteries_.get(int(old_id))
+            if old is None or old["status"] != "rented" or old.get("rental_id") != rental_id:
+                return False
+            await self.update_battery(int(old_id), status=old_status, rental_id=None,
+                                      cycles=int(old.get("cycles") or 0) + 1, by=by)
+            for extra in self.rental_extras_.values():
+                if (extra["rental_id"] == rental_id and extra["battery_id"] == int(old_id)
+                        and extra["removed_at"] is None):
+                    extra["battery_id"] = int(new_id)
+        await self.update_battery(int(new_id), status="rented", rental_id=rental_id,
+                                  bike_id=bike_id or new.get("bike_id"), by=by)
+        return True
 
     # ─── свои фильтры списков ───
     async def saved_views(self, staff_id, section):
@@ -2932,12 +2966,20 @@ class FakeCrm:
         row = self.rental_extras_.get(extra_id)
         return dict(row) if row else None
 
-    async def add_rental_extra(self, rental_id, *, kind, title, price, battery_id, by):
+    async def add_rental_extra(self, rental_id, *, kind, title, price, battery_id, by,
+                               issue=False, bike_id=None):
         # Частичный уникальный индекс rental_extras_battery_once.
         if battery_id is not None and any(
                 e["rental_id"] == rental_id and e["battery_id"] == battery_id
                 and e["removed_at"] is None for e in self.rental_extras_.values()):
             raise UniqueError("rental_extras_battery_once")
+        # Выдача батареи - в той же транзакции: не свободна - ничего.
+        if issue and battery_id is not None:
+            battery = self.batteries_.get(battery_id)
+            if battery is None or battery["status"] != "available":
+                return None
+            await self.update_battery(battery_id, status="rented", rental_id=rental_id,
+                                      bike_id=bike_id or battery.get("bike_id"), by=by)
         eid = self._id()
         self.rental_extras_[eid] = {
             "id": eid, "rental_id": rental_id, "kind": kind, "battery_id": battery_id,
@@ -2992,9 +3034,10 @@ class FakeCrm:
         rental["battery_asked_at"] = self._now()
         return True
 
-    async def return_battery(self, battery_id, *, status="available", by):
+    async def return_battery(self, battery_id, *, rental_id, status="available", by):
         battery = self.batteries_.get(battery_id)
-        if battery is None or battery["status"] != "rented":
+        if (battery is None or battery["status"] != "rented"
+                or battery.get("rental_id") != rental_id):
             return False
         await self.update_battery(battery_id, status=status, rental_id=None,
                                   cycles=int(battery.get("cycles") or 0) + 1, by=by)
@@ -3071,11 +3114,21 @@ class FakeCrm:
                    if e["request_id"] == request_id and e["kind"] == "code_sent"
                    and e["at"] >= since)
 
-    async def bump_sign_attempt(self, request_id):
-        request = self.signs_[request_id]
+    async def claim_sign_attempt(self, request_id, *, code_hash, max_attempts,
+                                 max_wrong):
+        # Как UPDATE ... where: попытка берётся только в пределах, промах -
+        # сверкой с тем кодом, что лежит в строке сейчас.
+        request = self.signs_.get(request_id)
+        if (request is None or request["status"] not in ("new", "code")
+                or not request.get("code_hash")
+                or request["attempts"] >= max_attempts
+                or request.get("wrong_total", 0) >= max_wrong):
+            return None
+        ok = request["code_hash"] == code_hash
         request["attempts"] += 1
-        request["wrong_total"] = request.get("wrong_total", 0) + 1
-        return request["attempts"]
+        request["wrong_total"] = request.get("wrong_total", 0) + (0 if ok else 1)
+        return {"attempts": request["attempts"], "wrong_total": request["wrong_total"],
+                "ok": ok}
 
     async def mark_signed(self, request_id, *, ip, agent):
         request = self.signs_.get(request_id)
@@ -3569,10 +3622,12 @@ class FakeCrm:
         return before - len(self.positions_)
 
     async def tracker_alerts(self, *, open_only=True, level=None, kind=None,
-                             limit=200):
+                             tracker_id=None, limit=200):
         rows = []
         for alert in self.alerts_.values():
             if open_only and alert["handled_at"] is not None:
+                continue
+            if tracker_id is not None and alert["tracker_id"] != tracker_id:
                 continue
             if level and alert.get("level") != level:
                 continue
