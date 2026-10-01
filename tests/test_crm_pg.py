@@ -1069,7 +1069,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          "не отнесённая в StarLine - ответа ещё нет")
         await self.crm.finish_tracker_command(command, ok=True, result="принял")
 
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         rows = await self.crm.unreported_tracker_alerts(max_tries=3)
         self.assertEqual([(r["id"], r["bike_code"], r["device_id"]) for r in rows],
                          [(alert, "B-1", "1001")])
@@ -1122,7 +1122,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             "  drop column report_tries; "
             "alter table crm.tracker_commands drop column reported_at, "
             "  drop column report_tries")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual(await self.crm.unreported_tracker_alerts(max_tries=3), [])
         self.assertEqual(await self.crm.unreported_tracker_commands(max_tries=3), [])
         await self.crm.finish_tracker_command(waiting, ok=True, result="принял")
