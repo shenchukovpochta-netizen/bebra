@@ -326,6 +326,24 @@ def is_foreign(anketa: dict | None) -> bool:
     return bool(value) and value.casefold() != RUSSIA.casefold()
 
 
+# Как ещё пишут «Россия». Подсказка шага на английском и узбекском прямо
+# советует «Russia» и «Rossiya», а в MAX кнопок нет вовсе: без этого списка
+# россиянин с «РФ» уходил в ветку иностранца - срок действия вместо кода
+# подразделения, а в договоре гражданство «Рф». Сравнение - без регистра,
+# точек и лишних пробелов.
+RUSSIA_ALIASES = frozenset({
+    "россия", "рф", "российская федерация", "раҫҫей",
+    "russia", "russian federation", "rossiya", "rossiia", "rossija", "rossia",
+    "rossiyskaya federatsiya", "rf", "rus", "russiýa", "russiya",
+    "روسيا", "روسیه", "रूस",
+})
+
+
+def _is_russia(text: str) -> bool:
+    key = re.sub(r"\s+", " ", text.replace(".", "")).strip().casefold()
+    return key in RUSSIA_ALIASES or key.replace(" ", "") in RUSSIA_ALIASES
+
+
 def validate_citizenship(raw: str | None) -> Validation:
     """Гражданство: кнопка из списка или название страны текстом."""
     text = _clean(raw)
@@ -334,6 +352,8 @@ def validate_citizenship(raw: str | None) -> Validation:
             False, error="Гражданство - название страны, например Узбекистан.")
     if not _no_markup(text):
         return Validation(False, error="Недопустимы символы < > и &.")
+    if _is_russia(text):
+        return Validation(True, value=RUSSIA)
     # Кнопку и ручной ввод приводим к одному написанию: иначе «россия»
     # и «Россия» разошлись бы по разным веткам анкеты.
     for known in CITIZENSHIPS:
@@ -532,6 +552,18 @@ ANKETA_BY_STATE: dict[str, Step] = {
     step.state: step for step in _STEPS_HEAD + _STEPS_DOC_RU + _STEPS_DOC_FOREIGN
     + _STEPS_TAIL
 }
+
+# Регистрация не закончена: от первого шага до подписи договора, плюс
+# повторная анкета клиента, чью прежнюю стёр ретеншен. purge_after таким
+# строкам ставят только одобрение и отказ, и брошенная на подтверждении,
+# на проверке, на подписи или после «Есть ошибка» анкета со сканами жила
+# вечно. Ретеншен чистит их по сроку бездействия (`PURGE_STALE_DAYS`) и
+# возвращает человека к началу. Аренда в этих состояниях не идёт никогда.
+UNFINISHED_STATES: frozenset[str] = frozenset({
+    NEW, WAIT_LANG, WAIT_FIO, WAIT_PDN, WAIT_OFERTA, WAIT_CONTACT,
+    *ANKETA_BY_STATE, WAIT_DOC, WAIT_DOC2, WAIT_PARENT_CONSENT,
+    CONFIRM, PENDING, WAIT_SIGN,
+})
 
 
 def step_for(state: str, anketa: dict | None = None) -> Step | None:
@@ -1855,7 +1887,9 @@ def fixation_form(user: dict, anketa: dict | None, issue: dict | None = None, *,
     """
     data = dict(anketa or {})
     given = issue_context(issue)
-    kit = "\n".join(f"  - {name}: {given[field]}" for field, name in KIT_FIELDS)
+    # Комплектацию пишет оператор формой выдачи: «зеркала: <2>» без
+    # экранирования рвал отправку всей формы.
+    kit = "\n".join(f"  - {name}: {esc(given[field])}" for field, name in KIT_FIELDS)
     username = user.get("username")
     return (
         f"1. ФИО: {esc(user.get('full_name') or FORM_BLANK)}\n"

@@ -74,6 +74,10 @@ T: dict[str, str] = {
         "couple of minutes — answer one message at a time, exactly as "
         "written in your passport."
     ),
+    "ANKETA_AGAIN": (
+        "To rent again, please fill in the form once more: we keep passport "
+        "details only for a limited time and then delete them."
+    ),
     "ASK_BIRTH": "Date of birth — as DD.MM.YYYY.\nFor example: 07.03.1990",
     "ASK_BIRTH_PLACE": "Place of birth, as in your passport.\nFor example: gor. Kazan",
     "ASK_CITIZENSHIP": (

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -35,6 +36,12 @@ def _is_faq(inner: Any) -> bool:
     return False
 
 
+# Сама команда, а не начало слова: «/staffИван Петров» - не команда, и
+# по startswith такое сообщение шло мимо гейта подписки прямо ответом на
+# шаг ФИО. Хвост «@имя_бота» Telegram дописывает в группах.
+STAFF_COMMAND = re.compile(r"^/staff(@\w+)?(\s|$)", re.IGNORECASE)
+
+
 def _is_staff_link(inner: Any) -> bool:
     """«/staff <код>» - привязка сотрудника к боту.
 
@@ -42,16 +49,18 @@ def _is_staff_link(inner: Any) -> bool:
     не обязан, а ответ на анкетный вопрос из его кода получиться не должен.
     """
     return (isinstance(inner, Message)
-            and str(inner.text or "").strip().lower().startswith("/staff"))
+            and STAFF_COMMAND.match(str(inner.text or "").strip()) is not None)
 
 
 # Служебные кнопки клиента, которые приходят не в начале пути, а после
-# него: оценка после сдачи (fb:), ответ на смету (est:), «Беру» из листа
-# ожидания (wl:), проверка оплаты счёта (cab:paycheck:). Бывший подписчик
-# отписался от канала вместе с арендой - гейт отвечал бы ему «подпишитесь»
-# вместо оценки, согласия на ремонт или чека. Права проверяет сам
-# обработчик: оценку и смету - по клиенту аренды или наряда.
-SERVICE_CALLBACKS = ("fb:", "est:", "wl:", "cab:paycheck:")
+# него: оценка после сдачи (fb:), ответ на смету (est:), «Беру» и «Снять
+# заявку» из листа ожидания (wl:, cab:book:cancel), проверка оплаты счёта
+# (cab:paycheck:), «Ответить» под ответом из «Входящих» (inbox_answer).
+# Бывший подписчик отписался от канала вместе с арендой - гейт отвечал бы
+# ему «подпишитесь» вместо оценки, согласия на ремонт или чека. Права
+# проверяет сам обработчик: оценку и смету - по клиенту аренды или наряда.
+SERVICE_CALLBACKS = ("fb:", "est:", "wl:", "cab:paycheck:", "cab:book:cancel",
+                     "inbox_answer")
 
 
 def _is_service_callback(inner: Any) -> bool:

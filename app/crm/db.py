@@ -1161,20 +1161,23 @@ class CrmDB:
     async def extend_rental_paid(self, rental_id: int, client_id: int, *,
                                  amount: Decimal, period_from: date, period_to: date,
                                  pay_note: str, charge_note: str,
-                                 method: str | None, created_by: str) -> None:
+                                 method: str | None, created_by: str,
+                                 shift_id: int | None = None) -> None:
         """Платёж за продление и начисление за новый срок - одной транзакцией.
 
         Порознь сбой между ними оставлял платёж без начисления, и клиент
-        уходил в плюс на целый период.
+        уходил в плюс на целый период. Наличные помнят свою смену
+        (`shift_id`), как и любой платёж в кассу.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             if amount:
                 await conn.execute(
                     """
                     insert into crm.ledger (client_id, rental_id, kind, amount,
-                                            method, note, created_by)
-                    values ($1, $2, 'payment', $3, $4, $5, $6)
-                    """, client_id, rental_id, amount, method, pay_note, created_by)
+                                            method, note, created_by, shift_id)
+                    values ($1, $2, 'payment', $3, $4, $5, $6, $7)
+                    """, client_id, rental_id, amount, method, pay_note, created_by,
+                    shift_id)
             await conn.execute(
                 """
                 insert into crm.ledger (client_id, rental_id, kind, amount,

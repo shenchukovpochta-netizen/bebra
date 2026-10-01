@@ -51,26 +51,55 @@ async def drain(timeout: float = 10.0) -> None:
     await asyncio.wait(set(_background), timeout=timeout)
 
 
+def _row_paths(row: Any) -> list[str]:
+    return [p for p in (row["doc_path"], row["doc2_path"], row["parent_path"],
+                        row["contract_path"], row["soglasie_path"],
+                        row["act_in_path"], row["act_out_path"],
+                        row["buyout_path"]) if p]
+
+
+def _remove_files(row: Any, paths: list[str], cfg: Config) -> bool:
+    """Удалить файлы строки. False - ссылки в базе трогать нельзя."""
+    # Путь пришёл из своей же базы, но перед удалением всё равно сверяется
+    # с шаблоном: одна опечатка в запросе - и rm уедет не туда.
+    unsafe = [p for p in paths if not logic.is_safe_store_path(p, cfg.storage_dir)]
+    if unsafe:
+        log.error("подозрительный путь у %s: %s - пропускаю", row["tg_id"], unsafe)
+        return False
+    # Не удалилось - ссылку в базе не трогаем, иначе файл останется
+    # на диске навсегда и без следа. Строка уедет на следующий прогон.
+    return all(files.remove(p) for p in paths)
+
+
 async def purge_once(db: Database, cfg: Config) -> tuple[int, int]:
-    """Возвращает (удалено файлов, удалено записей журнала)."""
+    """Возвращает (удалено файлов, удалено записей журнала).
+
+    Два правила. Первое - по `purge_after`: его ставят одобрение, отказ и
+    подписи. Второе - брошенная регистрация (`db.stale_registrations`):
+    анкета и сканы того, кто не дошёл до подписи договора, по сроку
+    бездействия `purge_stale_days`. Правило общее для Telegram и MAX:
+    у обоих ботов один `bot.users` и один этот проход.
+    """
     removed = 0
     for row in await db.rows_to_purge():
-        paths = [p for p in (row["doc_path"], row["doc2_path"], row["parent_path"],
-                             row["contract_path"], row["soglasie_path"],
-                             row["act_in_path"], row["act_out_path"],
-                             row["buyout_path"]) if p]
-        # Путь пришёл из своей же базы, но перед удалением всё равно сверяется
-        # с шаблоном: одна опечатка в запросе - и rm уедет не туда.
-        unsafe = [p for p in paths if not logic.is_safe_store_path(p, cfg.storage_dir)]
-        if unsafe:
-            log.error("подозрительный путь у %s: %s - пропускаю", row["tg_id"], unsafe)
-            continue
-        if not all(files.remove(p) for p in paths):
-            # Не удалилось - ссылку в базе не трогаем, иначе файл останется
-            # на диске навсегда и без следа. Строка уедет на следующий прогон.
+        paths = _row_paths(row)
+        if not _remove_files(row, paths, cfg):
             continue
         await db.clear_files(row["tg_id"])
         await db.log_event(row["tg_id"], "files_purged", {"count": len(paths)})
+        removed += len(paths)
+
+    stale_days = getattr(cfg, "purge_stale_days", 30)
+    for row in await db.stale_registrations(
+            logic.UNFINISHED_STATES, stale_days,
+            max(stale_days, cfg.purge_approved_days)):
+        paths = _row_paths(row)
+        if not _remove_files(row, paths, cfg):
+            continue
+        if not await db.clear_stale_registration(row["tg_id"], row["updated_at"]):
+            continue            # человек вернулся между выборкой и чисткой
+        await db.log_event(row["tg_id"], "stale_registration_purged",
+                           {"count": len(paths)})
         removed += len(paths)
 
     pruned = await db.prune_updates_log(cfg.updates_log_days)

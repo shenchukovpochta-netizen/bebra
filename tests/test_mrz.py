@@ -28,8 +28,9 @@ TODAY = date(2026, 9, 16)
 # Паспорт 1234 567890, Иванов Иван Иванович, род. 15.03.1995,
 # выдан 20.06.2015, код подразделения 160-002. Контрольные цифры посчитаны
 # по ICAO 9303 и вписаны в строку, а не взяты из проверяемого кода.
+# Личный номер - как у МВД: 4-я цифра серии, дата выдачи, код, «<».
 LINE1 = "PNRUSIVANOV<<IVAN<IVANOVICH<<<<<<<<<<<<<<<<<"
-LINE2 = "1235678909RUS9503157M<<<<<<04160002150620<98"
+LINE2 = "1235678909RUS9503157M<<<<<<04150620160002<98"
 GOOD = f"{LINE1}\n{LINE2}\n"
 
 ANKETA = {"fio": "Иванов Иван Иванович", "passport_number": "1234 567890",
@@ -119,6 +120,20 @@ class TestParse(unittest.TestCase):
         self.assertEqual(m.passport_number, "")
         self.assertIn("серия и номер", m.failed)
         self.assertEqual(m.birth_date, date(1995, 3, 15), "остальные поля целы")
+
+    def test_personal_number_is_series_digit_then_date_then_code(self):
+        """Раскладка МВД: «4151218910003<» - серия ...4, выдан 18.12.2015,
+        код 910-003. Строка собрана руками, контрольные цифры - тоже:
+        поле 29-42 даёт «5», общая - «0»."""
+        line2 = "1235678909RUS9503157M<<<<<<<4151218910003<50"
+        self.assertEqual(mrz.check_digit("4151218910003<"), "5")
+        self.assertEqual(mrz.check_digit(line2[0:10] + line2[13:20] + line2[21:43]),
+                         line2[43], "общая контрольная цифра примера сходится")
+        m = mrz.parse(f"{LINE1}\n{line2}\n", today=TODAY)
+        self.assertEqual(m.passport_number, "1234 567890")
+        self.assertEqual(m.passport_date, date(2015, 12, 18))
+        self.assertEqual(m.passport_code, "910-003")
+        self.assertEqual(m.failed, ())
 
     def test_broken_personal_number_keeps_nine_digits(self):
         """Личный номер не сошёлся: четвёртой цифры серии нет, девять - есть."""

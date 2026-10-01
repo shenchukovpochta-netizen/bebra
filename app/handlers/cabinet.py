@@ -1164,7 +1164,7 @@ async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
     await bot.send_message(
         user["tg_id"],
         (texts.ESTIMATE_OK if agree else texts.ESTIMATE_NO).format(
-            no=order.get("no") or ""))
+            no=logic.esc(order.get("no") or "")))
     # Технику держит наряд, и техник ждёт именно этого ответа.
     await _tell_estimate_answer(bot, crm, cfg, order, client, agree=agree)
 
@@ -1172,8 +1172,10 @@ async def cb_estimate(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
 async def _tell_estimate_answer(bot: Bot, crm: Any, cfg: Config, order: dict,
                                 client: dict, *, agree: bool) -> None:
     mark = "✅ согласовал" if agree else "✖️ отказался"
-    text = (f"🔧 Клиент {mark}: наряд {order.get('no')}\n"
-            f"{client.get('full_name') or '—'} · "
+    # Сообщение уходит с parse_mode=HTML: имя из карточки клиента правят
+    # в панели, и «<» или «&» в нём рвали отправку - техник не узнавал ответ.
+    text = (f"🔧 Клиент {mark}: наряд {logic.esc(order.get('no'))}\n"
+            f"{logic.esc(client.get('full_name') or '—')} · "
             f"{crm_logic.money(order.get('estimate'))}")
     # Получателя этого уведомления владелец назначает в панели - обычно
     # техника, который и ждёт ответа. Прямой send в служебный чат его

@@ -81,6 +81,52 @@ async def _to_client(bot: Bot, tg_id: int, doc: BufferedInputFile, what: str,
         return False
 
 
+async def _alert(bot: Bot, cfg: Config, text: str) -> None:
+    """Сообщение оператору в чат договоров; недоставка - только в журнал."""
+    try:
+        await bot.send_message(cfg.contract_chat_id, text)
+    except TelegramAPIError:
+        log.exception("алерт не доставлен")
+
+
+async def crm_alert(bot: Bot, cfg: Config, data: dict, what: str,
+                    problem: str | None) -> None:
+    """Событие с деньгами не легло в CRM (`crm.sync` вернул причину) -
+    оператору в чат: платёж и аренду он вносит руками, а не узнаёт о них
+    по расхождению кассы через неделю."""
+    if not problem:
+        return
+    await _alert(bot, cfg, texts.CRM_SYNC_ALERT.format(
+        what=what, number=logic.esc(data.get("contract_no") or "—"),
+        tg_id=data.get("tg_id"), reason=logic.esc(problem)))
+
+
+async def send_issue_prompt(bot: Bot, db: Database, cfg: Config, target: int,
+                            fio: str | None) -> bool:
+    """Приглашение «ответьте данными выдачи» в чат договоров.
+
+    Не ушло - привязка к прошлому приглашению стирается: по пустой
+    привязке следующее сообщение клиента (`registration.st_pending`)
+    отправит приглашение заново. Иначе одобренный клиент ждал вечно, а
+    оператору не на что было ответить формой.
+    """
+    try:
+        sent = await bot.send_message(
+            cfg.contract_chat_id,
+            texts.ISSUE_PROMPT.format(fio=logic.esc(fio or "без имени"), tg_id=target,
+                                      form=logic.ISSUE_FORM_TEMPLATE))
+    except TelegramAPIError as exc:
+        log.exception("приглашение выдачи для %s не доставлено", target)
+        await db.log_event(target, "issue_prompt_failed", {"error": str(exc)})
+        await db.patch(target, issue_chat_id=None, issue_message_id=None)
+        await _alert(bot, cfg, texts.CONTRACT_ALERT_FAILED.format(
+            tg_id=target, reason=logic.esc(str(exc))))
+        return False
+    await db.patch(target, issue_chat_id=sent.chat.id,
+                   issue_message_id=sent.message_id)
+    return True
+
+
 def _filename(number: str) -> str:
     return f"dogovor-{number}.docx"
 
@@ -321,7 +367,6 @@ async def start_payment(bot: Bot, db: Database, cfg: Config, data: dict) -> None
     данных выдачи от оператора): состояние wait_payment выставляет вызывающий.
     """
     tg_id = data["tg_id"]
-    number = data.get("contract_no") or ""
     lang = i18n.user_lang(data)
     try:
         await bot.send_message(
@@ -334,16 +379,32 @@ async def start_payment(bot: Bot, db: Database, cfg: Config, data: dict) -> None
         # оператору: без неё оплату некому подтвердить, и продление
         # застревает молча.
         log.warning("приглашение к оплате не доставлено клиенту %s", tg_id)
+    await send_pay_card(bot, db, cfg, data)
+
+
+async def send_pay_card(bot: Bot, db: Database, cfg: Config, data: dict,
+                        price: str | None = None) -> bool:
+    """Карточка оплаты с кнопкой «Оплата получена» в чат договоров.
+
+    Не ушла - ссылка на прошлую карточку стирается: по пустой ссылке
+    следующее сообщение клиента на этапе оплаты (`st_wait_payment`) шлёт
+    карточку заново. Иначе клиент стоял в wait_payment навсегда, а
+    подтвердить оплату оператору было нечем.
+    """
+    tg_id = data["tg_id"]
+    number = data.get("contract_no") or ""
     try:
         sent = await bot.send_message(
-            cfg.contract_chat_id, pay_card(data),
+            cfg.contract_chat_id, pay_card(data, price),
             reply_markup=kb.pay_confirm(tg_id))
-        await db.patch(tg_id, pay_chat_id=sent.chat.id,
-                       pay_message_id=sent.message_id)
     except TelegramAPIError:
         # Без карточки оператор не подтвердит оплату кнопкой - молчать нельзя.
         log.exception("карточка оплаты по договору %s не доставлена", number)
         await db.log_event(tg_id, "pay_card_failed", {"number": number})
+        await db.patch(tg_id, pay_chat_id=None, pay_message_id=None)
+        return False
+    await db.patch(tg_id, pay_chat_id=sent.chat.id, pay_message_id=sent.message_id)
+    return True
 
 
 async def _fix(bot: Bot, db: Database, cfg: Config, data: dict, anketa: dict, *,
@@ -378,7 +439,8 @@ async def _fix(bot: Bot, db: Database, cfg: Config, data: dict, anketa: dict, *,
         try:
             await bot.send_message(cfg.contract_chat_id,
                                    texts.CONTRACT_ALERT_NOT_DELIVERED.format(
-                                       number=number, tg_id=data.get("tg_id")))
+                                       number=logic.esc(number),
+                                       tg_id=data.get("tg_id")))
         except TelegramAPIError:
             log.exception("алерт о недоставке тоже не ушёл")
 
@@ -522,8 +584,11 @@ async def cb_paid(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         fio=logic.esc(data.get("full_name")), tg_id=user["tg_id"],
         number=logic.esc(data.get("contract_no") or ""),
         price=logic.esc(rent_price(data)))
+    # Кнопка подтверждения - прямо под сигналом: карточку оплаты могли не
+    # доставить или удалить, и без кнопки здесь подтвердить было бы нечем.
     await to_operator(cfg, data, lambda reply_to: bot.send_message(
-        cfg.contract_chat_id, card, reply_to_message_id=reply_to))
+        cfg.contract_chat_id, card, reply_to_message_id=reply_to,
+        reply_markup=kb.pay_confirm(user["tg_id"])))
 
 
 @router.message(StateIs(logic.WAIT_PAYMENT), F.photo | F.document)
@@ -550,7 +615,7 @@ async def st_payment_receipt(message: Message, bot: Bot, db: Database,
     send = bot.send_photo if is_photo else bot.send_document
     delivered = await to_operator(cfg, data, lambda reply_to: send(
         cfg.contract_chat_id, file_id, caption=caption,
-        reply_to_message_id=reply_to))
+        reply_to_message_id=reply_to, reply_markup=kb.pay_confirm(user["tg_id"])))
 
     lang = i18n.user_lang(user)
     if delivered:
@@ -565,10 +630,14 @@ async def st_payment_receipt(message: Message, bot: Bot, db: Database,
 
 
 @router.message(StateIs(logic.WAIT_PAYMENT))
-async def st_wait_payment(message: Message, cfg: Config, user: dict) -> None:
+async def st_wait_payment(message: Message, bot: Bot, db: Database, cfg: Config,
+                          user: dict) -> None:
     """Любое другое сообщение на этапе оплаты возвращает сумму, ссылку
     и кнопки: потерянное в ленте сообщение с кнопкой - это тупик
-    без переотправки."""
+    без переотправки. Карточка оператору не ушла в своё время - уходит
+    сейчас: без неё оплату некому подтвердить."""
+    if not user.get("pay_message_id"):
+        await send_pay_card(bot, db, cfg, user)
     lang = i18n.user_lang(user)
     await message.answer(
         i18n.t(lang, "PAY_WAIT").format(price=logic.esc(rent_price(user)),
@@ -659,7 +728,14 @@ async def send_act_in(bot: Bot, db: Database, cfg: Config, data: dict,
 async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
                       cfg: Config, vault: Vault, user: dict,
                       crm: Any = None) -> None:
-    """Подпись Акта приёма-передачи: с этого момента имущество передано."""
+    """Подпись Акта приёма-передачи: с этого момента имущество передано.
+
+    Учёт идёт сразу за подписью, до сборки экземпляра: велосипед у
+    клиента с этой секунды, и аренда в CRM не вправе зависеть от того,
+    собрался ли docx. Раньше сбой шаблона или диска обрывал обработчик
+    до `on_rental_started` - аренды в панели не было вовсе, и приглашение
+    возврата не уходило: закрыть её из бота было нечем.
+    """
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_ACT_SIGN,
                           state=logic.APPROVED, act_in_signed_at=signed_at):
@@ -675,57 +751,57 @@ async def cb_act_sign(callback: CallbackQuery, bot: Bot, db: Database,
     number = data.get("contract_no") or ""
     stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
 
-    try:
-        docx, digest = _build_act(cfg, cfg.act_in_template,
-                                  _act_context(cfg, data, anketa,
-                                               signed_at=stamp))
-    except ContractProblem:
-        # Подпись зафиксирована; без пересобранного экземпляра остаёмся,
-        # но прокат не блокируем.
-        log.exception("подписанный акт приёма %s не собрался", tg_id)
-        await bot.send_message(cfg.contract_chat_id,
-                               texts.CONTRACT_ALERT_FAILED.format(
-                                   tg_id=tg_id,
-                                   reason="акт приёма не пересобрался"))
-        return
-
-    old_path = data.get("act_in_path")
-    path, _ = files.store(cfg.storage_dir, tg_id, "actin", docx)
-    await db.patch(tg_id, act_in_path=str(path), act_in_sha256=digest)
-    if old_path and old_path != str(path):
-        # Акт прошлого цикла аренды: ссылка в базе уже указывает на новый
-        # файл, и старый без удаления пролежал бы на диске мимо ретеншена.
-        files.remove(old_path)
     await db.log_event(tg_id, "act_in_signed", {"number": number})
     # Аренда началась - отсчёт хранения заново, от последней активности.
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
     if crm is not None:
         # Имущество передано - в CRM появляется аренда и первое начисление.
-        await crm_sync.on_rental_started(crm, data,
-                                         today=logic.local_date(signed_at))
+        await crm_alert(bot, cfg, data, "Начало аренды",
+                        await crm_sync.on_rental_started(
+                            crm, data, today=logic.local_date(signed_at)))
 
-    # Недоставка клиенту не отменяет фиксацию и приглашение возврата.
-    await _to_client(
-        bot, tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
-        "акт приёма", number,
-        caption=i18n.t(lang, "ACT_IN_SIGNED").format(
-            number=logic.esc(number), signed_at=stamp,
-            video_url=logic.esc(cfg.video_url)),
-        reply_markup=kb.main_menu(lang),
-    )
+    docx = digest = None
     try:
-        await bot.send_document(
-            cfg.fix_chat_id,
-            BufferedInputFile(docx, filename=_act_filename("priema", number)),
-            caption=texts.ACT_FIX_CARD.format(
-                title="✅ Акт приёма-передачи", number=logic.esc(number),
-                fio=logic.esc(data.get("full_name")), tg_id=tg_id,
-                signed_at=stamp, sha256=digest),
-            message_thread_id=cfg.fix_topic_id,
+        docx, digest = _build_act(cfg, cfg.act_in_template,
+                                  _act_context(cfg, data, anketa, signed_at=stamp))
+        old_path = data.get("act_in_path")
+        path, _ = files.store(cfg.storage_dir, tg_id, "actin", docx)
+        await db.patch(tg_id, act_in_path=str(path), act_in_sha256=digest)
+        if old_path and old_path != str(path):
+            # Акт прошлого цикла аренды: ссылка в базе уже указывает на новый
+            # файл, и старый без удаления пролежал бы на диске мимо ретеншена.
+            files.remove(old_path)
+    except (ContractProblem, OSError):
+        # Подпись зафиксирована; без пересобранного экземпляра остаёмся,
+        # но прокат не блокируем: приглашение возврата ниже уходит всё равно.
+        log.exception("подписанный акт приёма %s не собрался", tg_id)
+        docx = None
+        await _alert(bot, cfg, texts.CONTRACT_ALERT_FAILED.format(
+            tg_id=tg_id, reason="акт приёма не пересобрался"))
+
+    if docx is not None:
+        # Недоставка клиенту не отменяет фиксацию и приглашение возврата.
+        await _to_client(
+            bot, tg_id, BufferedInputFile(docx, filename=_act_filename("priema", number)),
+            "акт приёма", number,
+            caption=i18n.t(lang, "ACT_IN_SIGNED").format(
+                number=logic.esc(number), signed_at=stamp,
+                video_url=logic.esc(cfg.video_url)),
+            reply_markup=kb.main_menu(lang),
         )
-    except TelegramAPIError:
-        log.exception("акт приёма %s не доставлен в чат фиксации", number)
-        await db.log_event(tg_id, "act_in_fix_failed", {"number": number})
+        try:
+            await bot.send_document(
+                cfg.fix_chat_id,
+                BufferedInputFile(docx, filename=_act_filename("priema", number)),
+                caption=texts.ACT_FIX_CARD.format(
+                    title="✅ Акт приёма-передачи", number=logic.esc(number),
+                    fio=logic.esc(data.get("full_name")), tg_id=tg_id,
+                    signed_at=stamp, sha256=digest),
+                message_thread_id=cfg.fix_topic_id,
+            )
+        except TelegramAPIError:
+            log.exception("акт приёма %s не доставлен в чат фиксации", number)
+            await db.log_event(tg_id, "act_in_fix_failed", {"number": number})
 
     # Приглашение возврата: когда велосипед вернут, оператор ответит на это
     # сообщение данными возврата, и бот соберёт Акт возврата.
@@ -818,6 +894,9 @@ async def send_act_out(bot: Bot, db: Database, cfg: Config, vault: Vault,
 async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
                          cfg: Config, vault: Vault, user: dict,
                          crm: Any = None) -> None:
+    """Подпись Акта возврата. Аренда в CRM закрывается сразу за подписью,
+    до сборки экземпляра: сдавшему велосипед начисления не идут, даже если
+    docx не собрался или диск не принял файл."""
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_RETURN_SIGN,
                           state=logic.APPROVED, act_out_signed_at=signed_at):
@@ -833,23 +912,6 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
     number = data.get("contract_no") or ""
     stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
 
-    try:
-        docx, digest = _build_act(cfg, cfg.act_out_template,
-                                  _act_context(cfg, data, anketa,
-                                               signed_at=stamp))
-    except ContractProblem:
-        log.exception("подписанный акт возврата %s не собрался", tg_id)
-        await bot.send_message(cfg.contract_chat_id,
-                               texts.CONTRACT_ALERT_FAILED.format(
-                                   tg_id=tg_id,
-                                   reason="акт возврата не пересобрался"))
-        return
-
-    old_path = data.get("act_out_path")
-    path, _ = files.store(cfg.storage_dir, tg_id, "actout", docx)
-    await db.patch(tg_id, act_out_path=str(path), act_out_sha256=digest)
-    if old_path and old_path != str(path):
-        files.remove(old_path)      # акт прошлого цикла, ссылки на него уже нет
     await db.log_event(tg_id, "act_out_signed", {"number": number})
     if crm is not None:
         await crm_sync.on_rental_closed(crm, data,
@@ -866,6 +928,20 @@ async def cb_return_sign(callback: CallbackQuery, bot: Bot, db: Database,
         "number": number, "bike": given["bike_model"], "term": given["rent_term"],
         "closed_at": closed.get("closed_at") or stamp[:5],
     })
+
+    try:
+        docx, digest = _build_act(cfg, cfg.act_out_template,
+                                  _act_context(cfg, data, anketa, signed_at=stamp))
+        old_path = data.get("act_out_path")
+        path, _ = files.store(cfg.storage_dir, tg_id, "actout", docx)
+        await db.patch(tg_id, act_out_path=str(path), act_out_sha256=digest)
+        if old_path and old_path != str(path):
+            files.remove(old_path)      # акт прошлого цикла, ссылки на него уже нет
+    except (ContractProblem, OSError):
+        log.exception("подписанный акт возврата %s не собрался", tg_id)
+        await _alert(bot, cfg, texts.CONTRACT_ALERT_FAILED.format(
+            tg_id=tg_id, reason="акт возврата не пересобрался"))
+        return
 
     await _to_client(
         bot, tg_id, BufferedInputFile(docx, filename=_act_filename("vozvrata", number)),
@@ -984,7 +1060,11 @@ async def send_buyout_act(bot: Bot, db: Database, cfg: Config, vault: Vault,
 async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
                          cfg: Config, vault: Vault, user: dict,
                          crm: Any = None) -> None:
-    """Подпись Акта о переходе права собственности - велосипед стал его."""
+    """Подпись Акта о переходе права собственности - велосипед стал его.
+
+    Аренда в CRM закрывается сразу за подписью, до сборки экземпляра:
+    иначе сбой шаблона оставлял бы проданный велосипед в аренде с
+    начислениями и напоминаниями о долге новому владельцу."""
     signed_at = utcnow()
     if not await db.patch(user["tg_id"], expected_state=logic.WAIT_BUYOUT_SIGN,
                           state=logic.APPROVED, buyout_signed_at=signed_at):
@@ -1000,23 +1080,6 @@ async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
     number = data.get("contract_no") or ""
     stamp = signed_at.strftime("%d.%m.%Y %H:%M UTC")
 
-    try:
-        docx, digest = _build_act(cfg, cfg.buyout_template,
-                                  _act_context(cfg, data, anketa,
-                                               signed_at=stamp))
-    except ContractProblem:
-        log.exception("подписанный акт выкупа %s не собрался", tg_id)
-        await bot.send_message(cfg.contract_chat_id,
-                               texts.BUYOUT_ALERT_FAILED.format(
-                                   tg_id=tg_id,
-                                   reason="акт выкупа не пересобрался"))
-        return
-
-    old_path = data.get("buyout_path")
-    path, _ = files.store(cfg.storage_dir, tg_id, "buyout", docx)
-    await db.patch(tg_id, buyout_path=str(path), buyout_sha256=digest)
-    if old_path and old_path != str(path):
-        files.remove(old_path)
     await db.log_event(tg_id, "buyout_signed", {"number": number})
     await db.set_purge_after(tg_id, cfg.purge_approved_days)
     if crm is not None:
@@ -1024,6 +1087,20 @@ async def cb_buyout_sign(callback: CallbackQuery, bot: Bot, db: Database,
         # напоминания о долге шли бы новому владельцу велосипеда.
         await crm_sync.on_buyout_signed(crm, {**data, "tg_id": tg_id},
                                         today=logic.local_date(signed_at))
+
+    try:
+        docx, digest = _build_act(cfg, cfg.buyout_template,
+                                  _act_context(cfg, data, anketa, signed_at=stamp))
+        old_path = data.get("buyout_path")
+        path, _ = files.store(cfg.storage_dir, tg_id, "buyout", docx)
+        await db.patch(tg_id, buyout_path=str(path), buyout_sha256=digest)
+        if old_path and old_path != str(path):
+            files.remove(old_path)
+    except (ContractProblem, OSError):
+        log.exception("подписанный акт выкупа %s не собрался", tg_id)
+        await _alert(bot, cfg, texts.BUYOUT_ALERT_FAILED.format(
+            tg_id=tg_id, reason="акт выкупа не пересобрался"))
+        return
 
     await _to_client(
         bot, tg_id, BufferedInputFile(docx, filename=_act_filename("vykup", number)),

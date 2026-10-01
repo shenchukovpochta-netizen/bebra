@@ -18,7 +18,7 @@ from aiogram import Bot, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from .. import texts
+from .. import logic, texts
 from ..crm import logic as crm_logic
 
 log = logging.getLogger(__name__)
@@ -46,5 +46,6 @@ async def cmd_staff(message: Message, command: CommandObject | None = None,
     if not linked:
         await message.answer(texts.STAFF_LINK_TAKEN)
         return
-    await message.answer(texts.STAFF_LINKED.format(name=person.get("name")
-                                                   or person["login"]))
+    # Имя заводят в панели, а ответ уходит с parse_mode=HTML.
+    await message.answer(texts.STAFF_LINKED.format(name=logic.esc(
+        person.get("name") or person["login"])))

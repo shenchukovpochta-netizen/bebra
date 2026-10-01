@@ -2657,10 +2657,9 @@ class TestFlow(unittest.IsolatedAsyncioTestCase):
         self.dp, self.bot, self.db, self.session, self.cfg, self.vault = build(
             make_config(video_url="https://youtu.be/x?si=a&t=10",
                         channel_url="https://t.me/c?a=1&b=2"))
-        self._orig_download, self._orig_store = files.download, files.store
-        files.download = lambda bot, file_id, max_bytes: _async(b"bytes")
-        files.store = lambda d, tg, slot, data: (
-            Path(f"/tmp/{tg}-{slot}.{files.SLOT_EXT[slot]}"), "hash")
+        # Заглушки файлов остались от asyncSetUp: пересохранять их как
+        # «исходные» нельзя - asyncTearDown вернул бы заглушку навсегда, и
+        # следующий тест процесса писал бы файлы мимо диска.
 
         self.session.subscribed = False
         await self.feed(msg("/start"))

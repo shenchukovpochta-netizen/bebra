@@ -771,6 +771,11 @@ class TestPointHours(CabinetCase):
 
     async def test_rent_request_names_the_open_points(self):
         self.db.users[USER_ID]["act_out_signed_at"] = "сегодня"
+        # Анкета жива: стёртую ретеншеном «Арендовать» отправляет заполнять
+        # заново, а не к оператору (повторная анкета - test_bot_defects).
+        from tests.test_flow import ANSWERS_BY_FIELD
+        self.db.users[USER_ID]["anketa_enc"] = self.vault.encrypt(
+            {step.field: ANSWERS_BY_FIELD[step.field] for step in logic.anketa_steps(None)})
         closed = next(loc for loc in await self.crm.locations() if loc["name"] == "Павлюхина")
         await self.crm.update_location(closed["id"], active=False)
         await self.feed(msg("🚲 Арендовать"))

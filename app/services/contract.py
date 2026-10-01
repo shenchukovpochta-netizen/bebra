@@ -84,9 +84,16 @@ def substitute(xml: str, ctx: dict[str, Any]) -> str:
     Неизвестное поле остаётся в документе видимой пометкой, а не пустотой:
     опечатка в шаблоне должна бросаться в глаза тому, кто первый раз откроет
     договор, а не тихо выкидывать из него реквизит.
+
+    Подпись и печать (`MARK_FIELDS`) не трогаются вовсе: на их место
+    картинку ставит `put_marks` уже после подстановки, и превращённая
+    здесь в «нет поля signature» метка до неё не доживала - png ложился
+    в архив, а в тексте документа его не было.
     """
     def replace(match: re.Match) -> str:
         key = match.group(1)
+        if key in MARK_FIELDS:
+            return match.group(0)
         if key not in ctx:
             log.warning("в шаблоне договора неизвестное поле %r", key)
             return f"«нет поля {key}»"
@@ -161,12 +168,27 @@ def put_marks(xml: str, marks: dict[str, bytes]) -> tuple[str, dict[str, bytes]]
         rel_id = f"rIdMark{field}"
         media[f"media/{field}.png"] = raw
         picture = picture_xml(rel_id, field, width, height)
-        # Через re.sub с готовой строкой, а не с заменой: в картинке есть
+        # Через re.sub с функцией, а не со строкой замены: в картинке есть
         # обратные слэши и группы, которые re истолковал бы по-своему.
-        xml = re.sub(r"\{\{\s*" + field + r"\s*\}\}", lambda _m, pic=picture: pic,
-                     xml)
+        xml = re.sub(r"\{\{\s*" + field + r"\s*\}\}",
+                     lambda m, pic=picture: _drawing_at(m, pic), xml)
         del marker
     return xml, media
+
+
+def _drawing_at(match: re.Match, picture: str) -> str:
+    """Рисунок на месте метки.
+
+    Метка лежит внутри узла текста <w:t>, а рисунок по схеме - его сосед
+    в прогоне <w:r>, не ребёнок: вложенный в <w:t> он делает документ
+    битым для Word. Поэтому узел текста закрывается перед рисунком и
+    открывается заново после него - текст по обе стороны метки остаётся.
+    """
+    xml, at = match.string, match.start()
+    opened = max(xml.rfind("<w:t>", 0, at), xml.rfind("<w:t ", 0, at))
+    if opened > xml.rfind("</w:t>", 0, at):
+        return f'</w:t>{picture}<w:t xml:space="preserve">'
+    return picture
 
 
 def add_rels(rels_xml: str, media: dict[str, bytes]) -> str:
@@ -241,7 +263,9 @@ def fill(template: bytes, ctx: dict[str, Any]) -> bytes:
         return template
     if not PLACEHOLDER.search(xml):
         return template
-    return _pack(template, substitute(xml, ctx), {})
+    # Подпись и печать в политике не ставятся: метка просто исчезает.
+    filled, _ = put_marks(substitute(xml, ctx), {})
+    return _pack(template, filled, {})
 
 
 def _pack(template: bytes, filled: str, media: dict[str, bytes]) -> bytes:

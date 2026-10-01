@@ -161,6 +161,12 @@ class Config:
     # ознакомления КАК ЕСТЬ, без подстановок. Файла нет - шаг работает
     # текстом, без вложения.
     pdn_policy_file: Path = Path("/srv/app/pdn_policy.docx")
+    # Брошенная регистрация (договор не подписан, аренды нет): через
+    # столько дней бездействия ретеншен стирает анкету, сканы и
+    # неподписанный договор и возвращает человека к началу. purge_after
+    # таким строкам не ставит никто, и без этого срока паспорт со
+    # шага «Подтверждаю» или «на проверке» жил бы вечно.
+    purge_stale_days: int = 30
     auto_approve: bool = False
     # StarLine: где сейчас велосипед. Пусто - опрос не запускается, и
     # раздел трекеров показывает то, что в базе (то есть ничего).
@@ -278,6 +284,7 @@ class Config:
             pay_url=_env("PAY_URL", faq.PAY_URL),
             purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
             purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
+            purge_stale_days=_int("PURGE_STALE_DAYS", "30"),
             updates_log_days=_int("UPDATES_LOG_DAYS", "7"),
             remind_before_days=_int("REMIND_BEFORE_DAYS", "2"),
             remind_hour_utc=_int("REMIND_HOUR_UTC", "7"),
