@@ -520,6 +520,44 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.crm.delete_access_profile(pid))
         self.assertIsNone(await self.crm.access_profile(pid))
 
+    async def test_quick_repair_form_on_postgres(self):
+        """Форма стороннего ремонта из бота на настоящей базе: карточка
+        клиента, наряд задним числом по дате обращения, закрытие днём
+        окончания, оплата наличными в смену мастера, поиск по номеру."""
+        from app.crm import quickforms
+        await self.seed()
+        tech = await self.crm.access_profile_by_code("tech")
+        master = await self.crm.create_staff("vova", "hash", "Вова", "manager", tech["id"])
+        await self.crm.link_staff_tg(master, 9100, "vova")
+        staff = await quickforms.staff_for(self.crm, 9100)
+        shift = await self.crm.create_shift(location=None, opening=D(0), note=None,
+                                            by="staff:vova")
+        today = date.today()
+        opened, done = today - timedelta(days=8), today - timedelta(days=1)
+        form = (f"Дата обращения: {opened:%d.%m.%Y}\nИмя клиента: Артем\n"
+                "Номер телефона клиента: 89996557593 @Fhnvjk21\n"
+                "Проблема/заказ: мотор троит\n"
+                f"Дата окончания (фактического, либо оговорено с клиентом): {done:%d.%m.%Y}\n"
+                "Кто выполняет (выполнил) работу: вовуча\n"
+                "Итоговая сумма (за работу):\n1500\n"
+                "Итоговая сумма (за запчасти): 2500\n"
+                "Формат оплаты (нал/оплата по карте): нал")
+        card = await quickforms.apply_repair(self.crm, staff, form, today=today)
+        no = logic.order_no_in(card)
+        order = await self.crm.work_order_by_no(no)
+        self.assertEqual((order["payer"], order["tech_id"], order["status"]),
+                         ("client", master, "done"))
+        self.assertEqual(order["opened_at"].astimezone().date(), opened)
+        self.assertEqual(order["closed_at"].astimezone().date(), done)
+        self.assertEqual(order["total"], D("4000.00"))
+        self.assertIsNotNone(order["paid_at"])
+        self.assertEqual([m["amount"] for m in await self.crm.cash_moves(shift)],
+                         [D("4000.00")])
+        client = await self.crm.client_by_phone("+79996557593")
+        self.assertEqual(client["username"], "Fhnvjk21")
+        self.assertEqual(await self.crm.client_balance(client["id"]), D(0),
+                         "ремонт в журнал аренды не идёт")
+
     async def test_work_order_lifecycle_on_postgres(self):
         """Наряд от открытия до закрытия на настоящей базе: номер, запрет
         второго открытого наряда и запись ремонта в журнал велосипеда."""

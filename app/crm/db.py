@@ -87,6 +87,8 @@ ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
     "estimate_sent_at", "approved_at", "approved_by", "declined_at", "location",
+    # Дата обращения из формы бота: наряд заводят задним числом.
+    "opened_at",
 })
 RENTAL_FIELDS = frozenset({
     "search_at", "search_by", "search_note",
@@ -1900,6 +1902,11 @@ class CrmDB:
     async def work_order(self, order_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
             f"{self._ORDER_SELECT} where o.id = $1", order_id))
+
+    async def work_order_by_no(self, no: str) -> dict | None:
+        """Наряд по номеру РЕМ-000123: так его называет карточка в боте."""
+        return _row(await self.pool.fetchrow(
+            f"{self._ORDER_SELECT} where o.no = $1", no))
 
     async def open_order_of(self, bike_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(

@@ -11723,3 +11723,297 @@ def inbox_preview(text: str | None, kind: str | None, *, limit: int = 90) -> str
     if kind and kind != "text":
         return f"[{INBOX_KINDS.get(kind, kind)}]"
     return ""
+
+
+# ─────────────────── быстрые формы сотрудника в боте ───────────────────
+#
+# Мастер заводит сторонний ремонт, администратор - выдачу, одним
+# сообщением в личке бота: форма «ключ: значение», предпросмотр, кнопка.
+# Здесь - только разбор текста; поиск в базе и запись - app/crm/quickforms.py.
+
+QUICK_REPAIR_TEMPLATE = (
+    "Дата обращения: {today}\n"
+    "Имя клиента: \n"
+    "Номер телефона клиента: \n"
+    "Проблема/заказ: \n"
+    "Дата окончания (фактического, либо оговорено с клиентом): -\n"
+    "Кто выполняет (выполнил) работу: {who}\n"
+    "Итоговая сумма (за работу): 0\n"
+    "Итоговая сумма (за запчасти): 0\n"
+    "Формат оплаты (нал/оплата по карте): 0"
+)
+QUICK_ISSUE_TEMPLATE = (
+    "Выдача\n"
+    "Телефон клиента: \n"
+    "Велосипед №: \n"
+    "Срок, дней: 7\n"
+    "Пробег, км: \n"
+    "Аккумулятор №: -\n"
+    "Сумма оплаты: 0\n"
+    "Формат оплаты (нал/карта/перевод): 0\n"
+    "Договор №: -\n"
+    "Дата начала: {today}"
+)
+# Слова способа оплаты -> код METHODS. «Безнал» и «перевод» - перевод,
+# «нал» - только начало слова (как в pay_method_from_text).
+QUICK_METHOD_WORDS: tuple[tuple[str, str], ...] = (
+    ("transfer", r"безнал|перевод|по номеру"),
+    ("cash", r"(?<![а-я])нал"),
+    ("card", r"карт|термин|эквайр"),
+    ("sbp", r"\bсбп\b|\bqr\b|\bкуар"),
+)
+QUICK_TERM_WORDS = {"неделя": 7, "неделю": 7, "месяц": 30, "сутки": 1, "день": 1}
+# Мастер «я»/«сам» - тот, кто прислал форму.
+QUICK_SELF_WORDS = frozenset({"я", "сам", "сама", "мной", "мною"})
+
+
+def _quick_keys(lines: Sequence[str]) -> list[str]:
+    return [pair[0] for pair in (_ops_pair(line) for line in lines) if pair]
+
+
+def quick_value(lines: Sequence[str], pattern: str, *, text: bool = False) -> str:
+    """Значение быстрой формы. Пустая строка ключа - значение строкой ниже
+    («Итоговая сумма (за работу):» и «0» под ней - так пишут на точке).
+
+    Строка ниже берётся, только когда у ключа пусто: «2500», под которым
+    остался «0» из старой формы, иначе склеивалось в «2500 0» и читалось
+    как 25 000 ₽. Абзац продолжения - только для текста (`text`): жалобу
+    пишут в несколько строк, суммы и даты - нет."""
+    for i, line in enumerate(lines):
+        pair = _ops_pair(line)
+        if pair is None or not re.search(pattern, pair[0]):
+            continue
+        if text:
+            return ops_value(lines[i:], pattern, multiline=True)
+        value = pair[1].strip()
+        if not value and i + 1 < len(lines) and ":" not in lines[i + 1]:
+            value = lines[i + 1].strip()
+        return _ops_blank(value)
+    return ""
+
+
+def quick_form_kind(text: Any) -> str | None:
+    """Какая это форма: "repair" (сторонний ремонт), "issue" (выдача) или
+    None. Дёшево и без базы: по этому же гейт подписки пропускает форму
+    сотрудника, а не только обработчик её узнаёт."""
+    lines = ops_lines(text)
+    if len(lines) < 3:
+        return None
+    keys = _quick_keys(lines)
+    first = _ops_norm(lines[0])
+    if re.match(r"^\W*выдача\b", first) and any(re.search(r"велосипед", k) for k in keys):
+        return "issue"
+    if any(re.search(r"проблем", k) for k in keys) \
+            and any(re.search(r"дата обращ|\bимя\b", k) for k in keys):
+        return "repair"
+    return None
+
+
+def form_date(raw: Any, *, today: date) -> tuple[date | None, str]:
+    """Дата из формы: «23.09», «23.09.2026», «23.09.26», «сегодня», «вчера».
+    Пусто или прочерк - (None, ""). Без года - тот год, где дата ближе всего
+    к сегодня: «28.12», написанное 2 января, - это прошлый декабрь."""
+    text = _ops_norm(raw)
+    if _ops_blank(text) == "" or text in ("0", "нет"):
+        return None, ""
+    if text == "сегодня":
+        return today, ""
+    if text == "вчера":
+        return today - timedelta(days=1), ""
+    m = re.fullmatch(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2}|\d{4}))?(?:\s*г\.?)?", text)
+    if not m:
+        return None, f"Не понял дату «{raw}»: пишите 23.09 или 23.09.2026."
+    day, month = int(m.group(1)), int(m.group(2))
+    year_raw = m.group(3)
+    try:
+        if year_raw:
+            year = int(year_raw) + (2000 if len(year_raw) == 2 else 0)
+            return date(year, month, day), ""
+        options = []
+        for year in (today.year - 1, today.year, today.year + 1):
+            try:
+                options.append(date(year, month, day))
+            except ValueError:
+                continue
+        if not options:
+            raise ValueError
+        return min(options, key=lambda d: abs((d - today).days)), ""
+    except ValueError:
+        return None, f"Такой даты нет: «{raw}»."
+
+
+def form_method(raw: Any) -> tuple[str | None, str]:
+    """Способ оплаты из формы -> код METHODS. «0», «-», «нет» - не платил:
+    (None, "")."""
+    text = _ops_norm(raw)
+    if _ops_blank(text) == "" or text in ("0", "нет", "не платил", "не оплачено", "долг"):
+        return None, ""
+    for code, pattern in QUICK_METHOD_WORDS:
+        if re.search(pattern, text):
+            return code, ""
+    return None, f"Не понял формат оплаты «{raw}»: нал, карта или перевод."
+
+
+def form_money(raw: Any, what: str) -> tuple[Decimal, str]:
+    """Сумма из формы: пусто и прочерк - ноль; «1 500 р» - 1500."""
+    if _ops_blank(str(raw or "")) == "":
+        return Decimal("0.00"), ""
+    got = ops_money(raw)
+    if got is None or got < 0:
+        return Decimal("0.00"), f"Не понял сумму «{what}: {raw}» — нужна цифра."
+    return got, ""
+
+
+def form_phone(raw: Any) -> tuple[str | None, str | None]:
+    """(телефон +7…, ник Telegram без @) из строки «89996557593 @ivan»."""
+    text = str(raw or "")
+    nick = re.search(r"@([A-Za-z0-9_]{4,32})\b", text)
+    found = re.search(r"\+?\d[\d\s()\-]{8,}\d", text)
+    phone = bot_logic.normalize_phone(found.group()) if found else None
+    return phone, nick.group(1) if nick else None
+
+
+def form_term(raw: Any) -> int | None:
+    """Срок аренды в днях: «7», «7 дней», «неделя», «2 недели», «месяц»."""
+    text = _ops_norm(raw)
+    if not text:
+        return None
+    m = re.match(r"^(\d{1,3})\s*(нед|мес)?", text)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        days = n * (7 if unit == "нед" else 30 if unit == "мес" else 1)
+        return days if 0 < days <= 366 else None
+    for word, days in QUICK_TERM_WORDS.items():
+        if text.startswith(word):
+            return days
+    return None
+
+
+def parse_quick_repair(text: Any, *, today: date) -> tuple[dict | None, list[str]]:
+    """Форма стороннего ремонта (QUICK_REPAIR_TEMPLATE). Суммы и способ
+    оплаты часто пишут строкой ниже ключа («Итоговая сумма (за работу):»
+    и «0» под ней) - поэтому значения читаются с продолжением."""
+    lines = ops_lines(text)
+    errors: list[str] = []
+
+    def value(pattern: str, *, text: bool = False) -> str:
+        return quick_value(lines, pattern, text=text)
+
+    opened, err = form_date(value(r"дата обращ"), today=today)
+    if err:
+        errors.append(err)
+    opened = opened or today
+    if opened > today:
+        errors.append("Дата обращения в будущем — проверьте число.")
+    name = " ".join(value(r"\bимя\b").split())[:120]
+    if not name:
+        errors.append("Нет имени клиента.")
+    phone, nick = form_phone(value(r"телефон"))
+    if not phone:
+        errors.append("Нет телефона клиента или он не похож на номер.")
+    problem = " ".join(value(r"проблем|заказ", text=True).split())[:500]
+    if not problem:
+        errors.append("Нет строки «Проблема/заказ».")
+    finish, err = form_date(value(r"окончан|готов"), today=today)
+    if err:
+        errors.append(err)
+    work, err = form_money(value(r"за работу|\bработа\b"), "за работу")
+    if err:
+        errors.append(err)
+    parts, err = form_money(value(r"запчаст"), "за запчасти")
+    if err:
+        errors.append(err)
+    method, err = form_method(value(r"формат оплат|способ оплат"))
+    if err:
+        errors.append(err)
+    if method and work + parts <= 0:
+        errors.append("Оплата указана, а сумма ноль — впишите сумму или 0 в оплате.")
+    thing = " ".join(value(r"^техника|что чин|объект", text=True).split())[:200]
+    data = {"opened_on": opened, "name": name, "phone": phone, "username": nick,
+            "problem": problem, "thing": thing,
+            "finish_on": finish, "tech": " ".join(value(r"выполня|мастер|исполнит").split())[:80],
+            "work": work, "parts": parts, "method": method}
+    return (None if errors else data), errors
+
+
+def parse_quick_issue(text: Any, *, today: date) -> tuple[dict | None, list[str]]:
+    """Форма быстрой выдачи (QUICK_ISSUE_TEMPLATE)."""
+    lines = ops_lines(text)
+    errors: list[str] = []
+
+    def value(pattern: str) -> str:
+        return quick_value(lines, pattern)
+
+    phone, _ = form_phone(value(r"телефон"))
+    if not phone:
+        errors.append("Нет телефона клиента или он не похож на номер.")
+    code = check_code(re.sub(r"^№\s*", "", value(r"велосипед")))
+    if not code.ok:
+        errors.append("Нет номера велосипеда.")
+    term = form_term(value(r"срок"))
+    if term is None:
+        errors.append("Срок аренды: число дней, например 7.")
+    mileage_raw = value(r"пробег")
+    if not re.fullmatch(r"\d[\d  ]{0,8}(?:\s*км)?", mileage_raw or ""):
+        errors.append("Пробег с дисплея — числом, без него выдачу не оформить.")
+        mileage = None
+    else:
+        mileage = int(re.sub(r"\D", "", mileage_raw))
+    battery_raw = re.sub(r"^№\s*", "", value(r"аккумулятор|\bакб\b|батаре"))
+    battery = check_code(battery_raw).value if battery_raw else None
+    pay, err = form_money(value(r"сумма"), "сумма оплаты")
+    if err:
+        errors.append(err)
+    method, err = form_method(value(r"формат|способ"))
+    if err:
+        errors.append(err)
+    if pay > 0 and not method:
+        errors.append("Сумма есть, а формат оплаты не указан: нал, карта или перевод.")
+    if method and pay <= 0:
+        errors.append("Формат оплаты указан, а сумма ноль.")
+    contract = " ".join(value(r"договор").split())[:60] or None
+    started, err = form_date(value(r"дата|начал"), today=today)
+    if err:
+        errors.append(err)
+    started = started or today
+    problem = rental_start_problem(started, today)
+    if problem:
+        errors.append(problem)
+    data = {"phone": phone, "bike_code": code.value if code.ok else None, "term": term,
+            "mileage": mileage, "battery_code": battery, "pay": pay, "method": method,
+            "contract_no": contract, "started_on": started}
+    return (None if errors else data), errors
+
+
+def match_staff(people: Iterable[Mapping[str, Any]], said: Any) -> list[dict]:
+    """Сотрудники под «Кто выполняет»: точное слово имени, логин или ник
+    Telegram; иначе - первые три буквы («вовуча» - это «Вова»). Несколько
+    подходящих - решает человек, а не первый в списке."""
+    word = _ops_norm(said).lstrip("@")
+    if not word:
+        return []
+    active = [dict(p) for p in people if p.get("active", True) and not staff_expired(p)]
+
+    def tokens(p: Mapping[str, Any]) -> set[str]:
+        out = set(_ops_norm(p.get("name")).replace(".", " ").split())
+        out.add(_ops_norm(p.get("login")))
+        out.add(_ops_norm(p.get("tg_username")).lstrip("@"))
+        return {t for t in out if t}
+    exact = [p for p in active if word in tokens(p) or word == _ops_norm(p.get("name"))]
+    if exact:
+        return exact
+    if len(word) < 3:
+        return []
+    return [p for p in active
+            if any(len(t) >= 3 and (word.startswith(t[:3]) or t.startswith(word[:3]))
+                   for t in tokens(p))]
+
+
+ORDER_NO_RE = re.compile(r"РЕМ-\d{6}")
+
+
+def order_no_in(text: Any) -> str | None:
+    """Номер наряда из карточки бота («Наряд РЕМ-000123 …»)."""
+    found = ORDER_NO_RE.search(str(text or ""))
+    return found.group() if found else None

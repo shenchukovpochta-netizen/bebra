@@ -16,6 +16,7 @@ from . import i18n, logic
 from . import keyboards as kb
 from .config import Config
 from .crm import company, doctemplates, points
+from .crm import logic as crm_logic
 from .db import Database
 from .filters import is_service_chat, ops_topic
 from .services.crypto import Vault
@@ -39,17 +40,25 @@ def _is_faq(inner: Any) -> bool:
 # Сама команда, а не начало слова: «/staffИван Петров» - не команда, и
 # по startswith такое сообщение шло мимо гейта подписки прямо ответом на
 # шаг ФИО. Хвост «@имя_бота» Telegram дописывает в группах.
-STAFF_COMMAND = re.compile(r"^/(staff|crm)(@\w+)?(\s|$)", re.IGNORECASE)
+STAFF_COMMAND = re.compile(r"^/(staff|crm|remont|vydacha)(@\w+)?(\s|$)", re.IGNORECASE)
 
 
 def _is_staff_command(inner: Any) -> bool:
-    """«/staff <код>» - привязка сотрудника к боту, «/crm» - панель CRM.
+    """«/staff <код>» - привязка сотрудника к боту, «/crm» - панель CRM,
+    «/remont» и «/vydacha» - шаблоны быстрых форм, и сами формы в личке.
 
     Идут мимо гейта подписки и анкеты: сотрудник не клиент, канал он читать
     не обязан, а ответ на анкетный вопрос из его команды получиться не должен.
+    Сотрудник ли это, решает обработчик (handlers/staff.py): чужому форма
+    отвечает отказом, а не пишет в CRM.
     """
-    return (isinstance(inner, Message)
-            and STAFF_COMMAND.match(str(inner.text or "").strip()) is not None)
+    if not isinstance(inner, Message):
+        return False
+    text = str(inner.text or "").strip()
+    if STAFF_COMMAND.match(text) is not None:
+        return True
+    return (inner.chat is not None and inner.chat.type == "private"
+            and crm_logic.quick_form_kind(text) is not None)
 
 
 # Служебные кнопки клиента, которые приходят не в начале пути, а после
@@ -59,8 +68,10 @@ def _is_staff_command(inner: Any) -> bool:
 # Бывший подписчик отписался от канала вместе с арендой - гейт отвечал бы
 # ему «подпишитесь» вместо оценки, согласия на ремонт или чека. Права
 # проверяет сам обработчик: оценку и смету - по клиенту аренды или наряда.
+# «qf:» - подтверждение быстрой формы сотрудника: он канал читать не обязан,
+# права - его роль в панели, проверяет обработчик.
 SERVICE_CALLBACKS = ("fb:", "est:", "wl:", "cab:paycheck:", "cab:book:cancel",
-                     "inbox_answer")
+                     "inbox_answer", "qf:")
 
 
 def _is_service_callback(inner: Any) -> bool:

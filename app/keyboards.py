@@ -129,6 +129,20 @@ def crm_app(url: str) -> InlineKeyboardMarkup:
     ])
 
 
+def quick_confirm(kind: str, target: int = 0) -> InlineKeyboardMarkup:
+    """Подтверждение быстрой формы сотрудника. Сама форма в кнопку не едет
+    (64 байта): обработчик перечитывает её из сообщения, на которое ответил
+    предпросмотр, - в кнопке только вид и наряд, который форма дополняет."""
+    if kind == "issue":
+        ok = InlineKeyboardButton(text=texts.BTN_QF_ISSUE, callback_data="qf:i")
+    else:
+        ok = InlineKeyboardButton(
+            text=texts.BTN_QF_REPAIR_EDIT if target else texts.BTN_QF_REPAIR_NEW,
+            callback_data=f"qf:r:{int(target)}")
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        ok, InlineKeyboardButton(text=texts.BTN_QF_CANCEL, callback_data="qf:x")]])
+
+
 def moderation(tg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{tg_id}"),

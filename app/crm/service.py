@@ -586,7 +586,8 @@ async def open_order(crm: Any, *, bike: dict | None, payer: str,
 
 
 async def close_order(crm: Any, order: dict, *, by: str,
-                      bike_status: str = "available") -> dict:
+                      bike_status: str = "available",
+                      closed_at: datetime | None = None) -> dict:
     """Закрыть наряд: посчитать итоги, записать ремонт в журнал велосипеда
     и вернуть велосипед в парк.
 
@@ -617,7 +618,7 @@ async def close_order(crm: Any, order: dict, *, by: str,
     # велосипеда два ремонта с одинаковыми позициями.
     done = await crm.close_work_order(
         order["id"], total=totals["total"], cost=totals["cost"],
-        closed_at=datetime.now(UTC), repair=repair)
+        closed_at=closed_at or datetime.now(UTC), repair=repair)
     if done is None:
         raise ServiceError("Наряд уже закрыт.")
     if order.get("bike_id"):

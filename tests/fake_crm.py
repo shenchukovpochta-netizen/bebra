@@ -1435,6 +1435,10 @@ class FakeCrm:
         o = self.orders_.get(order_id)
         return self._order_row(o) if o else None
 
+    async def work_order_by_no(self, no):
+        o = next((o for o in self.orders_.values() if o.get("no") == no), None)
+        return self._order_row(o) if o else None
+
     async def open_order_of(self, bike_id):
         o = next((o for o in self.orders_.values()
                   if o.get("bike_id") == bike_id and o["status"] in crm_logic.ORDER_OPEN),
