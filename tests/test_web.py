@@ -51,9 +51,13 @@ class FakeBot:
 
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.menus: list[tuple[int, object]] = []
 
     async def send_message(self, chat_id, text, reply_markup=None):
         self.sent.append((chat_id, plain(text)))
+
+    async def set_chat_menu_button(self, chat_id=None, menu_button=None):
+        self.menus.append((chat_id, menu_button))
 
     async def get_me(self):
         return types.SimpleNamespace(username="mybike_test_bot")

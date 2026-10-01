@@ -39,14 +39,14 @@ def _is_faq(inner: Any) -> bool:
 # Сама команда, а не начало слова: «/staffИван Петров» - не команда, и
 # по startswith такое сообщение шло мимо гейта подписки прямо ответом на
 # шаг ФИО. Хвост «@имя_бота» Telegram дописывает в группах.
-STAFF_COMMAND = re.compile(r"^/staff(@\w+)?(\s|$)", re.IGNORECASE)
+STAFF_COMMAND = re.compile(r"^/(staff|crm)(@\w+)?(\s|$)", re.IGNORECASE)
 
 
-def _is_staff_link(inner: Any) -> bool:
-    """«/staff <код>» - привязка сотрудника к боту.
+def _is_staff_command(inner: Any) -> bool:
+    """«/staff <код>» - привязка сотрудника к боту, «/crm» - панель CRM.
 
-    Идёт мимо гейта подписки и анкеты: техник не клиент, канал он читать
-    не обязан, а ответ на анкетный вопрос из его кода получиться не должен.
+    Идут мимо гейта подписки и анкеты: сотрудник не клиент, канал он читать
+    не обязан, а ответ на анкетный вопрос из его команды получиться не должен.
     """
     return (isinstance(inner, Message)
             and STAFF_COMMAND.match(str(inner.text or "").strip()) is not None)
@@ -226,7 +226,7 @@ class PipelineMiddleware(BaseMiddleware):
         # тоже мимо: они приходят после аренды, когда канал ему уже не нужен.
         # Комментарий к оценке узнаётся по базе, и спрашиваем её только у
         # неподписанного: остальным лишний запрос ни к чему.
-        if not _is_faq(inner) and not _is_staff_link(inner) \
+        if not _is_faq(inner) and not _is_staff_command(inner) \
                 and not _is_service_callback(inner) \
                 and not await check_subscription(data["bot"], self.cfg.channel_id, user_id) \
                 and not await self._is_feedback_reply(inner):

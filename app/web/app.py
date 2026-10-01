@@ -5330,6 +5330,21 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                           else "своя точка снята."))
         return redirect("/staff")
 
+    async def drop_crm_menu(tg_id: Any) -> None:
+        """Кнопку «CRM» в меню чата (handlers/staff.set_crm_menu) - обратно
+        в обычное меню, когда сотрудника отвязали или отключили. За ней
+        только страница входа, но держать её у того, кому доступ закрыли,
+        незачем. Один запрос по кнопке оператора; сбой Telegram отвязке и
+        отключению не мешает."""
+        if bot is None or not tg_id or not hasattr(bot, "set_chat_menu_button"):
+            return
+        try:
+            from aiogram.types import MenuButtonDefault
+            await bot.set_chat_menu_button(chat_id=int(tg_id),
+                                           menu_button=MenuButtonDefault())
+        except Exception:                                # noqa: BLE001
+            log.warning("кнопка CRM в чате %s не снята", tg_id, exc_info=True)
+
     @app.post("/staff/{staff_id}/telegram")
     async def staff_telegram(request: Request, staff_id: int) -> Response:
         """Код привязки Telegram сотруднику - или отвязка.
@@ -5344,6 +5359,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Сотрудник")
         if (await form(request)).get("unlink"):
             await crm.unlink_staff_tg(staff_id)
+            await drop_crm_menu(person.get("tg_id"))
             flash(request, f"Telegram сотрудника {person['login']} отвязан.")
             return redirect("/staff")
         for _ in range(10):
@@ -5406,6 +5422,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Себя отключить нельзя.", "err")
             return redirect("/staff")
         await crm.set_staff_active(staff_id, not target["active"])
+        if target["active"]:
+            await drop_crm_menu(target.get("tg_id"))
         flash(request, "Доступ " + ("включён." if not target["active"] else "отключён."))
         return redirect("/staff")
 

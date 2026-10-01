@@ -568,10 +568,11 @@ class TestStaffCommandGate(FlowCase):
                            chat=Chat(id=1, type="private"),
                            from_user=User(id=1, is_bot=False, first_name="u"), text=text)
         for text in ("/staff AB3D9K2M", "/staff", "/STAFF ab3d9k2m",
-                     "/staff@mybike_bot AB3D9K2M"):
-            self.assertTrue(middlewares._is_staff_link(message(text)), text)
-        for text in ("/staffИван Петров", "/staffer x", "staff AB3D9K2M"):
-            self.assertFalse(middlewares._is_staff_link(message(text)), text)
+                     "/staff@mybike_bot AB3D9K2M", "/crm", "/crm@mybike_bot"):
+            self.assertTrue(middlewares._is_staff_command(message(text)), text)
+        for text in ("/staffИван Петров", "/staffer x", "staff AB3D9K2M",
+                     "/crmИван", "crm"):
+            self.assertFalse(middlewares._is_staff_command(message(text)), text)
 
 
 class TestServiceButtonsSkipTheGate(FlowCase):

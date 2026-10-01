@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,6 +25,9 @@ except ImportError:                                    # pragma: no cover
 
 try:
     import test_cabinet as tc
+    import test_flow as tf
+    from aiogram.methods import SetChatMenuButton
+    from aiogram.types import ForceReply
     HAVE_AIOGRAM = tc.HAVE_AIOGRAM
 except ImportError:                                    # pragma: no cover
     HAVE_AIOGRAM = False
@@ -41,6 +45,15 @@ class TestLinkLogic(unittest.TestCase):
         self.assertEqual(logic.clean_link_code(" ab3d9k2m "), "AB3D9K2M")
         self.assertEqual(logic.clean_link_code("ab3d9k2m лишнее"), "AB3D9K2M")
         self.assertEqual(logic.clean_link_code("AB3"), "")
+
+    def test_panel_app_url_needs_an_https_domain(self):
+        self.assertEqual(logic.panel_app_url("crm.example.ru"), "https://crm.example.ru/")
+        self.assertEqual(logic.panel_app_url(" HTTPS://CRM.Example.ru/ "),
+                         "https://crm.example.ru/")
+        self.assertEqual(logic.panel_app_url("http://crm.example.ru"),
+                         "https://crm.example.ru/", "Mini App - только https")
+        for bad in ("", None, "crm example.ru", "crm.example.ru/путь", "javascript:x"):
+            self.assertIsNone(logic.panel_app_url(bad), bad)
 
     def test_label_tells_the_state(self):
         self.assertEqual(logic.staff_tg_label({"tg_id": 1, "tg_username": "ivan"}),
@@ -78,6 +91,31 @@ class TestStaffLinkInPanel(tw.WebCase):
         tech = self.tech()
         self.assertIsNone(tech["tg_id"])
         self.assertIsNone(tech["link_code"])
+
+    def test_unlink_takes_the_crm_button_back(self):
+        tw.run(self.crm.link_staff_tg(self.tech_id, TECH_ID, "petr"))
+        self.client.post(f"/staff/{self.tech_id}/telegram", data={"unlink": "1"})
+        self.assertEqual([chat for chat, _ in self.bot.menus], [TECH_ID])
+        self.assertEqual(self.bot.menus[0][1].type, "default")
+
+    def test_disabling_takes_the_crm_button_back_enabling_does_not(self):
+        tw.run(self.crm.link_staff_tg(self.tech_id, TECH_ID, "petr"))
+        self.client.post(f"/staff/{self.tech_id}/toggle")
+        self.assertFalse(self.tech()["active"])
+        self.assertEqual([chat for chat, _ in self.bot.menus], [TECH_ID])
+        self.client.post(f"/staff/{self.tech_id}/toggle")
+        self.assertTrue(self.tech()["active"])
+        self.assertEqual(len(self.bot.menus), 1, "включение кнопку не ставит: /crm")
+
+    def test_panel_pages_carry_the_telegram_bridge(self):
+        """Вход и страницы за входом - со скриптом Mini App: с них панель
+        и открывается внутри Telegram."""
+        self.assertIn('src="/static/tg.js', self.get_ok("/"))
+        self.client.post("/logout")
+        self.assertIn('src="/static/tg.js', self.get_ok("/login"))
+        script = self.client.get("/static/tg.js")
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("web_app_expand", script.text)
 
     def test_only_staff_editors_can_issue_codes(self):
         manager = tw.run(self.crm.access_profile_by_code("manager"))
@@ -171,6 +209,106 @@ class TestStaffLinkInBot(tc.CabinetCase):
         staff_id = await self.staff_with_code()
         await self.feed(tc.msg("/staff AB3D9K2M", user_id=TECH_ID, chat_id=TECH_ID))
         self.assertEqual((await self.crm.staff_by_id(staff_id))["tg_id"], TECH_ID)
+
+
+@unittest.skipUnless(HAVE_AIOGRAM, "aiogram не установлен")
+class TestCrmAppInBot(tc.CabinetCase):
+    """«/crm» - панель CRM внутри Telegram (Mini App). Вход - логин и пароль
+    в форме самой панели: бот пароля не спрашивает и не видит."""
+
+    DOMAIN = "crm.example.ru"
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await self.bot.session.close()
+        (self.dp, self.bot, self.db, self.crm, self.session,
+         self.cfg, self.vault) = tc.build(tf.make_config(crm_domain=self.DOMAIN))
+
+    def calls(self, kind):
+        return [c for c in self.session.calls if isinstance(c, kind)]
+
+    def buttons(self, chat_id):
+        markup = next(m.reply_markup for m in reversed(self.session.sent_to(chat_id))
+                      if m.reply_markup is not None)
+        return [b for row in markup.inline_keyboard for b in row]
+
+    async def linked_tech(self, active=True):
+        staff_id = await self.crm.create_staff("petr", "hash", "Пётр", "manager")
+        await self.crm.link_staff_tg(staff_id, TECH_ID, "petr")
+        if not active:
+            await self.crm.set_staff_active(staff_id, False)
+        return staff_id
+
+    async def test_command_opens_the_panel_inside_telegram(self):
+        await self.feed(tc.msg("/crm", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertIn("логин и пароль", self.last_text(TECH_ID))
+        app, browser = self.buttons(TECH_ID)
+        self.assertEqual(app.web_app.url, f"https://{self.DOMAIN}/")
+        self.assertEqual(browser.url, f"https://{self.DOMAIN}/")
+
+    async def test_password_is_never_asked_in_the_chat(self):
+        """Бот не ждёт пароля ответом: ни просьбы, ни поля для ответа."""
+        await self.feed(tc.msg("/crm", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertIn("не сообщением сюда", self.last_text(TECH_ID))
+        self.assertFalse(any(isinstance(m.reply_markup, ForceReply)
+                             for m in self.session.sent_to(TECH_ID)))
+
+    async def test_linked_employee_gets_the_menu_button(self):
+        await self.linked_tech()
+        await self.feed(tc.msg("/crm", user_id=TECH_ID, chat_id=TECH_ID))
+        menus = self.calls(SetChatMenuButton)
+        self.assertEqual(len(menus), 1)
+        self.assertEqual(menus[0].chat_id, TECH_ID)
+        self.assertEqual(menus[0].menu_button.web_app.url, f"https://{self.DOMAIN}/")
+
+    async def test_stranger_and_disabled_get_no_menu_button(self):
+        await self.feed(tc.msg("/crm", user_id=9300, chat_id=9300))
+        await self.linked_tech(active=False)
+        await self.feed(tc.msg("/crm", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertEqual(self.calls(SetChatMenuButton), [],
+                         "за кнопкой всё равно вход по паролю, но в меню её нет")
+
+    async def test_works_without_channel_subscription(self):
+        self.session.subscribed = False
+        await self.feed(tc.msg("/crm", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertIn("логин и пароль", self.last_text(TECH_ID))
+
+    async def test_link_puts_the_menu_button_and_says_so(self):
+        staff_id = await self.crm.create_staff("petr", "hash", "Пётр", "manager")
+        await self.crm.set_staff_link_code(staff_id, "AB3D9K2M")
+        await self.feed(tc.msg("/staff AB3D9K2M", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertIn("/crm", self.last_text(TECH_ID))
+        self.assertEqual(len(self.calls(SetChatMenuButton)), 1)
+
+    async def test_group_is_sent_to_the_private_chat(self):
+        """Кнопку Mini App Telegram в группе не примет - там подсказка. В
+        группу /crm доходит только из тем рабочей группы точек: прочие
+        групповые сообщения конвейер отбрасывает раньше."""
+        answers = []
+
+        async def answer(text, **kwargs):
+            answers.append((text, kwargs))
+        message = SimpleNamespace(answer=answer, chat=SimpleNamespace(type="supergroup"),
+                                  from_user=SimpleNamespace(id=TECH_ID))
+        await tc.staff_h.cmd_crm(message, bot=self.bot, crm=self.crm, cfg=self.cfg)
+        self.assertEqual(len(answers), 1)
+        self.assertIn("в личке", answers[0][0])
+        self.assertNotIn("reply_markup", answers[0][1])
+        self.assertEqual(self.calls(SetChatMenuButton), [])
+
+
+@unittest.skipUnless(HAVE_AIOGRAM, "aiogram не установлен")
+class TestCrmAppWithoutDomain(tc.CabinetCase):
+    async def test_no_https_domain_no_button(self):
+        await self.feed(tc.msg("/crm", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertIn("CRM_DOMAIN", self.last_text(TECH_ID))
+        self.assertFalse(any(m.reply_markup for m in self.session.sent_to(TECH_ID)))
+
+    async def test_link_without_domain_says_nothing_about_crm(self):
+        staff_id = await self.crm.create_staff("petr", "hash", "Пётр", "manager")
+        await self.crm.set_staff_link_code(staff_id, "AB3D9K2M")
+        await self.feed(tc.msg("/staff AB3D9K2M", user_id=TECH_ID, chat_id=TECH_ID))
+        self.assertNotIn("/crm", self.last_text(TECH_ID))
 
 
 if __name__ == "__main__":                             # pragma: no cover

@@ -7,9 +7,10 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 
-from . import i18n, logic
+from . import i18n, logic, texts
 from .crm import logic as crm_logic
 
 # Все подписи кнопок идут через i18n.t(lang, "BTN_*"): русский - источник,
@@ -115,6 +116,16 @@ def confirm(lang: str = "ru") -> InlineKeyboardMarkup:
                               callback_data="confirm")],
         [InlineKeyboardButton(text=i18n.t(lang, "BTN_RESTART"),
                               callback_data="restart")],
+    ])
+
+
+def crm_app(url: str) -> InlineKeyboardMarkup:
+    """Панель CRM для сотрудника: внутри Telegram (Mini App) и запасной
+    ссылкой в браузер - Telegram в браузере (web.telegram.org) открывает
+    Mini App во фрейме, а панель во фрейм не встраивается намеренно."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=texts.BTN_CRM_APP, web_app=WebAppInfo(url=url))],
+        [InlineKeyboardButton(text=texts.BTN_CRM_BROWSER, url=url)],
     ])
 
 

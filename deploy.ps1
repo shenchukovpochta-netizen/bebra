@@ -167,7 +167,7 @@ $webTemplates = @('app/web/templates/base.html', 'app/web/templates/_summary.htm
 $webStatic = @('app/web/static/style.css', 'app/web/static/fonts.css',
                'app/web/static/icon-192.png', 'app/web/static/icon-512.png',
                'app/web/static/icon-maskable-512.png', 'app/web/static/apple-touch-icon.png',
-               'app/web/static/icons.svg')
+               'app/web/static/icons.svg', 'app/web/static/tg.js')
 $webFonts = @('app/web/static/fonts/onest-400-cyrillic-ext.woff2',
              'app/web/static/fonts/onest-400-cyrillic.woff2',
              'app/web/static/fonts/onest-400-latin.woff2',

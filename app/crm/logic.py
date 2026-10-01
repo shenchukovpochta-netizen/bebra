@@ -11663,15 +11663,35 @@ def wazzup_state(settings: Mapping[str, Any], *,
             "hooked_at": _moment(data.get("hooked_at"))}
 
 
+def panel_host(domain: Any) -> str | None:
+    """Домен панели из CRM_DOMAIN: без схемы и косых, строчными. Не похож
+    на домен - None: по нему не собрать ни хук, ни кнопку бота."""
+    host = str(domain or "").strip().lower()
+    host = re.sub(r"^https?://", "", host).strip("/")
+    if not host or not re.fullmatch(r"[a-z0-9.-]+(:\d+)?", host):
+        return None
+    return host
+
+
+def panel_app_url(domain: Any) -> str | None:
+    """Адрес панели для кнопки бота «Открыть CRM» (Telegram Mini App).
+
+    Mini App Telegram открывает только по https, поэтому без домена панели
+    (CRM_DOMAIN, профиль https) кнопки нет: голый адрес сервера по http
+    Telegram не примет. Путь - корень: вошедшего панель ведёт на его
+    стартовую страницу, остальных - на вход по логину и паролю."""
+    host = panel_host(domain)
+    return f"https://{host}/" if host else None
+
+
 def wazzup_hook_url(domain: Any, token: Any) -> str | None:
     """Адрес хука для подписки Wazzup: https://<домен>/hook/inbox/<токен>.
 
     Без домена панели или токена хука подписывать нечего: Wazzup стучится
     снаружи, а пустой токен - это выключенный хук (404)."""
-    host = str(domain or "").strip().lower()
-    host = re.sub(r"^https?://", "", host).strip("/")
+    host = panel_host(domain)
     secret = str(token or "").strip()
-    if not host or not secret or not re.fullmatch(r"[a-z0-9.-]+(:\d+)?", host):
+    if not host or not secret:
         return None
     if not re.fullmatch(r"[A-Za-z0-9_-]+", secret):
         return None
