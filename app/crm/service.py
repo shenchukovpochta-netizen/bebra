@@ -41,13 +41,27 @@ async def cash_shift_id(crm: Any, method: str | None, by: str | None) -> int | N
 
 
 async def credit_claim(crm: Any, claim: dict, amount: Decimal, *, by: str,
-                       method: str = "sbp") -> int | None:
+                       method: str = "sbp", twice_ok: bool = False) -> int | None:
     """Зачислить заявку клиента. None - её уже закрыл кто-то другой.
 
     Закрытие заявки и платёж - одна транзакция в базе: второй оператор
     (двойной тап, панель и Telegram одновременно) не пишет в журнал
     ничего, и сумма платежей в отчётах не раздувается.
+
+    Перевод той же суммы этому клиенту уже зачислен из выписки рядом по
+    дате - отказ (`ServiceError`) с объяснением, пока человек не отметит
+    `twice_ok`: «Я оплатил» и строка выписки с номером договора - чаще
+    всего одни и те же деньги.
     """
+    if not twice_ok:
+        made = claim.get("created_at")
+        made = made if isinstance(made, datetime) else datetime.now(UTC)
+        window = timedelta(days=logic.BANK_TWICE_DAYS)
+        problem = logic.claim_bank_twice(
+            claim, amount, await crm.bank_credits_of(int(claim["client_id"]),
+                                                     made - window, made + window))
+        if problem:
+            raise ServiceError(problem)
     return await crm.credit_claim(
         claim["id"], client_id=claim["client_id"], amount=abs(amount), method=method,
         note=f"Пополнение по заявке #{claim['id']}", created_by=by,
@@ -1439,8 +1453,10 @@ async def credit_bank_txn(crm: Any, txn: dict, client: dict, *, by: str,
         raise ServiceError("Эта строка выписки уже разобрана.")
     if txn.get("direction") != "credit":
         raise ServiceError("Это списание со счёта, а не поступление.")
-    if client.get("status") != "active":
-        raise ServiceError("Клиент заблокирован или в чёрном списке.")
+    # Статус клиента не проверяется: должник из чёрного списка, вернувший
+    # долг переводом, иначе не зачислялся из выписки никогда, а запись
+    # журналом руками оставляла строку выписки «новой» - и её могли
+    # зачислить второй раз. Блокировка запрещает выдачу, а не приём денег.
     ledger_id = await crm.credit_bank_txn(
         txn["id"], client_id=client["id"], amount=logic.to_money(txn["amount"]),
         method=method,
@@ -1720,6 +1736,8 @@ async def check_pay_order(crm: Any, order: dict, *, acquiring: Any) -> str:
     if state.get("state") == "paid":
         closed = await crm.mark_pay_paid(order["id"], method="card", by="эквайринг")
         await _remember_card(crm, order, state.get("card") or {})
+        if closed == logic.REPAIR_PAID_TWICE:
+            return "repair_twice"
         if closed is None:
             # Закрыт раньше. Банком (второй опрос, кнопка в кабинете) - это
             # тот же платёж; руками - это второй платёж по тому же счёту.
@@ -1781,6 +1799,11 @@ async def credit_pay_order(crm: Any, order: dict, *, by: str,
         raise ServiceError("Счёт уже оплачен")
     if order.get("status") == "cancelled":
         raise ServiceError("Счёт снят, оплачивать нечего")
+    if order.get("work_order_id"):
+        work = await crm.work_order(int(order["work_order_id"]))
+        if work is not None and work.get("paid_at"):
+            raise ServiceError("Ремонт по этому наряду уже оплачен — второй раз "
+                               "деньги не принимайте, а этот счёт снимите.")
     done = await crm.mark_pay_paid(order["id"], method=method, by=by,
                                    shift_id=await cash_shift_id(crm, method, by))
     if done is None:
@@ -2027,6 +2050,13 @@ async def invoice_order(crm: Any, order: dict, *, by: str,
         raise ServiceError("Свой ремонт клиенту не выставляют.")
     if order.get("paid_at"):
         raise ServiceError("Ремонт уже оплачен.")
+    # Второй счёт при открытом первом - вторая ссылка у клиента: оплатит
+    # обе, и ремонт окажется оплачен дважды.
+    live = [i for i in await crm.work_order_invoices(int(order["id"]))
+            if i.get("status") in logic.PAY_OPEN]
+    if live:
+        raise ServiceError(f"Счёт {live[0].get('no')} уже выставлен и ждёт оплаты — "
+                           "отправьте клиенту его ссылку или снимите счёт.")
     amount = logic.to_money(order.get("total") or order.get("estimate"))
     if amount <= 0:
         raise ServiceError("Сумма ремонта не посчитана: закройте наряд "

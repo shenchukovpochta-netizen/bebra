@@ -56,6 +56,12 @@ async def poll_once(crm: Any, acquiring: Any, *, limit: int = 100) -> dict:
                             order.get("no"))
                 twice.append(order)
             continue
+        if state == "repair_twice":
+            # Второй счёт за уже оплаченный ремонт: счёт закрыт с отметкой
+            # этим же вызовом, и сказать команде надо ровно сейчас.
+            log.warning("ремонт по счёту %s оплачен дважды", order.get("no"))
+            twice.append(order)
+            continue
         if state == "paid_before":
             continue                 # закрыл другой: сообщает тоже он
         if order.get("status") not in logic.PAY_OPEN:
@@ -94,10 +100,12 @@ async def report_twice(bot: Any, crm: Any, cfg: Any, order: dict) -> bool:
     В журнал второй раз не пишем - решает человек: вернуть клиенту или
     зачесть. Молчать нельзя: иначе вторые деньги лежат на счёте ничьими.
     """
+    why = ("Ремонт по наряду уже был оплачен — другим счётом или на месте."
+           if order.get("work_order_id") else
+           "Закрыт наличными или переводом, а клиент оплатил и ссылку.")
     text = (f"⚠️ Счёт {order.get('no')} оплачен дважды — "
             f"{logic.money(order.get('amount'))}\n"
-            "Закрыт наличными или переводом, а клиент оплатил и ссылку. Второй раз "
-            "не зачислено: верните деньги или зачтите руками.\n"
+            f"{why} Второй раз не зачислено: верните деньги или зачтите руками.\n"
             + logic.html.escape(f"{order.get('full_name') or 'клиент'} · "
                                 f"{order.get('purpose') or ''}", quote=False))
     return await notices.send_team(crm, bot, "pay_twice", text.strip(),

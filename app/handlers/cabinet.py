@@ -404,6 +404,10 @@ async def cb_paycheck(callback: CallbackQuery, bot: Bot, db: Database, cfg: Conf
             # агенту; зачисление клиент видит прямо здесь, ответом.
             fresh = await crm.pay_order(order["id"]) or order
             await paying.tell_paid(bot, db, crm, cfg, fresh)
+        elif state == "repair_twice":
+            # Второй счёт за оплаченный ремонт: опрос этот счёт уже не
+            # увидит закрытым впервые - сказать команде должен тот, кто закрыл.
+            await paying.report_twice(bot, crm, cfg, await crm.pay_order(order["id"]) or order)
         order = await crm.pay_order(order["id"]) or order
     if order["status"] == "paid":
         await callback.answer()
@@ -1064,7 +1068,11 @@ async def cb_claim(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
     if amount <= 0:
         await callback.answer(texts.CAB_CLAIM_NO_AMOUNT, show_alert=True)
         return
-    balance = await credit(bot, db, crm, claim, amount, who=who)
+    try:
+        balance = await credit(bot, db, crm, claim, amount, who=who)
+    except service.ServiceError:
+        await callback.answer(texts.CAB_CLAIM_BANK_TWICE, show_alert=True)
+        return
     if balance is None:
         await callback.answer(texts.CAB_CLAIM_NOT_PENDING, show_alert=True)
         return
@@ -1102,7 +1110,11 @@ async def claim_amount_reply(message: Message, bot: Bot, db: Database, cfg: Conf
         await message.reply(texts.CAB_CLAIM_AMOUNT_BAD)
         return
     who = message.from_user.username or str(message.from_user.id)
-    balance = await credit(bot, db, crm, claim, check.value, who=who)
+    try:
+        balance = await credit(bot, db, crm, claim, check.value, who=who)
+    except service.ServiceError:
+        await message.reply(texts.CAB_CLAIM_BANK_TWICE)
+        return
     if balance is None:
         await message.reply(texts.CAB_CLAIM_NOT_PENDING)
         return

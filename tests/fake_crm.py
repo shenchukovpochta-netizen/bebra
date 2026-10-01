@@ -3398,7 +3398,30 @@ class FakeCrm:
                             "ref": f"#{row['id']}" if source == "claim" else row["no"],
                             "client_id": row["client_id"], "amount": entry["amount"],
                             "paid_at": entry["created_at"]})
+        owned = ({c.get("ledger_id") for c in self.claims_.values()}
+                 | {o.get("ledger_id") for o in self.pay_orders_.values()})
+        for entry in self.ledger_:
+            if (entry["kind"] != "payment" or (entry.get("method") or "") == "cash"
+                    or entry["created_at"] < since or entry["id"] in linked
+                    or entry["id"] in owned):
+                continue
+            out.append({"source": "payment", "ref": f"#{entry['id']}",
+                        "client_id": entry["client_id"], "amount": entry["amount"],
+                        "paid_at": entry["created_at"]})
+        for claim in self.claims_.values():
+            if claim["status"] == "pending" and claim["created_at"] >= since:
+                out.append({"source": "pending", "ref": f"#{claim['id']}",
+                            "client_id": claim["client_id"],
+                            "amount": claim.get("amount_hint"),
+                            "paid_at": claim["created_at"]})
         return out
+
+    async def bank_credits_of(self, client_id, since, until):
+        rows = [{"id": t["id"], "amount": t["amount"], "booked_at": t["booked_at"]}
+                for t in self.bank_.values()
+                if t.get("client_id") == client_id and t.get("status") == "matched"
+                and t.get("ledger_id") and since <= t["booked_at"] <= until]
+        return sorted(rows, key=lambda r: r["booked_at"], reverse=True)
 
     async def last_bank_txn_at(self):
         moments = [t["booked_at"] for t in self.bank_.values()]
@@ -3653,16 +3676,20 @@ class FakeCrm:
         if order.get("work_order_id") is not None:
             # Красная линия: выручка ремонта в журнал аренды не идёт.
             work = self.orders_.get(order["work_order_id"])
-            if work is not None:
+            twice = work is None or work.get("paid_at") is not None
+            if work is not None and not twice:
                 work["paid_at"] = self._now()
             order.update(status="paid", paid_at=self._now(),
-                         checked_at=self._now(), error=None, paid_method=method)
+                         checked_at=self._now(), paid_method=method,
+                         error=crm_logic.REPAIR_TWICE_NOTE if twice else None)
+            if twice:
+                order["bank_paid_at"] = self._now()
             # Наличные за ремонт - движением смены, как в той же транзакции базы.
             if method == "cash" and shift_id is not None:
                 await self.add_cash_move(shift_id, kind="in", amount=order["amount"],
                                          reason=f"{order['purpose']} · счёт {order['no']}",
                                          by=by)
-            return 0
+            return crm_logic.REPAIR_PAID_TWICE if twice else 0
         ledger_id = await self.add_ledger(
             client_id=order["client_id"], rental_id=order["rental_id"],
             kind="payment", amount=order["amount"], method=method,

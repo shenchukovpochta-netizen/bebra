@@ -59,7 +59,7 @@
   <h2>Сменить тариф</h2>
   <form method="post" action="/rentals/{{ rental.id }}/tariff" class="grid2">
     <label>Тариф <select name="tariff_id">{% for t in tariffs %}<option value="{{ t.id }}" {% if t.id == rental.tariff_id %}selected{% endif %}>{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}</select></label>
-    <label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    {% if can_act(staff, 'money_edit') %}<label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% endif %}
     <button type="submit">Применить со следующего периода</button>
   </form>
   {% endif %}

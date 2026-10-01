@@ -51,7 +51,7 @@
   пишется в журнал клиента обычным платежом.</p>
 </div>
 
-{% if can_edit(staff, 'cash') %}
+{% if can_edit(staff, 'cash') and can_edit(staff, 'finance') %}
 <div class="card narrow">
   <h2>Автозачисление</h2>
   <form method="post" action="/bank/settings">

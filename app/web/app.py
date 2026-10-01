@@ -756,7 +756,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
         can_act=logic.can_act, visible_sections=logic.visible_sections,
         home_for=logic.home_for,
-        today=date.today, bot_enabled=bot is not None,
+        today=date.today, timedelta=timedelta, bot_enabled=bot is not None,
+        RENTAL_BACKDATE_DAYS=logic.RENTAL_BACKDATE_DAYS,
+        RENTAL_AHEAD_DAYS=logic.RENTAL_AHEAD_DAYS,
         demo=cfg.demo, DEMO_LOGINS=DEMO_LOGINS,
         LEARN_TRACKS=learning.TRACKS,
         STAFF_TERMS=logic.STAFF_TERMS, staff_expired=logic.staff_expired,
@@ -2826,6 +2828,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect(back)
+        problem = logic.rental_start_problem(started.value, date.today())
+        if problem:
+            flash(request, problem, "err")
+            return redirect(back)
         if pay.value > 0 and method not in logic.METHODS:
             flash(request, "Выберите способ оплаты.", "err")
             return redirect(back)
@@ -3689,6 +3695,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not started.ok or billing_mode not in logic.BILLING:
             flash(request, started.error or "Недопустимый режим начисления.", "err")
             return redirect("/rentals/new")
+        # Ручное начисление выключает биллинг аренды: дальше деньги в ней
+        # пишет только право на записи в журнал. Без него это был бы
+        # способ остановить начисления вовсе.
+        if billing_mode == "manual" and not logic.can_act(request.state.staff,
+                                                          "money_edit"):
+            return denied(request, "money_edit")
+        problem = logic.rental_start_problem(started.value, date.today())
+        if problem:
+            flash(request, problem, "err")
+            return redirect("/rentals/new")
         tariff, why = await fit_tariff(tariff, bike)
         if tariff is None:
             flash(request, why, "err")
@@ -4117,7 +4133,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rental = await crm.rental(rental_id)
         if rental is None:
             return render(request, "missing.html", status_code=404, what="Аренда")
+        # Цена аренды - деньги: форма смены тарифа видна только с
+        # «Финансами», и маршрут требует того же.
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
         data = await form(request)
+        billing = data.get("billing") or rental["billing"]
+        if billing not in logic.BILLING:
+            flash(request, "Недопустимый режим начисления.", "err")
+            return redirect(f"/rentals/{rental_id}")
+        if billing != rental["billing"] and not logic.can_act(request.state.staff,
+                                                              "money_edit"):
+            return denied(request, "money_edit")
         tariff = await by_id(crm.tariff, data.get("tariff_id"))
         if tariff is None or rental["status"] != "active":
             flash(request, "Выберите тариф; менять можно только у идущей аренды.", "err")
@@ -4128,8 +4155,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, why, "err")
             return redirect(f"/rentals/{rental_id}")
         try:
-            await service.change_tariff(crm, rental, tariff,
-                                        billing=data.get("billing") or rental["billing"])
+            await service.change_tariff(crm, rental, tariff, billing=billing)
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
             return redirect(f"/rentals/{rental_id}")
@@ -4305,8 +4331,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not amount.ok or not logic.check_choice(method, logic.METHODS).ok:
             flash(request, amount.error or "Способ оплаты: недопустимое значение.", "err")
             return redirect("/claims")
-        ledger_id = await service.credit_claim(crm, claim, amount.value, by=who(request),
-                                               method=method)
+        try:
+            ledger_id = await service.credit_claim(
+                crm, claim, amount.value, by=who(request), method=method,
+                twice_ok=bool(data.get("twice_ok")))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return redirect("/claims")
         if ledger_id is None:
             flash(request, "Заявку уже обработали.", "err")
             return redirect("/claims")
@@ -5047,6 +5078,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Клиент")
         data = await form(request)
         back = f"/clients/{client_id}"
+        if not form_once(data):
+            flash(request, "Форма уже отправлена — повторное нажатие пропущено.")
+            return redirect(back)
         try:
             if (data.get("action") or "") == "review":
                 amount = await service.grant_review_bonus(
@@ -5054,15 +5088,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             else:
                 got = cost_field(data, "amount")
                 if not got.ok:
+                    form_once_release(data)
                     flash(request, got.error, "err")
                     return redirect(back)
                 note = logic.check_note(data.get("note"))
                 if not note.ok:
+                    form_once_release(data)
                     flash(request, note.error, "err")
                     return redirect(back)
                 amount = await service.grant_manual_bonus(
                     crm, client, got.value, note=note.value or "", by=who(request))
         except service.ServiceError as exc:
+            form_once_release(data)
             flash(request, str(exc), "err")
             return redirect(back)
         flash(request, f"Начислено баллами: {logic.money(amount)}. "
@@ -7772,8 +7809,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/bank/settings")
     async def bank_settings(request: Request) -> Response:
+        # Деньги на баланс без человека - решение владельца, как и
+        # автосписание с карты: одного права на кассу (оно есть у
+        # администратора точки) мало, нужны «Финансы».
         if not may_edit(request, "cash"):
             return denied(request, "cash")
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
         data = await form(request)
         await crm.set_setting("bank_auto_credit", "1" if data.get("auto") else "0",
                               by=who(request))

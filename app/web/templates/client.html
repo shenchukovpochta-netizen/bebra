@@ -60,10 +60,14 @@
 
   {# Баллы - не платёж: в средний чек они не идут, поэтому отдельно. #}
   <h3>Начислить баллы</h3>
+  {# Ключ формы: двойной клик не начисляет баллы дважды - у ручного бонуса
+     нет уникального индекса, как у отзыва. #}
   <form method="post" action="/clients/{{ client.id }}/bonus" class="inline-form">
+    <input type="hidden" name="once" value="{{ once() }}">
     <button type="submit" name="action" value="review" class="ghost">За отзыв</button>
   </form>
   <form method="post" action="/clients/{{ client.id }}/bonus" class="inline-form">
+    <input type="hidden" name="once" value="{{ once() }}">
     <input name="amount" inputmode="decimal" placeholder="500" size="7" required>
     <input name="note" placeholder="за что" size="16">
     <button type="submit" name="action" value="manual" class="ghost">Начислить</button>

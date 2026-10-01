@@ -20,6 +20,9 @@
         <input name="amount" value="{{ c.amount_hint or '' }}" size="7" inputmode="decimal">
         <select name="method">{% for code, label in METHODS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
         <button type="submit">Зачислить</button>
+        {# Перевод той же суммы уже зачислен из выписки - панель откажет с
+           объяснением; эта галочка - «знаю, клиент заплатил второй раз». #}
+        <label class="check small"><input type="checkbox" name="twice_ok" value="1"> это другой платёж, не из выписки</label>
       </form>
       {% endif %}
     </td>

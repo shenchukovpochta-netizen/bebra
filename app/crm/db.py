@@ -4608,11 +4608,17 @@ class CrmDB:
             return ledger_id
 
     async def credits_since(self, since: datetime) -> list[dict]:
-        """Платежи, зачисленные мимо выписки - заявкой «Я оплатил» или
-        счётом (наличные, перевод, эквайринг), - и ни к одной строке
-        выписки не привязанные. По ним автозачисление узнаёт перевод,
-        который уже лежит в журнале: зачислить его второй раз - деньги
-        клиента дважды на балансе."""
+        """Деньги, зачисленные мимо выписки и ни к одной её строке не
+        привязанные, - и заявки «Я оплатил», которые ещё ждут. По ним
+        автозачисление узнаёт перевод, который уже лежит в журнале или
+        вот-вот ляжет: зачислить его второй раз - деньги клиента дважды
+        на балансе.
+
+        Источники: заявка, счёт и любой безналичный платёж руками или
+        ботом («Оплата получена», выдача, журнал клиента). Наличные - нет:
+        перевода в выписке у них не бывает. Ждущая заявка - с суммой из
+        неё, если клиент её назвал (`amount_hint`), иначе без суммы.
+        """
         return _rows(await self.pool.fetch(
             """
             select 'claim' as source, '#' || p.id::text as ref, p.client_id,
@@ -4625,7 +4631,31 @@ class CrmDB:
               from crm.pay_orders o join crm.ledger l on l.id = o.ledger_id
              where o.status = 'paid' and l.created_at >= $1
                and not exists (select 1 from crm.bank_txns t where t.ledger_id = l.id)
+            union all
+            select 'payment', '#' || l.id::text, l.client_id, l.amount, l.created_at
+              from crm.ledger l
+             where l.kind = 'payment' and coalesce(l.method, '') <> 'cash'
+               and l.created_at >= $1
+               and not exists (select 1 from crm.bank_txns t where t.ledger_id = l.id)
+               and not exists (select 1 from crm.payment_claims p where p.ledger_id = l.id)
+               and not exists (select 1 from crm.pay_orders o where o.ledger_id = l.id)
+            union all
+            select 'pending', '#' || p.id::text, p.client_id, p.amount_hint, p.created_at
+              from crm.payment_claims p
+             where p.status = 'pending' and p.created_at >= $1
             """, since))
+
+    async def bank_credits_of(self, client_id: int, since: datetime,
+                              until: datetime) -> list[dict]:
+        """Поступления выписки, уже зачисленные этому клиенту за окно: с
+        ними сверяется заявка «Я оплатил», прежде чем её подтвердят."""
+        return _rows(await self.pool.fetch(
+            """
+            select id, amount, booked_at from crm.bank_txns
+             where client_id = $1 and status = 'matched' and ledger_id is not null
+               and booked_at >= $2 and booked_at <= $3
+             order by booked_at desc
+            """, client_id, since, until))
 
     async def last_bank_txn_at(self) -> datetime | None:
         return await self.pool.fetchval("select max(booked_at) from crm.bank_txns")
@@ -4975,13 +5005,19 @@ class CrmDB:
                 # Красная линия: выручка чужого ремонта в crm.ledger не
                 # попадает - журнал это аренда, и средний чек считается
                 # по нему. Оплата ремонта живёт на наряде.
-                await conn.execute(
-                    "update crm.work_orders set paid_at = now() where id = $1",
+                # Ремонт уже оплачен (другим счётом или на месте) - эти
+                # деньги вторые: счёт закрывается с отметкой, а не молча.
+                first = await conn.fetchval(
+                    "update crm.work_orders set paid_at = now() "
+                    "where id = $1 and paid_at is null returning id",
                     order["work_order_id"])
+                twice = first is None
                 await conn.execute(
                     "update crm.pay_orders set status = 'paid', paid_at = now(), "
-                    "checked_at = now(), error = null, paid_method = $2 "
-                    "where id = $1", order_id, method)
+                    "checked_at = now(), error = $3, paid_method = $2, "
+                    "bank_paid_at = case when $4 then now() else bank_paid_at end "
+                    "where id = $1", order_id, method,
+                    logic.REPAIR_TWICE_NOTE if twice else None, twice)
                 # Наличные за ремонт легли в ящик: без движения смены касса
                 # на закрытии показала бы излишек. В журнал - по-прежнему нет.
                 if method == "cash" and shift_id is not None:
@@ -4995,7 +5031,7 @@ class CrmDB:
                 # 0, а не None: счёт закрыт этим вызовом, просто без записи
                 # в журнале. None значит «уже был оплачен» - по нему второй
                 # опрос понимает, что сообщать об оплате не ему.
-                return 0
+                return logic.REPAIR_PAID_TWICE if twice else 0
             ledger_id = int(await conn.fetchval(
                 """
                 insert into crm.ledger (client_id, rental_id, kind, amount,

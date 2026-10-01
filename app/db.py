@@ -8,6 +8,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 
@@ -55,15 +56,28 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
         await conn.set_type_codec(
             type_name, encoder=json.dumps, decoder=json.loads, schema="pg_catalog",
         )
-    # Сутки и месяцы в отчётах режутся по часовому поясу сессии, а сервер
-    # Postgres живёт в UTC: без этого «за сегодня» начиналось бы в 03:00
-    # по Москве. Пояс - тот же TZ, что у контейнеров бота и панели.
-    tz = os.environ.get("TZ") or ""
-    if tz:
-        try:
-            await conn.execute(f"set time zone '{tz.replace(chr(39), '')}'")
-        except asyncpg.PostgresError:
-            log.warning("часовой пояс %r Postgres не принял, отчёты считаются в UTC", tz)
+
+
+def session_timezone() -> str | None:
+    """Часовой пояс сессий Postgres - тот же TZ, что у контейнеров бота и
+    панели. Сутки и месяцы в отчётах режутся по нему, а сервер Postgres
+    живёт в UTC: без него «за сегодня» начиналось бы в 03:00 по Москве.
+
+    Пояс уходит параметром подключения (`server_settings`), а не командой
+    SET в init: пул asyncpg при возврате соединения делает RESET ALL, и
+    SET жил ровно до первого запроса - дальше все даты в SQL считались в
+    UTC. Негодный пояс не передаётся вовсе: с ним Postgres не пустил бы
+    ни одного подключения.
+    """
+    tz = (os.environ.get("TZ") or "").strip()
+    if not tz:
+        return None
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("часовой пояс %r не распознан, отчёты считаются в поясе сервера", tz)
+        return None
+    return tz
 
 
 class Database:
@@ -79,8 +93,12 @@ class Database:
         превращается в мусор, пароль теряется. Отдельные аргументы
         create_pool убирают этот класс ошибок целиком.
         """
+        params = dict(params)
+        tz = session_timezone()
+        settings = {**params.pop("server_settings", {}), **({"timezone": tz} if tz else {})}
         pool = await asyncpg.create_pool(
             **params, min_size=1, max_size=10, command_timeout=30, init=_init_connection,
+            server_settings=settings or None,
         )
         return cls(pool)
 

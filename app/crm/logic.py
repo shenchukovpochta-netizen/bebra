@@ -456,6 +456,25 @@ def check_date(raw: Any, *, default: date | None = None) -> Check:
     return Check(False, error="Дата: в виде ДД.ММ.ГГГГ.")
 
 
+# Окно даты начала аренды. Без него опечатка в годе (0026, 2016 вместо
+# 2026) начисляла сотни периодов разом - и ещё больше каждым дневным
+# проходом. Задним числом оформляют забытую выдачу, вперёд - выдачу по
+# заявке; месяца в обе стороны хватает с запасом.
+RENTAL_BACKDATE_DAYS = 31
+RENTAL_AHEAD_DAYS = 31
+
+
+def rental_start_problem(started: date, today: date) -> str | None:
+    """Почему эту дату начала аренды не принять; None - дата годится."""
+    if started < today - timedelta(days=RENTAL_BACKDATE_DAYS):
+        return (f"Дата начала {started:%d.%m.%Y} раньше, чем {RENTAL_BACKDATE_DAYS} дн. "
+                "назад, — проверьте год: с ней сразу начислились бы все прошедшие периоды.")
+    if started > today + timedelta(days=RENTAL_AHEAD_DAYS):
+        return (f"Дата начала {started:%d.%m.%Y} дальше, чем через {RENTAL_AHEAD_DAYS} дн., "
+                "— проверьте год.")
+    return None
+
+
 def parse_id(raw: Any) -> int | None:
     """Номер записи из адреса или формы: только ASCII-цифры, в bigint.
 
@@ -6439,17 +6458,46 @@ def bank_credited_before(txn: Mapping[str, Any], client_id: Any,
     for row in credits:
         if row.get("client_id") is None or int(row["client_id"]) != int(client_id):
             continue
-        if to_money(row.get("amount")) != amount:
+        pending = row.get("source") == "pending"
+        # Ждущая заявка - при любой сумме: клиент мог её не назвать или
+        # ошибиться в ней, а зачисленная выписка плюс подтверждённая потом
+        # заявка - те же деньги дважды.
+        if not pending and to_money(row.get("amount")) != amount:
             continue
         paid = row.get("paid_at")
         if isinstance(booked, datetime) and isinstance(paid, datetime) \
                 and abs(paid - booked) > timedelta(days=days):
             continue
-        what = (f"счёт {row.get('ref')}" if row.get("source") == "order"
-                else f"заявка «Я оплатил» {row.get('ref')}")
         when = f" {paid:%d.%m}" if isinstance(paid, datetime) else ""
+        if pending:
+            return {**row, "note": f"клиент нажал «Я оплатил» (заявка {row.get('ref')}"
+                                   f"{when}) — зачислите одно из двух: заявку или "
+                                   "эту строку"}
+        what = {"order": f"счёт {row.get('ref')}",
+                "payment": f"платёж {row.get('ref')} в журнале"}.get(
+                    row.get("source"), f"заявка «Я оплатил» {row.get('ref')}")
         return {**row, "note": f"{money(amount)} уже зачислено ({what}{when}) — "
                                "сверьте, не те же ли это деньги"}
+    return None
+
+
+def claim_bank_twice(claim: Mapping[str, Any], amount: Any,
+                     bank: Iterable[Mapping[str, Any]]) -> str | None:
+    """Обратная сторона `bank_credited_before`: заявку «Я оплатил» хотят
+    подтвердить, а перевод той же суммы этому клиенту уже зачислен из
+    выписки (автозачислением или человеком) рядом по дате. None - нет.
+
+    Выписка с номером договора зачисляется сама и до того, как клиент
+    нажмёт кнопку, - и подтверждённая потом заявка положила бы те же
+    деньги второй раз."""
+    want = to_money(amount)
+    for row in bank:
+        if to_money(row.get("amount")) == want:
+            booked = row.get("booked_at")
+            when = f" {booked:%d.%m}" if isinstance(booked, datetime) else ""
+            return (f"{money(want)} этому клиенту уже зачислено из выписки банка{when}. "
+                    "Если это тот же перевод — отклоните заявку; если клиент заплатил "
+                    "второй раз — подтвердите с отметкой «это другой платёж».")
     return None
 
 
@@ -6862,6 +6910,12 @@ PAY_RECHECK_MINUTES = 30
 PAY_TWICE_HOURS = PAY_LINK_HOURS + 1
 PAY_TWICE_NOTE = ("банк: оплачен ещё и по ссылке — деньги пришли дважды, "
                   "второй раз не зачислено; верните клиенту или зачтите руками")
+# Оплачен второй счёт за ремонт, который уже оплачен (другим счётом или на
+# месте): `mark_pay_paid` закрывает счёт с этой отметкой и возвращает
+# REPAIR_PAID_TWICE вместо 0, а опрос говорит команде о двойных деньгах.
+REPAIR_PAID_TWICE = -1
+REPAIR_TWICE_NOTE = ("банк: ремонт уже был оплачен — деньги пришли дважды; "
+                     "верните клиенту или зачтите руками")
 # Банк не ответил на списание с карты (таймаут, 5xx, мусор вместо ответа):
 # списал он или нет - неизвестно. Счёт остаётся открытым и держит клиента
 # вне автосписания, пока человек не сверит операцию в Точке.

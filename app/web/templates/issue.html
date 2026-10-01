@@ -216,7 +216,7 @@
       <dt>Тариф</dt><dd>{{ tariff.name }} — {{ money(tariff.price) }} / {{ tariff.period_days }} дн. <span class="muted">({{ money(per_day) }} в день)</span></dd>
       <dt>Итого за период</dt><dd><b id="period-total" data-base="{{ tariff.price }}">{{ money(tariff.price) }}</b>
         <span class="muted">велосипед плюс отмеченные доп. аккумуляторы</span></dd>
-      <dt>Начало</dt><dd><input name="started_on" type="date" value="{{ started_on|iso }}" style="max-width:200px"></dd>
+      <dt>Начало</dt><dd><input name="started_on" type="date" value="{{ started_on|iso }}" min="{{ (today() - timedelta(days=RENTAL_BACKDATE_DAYS))|iso }}" max="{{ (today() + timedelta(days=RENTAL_AHEAD_DAYS))|iso }}" style="max-width:200px"></dd>
       <dt>Пробег при выдаче</dt><dd><input name="mileage" inputmode="numeric" value="{{ mileage }}" required style="max-width:200px"> <span class="muted">км с дисплея; по нему посчитается накат за аренду</span></dd>
       <dt>Оплачено будет до</dt><dd>{{ ends_on|dmy }} <span class="muted">при оплате первого периода</span></dd>
       <dt>Договор №</dt><dd><input name="contract_no" value="{{ contract_no }}" placeholder="из бота или бумажный" style="max-width:260px"></dd>
