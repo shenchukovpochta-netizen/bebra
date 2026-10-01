@@ -56,7 +56,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                 "drop schema if exists bot cascade")
         db = Database(self.pool)
         await db.apply_schema(SCHEMA)
-        await db.apply_schema(SCHEMA)
+        await db.apply_schema(SCHEMA, force=True)
         self.crm = CrmDB(self.pool)
 
     async def asyncTearDown(self):
@@ -101,12 +101,24 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                          price=D(1), billing="auto",
                                          started_on=date.today(), contract_no=None,
                                          created_by="t")
+
+        def second_on_the_bike():
+            return self.crm.create_rental(client_id=other, bike_id=self.bike_id,
+                                          tariff_id=None, tariff_name="t", period_days=7,
+                                          price=D(1), billing="auto",
+                                          started_on=date.today(), contract_no=None,
+                                          created_by="t")
+
+        # Велосипед «в аренде»: условие статуса в UPDATE срабатывает раньше
+        # индекса - None, не записано ничего.
+        self.assertIsNone(await second_on_the_bike())
+        # Индекс - страховка на расхождение «свободен, а аренда идёт».
+        await self.pool.execute("update crm.bikes set status = 'available' where id = $1",
+                                self.bike_id)
         with self.assertRaises(asyncpg.UniqueViolationError):
-            await self.crm.create_rental(client_id=other, bike_id=self.bike_id,
-                                         tariff_id=None, tariff_name="t", period_days=7,
-                                         price=D(1), billing="auto",
-                                         started_on=date.today(), contract_no=None,
-                                         created_by="t")
+            await second_on_the_bike()
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "available",
+                         "откат вместе с арендой")
         # service переводит ошибку в понятное сообщение
         with self.assertRaises(service.ServiceError):
             await service.open_rental(
@@ -161,11 +173,13 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          [(None, "available")])
         await self.crm.update_bike(self.bike_id, by="staff:admin", status="repair")
         await self.crm.update_bike(self.bike_id, note="без смены статуса")
-        rid = await self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
-                                           tariff_id=None, tariff_name="t", period_days=7,
-                                           price=D(1000), billing="manual",
-                                           started_on=date.today(), contract_no=None,
-                                           created_by="bot")
+        # Из ремонта в аренду выдаёт только бот по подписанному акту
+        # (забытая отметка «в ремонте»); панель выдаёт лишь свободный.
+        rid = await self.crm.start_rental_charged(
+            client_id=self.client_id, bike_id=self.bike_id, tariff_name="t",
+            period_days=7, price=D(1000), billing="manual", started_on=date.today(),
+            period_to=date.today() + timedelta(days=7), contract_no=None, note="t",
+            created_by="bot")
         await self.crm.close_rental(rid, closed_on=date.today(), note=None,
                                     bike_status="maintenance", closed_by="staff:irik")
         log = await self.crm.bike_status_log(self.bike_id)
@@ -180,7 +194,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("repair", "rented", "bot"), pairs)
         self.assertEqual(len(pairs), 4)
         # повторное применение схемы не дублирует бэкфилл
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual(len(await self.crm.bike_status_log(self.bike_id)), 4)
         # с какого момента велосипед в текущем статусе - последняя запись
         since = await self.crm.bike_status_since()
@@ -397,7 +411,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.crm.delete_access_profile(tech["id"]))
         await self.crm.update_access_profile(oper["id"], name="Точка",
                                              perms={"sections": {"issue": "view"}})
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIsNone(await self.crm.access_profile_by_code("tasks_tech"))
         again = await self.crm.access_profile_by_code("tasks_operator")
         self.assertEqual((again["name"], again["perms"]),
@@ -412,7 +426,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.crm.delete_access_profile(manager["id"]))
         own = await self.crm.create_access_profile(
             "Менеджер", {"sections": {"rentals": "view"}, "actions": {}})
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIsNone(await self.crm.access_profile_by_code("manager"),
                           "удалённый не возвращается")
         self.assertEqual((await self.crm.access_profile(own))["name"], "Менеджер")
@@ -424,7 +438,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.crm.delete_access_profile(tech["id"]))
         await self.pool.execute(
             "delete from crm.settings where key = 'staff_profiles_seeded'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIsNone(await self.crm.access_profile_by_code("tech"))
         self.assertIsNone(await self.crm.access_profile_by_code("manager"))
         self.assertEqual((await self.crm.settings()).get("staff_profiles_seeded"), "1")
@@ -443,7 +457,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                                         "Павлюхина 97А"), "ok")
         await self.crm.update_location(points["Адоратского"]["id"], phone=None,
                                        hours=None, lat=None, lon=None, public_title=None)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
 
         def shape(rows):
             return sorted((p["name"], p["phone"], p["hours"], p["lat"], p["public_title"])
@@ -460,7 +474,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         # Живая установка до отметки: точки в справочнике есть - только
         # отметка, ни фантома, ни контактов поверх стёртых.
         await self.pool.execute("delete from crm.settings where key = 'locations_seeded'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual(shape(await self.crm.locations()), shape(after))
         self.assertEqual((await self.crm.settings()).get("locations_seeded"), "1")
 
@@ -479,7 +493,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         sid = await self.crm.create_staff("old", logic.hash_password("password-1"),
                                           "Старый", "admin")
         await self.pool.execute("update crm.staff set profile_id = null where id = $1", sid)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual((await self.crm.staff_by_id(sid))["profile_code"], "owner")
 
         pid = await self.crm.create_access_profile(
@@ -974,7 +988,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             tid)
         await self.pool.execute(
             "delete from crm.settings where key = 'tracker_zero_fix_cleaned'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         row = await self.pool.fetchrow("select lat, lon from crm.trackers where id = $1", tid)
         self.assertIsNone(row["lat"])
         self.assertIsNone(row["lon"])
@@ -1272,7 +1286,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
 
         # Повторное применение схемы ничего не дублирует.
         db = Database(self.pool)
-        await db.apply_schema(SCHEMA)
+        await db.apply_schema(SCHEMA, force=True)
         self.assertEqual(len(await self.crm.bike_models()), len(models))
 
     async def test_payments_on_postgres(self):
@@ -1435,7 +1449,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          ("in_work", "клиент"))
         # Повторное применение схемы колонок не теряет.
         db = Database(self.pool)
-        await db.apply_schema(SCHEMA)
+        await db.apply_schema(SCHEMA, force=True)
         self.assertEqual((await self.crm.work_order(order_id))["approved_by"],
                          "клиент")
 
@@ -1686,7 +1700,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
     async def test_tariff_kind_survives_reapply(self):
         """Схема идемпотентна: вид тарифа и позиции переживают повтор."""
         await self.seed()
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         rows = await self.crm.tariffs()
         self.assertTrue(all((r.get("kind") or "") == "bike" for r in rows),
                         "старый тариф без вида читается как велосипед")
@@ -1738,7 +1752,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
     async def test_battery_columns_survive_reapply(self):
         await self.seed()
         battery_id = await self.crm.create_battery(code="9510002", status="new")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         row = await self.crm.battery(battery_id)
         self.assertEqual(row["status"], "new")
         self.assertEqual(row["checked"], {})
@@ -2058,7 +2072,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(found[0]["employer"], "samokat")
         self.assertEqual(await self.crm.clients(q="905 555"), [])
         # Повторное применение схемы колонки не теряет.
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual((await self.crm.client(self.client_id))["phone2"], "+79171112233")
 
     async def test_battery_status_since_on_postgres(self):
@@ -2098,7 +2112,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             "when 'tasks_tech' then 'Механик: только задачи' else name end")
         await self.pool.execute("insert into crm.access_profiles (name) values ('Мастер')")
         await self.pool.execute("delete from crm.settings where key = 'role_names_v2'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         names = {r["code"]: r["name"] for r in await self.crm.access_profiles()}
         self.assertEqual(names["manager"], "Администратор")
         self.assertEqual(names["tech"], "Механик на Адоратского", "своё имя владельца")
@@ -2107,13 +2121,13 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         # второй старт ничего не трогает: переименовал владелец - так и остаётся
         await self.pool.execute(
             "update crm.access_profiles set name = 'Менеджер' where code = 'manager'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         manager = await self.crm.access_profile_by_code("manager")
         self.assertEqual(manager["name"], "Менеджер")
 
     async def test_mileage_column_survives_reapply(self):
         """schema.sql идемпотентен: повторный старт не теряет колонку."""
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         rows = await self.crm.pool.fetch(
             "select column_name from information_schema.columns "
             "where table_schema = 'crm' and table_name = 'bike_status_log'")
@@ -2136,14 +2150,14 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.settings()).get("work_price_version"), "2026-08-17")
         # Правка в панели переживает повторный старт.
         await self.crm.update_work_type(row["id"], price=D("1100"))
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual((await self.crm.work_type(row["id"]))["price"], D("1100"))
         # Новая редакция (отметки нет): нетронутая заглушка выключается,
         # цена регламента возвращается, строки не плодятся.
         old = await self.crm.create_work_type(title="Замена камеры", category="Ходовая",
                                               minutes=15, price=D(200), node="tube_tire")
         await self.pool.execute("delete from crm.settings where key = 'work_price_version'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertFalse((await self.crm.work_type(old))["active"])
         self.assertEqual((await self.crm.work_type(row["id"]))["price"], D("1000"))
         self.assertEqual(len(await self.crm.work_types()), len(types) + 1)
@@ -2170,11 +2184,11 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             await self.pool.execute(
                 "insert into crm.payment_claims (client_id) values ($1)",
                 self.client_id)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         left = await self.pool.fetchval(
             "select count(*) from crm.payment_claims where status = 'pending'")
         self.assertEqual(left, 1, "лишние открытые заявки схлопнуты")
-        await Database(self.pool).apply_schema(SCHEMA)   # идемпотентность
+        await Database(self.pool).apply_schema(SCHEMA, force=True)   # идемпотентность
 
     async def test_rental_and_its_first_charge_are_one_transaction(self):
         """Аренда из бота заводится вместе с начислением: порознь сбой между
@@ -2307,13 +2321,13 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.pool.fetchval(
             "select string_agg(status, ',' order by id) from crm.work_orders"),
             "approve,new", "наряды схема не закрывает")
-        await Database(self.pool).apply_schema(SCHEMA)       # и старт не падает
+        await Database(self.pool).apply_schema(SCHEMA, force=True)       # и старт не падает
 
         await self.pool.execute(
             "update crm.work_orders set status = 'cancelled' where no = 'РЕМ-000002'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIn("approve", await index())
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         with self.assertRaises(asyncpg.UniqueViolationError):
             await self.crm.create_work_order(
                 bike_id=self.bike_id, payer="own", client_id=None,
@@ -2330,7 +2344,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1, "сид кладёт ровно одну строку")
         await self.pool.execute("update crm.tariffs set active = false where id = $1",
                                 rows[0]["id"])
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         again = await self.pool.fetch(
             "select id, active from crm.tariffs where kind = 'bike' and model = "
             "'Monster Truck + (Два АКБ)' and period_days = 7")
@@ -2350,7 +2364,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                     and t["period_days"] == 7)
         await self.crm.update_tariff(month["id"], period_days=28)
         await self.crm.update_tariff(week["id"], model="Kugoo V3")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
 
         def shape(rows):
             return sorted((t["id"], t["model"], t["period_days"], t["active"])
@@ -2362,7 +2376,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                           and t["period_days"] == 30])
         # Живая установка до отметки: тарифы есть - только отметка.
         await self.pool.execute("delete from crm.settings where key = 'tariffs_seeded'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual(shape(await self.crm.tariffs()), shape(after))
         self.assertEqual((await self.crm.settings()).get("tariffs_seeded"), "1")
 
@@ -4266,7 +4280,7 @@ class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
         stuck = await self.pool.fetchval(
             "insert into crm.inbox_messages (thread_id, direction, body_enc, status, "
             "created_at) values ($1, 'out', 'e', 'sending', $2) returning id", tid, long_ago)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
 
         row = await self.row(tid)
         self.assertIs(row["client_manual"], False)
@@ -4344,3 +4358,386 @@ class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m[1] for m in threads[("avito", "chat-1")]["messages"]],
                          ["a1", "a2"])
         self.assertEqual([m[1] for m in threads[("avito", "gw-1")]["messages"]], [None])
+
+
+# ─────────────────── схема на старте, выдача, продление, склад ───────────────────
+
+@unittest.skipUnless(HAVE_PG, "pgserver или asyncpg не установлены")
+class TestStartAndIssueOnPostgres(unittest.IsolatedAsyncioTestCase):
+    """Схема на старте не трогает таблицы, если её текст не менялся; индекс
+    тарифов не роняет схему на старых дублях; выдача и замена берут только
+    подходящий велосипед; продление - пара «всё или ничего»; откат приёмки
+    заказа не падает сам; закрытие аренды закрывает журнал перемещений.
+    Где есть FakeCrm - та же история на нём даёт тот же ответ."""
+
+    setUpClass = classmethod(TestCrmOnPostgres.setUpClass.__func__)
+    tearDownClass = classmethod(TestCrmOnPostgres.tearDownClass.__func__)
+    asyncSetUp = TestCrmOnPostgres.asyncSetUp
+    asyncTearDown = TestCrmOnPostgres.asyncTearDown
+    seed = TestCrmOnPostgres.seed
+
+    # ── схема на старте ──
+
+    async def test_unchanged_schema_is_not_applied_again(self):
+        """Перезапуск с тем же schema.sql не берёт ни одного замка таблиц:
+        прежний повторный прогон ждал AccessExclusive на трёх десятках
+        горячих таблиц, и живые запросы ловили deadlock."""
+        from app.db import schema_digest
+
+        db = Database(self.pool)
+        text = SCHEMA.read_text(encoding="utf-8")
+        self.assertEqual((await self.crm.settings()).get("schema_sha256"),
+                         schema_digest(text), "отпечаток пишется вместе со схемой")
+
+        # Живая транзакция держит таблицу парка, как запрос панели.
+        busy = await asyncpg.connect(self.pg.get_uri())
+        try:
+            await busy.execute("begin")
+            await busy.execute("select count(*) from crm.bikes")
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            self.assertFalse(await db.apply_schema(SCHEMA), "тот же текст - пропуск")
+            self.assertLess(loop.time() - started, 2, "пропуск не ждёт замков таблиц")
+            # Прогон всё же нужен (force), а таблица занята: ожидание замка -
+            # ошибка через lock_timeout, повтор с предупреждением, потом отказ.
+            with self.assertLogs("app.db", level="WARNING") as logs, \
+                    self.assertRaises(asyncpg.LockNotAvailableError):
+                await db.apply_schema(SCHEMA, force=True, lock_timeout="200ms",
+                                      attempts=2, pause=0.01)
+            self.assertTrue(any("попытки 1 из 2" in m for m in logs.output), logs.output)
+        finally:
+            await busy.execute("rollback")
+            await busy.close()
+        self.assertTrue(await db.apply_schema(SCHEMA, force=True, lock_timeout="200ms",
+                                              attempts=1), "таблица свободна - прошло")
+
+        # Другой текст (обновление) - применяется и запоминается.
+        with tempfile.TemporaryDirectory() as tmp:
+            newer = Path(tmp) / "schema.sql"
+            newer.write_text(text + "\n-- новая версия\n", encoding="utf-8")
+            self.assertTrue(await db.apply_schema(newer))
+            self.assertEqual((await self.crm.settings())["schema_sha256"],
+                             schema_digest(newer.read_text(encoding="utf-8")))
+            self.assertFalse(await db.apply_schema(newer))
+        self.assertTrue(await db.apply_schema(SCHEMA), "откат кода - снова свой текст")
+
+        # Отпечаток пропал (база старше проверки) - применяется.
+        await self.pool.execute("delete from crm.settings where key = 'schema_sha256'")
+        self.assertTrue(await db.apply_schema(SCHEMA))
+        # Снесённые схемы (тесты, откат обновления, сброс демо) накатываются
+        # заново: снесена и bot - отпечаток в crm на месте, а пропуска нет.
+        await self.pool.execute("drop schema bot cascade")
+        self.assertTrue(await db.apply_schema(SCHEMA))
+        self.assertIsNotNone(await self.pool.fetchval("select to_regclass('bot.users')"))
+        await self.pool.execute("drop schema crm cascade; drop schema bot cascade")
+        self.assertTrue(await db.apply_schema(SCHEMA))
+        self.assertEqual(len(await self.crm.tariffs()), 12, "свежая схема с сидом")
+        self.assertFalse(await db.apply_schema(SCHEMA))
+
+    async def test_tariff_index_waits_for_old_duplicates(self):
+        """До 2026-09-17 уникальности у тарифов не было: две действующие
+        «недели» на одну модель роняли создание индекса и с ним всю схему -
+        сервисы не поднимались. Теперь индекса нет, пока пара есть, и в
+        журнал Postgres уходит предупреждение с номерами; разобрали - встаёт."""
+        await self.pool.execute("drop index crm.tariffs_kind_model_period_idx")
+        first = await self.crm.create_tariff("Неделя", 7, D("3000"), None)
+        second = await self.crm.create_tariff("Неделя (старая)", 7, D("2800"), None)
+
+        async def index():
+            return await self.pool.fetchval(
+                "select indexdef from pg_indexes where schemaname = 'crm' "
+                "and indexname = 'tariffs_kind_model_period_idx'")
+
+        warnings = []
+
+        def listen(_conn, msg):
+            warnings.append(msg)
+
+        async with self.pool.acquire() as conn:
+            conn.add_log_listener(listen)
+            try:
+                async with conn.transaction():
+                    await conn.execute("select pg_advisory_xact_lock(7331)")
+                    await conn.execute(SCHEMA.read_text(encoding="utf-8"))
+                await asyncio.sleep(0.05)
+            finally:
+                conn.remove_log_listener(listen)
+        found = [str(m) for m in warnings if m.severity_en == "WARNING"]
+        self.assertEqual(len(found), 1, found)
+        self.assertIn(f"{first}, {second}", found[0])
+        self.assertIsNone(await index(), "индекса нет, схема прошла")
+        await Database(self.pool).apply_schema(SCHEMA, force=True)   # и старт не падает
+
+        await self.crm.update_tariff(second, active=False)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        self.assertIn("period_days", await index())
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.crm.create_tariff("Неделя-2", 7, D("3100"), None)
+
+    # ── склад ──
+
+    async def test_failed_receipt_returns_the_order(self):
+        """Приход не получился - заказ снова «заказан». Откат писал total =
+        null в NOT NULL колонку и падал сам: исходная ошибка пряталась за
+        NotNullViolation, заказ оставался «принят» без движений на складе,
+        а повтор приёмки отказывал «Заказ уже принят»."""
+        await self.seed()
+        part_id = await self.crm.create_part(
+            title="Контроллер", node="controller", unit="шт", cost=D("2500"),
+            price=D("4000"), min_stock=2, model=None, note=None)
+        order = (await service.collect_part_needs(self.crm, by="staff:t"))["order"]
+        items = await self.crm.part_order_items(order["id"])
+        await self.crm.update_part_order(order["id"], status="ordered",
+                                         total=logic.order_total(items),
+                                         ordered_at=datetime.now(UTC))
+        # Строка с нулём штук: приход пуст, ServiceError внутри приёмки.
+        await self.pool.execute("update crm.part_order_items set qty = 0 "
+                                "where order_id = $1", order["id"])
+        with self.assertRaises(service.ServiceError) as err:
+            await service.receive_part_order(
+                self.crm, await self.crm.part_order(order["id"]), by="staff:t")
+        self.assertIn("Приход пуст", str(err.exception), "видна настоящая причина")
+        back = await self.crm.part_order(order["id"])
+        self.assertEqual((back["status"], back["closed_at"], back["doc_id"]),
+                         ("ordered", None, None))
+        self.assertIsNotNone(back["total"])
+        self.assertEqual(await self.crm.part_stock(part_id), 0)
+
+        # Поправили строку - приёмка проходит с того же заказа.
+        await self.pool.execute("update crm.part_order_items set qty = 2 "
+                                "where order_id = $1", order["id"])
+        doc_id = await service.receive_part_order(
+            self.crm, await self.crm.part_order(order["id"]), by="staff:t")
+        self.assertEqual(await self.crm.part_stock(part_id), 2)
+        self.assertEqual((await self.crm.part_order(order["id"]))["doc_id"], doc_id)
+
+    # ── закрытие аренды и журнал перемещений ──
+
+    async def test_close_rental_closes_the_bike_journal(self):
+        """Закрытие оставляло строку последнего велосипеда открытой: карточка
+        закрытой аренды держала его «сейчас у клиента», сутки росли, а
+        «накатал» считался по одометру следующего клиента."""
+        async def story(crm):
+            tariff = await crm.create_tariff("Неделя", 7, D("3000"), None)
+            client = await crm.create_client(full_name="Иванов Иван",
+                                             phone="+79990000000")
+            first = await crm.create_bike(code="J-1", model="MT")
+            spare = await crm.create_bike(code="J-2", model="MT")
+            start = date.today() - timedelta(days=10)
+            rid = await service.open_rental(
+                crm, client=await crm.client(client), bike=await crm.bike(first),
+                tariff=await crm.tariff(tariff), started_on=start, contract_no=None,
+                by="t", mileage=1000, billing="manual")
+            await service.swap_bike(crm, await crm.rental(rid), await crm.bike(spare),
+                                    reason="repair", mileage_old=1100,
+                                    mileage_new=500, by="t")
+            await service.close_rental(crm, await crm.rental(rid),
+                                       closed_on=date.today(), note=None, by="t",
+                                       mileage=640)
+            rows = logic.rental_bike_rows(await crm.rental_bikes(rid))
+            return ([(r["bike_code"], r["returned_on"], r["mileage_end"], r["open"],
+                      r["ridden"]) for r in rows],
+                    logic.rental_mileage(await crm.rental_bikes(rid), current=99999))
+
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        today = date.today()
+        self.assertEqual(real[0], [("J-1", today, 1100, False, 100),
+                                   ("J-2", today, 640, False, 140)])
+        self.assertEqual(real[1], 240, "одометр после сдачи не в счёт")
+
+    async def test_old_closed_rentals_get_their_journal_closed(self):
+        """Уже закрытые аренды с открытой строкой журнала закрывает схема:
+        днём и пробегом закрытия аренды. Повтор ничего не меняет."""
+        await self.seed()
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() - timedelta(days=5), contract_no=None, by="t",
+            mileage=300, billing="manual")
+        closed_on = date.today() - timedelta(days=1)
+        await service.close_rental(self.crm, await self.crm.rental(rid),
+                                   closed_on=closed_on, note=None, by="t", mileage=420)
+        # Так их оставляла прежняя версия.
+        await self.pool.execute("update crm.rental_bikes set returned_on = null, "
+                                "mileage_end = null where rental_id = $1", rid)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        rows = await self.crm.rental_bikes(rid)
+        self.assertEqual([(r["returned_on"], r["mileage_end"]) for r in rows],
+                         [(closed_on, 420)])
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        self.assertEqual(await self.crm.rental_bikes(rid), rows)
+
+    # ── продление из бота ──
+
+    async def test_extension_is_all_or_nothing(self):
+        """Платёж ложился всегда, а начисление - `on conflict do nothing`:
+        два подтверждения одного продления давали два платежа на одно
+        начисление, а закрытой аренде платёж с начислением писались мимо
+        её статуса. Теперь пара целиком или ничего - и на заглушке так же."""
+        async def story(crm):
+            client = await crm.create_client(full_name="Иванов Иван",
+                                             phone="+79990000000")
+            bike = await crm.create_bike(code="E-1", model="MT")
+            today = date.today()
+            rid = await crm.start_rental_charged(
+                client_id=client, bike_id=bike, tariff_name="Неделя", period_days=7,
+                price=D("3000"), billing="manual", started_on=today,
+                period_to=today + timedelta(days=7), contract_no="АВ-7",
+                note="Аренда", created_by="bot")
+
+            def extend(day_from):
+                return crm.extend_rental_paid(
+                    rid, client, amount=D("3000"), period_from=day_from,
+                    period_to=day_from + timedelta(days=7), pay_note="Продление",
+                    charge_note="Продление: неделя", method="sbp", created_by="bot")
+
+            week = today + timedelta(days=7)
+            # Два подтверждения разом, оба прочли «оплачено до» до записи.
+            got = list(await asyncio.gather(extend(week), extend(week)))
+            again = await extend(week)
+            await crm.close_rental(rid, closed_on=today, note=None, closed_by="t")
+            closed = await extend(week + timedelta(days=7))
+            kinds = sorted(x["kind"] for x in await crm.ledger_of(client))
+            return (sorted(got), again, closed, kinds, await crm.client_balance(client),
+                    (await crm.rental(rid))["billed_until"])
+
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        self.assertEqual(real[:3], ([False, True], False, False))
+        self.assertEqual(real[3], ["charge", "charge", "payment"], "один платёж")
+        self.assertEqual(real[4], D("-3000.00"))
+        self.assertEqual(real[5], date.today() + timedelta(days=14))
+
+    # ── выдача только подходящего велосипеда ──
+
+    async def test_issue_takes_only_a_free_bike(self):
+        """Выдача, бот и замена ставили «в аренде» безусловно: велосипед на
+        сборке, в ремонте, утерянный или проданный молча уходил клиенту.
+        Панель выдаёт только свободный; бот - ещё и забытый «в ремонте» или
+        «забронирован» (акт подписан), но не на сборке, утерянный, проданный
+        и списанный. Отказ ничего не пишет. Заглушка отвечает так же."""
+        async def story(crm):
+            tariff = await crm.tariff(await crm.create_tariff("Неделя", 7, D("3000"),
+                                                              None))
+            clients = [await crm.create_client(full_name=f"Клиент {n}",
+                                               phone=f"+7999000000{n}")
+                       for n in range(6)]
+            bikes = {}
+            for status in ("available", "repair", "new", "lost", "sold",
+                           "written_off"):
+                bikes[status] = await crm.create_bike(code=f"S-{status}", model="MT",
+                                                      status=status)
+            out = {}
+            # Панель: карточка снята, пока велосипед был свободен, а он
+            # ушёл в ремонт - отказ словами, со свежим статусом.
+            stale = await crm.bike(bikes["available"])
+            await crm.update_bike(bikes["available"], status="repair", by="t")
+            try:
+                await service.open_rental(
+                    crm, client=await crm.client(clients[0]), bike=stale,
+                    tariff=tariff, started_on=date.today(), contract_no=None, by="t")
+                out["panel"] = "выдан"
+            except service.ServiceError as exc:
+                out["panel"] = str(exc)
+            out["create"] = [await crm.create_rental(
+                client_id=clients[1], bike_id=bikes[s], tariff_id=None,
+                tariff_name="t", period_days=7, price=D(1), billing="manual",
+                started_on=date.today(), contract_no=None, created_by="t")
+                for s in ("new", "lost")]
+            # Бот: «в ремонте» - забытая отметка, остальное - нет.
+            bot = {}
+            for n, status in enumerate(("new", "lost", "sold", "written_off",
+                                        "repair"), start=1):
+                rid = await crm.start_rental_charged(
+                    client_id=clients[n], bike_id=bikes[status], tariff_name="Неделя",
+                    period_days=7, price=D("3000"), billing="manual",
+                    started_on=date.today(), period_to=date.today() + timedelta(days=7),
+                    contract_no=None, note="Аренда", created_by="bot")
+                bot[status] = rid is not None
+            out["bot"] = bot
+            out["bikes"] = {s: (await crm.bike(b))["status"] for s, b in bikes.items()}
+            out["rentals"] = sorted(
+                (r["client_id"] == clients[5], r["bike_id"] == bikes["repair"])
+                for r in await crm.active_rentals())
+            ledger = [x for c in clients for x in await crm.ledger_of(c)]
+            out["charges"] = sum(1 for x in ledger if x["kind"] == "charge")
+            out["rented_log"] = sorted([
+                s for s, b in bikes.items()
+                for x in await crm.bike_status_log(b) if x["to_status"] == "rented"])
+            return out
+
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        self.assertIn("S-available уже «В ремонте»", real["panel"])
+        self.assertEqual(real["create"], [None, None])
+        self.assertEqual(real["bot"], {"new": False, "lost": False, "sold": False,
+                                       "written_off": False, "repair": True})
+        self.assertEqual(real["bikes"], {"available": "repair", "repair": "rented",
+                                         "new": "new", "lost": "lost", "sold": "sold",
+                                         "written_off": "written_off"})
+        self.assertEqual(real["rentals"], [(True, True)], "аренд-призраков нет")
+        self.assertEqual(real["charges"], 1, "отказ не оставил начислений")
+        self.assertEqual(real["rented_log"], ["repair"])
+
+    async def test_swap_takes_only_a_free_bike(self):
+        """Замена ставила «в аренде» новому велосипеду без условия: ушедший
+        тем временем в ремонт уезжал к клиенту. Теперь отказ до записей:
+        старый у клиента, журнал перемещений не тронут."""
+        async def story(crm):
+            tariff = await crm.create_tariff("Неделя", 7, D("3000"), None)
+            client = await crm.create_client(full_name="Иванов Иван",
+                                             phone="+79990000000")
+            bike = await crm.create_bike(code="W-1", model="MT")
+            other = await crm.create_bike(code="W-2", model="MT")
+            rid = await service.open_rental(
+                crm, client=await crm.client(client), bike=await crm.bike(bike),
+                tariff=await crm.tariff(tariff), started_on=date.today(),
+                contract_no=None, by="t", mileage=10)
+            stale = await crm.bike(other)
+            await crm.update_bike(other, status="repair", by="t")
+            try:
+                await service.swap_bike(crm, await crm.rental(rid), stale,
+                                        reason="repair", by="t")
+                said = "заменён"
+            except service.ServiceError as exc:
+                said = str(exc)
+            direct = await crm.swap_rental_bike(
+                rid, old_bike_id=bike, new_bike_id=other, old_status="repair",
+                mileage_old=None, mileage_new=None, reason="Поломка",
+                today=date.today(), by="t")
+            return (said, direct, (await crm.rental(rid))["bike_id"] == bike,
+                    (await crm.bike(bike))["status"], (await crm.bike(other))["status"],
+                    [(r["bike_id"] == bike, r["returned_on"])
+                     for r in await crm.rental_bikes(rid)])
+
+        real = await story(self.crm)
+        self.assertEqual(real, await story(FakeCrm()))
+        self.assertIn("W-2 уже «В ремонте»", real[0])
+        self.assertEqual(real[1:], (False, True, "rented", "repair", [(True, None)]))
+
+    async def test_bot_issue_of_a_lost_bike_goes_without_the_bike(self):
+        """Бот принимал по раме любой велосипед, кроме «в аренде»: утерянный
+        или проданный по подписанному акту становился «в аренде». Отказать
+        бот не может - акт подписан, - поэтому аренда и деньги заводятся без
+        велосипеда, а расхождение видно в панели и в чате."""
+        from app.crm import sync
+
+        await self.seed()
+        await self.crm.update_bike(self.bike_id, status="lost", by="t")
+        user = {"tg_id": 5001, "phone": "+79990000000", "full_name": "Иванов Иван",
+                "contract_no": "АВ-9",
+                "issue_data": {"rent_price": "3000", "vin_frame": "FR1",
+                               "bike_model": "Kugoo V3"},
+                "rent_from": date.today(), "rent_until": date.today() + timedelta(days=7)}
+        with self.assertLogs("app.crm.sync", level="WARNING") as logs:
+            await sync.on_rental_started(self.crm, user, today=date.today())
+        self.assertTrue(any("FR1" in m for m in logs.output), logs.output)
+        rental = await self.crm.active_rental_of(self.client_id)
+        self.assertIsNotNone(rental, "аренда заведена")
+        self.assertIsNone(rental["bike_id"])
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("-3000.00"))
+        self.assertEqual((await self.crm.bike(self.bike_id))["status"], "lost")
+        issues = logic.integrity_issues(await self.crm.bikes(), [rental], {})
+        self.assertIn("rental_without_bike", [x["kind"] for x in issues])

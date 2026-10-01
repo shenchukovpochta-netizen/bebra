@@ -1075,8 +1075,9 @@ class CrmDB:
                             mileage_start: int | None = None,
                             base_price: Decimal | None = None,
                             promo_code: str | None = None,
-                            location: str | None = None) -> int:
-        """Аренда и статус велосипеда - одной транзакцией.
+                            location: str | None = None) -> int | None:
+        """Аренда и статус велосипеда - одной транзакцией. None - велосипед
+        не свободен, не записано ничего.
 
         `price` - цена периода целиком, вместе с позициями; `base_price` -
         цена одного велосипеда. По первой идёт начисление, по второй
@@ -1086,31 +1087,40 @@ class CrmDB:
         встаёт на неё тем же UPDATE, что и в «rented»: пока аренда идёт, он
         числится на её точке, иначе чек точки не сошёлся бы с днями.
 
+        Выдать можно только свободный: условие в самом UPDATE, и он идёт
+        первым, до аренды. Проверка статуса в сервисе читает карточку,
+        снятую до формы, - велосипед, который тем временем ушёл в ремонт,
+        потерю или на сборку, иначе молча становился «в аренде».
+
         Уникальные индексы на активную аренду клиента и велосипеда бросают
         UniqueViolationError; вызывающий переводит его в понятное сообщение.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", created_by or "")
+            if bike_id is not None:
+                # greatest: пробег велосипеда не уменьшается никогда, даже
+                # если аренду задним числом оформили с меньшим числом.
+                bike = await conn.fetchrow(
+                    "update crm.bikes set status = 'rented', "
+                    "location = coalesce($3, location), "
+                    "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
+                    "updated_at = now() where id = $1 and status = 'available' "
+                    "returning location",
+                    bike_id, mileage_start, location)
+                if bike is None:
+                    return None
+                location = bike["location"]
             row = await conn.fetchrow(
                 """
                 insert into crm.rentals
                   (client_id, bike_id, tariff_id, tariff_name, period_days, price,
                    base_price, billing, started_on, billed_until, contract_no,
                    created_by, mileage_start, promo_code, location)
-                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11, $13,
-                        coalesce($14, (select location from crm.bikes where id = $2)))
-                returning id, location
+                values ($1, $2, $3, $4, $5, $6, $12, $7, $8, $8, $9, $10, $11, $13, $14)
+                returning id
                 """, client_id, bike_id, tariff_id, tariff_name, period_days,
                 price, billing, started_on, contract_no, created_by, mileage_start,
                 base_price if base_price is not None else price, promo_code, location)
-            if bike_id is not None:
-                # greatest: пробег велосипеда не уменьшается никогда, даже
-                # если аренду задним числом оформили с меньшим числом.
-                await conn.execute(
-                    "update crm.bikes set status = 'rented', location = $3, "
-                    "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
-                    "updated_at = now() where id = $1",
-                    bike_id, mileage_start, row["location"])
             return int(row["id"])
 
     async def start_rental_charged(self, *, client_id: int, bike_id: int | None,
@@ -1118,8 +1128,9 @@ class CrmDB:
                                    billing: str, started_on: date, period_to: date,
                                    contract_no: str | None, note: str,
                                    created_by: str | None,
-                                   location: str | None = None) -> int:
-        """Аренда и её первое начисление - одной транзакцией.
+                                   location: str | None = None) -> int | None:
+        """Аренда и её первое начисление - одной транзакцией. None -
+        велосипед в аренду уйти не может, не записано ничего.
 
         Так аренду заводит бот по подписанному акту. Двумя запросами сбой
         между ними оставлял аренду без начисления навсегда: такие аренды
@@ -1129,21 +1140,34 @@ class CrmDB:
 
         Точка - как у create_rental: в форме бота её нет, и выдача идёт с
         точки велосипеда.
+
+        Статус велосипеда - условием в UPDATE, как у create_rental, но
+        шире: акт подписан, велосипед у клиента, и «в ремонте» или
+        «забронирован» в учёте - забытая отметка (logic.BOT_ISSUE_STATUSES).
+        На сборке, утерянный, проданный и списанный «в аренде» не встают
+        никогда; что делать с такой выдачей, решает вызывающий.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)",
                                created_by or "")
-            row = await conn.fetchrow(
+            if bike_id is not None:
+                bike = await conn.fetchrow(
+                    "update crm.bikes set status = 'rented', "
+                    "location = coalesce($2, location), updated_at = now() "
+                    "where id = $1 and status = any($3::text[]) returning location",
+                    bike_id, location, list(logic.BOT_ISSUE_STATUSES))
+                if bike is None:
+                    return None
+                location = bike["location"]
+            rental_id = int(await conn.fetchval(
                 """
                 insert into crm.rentals
                   (client_id, bike_id, tariff_name, period_days, price, base_price,
                    billing, started_on, billed_until, contract_no, created_by, location)
-                values ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10,
-                        coalesce($11, (select location from crm.bikes where id = $2)))
-                returning id, location
+                values ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10, $11)
+                returning id
                 """, client_id, bike_id, tariff_name, period_days, price, billing,
-                started_on, period_to, contract_no, created_by, location)
-            rental_id = int(row["id"])
+                started_on, period_to, contract_no, created_by, location))
             await conn.execute(
                 """
                 insert into crm.ledger
@@ -1152,22 +1176,35 @@ class CrmDB:
                 values ($1, $2, 'charge', $3, $4, $5, $6, $7)
                 """, client_id, rental_id, -price, started_on, period_to, note,
                 created_by)
-            if bike_id is not None:
-                await conn.execute(
-                    "update crm.bikes set status = 'rented', location = $2, "
-                    "updated_at = now() where id = $1", bike_id, row["location"])
             return rental_id
 
     async def extend_rental_paid(self, rental_id: int, client_id: int, *,
                                  amount: Decimal, period_from: date, period_to: date,
                                  pay_note: str, charge_note: str,
-                                 method: str | None, created_by: str) -> None:
+                                 method: str | None, created_by: str) -> bool:
         """Платёж за продление и начисление за новый срок - одной транзакцией.
+        False - не записано ничего: аренда уже не идёт или этот период уже
+        начислен.
 
         Порознь сбой между ними оставлял платёж без начисления, и клиент
-        уходил в плюс на целый период.
+        уходил в плюс на целый период. Пара - всё или ничего: начисление
+        с `on conflict do nothing` при уже начисленном периоде молча
+        пропадало, а платёж ложился, и два одновременных подтверждения
+        одного продления давали два платежа на одно начисление. Теперь
+        начисленный период - отказ до записи, а дубль, проскочивший мимо
+        проверки, роняет UniqueViolationError и откатывает и платёж.
+        Строка аренды под замком: закрытие, пришедшее в ту же секунду,
+        ждёт, а закрытой аренде период не начисляется, как в charge_period.
         """
         async with self.pool.acquire() as conn, conn.transaction():
+            status = await conn.fetchval(
+                "select status from crm.rentals where id = $1 for update", rental_id)
+            if status != "active":
+                return False
+            if await conn.fetchval(
+                    "select exists (select 1 from crm.ledger where rental_id = $1 "
+                    "and kind = 'charge' and period_from = $2)", rental_id, period_from):
+                return False
             if amount:
                 await conn.execute(
                     """
@@ -1180,12 +1217,12 @@ class CrmDB:
                 insert into crm.ledger (client_id, rental_id, kind, amount,
                                         period_from, period_to, note, created_by)
                 values ($1, $2, 'charge', $3, $4, $5, $6, $7)
-                on conflict do nothing
                 """, client_id, rental_id, -amount, period_from, period_to,
                 charge_note, created_by)
             await conn.execute(
                 "update crm.rentals set billed_until = greatest(billed_until, $2), "
                 "updated_at = now() where id = $1", rental_id, period_to)
+            return True
 
     async def update_rental(self, rental_id: int, **fields: Any) -> None:
         sets, values = _set_clause(fields, RENTAL_FIELDS, 2)
@@ -1235,6 +1272,15 @@ class CrmDB:
                     "updated_at = now() where id = $1 and status = 'rented'",
                     row["bike_id"], bike_status, mileage_end, return_location,
                     row["location"])
+            # Журнал перемещений закрывается вместе с арендой: без этого
+            # открытая строка держала в карточке закрытой аренды «сейчас у
+            # клиента», сутки росли, а «накатал» считался по одометру
+            # велосипеда, уже уехавшего к следующему клиенту.
+            await conn.execute(
+                "update crm.rental_bikes set returned_on = $2, "
+                "mileage_end = coalesce($3, mileage_end) "
+                "where rental_id = $1 and returned_on is null",
+                rental_id, closed_on, mileage_end)
             # Позиции закрываются вместе с арендой: доп. аккумулятор
             # вернулся на склад, и висеть действующим ему незачем.
             await conn.execute(
@@ -3311,10 +3357,15 @@ class CrmDB:
         return row is not None
 
     async def release_part_order(self, order_id: int, *, status: str) -> None:
-        """Вернуть заказ в прежний статус, если приход не получился."""
+        """Вернуть заказ в прежний статус, если приход не получился.
+
+        Сумма остаётся той, что посчитала заявка: это сумма тех же строк.
+        `total = null` в NOT NULL колонку ронял сам откат - исходная
+        ошибка пряталась за NotNullViolation, а заказ оставался «принят»
+        без единого движения на складе, и повтор приёмки отказывал."""
         await self.pool.execute(
-            "update crm.part_orders set status = $2, closed_at = null, "
-            "total = null where id = $1 and status = 'received' and doc_id is null",
+            "update crm.part_orders set status = $2, closed_at = null "
+            "where id = $1 and status = 'received' and doc_id is null",
             order_id, status)
 
     async def part_order_items(self, order_id: int) -> list[dict]:
@@ -3596,6 +3647,21 @@ class CrmDB:
                 return False
             if rental["bike_id"] != old_bike_id:
                 return False          # велосипед уже сменили в другом окне
+            # Новый - только свободный, условием в его UPDATE, и тот идёт
+            # первым: ушедший тем временем в ремонт, потерю или к другому
+            # клиенту даёт False до единой записи.
+            # $4 - у аренды был велосипед: новый встаёт ровно на её точку,
+            # «не на точке» включительно. Без велосипеда - на свою.
+            taken = await conn.fetchrow(
+                "update crm.bikes set status = 'rented', "
+                "location = case when $4 then $3 else coalesce($3, location) end, "
+                "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
+                "updated_at = now() where id = $1 and status = 'available' "
+                "returning location",
+                new_bike_id, mileage_new, rental["location"], old_bike_id is not None)
+            if taken is None:
+                return False
+            place = taken["location"]
             if old_bike_id is not None:
                 # Журнал мог не застать выдачу (аренда старше замены) -
                 # тогда открываем строку задним числом по данным аренды.
@@ -3628,14 +3694,6 @@ class CrmDB:
                                               mileage_start, reason, created_by)
                 values ($1, $2, $3, $4, $5, $6)
                 """, rental_id, new_bike_id, today, mileage_new, reason, by)
-            # $4 - у аренды был велосипед: новый встаёт ровно на её точку,
-            # «не на точке» включительно. Без велосипеда - на свою.
-            place = await conn.fetchval(
-                "update crm.bikes set status = 'rented', "
-                "location = case when $4 then $3 else coalesce($3, location) end, "
-                "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
-                "updated_at = now() where id = $1 returning location",
-                new_bike_id, mileage_new, rental["location"], old_bike_id is not None)
             await conn.execute(
                 "update crm.rentals set bike_id = $2, mileage_start = coalesce($3, 0), "
                 "mileage_end = null, "

@@ -483,7 +483,7 @@ class TestPointPlanOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(pav["plan_rented"])
         await self.crm.update_location(pav["id"], plan_rented=12, plan_check=D("550"))
         self.assertEqual(await self.crm.rename_location(pav["id"], "Павлюхина 97А"), "ok")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         row = await self.point("Павлюхина 97А")
         self.assertEqual((row["plan_rented"], row["plan_check"]), (12, D("550.00")))
         plan = logic.point_plan(row, check=D(500))

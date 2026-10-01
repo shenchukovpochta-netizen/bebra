@@ -118,6 +118,10 @@ async def _bike_for(crm: Any, spec: dict) -> int | None:
     что реально выдано, даже если оператор ещё не занёс велосипед руками.
     Занятый другой арендой велосипед не трогаем - это ошибка оператора,
     и её должно быть видно в панели, а не спрятано в тихом переносе.
+    Так же и с велосипедом на сборке, утерянным, проданным и списанным:
+    «в аренде» он не встаёт (logic.BOT_ISSUE_STATUSES), аренда заводится
+    без велосипеда и попадает в расхождения - их видят на сводке и в
+    ежедневной сводке в чат.
     """
     frame = spec.get("frame_no")
     if frame:
@@ -125,6 +129,11 @@ async def _bike_for(crm: Any, spec: dict) -> int | None:
         if bike is not None:
             if bike.get("status") == "rented":
                 log.warning("CRM: велосипед с рамой %s уже в аренде", frame)
+                return None
+            if bike.get("status") not in logic.BOT_ISSUE_STATUSES:
+                log.warning("CRM: велосипед с рамой %s «%s» - аренда заводится без "
+                            "велосипеда", frame,
+                            logic.BIKE_STATUSES.get(bike.get("status"), bike.get("status")))
                 return None
             return bike["id"]
     code = logic.bike_code_from_frame(frame, spec.get("bike_model"))
@@ -150,15 +159,23 @@ async def on_rental_started(crm: Any, user: dict, *, today: date) -> None:
         # Аренда и её первое начисление - одной транзакцией: порознь сбой
         # между ними оставлял аренду без начисления навсегда, а клиента -
         # с лишним периодом на балансе.
-        await crm.start_rental_charged(
-            client_id=client["id"], bike_id=bike_id,
-            tariff_name=spec["tariff_name"], period_days=spec["period_days"],
-            price=spec["price"], billing=spec["billing"],
-            started_on=spec["started_on"], period_to=period_to,
-            contract_no=user.get("contract_no"),
+        fields = dict(
+            client_id=client["id"], tariff_name=spec["tariff_name"],
+            period_days=spec["period_days"], price=spec["price"],
+            billing=spec["billing"], started_on=spec["started_on"],
+            period_to=period_to, contract_no=user.get("contract_no"),
             note=f"Аренда по договору № {user.get('contract_no') or '—'}: "
                  f"{logic.period_label(spec['started_on'], period_to)}",
             created_by="bot")
+        rental_id = await crm.start_rental_charged(bike_id=bike_id, **fields)
+        if rental_id is None:
+            # Велосипед ушёл из подходящего статуса между проверкой и
+            # записью. Акт подписан, отказать некому: аренда и деньги
+            # заводятся без велосипеда, расхождение - в панели и в чате.
+            log.warning("CRM: велосипед %s по договору %s не встал «в аренде» - "
+                        "аренда заведена без велосипеда", bike_id,
+                        user.get("contract_no"))
+            await crm.start_rental_charged(bike_id=None, **fields)
         # Шаг воронки приглашений: аренду из бота оформляет не open_rental,
         # и без этого друг перепрыгивал бы «взял велосипед» - а это
         # основной путь выдачи, через договор и акт в боте.
@@ -189,13 +206,20 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
                             (user.get("issue_data") or {}).get("rent_price"))
             # Платёж и начисление - одной транзакцией: порознь сбой между
             # ними уводил клиента в плюс на целый период.
-            await crm.extend_rental_paid(
-                rental["id"], client["id"], amount=amount or logic.to_money(0),
-                period_from=start, period_to=until, method="sbp", created_by=by,
-                pay_note=f"Продление по договору № "
-                         f"{user.get('contract_no') or '—'} "
-                         f"до {until.strftime('%d.%m.%Y')}",
-                charge_note=f"Продление: {logic.period_label(start, until)}")
+            if not await crm.extend_rental_paid(
+                    rental["id"], client["id"], amount=amount or logic.to_money(0),
+                    period_from=start, period_to=until, method="sbp", created_by=by,
+                    pay_note=f"Продление по договору № "
+                             f"{user.get('contract_no') or '—'} "
+                             f"до {until.strftime('%d.%m.%Y')}",
+                    charge_note=f"Продление: {logic.period_label(start, until)}"):
+                # Аренду закрыли или этот период уже начислил другой
+                # обработчик, пока шло подтверждение: пара не записана
+                # целиком, второго платежа на одно начисление нет.
+                log.warning("CRM: продление %s до %s не записано - аренда %s уже "
+                            "закрыта или период с %s начислен; проверьте в панели",
+                            user.get("contract_no"), until, rental["id"], start)
+                return
         elif amount:
             # Аренда начисляется по календарю или продление уже начислено:
             # остаётся один платёж.
