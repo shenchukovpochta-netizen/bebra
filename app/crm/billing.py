@@ -1,13 +1,17 @@
 """Дневной проход CRM: начисления, напоминания клиентам, сводка оператору.
 
-Живёт в том же расписании, что напоминания бота о сроке (tasks.reminders_loop):
-раз в сутки в рабочий час. Начисления идемпотентны (уникальный индекс
-на период), поэтому лишний проход безвреден, а пропущенный - догоняется.
+Живёт в том же круге, что напоминания бота о сроке (tasks.reminders_loop),
+и зовётся каждые 15 минут; что делать, решает сам. Начисления - раз в
+сутки, первым кругом после полуночи: утренние напоминания и автосписание
+видят уже начисленный сегодняшний период. Уведомления - каждое в свой
+час. Начисления идемпотентны (уникальный индекс на период), поэтому
+лишний проход безвреден, а пропущенный - догоняется.
 """
 
 from __future__ import annotations
 
 import html
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -54,11 +58,21 @@ async def remind_once(bot: Any, db: Any, crm: Any, cfg: Any, *,
     """
     rentals = await crm.active_rentals()
     state = state if state is not None else await notices.settings(crm)
+    by_bot: set[int] | None = None
     sent = 0
     for r in rentals:
         kind = logic.reminder_due(r, before_days=cfg.remind_before_days, today=today)
         if kind is None:
             continue
+        # Аренде из бота о сроке напоминает бот (logic.bot_reminds): второе
+        # напоминание о том же из CRM - уже спам. Отметку не ставим: аренда
+        # в сводке остаётся, а молчим мы не за неё, а вместо неё. Аренды
+        # бота читаем, только когда есть кого с ними сверять.
+        if r.get("billing") == "manual" and r.get("tg_id"):
+            if by_bot is None:
+                by_bot = await bot_reminded(db)
+            if logic.bot_reminds(r, by_bot):
+                continue
         code = REMIND_CODE[kind]
         if codes is not None and code not in codes:
             continue                     # не его час, придёт в свой слот
@@ -75,6 +89,26 @@ async def remind_once(bot: Any, db: Any, crm: Any, cfg: Any, *,
         if await send_reminder(bot, db, crm, r, kind=kind, today=today):
             sent += 1
     return sent, logic.digest(rentals, today=today, before_days=cfg.remind_before_days)
+
+
+async def bot_reminded(db: Any) -> set[int]:
+    """tg_id клиентов, чью аренду ведёт бот и о сроке напоминает он сам
+    (tasks.remind_once читает те же строки). Не прочиталось - пусто: пусть
+    лучше CRM напомнит вторым сообщением, чем не напомнит никто."""
+    if db is None:
+        return set()
+    try:
+        rows = await db.active_rentals()
+    except Exception:                                    # noqa: BLE001
+        log.warning("аренды бота не прочитаны: CRM напоминает всем", exc_info=True)
+        return set()
+    out: set[int] = set()
+    for row in rows:
+        try:
+            out.add(int(row["tg_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 async def send_reminder(bot: Any, db: Any, crm: Any, rental: dict, *, kind: str,
@@ -377,7 +411,11 @@ TRACK_KEEP_DAYS = 30
 
 
 async def tell_promos(bot: Any, db: Any, crm: Any, applied: list[dict]) -> int:
-    """Клиентам о сработавших акциях: одно сообщение на скидку."""
+    """Клиентам о сработавших акциях: одно сообщение на скидку.
+
+    Шлёт сразу: так зовут выдача и кнопка «Начислить», это день и человек
+    рядом. Ночное начисление дневного прохода идёт через очередь
+    (queue_promos -> flush_promos) и ждёт утра."""
     sent = 0
     for got in applied:
         try:
@@ -395,6 +433,50 @@ async def tell_promos(bot: Any, db: Any, crm: Any, applied: list[dict]) -> int:
                 period_index=g.get("period_index") or 0))
         sent += 1 if ok else 0
     return sent
+
+
+# Скидки ночного начисления - в crm.settings до утра. Начисляет проход
+# первым кругом суток, сразу после полуночи, и «скидка по акции» в 00:05
+# будила бы клиента. Не в памяти круга: перезапуск бота до утра иначе
+# съедал бы эти сообщения. Повтор после записи не грозит: очередь
+# снимается до отправки (flush_promos).
+PROMO_QUEUE_KEY = "promo_queue"
+
+
+async def queue_promos(crm: Any, applied: list[dict]) -> int:
+    """Отложить сообщения о скидках до дневного окна. Возвращает, сколько."""
+    if not applied:
+        return 0
+    queued = logic.parse_promo_queue((await crm.settings()).get(PROMO_QUEUE_KEY))
+    fresh = [logic.promo_queue_item(got) for got in applied]
+    rows = [{**item, "amount": str(item["amount"])} for item in queued] + fresh
+    await crm.set_setting(PROMO_QUEUE_KEY,
+                          json.dumps(rows[-logic.PROMO_QUEUE_MAX:], ensure_ascii=False),
+                          by="billing")
+    return len(fresh)
+
+
+async def flush_promos(bot: Any, db: Any, crm: Any) -> int:
+    """Отложенные с ночи скидки - клиентам. Очередь снимается ДО отправки:
+    сбой посреди неё не пришлёт ту же скидку второй раз - как у других
+    сообщений, отметка про попытку, а не про удачу. Акция и клиент
+    перечитываются: удалённая акция молча выпадает."""
+    queued = logic.parse_promo_queue((await crm.settings()).get(PROMO_QUEUE_KEY))
+    if not queued:
+        return 0
+    await crm.set_setting(PROMO_QUEUE_KEY, "[]", by="billing")
+    applied: list[dict] = []
+    for item in queued:
+        try:
+            promo = await crm.promo(item["promo_id"])
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: акция %s для уведомления не прочитана", item["promo_id"])
+            continue
+        if promo is None:
+            continue
+        applied.append({"client_id": item["client_id"], "promo": promo,
+                        "amount": item["amount"], "period_index": item["period_index"]})
+    return await tell_promos(bot, db, crm, applied)
 
 
 async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
@@ -421,8 +503,13 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
     def chat(code: str) -> Any:
         return notices.chat_for(state, code, cfg.contract_chat_id)
 
+    # Скидку клиенту - только днём: ночью она ждёт в очереди.
+    daytime = manual or logic.promo_hours_ok(state.get("promo_applied"), now)
+
     # Начисления - не уведомление, тумблера у них нет: это деньги.
-    # Один раз в сутки, в тот же час, что и раньше.
+    # Один раз в сутки, первым кругом после полуночи (отметка - местная
+    # дата): к напоминаниям в 8 и 9 и к автосписанию сегодняшний период уже
+    # в журнале. Час ничего не решает, кроме сообщения о скидке.
     if manual or done.get("charge") != today:
         applied: list[dict] = []
         try:
@@ -436,13 +523,27 @@ async def run_daily(bot: Any, db: Any, crm: Any, cfg: Any, *, today: date,
         except Exception:                                # noqa: BLE001
             log.exception("CRM: проход начислений не удался")
         # Скидки по акциям уже в журнале - сообщение о них клиенту
-        # доставляется отдельно и начисление не откатывает.
+        # доставляется отдельно и начисление не откатывает. Ночью оно
+        # ждёт утра в очереди.
         try:
-            told = await tell_promos(bot, db, crm, applied)
-            if told:
-                log.info("CRM: уведомлений о скидках отправлено %s", told)
+            if daytime:
+                told = await tell_promos(bot, db, crm, applied)
+                if told:
+                    log.info("CRM: уведомлений о скидках отправлено %s", told)
+            elif await queue_promos(crm, applied):
+                log.info("CRM: скидок ждут утра %s", len(applied))
         except Exception:                                # noqa: BLE001
             log.exception("CRM: уведомления о скидках не ушли")
+
+    # Отложенные с ночи скидки - первым дневным кругом. Пустая очередь -
+    # одно чтение настроек, и только днём.
+    if daytime:
+        try:
+            told = await flush_promos(bot, db, crm)
+            if told:
+                log.info("CRM: скидок, ждавших утра, отправлено %s", told)
+        except Exception:                                # noqa: BLE001
+            log.exception("CRM: отложенные уведомления о скидках не ушли")
 
     digest = ""
     # Напоминания об аренде: три кода со своими часами, но один проход

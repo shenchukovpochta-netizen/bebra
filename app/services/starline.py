@@ -252,18 +252,37 @@ class StarlineClient:
         self._user_token, self._user_token_at = str(user_token), now
         return self._user_token
 
+    def _forget(self, *, tokens: bool = False) -> None:
+        """Забыть вход, чтобы следующий запрос прошёл авторизацию заново.
+
+        Без этого клиент жил с протухшим состоянием до перезапуска бота:
+        StarLine отвечает об отказе телом (HTTP 200 и code 401), cookie и
+        user_id оставались прежними, и каждый круг опроса падал на том же.
+        `tokens` - и токены приложения и пользователя: auth.slid, который
+        отверг пользовательский токен, иначе отвергал бы его до конца
+        суток кэша (USER_TOKEN_TTL)."""
+        self._slnet, self._user_id = "", ""
+        if tokens:
+            self._user_token, self._user_token_at = "", 0.0
+            self._app_token, self._app_token_at = "", 0.0
+
     async def connect(self, session, *, now: float) -> str:
-        """Обмен пользовательского токена на cookie slnet."""
-        user_token = await self.user_token(session, now=now)
-        data, response = await self._json(
-            session, "POST", f"{self.api_url}/v2/auth.slid",
-            json={"slid_token": user_token})
-        if not isinstance(data, dict) or "user_id" not in data:
-            raise StarlineError("auth.slid: StarLine не вернул пользователя")
+        """Обмен пользовательского токена на cookie slnet. Отказ на любом
+        шаге цепочки стирает вход целиком: следующий круг войдёт с нуля."""
+        try:
+            user_token = await self.user_token(session, now=now)
+            data, response = await self._json(
+                session, "POST", f"{self.api_url}/v2/auth.slid",
+                json={"slid_token": user_token})
+            if not isinstance(data, dict) or "user_id" not in data:
+                raise StarlineError("auth.slid: StarLine не вернул пользователя")
+            cookie = _slnet_from(response)
+            if not cookie:
+                raise StarlineError("auth.slid: StarLine не отдал cookie slnet")
+        except StarlineError:
+            self._forget(tokens=True)
+            raise
         self._user_id = str(data["user_id"])
-        cookie = _slnet_from(response)
-        if not cookie:
-            raise StarlineError("auth.slid: StarLine не отдал cookie slnet")
         self._slnet = cookie
         return cookie
 
@@ -272,8 +291,12 @@ class StarlineClient:
         """Запрос к API с cookie slnet и одним повтором при отказе авторизации.
 
         Cookie протухает молча, и первый же запрос после этого возвращает
-        403. Повторять дальше нечего - это уже неверный пароль или
-        блокировка кабинета.
+        отказ: HTTP 401/403 или HTTP 200 с `code: 401` в теле. Повторять
+        дальше нечего - это уже неверный пароль или блокировка кабинета;
+        тогда вход забывается целиком, и следующий круг опроса войдёт с
+        нуля, а не будет стучаться с той же мёртвой cookie до перезапуска.
+        Код 403 в теле - не авторизация: так set_param отвечает «устройство
+        не на связи», и его слова уходят оператору как есть.
         """
         for attempt in (1, 2):
             if not self._slnet:
@@ -281,9 +304,11 @@ class StarlineClient:
             data, response = await self._json(
                 session, method, f"{self.api_url}{path}",
                 headers={"Cookie": f"slnet={self._slnet}"}, **kwargs)
-            if getattr(response, "status", 200) in (401, 403) and attempt == 1:
-                self._slnet = ""
-                continue
+            if _auth_refused(data, response):
+                if attempt == 1:
+                    self._forget()
+                    continue
+                self._forget(tokens=True)
             return data
         return None
 
@@ -304,6 +329,10 @@ class StarlineClient:
                                     f"/v2/user/{self._user_id}/user_info", now=now)
             devices = (data or {}).get("devices") if isinstance(data, dict) else None
             if devices is None:
+                # Ответ без устройств - чаще всего отказ телом с чужим
+                # кодом. Вход забывается: следующий круг возьмёт свежую
+                # cookie, а не будет падать на этой до перезапуска.
+                self._forget()
                 raise StarlineError("user_info: StarLine не вернул устройства")
             # Трекеры, расшаренные на кабинет из другого, лежат отдельным
             # списком; без него они для опроса как будто не существуют.
@@ -358,6 +387,14 @@ class StarlineClient:
         из панели безопасна для курьера на дороге.
         """
         return await self.set_param(device_id, BLOCK_PARAM, 1 if on else 0, now=now)
+
+
+def _auth_refused(data: Any, response: Any) -> bool:
+    """Отказ авторизации: HTTP 401/403 или HTTP 200 с code 401 в теле -
+    StarLine отвечает об ошибке и так, и так."""
+    if getattr(response, "status", 200) in (401, 403):
+        return True
+    return isinstance(data, dict) and str(data.get("code", "")).strip() == "401"
 
 
 def _slnet_from(response: Any) -> str:

@@ -1040,6 +1040,81 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             "set recorded_at = recorded_at - interval '60 days'")
         self.assertEqual(await self.crm.purge_tracker_positions(30), 2)
 
+    async def test_unreported_tracker_news_on_postgres(self):
+        """Что служебный чат ещё не видел: открытые новые тревоги и
+        отнесённые команды, с пределом попыток. Повторное применение схемы
+        (каждый старт) недоставленное доставленным не делает."""
+        await self.seed()
+        tid = await self.crm.create_tracker(device_id="1001", alias="A",
+                                            bike_id=self.bike_id)
+        alert = await self.crm.raise_alert(tracker_id=tid, kind="moving", note="24 км/ч",
+                                           bike_id=self.bike_id, lat=None, lon=None)
+        command = await self.crm.queue_tracker_command(tracker_id=tid, command="block",
+                                                       by="admin")
+        self.assertEqual(await self.crm.unreported_tracker_commands(max_tries=3), [],
+                         "не отнесённая в StarLine - ответа ещё нет")
+        await self.crm.finish_tracker_command(command, ok=True, result="принял")
+
+        await Database(self.pool).apply_schema(SCHEMA)
+        rows = await self.crm.unreported_tracker_alerts(max_tries=3)
+        self.assertEqual([(r["id"], r["bike_code"], r["device_id"]) for r in rows],
+                         [(alert, "B-1", "1001")])
+        commands = await self.crm.unreported_tracker_commands(max_tries=3)
+        self.assertEqual([(c["id"], c["bike_code"]) for c in commands], [(command, "B-1")])
+
+        await self.crm.mark_alerts_reported([alert], ok=False)
+        await self.crm.mark_alerts_reported([alert], ok=False)
+        self.assertEqual(len(await self.crm.unreported_tracker_alerts(max_tries=3)), 1)
+        await self.crm.mark_alerts_reported([alert], ok=False)
+        self.assertEqual(await self.crm.unreported_tracker_alerts(max_tries=3), [],
+                         "три неудачи - предел")
+        self.assertEqual(len(await self.crm.unreported_tracker_alerts(max_tries=5)), 1)
+        await self.crm.mark_alerts_reported([alert], ok=True)
+        self.assertEqual(await self.crm.unreported_tracker_alerts(max_tries=5), [])
+        await self.crm.mark_commands_reported([command], ok=True)
+        self.assertEqual(await self.crm.unreported_tracker_commands(max_tries=3), [])
+
+        # Разобранная в панели и закрытая в чат не идут.
+        other = await self.crm.raise_alert(tracker_id=tid, kind="offline", note=None,
+                                           bike_id=None, lat=None, lon=None)
+        await self.crm.set_alert_state(other, state="normal", by="t")
+        self.assertEqual(await self.crm.unreported_tracker_alerts(max_tries=3), [])
+        await self.crm.close_alerts(tid, ["offline"], by="tracking")
+        third = await self.crm.raise_alert(tracker_id=tid, kind="offline", note=None,
+                                           bike_id=None, lat=None, lon=None)
+        await self.crm.close_alerts(tid, ["offline"], by="tracking")
+        self.assertIsNotNone(third)
+        self.assertEqual(await self.crm.unreported_tracker_alerts(max_tries=3), [])
+
+    async def test_tracker_news_before_the_column_counts_as_reported(self):
+        """Колонка заводится один раз: прежние тревоги и ответы считаются
+        доставленными, иначе первый круг после обновления вывалил бы в чат
+        всю историю. Команда, ещё не отнесённая в StarLine, - нет."""
+        await self.seed()
+        tid = await self.crm.create_tracker(device_id="1001", alias="A")
+        await self.crm.raise_alert(tracker_id=tid, kind="moving", note=None,
+                                   bike_id=None, lat=None, lon=None)
+        done = await self.crm.queue_tracker_command(tracker_id=tid, command="block",
+                                                    by="admin")
+        await self.crm.finish_tracker_command(done, ok=True, result="принял")
+        other = await self.crm.create_tracker(device_id="1002", alias="B")
+        waiting = await self.crm.queue_tracker_command(tracker_id=other, command="block",
+                                                       by="admin")
+        # База «до обновления»: колонок нет.
+        await self.pool.execute(
+            "drop index crm.tracker_alerts_unreported_idx; "
+            "drop index crm.tracker_commands_unreported_idx; "
+            "alter table crm.tracker_alerts drop column reported_at, "
+            "  drop column report_tries; "
+            "alter table crm.tracker_commands drop column reported_at, "
+            "  drop column report_tries")
+        await Database(self.pool).apply_schema(SCHEMA)
+        self.assertEqual(await self.crm.unreported_tracker_alerts(max_tries=3), [])
+        self.assertEqual(await self.crm.unreported_tracker_commands(max_tries=3), [])
+        await self.crm.finish_tracker_command(waiting, ok=True, result="принял")
+        self.assertEqual([c["id"] for c in
+                          await self.crm.unreported_tracker_commands(max_tries=3)], [waiting])
+
     async def test_cash_and_bank_on_postgres(self):
         """Касса на живой базе: одна открытая смена на точку, наличные
         подтягиваются из журнала, выписка не двоится."""

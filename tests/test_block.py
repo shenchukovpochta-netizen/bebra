@@ -207,6 +207,29 @@ class TestPollCommands(tw.WebCase):
         self.assertIn("не прошла", self.bot.sent[-1][1])
         self.assertEqual(tracking.commands_digest([]), "")
 
+    def test_answer_lost_by_telegram_is_posted_next_round(self):
+        """Оператор нажал кнопку и ждёт «прошло / не прошло»: ответ, не
+        ушедший в чат, раньше пропадал - команда уже выполнена, второй
+        раз её опрос не видит. Теперь его догоняет следующий круг."""
+        from aiogram.exceptions import TelegramNetworkError
+        from aiogram.methods import SendMessage
+
+        class Down:
+            async def send_message(self, chat_id, text, reply_markup=None):
+                raise TelegramNetworkError(SendMessage(chat_id=chat_id, text=text), "нет сети")
+
+        chat = types.SimpleNamespace(contract_chat_id=-100500)
+        self.queue()
+        tw.run(tracking.poll_once(self.crm, Client()))
+        # [0] - ответы на команды; тревога «молчит» у трекера без связи
+        # идёт своим счётом и здесь не важна.
+        with self.assertLogs("app.crm.tracking", "ERROR"):
+            self.assertEqual(tw.run(tracking.report_pending(Down(), self.crm, chat))[0], 0)
+        self.assertEqual(tw.run(tracking.report_pending(self.bot, self.crm, chat))[0], 1)
+        self.assertEqual(tw.run(tracking.report_pending(self.bot, self.crm, chat))[0], 0)
+        answers = [t for _, t in self.bot.sent if "StarLine принял" in t]
+        self.assertEqual(len(answers), 1, "один раз")
+
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
 class TestBlockPanel(tw.WebCase):

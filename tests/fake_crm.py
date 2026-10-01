@@ -3576,7 +3576,8 @@ class FakeCrm:
                                   "lat": lat, "lon": lon, "created_at": self._now(),
                                   "level": level, "state": "new", "taken_by": None,
                                   "taken_at": None, "snooze_until": None,
-                                  "handled_at": None, "handled_by": None}
+                                  "handled_at": None, "handled_by": None,
+                                  "reported_at": None, "report_tries": 0}
         return alert_id
 
     async def set_alert_state(self, alert_id, *, state, by, snooze_until=None):
@@ -3601,6 +3602,30 @@ class FakeCrm:
         if alert and alert["handled_at"] is None:
             alert["handled_at"], alert["handled_by"] = self._now(), by
 
+    async def unreported_tracker_alerts(self, *, max_tries, limit=200):
+        rows = []
+        for alert in sorted(self.alerts_.values(),
+                            key=lambda a: (a["created_at"], a["id"])):
+            if (alert.get("reported_at") is not None or alert["handled_at"] is not None
+                    or alert.get("state") != "new"
+                    or int(alert.get("report_tries") or 0) >= max_tries):
+                continue
+            tracker = self.trackers_.get(alert["tracker_id"]) or {}
+            bike = self.bikes_.get(alert.get("bike_id")) or {}
+            rows.append({**alert, "device_id": tracker.get("device_id"),
+                         "alias": tracker.get("alias"), "bike_code": bike.get("code")})
+        return rows[:limit]
+
+    async def mark_alerts_reported(self, ids, *, ok):
+        for alert_id in ids:
+            alert = self.alerts_.get(alert_id)
+            if alert is None or alert.get("reported_at") is not None:
+                continue
+            if ok:
+                alert["reported_at"] = self._now()
+            else:
+                alert["report_tries"] = int(alert.get("report_tries") or 0) + 1
+
     # ─── команды устройству ───
     async def queue_tracker_command(self, *, tracker_id, command, by, alert_id=None,
                                     note=None):
@@ -3612,7 +3637,8 @@ class FakeCrm:
         self.commands_.append({"id": cid, "tracker_id": tracker_id, "command": command,
                                "alert_id": alert_id, "note": note, "requested_by": by,
                                "requested_at": self._now(), "sent_at": None,
-                               "ok": None, "result": None})
+                               "ok": None, "result": None, "reported_at": None,
+                               "report_tries": 0})
         return cid
 
     async def pending_tracker_commands(self):
@@ -3639,6 +3665,29 @@ class FakeCrm:
         rows = [dict(c) for c in self.commands_ if c["tracker_id"] == tracker_id]
         return sorted(rows, key=lambda c: (c["requested_at"], c["id"]),
                       reverse=True)[:limit]
+
+    async def unreported_tracker_commands(self, *, max_tries, limit=100):
+        rows = []
+        for c in sorted(self.commands_, key=lambda c: (c["sent_at"] or c["requested_at"],
+                                                       c["id"])):
+            if (c["sent_at"] is None or c.get("reported_at") is not None
+                    or int(c.get("report_tries") or 0) >= max_tries):
+                continue
+            tracker = self.trackers_.get(c["tracker_id"]) or {}
+            bike = self.bikes_.get(tracker.get("bike_id")) or {}
+            rows.append({**c, "device_id": tracker.get("device_id"),
+                         "bike_id": tracker.get("bike_id"), "bike_code": bike.get("code")})
+        return rows[:limit]
+
+    async def mark_commands_reported(self, ids, *, ok):
+        wanted = set(ids)
+        for c in self.commands_:
+            if c["id"] not in wanted or c.get("reported_at") is not None:
+                continue
+            if ok:
+                c["reported_at"] = self._now()
+            else:
+                c["report_tries"] = int(c.get("report_tries") or 0) + 1
 
 
     # ─────────────────── приём оплаты ───────────────────

@@ -4314,6 +4314,35 @@ class CrmDB:
             "update crm.tracker_alerts set handled_at = now(), handled_by = $2 "
             "where id = $1 and handled_at is null", alert_id, by)
 
+    async def unreported_tracker_alerts(self, *, max_tries: int,
+                                        limit: int = 200) -> list[dict]:
+        """Открытые тревоги, которых служебный чат ещё не видел. Разобранная
+        в панели («в работе», «отложена», «норма») в чат уже не нужна, а
+        закрытая - тем более: причина исчезла."""
+        return _rows(await self.pool.fetch(
+            """
+            select a.*, t.device_id, t.alias, b.code as bike_code
+              from crm.tracker_alerts a
+              join crm.trackers t on t.id = a.tracker_id
+              left join crm.bikes b on b.id = a.bike_id
+             where a.reported_at is null and a.handled_at is null
+               and a.state = 'new' and a.report_tries < $1
+             order by a.created_at, a.id limit $2
+            """, max_tries, limit))
+
+    async def mark_alerts_reported(self, ids: list[int], *, ok: bool) -> None:
+        """Сводка дошла - отметка; не дошла - ещё одна попытка в счёт."""
+        if not ids:
+            return
+        if ok:
+            await self.pool.execute(
+                "update crm.tracker_alerts set reported_at = now() "
+                "where id = any($1::bigint[]) and reported_at is null", ids)
+        else:
+            await self.pool.execute(
+                "update crm.tracker_alerts set report_tries = report_tries + 1 "
+                "where id = any($1::bigint[]) and reported_at is null", ids)
+
     # ─────────────── команды устройству (блокировка мотора) ───────────────
 
     async def queue_tracker_command(self, *, tracker_id: int, command: str, by: str,
@@ -4355,6 +4384,32 @@ class CrmDB:
         return _rows(await self.pool.fetch(
             "select * from crm.tracker_commands where tracker_id = $1 "
             "order by requested_at desc, id desc limit $2", tracker_id, limit))
+
+    async def unreported_tracker_commands(self, *, max_tries: int,
+                                          limit: int = 100) -> list[dict]:
+        """Отнесённые в StarLine команды, ответ на которые чат ещё не видел."""
+        return _rows(await self.pool.fetch(
+            """
+            select c.*, t.device_id, t.bike_id, b.code as bike_code
+              from crm.tracker_commands c
+              join crm.trackers t on t.id = c.tracker_id
+              left join crm.bikes b on b.id = t.bike_id
+             where c.sent_at is not null and c.reported_at is null
+               and c.report_tries < $1
+             order by c.sent_at, c.id limit $2
+            """, max_tries, limit))
+
+    async def mark_commands_reported(self, ids: list[int], *, ok: bool) -> None:
+        if not ids:
+            return
+        if ok:
+            await self.pool.execute(
+                "update crm.tracker_commands set reported_at = now() "
+                "where id = any($1::bigint[]) and reported_at is null", ids)
+        else:
+            await self.pool.execute(
+                "update crm.tracker_commands set report_tries = report_tries + 1 "
+                "where id = any($1::bigint[]) and reported_at is null", ids)
 
     # ─────────────────────────── касса ───────────────────────────
 
