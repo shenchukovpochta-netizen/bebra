@@ -203,7 +203,7 @@ $demo = @('app/demo/__init__.py', 'app/demo/__main__.py', 'app/demo/runtime.py',
           'app/demo/people.py', 'app/demo/seed_service.py', 'app/demo/seed_extras.py',
           'app/demo/seed_franchise.py')
 $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
-          'tests/test_sql.py', 'tests/test_flow.py', 'tests/test_contract.py',
+          'tests/test_sql.py', 'tests/test_db_tz.py', 'tests/test_flow.py', 'tests/test_contract.py',
           'tests/test_max.py', 'tests/test_faq.py', 'tests/test_i18n.py',
           'tests/fake_crm.py', 'tests/plain.py', 'tests/test_crm_logic.py', 'tests/test_crm_sql.py',
           'tests/test_crm_pg.py', 'tests/test_cabinet.py', 'tests/test_web.py',

@@ -356,6 +356,30 @@ class TestSigningFlow(tw.WebCase):
                  if e["kind"] == "code_sent"]
         self.assertEqual(notes[-1], "staff:admin", "кто выдал код - в журнале")
 
+    def test_a_stale_snapshot_buys_no_extra_attempts(self):
+        """Предел попыток проверялся по строке из начала запроса, а промах
+        прибавлялся безусловно: параллельные запросы со снимком «попыток 0»
+        сверяли код сколько угодно раз. Попытка берётся в самой строке."""
+        request_id, row = self.start()
+        self.client.post(f"/sign/{row['token']}/code")
+        live = self.last_code()
+        wrong = "000000" if live != "000000" else "111111"
+        stale = tw.run(self.crm.sign_request(request_id))
+        for _ in range(logic.SIGN_MAX_ATTEMPTS):
+            with self.assertRaises(service.ServiceError) as err:
+                tw.run(service.verify_sign(self.crm, stale, wrong))
+            self.assertIn("Неверный код", str(err.exception))
+        with self.assertRaises(service.ServiceError) as err:
+            tw.run(service.verify_sign(self.crm, stale, live))
+        self.assertIn("получите новый", str(err.exception))
+        stored = tw.run(self.crm.sign_request(request_id))
+        self.assertEqual(stored["status"], "code", "верный код после предела не подписал")
+        self.assertEqual((stored["attempts"], stored["wrong_total"]),
+                         (logic.SIGN_MAX_ATTEMPTS, logic.SIGN_MAX_ATTEMPTS))
+        wrong_events = [e for e in tw.run(self.crm.sign_events(request_id))
+                        if e["kind"] == "code_wrong"]
+        self.assertEqual(len(wrong_events), logic.SIGN_MAX_ATTEMPTS)
+
     def test_signing_without_a_code_is_refused(self):
         _, row = self.start()
         self.client.post(f"/sign/{row['token']}", data={"code": "123456"})

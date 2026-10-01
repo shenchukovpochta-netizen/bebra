@@ -168,6 +168,30 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
                      f"/issue?client={huge}", f"/orders/new?bike={huge}"):
             await self.get_ok(path)
 
+    async def test_operator_input_is_a_message_not_a_500(self):
+        """Проверка кода на живой базе: нулевой байт (Postgres не хранит \\x00
+        в тексте), номер несуществующего техника и поставщика (ссылка базы),
+        «25 кг» в весе модели и число сверх integer - отказ на форме, а не
+        500; страницы после них открываются."""
+        for path in ("/clients?q=%00", "/bikes?q=a%00b", "/rentals?q=%00&view=debt"):
+            await self.get_ok(path)
+        self.assertEqual((await self.client.get("/sign/ab%00cd")).status_code, 404)
+        await self.post("/bikes", code="N-1", model="Kugoo V3", note="до\x00бавлен")
+        self.assertEqual((await self.crm.bike_by_code("N-1"))["note"], "добавлен")
+        bike = await self.crm.bike_by_code("N-1")
+        await self.post("/orders", payer="own", bike_id=str(bike["id"]),
+                        tech_id="999999", complaint="стук")
+        self.assertEqual(await self.crm.work_orders(), [])
+        await self.post("/assets", codes="Z-1", model="Kugoo V3", supplier_id="999999")
+        self.assertEqual(await self.crm.purchases(), [])
+        model = await self.crm.create_bike_model(title="Kugoo V3", brand=None,
+                                                 factory_title=None, battery_slots=1,
+                                                 note=None)
+        await self.post(f"/models/bikes/{model}", weight_kg="25 кг", note="")
+        await self.post(f"/models/bikes/{model}", speed_kmh="99999999999", note="")
+        await self.post("/models/batteries", title="60V", capacity="9999999")
+        await self.get_ok("/models")
+
     async def test_rental_form_lists_clients_past_the_500th(self):
         """Форма новой аренды брала клиентов пределом по умолчанию - 500 по
         имени: курьер дальше пятисотого в выпадающий список не попадал."""

@@ -220,6 +220,33 @@ class TestReportPages(tw.WebCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("Камера", r.text)
 
+    def test_spend_and_model_parts_hide_cost_without_finance(self):
+        """Себестоимость - деньги: со «Складом» и «Сервисом», но без
+        «Финансов» видны штуки и наряды, а не рубли - ни на страницах, ни в
+        выгрузке, ни в блоках «Отчётов»."""
+        order_id = self.closed_order()
+        _run(self.crm.add_part_move(part_id=self.part_id, kind="order", qty=-3,
+                                    cost=D(4321), order_id=order_id,
+                                    created_by="тест"))
+        self.assertIn("12 963", self.get_ok("/reports/spend"), "владельцу рубли видны")
+        profile = _run(self.crm.create_access_profile(
+            "Склад и сервис", {"sections": {"service": "view", "inventory": "view",
+                                            "reports": "view"}}))
+        _run(self.crm.create_staff("sklad", logic.hash_password("sklad-pass-1"),
+                                   name="Кладовщик", role="tech", profile_id=profile))
+        self.client.post("/logout")
+        self.login("sklad", "sklad-pass-1")
+        for path in ("/reports/spend", "/reports/model-parts", "/reports"):
+            text = self.get_ok(path)
+            for money in ("12 963", "4 321", "₽", "Себестоимость"):
+                self.assertNotIn(money, text, f"{path}: {money}")
+        self.assertIn("Камера", self.get_ok("/reports/spend"), "штуки видны")
+        self.assertIn("Kugoo V3", self.get_ok("/reports/model-parts"))
+        csv_text = self.client.get("/reports/spend.csv").content.decode("utf-8-sig")
+        self.assertIn("Камера", csv_text)
+        for money in ("Себестоимость", "12963"):
+            self.assertNotIn(money, csv_text, money)
+
     def test_reports_need_their_section(self):
         profile = _run(self.crm.create_access_profile(
             "Только клиенты", {"sections": {"clients": "view"}}))

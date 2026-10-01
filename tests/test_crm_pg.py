@@ -4344,3 +4344,144 @@ class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m[1] for m in threads[("avito", "chat-1")]["messages"]],
                          ["a1", "a2"])
         self.assertEqual([m[1] for m in threads[("avito", "gw-1")]["messages"]], [None])
+
+
+@unittest.skipUnless(HAVE_PG, "pgserver или asyncpg не установлены")
+class TestReviewFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
+    """Проверка кода: замена чужой батареи, гонка выдачи доп. аккумулятора,
+    тревоги одного трекера, попытки кода подписи под замком строки и дата
+    возврата без бесконечности - на настоящем Postgres, где живут замки и
+    условия UPDATE. Обвязка та же, без наследования тестов."""
+
+    setUpClass = classmethod(TestCrmOnPostgres.setUpClass.__func__)
+    tearDownClass = classmethod(TestCrmOnPostgres.tearDownClass.__func__)
+    asyncSetUp = TestCrmOnPostgres.asyncSetUp
+    asyncTearDown = TestCrmOnPostgres.asyncTearDown
+    seed = TestCrmOnPostgres.seed
+
+    async def two_rentals(self):
+        await self.seed()
+        other_client = await self.crm.create_client(full_name="Петров", phone="+79990000002")
+        other_bike = await self.crm.create_bike(code="B-2", model="Kugoo V3")
+        tariff = await self.crm.tariff(self.tariff_id)
+        mine = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=tariff,
+            started_on=date.today(), contract_no=None, by="t")
+        theirs = await service.open_rental(
+            self.crm, client=await self.crm.client(other_client),
+            bike=await self.crm.bike(other_bike), tariff=tariff,
+            started_on=date.today(), contract_no=None, by="t")
+        return mine, theirs
+
+    async def test_battery_swap_and_issue_are_guarded_in_sql(self):
+        mine, theirs = await self.two_rentals()
+        a1, a2, a3, a4 = [await self.crm.create_battery(code=f"A-{n}", by="t")
+                          for n in range(1, 5)]
+        self.assertEqual(await self.crm.issue_batteries(mine, battery_ids=[a1],
+                                                        bike_id=self.bike_id, by="t"), 1)
+        self.assertEqual(await self.crm.issue_batteries(theirs, battery_ids=[a2],
+                                                        bike_id=None, by="t"), 1)
+        # Всё или ничего: a2 уже у соседа - a3 не выдаётся в одиночку.
+        self.assertEqual(await self.crm.issue_batteries(mine, battery_ids=[a3, a2],
+                                                        bike_id=None, by="t"), 0)
+        self.assertEqual((await self.crm.battery(a3))["status"], "available")
+
+        # Чужая батарея не снимается ни сервисом, ни запросом в обход него.
+        with self.assertRaises(service.ServiceError):
+            await service.swap_battery(self.crm, await self.crm.rental(mine),
+                                       await self.crm.battery(a2),
+                                       await self.crm.battery(a3), by="t")
+        self.assertFalse(await self.crm.swap_battery(
+            mine, old_id=a2, new_id=a3, bike_id=None, old_status="repair", by="t"))
+        await self.crm.update_battery(a4, status="lost", by="t")
+        self.assertFalse(await self.crm.swap_battery(
+            mine, old_id=a4, new_id=a3, bike_id=None, old_status="available", by="t"))
+        self.assertEqual(((await self.crm.battery(a2))["rental_id"],
+                          (await self.crm.battery(a4))["status"],
+                          (await self.crm.battery(a3))["status"]),
+                         (theirs, "lost", "available"))
+
+        # Платная позиция переезжает на новую батарею вместе с заменой.
+        extra = await self.crm.add_rental_extra(
+            mine, kind="battery", title="Доп. АКБ", price=D(1170), battery_id=a3,
+            by="t", issue=True, bike_id=self.bike_id)
+        self.assertIsNotNone(extra)
+        self.assertEqual((await self.crm.battery(a3))["rental_id"], mine)
+        a5 = await self.crm.create_battery(code="A-5", by="t")
+        self.assertTrue(await self.crm.swap_battery(
+            mine, old_id=a3, new_id=a5, bike_id=self.bike_id, old_status="repair",
+            by="staff:kolya"))
+        self.assertEqual((await self.crm.rental_extra(extra))["battery_id"], a5)
+        self.assertEqual((await self.crm.battery(a3))["status"], "repair")
+        log = await self.crm.battery_status_log(a3)
+        self.assertEqual((log[0]["to_status"], log[0]["changed_by"]),
+                         ("repair", "staff:kolya"))
+        # Возврат - только своей аренде.
+        self.assertFalse(await self.crm.return_battery(a2, rental_id=mine, by="t"))
+        self.assertTrue(await self.crm.return_battery(a2, rental_id=theirs, by="t"))
+
+        # Батарея занята - позиция не встаёт, цена не растёт.
+        price = (await self.crm.rental(mine))["price"]
+        self.assertIsNone(await self.crm.add_rental_extra(
+            mine, kind="battery", title="Доп. АКБ", price=D(1170), battery_id=a1,
+            by="t", issue=True, bike_id=None))
+        self.assertEqual((await self.crm.rental(mine))["price"], price)
+        self.assertEqual(len(await self.crm.rental_extras(mine, live_only=True)), 1)
+
+    async def test_tracker_card_alerts_are_its_own(self):
+        await self.seed()
+        mine = await self.crm.create_tracker(device_id="2001")
+        other = await self.crm.create_tracker(device_id="2002")
+        old = await self.crm.raise_alert(tracker_id=mine, kind="moving", note="давно",
+                                         bike_id=None, lat=None, lon=None)
+        for n in range(3):
+            got = await self.crm.raise_alert(tracker_id=other, kind="moving",
+                                             note=str(n), bike_id=None, lat=None, lon=None)
+            await self.crm.handle_alert(got, by="t")
+        self.assertEqual([a["id"] for a in await self.crm.tracker_alerts(
+            open_only=False, tracker_id=mine, limit=2)], [old])
+        self.assertNotIn(old, [a["id"] for a in await self.crm.tracker_alerts(
+            open_only=False, limit=2)], "без отбора предел съедал бы её")
+
+    async def test_sign_attempts_are_claimed_under_the_row_lock(self):
+        """Двадцать параллельных неверных кодов: попыток взято ровно пять,
+        шестой и дальше - отказ без сверки."""
+        await self.seed()
+        created = await service.start_signing(
+            self.crm, client=await self.crm.client(self.client_id), rental=None,
+            company={}, bot_user=None, by="staff:t")
+        row = await self.crm.sign_request(created["id"])
+        code = await service.issue_sign_code(self.crm, row)
+        stored = await self.crm.sign_request(created["id"])
+        wrong = "000000" if code != "000000" else "111111"
+        bad = logic.hash_sign_code(stored["token"], wrong)
+        tries = await asyncio.gather(*[
+            self.crm.claim_sign_attempt(created["id"], code_hash=bad,
+                                        max_attempts=logic.SIGN_MAX_ATTEMPTS,
+                                        max_wrong=logic.SIGN_MAX_WRONG)
+            for _ in range(20)])
+        taken = [t for t in tries if t is not None]
+        self.assertEqual(len(taken), logic.SIGN_MAX_ATTEMPTS)
+        self.assertFalse(any(t["ok"] for t in taken))
+        after = await self.crm.sign_request(created["id"])
+        self.assertEqual((after["attempts"], after["wrong_total"]),
+                         (logic.SIGN_MAX_ATTEMPTS, logic.SIGN_MAX_ATTEMPTS))
+        # Верный код по снимку из начала запроса тоже не проходит.
+        with self.assertRaises(service.ServiceError):
+            await service.verify_sign(self.crm, stored, code)
+        self.assertNotEqual((await self.crm.sign_request(created["id"]))["status"],
+                            "signed")
+
+    async def test_return_date_cannot_become_infinity(self):
+        """31.12.9999 - это date.max, asyncpg пишет его бесконечностью, и
+        «возврат минус начало» в клиентах и риске падали навсегда."""
+        mine, _ = await self.two_rentals()
+        with self.assertRaises(service.ServiceError):
+            await service.close_rental(self.crm, await self.crm.rental(mine),
+                                       closed_on=date.max, note=None, by="t")
+        self.assertEqual((await self.crm.rental(mine))["status"], "active")
+        await service.close_rental(self.crm, await self.crm.rental(mine),
+                                   closed_on=date.today(), note=None, by="t")
+        self.assertTrue(await self.crm.clients(limit=10))
+        self.assertIn(self.client_id, await self.crm.risk_facts([self.client_id]))

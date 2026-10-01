@@ -165,6 +165,48 @@ class TestBatteryService(tw.WebCase):
         with self.assertRaises(service.ServiceError):
             self.issue([9999])
 
+    def test_issue_is_all_or_nothing(self):
+        """Батарею забрали между проверкой и выдачей (проверка видела её
+        свободной): не выдаётся ни одна, и выдача говорит об этом отказом,
+        а не «выдано» с батареей у соседа."""
+        tw.run(self.crm.update_battery(self.a2, status="rented", rental_id=999))
+        real = self.crm.battery
+
+        async def stale(battery_id):
+            row = await real(battery_id)
+            return {**row, "status": "available"} if row else row
+
+        self.crm.battery = stale
+        with self.assertRaises(service.ServiceError) as err:
+            self.issue([self.a1, self.a2])
+        self.assertIn("только что выдали", str(err.exception))
+        self.crm.battery = real
+        self.assertEqual(tw.run(self.crm.battery(self.a1))["status"], "available",
+                         "первая не ушла в одиночку")
+        self.assertEqual(tw.run(self.crm.battery(self.a2))["rental_id"], 999)
+
+    def test_swap_refuses_a_battery_that_is_not_this_rentals(self):
+        """Снимается только батарея этой аренды и только «у клиента»."""
+        self.issue([self.a1])
+        rental = tw.run(self.crm.rental(self.rental_id))
+        stray = tw.run(self.crm.create_battery(code="A-3", model_id=self.model_id,
+                                               status="new", by="t"))
+        for old in (stray, self.a1):
+            row = tw.run(self.crm.battery(old))
+            if old == self.a1:
+                row = {**row, "rental_id": 999}     # будто из чужой аренды
+            with self.assertRaises(service.ServiceError):
+                tw.run(service.swap_battery(self.crm, rental, row,
+                                            tw.run(self.crm.battery(self.a2)), by="t"))
+        self.assertEqual(tw.run(self.crm.battery(stray))["status"], "new",
+                         "на сборке не встаёт в ремонт и свободные")
+        self.assertEqual(tw.run(self.crm.battery(self.a2))["status"], "available")
+        # Снимок формы устарел: база сверяет аренду сама.
+        self.assertFalse(tw.run(self.crm.swap_battery(
+            999, old_id=self.a1, new_id=self.a2, bike_id=None, old_status="repair",
+            by="t")))
+        self.assertEqual(tw.run(self.crm.battery(self.a1))["rental_id"], self.rental_id)
+
     def test_swap_returns_the_old_one_to_repair(self):
         self.issue([self.a1])
         rental = tw.run(self.crm.rental(self.rental_id))

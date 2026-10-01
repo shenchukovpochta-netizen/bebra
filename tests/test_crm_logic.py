@@ -294,6 +294,51 @@ class TestChecks(unittest.TestCase):
         self.assertIsNone(logic.check_note("  ").value)
         self.assertFalse(logic.check_note("x" * 3000).ok)
 
+    def test_return_date_lies_between_start_and_today(self):
+        """31.12.9999 ложился в базу бесконечностью и ронял клиентов и риск."""
+        start = TODAY - timedelta(days=10)
+        self.assertIsNone(logic.rental_close_problem(TODAY, start, TODAY))
+        self.assertIsNone(logic.rental_close_problem(start, start, TODAY))
+        self.assertIn("ещё не наступила",
+                      logic.rental_close_problem(date.max, start, TODAY))
+        self.assertIn("ещё не наступила",
+                      logic.rental_close_problem(TODAY + timedelta(days=1), start, TODAY))
+        self.assertIn("раньше начала",
+                      logic.rental_close_problem(start - timedelta(days=1), start, TODAY))
+        # Выдача по заявке на будущее отменяется сегодняшним днём.
+        ahead = TODAY + timedelta(days=5)
+        self.assertIsNone(logic.rental_close_problem(TODAY, ahead, TODAY))
+        self.assertIsNotNone(logic.rental_close_problem(TODAY - timedelta(days=1),
+                                                        ahead, TODAY))
+        self.assertIsNone(logic.rental_close_problem(TODAY, None, TODAY))
+
+    def test_purchase_date_is_not_in_the_future_nor_before_2000(self):
+        """31.12.9998 уводила срок службы за 9999 год: add_months падал на
+        плане замены и карточке батареи."""
+        check = logic.check_purchase_date
+        self.assertEqual(check("13.09.2026", today=TODAY).value, TODAY)
+        self.assertIsNone(check("", today=TODAY).value)
+        self.assertEqual(check(" ", today=TODAY, default=TODAY).value, TODAY)
+        for raw in ("31.12.9998", "14.09.2026", "31.12.1999", "вчера"):
+            self.assertFalse(check(raw, today=TODAY).ok, raw)
+
+    def test_model_specs_refuse_words_and_overflow(self):
+        """«25 кг» ронял Decimal (InvalidOperation), целое сверх integer -
+        базу; оба были 500 на сохранении модели."""
+        got = logic.check_model_specs({"weight_kg": "25,5", "speed_kmh": "60",
+                                       "charge_hours": "6", "range_km": ""})
+        self.assertTrue(got.ok)
+        self.assertEqual(got.value["weight_kg"], D("25.50"))
+        self.assertEqual(got.value["speed_kmh"], 60)
+        self.assertIsNone(got.value["range_km"], "пусто - «не знаем», а не ноль")
+        for field, raw in (("weight_kg", "25 кг"), ("weight_kg", "NaN"),
+                           ("weight_kg", "Infinity"), ("weight_kg", "9999.999"),
+                           ("speed_kmh", "99999999999"), ("speed_kmh", "12.5"),
+                           ("motor_watt", "-1"), ("charge_hours", "1e400")):
+            got = logic.check_model_specs({field: raw})
+            self.assertFalse(got.ok, f"{field}={raw}")
+            self.assertTrue(got.error, f"{field}={raw}")
+
 
 class TestPasswords(unittest.TestCase):
     def test_roundtrip(self):

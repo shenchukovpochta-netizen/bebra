@@ -502,6 +502,41 @@ class TestTrackerPanel(tw.WebCase):
         self.assertEqual(r.headers["location"], "/map")
         self.assertEqual(tw.run(self.crm.tracker_alerts()), [])
 
+    def test_card_keeps_its_open_alert_behind_the_fleets_history(self):
+        """Карточка брала полсотни тревог всего парка и отбирала свои: давняя
+        открытая тревога этого трекера пропадала за чужой историей."""
+        tw.run(self.crm.raise_alert(tracker_id=self.tracker_id, kind="offline",
+                                    note="своя давняя", bike_id=None, lat=None, lon=None))
+        other = tw.run(self.crm.create_tracker(device_id="1009"))
+        for n in range(60):
+            got = tw.run(self.crm.raise_alert(tracker_id=other, kind="moving",
+                                              note=f"чужая {n}", bike_id=None,
+                                              lat=None, lon=None))
+            tw.run(self.crm.handle_alert(got, by="t"))
+        card = self.get_ok(f"/trackers/{self.tracker_id}")
+        self.assertIn("своя давняя", card)
+        self.assertNotIn("чужая", card)
+
+    def test_command_refuses_an_alert_of_another_tracker(self):
+        """Номер тревоги - из формы: несуществующий упирался в ссылку базы
+        (500), чужой связал бы команду не с той историей."""
+        other = tw.run(self.crm.create_tracker(device_id="1009"))
+        foreign = tw.run(self.crm.raise_alert(tracker_id=other, kind="moving",
+                                              note="x", bike_id=None, lat=None, lon=None))
+        for alert_id in ("999999", str(foreign)):
+            r = self.client.post(f"/trackers/{self.tracker_id}/command",
+                                 data={"command": "block", "alert_id": alert_id})
+            self.assertEqual(r.status_code, 303, alert_id)
+            self.assertIsNone(tw.run(self.crm.pending_command_of(self.tracker_id)),
+                              alert_id)
+        self.assertIn("Тревога не найдена", self.get_ok(f"/trackers/{self.tracker_id}"))
+        own = tw.run(self.crm.raise_alert(tracker_id=self.tracker_id, kind="moving",
+                                          note="y", bike_id=None, lat=None, lon=None))
+        self.client.post(f"/trackers/{self.tracker_id}/command",
+                         data={"command": "block", "alert_id": str(own)})
+        self.assertEqual(tw.run(self.crm.pending_command_of(self.tracker_id))["alert_id"],
+                         own)
+
     def test_toggle_takes_the_tracker_off_watch(self):
         self.client.post(f"/trackers/{self.tracker_id}/toggle")
         self.assertFalse(tw.run(self.crm.tracker(self.tracker_id))["active"])

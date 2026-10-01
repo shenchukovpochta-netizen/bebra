@@ -137,6 +137,24 @@ class TestIntegrityInPanel(tw.WebCase):
         self.assertIn("Числится в аренде, а аренды нет", page)
         self.assertIn("B-1", page)
 
+    def test_debt_without_rental_needs_finance(self):
+        """«N ₽ за клиентом» - это сумма и список должников: отчёт открыт с
+        правом на парк, а долги - только с «Финансами»."""
+        tw.run(self.crm.add_ledger(client_id=self.client_id, rental_id=None,
+                                   kind="fine", amount=D(-7345), method=None,
+                                   note="штраф", created_by="t"))
+        self.assertIn("7 345", self.get_ok("/reports/integrity"))
+        profile = tw.run(self.crm.create_access_profile(
+            "Парк", {"sections": {"bikes": "view", "clients": "view",
+                                  "reports": "view"}}))
+        tw.run(self.crm.create_staff("ivan", logic.hash_password("password-1"),
+                                     "Иван", "manager", profile))
+        self.client.post("/logout")
+        self.login("ivan", "password-1")
+        page = self.get_ok("/reports/integrity")
+        for money in ("7 345", "Долг есть, а аренды нет", "Иванов Иван"):
+            self.assertNotIn(money, page, money)
+
     def test_page_needs_access_to_the_park(self):
         profile = tw.run(self.crm.create_access_profile(
             "Только заявки", {"sections": {"claims": "view"}}))

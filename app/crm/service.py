@@ -92,7 +92,8 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
                       promo_code: str | None = None,
                       applied: list[dict] | None = None,
                       location: str | None = None,
-                      booking: Mapping[str, Any] | None = None) -> int:
+                      booking: Mapping[str, Any] | None = None,
+                      missed: list[dict] | None = None) -> int:
     """Оформить аренду и начислить первый период.
 
     Аренда с датой начала в будущем не начисляется заранее: первый период
@@ -151,11 +152,27 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             await close_booking(crm, booked["id"], rental_id=rental_id, by=by)
     except Exception:                                    # noqa: BLE001
         log.exception("заявка клиента %s не закрыта выдачей", client.get("id"))
+    # Батарея позиции уходит клиенту тем же действием, что встаёт в цену:
+    # порознь занятая за эту секунду батарея оставалась в цене периода
+    # (и в первом начислении) при «Батареи не выданы» на экране. Не
+    # выданная - не позиция и не деньги: цена периода пересобирается из
+    # того, что действительно ушло, до начисления. Вызывающему - в `missed`.
+    added: list[Mapping[str, Any]] = []
     for extra in extras:
-        await crm.add_rental_extra(
+        battery_id = extra.get("battery_id")
+        got = await crm.add_rental_extra(
             rental_id, kind=str(extra.get("kind") or "battery"),
             title=str(extra["title"]), price=logic.to_money(extra.get("price")),
-            battery_id=extra.get("battery_id"), by=by)
+            battery_id=battery_id, by=by, issue=battery_id is not None,
+            bike_id=(bike or {}).get("id"))
+        if got is None:
+            if missed is not None:
+                missed.append(dict(extra))
+            continue
+        added.append(extra)
+    if len(added) != len(extras):
+        price = logic.period_price(base, added)
+        await crm.update_rental(rental_id, price=price)
     if billing == "auto":
         await charge_due(crm, rental={"id": rental_id, "client_id": client["id"],
                                       "billed_until": started_on,
@@ -390,6 +407,9 @@ async def close_rental(crm: Any, rental: dict, *, closed_on: date, note: str | N
     """`return_location` - где сдали; не указана - точка аренды."""
     if bike_status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус велосипеда.")
+    problem = logic.rental_close_problem(closed_on, rental.get("started_on"), date.today())
+    if problem:
+        raise ServiceError(problem)
     if not await crm.close_rental(rental["id"], closed_on=closed_on, note=note,
                                   bike_status=bike_status, closed_by=by,
                                   mileage_end=mileage,
@@ -916,6 +936,13 @@ async def receive_parts(crm: Any, *, supplier_id: int | None, lines: list[dict],
     clean = [line for line in lines if int(line.get("qty") or 0) > 0]
     if not clean:
         raise ServiceError("Приход пуст: укажите хотя бы одну позицию с количеством.")
+    # Номера приходят из формы: несуществующий упирался в ссылку базы
+    # и ронял проведение 500 вместо понятного отказа.
+    if supplier_id is not None and await crm.supplier(int(supplier_id)) is None:
+        raise ServiceError("Такого поставщика нет — обновите страницу.")
+    for line in clean:
+        if await crm.part(int(line["part_id"])) is None:
+            raise ServiceError("Такой позиции на складе нет — обновите страницу.")
     return await crm.create_part_doc(kind="receipt", supplier_id=supplier_id,
                                      lines=clean, note=note, created_by=by)
 
@@ -1251,8 +1278,11 @@ async def issue_with_batteries(crm: Any, rental_id: int, *, bike: dict | None,
                 f"Батарея {battery['code']} сейчас "
                 f"«{logic.BATTERY_STATUSES.get(battery['status'], battery['status'])}».")
         ready.append(int(battery_id))
-    await crm.issue_batteries(rental_id, battery_ids=ready,
-                              bike_id=(bike or {}).get("id"), by=by)
+    # Между проверкой и выдачей батарею мог забрать соседний оператор:
+    # база выдаёт всё или ничего, и «ничего» - это отказ, а не «выдано».
+    if ready and not await crm.issue_batteries(rental_id, battery_ids=ready,
+                                               bike_id=(bike or {}).get("id"), by=by):
+        raise ServiceError("Батарею только что выдали другому клиенту.")
     return len(ready)
 
 
@@ -1286,12 +1316,16 @@ async def add_battery_extra(crm: Any, rental: dict, battery: dict, *,
             f"Нет тарифа на аккумулятор «{battery.get('model_title') or '—'}» "
             f"на {int(rental.get('period_days') or 0)} дн. — заведите цену "
             "в тарифах.")
-    await crm.add_rental_extra(
-        rental["id"], kind="battery",
-        title=logic.extra_title("battery", battery.get("model_title")),
-        price=price, battery_id=int(battery["id"]), by=by)
-    await crm.issue_batteries(rental["id"], battery_ids=[int(battery["id"])],
-                              bike_id=rental.get("bike_id"), by=by)
+    # Позиция, цена и выдача батареи - одной транзакцией: порознь батарею,
+    # которую за эту секунду выдали другому, выдача молча пропускала, а
+    # позиция уже стояла в цене и экран говорил «выдан».
+    if await crm.add_rental_extra(
+            rental["id"], kind="battery",
+            title=logic.extra_title("battery", battery.get("model_title")),
+            price=price, battery_id=int(battery["id"]), by=by,
+            issue=True, bike_id=rental.get("bike_id")) is None:
+        raise ServiceError(f"Батарею {battery.get('code')} только что выдали — "
+                           "обновите страницу и выберите другую.")
     return price
 
 
@@ -1311,7 +1345,8 @@ async def drop_battery_extra(crm: Any, rental: dict, extra: dict, *, by: str,
     if not await crm.drop_rental_extra(int(extra["id"]), by=by):
         raise ServiceError("Позиция уже снята.")
     if extra.get("battery_id"):
-        await crm.return_battery(int(extra["battery_id"]), status=status, by=by)
+        await crm.return_battery(int(extra["battery_id"]), rental_id=int(rental["id"]),
+                                 status=status, by=by)
 
 
 async def swap_battery(crm: Any, rental: dict, old: dict | None, new: dict, *,
@@ -1330,12 +1365,21 @@ async def swap_battery(crm: Any, rental: dict, old: dict | None, new: dict, *,
     if old is not None and int(old["id"]) == int(new["id"]):
         raise ServiceError("Это та же батарея.")
     if old is not None:
+        # Номер снимаемой приходит из формы: батарея другой аренды или
+        # не «у клиента» (на сборке, потерянная, проданная) - не наша, и
+        # снять её значило бы отнять у соседа или вернуть списанную в
+        # свободные. База проверяет то же под замком строк.
+        if (old.get("status") != "rented"
+                or int(old.get("rental_id") or 0) != int(rental["id"])):
+            raise ServiceError(f"Батарея {old.get('code')} не у этой аренды.")
         if old_status not in logic.BATTERY_MANUAL_STATUSES:
             raise ServiceError("Недопустимый статус снятой батареи.")
-        await crm.update_battery(old["id"], status=old_status, rental_id=None,
-                                 cycles=int(old.get("cycles") or 0) + 1, by=by)
-    await crm.update_battery(new["id"], status="rented", rental_id=rental["id"],
-                             bike_id=rental.get("bike_id"), by=by)
+    if not await crm.swap_battery(
+            int(rental["id"]), old_id=int(old["id"]) if old is not None else None,
+            new_id=int(new["id"]), bike_id=rental.get("bike_id"),
+            old_status=old_status, by=by):
+        raise ServiceError("Батареи успели поменяться — обновите страницу "
+                           "и проверьте, что у клиента.")
 
 
 async def _spare_batteries(crm: Any, rental: dict) -> list[dict]:
@@ -1654,17 +1698,31 @@ async def verify_sign(crm: Any, request: dict, raw_code: str, *,
     code = logic.clean_sign_code(raw_code)
     if len(code) != 6:
         raise ServiceError("Код — шесть цифр.")
-    if logic.hash_sign_code(request["token"], code) != request["code_hash"]:
-        left = await crm.bump_sign_attempt(request["id"])
+    # Попытка берётся и код сверяется одним UPDATE под замком строки: по
+    # снимку из начала запроса параллельные запросы видели «попыток 0» и
+    # сверяли код сколько угодно раз. Снимок выше - только для ответа.
+    tried = await crm.claim_sign_attempt(
+        request["id"], code_hash=logic.hash_sign_code(request["token"], code),
+        max_attempts=logic.SIGN_MAX_ATTEMPTS, max_wrong=logic.SIGN_MAX_WRONG)
+    if tried is None:
+        fresh = logic.sign_state(await crm.sign_request(request["id"]) or request,
+                                 now=now)
+        if fresh["signed"]:
+            raise ServiceError("Документы уже подписаны.")
+        if fresh["locked"]:
+            raise ServiceError("Слишком много неверных кодов. Позвоните "
+                               "оператору — он выдаст код.")
+        raise ServiceError("Код больше не действует — получите новый.")
+    if not tried["ok"]:
         await crm.log_sign_event(request["id"], kind="code_wrong", ip=ip,
                                  agent=agent,
-                                 note=f"попытка {left}")
-        if int(request.get("wrong_total") or 0) + 1 >= logic.SIGN_MAX_WRONG:
+                                 note=f"попытка {tried['attempts']}")
+        if int(tried["wrong_total"]) >= logic.SIGN_MAX_WRONG:
             raise ServiceError("Неверный код. Попытки кончились — позвоните "
                                "оператору, он выдаст код.")
         raise ServiceError(
             f"Неверный код. Осталось попыток: "
-            f"{max(logic.SIGN_MAX_ATTEMPTS - left, 0)}.")
+            f"{max(logic.SIGN_MAX_ATTEMPTS - int(tried['attempts']), 0)}.")
     if not await crm.mark_signed(request["id"], ip=ip, agent=agent):
         raise ServiceError("Документы уже подписаны.")
     digest = logic.sign_docs_digest(request.get("docs") or [])

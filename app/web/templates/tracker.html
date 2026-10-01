@@ -43,7 +43,7 @@
   <p>{% if block.blocked %}<b>Заблокирован</b>{% if tracker.blocked_at %} с {{ tracker.blocked_at|dmy }}{% endif %}{% if tracker.blocked_by %} · {{ tracker.blocked_by }}{% endif %}{% else %}Не заблокирован{% endif %}
     {% if block.pending %}<br><span class="tag rented">в очереди: {{ TRACKER_COMMANDS[block.pending.command] }}</span> <small class="muted">с {{ block.pending.requested_at|dmy }}{% if block.pending.requested_by %} · {{ block.pending.requested_by }}{% endif %}</small>{% endif %}</p>
   {% if can_edit(staff, 'trackers') and tracker.active and block.next %}
-  <form method="post" action="/trackers/{{ tracker.id }}/command" class="inline-form" onsubmit="return confirm('{{ TRACKER_COMMANDS[block.next] }}? Сработает после остановки велосипеда.')">
+  <form method="post" action="/trackers/{{ tracker.id }}/command" class="inline-form" data-confirm="{{ TRACKER_COMMANDS[block.next] }}? Сработает после остановки велосипеда." onsubmit="return confirm(this.dataset.confirm)">
     <input type="hidden" name="command" value="{{ block.next }}">
     <button type="submit" class="{% if block.next == 'block' %}danger{% else %}ghost{% endif %}">{{ TRACKER_COMMANDS[block.next] }}</button>
   </form>

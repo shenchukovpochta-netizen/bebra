@@ -121,8 +121,8 @@
 <details class="card fold">
   <summary>Траты по моделям <small class="muted">запчасти в наряды</small></summary>
   <table>
-    <tr><th>Модель</th><th class="num">Нарядов</th><th class="num">Запчасти</th><th class="num">На велосипед</th></tr>
-    {% for r in sm.model_parts %}<tr><td>{{ r.model }}</td><td class="num">{{ r.orders }}</td><td class="num">{{ money(r.cost) }}</td><td class="num">{% if r.per_bike is none %}—{% else %}{{ money(r.per_bike) }}{% endif %}</td></tr>
+    <tr><th>Модель</th><th class="num">Нарядов</th>{% if money_ok %}<th class="num">Запчасти</th><th class="num">На велосипед</th>{% else %}<th class="num">Штук</th>{% endif %}</tr>
+    {% for r in sm.model_parts %}<tr><td>{{ r.model }}</td><td class="num">{{ r.orders }}</td>{% if money_ok %}<td class="num">{{ money(r.cost) }}</td><td class="num">{% if r.per_bike is none %}—{% else %}{{ money(r.per_bike) }}{% endif %}</td>{% else %}<td class="num">{{ r.qty }}</td>{% endif %}</tr>
     {% else %}<tr><td colspan="4" class="muted">Запчасти в наряды не уходили.</td></tr>{% endfor %}
   </table>
   <p><a href="/reports/model-parts{{ sm.q }}">подробнее →</a></p>
@@ -132,8 +132,8 @@
 <details class="card fold">
   <summary>Расход склада <small class="muted">что ушло со склада</small></summary>
   <table>
-    <tr><th>Позиция</th><th class="num">Ушло</th><th class="num">Себестоимость</th></tr>
-    {% for r in sm.spend %}<tr><td>{{ r.title }}</td><td class="num">{{ r.qty }} {{ r.unit }}</td><td class="num">{{ money(r.cost) }}</td></tr>
+    <tr><th>Позиция</th><th class="num">Ушло</th>{% if money_ok %}<th class="num">Себестоимость</th>{% endif %}</tr>
+    {% for r in sm.spend %}<tr><td>{{ r.title }}</td><td class="num">{{ r.qty }} {{ r.unit }}</td>{% if money_ok %}<td class="num">{{ money(r.cost) }}</td>{% endif %}</tr>
     {% else %}<tr><td colspan="3" class="muted">Со склада ничего не уходило.</td></tr>{% endfor %}
   </table>
   <p><a href="/reports/spend{{ sm.q }}">подробнее →</a></p>
