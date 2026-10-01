@@ -19,6 +19,10 @@ if [ -z "$ZIP" ]; then die "укажите архив: bash update.sh /root/mybi
 if [ ! -f "$ZIP" ]; then die "нет файла $ZIP"; fi
 ZIP="$(cd "$(dirname "$ZIP")" && pwd)/$(basename "$ZIP")"
 cd "$(dirname "$0")"
+# Абсолютный путь проекта - для текста отката: его читают и выполняют из
+# того каталога, где запускали обновление (INSTALL.md - из /root), а
+# пути backups/…, bootstrap.sh и docker compose - от каталога проекта.
+PROJECT="$(pwd)"
 if [ "$(id -u)" -ne 0 ]; then die "запускать от root"; fi
 # Обновляют установленное: без .env это первая установка, и ей нужен
 # install.sh с вопросами, а не код поверх пустоты.
@@ -52,7 +56,9 @@ fi
 rollback() {
   cat <<EOF
 
-    Откат к моменту перед обновлением - база из дампа, затем прежний код:
+    Откат к моменту перед обновлением - база из дампа, затем прежний код
+    (первая строка - в каталог проекта: остальные пути от него):
+      cd "$PROJECT"
       docker compose --profile max stop bot crm bot-max
       { echo 'drop schema if exists crm cascade; drop schema if exists bot cascade;'; \\
         gunzip -c $DUMP; } | docker compose exec -T postgres \\

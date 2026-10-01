@@ -204,6 +204,165 @@ class TestReminderMarkAfterWork(ScheduleCase):
         self.assertEqual(len(self.to_client()), 1, "второй раз за сутки не уходит")
 
 
+class TestPromoWaitsForTheDay(ScheduleCase):
+    """Начисление - первым кругом после полуночи, и «скидка по акции»
+    уходила клиенту в 00:05. Теперь деньги - ночью, сообщение - утром."""
+
+    def setUp(self):
+        super().setUp()
+        run(self.crm.create_promo(
+            kind="season", title="Сезонная", percent=10, amount=None, code=None,
+            params={}, starts_on=None, ends_on=None, max_uses=None,
+            once_per_client=False, text=None, note=None, by="t"))
+
+    def promo_texts(self) -> list[str]:
+        return [t for t in self.to_client() if "Сезонная" in t]
+
+    def test_night_charge_tells_the_client_in_the_morning_once(self):
+        self.rental(billed_offset=0)              # период начинается сегодня
+        done: dict = {}
+        self.pass_at(0, done)
+        self.assertEqual(done["charge"], self.today, "деньги - ночью, как раньше")
+        bonuses = [x for x in self.crm.ledger_ if x["kind"] == "bonus"]
+        self.assertEqual([x["amount"] for x in bonuses], [D(300)])
+        self.assertEqual(self.promo_texts(), [], "в 00:05 клиента не будим")
+        self.assertIn(billing.PROMO_QUEUE_KEY, self.crm.settings_)
+
+        self.pass_at(8, done)
+        self.assertEqual(self.promo_texts(), [], "до девяти - ещё ночь")
+        self.pass_at(9, done)
+        self.assertEqual(len(self.promo_texts()), 1, self.to_client())
+        self.assertIn("300", self.promo_texts()[0])
+        for hour in (10, 14, 20):
+            self.pass_at(hour, done)
+        self.assertEqual(len(self.promo_texts()), 1, "второй раз не уходит")
+        self.assertEqual(run(self.crm.settings())[billing.PROMO_QUEUE_KEY], "[]")
+
+    def test_queue_survives_a_restart(self):
+        """Очередь - в crm.settings: бот, перезапущенный до утра, начинает
+        с пустой памятью круга, а скидку всё равно сообщает."""
+        self.rental(billed_offset=0)
+        self.pass_at(0, {})
+        self.pass_at(9, {"charge": self.today})       # новая память круга
+        self.assertEqual(len(self.promo_texts()), 1)
+
+    def test_daytime_charge_tells_at_once(self):
+        """Бот лежал всю ночь и поднялся днём: начисление и сообщение -
+        тем же кругом, очередь не нужна."""
+        self.rental(billed_offset=0)
+        self.pass_at(11, {})
+        self.assertEqual(len(self.promo_texts()), 1)
+        self.assertNotIn(billing.PROMO_QUEUE_KEY, self.crm.settings_)
+
+    def test_junk_in_the_queue_does_not_break_the_pass(self):
+        self.crm.settings_[billing.PROMO_QUEUE_KEY] = '[{"client_id": "x"}, 5, "мусор"'
+        done: dict = {}
+        self.pass_at(9, done)
+        self.assertEqual(self.promo_texts(), [])
+
+
+class TestEveningCutoff(ScheduleCase):
+    """Бот, поднятый в 23:30 после простоя, догонял «в этот час или позже»
+    и слал клиенту напоминание об оплате на ночь глядя."""
+
+    def test_client_reminder_waits_for_tomorrow_team_digest_does_not(self):
+        self.rental(billed_offset=7, balance=D(3000))      # сегодня последний день
+        done: dict = {}
+        self.pass_at(23, done)
+        self.assertEqual(self.to_client(), [], "клиенту в 23:05 не пишем")
+        self.assertNotIn("rent_due", done, "отметки нет - завтра уйдёт в свой час")
+        self.assertTrue([t for t in self.to_chat() if "Сводка по оплатам" in t],
+                        "команде - без вечерней границы")
+        tomorrow = self.today + timedelta(days=1)
+        now = datetime.combine(tomorrow, datetime.min.time()).replace(hour=8, minute=5)
+        run(billing.run_daily(self.bot, self.db, self.crm, self.cfg,
+                              today=tomorrow, now=now, done=done))
+        self.assertTrue(any("не оплачена" in t for t in self.to_client()),
+                        self.to_client())
+
+    def test_bot_pass_and_autocharge_stop_in_the_evening(self):
+        from zoneinfo import ZoneInfo
+
+        from app import tasks
+        from app.crm import logic
+        msk = ZoneInfo("Europe/Moscow")
+        late = datetime(2026, 9, 21, 20, 30, tzinfo=msk)          # 20:30 МСК
+        self.assertTrue(tasks.due_today(late, None, 7, tz=msk))
+        night = datetime(2026, 9, 21, 21, 30, tzinfo=msk)         # 21:30 МСК
+        self.assertFalse(tasks.due_today(night, None, 7, tz=msk),
+                         "проход бота шлёт клиентам - не позже вечера")
+        # Час, поставленный на вечер, догоняется в пределах своего часа.
+        self.assertTrue(tasks.due_today(datetime(2026, 9, 21, 22, 30, tzinfo=msk),
+                                        None, 19, tz=msk))
+        self.assertFalse(tasks.due_today(datetime(2026, 9, 21, 23, 30, tzinfo=msk),
+                                         None, 19, tz=msk))
+        settings = {"autocharge_hour": "12"}
+        self.assertTrue(logic.autocharge_time(settings, datetime(2026, 9, 21, 20, 59)))
+        self.assertFalse(logic.autocharge_time(settings, datetime(2026, 9, 21, 23, 30)),
+                         "списание с сообщением клиенту - не ночью")
+
+
+class _TrackedDB:
+    """База бота, у которой идёт своя аренда клиента 5001."""
+
+    def __init__(self, tg_ids=(5001,)) -> None:
+        self.tg_ids = list(tg_ids)
+        self.reads = 0
+
+    async def active_rentals(self):
+        self.reads += 1
+        return [{"tg_id": t} for t in self.tg_ids]
+
+    async def get_user(self, tg_id):
+        return None
+
+
+class TestOneReminderStream(ScheduleCase):
+    """Аренде, которую завёл бот, напоминали двое: бот по rent_until и CRM
+    по балансу. Теперь о ручной аренде клиента из бота напоминает бот."""
+
+    def manual(self) -> int:
+        rental_id = self.rental(billed_offset=6, balance=D(3000))   # просрочка
+        run(self.crm.update_rental(rental_id, billing="manual"))
+        return rental_id
+
+    def test_bot_rental_is_reminded_by_the_bot_only(self):
+        rental_id = self.manual()
+        self.db = _TrackedDB()
+        done: dict = {}
+        self.pass_at(8, done)
+        self.assertEqual(self.to_client(), [], "напоминает бот, CRM молчит")
+        self.assertIsNone(run(self.crm.rental(rental_id)).get("notified_on"),
+                          "отметку не ставим: молчим вместо бота, а не за клиента")
+        self.assertEqual(done["rent_overdue"], self.today)
+
+    def test_panel_manual_rental_without_bot_rental_is_still_reminded(self):
+        self.manual()
+        self.db = _TrackedDB(tg_ids=())
+        self.pass_at(8, {})
+        self.assertTrue(any("не оплачена" in t for t in self.to_client()))
+
+    def test_auto_rental_is_reminded_by_crm(self):
+        self.rental(billed_offset=6, balance=D(3000))
+        self.db = _TrackedDB()
+        self.pass_at(8, {})
+        self.assertTrue(any("не оплачена" in t for t in self.to_client()))
+        self.assertEqual(self.db.reads, 0, "аренды бота читаются, только если есть ручная")
+
+    def test_unreadable_bot_rentals_mean_crm_reminds(self):
+        """Лучше два напоминания, чем ни одного."""
+        self.manual()
+
+        class Broken(_TrackedDB):
+            async def active_rentals(self):
+                raise RuntimeError("база бота недоступна")
+
+        self.db = Broken()
+        with self.assertLogs("app.crm.billing", "WARNING"):
+            self.pass_at(8, {})
+        self.assertTrue(any("не оплачена" in t for t in self.to_client()))
+
+
 class _LoopDB:
     """База бота для круга напоминаний: считает проходы самого бота."""
 

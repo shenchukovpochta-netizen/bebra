@@ -332,6 +332,30 @@ def reminder_due(rental: dict, *, before_days: int, today: date) -> str | None:
     return kind
 
 
+def bot_reminds(rental: Mapping[str, Any], bot_tg_ids: set[int] | frozenset[int]) -> bool:
+    """О сроке этой аренды клиенту напоминает сам бот, и CRM молчит.
+
+    Аренда, которую завёл бот по акту приёма, - ручная (`rental_from_issue`),
+    и у того же клиента в bot.users идёт её срок `rent_until`: бот шлёт
+    «заканчивается», «последний день» и «просрочка» сам (tasks.remind_once).
+    CRM слала бы о том же своё - два потока одних напоминаний с разными
+    кнопками. Остаётся бот: срок такой аренды ведёт он (оператор называет
+    его формой выдачи и продления, периоды в журнал кладут события бота),
+    его напоминание знает «клиент уже попросил закрыть» и «ждёт оплаты
+    продления» и ведёт кнопкой в это продление. Ручная, заведённая в
+    панели клиенту без аренды в боте, и аренда по тарифу напоминаются из
+    CRM, как раньше. `bot_tg_ids` - tg_id идущих аренд бота
+    (Database.active_rentals).
+    """
+    if rental.get("billing") != "manual" or not rental.get("tg_id"):
+        return False
+    try:
+        tg_id = int(rental["tg_id"])
+    except (TypeError, ValueError):
+        return False
+    return tg_id in bot_tg_ids
+
+
 def digest(rentals: Iterable[dict], *, today: date, before_days: int) -> str:
     """Сводка оператору: кто в долгу и у кого платёж на днях.
 
@@ -7106,8 +7130,14 @@ def autocharge_time(settings: Mapping[str, Any] | None, now: datetime) -> bool:
     """Пора ли дневному проходу автосписания: час настал, а сегодня (по
     местным часам) прохода ещё не было. Отметка - в crm.settings
     (`autocharge_done_on`), а не в памяти цикла: перезапуск бота после
-    часа списания иначе прогонял бы проход второй раз за день."""
-    if now.hour < pay_settings(settings)["autocharge_hour"]:
+    часа списания иначе прогонял бы проход второй раз за день.
+
+    Догоняет только до вечера (too_late_for_clients): списание с карты
+    приходит клиенту сообщением, и после простоя бота оно не должно
+    уходить в половине двенадцатого ночи. Пропущенный день спишется
+    завтра в свой час - долг никуда не денется."""
+    hour = pay_settings(settings)["autocharge_hour"]
+    if now.hour < hour or too_late_for_clients(now.hour, hour):
         return False
     return str((settings or {}).get("autocharge_done_on") or "") != now.date().isoformat()
 
@@ -7178,6 +7208,11 @@ NOTICE_STATUSES: dict[str, str] = {
 # Сколько держим историю отправок. Месяц отвечает на «почему клиент
 # говорит, что ему не написали»; дальше вопрос уже не задают.
 NOTICE_LOG_DAYS = 30
+# Дневное окно сообщений клиенту, местные часы (from, to). Им же меряются
+# вечерняя граница уведомлений по расписанию (too_late_for_clients) и
+# скидка ночного начисления, которая ждёт утра (promo_hours_ok). Вопрос
+# после сдачи - то же окно (FEEDBACK_HOURS): сообщение в 23:40 будит.
+CLIENT_HOURS = (9, 21)
 
 NOTICES: dict[str, dict[str, Any]] = {
     # ─ клиентам ─
@@ -7224,7 +7259,8 @@ NOTICES: dict[str, dict[str, Any]] = {
         "group": "client", "target": "client", "hour": None,
         "title": "Скидка по акции",
         "hint": "Уходит сразу, как акция сработала: на выдаче или при "
-                "начислении периода.",
+                "начислении периода. Ночное начисление (сразу после "
+                "полуночи) ждёт утра: скидка уходит с 9:00.",
     },
     "estimate_sent": {
         "group": "client", "target": "client", "hour": None,
@@ -7526,6 +7562,14 @@ def notice_time(setting: Mapping[str, Any] | None) -> str:
     return f"{int(setting['at_hour']):02d}:{int(setting.get('at_minute') or 0):02d}"
 
 
+def too_late_for_clients(now_hour: int, start_hour: int) -> bool:
+    """Поздно ли догонять сообщение клиенту или в канал, чей час
+    `start_hour`. Граница - конец дневного окна (CLIENT_HOURS), а час,
+    который владелец сам поставил на вечер, догоняется только в пределах
+    своего часа: иначе такое уведомление не уходило бы никогда."""
+    return now_hour >= max(CLIENT_HOURS[1], int(start_hour) + 1)
+
+
 def notice_due(setting: Mapping[str, Any] | None, now: datetime,
                done_on: date | None = None) -> bool:
     """Пора ли отправлять уведомление по расписанию.
@@ -7533,6 +7577,12 @@ def notice_due(setting: Mapping[str, Any] | None, now: datetime,
     Не «ровно в этот час», а «в этот час или позже, если сегодня ещё не
     отправляли»: бота перезапускают среди дня, и привязка к минуте молча
     съедала бы уведомления за целые сутки.
+
+    Догоняет клиентское и канальное только до вечера (too_late_for_clients):
+    бот, поднятый в 23:30 после простоя, слал бы напоминание об оплате,
+    просьбу об отзыве и пост о свободных велосипедах на ночь глядя.
+    Пропущенное сегодня уходит завтра в свой час - отметка дня не
+    ставится. Команде - без границы: служебный чат читают и вечером.
     """
     if not setting or not setting.get("enabled"):
         return False
@@ -7542,7 +7592,52 @@ def notice_due(setting: Mapping[str, Any] | None, now: datetime,
     if done_on == now.date():
         return False
     minutes_now = now.hour * 60 + now.minute
-    return minutes_now >= int(hour) * 60 + int(setting.get("at_minute") or 0)
+    if minutes_now < int(hour) * 60 + int(setting.get("at_minute") or 0):
+        return False
+    if setting.get("target") in ("client", "channel"):
+        return not too_late_for_clients(now.hour, int(hour))
+    return True
+
+
+def promo_hours_ok(setting: Mapping[str, Any] | None, now: datetime) -> bool:
+    """Днём ли говорить клиенту о скидке, которую дало начисление.
+    Начисляет дневной проход в первом круге суток, сразу после полуночи, и
+    «скидка по акции» в 00:05 будила бы - такие ждут утра в очереди."""
+    return notice_hours_ok(setting, now, CLIENT_HOURS)
+
+
+# Сколько скидок держит ночная очередь. Одна на период аренды - столько
+# за ночь не набирается и у большого парка; предел - от мусора в строке.
+PROMO_QUEUE_MAX = 500
+
+
+def promo_queue_item(got: Mapping[str, Any]) -> dict[str, Any]:
+    """Сработавшая акция - в строку очереди: только номера и сумма. Акцию
+    перечитывают при отправке, клиента тоже - в настройке им не место."""
+    return {"client_id": int(got["client_id"]), "promo_id": int(got["promo"]["id"]),
+            "amount": str(to_money(got["amount"])),
+            "period_index": int(got.get("period_index") or 0)}
+
+
+def parse_promo_queue(raw: Any) -> list[dict[str, Any]]:
+    """Очередь скидок из crm.settings. Мусор отбрасывается построчно, а не
+    роняет проход: сломанная строка не должна держать остальных."""
+    try:
+        data = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append({"client_id": int(item["client_id"]),
+                        "promo_id": int(item["promo_id"]),
+                        "amount": to_money(item["amount"]),
+                        "period_index": int(item.get("period_index") or 0)})
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue
+    return out[-PROMO_QUEUE_MAX:]
 
 
 def notice_rows(settings: Mapping[str, Mapping[str, Any]],
@@ -7903,7 +7998,8 @@ FEEDBACK_ASK_HOURS = 48
 # Окно вопроса, местные часы (параметры уведомления «feedback_ask»):
 # сдача днём и вечером спрашивается сразу, а закрытие, которое оператор
 # провёл за полночь, ждёт утра - сообщение о вчерашней сдаче в 23:40 будит.
-FEEDBACK_HOURS = (9, 21)
+# Окно общее для сообщений клиенту (CLIENT_HOURS).
+FEEDBACK_HOURS = CLIENT_HOURS
 # Сигнал о низкой оценке ждёт комментарий: одно сообщение «2 из 5, есть
 # комментарий» лучше двух подряд.
 FEEDBACK_ALERT_WAIT_MINUTES = 10

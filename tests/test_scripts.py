@@ -99,6 +99,62 @@ class TestScripts(unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual(r.stdout, want, env)
 
+    def test_install_drops_https_without_domains(self):
+        """Домены убрали - Caddy без сайта только держал бы 80 и 443."""
+        text = (ROOT / "install.sh").read_text(encoding="utf-8")
+        start = text.index('DEMO_DOMAIN="${DEMO_DOMAIN:-}"\n')
+        end = text.index("add_profile demo; fi\n", start) + len("add_profile demo; fi\n")
+        block = text[start:end]
+        with tempfile.TemporaryDirectory() as tmp:
+            for profiles, want in (("https,max", "max"), ("max,https,x", "max,x"),
+                                   ("https", ""), ("", "")):
+                r = _bash(f'set -euo pipefail; CRM_DOMAIN=""; DEMO_DOMAIN=""; '
+                          f'COMPOSE_PROFILES="{profiles}"; {block}'
+                          f'printf %s "$COMPOSE_PROFILES"', tmp)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout, want, profiles)
+
+    def test_install_asks_for_the_domain_and_keeps_the_old_one(self):
+        """Домен панели молча подставлялся владельца: https, сертификат
+        Caddy и подписка WhatsApp - на чужой адрес. Теперь спрашивается:
+        Enter - прежний из .env, «-» - без домена, пусто - без домена."""
+        text = (ROOT / "install.sh").read_text(encoding="utf-8")
+        ask = re.search(r"(?ms)^ask\(\) \{\n.*?^\}\n", text).group()
+        start = text.index("ask CRM_DOMAIN ")
+        end = text.index('if [ "$CRM_DOMAIN" = "-" ]; then CRM_DOMAIN=""; fi\n', start)
+        block = text[start:end] + 'if [ "$CRM_DOMAIN" = "-" ]; then CRM_DOMAIN=""; fi\n'
+        cases = (("crm.old.ru", "\n", "crm.old.ru"), ("crm.old.ru", "-\n", ""),
+                 ("", "\n", ""), ("", "https://crm.x.ru\ncrm.x.ru\n", "crm.x.ru"))
+        with tempfile.TemporaryDirectory() as tmp:
+            for current, typed, want in cases:
+                r = subprocess.run(
+                    ["bash", "-c", f'set -euo pipefail; warn() {{ :; }}; die() {{ exit 9; }}\n'
+                                   f'{ask}CRM_DOMAIN="{current}"\n{block}'
+                                   f'printf "[%s]" "$CRM_DOMAIN"'],
+                    cwd=tmp, input=typed, capture_output=True, text=True,
+                    env={**os.environ, "LC_ALL": "C.UTF-8"})
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(r.stdout.endswith(f"[{want}]"), (current, typed, r.stdout))
+
+    def test_no_owner_values_by_default(self):
+        """Ссылка на оплату и домен владельца жили умолчаниями install.sh и
+        .env.example: франчайзи, нажавший Enter, принимал деньги клиентов
+        на чужой счёт и просил сертификат на чужой домен."""
+        from app import faq
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        for name, text in (("install.sh", install), (".env.example", example)):
+            self.assertNotIn(faq.PAY_URL, text, name)
+            self.assertNotIn(faq.PAY_URL.split("?")[0], text, name)
+        self.assertIsNone(re.search(r"\$\{PAY_URL:?[-=]", install),
+                          "у ссылки на оплату нет умолчания")
+        self.assertRegex(install, r'(?m)^ask PAY_URL ', "ссылку спрашивают")
+        self.assertRegex(install, r'(?m)^CRM_DOMAIN="\$\{CRM_DOMAIN:-\}"$')
+        env = dict(re.findall(r'(?m)^([A-Z][A-Z0-9_]*)="(.*)"$', example))
+        self.assertEqual(env["CRM_DOMAIN"], "")
+        self.assertEqual(env["COMPOSE_PROFILES"], "", "без домена https не нужен")
+        self.assertRegex(env["PAY_URL"], r"^https://\S+X{8,}$", "явная заглушка")
+
     def test_bootstrap_makes_demo_secrets_always(self):
         """Секреты демо объявлены в compose на уровне файла: без файлов не
         поднялся бы и боевой стек, даже без профиля demo."""
@@ -376,6 +432,19 @@ class TestUpdate(unittest.TestCase):
         self.assertNotIn("прежний архив", r.stdout)
 
     @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
+    def test_rollback_starts_in_the_project_directory(self):
+        """Обновление запускают из /root (INSTALL.md), а пути отката -
+        backups/…, bootstrap.sh, docker compose - от каталога проекта:
+        скопированный из терминала откат промахивался мимо проекта."""
+        r = self.run_update(str(self.archive()))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        cd = f'cd "{self.server.resolve()}"'
+        self.assertIn(cd, r.stdout)
+        self.assertLess(r.stdout.index(cd), r.stdout.index("--profile max stop"))
+        commands = rollback_commands()
+        self.assertEqual(commands[0], 'cd "/opt/mybike-bot"', "первая команда отката")
+
+    @unittest.skipUnless(shutil.which("rsync"), "нужен rsync")
     def test_update_keeps_settings_documents_and_backups(self):
         import gzip
         r = self.run_update(str(self.archive()))
@@ -460,6 +529,7 @@ def rollback_commands(max_up: bool = False) -> list[str]:
         extra = {"MAX_UP": "1", "MAX_LINE": "\n" + line}
     r = subprocess.run(["bash", "-c", f"{func}\nrollback"], capture_output=True, text=True,
                        env={**os.environ, "LC_ALL": "C.UTF-8", "DB_USER": "mb",
+                            "PROJECT": "/opt/mybike-bot",
                             "DB_NAME": "mbdb", "DUMP": "backups/pre-update.sql.gz",
                             "CODE": "backups/pre-update-code.tar.gz", **extra})
     lines = [x.strip() for x in r.stdout.replace("\\\n", " ").splitlines()
@@ -741,6 +811,28 @@ class TestCaddyfile(unittest.TestCase):
         self.assertEqual(panel.count("method POST"), 2)
         self.assertIn("@narrow not {", panel)
 
+    def test_token_in_the_address_is_masked_in_the_log(self):
+        """Ошибка прокси (панель перезапускается - 502) пишет в лог запрос с
+        полным uri, а в нём токен хука WhatsApp и ссылки на подпись. Фильтр
+        стоит в глобальных опциях, на логгере по умолчанию; регулярка - RE2,
+        здесь она же через re (для этого выражения синтаксис общий)."""
+        out, _ = self.build("crm.x.ru", "")
+        options = out[:out.index("crm.x.ru {")]
+        m = re.search(r"\n\tlog \{\n\t\tformat filter \{\n\t\t\tfields \{\n"
+                      r"\t\t\t\trequest>uri regexp (\S+) (\S+)\n\t\t\t\}\n\t\t\}\n\t\}\n\}\n$",
+                      options)
+        self.assertIsNotNone(m, options)
+        pattern, value = re.compile(m.group(1)), m.group(2).replace("$1", r"\1")
+        token = "a" * 64
+        cases = {f"/hook/inbox/{token}": "/hook/inbox/REDACTED",
+                 f"/sign/{token}": "/sign/REDACTED",
+                 f"/sign/{token}/doc/1?x=1": "/sign/REDACTED/doc/1?x=1",
+                 f"/login?next=/sign/{token}": "/login?next=/sign/REDACTED",
+                 "/hook/inbox": "/hook/inbox", "/signings/5": "/signings/5",
+                 "/rentals/7/close": "/rentals/7/close", "/hook/metrics": "/hook/metrics"}
+        for uri, want in cases.items():
+            self.assertEqual(pattern.sub(value, uri), want, uri)
+
     @unittest.skipUnless(shutil.which("caddy"), "нет caddy в PATH")
     def test_real_caddy_accepts_the_file(self):
         """С настоящим caddy (если он есть рядом): файл разбирается, у
@@ -754,6 +846,12 @@ class TestCaddyfile(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.count('"max_size":51000000'), 1)
         self.assertEqual(r.stdout.count('"max_size":22000000'), 1)
+        # Фильтр токена - на логгере по умолчанию (JSON экранирует «>»).
+        import json
+        logs = json.loads(r.stdout)["logging"]["logs"]["default"]["encoder"]
+        self.assertEqual(logs["format"], "filter")
+        uri = logs["fields"]["request>uri"]
+        self.assertEqual((uri["filter"], uri["value"]), ("regexp", "/$1/REDACTED"))
 
 
 class TestConsistencyDemoGuard(unittest.TestCase):

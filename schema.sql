@@ -2244,6 +2244,40 @@ create unique index if not exists tracker_commands_one_pending
 create index if not exists tracker_commands_idx
   on crm.tracker_commands (tracker_id, requested_at desc);
 
+-- Дошла ли тревога или ответ на команду до служебного чата. Тревога
+-- поднимается один раз (частичный уникальный индекс), и сводка, не
+-- доставленная с первого круга, пропадала из чата насовсем: повторить её
+-- было не из чего. Теперь опрос каждый круг шлёт то, чего чат ещё не видел
+-- (`reported_at is null`), а `report_tries` держит предел попыток: сводку,
+-- которую Telegram отвергает, нельзя слать вечно - за ней стояли бы все
+-- следующие. Колонка заводится один раз: что было до неё, считается
+-- доставленным, иначе первый круг после обновления вывалил бы в чат всю
+-- историю. Команда, ещё не отнесённая в StarLine, остаётся недоставленной:
+-- ответ на неё оператор ещё не видел.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'crm' and table_name = 'tracker_alerts'
+                    and column_name = 'reported_at') then
+    alter table crm.tracker_alerts add column reported_at timestamptz;
+    update crm.tracker_alerts set reported_at = created_at;
+  end if;
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'crm' and table_name = 'tracker_commands'
+                    and column_name = 'reported_at') then
+    alter table crm.tracker_commands add column reported_at timestamptz;
+    update crm.tracker_commands set reported_at = sent_at where sent_at is not null;
+  end if;
+end $$;
+alter table crm.tracker_alerts add column if not exists report_tries smallint not null
+  default 0;
+alter table crm.tracker_commands add column if not exists report_tries smallint not null
+  default 0;
+create index if not exists tracker_alerts_unreported_idx
+  on crm.tracker_alerts (created_at) where reported_at is null and handled_at is null;
+create index if not exists tracker_commands_unreported_idx
+  on crm.tracker_commands (sent_at) where reported_at is null and sent_at is not null;
+
 -- ────── просьба об отзыве, отказы карты, одна заявка на клиента ──────
 --
 -- Три мелочи, каждая из которых чинит своё тихое неудобство.

@@ -202,6 +202,106 @@ class TestStarlineParsing(unittest.TestCase):
         _run(client.devices(now=10.0))
         self.assertEqual(len(calls), 1)
 
+    def starline(self, script):
+        """Клиент на заглушке: `script(url, cookie)` отвечает (data, status,
+        cookies); cookie - та, с которой пришёл запрос."""
+        calls: list[str] = []
+
+        class Response:
+            def __init__(self, data, status=200, cookies=None):
+                self._data, self.status = data, status
+                self.cookies = cookies or {}
+                self.headers = {}
+
+            async def json(self, content_type=None):
+                return self._data
+
+        class Session:
+            async def request(self, method, url, **kwargs):
+                calls.append(url.rsplit("/", 1)[-1] or url.rsplit("/", 2)[-2])
+                if url.endswith("getCode/"):
+                    return Response({"state": 1, "desc": {"code": "CODE"}})
+                if url.endswith("getToken/"):
+                    return Response({"state": 1, "desc": {"token": "APP"}})
+                if url.endswith("user/login/"):
+                    return Response({"state": 1, "desc": {"user_token": "SLID"}})
+                sent = (kwargs.get("headers") or {}).get("Cookie", "")
+                return Response(*script(url, sent.removeprefix("slnet=")))
+
+            async def close(self):
+                pass
+
+        client = starline.StarlineClient(app_id="1", app_secret="s", login="l",
+                                         password="p", session_factory=Session)
+        return client, calls
+
+    def test_refusal_in_the_body_logs_in_again(self):
+        """StarLine отвечает об отказе телом: HTTP 200 и code 401. Клиент
+        видел «нет устройств», а cookie и user_id оставались прежними - и
+        каждый круг опроса падал на том же до перезапуска бота."""
+        state = {"cookie": "OLD", "dead": {"OLD"}}
+
+        def script(url, cookie):
+            if url.endswith("auth.slid"):
+                return {"user_id": "42"}, 200, {"slnet": state["cookie"]}
+            return (({"code": 401, "codestring": "Unauthorized"}, 200, None)
+                    if cookie in state["dead"]
+                    else ({"code": 200, "devices": [{"device_id": 1}]}, 200, None))
+
+        client, calls = self.starline(script)
+        state["cookie"] = "NEW"                  # следующий вход даст живую
+        client._slnet, client._user_id = "OLD", "42"
+        client._user_token, client._user_token_at = "SLID", 0.0
+        client._app_token, client._app_token_at = "APP", 0.0
+        devices = _run(client.devices(now=10.0))
+        self.assertEqual([d["device_id"] for d in devices], ["1"])
+        self.assertEqual(client._slnet, "NEW", "отказ телом - повторный вход в том же круге")
+
+        # Вход не помогает (пароль сменили): круг падает, но вход забыт
+        # целиком - следующий круг идёт с нуля, а не с мёртвой cookie.
+        state["dead"].add("NEW")
+        with self.assertRaises(starline.StarlineError):
+            _run(client.devices(now=20.0))
+        self.assertEqual((client._slnet, client._user_id, client._user_token), ("", "", ""))
+        calls.clear()
+        state["cookie"] = "FRESH"
+        self.assertEqual(len(_run(client.devices(now=30.0))), 1)
+        self.assertIn("login", " ".join(calls), "пользователь входит заново")
+
+    def test_failed_auth_slid_forgets_the_user_token(self):
+        """auth.slid отверг токен пользователя - без сброса клиент сутки
+        (USER_TOKEN_TTL) ходил бы с тем же токеном и тем же отказом."""
+        answers = {"slid": ({"code": 401}, 200, None)}
+
+        def script(url, cookie):
+            if url.endswith("auth.slid"):
+                return answers["slid"]
+            return {"devices": []}, 200, None
+
+        client, calls = self.starline(script)
+        with self.assertRaises(starline.StarlineError):
+            _run(client.devices(now=0.0))
+        self.assertEqual((client._user_token, client._slnet, client._user_id), ("", "", ""))
+        answers["slid"] = ({"user_id": "42"}, 200, {"slnet": "C"})
+        calls.clear()
+        self.assertEqual(_run(client.devices(now=5.0)), [])
+        self.assertIn("login", " ".join(calls), "новый токен пользователя, а не прежний")
+
+    def test_device_refusal_403_is_not_a_login_problem(self):
+        """403 в теле у set_param - «устройство не на связи», а не отказ
+        входа: вход не сбрасывается, слова StarLine доходят до оператора."""
+        def script(url, cookie):
+            if url.endswith("auth.slid"):
+                return {"user_id": "42"}, 200, {"slnet": "C"}
+            return {"code": 403, "codestring": "Device offline"}, 200, None
+
+        client, calls = self.starline(script)
+        with self.assertRaises(starline.StarlineError) as ctx:
+            _run(client.block_motor("1001", True, now=0.0))
+        self.assertIn("Device offline", str(ctx.exception))
+        self.assertEqual(client._slnet, "C")
+        self.assertEqual(sum(1 for c in calls if c == "set_param"), 1, "без повтора")
+
     def test_client_without_credentials_does_nothing(self):
         client = starline.StarlineClient(app_id="", app_secret="", login="",
                                          password="")
@@ -404,6 +504,64 @@ class TestTrackingPoll(tw.WebCase):
         sent = tw.run(tracking.report_alerts(self.bot, chat, out["alerts"]))
         self.assertEqual(sent, 1)
         self.assertIn("Тревога StarLine", self.bot.sent[-1][1])
+
+    def test_undelivered_alert_is_retried_and_capped(self):
+        """Тревога поднимается один раз: сводка, не ушедшая с первого
+        круга, пропадала из чата насовсем. Теперь недоставленное шлётся
+        следующими кругами - но не вечно."""
+        from aiogram.exceptions import TelegramNetworkError
+        from aiogram.methods import SendMessage
+
+        class Down:
+            def __init__(self):
+                self.tries = 0
+
+            async def send_message(self, chat_id, text, reply_markup=None):
+                self.tries += 1
+                raise TelegramNetworkError(SendMessage(chat_id=chat_id, text=text),
+                                           "сеть легла")
+
+        chat = types.SimpleNamespace(contract_chat_id=-100500)
+        self.poll([self.device()])
+        self.poll([self.device(alarm=True)])
+        down = Down()
+        with self.assertLogs("app.crm.tracking", "ERROR"):
+            self.assertEqual(tw.run(tracking.report_pending(down, self.crm, chat)), (0, 0))
+        alert = tw.run(self.crm.tracker_alerts())[0]
+        self.assertIsNone(alert["reported_at"])
+        self.assertEqual(alert["report_tries"], 1)
+        # Следующий круг: Telegram поднялся - сводка уходит, и один раз.
+        self.poll([self.device(alarm=True)])
+        self.assertEqual(tw.run(tracking.report_pending(self.bot, self.crm, chat)), (0, 1))
+        self.assertIn("Тревога StarLine", self.bot.sent[-1][1])
+        self.assertEqual(tw.run(tracking.report_pending(self.bot, self.crm, chat)), (0, 0))
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertIsNotNone(tw.run(self.crm.tracker_alerts())[0]["reported_at"])
+
+        # Сводку, которую Telegram не принимает, не шлём вечно.
+        tracker_row = tw.run(self.crm.tracker_by_device("1001"))
+        tw.run(self.crm.raise_alert(tracker_id=tracker_row["id"], kind="offline",
+                                    note=None, bike_id=None, lat=None, lon=None))
+        down = Down()
+        with self.assertLogs("app.crm.tracking", "ERROR"):
+            for _ in range(tracking.REPORT_TRIES + 3):
+                tw.run(tracking.report_pending(down, self.crm, chat, tries=3))
+        self.assertEqual(down.tries, 3)
+
+    def test_closed_or_handled_alert_is_not_posted_late(self):
+        """Причина исчезла или оператор уже разобрал тревогу в панели -
+        догонять её в чат незачем."""
+        chat = types.SimpleNamespace(contract_chat_id=-100500)
+        self.poll([self.device()])
+        self.poll([self.device(alarm=True)])
+        alert = tw.run(self.crm.tracker_alerts())[0]
+        tw.run(self.crm.set_alert_state(alert["id"], state="working", by="t"))
+        self.assertEqual(tw.run(tracking.report_pending(self.bot, self.crm, chat)), (0, 0))
+        self.poll([self.device(alarm=False)])
+        self.poll([self.device(alarm=True)])          # новая тревога
+        self.poll([self.device(alarm=False)])         # и снова закрыта
+        self.assertEqual(tw.run(tracking.report_pending(self.bot, self.crm, chat)), (0, 0))
+        self.assertEqual(self.bot.sent, [])
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")

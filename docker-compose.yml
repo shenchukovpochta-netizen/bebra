@@ -351,7 +351,8 @@ services:
   # путям не делится: шесть фото при сдаче (до 48 МБ) оператор шлёт с
   # телефона на точке, и при 1 Мбит/с это минут шесть - на двух минутах
   # закрытие обрывалось, не дойдя до панели. Медленный заголовок режет
-  # read_header.
+  # read_header. Лог Caddy - с фильтром: токен в адресе (/hook/inbox/…,
+  # /sign/…) заменяется на REDACTED, иначе ошибка прокси писала бы его.
   caddy:
     image: caddy:2-alpine
     profiles: [https]
@@ -374,7 +375,13 @@ services:
             "$$1" "$$wide" "$$wide" "$$4" "$$3" "$$2"
         }
         {
-          printf '{\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 600s\n\t\t}\n\t}\n}\n'
+          printf '{\n\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 600s\n\t\t}\n\t}\n'
+          # Токен в адресе - не в лог: ошибка прокси (панель перезапускается,
+          # 502) пишет запрос с полным uri, а это /hook/inbox/<токен> Wazzup и
+          # /sign/<токен> ссылки на подпись. Фильтр - на логгере по
+          # умолчанию, куда идут и http.log.error, и reverse_proxy.
+          printf '\tlog {\n\t\tformat filter {\n\t\t\tfields {\n\t\t\t\trequest>uri regexp %s /$$1/REDACTED\n\t\t\t}\n\t\t}\n\t}\n}\n' \
+            '/(hook/inbox|sign)/[^/?]+'
           if [ -n "$${CRM_DOMAIN}" ]; then panel "$${CRM_DOMAIN}" crm:8080 22MB 51MB; fi
         } > /tmp/Caddyfile
         if [ -n "$${DEMO_DOMAIN}" ]; then

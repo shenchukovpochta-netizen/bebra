@@ -86,6 +86,29 @@ class TestNoticeLogic(unittest.TestCase):
         self.assertFalse(logic.notice_due(off["daily_digest"],
                                           datetime(2026, 9, 17, 21, 0)))
 
+    def test_client_and_channel_catch_up_only_until_evening(self):
+        """«В этот час или позже» догоняло до 23:59: после простоя бота
+        напоминание об оплате и пост в канал уходили в 23:30. Клиенту и в
+        канал - до конца дневного окна, команде - без границы."""
+        state = logic.notice_settings([])
+        self.assertEqual(logic.CLIENT_HOURS, logic.FEEDBACK_HOURS,
+                         "окно то же, что у вопроса после сдачи")
+        for code in ("rent_due", "review_ask", "free_bikes"):
+            self.assertTrue(logic.notice_due(state[code], datetime(2026, 9, 17, 20, 59)),
+                            code)
+            self.assertFalse(logic.notice_due(state[code], datetime(2026, 9, 17, 21, 0)),
+                             code)
+            self.assertFalse(logic.notice_due(state[code], datetime(2026, 9, 17, 23, 30)),
+                             code)
+        self.assertTrue(logic.notice_due(state["integrity"], datetime(2026, 9, 17, 23, 30)),
+                        "команде вечером - можно")
+        # Час, который владелец сам поставил на вечер, уходит в свой час,
+        # но не догоняется до полуночи.
+        late = logic.notice_settings([{"code": "review_ask", "enabled": True,
+                                       "at_hour": 22}])["review_ask"]
+        self.assertTrue(logic.notice_due(late, datetime(2026, 9, 17, 22, 10)))
+        self.assertFalse(logic.notice_due(late, datetime(2026, 9, 17, 23, 10)))
+
     def test_rows_are_grouped_and_counted(self):
         rows = logic.notice_rows(logic.notice_settings([]), {"rent_due": 12})
         self.assertEqual(set(rows), set(logic.NOTICE_GROUPS))

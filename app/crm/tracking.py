@@ -7,7 +7,9 @@
 Тревога поднимается один раз и висит, пока оператор её не снимет или
 пока причина не исчезнет сама: велосипед вернулся на связь, уехал в
 аренду, питание восстановилось. Иначе каждые пять минут в чат падало бы
-одно и то же, и через неделю чат перестают читать.
+одно и то же, и через неделю чат перестают читать. В чат она уходит по
+отметке в базе (`reported_at`), а не из памяти круга: сводка, которую
+Telegram не принял, повторяется следующими кругами (REPORT_TRIES).
 
 Команды устройству (блокировка мотора) идут тем же путём, только в
 обратную сторону: панель кладёт команду в очередь, опрос относит её в
@@ -32,6 +34,12 @@ log = logging.getLogger(__name__)
 # Пять минут - компромисс: StarLine отдаёт позицию не чаще, а чаще
 # спрашивать значит жечь лимиты их API ради той же точки.
 POLL_SECONDS = 300
+# Сколько кругов подряд пробовать донести до чата тревогу или ответ на
+# команду, если сводка не ушла. Час при опросе раз в пять минут: Telegram
+# за это время поднимается, а сводка, которую он отвергает, не должна
+# вечно стоять впереди всех следующих тревог. Тревога при этом не теряется
+# - она открыта в панели.
+REPORT_TRIES = 12
 
 
 async def send_commands(crm: Any, client: Any, *, now: datetime | None = None) -> list[dict]:
@@ -114,20 +122,29 @@ async def poll_once(crm: Any, client: Any, *, now: datetime | None = None) -> di
     return {"devices": seen, "alerts": fresh, "commands": commands}
 
 
-async def report_alerts(bot: Any, cfg: Any, alerts: list[dict]) -> int:
+async def report_alerts(bot: Any, cfg: Any, alerts: list[dict], *,
+                        crm: Any = None) -> int:
     """Новые тревоги - одной сводкой в служебный чат.
 
     Срочные и жёлтые идут одним сообщением: два сообщения подряд читают
-    так же, как одно, а разделять их значит завести второй чат.
+    так же, как одно, а разделять их значит завести второй чат. С `crm`
+    исход ложится на тревоги (reported_at или ещё одна попытка): тревога
+    поднимается один раз, и недоставленная сводка без этой отметки
+    пропадала из чата насовсем.
     """
     digest = logic.tracker_digest(alerts)
     if not digest:
         return 0
+    ids = [int(a["id"]) for a in alerts if a.get("id") is not None]
     try:
         await bot.send_message(cfg.contract_chat_id, digest)
     except TelegramAPIError:
         log.exception("сводка по трекерам не доставлена")
+        if crm is not None:
+            await crm.mark_alerts_reported(ids, ok=False)
         return 0
+    if crm is not None:
+        await crm.mark_alerts_reported(ids, ok=True)
     return len(alerts)
 
 
@@ -146,16 +163,37 @@ def commands_digest(commands: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def report_commands(bot: Any, cfg: Any, commands: list[dict]) -> int:
+async def report_commands(bot: Any, cfg: Any, commands: list[dict], *,
+                          crm: Any = None) -> int:
+    """Ответ StarLine на команды - в служебный чат; с `crm` исход ложится
+    на команды, как у тревог (report_alerts)."""
     text = commands_digest(commands)
     if not text:
         return 0
+    ids = [int(c["id"]) for c in commands if c.get("id") is not None]
     try:
         await bot.send_message(cfg.contract_chat_id, text)
     except TelegramAPIError:
         log.exception("ответ на команды трекерам не доставлен")
+        if crm is not None:
+            await crm.mark_commands_reported(ids, ok=False)
         return 0
+    if crm is not None:
+        await crm.mark_commands_reported(ids, ok=True)
     return len(commands)
+
+
+async def report_pending(bot: Any, crm: Any, cfg: Any, *,
+                         tries: int = REPORT_TRIES) -> tuple[int, int]:
+    """В чат - всё, чего он ещё не видел: ответы на команды и открытые
+    тревоги. Берётся из базы, а не из итогов круга: сводка, не ушедшая
+    на прошлом круге, и круг, оборвавшийся после записи тревог или
+    команд, догоняются следующим. Возвращает (команд, тревог)."""
+    commands = await crm.unreported_tracker_commands(max_tries=tries)
+    told_commands = await report_commands(bot, cfg, commands, crm=crm)
+    alerts = await crm.unreported_tracker_alerts(max_tries=tries)
+    told_alerts = await report_alerts(bot, cfg, alerts, crm=crm)
+    return told_commands, told_alerts
 
 
 async def tracking_loop(bot: Any, crm: Any, cfg: Any, client: Any, *,
@@ -168,10 +206,6 @@ async def tracking_loop(bot: Any, crm: Any, cfg: Any, client: Any, *,
     while True:
         try:
             result = await poll_once(crm, client)
-            if result.get("commands"):
-                await report_commands(bot, cfg, result["commands"])
-            if result["alerts"]:
-                await report_alerts(bot, cfg, result["alerts"])
             log.info("трекеры: устройств %s, новых тревог %s, команд %s",
                      result["devices"], len(result["alerts"]),
                      len(result.get("commands") or []))
@@ -179,4 +213,12 @@ async def tracking_loop(bot: Any, crm: Any, cfg: Any, client: Any, *,
             raise
         except Exception:                               # noqa: BLE001
             log.exception("опрос трекеров не удался, повтор через %s с", interval)
+        # Свой try: StarLine лежит - а недоставленное с прошлых кругов
+        # всё равно пробуем донести.
+        try:
+            await report_pending(bot, crm, cfg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                               # noqa: BLE001
+            log.exception("сводка по трекерам не собрана")
         await asyncio.sleep(interval)

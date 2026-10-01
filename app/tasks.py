@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramAPIError
 from . import i18n, logic, texts
 from . import keyboards as kb
 from .config import Config
+from .crm import logic as crm_logic
 from .crm import points
 from .db import Database, utcnow
 from .services import files
@@ -212,11 +213,18 @@ def due_today(now: datetime, last_run_on: date | None, hour: int,
     (Europe/Moscow, `tz` - для тестов): по дате UTC перезапуск между
     00:00 и 03:00 по Москве видел «вчера, час уже прошёл» и делал проход
     ночью.
+
+    И не позже вечера (crm_logic.too_late_for_clients, то же окно, что у
+    уведомлений CRM): проход шлёт клиентам «аренда заканчивается» и акты
+    выкупа, и бот, поднятый в 23:30 после простоя, будил бы их. Сегодня
+    тогда пропускается, завтра проход идёт в свой час.
     """
     if not 0 <= hour <= 23:
         return False
     local = now.astimezone(tz)
     start = datetime.combine(local.date(), time(hour), tzinfo=UTC).astimezone(tz).hour
+    if crm_logic.too_late_for_clients(local.hour, start):
+        return False
     return local.hour >= start and last_run_on != local.date()
 
 
