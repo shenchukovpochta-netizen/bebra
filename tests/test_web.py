@@ -162,6 +162,31 @@ class TestAuth(WebCase):
         r = self.client.post("/staff", data={"login": "x", "password": "password-2"})
         self.assertEqual(r.status_code, 403)
 
+    def test_staff_page_changes_role_by_button_only(self):
+        """Стрелка на списке ролей в фокусе меняла значение и отправляла
+        форму: одно нажатие клавиши давало «Владельца». Теперь - кнопкой."""
+        self.login()
+        run(self.crm.create_staff("ivan", logic.hash_password("password-1"), "Иван",
+                                  "manager"))
+        page = self.get_ok("/staff")
+        self.assertNotIn("this.form.submit()", page)
+        self.assertIn(">Сменить</button>", page)
+
+    def test_add_link_opens_the_dialog_without_script(self):
+        self.login()
+        self.assertNotRegex(self.get_ok("/staff"), r'id="add-staff"[^>]*\bopen\b')
+        self.assertRegex(self.get_ok("/staff?add=1"), r'id="add-staff"[^>]*\bopen\b')
+
+    def test_no_default_role_is_full_access(self):
+        """Удалили «Администратора» - в окне добавления не отмечено ничего,
+        а не первая роль списка: полные права выбирают руками."""
+        self.login()
+        manager = run(self.crm.access_profile_by_code("manager"))
+        run(self.crm.delete_access_profile(manager["id"]))
+        owner = run(self.crm.access_profile_by_code("owner"))
+        page = self.get_ok("/staff")
+        self.assertNotRegex(page, rf'name="profile_id" value="{owner["id"]}"[^>]*checked')
+
     def test_admin_adds_staff_and_changes_password(self):
         self.login()
         manager = run(self.crm.access_profile_by_code("manager"))
@@ -281,6 +306,50 @@ class TestPages(WebCase):
         self.assertIn("закрыта", self.bot.sent[-1][1])
         self.assertIn("царапина", self.get_ok(f"/rentals/{rental['id']}"))
         self.assertIn("Закрытые", self.get_ok("/rentals?status=closed"))
+
+    def test_rental_start_far_from_today_is_refused(self):
+        """Опечатка в годе (2025 вместо 2026) начислила бы разом все
+        прошедшие периоды: дальше месяца в обе стороны - отказ."""
+        for started in (date.today() - timedelta(days=logic.RENTAL_BACKDATE_DAYS + 1),
+                        date.today() + timedelta(days=logic.RENTAL_AHEAD_DAYS + 1)):
+            self.client.post("/rentals", data={"client_id": self.client_id,
+                                               "bike_id": self.bike_id,
+                                               "tariff_id": self.tariff_id,
+                                               "started_on": started.isoformat(),
+                                               "billing": "auto"})
+            self.assertIn("проверьте год", self.get_ok("/rentals/new"))
+        self.assertIsNone(run(self.crm.active_rental_of(self.client_id)))
+        self.assertEqual(run(self.crm.client_balance(self.client_id)), D(0))
+        page = self.get_ok("/rentals/new")
+        self.assertIn('min="' + (date.today() - timedelta(
+            days=logic.RENTAL_BACKDATE_DAYS)).isoformat() + '"', page)
+
+    def test_manual_billing_needs_money_edit(self):
+        """Ручное начисление - аренда без биллинга: администратору без
+        права на записи в журнал её не завести и в неё не перевести."""
+        manager = run(self.crm.access_profile_by_code("manager"))
+        run(self.crm.create_staff("ivan", logic.hash_password("password-1"), "Иван",
+                                  "manager", manager["id"]))
+        self.login("ivan", "password-1")
+        self.assertNotIn('name="billing"', self.get_ok("/rentals/new"))
+        r = self.client.post("/rentals", data={"client_id": self.client_id,
+                                               "bike_id": self.bike_id,
+                                               "tariff_id": self.tariff_id,
+                                               "started_on": date.today().isoformat(),
+                                               "billing": "manual"})
+        self.assertEqual(r.status_code, 403)
+        self.assertIsNone(run(self.crm.active_rental_of(self.client_id)))
+        r = self.client.post("/rentals", data={"client_id": self.client_id,
+                                               "bike_id": self.bike_id,
+                                               "tariff_id": self.tariff_id,
+                                               "started_on": date.today().isoformat()})
+        self.assertEqual(r.status_code, 303)
+        rental = run(self.crm.active_rental_of(self.client_id))
+        self.assertEqual(rental["billing"], "auto")
+        r = self.client.post(f"/rentals/{rental['id']}/tariff",
+                             data={"tariff_id": self.tariff_id, "billing": "manual"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(run(self.crm.rental(rental["id"]))["billing"], "auto")
 
     def test_rental_needs_active_tariff_and_client(self):
         self.client.post("/rentals", data={"client_id": "", "tariff_id": ""})

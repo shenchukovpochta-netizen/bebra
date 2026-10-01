@@ -860,12 +860,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         cached = nav_cache.fresh()
         if cached is not None:
             return cached
+        generation = nav_cache.generation
         try:
             value = await nav.gather_counts(crm, today=date.today())
         except Exception:                                   # noqa: BLE001
             log.exception("счётчики меню не собрались")
             value = {}
-        return nav_cache.put(value)
+        return nav_cache.put(value, generation=generation)
 
     async def auth(request: Request, call_next: Any) -> Response:
         request.state.staff = None
@@ -5124,8 +5125,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         сообщение уезжало наверх страницы, а форма оставалась пустой, и
         казалось, что кнопка просто не сработала."""
         profiles = await profile_choices()
+        # Без «Администратора» (его можно удалить) отмеченной не остаётся
+        # ничего, а не «Владелец» - полные права выбирают руками.
         default_role = next((p["id"] for p in profiles if p.get("code") == "manager"),
-                            profiles[0]["id"] if profiles else None)
+                            None)
         # В окне добавления - кого заводят чаще: администратор, мастер, их
         # «только задачи», свои роли; «Владелец» последним.
         order = {"manager": 0, "tech": 1, "tasks_operator": 2, "tasks_tech": 3,
@@ -5138,6 +5141,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       places=await location_names(),
                       can_manage=may_edit(request, "staff") and not cfg.demo,
                       add_form=add_form or {}, add_error=add_error,
+                      add_open=request.query_params.get("add") == "1",
                       demo_url=cfg.demo_url, status_code=status_code)
 
     @app.get("/staff")
@@ -9461,7 +9465,9 @@ async def ensure_admin(crm: Any, cfg: WebConfig) -> str | None:
         return None
     password = cfg.admin_password or logic.generate_password()
     owner = await crm.access_profile_by_code("owner")
+    # Имя - «Владелец», как роль: «Администратор» здесь читался бы как роль
+    # точки, и в меню стояло бы «Администратор · Владелец».
     await crm.create_staff(cfg.admin_login, logic.hash_password(password),
-                           "Администратор", "admin", owner["id"] if owner else None)
+                           "Владелец", "admin", owner["id"] if owner else None)
     return None if cfg.admin_password else password
 

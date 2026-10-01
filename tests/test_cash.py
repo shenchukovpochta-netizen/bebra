@@ -936,6 +936,70 @@ class TestBankPanel(tw.WebCase):
         self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
         self.assertIn("счёт СЧТ-000001", self.get_ok("/bank"))
 
+    def test_pending_claim_holds_auto_credit(self):
+        """Клиент перевёл по договору и нажал «Я оплатил», заявка ждёт.
+        Автозачисление строку не трогает при любой сумме в заявке: иначе
+        оператор подтвердил бы заявку потом - и деньги легли бы дважды."""
+        tw.run(self.crm.set_setting("bank_auto_credit", "1", by="t"))
+        tw.run(self.crm.create_claim(self.client_id, None))
+        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 0)
+        self.assertEqual(tw.run(self.crm.bank_txn(self.txn_id))["status"], "new")
+        self.assertIn("клиент нажал «Я оплатил»", self.get_ok("/bank"))
+
+    def test_any_noncash_payment_holds_auto_credit(self):
+        """«Оплата получена» в боте, выдача, журнал клиента - безналичный
+        платёж той же суммы мимо выписки: строку разбирает человек."""
+        tw.run(self.crm.set_setting("bank_auto_credit", "1", by="t"))
+        tw.run(self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                   amount=D(3000), method="sbp", note="бот",
+                                   created_by="bot"))
+        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 0)
+        self.assertIn("в журнале", self.get_ok("/bank"))
+        # наличные - не перевод: строку выписки они не объясняют
+        tw.run(self.crm.save_bank_txn({
+            "txn_id": "T-7", "booked_at": datetime.now(UTC), "amount": D(500),
+            "direction": "credit", "purpose": "по договору АВ-2026-000042"}))
+        tw.run(self.crm.add_ledger(client_id=self.client_id, kind="payment",
+                                   amount=D(500), method="cash", note="касса",
+                                   created_by="op"))
+        self.assertEqual(tw.run(banking.auto_credit(self.crm)), 1)
+
+    def test_claim_after_bank_credit_is_refused_until_marked(self):
+        """Выписка зачислилась сама раньше, чем клиент нажал «Я оплатил»:
+        подтверждение заявки той же суммы - отказ с объяснением, пока
+        оператор не отметит «это другой платёж»."""
+        tw.run(tw.service.credit_bank_txn(self.crm, tw.run(self.crm.bank_txn(self.txn_id)),
+                                          client=tw.run(self.crm.client(self.client_id)),
+                                          by="автозачисление"))
+        claim = tw.run(self.crm.create_claim(self.client_id, D(3000)))
+        self.client.post(f"/claims/{claim}/confirm", data={"amount": "3000"})
+        self.assertIn("уже зачислено из выписки", self.get_ok("/claims"))
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
+        self.client.post(f"/claims/{claim}/confirm", data={"amount": "3000",
+                                                           "twice_ok": "1"})
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(6000))
+
+    def test_blocked_client_can_still_be_credited(self):
+        """Блокировка запрещает выдачу, а не приём денег: должник из
+        чёрного списка, вернувший долг переводом, зачисляется из выписки."""
+        tw.run(self.crm.update_client(self.client_id, status="blacklist"))
+        self.client.post(f"/bank/{self.txn_id}", data={"client_id": str(self.client_id)})
+        self.assertEqual(tw.run(self.crm.bank_txn(self.txn_id))["status"], "matched")
+        self.assertEqual(tw.run(self.crm.client_balance(self.client_id)), D(3000))
+
+    def test_auto_credit_switch_needs_finance(self):
+        """Деньги на баланс без человека - решение владельца: одного права
+        на кассу (оно есть у администратора точки) мало."""
+        manager = tw.run(self.crm.access_profile_by_code("manager"))
+        tw.run(self.crm.create_staff("anna", logic.hash_password("password-1"), "Анна",
+                                     "manager", manager["id"]))
+        self.client.post("/logout")
+        self.login("anna", "password-1")
+        self.assertNotIn('action="/bank/settings"', self.get_ok("/bank"))
+        r = self.client.post("/bank/settings", data={"auto": "1"})
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(logic.bank_settings(tw.run(self.crm.settings()))["auto_credit"])
+
     def test_other_amount_is_still_credited(self):
         tw.run(self.crm.set_setting("bank_auto_credit", "1", by="t"))
         claim = tw.run(self.crm.create_claim(self.client_id, D(1000)))

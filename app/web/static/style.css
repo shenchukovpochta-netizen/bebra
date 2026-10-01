@@ -630,7 +630,11 @@ fieldset.role-pick .choice b{font-size:15px}
 /* ── сотрудники: строка - человек, роль и точка выбираются на месте ── */
 .staff-wrap{min-width:0}
 table.staff-table td{vertical-align:middle}
-table.staff-table td select{max-width:220px}
+/* Список сжимается вместе с колонкой: с потолком в 220px таблица
+   разъезжалась вбок на планшете и ноутбуке 13", а на телефоне список
+   вылезал из карточки (правило телефона ниже по файлу проигрывало). */
+table.staff-table td select{width:100%;max-width:220px;min-width:0}
+@media (max-width:1160px){table.staff-table td select{max-width:100%}}
 table.staff-table td .inline-form{margin:4px 0 0}
 table.staff-table td .inline-form:first-child{margin-top:0}
 @media (max-width:640px){

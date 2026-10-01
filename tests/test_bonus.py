@@ -246,6 +246,25 @@ class TestBonusPages(tw.WebCase):
         self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(250))
         self.assertIn("Баллы", self.get_ok(f"/clients/{self.client_id}"))
 
+    def test_double_click_grants_the_bonus_once(self):
+        """Два нажатия одной формы - одно начисление: ключ формы (`once`)
+        второй раз не принимается."""
+        form = {"action": "manual", "amount": "250", "note": "за простой",
+                "once": "bonus-form-1"}
+        self.client.post(f"/clients/{self.client_id}/bonus", data=form)
+        self.client.post(f"/clients/{self.client_id}/bonus", data=form)
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(250))
+
+    def test_refused_bonus_form_can_be_sent_again(self):
+        """Отказ (сумма не числом) возвращает ключ формы: исправленная та
+        же форма проходит, а не «уже отправлена»."""
+        form = {"action": "manual", "amount": "много", "note": "",
+                "once": "bonus-form-2"}
+        self.client.post(f"/clients/{self.client_id}/bonus", data=form)
+        self.client.post(f"/clients/{self.client_id}/bonus",
+                         data={**form, "amount": "100"})
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(100))
+
     def test_review_bonus_button_says_why_it_cannot(self):
         self.client.post(f"/clients/{self.client_id}/bonus",
                          data={"action": "review"})

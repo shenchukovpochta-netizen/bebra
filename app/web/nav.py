@@ -248,8 +248,9 @@ async def gather_counts(crm: Any, *, today: Any,
     """Числа для меню: сколько ждёт во «Входящих», новых тревог, запчастей
     на исходе и нарядов дольше срока. Считаются теми же правилами, что и
     страницы, - число в меню не должно спорить с экраном, куда ведёт."""
-    threads = await crm.inbox_threads(statuses=logic.INBOX_OPEN, limit=2000)
-    waiting = sum(1 for t in threads if t.get("waiting_since") or t.get("status") == "new")
+    # Ждущих ответа - одним count, тем же, что плитка «входящих ждут ответа»
+    # на сводке: полная лента с расшифровкой ради числа была бы дорогой.
+    waiting = await crm.inbox_open_count()
     alerts = await crm.tracker_alerts(open_only=True, limit=1000)
     settings = settings if settings is not None else await crm.settings()
     orders = logic.overdue_orders(
@@ -260,7 +261,12 @@ async def gather_counts(crm: Any, *, today: Any,
                      "booking": len(await crm.bookings(status="new")),
                      "claim": len(await crm.pending_claims())},
         "alerts": sum(1 for a in alerts if (a.get("state") or "new") == "new"),
-        "parts": len(logic.parts_low(await crm.parts(active_only=True))),
+        # Остаток и «в пути» - тем же построителем, что у склада и недельной
+        # сводки: сырые строки crm.parts пометок «ниже»/«на пределе» не несут,
+        # и без part_rows число здесь было бы нулём всегда.
+        "parts": len(logic.parts_low(logic.part_rows(
+            await crm.parts(active_only=True), await crm.stock_map(),
+            transit=await crm.parts_in_transit()))),
         "orders": len(orders),
     }
 
@@ -277,15 +283,22 @@ class CountsCache:
         self.clock = clock or time.monotonic
         self._at: float | None = None
         self._value: dict[str, Any] = {}
+        # Поколение: подсчёт, начатый до записи, не должен лечь в кэш после
+        # неё - иначе старые числа прожили бы ещё полминуты как свежие.
+        self.generation = 0
 
     def fresh(self) -> dict[str, Any] | None:
         if self._at is not None and self.clock() - self._at < self.ttl:
             return self._value
         return None
 
-    def put(self, value: dict[str, Any]) -> dict[str, Any]:
-        self._value, self._at = value, self.clock()
+    def put(self, value: dict[str, Any], *, generation: int | None = None) -> dict[str, Any]:
+        """Положить числа, если с начала подсчёта не было записи
+        (`generation` - взятое до подсчёта); иначе только вернуть их."""
+        if generation is None or generation == self.generation:
+            self._value, self._at = value, self.clock()
         return value
 
     def drop(self) -> None:
         self._at = None
+        self.generation += 1

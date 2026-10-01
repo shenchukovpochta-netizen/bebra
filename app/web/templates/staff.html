@@ -3,7 +3,9 @@
 {% block content %}
 <div class="bar"><h1>Сотрудники <small class="muted">{{ rows|selectattr('active')|list|length }} с доступом</small></h1>
   <a class="btn ghost" href="/profiles">Роли</a>
-  {% if can_manage %}<button type="button" onclick="document.getElementById('add-staff').showModal()">+ Добавить сотрудника</button>{% endif %}
+  {# Ссылка, а не кнопка: без скрипта она открывает ту же страницу с
+     открытым окном (?add=1), со скриптом - окно поверх списка. #}
+  {% if can_manage %}<a class="btn" href="/staff?add=1" onclick="document.getElementById('add-staff').showModal(); return false;">+ Добавить сотрудника</a>{% endif %}
 </div>
 {% if demo %}
 <p class="note">В демо сотрудников не добавить и не изменить: вход здесь общий для всех посетителей.
@@ -21,11 +23,12 @@
         <br><small class="muted">логин {{ s.login }}</small></td>
       <td data-label="Роль">
         {% if can_manage and s.id != staff.id %}
-        {# Смена роли - выбором в списке, без отдельной кнопки: скрипт
-           отправляет форму сам, без него остаётся кнопка. #}
+        {# Роль меняется кнопкой, а не выбором в списке: стрелка на списке в
+           фокусе меняет значение и отправила бы форму сразу - одно нажатие
+           клавиши при обходе таблицы давало бы человеку роль «Владелец». #}
         <form method="post" action="/staff/{{ s.id }}/profile" class="inline-form">
-          <select name="profile_id" aria-label="Роль" onchange="this.form.submit()">{% for p in profiles %}<option value="{{ p.id }}" {% if p.id == s.profile_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
-          <noscript><button type="submit" class="ghost">Сменить</button></noscript>
+          <select name="profile_id" aria-label="Роль">{% for p in profiles %}<option value="{{ p.id }}" {% if p.id == s.profile_id %}selected{% endif %}>{{ p.name }}</option>{% endfor %}</select>
+          <button type="submit" class="ghost small">Сменить</button>
         </form>
         {% else %}
         <a href="/profiles/{{ s.profile_id }}">{{ s.profile_name or 'без роли' }}</a>
@@ -35,8 +38,8 @@
         {% if can_manage %}
         <form method="post" action="/staff/{{ s.id }}/location" class="inline-form">
           {# Закрытая точка остаётся в строке: список без неё сбросил бы её при первом сохранении. #}
-          <select name="location" aria-label="Своя точка" onchange="this.form.submit()"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location }}</option>{% endif %}</select>
-          <noscript><button type="submit" class="ghost">Задать</button></noscript>
+          <select name="location" aria-label="Своя точка"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location }}</option>{% endif %}</select>
+          <button type="submit" class="ghost small">Задать</button>
         </form>
         {% else %}{{ s.location or '—' }}{% endif %}
       </td>
@@ -93,7 +96,7 @@
 </section>
 
 {% if can_manage %}
-<dialog id="add-staff" class="modal" aria-labelledby="add-staff-title">
+<dialog id="add-staff" class="modal" aria-labelledby="add-staff-title" {% if add_open and not add_error %}open{% endif %}>
   <form method="post" action="/staff">
     <div class="modal-head"><h2 id="add-staff-title">Добавить сотрудника</h2>
       <button type="button" class="icon" aria-label="Закрыть" onclick="this.closest('dialog').close()">×</button></div>

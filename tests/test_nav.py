@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -166,6 +167,13 @@ class TestTree(unittest.TestCase):
         cache.put({"alerts": 2})
         cache.drop()
         self.assertIsNone(cache.fresh(), "запись в панели сбрасывает кэш")
+        # Подсчёт начался до записи и закончился после - в кэш не ложится.
+        started = cache.generation
+        cache.drop()
+        self.assertEqual(cache.put({"alerts": 3}, generation=started), {"alerts": 3})
+        self.assertIsNone(cache.fresh(), "старые числа не выдают себя за свежие")
+        cache.put({"alerts": 4}, generation=cache.generation)
+        self.assertEqual(cache.fresh(), {"alerts": 4})
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
@@ -183,6 +191,17 @@ class TestMenuInPanel(tw.WebCase):
         self.assertIn('<nav class="crumbs" aria-label="Вы здесь"><span>Склад</span>', page)
         self.assertIn("<small>Владелец</small>", page)
         self.assertIn('action="/bikes" role="search"', page, "поиск велосипеда в меню")
+
+    def test_parts_badge_counts_low_stock(self):
+        """Счётчик «Заказ запчастей» - по остаткам, как у склада: сырые
+        строки позиций пометок «ниже»/«на пределе» не несут."""
+        tw.run(self.crm.create_part(title="Колодки", node="brakes", unit="шт",
+                                    cost=0, price=0, min_stock=5, model=None,
+                                    note=None))
+        counts = tw.run(nav.gather_counts(self.crm, today=date.today()))
+        self.assertEqual(counts["parts"], 1)
+        page = self.get_ok("/")
+        self.assertRegex(page, r'<span>Склад</span><em class="badge">1</em>')
 
     def test_counts_reach_the_menu_and_a_write_refreshes_them(self):
         page = self.get_ok("/")

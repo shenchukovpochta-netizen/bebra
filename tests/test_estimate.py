@@ -270,6 +270,45 @@ class TestEstimateFlow(tw.WebCase):
             _run(service.invoice_order(self.crm, self.order(), by="оператор",
                                        acquiring=tp.FakeAcquiring()))
 
+    def test_second_invoice_waits_for_the_first(self):
+        """Второй счёт при открытом первом - вторая ссылка у клиента:
+        оплатил бы обе. Пока первый ждёт оплаты, второго нет."""
+        self.add_line()
+        _run(self.crm.update_work_order(self.order_id, status="done", total=D(1500)))
+        first = _run(service.invoice_order(self.crm, self.order(), by="оператор",
+                                           acquiring=tp.FakeAcquiring()))
+        with self.assertRaises(service.ServiceError) as err:
+            _run(service.invoice_order(self.crm, self.order(), by="оператор",
+                                       acquiring=tp.FakeAcquiring()))
+        self.assertIn(first["no"], str(err.exception))
+
+    def test_second_paid_invoice_is_flagged_not_silent(self):
+        """Ремонт оплачен на точке, а клиент заплатил ещё и по ссылке:
+        счёт закрыт с отметкой о двойных деньгах, опрос скажет команде."""
+        self.add_line()
+        _run(self.crm.update_work_order(self.order_id, status="done", total=D(1500)))
+        invoice = _run(service.invoice_order(self.crm, self.order(), by="оператор",
+                                             acquiring=tp.FakeAcquiring()))
+        _run(self.crm.update_work_order(self.order_id, paid_at=datetime.now(UTC)))
+        self.assertEqual(_run(self.crm.mark_pay_paid(invoice["id"], method="card")),
+                         logic.REPAIR_PAID_TWICE)
+        flagged = _run(self.crm.pay_order(invoice["id"]))
+        self.assertEqual(flagged["status"], "paid")
+        self.assertEqual(flagged["error"], logic.REPAIR_TWICE_NOTE)
+        self.assertIsNotNone(flagged["bank_paid_at"])
+        self.assertEqual(_run(self.crm.client_balance(self.client_id)), D(0),
+                         "в журнал аренды не идёт и второй раз")
+
+    def test_hand_payment_of_paid_repair_is_refused(self):
+        self.add_line()
+        _run(self.crm.update_work_order(self.order_id, status="done", total=D(1500)))
+        invoice = _run(service.invoice_order(self.crm, self.order(), by="оператор",
+                                             acquiring=tp.FakeAcquiring()))
+        _run(self.crm.update_work_order(self.order_id, paid_at=datetime.now(UTC)))
+        with self.assertRaises(service.ServiceError):
+            _run(service.credit_pay_order(self.crm, _run(self.crm.pay_order(invoice["id"])),
+                                          by="оператор", method="cash"))
+
     def test_own_repair_is_not_invoiced(self):
         self.add_line()
         _run(self.crm.update_work_order(self.order_id, payer="own",
