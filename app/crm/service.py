@@ -85,6 +85,15 @@ async def add_entry(crm: Any, client: dict, *, kind: str, amount: Decimal,
         created_by=by, shift_id=await cash_shift_id(crm, method, by))
 
 
+def _bike_not_free(bike: Mapping[str, Any], fresh: Mapping[str, Any] | None) -> str:
+    """Отказ, когда база не выдала велосипед: статус свежий (`fresh`), а не
+    из формы, иначе человек прочёл бы «Свободен» и не понял отказа."""
+    status = (fresh or bike).get("status")
+    return (f"Велосипед {bike.get('code')} уже "
+            f"«{logic.BIKE_STATUSES.get(status, status)}» - его успели выдать "
+            f"или убрать из свободных. Выберите другой.")
+
+
 async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict,
                       started_on: date, contract_no: str | None, by: str,
                       billing: str = "auto", mileage: int | None = None,
@@ -136,6 +145,11 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
         if "unique" in type(exc).__name__.lower():
             raise ServiceError("Аренда уже оформлена другим оператором.") from exc
         raise
+    if rental_id is None:
+        # Велосипед ушёл из «свободен», пока заполняли форму: база его
+        # не выдала, и аренды нет. Статус - свежий, а не из формы.
+        fresh = await crm.bike(int(bike["id"])) if bike else None
+        raise ServiceError(_bike_not_free(bike or {}, fresh))
     # Журнал перемещений: с этой строки начинается история того, что
     # у клиента на руках. Без неё замена не знала бы, что снимать.
     if bike is not None:
@@ -1109,6 +1123,11 @@ async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
         reason=logic.SWAP_REASONS[reason], today=date.today(), by=by,
         swap_location=swap_location or None)
     if not ok:
+        # Отказ базы - либо аренда, либо новый велосипед: он мог уйти из
+        # свободных, пока заполняли форму, и тогда его и надо назвать.
+        fresh = await crm.bike(int(new_bike["id"]))
+        if fresh is not None and fresh.get("status") != "available":
+            raise ServiceError(_bike_not_free(new_bike, fresh))
         raise ServiceError("Аренда изменилась, пока вы заполняли форму. "
                            "Откройте её заново.")
     return {"old_bike_id": old_id, "new_bike_id": new_bike["id"],

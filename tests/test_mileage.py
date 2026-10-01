@@ -147,7 +147,11 @@ class TestMileageInPanel(tw.WebCase):
         self.assertEqual(fresh["status"], "closed")
         self.assertIsNone(fresh["mileage_end"])
         self.assertIsNone(logic.ridden(fresh))
-        self.assertNotIn("Накатал", self.get_ok(f"/rentals/{rental['id']}"))
+        # Ни «накатал N км», ни «накатано» в журнале перемещений: он после
+        # закрытия виден и у аренды с одним велосипедом, но пробег без
+        # числа на возврате не выдумывает.
+        page = self.get_ok(f"/rentals/{rental['id']}")
+        self.assertNotRegex(page, r"[Нн]акатал \d|накатано")
 
     def test_close_with_smaller_mileage_is_refused(self):
         self.issue_form(mileage="4266")

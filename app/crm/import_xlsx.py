@@ -644,6 +644,13 @@ async def apply_plan(crm: Any, plan: Plan, *, by: str = "import") -> dict[str, i
                 f"строка {r['line']}: аренда {r['fio']} не записана - "
                 f"клиент или велосипед уже в аренде")
             continue
+        if rental_id is None:
+            # Велосипед уже был в CRM и не свободен (ремонт, потерян, на
+            # сборке): база выдаёт в аренду только свободный, как и панель.
+            plan.skipped_rentals.append(
+                f"строка {r['line']}: аренда {r['fio']} не записана - велосипед "
+                f"в CRM не свободен, сначала поправьте его статус")
+            continue
         done["rentals"] += 1
         dated = _dated(r["started_on"])
         if r["charge"]:

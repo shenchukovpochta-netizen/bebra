@@ -525,7 +525,7 @@ python3 consistency.py
 | «Подписываю» | `cb_sign` | `wait_sign` → `wait_payment` | `contract_status='signed'`, `contract_signed_at`, пересобранные файлы. **CRM:** `sync.on_contract_signed` → `client_from_bot` заводит `crm.clients` или привязывает `tg_id` к карточке, найденной по телефону |
 | Показ суммы клиенту | `start_payment` | состояние ставит вызывающий | `pay_chat_id`, `pay_message_id` |
 | «Оплата получена» | `cb_pay` | `wait_payment` → `wait_act_sign` | `pay_confirmed_at`. **CRM:** `sync.on_payment_confirmed` → `crm.add_ledger` вида `payment`, затем `service.ref_paid` |
-| Подпись Акта приёма | `cb_act_sign` | `wait_act_sign` → `approved` | `act_in_signed_at`, `act_in_path`, `act_in_sha256`, приглашение возврата. **CRM:** `sync.on_rental_started` → `crm.start_rental_charged`: `crm.rentals` (точка аренды - точка велосипеда), первое начисление в `crm.ledger` и `bikes.status='rented'` одной транзакцией; `service.ref_rented` |
+| Подпись Акта приёма | `cb_act_sign` | `wait_act_sign` → `approved` | `act_in_signed_at`, `act_in_path`, `act_in_sha256`, приглашение возврата. **CRM:** `sync.on_rental_started` → `crm.start_rental_charged`: `crm.rentals` (точка аренды - точка велосипеда), первое начисление в `crm.ledger` и `bikes.status='rented'` одной транзакцией (велосипед на сборке, утерянный, проданный, списанный в аренду не встаёт - аренда без велосипеда, `logic.BOT_ISSUE_STATUSES`); `service.ref_rented` |
 | Оператор принял продление | `_extend_reply` | `approved` → `wait_payment` | `extend_until`, новая цена в `issue_data` |
 | Продление оплачено | `cb_pay` → `_apply_extension` | `wait_payment` → `approved` | `rent_until`, сброс `remind_*_at`. **CRM:** `sync.on_rental_extended` → `crm.extend_rental_paid`: платёж и начисление за новый срок одной транзакцией |
 | «Я оплатил(а)» в кабинете | `cabinet.cb_paid` (`app/handlers/cabinet.py`) | не меняется | строка `crm.payment_claims` (частичный уникальный индекс на открытую заявку), карточка оператору |
@@ -617,19 +617,36 @@ python3 consistency.py
 
 Схема целиком лежит в `schema.sql` и читается сверху вниз. Нумерованных миграций нет
 намеренно:
-файл один, порядок применения задан порядком строк. Применяется он при каждом старте,
+файл один, порядок применения задан порядком строк. Проверяется он при каждом старте
+(выполняется - если изменился, см. ниже),
 `Database.apply_schema` (`app/db.py`), и вызывают его три точки входа: `app/main.py`,
 `app/max_main.py`, `app/web/__main__.py`.
 
 ```python
 async with self.pool.acquire() as conn, conn.transaction():
     await conn.execute("select pg_advisory_xact_lock(7331)")
+    if not force and await _applied_digest(conn) == digest:
+        return False                  # текст тот же - таблицы не трогаем
+    await conn.execute("select set_config('lock_timeout', $1, true)", lock_timeout)
     await conn.execute(sql)
+    # ... и отпечаток в crm.settings (schema_sha256) той же транзакцией
 ```
 
 Блокировка нужна потому, что `if not exists` не спасает от гонки: бот и панель стартуют
 одновременно, на пустой базе оба создают одни и те же объекты, один падал бы с duplicate
 key.
+
+Выполняется файл только тогда, когда его текст изменился: sha256 текста лежит в
+`crm.settings` (`schema_sha256`) и пишется той же транзакцией. Повторный прогон того же
+текста ничего не меняет, но `alter table … add column if not exists` и пересоздание
+триггеров берут AccessExclusive на горячих таблицах до конца транзакции, и каждый
+перезапуск бота или панели ловил deadlock с живыми запросами. Отпечаток в `crm`, а не в
+`public`: откат обновления сносит crm и bot и заливает дамп с `ON_ERROR_STOP`, и таблица
+вне них уронила бы заливку. Нет схемы crm или bot (первый запуск, тест, откат, сброс
+демо) - файл применяется всегда. Ожидание замка ограничено `lock_timeout` (5 с):
+занятая таблица или deadlock - откат, пауза и новая попытка с предупреждением в лог,
+после пятой - исключение и перезапуск сервиса, а не вечное ожидание на старте. Тест,
+который правит данные и проверяет повторный прогон, зовёт `apply_schema(..., force=True)`.
 Отсюда главное правило: каждая строка файла выполняется много раз. Таблицы это
 `create table if not exists`, колонки `add column if not exists`, функции `create or
 replace`,
@@ -857,7 +874,9 @@ service.charge_all(crm, *, today: date) -> int                                  
 транзакцией. Поэтому повторный запуск дневного прохода (`app/crm/billing.py`) безвреден. По
 тому же принципу собраны `CrmDB.start_rental_charged` и `CrmDB.extend_rental_paid`
 (`app/crm/db.py` и `:698`): платёж и начисление пишутся вместе, иначе сбой между ними уводил
-клиента в плюс на целый период.
+клиента в плюс на целый период. Продление - всё или ничего: аренда не идёт или период
+уже начислен - `False` и ни платежа, ни начисления (два подтверждения одного продления
+давали два платежа на одно начисление).
 
 Цена периода считается в одном месте, `logic.period_price(base, extras)`
 (`app/crm/logic.py`): велосипед плюс живые позиции вроде доп. аккумулятора. Складывать её

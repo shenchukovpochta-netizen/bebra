@@ -1820,8 +1820,34 @@ alter table crm.tariffs add column if not exists kind text not null default 'bik
 
 -- Прошлый индекс не знал про вид и запрещал батарее иметь свою «неделю».
 drop index if exists crm.tariffs_model_period_idx;
-create unique index if not exists tariffs_kind_model_period_idx
-  on crm.tariffs (kind, coalesce(model, ''), period_days) where active;
+-- До 2026-09-17 у тарифов не было уникальности вовсе, и на живой базе
+-- могли остаться две действующие цены на одно и то же: индекс на них не
+-- строится, а сбой откатил бы всю схему, и сервисы не поднялись бы.
+-- Какую из двух цен выключить, решает владелец, а не схема: пока пары
+-- есть - индекса нет, в журнал Postgres уходит предупреждение с номерами
+-- тарифов; разберут - следующий старт его поставит.
+do $$
+declare
+  dups text;
+begin
+  if exists (select 1 from pg_indexes
+              where schemaname = 'crm' and indexname = 'tariffs_kind_model_period_idx') then
+    return;
+  end if;
+  select string_agg(ids, '; ' order by ids) into dups
+    from (select string_agg(id::text, ', ' order by id) as ids
+            from crm.tariffs
+           where active
+           group by kind, coalesce(model, ''), period_days
+          having count(*) > 1) d;
+  if dups is not null then
+    raise warning 'tariffs_kind_model_period_idx не создан: две цены на одно и то же (тарифы %)',
+      dups;
+    return;
+  end if;
+  create unique index tariffs_kind_model_period_idx
+    on crm.tariffs (kind, coalesce(model, ''), period_days) where active;
+end $$;
 
 -- Цены владельца: один раз на установку (settings.tariffs_seeded) и
 -- больше никогда.
@@ -2938,3 +2964,18 @@ create index if not exists rental_intent_log_by_idx
 -- шесть цифр без предела. Этот счёт новый код по ссылке не трогает: после
 -- logic.SIGN_MAX_WRONG заявку отпирает только код, выданный оператором.
 alter table crm.sign_requests add column if not exists wrong_total integer not null default 0;
+
+-- Журнал перемещений закрывался только заменой: закрытие аренды оставляло
+-- строку последнего велосипеда открытой, и карточка закрытой аренды
+-- показывала его «сейчас у клиента» с растущими сутками и пробегом по
+-- одометру, который уже наматывает следующий клиент. close_rental теперь
+-- закрывает строку сам; здесь - уже закрытые аренды. Отметка в настройках
+-- не нужна: закрытая аренда с открытой строкой бывает только ошибкой, и
+-- повтор находит ноль строк.
+update crm.rental_bikes rb
+   set returned_on = coalesce(r.closed_on, r.updated_at::date),
+       mileage_end = coalesce(rb.mileage_end, r.mileage_end)
+  from crm.rentals r
+ where r.id = rb.rental_id
+   and r.status = 'closed'
+   and rb.returned_on is null;

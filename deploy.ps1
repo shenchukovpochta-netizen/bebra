@@ -239,7 +239,7 @@ $tests = @('tests/__init__.py', 'tests/test_logic.py', 'tests/test_config.py',
           'tests/test_backup.py', 'tests/test_health.py',
           'tests/test_risk.py', 'tests/test_franchise.py',
           'tests/test_franchise_web.py', 'tests/test_feedback.py',
-          'tests/test_return_photos.py')
+          'tests/test_return_photos.py', 'tests/test_db_tz.py')
 
 foreach ($f in ($root + $app + $docs + $i18n + $handlers + $services + $max + $demo + $crm + $web +
                 $webTemplates + $webStatic + $webFonts + $tests)) {

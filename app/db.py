@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -80,6 +82,31 @@ def session_timezone() -> str | None:
     return tz
 
 
+# Применение схемы на живой базе: сколько ждать замка таблицы, сколько раз
+# пробовать и пауза между попытками (растёт с номером попытки).
+SCHEMA_LOCK_TIMEOUT = "5s"
+SCHEMA_ATTEMPTS = 5
+SCHEMA_PAUSE = 2.0
+
+
+def schema_digest(sql: str) -> str:
+    """Отпечаток текста схемы: по нему старт решает, применять ли её."""
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+async def _applied_digest(conn: asyncpg.Connection) -> str | None:
+    """Отпечаток схемы, применённой к этой базе. None - применять: схем
+    crm или bot нет (первый запуск, снесены тестом или откатом) либо
+    отпечаток ещё не записан (база старше этой проверки)."""
+    present = await conn.fetchval(
+        "select to_regclass('crm.settings') is not null "
+        "and to_regclass('bot.users') is not null")
+    if not present:
+        return None
+    return await conn.fetchval(
+        "select value from crm.settings where key = 'schema_sha256'")
+
+
 class Database:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
@@ -105,15 +132,72 @@ class Database:
     async def close(self) -> None:
         await self.pool.close()
 
-    async def apply_schema(self, path: Path) -> None:
-        """Схема идемпотентна, но «if not exists» не спасает от гонки: бот
+    async def apply_schema(self, path: Path, *, force: bool = False,
+                           lock_timeout: str = SCHEMA_LOCK_TIMEOUT,
+                           attempts: int = SCHEMA_ATTEMPTS,
+                           pause: float = SCHEMA_PAUSE) -> bool:
+        """Применить schema.sql, если его текст изменился. True - применён.
+
+        Схема идемпотентна, но «if not exists» не спасает от гонки: бот
         и панель стартуют одновременно и на пустой базе оба создают одни и
         те же объекты - один из них падал бы с duplicate key. Консультативная
-        блокировка выстраивает их в очередь."""
+        блокировка выстраивает их в очередь.
+
+        Прогон того же текста ничего не меняет, но не бесплатен: `alter
+        table … add column if not exists` и пересоздание триггеров берут
+        AccessExclusive, `create index` - Share, на трёх десятках горячих
+        таблиц до конца транзакции. На живой базе каждый перезапуск бота
+        или панели упирался в запросы второго процесса: зачисление заявки
+        падало на deadlock, вход в панель висел. Поэтому отпечаток текста
+        (sha256) лежит в `crm.settings` (`schema_sha256`), пишется той же
+        транзакцией, что и схема, и совпал - скрипт не выполняется.
+
+        Отпечаток в `crm`, а не в своей таблице в `public`: откат
+        обновления (update.sh) сносит crm и bot и заливает дамп с
+        ON_ERROR_STOP - таблица вне них уже стояла бы и уронила заливку.
+        Пропуск - только когда обе схемы на месте: снесённые (тесты, откат,
+        сброс демо) накатываются заново, даже если отпечаток где-то и
+        уцелел. `force` - выполнить в любом случае: тестам, которые правят
+        данные и проверяют, что повтор скрипта их не испортит.
+
+        Ожидание замка ограничено (`lock_timeout`): занятая таблица - это
+        ошибка через несколько секунд, а не очередь, за которой встают все
+        запросы к ней. Такой сбой или deadlock - откат всего и новая
+        попытка после паузы, с предупреждением в лог; кончились попытки -
+        исключение, и сервис перезапустится, а не повиснет на старте.
+        Консультативную блокировку предел не касается: она ставится до
+        него, и второй процесс честно ждёт, пока первый применит схему.
+        """
         sql = path.read_text(encoding="utf-8")
-        async with self.pool.acquire() as conn, conn.transaction():
-            await conn.execute("select pg_advisory_xact_lock(7331)")
-            await conn.execute(sql)
+        digest = schema_digest(sql)
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self.pool.acquire() as conn, conn.transaction():
+                    await conn.execute("select pg_advisory_xact_lock(7331)")
+                    if not force and await _applied_digest(conn) == digest:
+                        log.info("схема без изменений (%s): не применяется", digest[:12])
+                        return False
+                    await conn.execute("select set_config('lock_timeout', $1, true)",
+                                       lock_timeout)
+                    await conn.execute(sql)
+                    await conn.execute(
+                        "insert into crm.settings (key, value, updated_by) "
+                        "values ('schema_sha256', $1, 'schema') "
+                        "on conflict (key) do update set value = excluded.value, "
+                        "updated_at = now(), updated_by = excluded.updated_by",
+                        digest)
+                log.info("схема применена (%s)", digest[:12])
+                return True
+            except (asyncpg.LockNotAvailableError, asyncpg.DeadlockDetectedError) as exc:
+                if attempt >= attempts:
+                    log.error("схема не применена: таблицы заняты (%s), попыток %s",
+                              type(exc).__name__, attempts)
+                    raise
+                log.warning("схема не применена с попытки %s из %s: %s - повтор через "
+                            "%.0f с", attempt, attempts, type(exc).__name__,
+                            pause * attempt)
+                await asyncio.sleep(pause * attempt)
+        return False                                     # pragma: no cover
 
     # ─────────────────────── журнал апдейтов ───────────────────────
 

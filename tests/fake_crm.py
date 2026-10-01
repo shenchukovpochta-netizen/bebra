@@ -869,6 +869,22 @@ class FakeCrm:
                             period_days, price, billing, started_on, contract_no,
                             created_by, mileage_start=None, base_price=None,
                             promo_code=None, location=None):
+        # Как условие в UPDATE базы: выдать можно только свободный, иначе
+        # None и ничего не записано.
+        return self._open_rental(
+            ("available",), client_id=client_id, bike_id=bike_id, tariff_id=tariff_id,
+            tariff_name=tariff_name, period_days=period_days, price=price,
+            billing=billing, started_on=started_on, contract_no=contract_no,
+            created_by=created_by, mileage_start=mileage_start,
+            base_price=base_price, promo_code=promo_code, location=location)
+
+    def _open_rental(self, bike_from, *, client_id, bike_id, tariff_id, tariff_name,
+                     period_days, price, billing, started_on, contract_no,
+                     created_by, mileage_start=None, base_price=None,
+                     promo_code=None, location=None):
+        if (bike_id is not None
+                and (self.bikes_.get(bike_id) or {}).get("status") not in bike_from):
+            return None
         if self._active(client_id) is not None:
             raise UniqueError("rentals_active_client_idx")
         if bike_id is not None and any(r["bike_id"] == bike_id and r["status"] == "active"
@@ -911,12 +927,15 @@ class FakeCrm:
                                    period_days, price, billing, started_on,
                                    period_to, contract_no, note, created_by,
                                    location=None):
-        """Аренда и первое начисление одной транзакцией - как в базе."""
-        rid = await self.create_rental(
-            client_id=client_id, bike_id=bike_id, tariff_id=None,
-            tariff_name=tariff_name, period_days=period_days, price=price,
-            billing=billing, started_on=started_on, contract_no=contract_no,
-            created_by=created_by, location=location)
+        """Аренда и первое начисление одной транзакцией - как в базе:
+        велосипед, которому в аренду нельзя, - None и ничего не записано."""
+        rid = self._open_rental(
+            crm_logic.BOT_ISSUE_STATUSES, client_id=client_id, bike_id=bike_id,
+            tariff_id=None, tariff_name=tariff_name, period_days=period_days,
+            price=price, billing=billing, started_on=started_on,
+            contract_no=contract_no, created_by=created_by, location=location)
+        if rid is None:
+            return None
         await self.charge_period(rid, client_id, period_from=started_on,
                                  period_to=period_to, amount=-Decimal(price),
                                  note=note, created_by=created_by)
@@ -925,15 +944,21 @@ class FakeCrm:
     async def extend_rental_paid(self, rental_id, client_id, *, amount, period_from,
                                  period_to, pay_note, charge_note, method,
                                  created_by):
-        """Платёж и начисление продления одной транзакцией - как в базе."""
+        """Платёж и начисление продления одной транзакцией - как в базе:
+        аренда не идёт или период уже начислен - не пишется ничего."""
+        if (self.rentals_.get(rental_id) or {}).get("status") != "active":
+            return False
+        if any(x["kind"] == "charge" and x["rental_id"] == rental_id
+               and x["period_from"] == period_from for x in self.ledger_):
+            return False
         if amount:
             await self.add_ledger(client_id=client_id, rental_id=rental_id,
                                   kind="payment", amount=Decimal(amount),
                                   method=method, note=pay_note,
                                   created_by=created_by)
-        await self.charge_period(rental_id, client_id, period_from=period_from,
-                                 period_to=period_to, amount=-Decimal(amount),
-                                 note=charge_note, created_by=created_by)
+        return await self.charge_period(rental_id, client_id, period_from=period_from,
+                                        period_to=period_to, amount=-Decimal(amount),
+                                        note=charge_note, created_by=created_by)
 
     async def log_rental_intent(self, rental_id, intent, by):
         self.intent_log_.append({"rental_id": rental_id, "intent": intent,
@@ -969,6 +994,12 @@ class FakeCrm:
             if mileage_end is not None:
                 self.bikes_[r["bike_id"]]["mileage_km"] = max(
                     self.bikes_[r["bike_id"]].get("mileage_km") or 0, int(mileage_end))
+        # Как в базе: журнал перемещений закрывается вместе с арендой.
+        for row in self.rental_bikes_:
+            if row["rental_id"] == rental_id and row["returned_on"] is None:
+                row["returned_on"] = closed_on
+                if mileage_end is not None:
+                    row["mileage_end"] = int(mileage_end)
         for extra in self.rental_extras_.values():
             if extra["rental_id"] == rental_id and extra["removed_at"] is None:
                 extra.update(removed_at=self._now(), removed_by=closed_by)
@@ -2383,7 +2414,7 @@ class FakeCrm:
         order = self.part_orders_.get(order_id)
         if (order is not None and order["status"] == "received"
                 and order.get("doc_id") is None):
-            order.update(status=status, closed_at=None, total=None)
+            order.update(status=status, closed_at=None)
 
     async def update_part_order(self, order_id, **fields):
         if order_id in self.part_orders_:
@@ -2487,6 +2518,9 @@ class FakeCrm:
         if rental is None or rental["status"] != "active":
             return False
         if rental.get("bike_id") != old_bike_id:
+            return False
+        # Как условие в UPDATE базы: новый - только свободный, до записей.
+        if (self.bikes_.get(new_bike_id) or {}).get("status") != "available":
             return False
         # Одно время на всю замену: в базе это одна транзакция и одно now().
         at = self._now()

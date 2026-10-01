@@ -73,7 +73,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.pool.execute("drop schema if exists crm cascade; "
                                 "drop schema if exists bot cascade")
         await Database(self.pool).apply_schema(SCHEMA)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.crm = CrmDB(self.pool)
 
     async def asyncTearDown(self):
@@ -178,7 +178,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
             "select bike_id, min(changed_at) as at from crm.bike_status_log "
             "group by bike_id")}
 
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         settings = await self.crm.settings()
         self.assertTrue(all(k in settings for k in FLAGS))
         since = datetime.fromisoformat(settings["points_history_since"])
@@ -223,7 +223,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.pool.execute("update crm.rentals set location = null where id = $1", r2)
         await self.pool.execute("update crm.work_orders set location = null where id = $1",
                                 o2)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual(await self.count("bike_location_log"), logged)
         self.assertIsNone((await self.crm.rental(r2))["location"])
         self.assertIsNone((await self.crm.work_order(o2))["location"])
@@ -235,7 +235,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.pool.execute("update crm.bikes set location = 'Павлюхина' where id = $1",
                                 b1)
         await self.pool.execute("delete from crm.settings where key = 'rentals_location_filled'")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertEqual(moves(await self.crm.bike_location_log(b1)),
                          [(None, "Адоратского", None), ("Адоратского", "Павлюхина", None),
                           ("Павлюхина", "Адоратского", "schema")],
@@ -515,7 +515,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
             points.reset()
         pav = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
         await self.crm.update_location(pav["id"], directions=None)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIsNone(next(x for x in await self.crm.locations()
                                if x["name"] == "Павлюхина")["directions"],
                           "владелец стёр - сид не возвращает")
@@ -523,7 +523,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.pool.execute(
             "delete from crm.settings where key = 'locations_directions_seeded'")
         await self.crm.update_location(pav["id"], address="ул. Павлюхина, 97А, гск сокол")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIsNone(next(x for x in await self.crm.locations()
                                if x["name"] == "Павлюхина")["directions"])
         # Точку переименовали раньше, чем приехало поле: находим её по
@@ -532,7 +532,7 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
             "delete from crm.settings where key = 'locations_directions_seeded'")
         await self.crm.update_location(pav["id"], address="ул. Павлюхина, 97А")
         self.assertEqual(await self.crm.rename_location(pav["id"], "Главная"), "ok")
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIn("ГСК «Сокол»", next(x for x in await self.crm.locations()
                                          if x["id"] == pav["id"])["directions"])
 

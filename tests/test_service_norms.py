@@ -775,7 +775,7 @@ class TestNormsOnPostgres(unittest.IsolatedAsyncioTestCase):
         model_id = await self.crm.create_battery_model(
             title="Kugoo", brand=None, voltage=60, capacity=D(21), price=D(16000),
             service_months=15, note=None, max_cycles=900)
-        await Database(self.pool).apply_schema(SCHEMA)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
         nodes = {n["code"]: n["norm_days"] for n in await self.crm.repair_nodes()}
         self.assertEqual((nodes["motor_wheel"], nodes["brake_pads"], nodes["frame"]),
                          (5, 1, None))

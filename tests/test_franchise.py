@@ -706,7 +706,7 @@ class TestFranchiseOnPostgres(unittest.IsolatedAsyncioTestCase):
                                 "drop schema if exists bot cascade")
         db = Database(self.pool)
         await db.apply_schema(SCHEMA)
-        await db.apply_schema(SCHEMA)
+        await db.apply_schema(SCHEMA, force=True)
         self.crm = CrmDB(self.pool)
 
     async def asyncTearDown(self):
