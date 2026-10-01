@@ -1181,7 +1181,8 @@ class CrmDB:
     async def extend_rental_paid(self, rental_id: int, client_id: int, *,
                                  amount: Decimal, period_from: date, period_to: date,
                                  pay_note: str, charge_note: str,
-                                 method: str | None, created_by: str) -> bool:
+                                 method: str | None, created_by: str,
+                                 shift_id: int | None = None) -> bool:
         """Платёж за продление и начисление за новый срок - одной транзакцией.
         False - не записано ничего: аренда уже не идёт или этот период уже
         начислен.
@@ -1195,6 +1196,7 @@ class CrmDB:
         проверки, роняет UniqueViolationError и откатывает и платёж.
         Строка аренды под замком: закрытие, пришедшее в ту же секунду,
         ждёт, а закрытой аренде период не начисляется, как в charge_period.
+        Наличные помнят свою смену (`shift_id`), как и любой платёж в кассу.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             status = await conn.fetchval(
@@ -1209,9 +1211,10 @@ class CrmDB:
                 await conn.execute(
                     """
                     insert into crm.ledger (client_id, rental_id, kind, amount,
-                                            method, note, created_by)
-                    values ($1, $2, 'payment', $3, $4, $5, $6)
-                    """, client_id, rental_id, amount, method, pay_note, created_by)
+                                            method, note, created_by, shift_id)
+                    values ($1, $2, 'payment', $3, $4, $5, $6, $7)
+                    """, client_id, rental_id, amount, method, pay_note, created_by,
+                    shift_id)
             await conn.execute(
                 """
                 insert into crm.ledger (client_id, rental_id, kind, amount,

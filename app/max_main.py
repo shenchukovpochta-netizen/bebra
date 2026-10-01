@@ -77,6 +77,9 @@ def load_config() -> Config:
         video_url=_env("VIDEO_URL", "https://youtu.be/CyZzskq8o0o"),
         purge_approved_days=_int("PURGE_APPROVED_DAYS", "90"),
         purge_rejected_days=_int("PURGE_REJECTED_DAYS", "3"),
+        # Брошенная регистрация в MAX чистится по тому же сроку, что в
+        # Telegram: таблицы и ретеншен у ботов общие.
+        purge_stale_days=_int("PURGE_STALE_DAYS", "30"),
         updates_log_days=_int("UPDATES_LOG_DAYS", "7"),
         # Напоминания о сроке живут в Telegram-боте: у MAX старый поток
         # без актов и сроков. Поля нужны, чтобы Config собрался.

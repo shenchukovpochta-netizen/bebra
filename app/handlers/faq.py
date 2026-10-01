@@ -25,7 +25,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import faq, faq_i18n, i18n, logic, texts
 from .. import keyboards as kb
 from ..config import Config
-from ..crm import inbox, points
+from ..crm import company, inbox, points
 from ..db import Database
 from ..filters import StateIs
 
@@ -145,9 +145,11 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
     if not _registered(data):
         # До регистрации режима вопроса нет - и трогать состояние анкеты
         # нельзя: человек стоит посреди неё. Вместо этого - прямой контакт.
+        # Контакт - настройкой владельца, как в меню и «Входящих»: зашитая
+        # в переводы ссылка подменяется на выходе, а не правкой текстов.
         t = faq_i18n.T.get(lang, {})
-        await bot.send_message(tg_id, t.get("contact",
-                                            texts.FAQ_GUEST_CONTACT))
+        await bot.send_message(tg_id, company.with_contact(
+            t.get("contact", texts.FAQ_GUEST_CONTACT)))
         # Без режима вопроса (регистрация не пройдена или человек посреди
         # сценария) вопрос в поддержку не задать - но во «Входящих» видно,
         # что ему нужен человек, и ответить ему можно оттуда.
@@ -167,5 +169,6 @@ async def faq_topic(callback: CallbackQuery, bot: Bot, db: Database,
     if data["state"] == logic.WAIT_SUPPORT or await db.patch(
             tg_id, expected_state=logic.APPROVED, state=logic.WAIT_SUPPORT):
         t = faq_i18n.T.get(lang, {})
-        await bot.send_message(tg_id, t.get("handoff", texts.FAQ_HANDOFF),
+        await bot.send_message(tg_id, company.with_contact(
+                                   t.get("handoff", texts.FAQ_HANDOFF)),
                                reply_markup=kb.support_cancel(i18n.norm(lang)))

@@ -190,6 +190,7 @@ services:
 
       PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
       PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
+      PURGE_STALE_DAYS: ${PURGE_STALE_DAYS:-30}
       UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
       REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}
       REMIND_HOUR_UTC: ${REMIND_HOUR_UTC:-7}
@@ -534,6 +535,7 @@ services:
 
       PURGE_APPROVED_DAYS: ${PURGE_APPROVED_DAYS:-90}
       PURGE_REJECTED_DAYS: ${PURGE_REJECTED_DAYS:-3}
+      PURGE_STALE_DAYS: ${PURGE_STALE_DAYS:-30}
       UPDATES_LOG_DAYS: ${UPDATES_LOG_DAYS:-7}
       REMIND_BEFORE_DAYS: ${REMIND_BEFORE_DAYS:-2}
       REMIND_HOUR_UTC: ${REMIND_HOUR_UTC:-7}
@@ -544,6 +546,10 @@ services:
     volumes:
       - kycfiles:/files
       - ./app/contract_template.docx:/srv/app/contract_template.docx:ro
+      # Свой шаблон договора, подпись и печать владельца - как у бота
+      # Telegram: панель пишет, MAX-бот только читает (DOC_TEMPLATE_DIR
+      # по умолчанию /doctemplates).
+      - doctemplates:/doctemplates:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }

@@ -16,6 +16,8 @@ from ..config import Config
 from ..crm import company, inbox, points
 from ..db import Database, utcnow
 from ..filters import StateIs
+from ..services.crypto import Vault
+from . import registration
 from .faq import home, reply_for
 
 log = logging.getLogger(__name__)
@@ -33,7 +35,8 @@ BTN_TARIFFS, BTN_SUPPORT = "💰 Тарифы", "🆘 Поддержка"
 
 
 async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
-                        user: dict, text: str, *, state: str, crm: Any = None) -> bool:
+                        user: dict, text: str, *, state: str, crm: Any = None,
+                        vault: Vault | None = None) -> bool:
     """Кнопка меню, набранная посреди диалога: выйти и сделать, что просят.
 
     True - сообщение было кнопкой (или «Отмена») и уже обработано.
@@ -49,7 +52,7 @@ async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
     fresh = {**user, "state": logic.APPROVED}
     lang = i18n.user_lang(user)
     if key == "BTN_RENT":
-        await start_rent(message, bot, db, cfg, fresh, crm=crm)
+        await start_rent(message, bot, db, cfg, fresh, crm=crm, vault=vault)
     elif key == "BTN_TARIFFS":
         await message.answer(i18n.t(lang, "TARIFFS"),
                              reply_markup=kb.main_menu(lang))
@@ -79,7 +82,7 @@ async def menu_shortcut(message: Message, bot: Bot, db: Database, cfg: Config,
 # неожиданно уезжало карточкой в чат модерации.
 @router.message(StateIs(logic.WAIT_SUPPORT), F.text)
 async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
-                     user: dict, crm: Any = None) -> None:
+                     user: dict, crm: Any = None, vault: Vault | None = None) -> None:
     text = message.text.strip()
     lang = i18n.user_lang(user)
     if i18n.button_key(text) == "BTN_SUPPORT":
@@ -88,7 +91,7 @@ async def st_support(message: Message, bot: Bot, db: Database, cfg: Config,
                              reply_markup=kb.support_cancel(lang))
         return
     if await menu_shortcut(message, bot, db, cfg, user, text,
-                           state=logic.WAIT_SUPPORT, crm=crm):
+                           state=logic.WAIT_SUPPORT, crm=crm, vault=vault):
         return
 
     question = logic.support_question(message.text)
@@ -169,7 +172,7 @@ async def st_support_wrong(message: Message, user: dict) -> None:
 # ─────────────────── повторная аренда по запросу клиента ───────────────────
 
 async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
-                     user: dict, *, crm: Any = None) -> None:
+                     user: dict, *, crm: Any = None, vault: Vault | None = None) -> None:
     """«Арендовать»: у действующего клиента - заявка на повторную выдачу.
 
     Первую аренду оформляет регистрация. Эта ветка - для клиента
@@ -190,6 +193,12 @@ async def start_rent(message: Message, bot: Bot, db: Database, cfg: Config,
                 bike=logic.esc(given["bike_model"]),
                 term=logic.esc(given["rent_term"])),
             reply_markup=kb.main_menu(lang))
+        return
+
+    if vault is not None and registration.anketa_purged(vault, user):
+        # Анкету стёр ретеншен: заявка оператору ушла бы, а акт вышел бы
+        # с прочерками вместо паспортных данных. Сначала анкета и проверка.
+        await registration.reenter_anketa(bot, db, user)
         return
 
     tg_id = user["tg_id"]
@@ -332,11 +341,12 @@ async def start_close(message: Message, db: Database, user: dict) -> None:
 
 @router.message(StateIs(logic.WAIT_CLOSE_REASON), F.text)
 async def st_close_reason(message: Message, bot: Bot, db: Database, cfg: Config,
-                          user: dict, crm: Any = None) -> None:
+                          user: dict, crm: Any = None,
+                          vault: Vault | None = None) -> None:
     """Причина от клиента -> запрос оператору с формой закрытия."""
     text = message.text.strip()
     if await menu_shortcut(message, bot, db, cfg, user, text,
-                           state=logic.WAIT_CLOSE_REASON, crm=crm):
+                           state=logic.WAIT_CLOSE_REASON, crm=crm, vault=vault):
         return
     reason = logic.close_reason(text)
     if not reason.ok:
@@ -394,8 +404,8 @@ async def tariffs(message: Message, user: dict) -> None:
 
 @router.message(F.text.in_(i18n.variants("BTN_RENT")))
 async def rent(message: Message, bot: Bot, db: Database, cfg: Config,
-               user: dict, crm: Any = None) -> None:
-    await start_rent(message, bot, db, cfg, user, crm=crm)
+               vault: Vault, user: dict, crm: Any = None) -> None:
+    await start_rent(message, bot, db, cfg, user, crm=crm, vault=vault)
 
 
 async def rentals_text(db: Database, user: dict) -> str:

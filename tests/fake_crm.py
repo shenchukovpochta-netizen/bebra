@@ -943,9 +943,10 @@ class FakeCrm:
 
     async def extend_rental_paid(self, rental_id, client_id, *, amount, period_from,
                                  period_to, pay_note, charge_note, method,
-                                 created_by):
+                                 created_by, shift_id=None):
         """Платёж и начисление продления одной транзакцией - как в базе:
-        аренда не идёт или период уже начислен - не пишется ничего."""
+        аренда не идёт или период уже начислен - не пишется ничего.
+        Наличные помнят свою смену (`shift_id`)."""
         if (self.rentals_.get(rental_id) or {}).get("status") != "active":
             return False
         if any(x["kind"] == "charge" and x["rental_id"] == rental_id
@@ -955,7 +956,7 @@ class FakeCrm:
             await self.add_ledger(client_id=client_id, rental_id=rental_id,
                                   kind="payment", amount=Decimal(amount),
                                   method=method, note=pay_note,
-                                  created_by=created_by)
+                                  created_by=created_by, shift_id=shift_id)
         return await self.charge_period(rental_id, client_id, period_from=period_from,
                                         period_to=period_to, amount=-Decimal(amount),
                                         note=charge_note, created_by=created_by)

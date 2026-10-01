@@ -883,6 +883,16 @@ def first_amount(text: Any) -> Decimal | None:
     return to_money(int(digits)) if digits else None
 
 
+def pay_method_from_text(text: Any) -> str:
+    """Способ оплаты из строки формы выдачи: «3000 нал», «наличными» -
+    наличные, всё прочее («3000 qr», «перевод») - СБП.
+
+    «нал» - начало слова, а не любая его часть: «безнал» - это перевод.
+    """
+    low = str(text or "").casefold()
+    return "cash" if re.search(r"(?<![а-яё])нал", low) else "sbp"
+
+
 def rental_from_issue(issue: dict | None, rent_from: date | None,
                       rent_until: date | None, *, today: date) -> dict[str, Any]:
     """Условия аренды из формы выдачи оператора (issue_data бота).

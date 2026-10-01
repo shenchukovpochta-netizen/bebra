@@ -183,6 +183,43 @@ class TestMarksInDocx(unittest.TestCase):
             xml = zf.read(contract.DOCUMENT_XML).decode()
         self.assertNotIn("signature }}", xml)
 
+    def own_template(self) -> Path:
+        """Свой шаблон владельца с меткой подписи посреди текста."""
+        path = Path(tempfile.mkdtemp()) / "contract-0001.docx"
+        path.write_bytes(a_docx("Арендодатель {{ fio }} {{ signature }} подпись"))
+        return path
+
+    def test_signature_lands_in_the_text_not_only_in_media(self):
+        """Контекст договора поля signature не знает - как настоящий
+        `_context`. Раньше подстановка превращала метку в «нет поля», и
+        картинке оставалось только лечь в архив без места в тексте."""
+        data, _ = contract.build(self.own_template(), {"fio": "Иванов"},
+                                 {"signature": PNG})
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            xml = zf.read(contract.DOCUMENT_XML).decode()
+            self.assertIn("word/media/signature.png", zf.namelist())
+        self.assertNotIn("нет поля", xml)
+        self.assertNotIn("{{", xml)
+        self.assertIn('r:embed="rIdMarksignature"', xml)
+        # Рисунок - сосед узла текста в прогоне, а не его содержимое:
+        # вложенный в <w:t> он ломает документ для Word.
+        self.assertIn("Иванов </w:t><w:drawing", xml)
+        self.assertIn('</w:drawing><w:t xml:space="preserve"> подпись</w:t>', xml)
+
+    def test_digest_of_own_template_does_not_depend_on_the_mark(self):
+        path = self.own_template()
+        _, with_mark = contract.build(path, {"fio": "Иванов"}, {"signature": PNG})
+        _, without = contract.build(path, {"fio": "Иванов"})
+        self.assertEqual(with_mark, without)
+
+    def test_policy_fill_drops_the_mark(self):
+        """Политику не подписывают: метка исчезает, а не печатается текстом."""
+        filled = contract.fill(a_docx("Оператор {{ fio }} {{ stamp }}"), {"fio": "ИП"})
+        with zipfile.ZipFile(io.BytesIO(filled)) as zf:
+            xml = zf.read(contract.DOCUMENT_XML).decode()
+        self.assertNotIn("stamp", xml)
+        self.assertIn("Оператор ИП", xml)
+
 
 @unittest.skipUnless(HAVE_WEB, "нет fastapi/httpx")
 class TestDocPages(tw.WebCase):

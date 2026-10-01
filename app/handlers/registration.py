@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from aiogram import Bot, F, Router
@@ -23,6 +24,7 @@ from ..filters import StateIs
 from ..services import contract as contract_service
 from ..services import files, ocr
 from ..services.crypto import Vault
+from . import contract
 
 log = logging.getLogger(__name__)
 router = Router(name="registration")
@@ -140,8 +142,8 @@ async def _catch_invite(crm: Any, command: CommandObject | None, tg_id: int) -> 
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, db: Database, cfg: Config, vault: Vault,
-                    user: dict, command: CommandObject | None = None,
+async def cmd_start(message: Message, bot: Bot, db: Database, cfg: Config,
+                    vault: Vault, user: dict, command: CommandObject | None = None,
                     crm: Any = None) -> None:
     lang = i18n.user_lang(user)
     hello = await _catch_invite(crm, command, user["tg_id"])
@@ -151,8 +153,10 @@ async def cmd_start(message: Message, db: Database, cfg: Config, vault: Vault,
         # Заявка на проверке или уже одобрена и ждёт данных выдачи: /start
         # здесь - «что там с моей заявкой», а не «заполнить заново». Иначе
         # человек проходил анкету второй раз, а у модератора появлялась
-        # вторая карточка на того же клиента.
-        await message.answer(pending_text(user), reply_markup=kb.remove())
+        # вторая карточка на того же клиента. Карточка не ушла в своё
+        # время - уходит сейчас.
+        if await resend_missing_card(bot, db, cfg, vault, user, crm):
+            await message.answer(pending_text(user), reply_markup=kb.remove())
         return
     if user["status"] == logic.ST_APPROVED:
         # /start посреди вопроса в поддержку или причины сдачи - это
@@ -494,6 +498,48 @@ async def _advance(message: Message, bot: Bot, db: Database, vault: Vault,
                          reply_markup=_markup_for(following, lang))
 
 
+async def reenter_anketa(bot: Bot, db: Database, user: dict) -> bool:
+    """Повторная аренда, а анкеты уже нет: ретеншен стёр её вместе со
+    сканами через срок хранения после закрытия прошлой аренды.
+
+    Договор прежний и подписан, но Акт приёма печатает паспортные данные,
+    и без анкеты в нём вышли бы прочерки. Поэтому клиент проходит анкету
+    и документ заново, а дальше - модерацию: скан прошлого раза стёрт тем
+    же ретеншеном, сверять новые данные не с чем, кроме нового фото.
+    Статус на время анкеты - «новый»: /start посреди неё - обычное начало,
+    а не «вы уже зарегистрированы» при недописанной анкете.
+
+    False - состояние уже сдвинулось (клиент не в меню).
+    """
+    first = logic.next_state(logic.WAIT_CONTACT)
+    for state in (logic.APPROVED, logic.WAIT_SUPPORT):
+        if await db.patch(user["tg_id"], expected_state=state, state=first,
+                          status=logic.ST_NEW, anketa_enc=None):
+            break
+    else:
+        return False
+    await db.log_event(user["tg_id"], "anketa_reentry")
+    lang = i18n.user_lang(user)
+    try:
+        await bot.send_message(user["tg_id"], i18n.t(lang, "ANKETA_AGAIN"),
+                               reply_markup=kb.remove())
+        await bot.send_message(user["tg_id"], i18n.t(lang, PROMPTS[first]),
+                               reply_markup=_markup_for(first, lang))
+    except TelegramAPIError:
+        log.warning("приглашение заполнить анкету заново не доставлено %s",
+                    user["tg_id"])
+    return True
+
+
+def anketa_purged(vault: Vault, user: dict) -> bool:
+    """Повторная аренда, а анкеты для акта нет: прошлый цикл закрыт (акт
+    приёма был подписан), а ретеншен стёр анкету или она неполна по
+    нынешним правилам. Новый Акт приёма вышел бы с прочерками."""
+    return (user.get("contract_status") == logic.CT_SIGNED
+            and bool(user.get("act_in_signed_at"))
+            and bool(logic.missing_anketa_fields(vault.decrypt(user.get("anketa_enc")))))
+
+
 @router.message(StateIs(*logic.ANKETA_BY_STATE), F.text)
 async def st_anketa(message: Message, bot: Bot, db: Database, vault: Vault,
                     user: dict) -> None:
@@ -762,8 +808,12 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
                                reply_markup=kb.main_menu(lang))
         return
 
+    # Привязка к карточке прошлой заявки стирается: по ней `st_pending`
+    # узнаёт, что карточка этой заявки так и не ушла, а ответ модератора
+    # на старую карточку не решает судьбу новой заявки.
     if not await db.patch(user["tg_id"], expected_state=logic.CONFIRM,
-                          state=logic.PENDING, status=logic.ST_PENDING):
+                          state=logic.PENDING, status=logic.ST_PENDING,
+                          mod_chat_id=None, mod_message_id=None):
         await callback.answer()
         return
     await db.log_event(user["tg_id"], "submitted")
@@ -778,11 +828,21 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
     lang = i18n.user_lang(user)
     await callback.answer(i18n.t(lang, "SUBMITTED_TOAST"))
     await bot.send_message(user["tg_id"], i18n.t(lang, "SUBMITTED"))
-    # Если карточка не ушла (бот не в чате модерации, неверный ADMIN_CHAT_ID),
-    # заявка становится невидимой: пользователь ждёт, модератор не знает.
-    # Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
+    await _card_or_reset(bot, db, cfg, vault, user, crm)
+
+
+async def _card_or_reset(bot: Bot, db: Database, cfg: Config, vault: Vault,
+                         user: dict, crm: Any = None) -> bool:
+    """Карточка модерации. False - не ушла, и клиенту уже сказано, что дальше.
+
+    Если карточка не ушла (бот не в чате модерации, неверный ADMIN_CHAT_ID),
+    заявка становится невидимой: пользователь ждёт, модератор не знает.
+    Исключение наружу выпускать нельзя - пользователю уже сказано «отправлено».
+    """
+    lang = i18n.user_lang(user)
     try:
         await send_moderation_card(bot, db, cfg, vault, user["tg_id"], crm=crm)
+        return True
     except CardNotReady:
         # Анкеты для карточки нет: человек вернулся после отказа, когда
         # ретеншен уже стёр её. Оставить его в pending - значит тупик:
@@ -800,8 +860,37 @@ async def cb_confirm(callback: CallbackQuery, bot: Bot, db: Database,
                       "владелец аккаунта нажал /start у бота: написать первым "
                       "в личку бот не может", user["tg_id"])
         await db.log_event(user["tg_id"], "moderation_card_failed")
-        await bot.send_message(user["tg_id"],
-                               i18n.t(user.get("lang"), "SUBMIT_PROBLEM"))
+        await bot.send_message(user["tg_id"], i18n.t(lang, "SUBMIT_PROBLEM"))
+    return False
+
+
+# Сколько дать уходящей карточке, прежде чем считать её потерянной: заявка
+# переходит в pending до отправки карточки, и «спасибо» вдогонку к
+# «Подтверждаю» иначе слало бы модератору вторую карточку.
+CARD_GRACE = timedelta(seconds=60)
+
+
+async def resend_missing_card(bot: Bot, db: Database, cfg: Config, vault: Vault,
+                              user: dict, crm: Any = None) -> bool:
+    """Заявка ждёт, а её карточки у оператора нет - отправить сейчас.
+
+    Карточка уходит один раз, и сбой Telegram в этот момент оставлял
+    человека в pending навсегда: модерация не видела заявку, оператор -
+    приглашение выдачи. Привязки (`mod_message_id`, `issue_message_id`)
+    при сбое пусты, и следующее сообщение клиента ставит карточку заново.
+    False - карточка модерации снова не ушла, и клиенту уже сказано.
+    """
+    changed = user.get("updated_at")
+    if isinstance(changed, datetime) and utcnow() - changed < CARD_GRACE:
+        return True
+    if user.get("status") == logic.ST_PENDING and not user.get("mod_message_id"):
+        await db.log_event(user["tg_id"], "moderation_card_resent")
+        return await _card_or_reset(bot, db, cfg, vault, user, crm)
+    if user.get("status") == logic.ST_APPROVED and not user.get("issue_message_id"):
+        await db.log_event(user["tg_id"], "issue_prompt_resent")
+        await contract.send_issue_prompt(bot, db, cfg, user["tg_id"],
+                                         user.get("full_name"))
+    return True
 
 
 @router.message(StateIs(logic.CONFIRM))
@@ -810,8 +899,10 @@ async def st_confirm_wrong(message: Message, user: dict) -> None:
 
 
 @router.message(StateIs(logic.PENDING))
-async def st_pending(message: Message, user: dict) -> None:
-    await message.answer(pending_text(user))
+async def st_pending(message: Message, bot: Bot, db: Database, cfg: Config,
+                     vault: Vault, user: dict, crm: Any = None) -> None:
+    if await resend_missing_card(bot, db, cfg, vault, user, crm):
+        await message.answer(pending_text(user))
 
 
 # ─────────────────────────── фоновые задачи ───────────────────────────

@@ -74,6 +74,10 @@ T: dict[str, str] = {
         "Bu bir-iki minut alar — pasportda ýazylyşy ýaly, her jogaby aýry "
         "habar bilen iberiň."
     ),
+    "ANKETA_AGAIN": (
+        "Täzeden kärende almak üçin anketany ýene bir gezek dolduryň: pasport "
+        "maglumatlaryny çäkli möhlet saklaýarys, soňra pozýarys."
+    ),
     "ASK_BIRTH": "Doglan sene — GG.AA.ÝÝÝÝ görnüşinde.\nMeselem: 07.03.1990",
     "ASK_BIRTH_PLACE": "Doglan ýeriňiz, pasportdaky ýaly.\nMeselem: gor. Kazan",
     "ASK_CITIZENSHIP": (

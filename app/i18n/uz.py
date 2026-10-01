@@ -77,6 +77,10 @@ T: dict[str, str] = {
         "Bu bir-ikki daqiqa oladi — pasportda yozilganidek, har bir javobni "
         "alohida xabar bilan yuboring."
     ),
+    "ANKETA_AGAIN": (
+        "Qayta ijaraga olish uchun anketani yana to'ldiring: pasport "
+        "ma'lumotlarini cheklangan muddat saqlaymiz, so'ng o'chirib tashlaymiz."
+    ),
     "ASK_BIRTH": "Tug'ilgan sana — KK.OO.YYYY ko'rinishida.\nMasalan: 07.03.1990",
     "ASK_BIRTH_PLACE": "Tug'ilgan joy, pasportdagidek.\nMasalan: gor. Kazan",
     "ASK_CITIZENSHIP": (

@@ -463,6 +463,69 @@ class Database:
             limit,
         )
 
+    async def stale_registrations(self, states: Any, days: int, signed_days: int,
+                                  limit: int = 200) -> list[asyncpg.Record]:
+        """Брошенные регистрации: строка в незаконченном состоянии
+        (`logic.UNFINISHED_STATES`) не двигалась `days` дней, а в ней лежат
+        анкета, сканы или неподписанный договор.
+
+        purge_after им не ставит никто: его пишут одобрение, отказ и
+        подписи, а «Подтверждаю», «на проверке», «одобрено, ждём данных
+        выдачи», подпись договора и «Есть ошибка» его снимают или не
+        трогают. Клиент с подписанным договором, заполняющий анкету заново
+        после ретеншена, ждёт не меньше `signed_days` - срока хранения
+        документов подписавшего. Идущая аренда не трогается никогда.
+        """
+        return await self.pool.fetch(
+            "select tg_id, updated_at, doc_path, doc2_path, parent_path, contract_path, "
+            "       soglasie_path, act_in_path, act_out_path, buyout_path "
+            "from bot.users "
+            "where state = any($1::text[]) "
+            "  and updated_at < now() - make_interval(days => case "
+            "        when contract_status = 'signed' then $3::int else $2::int end) "
+            "  and not (act_in_signed_at is not null and act_out_signed_at is null) "
+            "  and (anketa_enc is not null "
+            "       or doc_file_id is not null or doc2_file_id is not null "
+            "       or parent_file_id is not null "
+            "       or doc_path is not null or doc2_path is not null "
+            "       or parent_path is not null "
+            "       or contract_path is not null or soglasie_path is not null) "
+            "order by updated_at limit $4",
+            sorted(states), days, signed_days, limit,
+        )
+
+    async def clear_stale_registration(self, tg_id: int, seen_at: datetime) -> bool:
+        """Стереть брошенную регистрацию и вернуть человека к началу.
+
+        То же, что `clear_files`, и ещё сброс шага: анкеты больше нет, и
+        оставить его на подтверждении, на проверке или на подписи значило
+        бы договор с прочерками. Неподписанный договор забывается вместе с
+        датой выдачи (новый будет датирован днём новой выдачи); подписанный
+        остаётся, а клиент - в меню. Номер договора и хэш скана живут, как
+        и в `clear_files`.
+
+        Только если строка не менялась с выборки (`seen_at`): человек,
+        вернувшийся в эту секунду, не теряет свежий шаг. False - не тронута.
+        """
+        row = await self.pool.fetchrow(
+            "update bot.users set doc_file_id = null, doc_path = null, "
+            "doc2_file_id = null, doc2_path = null, "
+            "parent_file_id = null, parent_path = null, "
+            "contract_path = null, soglasie_path = null, "
+            "act_in_path = null, act_out_path = null, buyout_path = null, "
+            "anketa_enc = null, purge_after = null, "
+            "state = case when contract_status = 'signed' then 'approved' else 'new' end, "
+            "status = case when contract_status = 'signed' then 'approved' else 'new' end, "
+            "contract_issued_at = case when contract_status = 'signed' "
+            "                          then contract_issued_at end, "
+            "contract_status = case when contract_status = 'signed' "
+            "                       then 'signed' else 'none' end, "
+            "updated_at = now() "
+            "where tg_id = $1 and updated_at = $2 returning tg_id",
+            tg_id, seen_at,
+        )
+        return row is not None
+
     async def clear_files(self, tg_id: int) -> None:
         """Стирает сканы и результаты распознавания.
 

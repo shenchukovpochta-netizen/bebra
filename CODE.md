@@ -524,16 +524,16 @@ python3 consistency.py
 | Сборка договора | `contract.issue` (`app/handlers/contract.py`) | `pending` → `wait_sign` | `contract_no` из `nextval('bot.contract_seq')`, `contract_path`, `contract_sha256`, `soglasie_*`, `contract_status='issued'`, `contract_issued_at` |
 | «Подписываю» | `cb_sign` | `wait_sign` → `wait_payment` | `contract_status='signed'`, `contract_signed_at`, пересобранные файлы. **CRM:** `sync.on_contract_signed` → `client_from_bot` заводит `crm.clients` или привязывает `tg_id` к карточке, найденной по телефону |
 | Показ суммы клиенту | `start_payment` | состояние ставит вызывающий | `pay_chat_id`, `pay_message_id` |
-| «Оплата получена» | `cb_pay` | `wait_payment` → `wait_act_sign` | `pay_confirmed_at`. **CRM:** `sync.on_payment_confirmed` → `crm.add_ledger` вида `payment`, затем `service.ref_paid` |
-| Подпись Акта приёма | `cb_act_sign` | `wait_act_sign` → `approved` | `act_in_signed_at`, `act_in_path`, `act_in_sha256`, приглашение возврата. **CRM:** `sync.on_rental_started` → `crm.start_rental_charged`: `crm.rentals` (точка аренды - точка велосипеда), первое начисление в `crm.ledger` и `bikes.status='rented'` одной транзакцией (велосипед на сборке, утерянный, проданный, списанный в аренду не встаёт - аренда без велосипеда, `logic.BOT_ISSUE_STATUSES`); `service.ref_rented` |
+| «Оплата получена» | `cb_pay` | `wait_payment` → `wait_act_sign` | `pay_confirmed_at`. **CRM:** `sync.on_payment_confirmed` → `crm.add_ledger` вида `payment` (способ - из строки оплаты формы выдачи: «нал» - `cash` со сменой принявшего, иначе `sbp`), затем `service.ref_paid`; не легло (телефон за чужим Telegram, сумма словами, сбой) - причина оператору в чат договоров (`contract.crm_alert`) |
+| Подпись Акта приёма | `cb_act_sign` | `wait_act_sign` → `approved` | `act_in_signed_at`, `act_in_path`, `act_in_sha256`, приглашение возврата. **CRM** (сразу за подписью, до сборки экземпляра - сбой docx аренду не теряет): `sync.on_rental_started` → `crm.start_rental_charged`: `crm.rentals` (точка аренды - точка велосипеда), первое начисление в `crm.ledger` и `bikes.status='rented'` одной транзакцией (велосипед на сборке, утерянный, проданный, списанный в аренду не встаёт - аренда без велосипеда, `logic.BOT_ISSUE_STATUSES`); `service.ref_rented` |
 | Оператор принял продление | `_extend_reply` | `approved` → `wait_payment` | `extend_until`, новая цена в `issue_data` |
-| Продление оплачено | `cb_pay` → `_apply_extension` | `wait_payment` → `approved` | `rent_until`, сброс `remind_*_at`. **CRM:** `sync.on_rental_extended` → `crm.extend_rental_paid`: платёж и начисление за новый срок одной транзакцией |
+| Продление оплачено | `cb_pay` → `_apply_extension` | `wait_payment` → `approved` | `rent_until`, сброс `remind_*_at`. **CRM:** `sync.on_rental_extended` → `crm.extend_rental_paid`: платёж (способ и смена - как у первой оплаты) и начисление за новый срок одной транзакцией |
 | «Я оплатил(а)» в кабинете | `cabinet.cb_paid` (`app/handlers/cabinet.py`) | не меняется | строка `crm.payment_claims` (частичный уникальный индекс на открытую заявку), карточка оператору |
 | Оператор зачислил заявку | `cb_claim`, `claim_amount_reply` → `cabinet.credit` | не меняется | `service.credit_claim` → `crm.credit_claim`: заявка `confirmed` и `crm.ledger` вида `payment` одной транзакцией |
 | Клиент просит закрыть аренду | `menu.start_close`, `st_close_reason` | `approved` → `wait_close_reason` → `approved` | `close_reason`, `close_requested_at`, `return_chat_id`, `return_message_id` |
 | Форма закрытия от оператора | `_return_reply` → `contract.send_act_out` | → `wait_return_sign` | `return_data` |
 | Фото ответом на карточку сдачи | `mod_reply` → `_return_photo` (`app/handlers/moderation.py`) | не меняется | `photos.save`: файл на `bikefiles` и `crm.return_photos` к идущей аренде или закрытой не больше часа назад; подпись со строкой «ключ: значение» (`logic.is_close_form`) идёт дальше в `_return_reply`, даже битая - ошибку оператор видит |
-| Подпись Акта возврата | `cb_return_sign` | `wait_return_sign` → `approved` | `act_out_signed_at`, `act_out_path`, `act_out_sha256`, событие `rental_closed`. **CRM:** `sync.on_rental_closed` → `crm.close_rental`: аренда `closed` (`closed_at`), велосипед `available` на точке возврата (строка «адрес» формы через `logic.match_location`; не узнали - точка аренды), позиции `rental_extras` сняты, строка `crm.feedback` в очередь вопроса «как вам аренда?» |
+| Подпись Акта возврата | `cb_return_sign` | `wait_return_sign` → `approved` | `act_out_signed_at`, `act_out_path`, `act_out_sha256`, событие `rental_closed`. **CRM** (до сборки экземпляра, как у акта приёма): `sync.on_rental_closed` → `crm.close_rental`: аренда `closed` (`closed_at`), велосипед `available` на точке возврата (строка «адрес» формы через `logic.match_location`; не узнали - точка аренды), позиции `rental_extras` сняты, строка `crm.feedback` в очередь вопроса «как вам аренда?» |
 
 ### Начисления идут по двум разным правилам
 
@@ -1574,7 +1574,7 @@ Messenger API: токен по `client_credentials` (живёт сутки, де
 МЧЗ по наличию `<<`.
 
 `app/services/mrz.py` чистый разбор без сети и без зависимостей: три раскладки (внутренний
-паспорт РФ, загранпаспорт, карта), контрольные цифры по весам 7-3-1 ICAO 9303. Контрольные
+паспорт РФ, загранпаспорт, карта), контрольные цифры по весам 7-3-1 ICAO 9303. Личный номер внутреннего паспорта РФ по раскладке МВД: последняя цифра серии, дата выдачи ГГММДД, код подразделения, «<» («4151218910003<» - серия ...4, 18.12.2015, 910-003). Контрольные
 цифры и есть причина, по которой OCR здесь допустим: неверно прочитанный символ валит сумму,
 и поле просто не показывается, а не подставляется тихо неверным.
 
@@ -1630,7 +1630,16 @@ AES-256-GCM (`app/services/crypto.py`). Ключ живёт docker secret `secre
 `db.set_purge_after`: 90 дней после одобрения (`PURGE_APPROVED_DAYS`) и 3 дня после отказа
 (`PURGE_REJECTED_DAYS`, `app/handlers/moderation.py`). Строка с подписанным актом приёма и
 неподписанным актом возврата не чистится: велосипед у клиента, документы нужны до конца
-аренды. Путь перед `unlink` сверяется с `logic.is_safe_store_path`, а если файл не удалился,
+аренды. Второе правило - брошенная регистрация (`db.stale_registrations`): строка в
+`logic.UNFINISHED_STATES` (от первого шага до подписи договора: подтверждение, проверка,
+«одобрено, ждём данных выдачи», подпись, после «Есть ошибка») с анкетой, сканами или
+неподписанным договором и без движения `PURGE_STALE_DAYS` дней (30). purge_after таким
+строкам не ставит никто, и паспорт брошенной заявки жил вечно. `db.clear_stale_registration`
+стирает то же, что `clear_files`, и возвращает человека к началу (`new`; неподписанный
+договор забывается вместе с датой выдачи), а только если строка не менялась с выборки.
+Клиент с подписанным договором, заполняющий анкету заново (`registration.reenter_anketa`:
+«Арендовать» после того, как ретеншен стёр анкету), ждёт не меньше `PURGE_APPROVED_DAYS` и
+возвращается в меню. Правило общее для Telegram и MAX: один `bot.users`, один проход. Путь перед `unlink` сверяется с `logic.is_safe_store_path`, а если файл не удалился,
 ссылка в базе остаётся: иначе он пролежал бы на диске вечно и без следа. `db.clear_files`
 обнуляет пути и `anketa_enc`, но сохраняет `doc_sha256` и реквизиты договора.
 
@@ -1657,7 +1666,11 @@ docx бессмысленно: zip несёт время сборки, и два
 Подпись и печать вставляются после подсчёта отпечатка (`put_marks`, размеры в `MARK_FIELDS`,
 EMU), картинка идёт inline; вместе с ней правятся `word/_rels/document.xml.rels` и
 `[Content_Types].xml`, без записи типа png документ не откроется вовсе. Нет картинки,
-подстановка просто исчезает.
+подстановка просто исчезает. `substitute` метки `MARK_FIELDS` не трогает (иначе «нет поля
+signature» съедала их до `put_marks`, и png лежал в архиве без места в тексте), а рисунок
+встаёт соседом узла `<w:t>` в прогоне, не внутрь него: вложенный в текст он ломает документ
+для Word. MAX собирает договор тем же выбором шаблона и печатей (`doctemplates.path_for`,
+`mark_snapshot`), бот MAX читает том `doctemplates`.
 
 Откуда берутся подстановки, `_context` в `app/handlers/contract.py`, четыре слоя в таком
 порядке:

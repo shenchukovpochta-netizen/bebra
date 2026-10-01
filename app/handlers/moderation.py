@@ -26,7 +26,7 @@ from ..db import Database, utcnow
 from ..filters import ServiceChatReply, is_operator
 from ..services import files
 from ..services.crypto import Vault
-from . import contract
+from . import contract, registration
 
 log = logging.getLogger(__name__)
 router = Router(name="moderation")
@@ -85,19 +85,8 @@ async def cb_approve(callback: CallbackQuery, bot: Bot, db: Database, cfg: Confi
     # в договоре и акте были бы прочерки под ручку.
     await _notify(bot, db, target, "APPROVED_WAIT_ISSUE")
     row = await db.get_user(target)
-    fio = (dict(row).get("full_name") if row else "") or "без имени"
-    try:
-        sent = await bot.send_message(
-            cfg.contract_chat_id,
-            texts.ISSUE_PROMPT.format(fio=logic.esc(fio), tg_id=target,
-                                      form=logic.ISSUE_FORM_TEMPLATE))
-        await db.patch(target, issue_chat_id=sent.chat.id,
-                       issue_message_id=sent.message_id)
-    except TelegramAPIError as exc:
-        log.exception("приглашение выдачи для %s не доставлено", target)
-        await db.log_event(target, "issue_prompt_failed", {"error": str(exc)})
-        await _alert(bot, cfg, texts.CONTRACT_ALERT_FAILED.format(
-            tg_id=target, reason=logic.esc(str(exc))))
+    await contract.send_issue_prompt(bot, db, cfg, target,
+                                     dict(row).get("full_name") if row else None)
 
 
 @router.callback_query(F.data.regexp(r"^pay:-?\d+$"))
@@ -152,6 +141,16 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
             )
         except TelegramAPIError:
             pass
+    # Нажали под сигналом «я оплатил» или под чеком, а не на самой
+    # карточке: кнопку снимаем и там, иначе она живёт вечно и на второе
+    # нажатие отвечает «не ждёт оплату».
+    if (isinstance(callback.message, Message)
+            and (callback.message.chat.id, callback.message.message_id)
+            != (before.get("pay_chat_id"), before.get("pay_message_id"))):
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramAPIError:
+            pass
 
     if extend_until:
         await _apply_extension(bot, db, target, before, extend_until)
@@ -159,15 +158,20 @@ async def cb_pay(callback: CallbackQuery, bot: Bot, db: Database, cfg: Config,
         # бы договор и сканы посреди долгой аренды или выкупа.
         await db.set_purge_after(target, cfg.purge_approved_days)
         if crm is not None:
-            await crm_sync.on_rental_extended(crm, before, until=extend_until,
-                                              by=f"tg:{callback.from_user.id}")
+            await contract.crm_alert(
+                bot, cfg, before, "Оплата продления",
+                await crm_sync.on_rental_extended(crm, before, until=extend_until,
+                                                  by=f"tg:{callback.from_user.id}"))
         return
 
     if crm is not None:
         # Платёж в журнал CRM. Аренда там появится после подписи акта
-        # приёма - и спишет этот платёж первым начислением.
-        await crm_sync.on_payment_confirmed(crm, before,
-                                            by=f"tg:{callback.from_user.id}")
+        # приёма - и спишет этот платёж первым начислением. Не лёг -
+        # оператору в чат, а не только строкой в журнал бота.
+        await contract.crm_alert(
+            bot, cfg, before, "Оплата",
+            await crm_sync.on_payment_confirmed(crm, before,
+                                                by=f"tg:{callback.from_user.id}"))
     await _notify(bot, db, target, "PAY_CONFIRMED_USER")
     row = await db.get_user(target)
     data = dict(row) if row else before
@@ -396,6 +400,14 @@ async def _issue_reply(message: Message, bot: Bot, db: Database,
         # Велосипед на руках - сначала возврат, потом новая выдача.
         await message.reply(texts.RENT_ACTIVE_MOD)
         return
+    if registration.anketa_purged(vault, target):
+        # Повторная выдача, а анкету стёр ретеншен: акт приёма вышел бы с
+        # прочерками вместо паспорта. До записи формы - клиенту анкета и
+        # проверка заново, оператору - прислать форму после одобрения.
+        if target["state"] in (logic.APPROVED, logic.WAIT_SUPPORT):
+            await registration.reenter_anketa(bot, db, target)
+        await message.reply(texts.REPEAT_NEEDS_ANKETA)
+        return
 
     # Даты срока считаются здесь же: по ним бот напоминает об окончании.
     # Строку срока оператор пишет как привык - разбирает её logic.
@@ -588,9 +600,11 @@ async def _repeat_rent(message: Message, bot: Bot, db: Database, cfg: Config,
                  remind_soon_at=None, remind_last_at=None,
                  remind_overdue_at=None)
     # Из меню или из недописанного вопроса в поддержку - но не из состояний,
-    # где человек что-то подписывает. expected_state закрывает и гонку двух
-    # операторов: второй ответ получит честный отказ.
-    for state in (logic.APPROVED, logic.WAIT_SUPPORT):
+    # где человек что-то подписывает. pending - заявка после повторной
+    # анкеты (анкету стёр ретеншен) одобрена и ждёт этой формы.
+    # expected_state закрывает и гонку двух операторов: второй ответ
+    # получит честный отказ.
+    for state in (logic.APPROVED, logic.WAIT_SUPPORT, logic.PENDING):
         if await db.patch(tg_id, expected_state=state, **cycle):
             break
     else:
@@ -644,6 +658,9 @@ async def _repeat_payment(bot: Bot, db: Database, cfg: Config, target: dict,
         log.warning("новая сумма оплаты не доставлена клиенту %s", tg_id)
     await db.log_event(tg_id, "payment_amount_changed", {"price": price})
     if not (target.get("pay_chat_id") and target.get("pay_message_id")):
+        # Карточки нет (не дошла при выдаче) - не молча выходим, а ставим
+        # новую: подтвердить оплату оператору иначе нечем.
+        await contract.send_pay_card(bot, db, cfg, target, price)
         return
     try:
         await bot.edit_message_text(

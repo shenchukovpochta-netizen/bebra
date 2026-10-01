@@ -9,6 +9,11 @@
 Каждая функция - best effort: любое исключение ловится и пишется в лог.
 Сбой CRM (нет схемы, нет связи) не должен остановить выдачу договора
 или акта - это цикл бота, и он важнее учёта.
+
+Но деньги молча не теряются: события с деньгами (оплата, продление,
+начало аренды) возвращают причину, по которой в CRM ничего не легло, и
+обработчик бота пишет её оператору в чат договоров. None - записано или
+записывать было нечего.
 """
 
 from __future__ import annotations
@@ -26,6 +31,25 @@ log = logging.getLogger(__name__)
 def _price_of(user: dict) -> Any:
     """Сумма из данных выдачи бота («3000 qr» -> 3000). None - не число."""
     return logic.first_amount((user.get("issue_data") or {}).get("rent_price"))
+
+
+def _method_of(user: dict) -> str:
+    """Способ оплаты из той же строки: «3000 нал» - наличные, иначе СБП.
+
+    Раньше бот писал «sbp» всегда, и наличные из формы выдачи в кассовую
+    смену не попадали: ящик расходился с журналом на каждую такую выдачу.
+    """
+    return logic.pay_method_from_text((user.get("issue_data") or {}).get("rent_price"))
+
+
+# Почему платёж или аренда из бота не легли в CRM - словами для оператора.
+# Телефон в текст не идёт: сообщение живёт в чате дольше анкеты.
+NO_CLIENT = ("телефон клиента в CRM записан за карточкой с другим Telegram "
+             "или телефона нет - карточку не выбрать")
+NO_AMOUNT = "сумма «{price}» не распознана"
+CRM_FAILED = "ошибка записи в CRM, подробности в журнале бота"
+NOT_EXTENDED = ("продление не записано: аренда в CRM уже закрыта или этот срок "
+                "уже начислен - платёж не принят, проверьте аренду в панели")
 
 
 async def client_from_bot(crm: Any, user: dict) -> dict | None:
@@ -89,26 +113,32 @@ async def on_contract_signed(crm: Any, user: dict) -> None:
                       user.get("contract_no"))
 
 
-async def on_payment_confirmed(crm: Any, user: dict, *, by: str) -> None:
+async def on_payment_confirmed(crm: Any, user: dict, *, by: str) -> str | None:
     """«Оплата получена» в боте: платёж в журнал CRM. Сумма - из данных
-    выдачи; если оператор написал её словами, платёж не заводится и
-    в логе остаётся след - добавит руками в панели."""
+    выдачи, способ - из той же строки («3000 нал» - наличные, в смену
+    принявшего). Не записалось - возвращается причина: оператор вносит
+    платёж руками, а не узнаёт о нём по расхождению кассы."""
     try:
         client = await client_from_bot(crm, user)
         if client is None:
-            return
+            return NO_CLIENT
         amount = _price_of(user)
         if not amount:
             log.warning("CRM: сумма оплаты по договору %s не распознана - "
                         "платёж не заведён", user.get("contract_no"))
-            return
+            return NO_AMOUNT.format(
+                price=(user.get("issue_data") or {}).get("rent_price") or "—")
+        method = _method_of(user)
         await crm.add_ledger(client_id=client["id"], kind="payment", amount=amount,
-                             method="sbp", created_by=by,
+                             method=method, created_by=by,
+                             shift_id=await service.cash_shift_id(crm, method, by),
                              note=f"Оплата по договору № {user.get('contract_no') or '—'} "
                                   f"(подтверждена в боте)")
         await service.ref_paid(crm, client, amount, by=by)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: платёж по договору %s не записан", user.get("contract_no"))
+        return CRM_FAILED
+    return None
 
 
 async def _bike_for(crm: Any, spec: dict) -> int | None:
@@ -144,14 +174,15 @@ async def _bike_for(crm: Any, spec: dict) -> int | None:
                                  note="Заведён ботом из формы выдачи")
 
 
-async def on_rental_started(crm: Any, user: dict, *, today: date) -> None:
-    """Акт приёма подписан: в CRM появляется аренда с первым начислением."""
+async def on_rental_started(crm: Any, user: dict, *, today: date) -> str | None:
+    """Акт приёма подписан: в CRM появляется аренда с первым начислением.
+    Не появилась - причина для оператора, как у платежа."""
     try:
         client = await client_from_bot(crm, user)
         if client is None:
-            return
+            return NO_CLIENT
         if await crm.active_rental_of(client["id"]) is not None:
-            return          # оформлена в панели раньше - не дублируем
+            return None     # оформлена в панели раньше - не дублируем
         spec = logic.rental_from_issue(user.get("issue_data"), user.get("rent_from"),
                                        user.get("rent_until"), today=today)
         bike_id = await _bike_for(crm, spec)
@@ -182,19 +213,29 @@ async def on_rental_started(crm: Any, user: dict, *, today: date) -> None:
         await service.ref_rented(crm, client)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: аренда по договору %s не заведена", user.get("contract_no"))
+        return CRM_FAILED
+    return None
 
 
-async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> None:
+async def on_rental_extended(crm: Any, user: dict, *, until: date,
+                             by: str) -> str | None:
     """Продление оплачено: платёж и начисление за новый срок одной парой.
 
     Аренда, заведённая ботом, начисляется вручную - по событиям, а не по
-    календарю, поэтому продление само добавляет свой период.
+    календарю, поэтому продление само добавляет свой период. Платёж не
+    лёг - причина для оператора.
     """
+    problem = None
     try:
         client = await client_from_bot(crm, user)
         if client is None:
-            return
+            return NO_CLIENT
         amount = _price_of(user)
+        if not amount:
+            problem = NO_AMOUNT.format(
+                price=(user.get("issue_data") or {}).get("rent_price") or "—")
+        method = _method_of(user)
+        shift_id = await service.cash_shift_id(crm, method, by) if amount else None
         rental = await crm.active_rental_of(client["id"])
         manual = rental is not None and rental.get("billing") == "manual"
         start = rental["billed_until"] if rental else None
@@ -208,7 +249,8 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
             # ними уводил клиента в плюс на целый период.
             if not await crm.extend_rental_paid(
                     rental["id"], client["id"], amount=amount or logic.to_money(0),
-                    period_from=start, period_to=until, method="sbp", created_by=by,
+                    period_from=start, period_to=until, method=method, created_by=by,
+                    shift_id=shift_id,
                     pay_note=f"Продление по договору № "
                              f"{user.get('contract_no') or '—'} "
                              f"до {until.strftime('%d.%m.%Y')}",
@@ -219,12 +261,12 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
                 log.warning("CRM: продление %s до %s не записано - аренда %s уже "
                             "закрыта или период с %s начислен; проверьте в панели",
                             user.get("contract_no"), until, rental["id"], start)
-                return
+                return NOT_EXTENDED
         elif amount:
             # Аренда начисляется по календарю или продление уже начислено:
             # остаётся один платёж.
             await crm.add_ledger(client_id=client["id"], kind="payment", amount=amount,
-                                 method="sbp", created_by=by,
+                                 method=method, created_by=by, shift_id=shift_id,
                                  note=f"Продление по договору № "
                                       f"{user.get('contract_no') or '—'} "
                                       f"до {until.strftime('%d.%m.%Y')}")
@@ -232,6 +274,8 @@ async def on_rental_extended(crm: Any, user: dict, *, until: date, by: str) -> N
             await service.ref_paid(crm, client, amount, by=by)
     except Exception:                                    # noqa: BLE001
         log.exception("CRM: продление по договору %s не записано", user.get("contract_no"))
+        return CRM_FAILED
+    return problem
 
 
 async def _return_point(crm: Any, user: dict) -> str | None:

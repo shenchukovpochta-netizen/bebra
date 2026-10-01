@@ -26,7 +26,7 @@ from typing import Any
 
 from .. import logic, tasks, texts
 from ..config import Config
-from ..crm import company, inbox
+from ..crm import company, doctemplates, inbox
 from ..crm import logic as crm_logic
 from ..crm import service as crm_service
 from ..db import Database, utcnow
@@ -410,7 +410,17 @@ async def cb_confirm(ctx: Ctx, user: dict, callback_id: str) -> None:
     await _say(ctx, user["tg_id"], texts.SUBMITTED)
     try:
         await send_moderation_card(ctx, user["tg_id"])
-    except (MaxAPIError, CardNotReady):
+    except CardNotReady:
+        # Анкеты для карточки нет (ретеншен стёр её после отказа): pending
+        # здесь - тупик, карточка не уйдёт никогда. Как в Telegram
+        # (`registration.cb_confirm`): на первый шаг и сказать об этом.
+        log.warning("карточка %s не собрана - анкета неполная, регистрация заново",
+                    user["tg_id"])
+        await ctx.db.patch(user["tg_id"], expected_state=logic.PENDING,
+                           state=logic.WAIT_FIO, status=logic.ST_NEW)
+        await ctx.db.log_event(user["tg_id"], "resubmit_after_purge")
+        await _say(ctx, user["tg_id"], texts.WELCOME)
+    except MaxAPIError:
         log.exception("КАРТОЧКА МОДЕРАЦИИ НЕ ОТПРАВЛЕНА для %s", user["tg_id"])
         await ctx.db.log_event(user["tg_id"], "moderation_card_failed")
         await _say(ctx, user["tg_id"], texts.SUBMIT_PROBLEM)
@@ -474,9 +484,10 @@ class ContractProblem(Exception):
 
 def _contract_ctx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
                   signed_at: str, issued_at: Any) -> dict:
+    # Дата выдачи - местная, как в Telegram (`contract._context`): `.date()`
+    # у момента в UTC ночью по Москве печатал в договоре вчерашнее число.
     built = logic.contract_context(
-        data, anketa, number=number,
-        today=issued_at.date() if issued_at else None)
+        data, anketa, number=number, today=logic.local_date(issued_at))
     # Данные выдачи MAX-версия пока не собирает - в шаблон уходят прочерки.
     built.update(logic.issue_context(data.get("issue_data")))
     built["purge_days"] = str(ctx.cfg.purge_approved_days)
@@ -492,12 +503,18 @@ async def _build_docx(ctx: Ctx, data: dict, anketa: dict, *, number: str,
     # Договор собирается и по кнопке модератора, а служебный апдейт снимок
     # реквизитов не освежает (runner._dispatch_service): освежаем здесь.
     await company.refresh(ctx.crm)
+    # Свой шаблон владельца, подпись и печать - тем же выбором, что в
+    # Telegram (`contract._build`): договор из MAX иначе собирался по
+    # поставочному шаблону без печати, хотя владелец загрузил свой.
+    await doctemplates.refresh(ctx.crm, getattr(ctx.cfg, "doc_dir", None))
     try:
         return await asyncio.to_thread(
             contract_service.build,
-            ctx.cfg.contract_template,
+            doctemplates.path_for("contract", ctx.cfg.contract_template,
+                                  getattr(ctx.cfg, "doc_dir", None)),
             _contract_ctx(ctx, data, anketa, number=number,
-                          signed_at=signed_at, issued_at=issued_at))
+                          signed_at=signed_at, issued_at=issued_at),
+            doctemplates.mark_snapshot())
     except (contract_service.TemplateProblem, OSError) as exc:
         raise ContractProblem(str(exc)) from exc
 
