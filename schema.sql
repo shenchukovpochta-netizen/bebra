@@ -3032,3 +3032,31 @@ create table if not exists crm.deal_log (
   at         timestamptz not null default now()
 );
 create index if not exists deal_log_deal_idx on crm.deal_log (deal_id, at);
+
+-- Задачи дня (app/crm/tasks.py): поручение человеку, а не событие системы.
+-- Наряды, просрочки, заявки и тревоги «Задачи дня» собирают сами из своих
+-- таблиц (app/crm/mytasks.py); здесь - то, чего в базе нет: «закупить
+-- запчасти», «напомнить о продлении», «ремонт АКБ». assignee_id null -
+-- незакреплённая: её видит точка (location) и берёт тот, кто свободен.
+-- pay - сколько задача приносит исполнителю в расчёте зарплаты (null -
+-- не оплачивается отдельно); done_by - кто сделал, по нему и считается.
+create table if not exists crm.tasks (
+  id          bigserial primary key,
+  title       text        not null check (length(title) between 1 and 300),
+  note        text,
+  assignee_id bigint      references crm.staff (id) on delete set null,
+  location    text,
+  due_on      date,
+  pay         numeric(12,2) check (pay is null or pay >= 0),
+  status      text        not null default 'open'
+                          check (status in ('open', 'done', 'cancelled')),
+  created_by  text,
+  created_by_id bigint    references crm.staff (id) on delete set null,
+  created_at  timestamptz not null default now(),
+  taken_at    timestamptz,
+  done_at     timestamptz,
+  done_by     bigint      references crm.staff (id) on delete set null,
+  updated_at  timestamptz not null default now()
+);
+create index if not exists tasks_open_idx on crm.tasks (due_on, id) where status = 'open';
+create index if not exists tasks_done_idx on crm.tasks (done_by, done_at) where status = 'done';

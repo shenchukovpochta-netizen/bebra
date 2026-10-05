@@ -94,7 +94,7 @@ Claude Code читает этот файл в начале каждой сесс
 `inbox_threads`, `inbox_messages`, `clients`, `rentals`, `rental_intent_log`,
 `rental_bikes`, `rental_extras`, `ledger`, `payment_claims`, `ops_reports`,
 `franchisees`, `franchise_snapshots`, `franchise_months`, `feedback`,
-`return_photos`, `deals`, `deal_log`.
+`return_photos`, `deals`, `deal_log`, `tasks`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -260,6 +260,10 @@ Claude Code читает этот файл в начале каждой сесс
   не возвращается. Без сводки вход ведёт сюда. **Срок доступа**
   (`staff.expires_at`): после него вход не пускает, сессии выбиваются
   тем же стражем, что «активен»; истёкший не отключается - продлевается.
+  **Поручения** (`tasks`, `app/crm/tasks.py`, `/tasks`): то, чего в базе
+  нет событием. Незакреплённую видит точка и берёт свободный (условие в
+  UPDATE); сделал - исполнитель, а не нажавший. Цена задачи - в зарплату,
+  ставит и видит её тот, кто ведёт команду.
 - **Одно окно**: «Входящие» (`/incoming`, `app/crm/incoming.py`) -
   одна лента сообщений, заявок на аренду и «Я оплатил», один пункт меню
   вместо трёх; это экран, а не таблица: данные и права остаются у своих

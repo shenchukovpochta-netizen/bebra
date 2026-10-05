@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "_tasks.html" as tk %}
+{% block title %}Все задачи — {{ app_title }}{% endblock %}
+{% block content %}
+{# Доска команды (app/crm/tasks.py): незакреплённые и открытые задачи
+   каждого сотрудника, фильтр по точке, ниже - сделанное сегодня. #}
+<div class="bar"><h1>Все задачи <small class="muted">{{ view.open }} открыто{% if view.hot %} · горит {{ view.hot }}{% endif %}</small></h1>
+  {% if locations|length > 1 %}
+  <form method="get" class="search">
+    <select name="location" onchange="this.form.submit()">
+      <option value="">все точки</option>
+      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+      <option value="none" {% if place == 'none' %}selected{% endif %}>без точки</option>
+    </select>
+    <noscript><button type="submit">Показать</button></noscript>
+  </form>
+  {% endif %}
+  <a class="btn ghost" href="/my">Задачи дня</a>
+</div>
+{{ tk.add_form(people, locations, staff, task_money, '/tasks') }}
+<section class="card my-group info">
+  <h2>Не закреплено <span class="muted">· {{ view.free|length }}</span></h2>
+  {% if view.free %}<ul class="my-items">{% for t in view.free %}{{ tk.row(t, '/tasks') }}{% endfor %}</ul>
+  {% else %}<p class="muted">Все задачи разобраны по людям.</p>{% endif %}
+</section>
+<div class="team-cols">
+  {% for p in view.people %}
+  <section class="card my-group {% if p.hot %}hot{% endif %}">
+    <h2><span>{{ p.name }}</span> <small class="muted">{{ p.role }}{% if p.location %} · {{ p.location }}{% endif %} · {{ p.tasks|length }}</small></h2>
+    {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, '/tasks') }}{% endfor %}</ul>
+    {% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
+  </section>
+  {% endfor %}
+</div>
+<section class="card">
+  <h2>Сделано сегодня <span class="muted">· {{ done|length }}</span></h2>
+  {% if done %}
+  <table class="cards">
+    <tr><th>Задача</th><th>Сделал</th><th>Когда</th>{% if money_ok %}<th class="num">Цена</th>{% endif %}</tr>
+    {% for t in done %}
+    <tr><td data-label="Задача"><a href="/tasks/{{ t.id }}">{{ t.title }}</a></td>
+      <td data-label="Сделал">{{ t.done_by_name or '—' }}</td>
+      <td data-label="Когда" class="nowrap">{{ t.done_at|dmy }}</td>
+      {% if money_ok %}<td data-label="Цена" class="num">{{ money(t.pay) if t.pay is not none else '—' }}</td>{% endif %}</tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Сегодня ещё ничего не закрыли.</p>{% endif %}
+</section>
+<p class="muted">Здесь — поручения людям: то, чего система сама не знает. Наряды, просрочки,
+  заявки на выдачу и тревоги каждый видит в своих «Задачах дня» без поручения.
+  Незакреплённую задачу видит её точка и берёт тот, кто свободен.
+  Сделанные задачи с ценой идут в расчёт зарплаты исполнителя («Команда»).</p>
+{% endblock %}

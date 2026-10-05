@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Задача — {{ app_title }}{% endblock %}
+{% block content %}
+<div class="bar"><h1>{{ task.title }}</h1>
+  <a class="btn ghost" href="/tasks">← Все задачи</a>
+</div>
+<div class="cols">
+<section class="card">
+  <dl>
+    <dt>Состояние</dt><dd><span class="tag {% if task.status == 'done' %}available{% elif task.status == 'cancelled' %}closed{% endif %}">{{ statuses.get(task.status, task.status) }}</span>{% if task.hot %} <span class="tag bad">{{ task.due_text }}</span>{% elif task.due_text %} {{ task.due_text }}{% endif %}</dd>
+    <dt>Исполнитель</dt><dd>{{ task.assignee_name or 'не закреплена' }}</dd>
+    {% if task.location %}<dt>Точка</dt><dd>{{ task.location }}</dd>{% endif %}
+    {% if task.due_on %}<dt>Срок</dt><dd>{{ task.due_on|dmy }}</dd>{% endif %}
+    {% if money_ok and task.pay is not none %}<dt>Цена</dt><dd>{{ money(task.pay) }}</dd>{% endif %}
+    {% if task.note %}<dt>Подробнее</dt><dd>{{ task.note }}</dd>{% endif %}
+    <dt>Поставил</dt><dd>{{ task.created_by or '—' }}, {{ task.created_at|dmy }}</dd>
+    {% if task.done_at %}<dt>Сделал</dt><dd>{{ task.done_by_name or '—' }}, {{ task.done_at|dmy }}</dd>{% endif %}
+  </dl>
+  <div class="deal-stages">
+    {% if task.can_take %}<form method="post" action="/tasks/{{ task.id }}/take"><input type="hidden" name="back" value="/tasks"><button type="submit" class="ghost">Взять себе</button></form>{% endif %}
+    {% if task.can_finish %}<form method="post" action="/tasks/{{ task.id }}/done"><input type="hidden" name="back" value="/tasks"><button type="submit">Сделано</button></form>{% endif %}
+    {% if task.can_change and task.status == 'open' %}<form method="post" action="/tasks/{{ task.id }}/cancel"><input type="hidden" name="back" value="/tasks"><button type="submit" class="ghost">Отменить</button></form>{% endif %}
+    {% if task.can_change and task.status != 'open' %}<form method="post" action="/tasks/{{ task.id }}/reopen"><input type="hidden" name="back" value="/tasks"><button type="submit" class="ghost">Вернуть в работу</button></form>{% endif %}
+  </div>
+</section>
+{% if task.can_change and task.status == 'open' %}
+<section class="card">
+  <h2>Изменить</h2>
+  <form method="post" action="/tasks/{{ task.id }}">
+    <label>Что сделать <input name="title" value="{{ task.title }}" maxlength="300" required></label>
+    <label>Кому
+      <select name="assignee">
+        <option value="none" {% if task.assignee_id is none %}selected{% endif %}>не закреплять</option>
+        {% for s in people %}<option value="{{ s.id }}" {% if task.assignee_id == s.id %}selected{% endif %}>{{ s.name }}{% if s.location %} · {{ s.location }}{% endif %}</option>{% endfor %}
+      </select></label>
+    <label>Срок <input type="date" name="due_on" value="{{ task.due_on.isoformat() if task.due_on else '' }}"></label>
+    <label>Точка
+      <select name="location"><option value="">без точки</option>
+        {% for l in locations %}<option value="{{ l.name }}" {% if task.location == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+      </select></label>
+    {% if task_money %}<label>Цена задачи, ₽ <input name="pay" inputmode="decimal" value="{{ task.pay if task.pay is not none else '' }}"></label>{% endif %}
+    <label>Подробнее <textarea name="note" rows="3" maxlength="2000">{{ task.note or '' }}</textarea></label>
+    <button type="submit">Сохранить</button>
+  </form>
+</section>
+{% endif %}
+</div>
+{% endblock %}

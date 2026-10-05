@@ -172,6 +172,19 @@ async def order_assigned(bot: Any, order: dict, tech: dict) -> bool:
     return await _send(bot, tech["tg_id"], text)
 
 
+async def task_assigned(bot: Any, task: dict, staff: dict, *, author: str) -> bool:
+    """Сотруднику: ему поручили задачу дня. Как наряд технику - сообщением,
+    чтобы не ждать, пока он откроет панель."""
+    if not staff.get("tg_id") or bot is None:
+        return False
+    due = task.get("due_on")
+    text = texts.STAFF_TASK_ASSIGNED.format(
+        title=bot_logic.esc(task.get("title") or ""),
+        due=f"Срок: {due:%d.%m.%Y}\n" if due else "",
+        author=bot_logic.esc(author or "—"))
+    return await _send(bot, staff["tg_id"], text)
+
+
 async def repair_ready(bot: Any, client: dict, order: dict, total: Any) -> bool:
     """Клиенту: его техника из наряда готова и сколько это стоило.
 

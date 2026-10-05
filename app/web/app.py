@@ -63,6 +63,7 @@ from ..crm import (
     photos,
     readiness,
     service,
+    tasks,
 )
 from ..services import contract as contract_service
 from ..services import tochka
@@ -1402,7 +1403,153 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             shift_open=shift_open, today=today,
             repair_norm=logic.repair_norm_default(settings),
             booking_url=booking_issue_url)
-        return render(request, "my.html", groups=groups, point=point, today=today)
+        return render(request, "my.html", groups=groups, point=point, today=today,
+                      task_lists=tasks.my_lists(staff, await crm.tasks(status="open"),
+                                                today=today),
+                      people=await team_people(),
+                      locations=await crm.locations(active_only=True),
+                      task_money=tasks.manages(staff))
+
+    # ─────────── задачи дня: поручения (app/crm/tasks.py) ───────────
+
+    async def team_people() -> list[dict]:
+        return [s for s in await crm.staff_all() if s.get("active")]
+
+    def task_back(data: dict[str, str]) -> str:
+        """Куда вернуться: только свои страницы, адрес из формы - чужая строка."""
+        back = data.get("back") or ""
+        return back if back in ("/my", "/tasks") else "/my"
+
+    @app.get("/tasks")
+    async def tasks_page(request: Request) -> Response:
+        """Все задачи команды: незакреплённые и по каждому сотруднику, с
+        фильтром по точке; ниже - сделанное сегодня. Открыта всем: это
+        доска команды, а не раздел; цены задач - тому, кто ведёт команду."""
+        staff = request.state.staff
+        today = date.today()
+        place = request.query_params.get("location") or ""
+        people = await team_people()
+        view = tasks.overview(await crm.tasks(status="open"), people, staff=staff,
+                              today=today, location=place)
+        start = datetime.combine(today, datetime.min.time()).astimezone()
+        done = [tasks.dress(t, staff=staff, today=today)
+                for t in await crm.tasks(status="done", done_since=start)]
+        return render(request, "tasks.html", view=view, done=done, place=place,
+                      people=people, locations=await crm.locations(active_only=True),
+                      today=today, task_money=tasks.manages(staff),
+                      money_ok=tasks.money_ok(staff))
+
+    @app.post("/tasks")
+    async def task_add(request: Request) -> Response:
+        staff = request.state.staff
+        data = await form(request)
+        fields, problem = tasks.parse_form(data, staff=staff, today=date.today())
+        back = task_back(data)
+        if problem:
+            flash(request, problem, "err")
+            return redirect(back)
+        assert fields is not None
+        assignee = None
+        if fields.get("assignee_id") is not None:
+            assignee = await crm.staff_by_id(fields["assignee_id"])
+            if assignee is None or not assignee.get("active"):
+                flash(request, "Такого сотрудника нет или он отключён.", "err")
+                return redirect(back)
+        if fields.get("location") is None and assignee is None:
+            # Незакреплённая без точки висела бы у всей сети: точка автора.
+            fields["location"] = staff.get("location") or None
+        task_id = await crm.create_task(by=who(request), by_id=int(staff["id"]), **fields)
+        if assignee is not None and int(assignee["id"]) != int(staff["id"]):
+            await notify.task_assigned(bot, await crm.task(task_id) or {}, assignee,
+                                       author=staff.get("name") or staff.get("login") or "")
+        flash(request, "Задача поставлена." if assignee is not None
+              else "Задача поставлена незакреплённой: её возьмёт тот, кто свободен.")
+        return redirect(back)
+
+    async def task_action(request: Request, task_id: str, action: str) -> Response:
+        staff = request.state.staff
+        data = await form(request)
+        back = task_back(data)
+        task = await by_id(crm.task, task_id)
+        if task is None:
+            return render(request, "missing.html", status_code=404, what="Задача")
+        me = int(staff["id"])
+        if action == "take":
+            ok = tasks.may_take(staff, task) and await crm.take_task(int(task["id"]), me)
+            flash(request, "Задача ваша." if ok else "Её уже взяли.", "ok" if ok else "err")
+        elif action == "done":
+            if not tasks.may_finish(staff, task):
+                flash(request, "Закрыть задачу может исполнитель, автор или руководитель.",
+                      "err")
+            elif await crm.finish_task(int(task["id"]), me):
+                flash(request, "Сделано.")
+        elif not tasks.may_change(staff, task):
+            flash(request, "Это может автор задачи или руководитель.", "err")
+        elif action == "cancel":
+            await crm.cancel_task(int(task["id"]))
+            flash(request, "Задача отменена.")
+        elif action == "reopen":
+            await crm.reopen_task(int(task["id"]))
+            flash(request, "Задача снова открыта.")
+        return redirect(back)
+
+    @app.post("/tasks/{task_id}/take")
+    async def task_take(request: Request, task_id: str) -> Response:
+        return await task_action(request, task_id, "take")
+
+    @app.post("/tasks/{task_id}/done")
+    async def task_done(request: Request, task_id: str) -> Response:
+        return await task_action(request, task_id, "done")
+
+    @app.post("/tasks/{task_id}/cancel")
+    async def task_cancel(request: Request, task_id: str) -> Response:
+        return await task_action(request, task_id, "cancel")
+
+    @app.post("/tasks/{task_id}/reopen")
+    async def task_reopen(request: Request, task_id: str) -> Response:
+        return await task_action(request, task_id, "reopen")
+
+    @app.get("/tasks/{task_id}")
+    async def task_card(request: Request, task_id: str) -> Response:
+        task = await by_id(crm.task, task_id)
+        if task is None:
+            return render(request, "missing.html", status_code=404, what="Задача")
+        staff = request.state.staff
+        return render(request, "task.html",
+                      task=tasks.dress(task, staff=staff, today=date.today()),
+                      people=await team_people(),
+                      locations=await crm.locations(active_only=True),
+                      task_money=tasks.manages(staff), money_ok=tasks.money_ok(staff),
+                      statuses=tasks.STATUSES)
+
+    @app.post("/tasks/{task_id}")
+    async def task_save(request: Request, task_id: str) -> Response:
+        task = await by_id(crm.task, task_id)
+        if task is None:
+            return render(request, "missing.html", status_code=404, what="Задача")
+        staff = request.state.staff
+        if not tasks.may_change(staff, task):
+            flash(request, "Править задачу может автор или руководитель.", "err")
+            return redirect(f"/tasks/{task['id']}")
+        data = await form(request)
+        fields, problem = tasks.parse_form(data, staff=staff, today=date.today())
+        if problem:
+            flash(request, problem, "err")
+            return redirect(f"/tasks/{task['id']}")
+        assert fields is not None
+        assignee = None
+        if fields.get("assignee_id") is not None:
+            assignee = await crm.staff_by_id(fields["assignee_id"])
+            if assignee is None:
+                flash(request, "Такого сотрудника нет.", "err")
+                return redirect(f"/tasks/{task['id']}")
+        await crm.update_task(int(task["id"]), **fields)
+        if (assignee is not None and fields["assignee_id"] != task.get("assignee_id")
+                and int(assignee["id"]) != int(staff["id"])):
+            await notify.task_assigned(bot, await crm.task(int(task["id"])) or {}, assignee,
+                                       author=staff.get("name") or staff.get("login") or "")
+        flash(request, "Задача сохранена.")
+        return redirect(f"/tasks/{task['id']}")
 
     # ─────────────────────── дашборд ───────────────────────
 
@@ -3131,9 +3278,6 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────── воронка: сделки по этапам (app/crm/deals.py) ───────────
 
-    async def deal_people() -> list[dict]:
-        return [s for s in await crm.staff_all() if s.get("active")]
-
     @app.get("/incoming")
     async def incoming_page(request: Request) -> Response:
         """«Входящие» доской, как в CRM продаж: от заявки до сдачи. Без
@@ -3154,7 +3298,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                             for r in await crm.deals(closed_days=deals.CLOSED_DAYS))
                 if deals.matches(d, q=q, who=who_f, me=int(staff["id"]), location=place)]
         return render(request, "deals.html", columns=deals.board(rows), q=q, who=who_f,
-                      place=place, people=await deal_people(),
+                      place=place, people=await team_people(),
                       locations=await crm.locations(active_only=True),
                       may_move=may_edit(request, "issue"), inbox_ok=inbox_ok,
                       closed_days=deals.CLOSED_DAYS)
@@ -3196,7 +3340,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         moves = [(code, deals.STAGES[code]) for code in deals.MANUAL
                  if code != deal.get("stage") and deals.can_move(deal, code) is None]
         return render(request, "deal.html", deal=view, log_rows=await crm.deal_log(deal["id"]),
-                      people=await deal_people(),
+                      people=await team_people(),
                       locations=await crm.locations(active_only=True),
                       may_move=may_edit(request, "issue"), inbox_ok=inbox_ok,
                       moves=moves, issue_url=issue_url, stages=deals.STAGES)

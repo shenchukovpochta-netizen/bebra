@@ -564,6 +564,37 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await self.crm.deals(closed_days=30)), 1,
                          "давно закрытые не на доске")
 
+    async def test_tasks_on_postgres(self):
+        """Задачи дня на настоящей базе: «Взять» одним UPDATE (второй не
+        перехватит), «Сделано» пишет исполнителя, окно сделанного - для
+        зарплаты."""
+        tech = await self.crm.access_profile_by_code("tech")
+        marat = await self.crm.create_staff("marat", "hash", "Марат", "manager", tech["id"])
+        anna = await self.crm.create_staff("anna", "hash", "Анна", "manager", tech["id"])
+        free = await self.crm.create_task(title="Ремонт АКБ", by="staff:admin",
+                                          location="Павлюхина", pay=D("300"))
+        mine = await self.crm.create_task(title="Закупить запчасти", by="staff:admin",
+                                          assignee_id=anna, due_on=date.today())
+        self.assertIsNotNone((await self.crm.task(mine))["taken_at"])
+        self.assertTrue(await self.crm.take_task(free, marat))
+        self.assertFalse(await self.crm.take_task(free, anna), "взятую не перехватить")
+        self.assertTrue(await self.crm.finish_task(free, anna))
+        done = await self.crm.task(free)
+        self.assertEqual((done["status"], done["done_by"], done["done_by_name"]),
+                         ("done", marat, "Марат"), "сделал исполнитель, а не нажавший")
+        self.assertFalse(await self.crm.finish_task(free, marat), "дважды не закрыть")
+        since = datetime.now(UTC) - timedelta(hours=1)
+        rows = await self.crm.tasks(status="done", done_since=since)
+        self.assertEqual([r["id"] for r in rows], [free])
+        self.assertEqual([r["id"] for r in await self.crm.tasks(status="open",
+                                                                assignee_id=anna)], [mine])
+        self.assertTrue(await self.crm.update_task(mine, assignee_id=None, pay=D("150")))
+        self.assertTrue(await self.crm.reopen_task(free))
+        self.assertIsNone((await self.crm.task(free))["done_by"])
+        self.assertTrue(await self.crm.cancel_task(mine))
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.create_task(title="", by="t")
+
     async def test_quick_repair_form_on_postgres(self):
         """Форма стороннего ремонта из бота на настоящей базе: карточка
         клиента, наряд задним числом по дате обращения, закрытие днём

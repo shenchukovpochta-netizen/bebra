@@ -678,3 +678,12 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .deal-stages{display:flex;flex-wrap:wrap;gap:6px}
 .deal-stages form{margin:0}
 @media (max-width:640px){.board-col{flex-basis:82vw}}
+
+/* Задачи дня (_tasks.html): кнопки строки справа, форма свёрнута. */
+.task-acts{display:flex;gap:6px;align-items:center}
+.task-acts form{margin:0}
+.task-acts button{padding:4px 12px;font-size:13px}
+.task-add summary{cursor:pointer}
+.task-add form{margin-top:12px}
+.team-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.team-cols .card h2{display:flex;justify-content:space-between;gap:8px;align-items:baseline}

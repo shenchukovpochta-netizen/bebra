@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_tasks.html" as tk %}
 {% block title %}Задачи дня — {{ app_title }}{% endblock %}
 {% block content %}
 {# Задачи этого сотрудника (app/crm/mytasks.py): наряды - по технику,
@@ -6,10 +7,24 @@
    раздел открыт профилем; строка ведёт в карточку записи. #}
 <div class="bar"><h1>Задачи дня
     <small class="muted">{{ today.strftime('%d.%m') }} · {% if point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
+  <a class="btn ghost" href="/tasks">Все задачи</a>
   {% if can_view(staff, 'dashboard') %}<a class="btn ghost" href="/">Сводка</a>{% endif %}</div>
 {% if not point %}
 <p class="muted">Своя точка не задана — показаны задачи всех точек.
   {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
+{% endif %}
+{{ tk.add_form(people, locations, staff, task_money, '/my') }}
+{% if task_lists.mine %}
+<section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">
+  <h2>Мои поручения <span class="muted">· {{ task_lists.mine|length }}</span></h2>
+  <ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
+</section>
+{% endif %}
+{% if task_lists.free %}
+<section class="card my-group info">
+  <h2>Не закреплено — можно взять <span class="muted">· {{ task_lists.free|length }}</span></h2>
+  <ul class="my-items">{% for t in task_lists.free %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
+</section>
 {% endif %}
 {% for g in groups %}
 <section class="card my-group {{ g.level }}">
@@ -24,10 +39,10 @@
   </ul>
   {% if g.more %}<p class="muted">и ещё {{ g.more }} — <a href="{{ g.url }}">весь список</a></p>{% endif %}
 </section>
-{% else %}
+{% else %}{% if not task_lists.mine and not task_lists.free %}
 <section class="card">
   <p>На сегодня задач нет: нарядов на вас нет, заявок на выдачу, просрочек и
     новых тревог{% if point %} на «{{ point }}»{% endif %} тоже.</p>
 </section>
-{% endfor %}
+{% endif %}{% endfor %}
 {% endblock %}

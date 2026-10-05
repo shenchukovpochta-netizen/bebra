@@ -77,6 +77,7 @@ class FakeCrm:
         self.ops_: dict[int, dict] = {}
         self.inbox_threads_: dict[int, dict] = {}
         self.deals_: dict[int, dict] = {}
+        self.tasks_: dict[int, dict] = {}
         self.deal_log_: list[dict] = []
         self.inbox_messages_: dict[int, dict] = {}
         self.franchisees_: dict[int, dict] = {}
@@ -4726,6 +4727,86 @@ class FakeCrm:
 
     async def drop_company_mark(self, kind):
         self.marks_.pop(kind, None)
+
+    # ─── задачи дня ───
+    def _task_row(self, t):
+        who = self.staff.get(t.get("assignee_id")) or {}
+        done = self.staff.get(t.get("done_by")) or {}
+        return {**t, "assignee_name": who.get("name"), "assignee_login": who.get("login"),
+                "assignee_tg_id": who.get("tg_id"), "done_by_name": done.get("name")}
+
+    async def tasks(self, *, status=None, assignee_id=None, done_since=None,
+                    done_until=None, limit=2000):
+        rows = []
+        for t in self.tasks_.values():
+            if status and t["status"] != status:
+                continue
+            if assignee_id is not None and t["assignee_id"] != assignee_id:
+                continue
+            if done_since is not None and (t["done_at"] is None or t["done_at"] < done_since):
+                continue
+            if done_until is not None and (t["done_at"] is None or t["done_at"] >= done_until):
+                continue
+            rows.append(self._task_row(t))
+        rows.sort(key=lambda r: (r["due_on"] is None, r["due_on"] or date.min, r["id"]))
+        return rows[:limit]
+
+    async def task(self, task_id):
+        t = self.tasks_.get(task_id)
+        return self._task_row(t) if t else None
+
+    async def create_task(self, *, title, by, by_id=None, note=None, assignee_id=None,
+                          location=None, due_on=None, pay=None):
+        assert 1 <= len(title) <= 300
+        tid = self._id()
+        now = self._now()
+        self.tasks_[tid] = {
+            "id": tid, "title": title, "note": note, "assignee_id": assignee_id,
+            "location": location, "due_on": due_on, "pay": pay, "status": "open",
+            "created_by": by, "created_by_id": by_id, "created_at": now,
+            "taken_at": now if assignee_id is not None else None, "done_at": None,
+            "done_by": None, "updated_at": now}
+        return tid
+
+    async def update_task(self, task_id, **fields):
+        t = self.tasks_.get(task_id)
+        if t is None or not fields:
+            return False
+        unknown = set(fields) - {"title", "note", "assignee_id", "location", "due_on", "pay"}
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        t.update(fields, updated_at=self._now())
+        return True
+
+    async def take_task(self, task_id, staff_id):
+        t = self.tasks_.get(task_id)
+        if t is None or t["status"] != "open" or t["assignee_id"] is not None:
+            return False
+        t.update(assignee_id=staff_id, taken_at=self._now(), updated_at=self._now())
+        return True
+
+    async def finish_task(self, task_id, staff_id):
+        t = self.tasks_.get(task_id)
+        if t is None or t["status"] != "open":
+            return False
+        t.update(status="done", done_at=self._now(),
+                 done_by=t["assignee_id"] if t["assignee_id"] is not None else staff_id,
+                 updated_at=self._now())
+        return True
+
+    async def cancel_task(self, task_id):
+        t = self.tasks_.get(task_id)
+        if t is None or t["status"] != "open":
+            return False
+        t.update(status="cancelled", updated_at=self._now())
+        return True
+
+    async def reopen_task(self, task_id):
+        t = self.tasks_.get(task_id)
+        if t is None or t["status"] == "open":
+            return False
+        t.update(status="open", done_at=None, done_by=None, updated_at=self._now())
+        return True
 
     # ─── сделки: воронка «Входящих» ───
     _DEAL_FIELDS = {"title", "name", "phone", "responsible_id", "location", "note",

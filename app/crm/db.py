@@ -88,6 +88,9 @@ DEAL_FIELDS = frozenset({
     "title", "name", "phone", "responsible_id", "location", "note",
     "client_id", "thread_id", "booking_id", "rental_id",
 })
+# Задача дня: что правится в карточке. Статус - своими методами (взять,
+# сделано, отменить): у каждого перехода своё условие в самом UPDATE.
+TASK_FIELDS = frozenset({"title", "note", "assignee_id", "location", "due_on", "pay"})
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
@@ -6554,3 +6557,95 @@ class CrmDB:
             "where client_id is null and closed_at < now() - make_interval(days => $1) "
             "and (name is not null or phone is not null) returning id", days)
         return len(rows)
+
+    # ─────────────── задачи дня (app/crm/tasks.py) ───────────────
+
+    _TASK_SELECT = """
+        select t.*, a.name as assignee_name, a.login as assignee_login,
+               a.tg_id as assignee_tg_id, d.name as done_by_name
+          from crm.tasks t
+          left join crm.staff a on a.id = t.assignee_id
+          left join crm.staff d on d.id = t.done_by
+    """
+
+    async def tasks(self, *, status: str | None = None, assignee_id: int | None = None,
+                    done_since: datetime | None = None, done_until: datetime | None = None,
+                    limit: int = 2000) -> list[dict]:
+        """Задачи. done_since/done_until - сделанные в окне (расчёт зарплаты
+        и «сделано сегодня»)."""
+        conds: list[str] = []
+        args: list[Any] = []
+        if status:
+            args.append(status)
+            conds.append(f"t.status = ${len(args)}")
+        if assignee_id is not None:
+            args.append(assignee_id)
+            conds.append(f"t.assignee_id = ${len(args)}")
+        if done_since is not None:
+            args.append(done_since)
+            conds.append(f"t.done_at >= ${len(args)}")
+        if done_until is not None:
+            args.append(done_until)
+            conds.append(f"t.done_at < ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._TASK_SELECT} {where} "
+            f"order by t.due_on nulls last, t.id limit ${len(args)}", *args))
+
+    async def task(self, task_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._TASK_SELECT} where t.id = $1", task_id))
+
+    async def create_task(self, *, title: str, by: str, by_id: int | None = None,
+                          note: str | None = None, assignee_id: int | None = None,
+                          location: str | None = None, due_on: date | None = None,
+                          pay: Decimal | None = None) -> int:
+        return int(await self.pool.fetchval(
+            """
+            insert into crm.tasks (title, note, assignee_id, location, due_on, pay,
+                                   created_by, created_by_id, taken_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8,
+                    case when $3::bigint is not null then now() end)
+            returning id
+            """, title, note, assignee_id, location, due_on, pay, by, by_id))
+
+    async def update_task(self, task_id: int, **fields: Any) -> bool:
+        if not fields:
+            return False
+        sets, values = _set_clause(fields, TASK_FIELDS, 2)
+        row = await self.pool.fetchrow(
+            f"update crm.tasks set {sets}, updated_at = now() where id = $1 "
+            "returning id", task_id, *values)
+        return row is not None
+
+    async def take_task(self, task_id: int, staff_id: int) -> bool:
+        """«Взять» незакреплённую: условие в самом UPDATE - двое нажали
+        разом, взял первый, второму False."""
+        row = await self.pool.fetchrow(
+            "update crm.tasks set assignee_id = $2, taken_at = now(), updated_at = now() "
+            "where id = $1 and status = 'open' and assignee_id is null returning id",
+            task_id, staff_id)
+        return row is not None
+
+    async def finish_task(self, task_id: int, staff_id: int) -> bool:
+        """Сделано. Сделал исполнитель, если он есть; незакреплённую закрыл
+        тот, кто нажал, - он и сделал."""
+        row = await self.pool.fetchrow(
+            "update crm.tasks set status = 'done', done_at = now(), "
+            "done_by = coalesce(assignee_id, $2), updated_at = now() "
+            "where id = $1 and status = 'open' returning id", task_id, staff_id)
+        return row is not None
+
+    async def cancel_task(self, task_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "update crm.tasks set status = 'cancelled', updated_at = now() "
+            "where id = $1 and status = 'open' returning id", task_id)
+        return row is not None
+
+    async def reopen_task(self, task_id: int) -> bool:
+        """Отметили по ошибке: снова открыта, сделанное снято с расчёта."""
+        row = await self.pool.fetchrow(
+            "update crm.tasks set status = 'open', done_at = null, done_by = null, "
+            "updated_at = now() where id = $1 and status <> 'open' returning id", task_id)
+        return row is not None

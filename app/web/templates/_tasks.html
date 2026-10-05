@@ -1,0 +1,39 @@
+{# Задачи дня (app/crm/tasks.py): строка задачи с кнопками и форма новой.
+   Один кусок на «Задачи дня» (/my), «Все задачи» (/tasks) и карточку. #}
+{% macro row(t, back, show_who=False) %}
+<li class="task-row{% if t.hot %} hot{% endif %}">
+  <a href="/tasks/{{ t.id }}"><b>{{ t.title }}</b>
+    <small class="muted">{{ [t.due_text,
+      (t.assignee_name or 'не закреплена') if show_who else '',
+      t.location or '',
+      money(t.pay) if t.pay is not none else '']|select|join(' · ') }}</small></a>
+  <span class="task-acts">
+    {% if t.can_take %}<form method="post" action="/tasks/{{ t.id }}/take"><input type="hidden" name="back" value="{{ back }}"><button type="submit" class="ghost">Взять</button></form>{% endif %}
+    {% if t.can_finish %}<form method="post" action="/tasks/{{ t.id }}/done"><input type="hidden" name="back" value="{{ back }}"><button type="submit">Сделано</button></form>{% endif %}
+  </span>
+</li>
+{% endmacro %}
+
+{% macro add_form(people, locations, staff, task_money, back, open=False) %}
+<details class="card task-add"{% if open %} open{% endif %}>
+  <summary><b>+ Поставить задачу</b></summary>
+  <form method="post" action="/tasks" class="grid2">
+    <input type="hidden" name="back" value="{{ back }}">
+    <label class="wide">Что сделать <input name="title" maxlength="300" required placeholder="закупить запчасти, напомнить о продлении, ремонт АКБ"></label>
+    <label>Кому
+      <select name="assignee">
+        <option value="me">мне</option>
+        <option value="none">не закреплять — возьмёт свободный</option>
+        {% for s in people if s.id != staff.id %}<option value="{{ s.id }}">{{ s.name }}{% if s.location %} · {{ s.location }}{% endif %}</option>{% endfor %}
+      </select></label>
+    <label>Срок <input type="date" name="due_on"></label>
+    {% if locations|length > 1 %}<label>Точка
+      <select name="location"><option value="">{% if staff.location %}моя ({{ staff.location }}){% else %}вся сеть{% endif %}</option>
+        {% for l in locations %}<option value="{{ l.name }}">{{ l.name }}</option>{% endfor %}
+      </select></label>{% endif %}
+    {% if task_money %}<label>Цена задачи, ₽ <input name="pay" inputmode="decimal" placeholder="в зарплату исполнителю"></label>{% endif %}
+    <label class="wide">Подробнее <textarea name="note" rows="2" maxlength="2000"></textarea></label>
+    <button type="submit">Поставить</button>
+  </form>
+</details>
+{% endmacro %}
