@@ -3084,3 +3084,25 @@ create table if not exists crm.staff_plans (
   updated_at   timestamptz not null default now(),
   primary key (staff_id, month)
 );
+
+-- Платёжный календарь (app/crm/cashflow.py): плановые расходы и приходы,
+-- которых в базе нет фактом, - аренда помещения, зарплата, закупка,
+-- налог. Ожидаемые платежи клиентов сюда не пишутся: они считаются из
+-- идущих аренд («оплачено до» и цена периода) и долгов журнала. Это
+-- план, а не деньги: в ledger строка не идёт и долг не закрывает.
+-- repeat_months - повтор каждые N месяцев с due_on (0 - разово); done_at -
+-- разовый платёж прошёл (повторяющийся снимают удалением).
+create table if not exists crm.cash_plan (
+  id            bigserial primary key,
+  due_on        date        not null,
+  title         text        not null check (length(title) between 1 and 200),
+  amount        numeric(12,2) not null check (amount > 0),
+  direction     text        not null default 'out' check (direction in ('out', 'in')),
+  repeat_months integer     not null default 0 check (repeat_months between 0 and 12),
+  location      text,
+  note          text,
+  done_at       timestamptz,
+  created_by    text,
+  created_at    timestamptz not null default now()
+);
+create index if not exists cash_plan_due_idx on crm.cash_plan (due_on) where done_at is null;

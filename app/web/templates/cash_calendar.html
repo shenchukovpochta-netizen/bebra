@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Платёжный календарь — {{ app_title }}{% endblock %}
+{% block content %}
+{# Платёжный календарь (app/crm/cashflow.py): аренда - по «оплачено до» и
+   цене периода, плановые строки - из crm.cash_plan. Это план, а не
+   деньги: ни строка, ни ожидание в ledger не идут. #}
+<div class="bar"><h1>Платёжный календарь <small class="muted">{{ cal.start|dmy }} — {{ cal.end|dmy }}</small></h1>
+  <form method="get" class="search">
+    <select name="days">{% for d in horizons %}<option value="{{ d }}" {% if d == days %}selected{% endif %}>{{ d }} дней</option>{% endfor %}</select>
+    {% if locations|length > 1 %}<select name="location"><option value="">все точки</option>
+      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}</select>{% endif %}
+    <input name="start" value="{{ start_raw }}" placeholder="остаток на сегодня, ₽" inputmode="decimal">
+    <button type="submit">Показать</button>
+  </form>
+  <a class="btn ghost" href="/finance">← Финансы</a>
+</div>
+<div class="tiles">
+  <div class="tile good"><b>{{ money(cal.total.rent) }}</b><span>ждём за аренду</span></div>
+  {% if cal.total.plan_in %}<div class="tile"><b>{{ money(cal.total.plan_in) }}</b><span>плановые приходы</span></div>{% endif %}
+  <div class="tile {% if cal.total.plan_out %}warn{% endif %}"><b>{{ money(cal.total.plan_out) }}</b><span>плановые расходы</span></div>
+  <div class="tile"><b>{{ money(cal.net) }}</b><span>итог за {{ days }} дней</span></div>
+  <a class="tile {% if cal.debts %}warn{% endif %}" href="/finance"><b>{{ money(cal.debts) }}</b><span>долги к сбору<br><small class="muted">когда отдадут — неизвестно, в итог не входят</small></span></a>
+</div>
+{% if cal.gap %}<p class="flash err">Кассовый разрыв {{ cal.gap|dmy }}: при остатке {{ money(cal.opening) }} в этот день денег не хватит. Перенесите расход или соберите долги.</p>
+{% elif cal.opening is none %}<p class="muted">Впишите остаток на сегодня — календарь покажет, хватит ли денег на каждый день и где кассовый разрыв.</p>{% endif %}
+<div class="card">
+<div class="table-wrap">
+<table class="cards">
+  <tr><th>День</th><th class="num">Аренда</th><th class="num">Приход</th><th class="num">Расход</th><th class="num">Итог дня</th>{% if cal.opening is not none %}<th class="num">Остаток</th>{% endif %}<th>Что</th></tr>
+  {% for d in cal.days %}{% if d.entries or loop.first %}
+  <tr class="{% if cal.opening is not none and d.balance < 0 %}warn-row{% endif %}">
+    <td class="nowrap" data-label="День"><b>{{ d.day.strftime('%d.%m') }}</b> <small class="muted">{{ ['пн','вт','ср','чт','пт','сб','вс'][d.day.weekday()] }}</small></td>
+    <td class="num" data-label="Аренда">{% if d.rent %}{{ money(d.rent) }} <small class="muted">· {{ d.rent_count }}</small>{% else %}—{% endif %}</td>
+    <td class="num" data-label="Приход">{{ money(d.plan_in) if d.plan_in else '—' }}</td>
+    <td class="num" data-label="Расход">{{ money(d.plan_out) if d.plan_out else '—' }}</td>
+    <td class="num" data-label="Итог дня"><b>{{ money(d.net) }}</b></td>
+    {% if cal.opening is not none %}<td class="num" data-label="Остаток">{{ money(d.balance) }}</td>{% endif %}
+    <td data-label="Что"><small>{% for i in d.entries if i.kind == 'plan' %}<span class="{% if i.direction == 'out' %}bad{% else %}ok{% endif %}">{{ '−' if i.direction == 'out' else '+' }}{{ money(i.amount) }} {{ i.title }}{% if i.overdue %} (просрочен){% endif %}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}
+      {% set rents = d.entries|selectattr('kind', 'equalto', 'rent')|list %}{% if rents %}{% if d.plan_in or d.plan_out %}<br>{% endif %}<span class="muted">аренда: {% for i in rents[:4] %}<a href="{{ i.url }}">{{ i.title }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% if rents|length > 4 %} и ещё {{ rents|length - 4 }}{% endif %}</span>{% endif %}</small></td>
+  </tr>
+  {% endif %}{% endfor %}
+</table>
+</div>
+<p class="muted">Аренда — следующий период каждой идущей аренды в день «оплачено до» по цене периода
+  и дальше каждые её дни. Не ждём: ручное начисление, клиент сказал «сдаю», аренда в розыске.
+  Дни без движения скрыты.</p>
+</div>
+<div class="cols">
+{% if may_plan %}
+<section class="card">
+  <h2>Добавить плановый платёж</h2>
+  <form method="post" action="/finance/calendar" class="grid2">
+    <label class="wide">Что <input name="title" maxlength="200" required placeholder="аренда помещения, зарплата, закупка АКБ"></label>
+    <label>Дата <input type="date" name="due_on" required value="{{ today.isoformat() }}"></label>
+    <label>Сумма, ₽ <input name="amount" inputmode="decimal" required></label>
+    <label>Вид <select name="direction">{% for code, label in directions.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+    <label>Повтор <select name="repeat_months"><option value="0">разово</option><option value="1">каждый месяц</option><option value="3">раз в квартал</option><option value="12">раз в год</option></select></label>
+    {% if locations|length > 1 %}<label>Точка <select name="location"><option value="">вся сеть</option>{% for l in locations %}<option value="{{ l.name }}">{{ l.name }}</option>{% endfor %}</select></label>{% endif %}
+    <button type="submit">Добавить</button>
+  </form>
+</section>
+{% endif %}
+<section class="card">
+  <h2>Плановые платежи <span class="muted">· {{ plans|length }}</span></h2>
+  {% if plans %}
+  <table class="cards">
+    <tr><th>Дата</th><th>Что</th><th class="num">Сумма</th><th>Повтор</th>{% if may_plan %}<th></th>{% endif %}</tr>
+    {% for x in plans %}
+    <tr><td class="nowrap" data-label="Дата">{{ x.due_on|dmy }}</td>
+      <td data-label="Что">{{ x.title }}{% if x.location %} <small class="muted">· {{ x.location }}</small>{% endif %}</td>
+      <td class="num" data-label="Сумма"><span class="{% if x.direction == 'out' %}bad{% else %}ok{% endif %}">{{ '−' if x.direction == 'out' else '+' }}{{ money(x.amount) }}</span></td>
+      <td data-label="Повтор">{% if x.repeat_months == 1 %}каждый месяц{% elif x.repeat_months %}раз в {{ x.repeat_months }} мес.{% else %}разово{% endif %}</td>
+      {% if may_plan %}<td data-label="" class="inline-form">
+        {% if not x.repeat_months %}<form method="post" action="/finance/calendar/{{ x.id }}/done"><button type="submit" class="ghost">Прошёл</button></form>{% endif %}
+        <form method="post" action="/finance/calendar/{{ x.id }}/delete"><button type="submit" class="ghost">Убрать</button></form></td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Плановых платежей нет. Добавьте аренду помещения, зарплаты и закупки — календарь покажет, когда денег не хватит.</p>{% endif %}
+</section>
+</div>
+{% endblock %}

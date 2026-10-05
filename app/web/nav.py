@@ -112,6 +112,7 @@ NAV: tuple[Group, ...] = (
     Group("Деньги", (
         Item("Финансы", "/finance", "wallet", section="finance",
              match=("/finance", "/payments", "/assets")),
+        Item("Платёжный календарь", "/finance/calendar", "flag", section="finance"),
         Item("Касса", "/cash", "banknote", section="cash", match=("/cash", "/bank")),
         Item("Тарифы", "/tariffs", "percent", section="tariffs"),
     )),

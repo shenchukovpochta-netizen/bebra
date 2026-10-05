@@ -6750,3 +6750,56 @@ class CrmDB:
             "order by done_at desc limit $4", int(staff["id"]), since, until, limit)
         return {"rentals": _rows(rentals), "payments": _rows(payments),
                 "orders": _rows(orders), "tasks": _rows(tasks)}
+
+    # ─────────────── доход по статьям и платёжный календарь (app/crm/cashflow.py) ───────────────
+
+    async def repair_income_by_location(self, since: datetime, until: datetime
+                                        ) -> dict[str | None, dict[str, Any]]:
+        """Оплаченный клиентами ремонт за окно по точке наряда: сторонний
+        (чужая техника) и арендаторам (свой велосипед за счёт клиента).
+        В ledger этих денег нет - журнал это аренда."""
+        rows = await self.pool.fetch(
+            """
+            select nullif(o.location, '') as location,
+                   coalesce(sum(o.total) filter (where o.bike_id is null), 0) as external,
+                   coalesce(sum(o.total) filter (where o.bike_id is not null), 0) as renters,
+                   count(*) as orders
+              from crm.work_orders o
+             where o.payer = 'client' and o.paid_at >= $1 and o.paid_at < $2
+             group by 1
+            """, since, until)
+        return {r["location"]: {"external": Decimal(r["external"] or 0),
+                                "renters": Decimal(r["renters"] or 0),
+                                "orders": int(r["orders"])} for r in rows}
+
+    async def cash_plan(self, *, until: date | None = None, open_only: bool = True
+                        ) -> list[dict]:
+        conds, args = [], []
+        if open_only:
+            conds.append("done_at is null")
+        if until is not None:
+            args.append(until)
+            conds.append(f"due_on <= ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        return _rows(await self.pool.fetch(
+            f"select * from crm.cash_plan {where} order by due_on, id", *args))
+
+    async def add_cash_plan(self, *, due_on: date, title: str, amount: Decimal,
+                            direction: str, repeat_months: int, by: str,
+                            location: str | None = None, note: str | None = None) -> int:
+        return int(await self.pool.fetchval(
+            "insert into crm.cash_plan (due_on, title, amount, direction, repeat_months, "
+            "location, note, created_by) values ($1, $2, $3, $4, $5, $6, $7, $8) "
+            "returning id", due_on, title, amount, direction, repeat_months, location,
+            note, by))
+
+    async def finish_cash_plan(self, plan_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "update crm.cash_plan set done_at = now() where id = $1 and done_at is null "
+            "returning id", plan_id)
+        return row is not None
+
+    async def drop_cash_plan(self, plan_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "delete from crm.cash_plan where id = $1 returning id", plan_id)
+        return row is not None

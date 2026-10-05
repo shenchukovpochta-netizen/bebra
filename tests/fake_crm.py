@@ -79,6 +79,7 @@ class FakeCrm:
         self.deals_: dict[int, dict] = {}
         self.tasks_: dict[int, dict] = {}
         self.staff_plans_: dict[tuple, dict] = {}
+        self.cash_plan_: dict[int, dict] = {}
         self.deal_log_: list[dict] = []
         self.inbox_messages_: dict[int, dict] = {}
         self.franchisees_: dict[int, dict] = {}
@@ -4808,6 +4809,47 @@ class FakeCrm:
             return False
         t.update(status="open", done_at=None, done_by=None, updated_at=self._now())
         return True
+
+    # ─── доход по статьям и платёжный календарь ───
+    async def repair_income_by_location(self, since, until):
+        out = {}
+        for o in self.orders_.values():
+            paid = o.get("paid_at")
+            if o.get("payer") != "client" or paid is None or not since <= paid < until:
+                continue
+            row = out.setdefault(o.get("location") or None,
+                                 {"external": Decimal(0), "renters": Decimal(0), "orders": 0})
+            key = "external" if o.get("bike_id") is None else "renters"
+            row[key] += Decimal(o.get("total") or 0)
+            row["orders"] += 1
+        return out
+
+    async def cash_plan(self, *, until=None, open_only=True):
+        rows = [dict(x) for x in self.cash_plan_.values()
+                if (not open_only or x["done_at"] is None)
+                and (until is None or x["due_on"] <= until)]
+        return sorted(rows, key=lambda x: (x["due_on"], x["id"]))
+
+    async def add_cash_plan(self, *, due_on, title, amount, direction, repeat_months, by,
+                            location=None, note=None):
+        assert direction in ("out", "in") and amount > 0 and 0 <= repeat_months <= 12
+        pid = self._id()
+        self.cash_plan_[pid] = {"id": pid, "due_on": due_on, "title": title,
+                                "amount": Decimal(amount), "direction": direction,
+                                "repeat_months": repeat_months, "location": location,
+                                "note": note, "done_at": None, "created_by": by,
+                                "created_at": self._now()}
+        return pid
+
+    async def finish_cash_plan(self, plan_id):
+        x = self.cash_plan_.get(plan_id)
+        if x is None or x["done_at"] is not None:
+            return False
+        x["done_at"] = self._now()
+        return True
+
+    async def drop_cash_plan(self, plan_id):
+        return self.cash_plan_.pop(plan_id, None) is not None
 
     # ─── команда: план и факт сотрудника ───
     async def staff_plans(self, month):

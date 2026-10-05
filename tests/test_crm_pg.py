@@ -633,6 +633,40 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncpg.CheckViolationError):
             await self.crm.set_staff_plan(anna, first, by="t", order_pct=D("150"))
 
+    async def test_income_and_cash_plan_on_postgres(self):
+        """Доход по статьям: оплаченные клиентские наряды по точке, чужая
+        техника отдельно от своей; плановые платежи календаря."""
+        await self.seed()
+        client = await self.crm.client(self.client_id)
+        own = await service.open_order(self.crm, bike=await self.crm.bike(self.bike_id),
+                                       payer="client", client=client, complaint="колесо",
+                                       object_note=None, tech_id=None, estimate=D(0), by="t")
+        ext = await service.open_order(self.crm, bike=None, payer="client", client=client,
+                                       complaint="мотор", object_note="самокат",
+                                       tech_id=None, estimate=D(0), by="t")
+        for oid, total in ((own, D("1200")), (ext, D("3500"))):
+            await self.crm.update_work_order(oid, total=total, location="Павлюхина",
+                                             status="done", closed_at=datetime.now(UTC),
+                                             paid_at=datetime.now(UTC))
+        since = datetime.now(UTC) - timedelta(hours=1)
+        got = await self.crm.repair_income_by_location(since, datetime.now(UTC)
+                                                       + timedelta(minutes=1))
+        self.assertEqual((got["Павлюхина"]["external"], got["Павлюхина"]["renters"],
+                          got["Павлюхина"]["orders"]), (D("3500.00"), D("1200.00"), 2))
+        pid = await self.crm.add_cash_plan(due_on=date.today(), title="Аренда помещения",
+                                           amount=D("40000"), direction="out",
+                                           repeat_months=1, by="t")
+        once = await self.crm.add_cash_plan(due_on=date.today(), title="Налог",
+                                            amount=D("5000"), direction="out",
+                                            repeat_months=0, by="t")
+        self.assertTrue(await self.crm.finish_cash_plan(once))
+        self.assertFalse(await self.crm.finish_cash_plan(once))
+        self.assertEqual([x["id"] for x in await self.crm.cash_plan()], [pid])
+        self.assertTrue(await self.crm.drop_cash_plan(pid))
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.add_cash_plan(due_on=date.today(), title="x", amount=D("0"),
+                                         direction="out", repeat_months=0, by="t")
+
     async def test_quick_repair_form_on_postgres(self):
         """Форма стороннего ремонта из бота на настоящей базе: карточка
         клиента, наряд задним числом по дате обращения, закрытие днём

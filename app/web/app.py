@@ -20,7 +20,7 @@ import re
 import secrets
 import time
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -48,6 +48,7 @@ from .. import texts
 from ..crm import (
     banking,
     billing,
+    cashflow,
     company,
     deals,
     doctemplates,
@@ -1728,7 +1729,38 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             transfers=(advice["transfer"] or {}).get("moves", ()),
             idle=advice["idle"], today=today,
             repair_norm=logic.repair_norm_default(settings))
+        # Критичное сверх задач: просроченные поручения, расхождения парка,
+        # кто ждёт ответа. Каждая строка - тому, кому открыт её адрес.
+        critical: list[dict[str, Any]] = []
+        late = [t for t in await crm.tasks(status="open")
+                if t.get("due_on") is not None and t["due_on"] < today]
+        if late:
+            critical.append({"code": "tasks_late", "title": "Просроченные поручения",
+                             "count": len(late), "url": "/tasks", "section": None,
+                             "names": [t["title"] for t in late[:3]]})
+        if may_view(request, "bikes"):
+            issues = await integrity_data(request)
+            if issues:
+                critical.append({"code": "integrity", "title": "Расхождения парка и аренд",
+                                 "count": len(issues), "url": "/reports/integrity",
+                                 "section": "bikes", "names": []})
+        waiting = (await crm.inbox_open_count()) if may_view(request, "inbox") else 0
+        if waiting:
+            critical.append({"code": "inbox", "title": "Ждут ответа в сообщениях",
+                             "count": waiting, "url": "/incoming", "section": "inbox",
+                             "names": []})
+        month_since = datetime.combine(first, datetime.min.time()).astimezone()
+        month_until = (datetime.now().astimezone() if span["is_current"] else
+                       datetime.combine(next_month, datetime.min.time()).astimezone())
+        income = cashflow.income(
+            await crm.money_by_location(month_since, month_until),
+            await crm.repair_income_by_location(month_since, month_until),
+            [p["name"] for p in places if p.get("active")])
+        week = cashflow.week_ahead(cashflow.calendar(
+            rows, await crm.cash_plan(until=today + timedelta(days=7)), start=today, days=7))
         return render(request, "dashboard.html",
+                      critical=critical, income=income, week=week,
+                      place_ids={p["name"]: p["id"] for p in places},
                       tasks=tasks, setup=await setup_wanted(request.state.staff, settings),
                       inbox_waiting=(await crm.inbox_open_count()
                                      if may_view(request, "inbox") else None),
@@ -1776,6 +1808,69 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       bonus_share=logic.bonus_totals(
                           [{"kind": "all", "amount": month_totals.get("bonus", 0)}],
                           month_totals.get("payment", 0))["share"])
+
+    # ─────────── платёжный календарь (app/crm/cashflow.py) ───────────
+
+    @app.get("/finance/calendar")
+    async def cash_calendar(request: Request) -> Response:
+        """Что придёт и уйдёт по дням вперёд: аренда по «оплачено до»,
+        плановые расходы и приходы, остаток и кассовый разрыв."""
+        if not may_view(request, "finance"):
+            return denied(request, "finance")
+        p = request.query_params
+        today = date.today()
+        days = int(p.get("days")) if (p.get("days") or "").isdigit() else 30
+        days = days if days in cashflow.HORIZONS else 30
+        opening = None
+        raw = (p.get("start") or "").replace(" ", "").replace("\u00a0", "").replace(",", ".")
+        if raw:
+            try:
+                value = Decimal(raw)
+                opening = (logic.to_money(value)
+                           if value.is_finite() and abs(value) < 10**10 else None)
+            except (InvalidOperation, ValueError):
+                opening = None
+        place = p.get("location") or ""
+        debts = sum((-Decimal(d["balance"]) for d in await crm.debtors(5000)), Decimal(0))
+        cal = cashflow.calendar(
+            await crm.active_rentals(),
+            await crm.cash_plan(until=today + timedelta(days=days)),
+            start=today, days=days, opening=opening, debts=debts, location=place)
+        return render(request, "cash_calendar.html", cal=cal, days=days, place=place,
+                      start_raw=p.get("start") or "", horizons=cashflow.HORIZONS,
+                      plans=await crm.cash_plan(open_only=True),
+                      locations=await crm.locations(active_only=True),
+                      directions=cashflow.DIRECTIONS, today=today,
+                      may_plan=may_edit(request, "finance"))
+
+    @app.post("/finance/calendar")
+    async def cash_calendar_add(request: Request) -> Response:
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        fields, problem = cashflow.parse_plan(await form(request), today=date.today())
+        if problem:
+            flash(request, problem, "err")
+        else:
+            assert fields is not None
+            await crm.add_cash_plan(by=who(request), **fields)
+            flash(request, "Платёж добавлен в календарь.")
+        return redirect("/finance/calendar")
+
+    @app.post("/finance/calendar/{plan_id}/done")
+    async def cash_calendar_done(request: Request, plan_id: str) -> Response:
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        if (pid := logic.parse_id(plan_id)) is not None:
+            await crm.finish_cash_plan(pid)
+        return redirect("/finance/calendar")
+
+    @app.post("/finance/calendar/{plan_id}/delete")
+    async def cash_calendar_drop(request: Request, plan_id: str) -> Response:
+        if not may_edit(request, "finance"):
+            return denied(request, "finance")
+        if (pid := logic.parse_id(plan_id)) is not None:
+            await crm.drop_cash_plan(pid)
+        return redirect("/finance/calendar")
 
     # ─────────────────── инструменты списков ───────────────────
 

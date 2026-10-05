@@ -94,7 +94,7 @@ Claude Code читает этот файл в начале каждой сесс
 `inbox_threads`, `inbox_messages`, `clients`, `rentals`, `rental_intent_log`,
 `rental_bikes`, `rental_extras`, `ledger`, `payment_claims`, `ops_reports`,
 `franchisees`, `franchise_snapshots`, `franchise_months`, `feedback`,
-`return_photos`, `deals`, `deal_log`, `tasks`, `staff_plans`.
+`return_photos`, `deals`, `deal_log`, `tasks`, `staff_plans`, `cash_plan`.
 
 - **`bike_status_log` — самая важная таблица.** Пишется триггером
   `crm.log_bike_status` при любой смене `bikes.status` (панель, аренда, бот,
@@ -227,6 +227,12 @@ Claude Code читает этот файл в начале каждой сесс
   список - карточки: класс `cards` у таблицы, `data-label` у каждой
   ячейки. Значок на главный экран - манифест без service worker:
   страницы с ПДн в кэше телефона не оседают.
+- **Доход по статьям и платёжный календарь** (`app/crm/cashflow.py`,
+  `cash_plan`): статьи - аренда (платежи журнала), сторонний ремонт и
+  ремонт арендаторам (оплаченные клиентские наряды - их в журнале нет).
+  Календарь ждёт аренду по «оплачено до» и цене периода (не ждёт ручную,
+  «сдаю», розыск), плановые строки - то, чего нет фактом; долги - «к
+  сбору» отдельно. Остаток вводит человек. В `ledger` ничего не пишет.
 - **Расхождения**: парк, аренды и наряды проверяются на несходимость
   (`logic.integrity_issues`) — отчётом в панели и раз в сутки в чат.
 - **Сотрудник и Telegram**: `staff.tg_id` ставится самим сотрудником по

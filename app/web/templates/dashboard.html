@@ -31,6 +31,27 @@
 {% set my_tasks = [] %}
 {# edit - строка ведёт в форму: видна тому, кто может её сохранить. #}
 {% for t in visible %}{% if can_view(staff, task_ok[t.code]) and (not t.edit or can_edit(staff, task_ok[t.code])) %}{% set _ = my_tasks.append(t) %}{% endif %}{% endfor %}
+{# Критично: горящее из задач и то, чего в них нет - просроченные
+   поручения, расхождения парка, кто ждёт ответа. #}
+{% set hot = my_tasks|selectattr('level', 'equalto', 'hot')|list %}
+{% set crit = [] %}
+{% for c in critical %}{% if c.section is none or can_view(staff, c.section) %}{% set _ = crit.append(c) %}{% endif %}{% endfor %}
+{% if hot or crit %}
+<section class="card my-group hot">
+  <h2>Критично <span class="muted">· {{ hot|length + crit|length }}</span></h2>
+  <div class="tasks">
+    {% for t in hot %}
+    <a class="task hot" href="{{ t.url }}"><span class="n">{{ t.count }}</span>
+      <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span></a>
+    {% endfor %}
+    {% for c in crit %}
+    <a class="task hot" href="{{ c.url }}"><span class="n">{{ c.count }}</span>
+      <span class="t">{{ c.title }}{% if c.names %}<small class="muted">{{ c.names|join(', ') }}{% if c.count > c.names|length %} и ещё {{ c.count - c.names|length }}{% endif %}</small>{% endif %}</span></a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% set my_tasks = my_tasks|rejectattr('level', 'equalto', 'hot')|list %}
 <section class="card">
   <h2>Задачи на сегодня <span class="muted">· {{ my_tasks|length }}</span></h2>
   {% if my_tasks %}
@@ -42,7 +63,7 @@
     </a>
     {% endfor %}
   </div>
-  {% else %}<p class="muted">Горящего нет: аренды оплачены, заявок и тревог нет, наряды идут в срок.</p>{% endif %}
+  {% else %}<p class="muted">{% if hot or crit %}Остальное — выше, в «Критично».{% else %}Горящего нет: аренды оплачены, заявок и тревог нет, наряды идут в срок.{% endif %}</p>{% endif %}
   <p class="muted">Здесь задачи всей сети. <a href="/my">Задачи дня</a> — только по вашей точке и вашим нарядам.</p>
 </section>
 <section class="card three">
@@ -115,6 +136,34 @@
 </div>
 
 {% if money_ok %}
+<section class="card">
+  <div class="three-head"><h2>Доход по статьям <span class="muted">{{ span.first.strftime('%m.%Y') }}{% if span.is_current %}, по сегодня{% endif %}</span></h2>
+    <span class="muted"><a href="/finance/calendar">платёжный календарь</a></span></div>
+  <div class="tiles">
+    <div class="tile"><b>{{ money(income.total.total) }}</b><span>всего пришло</span></div>
+    <div class="tile"><b>{{ money(income.total.rent) }}</b><span>аренда{% if income.total.share.rent is not none %} · {{ income.total.share.rent }} %{% endif %}</span></div>
+    <div class="tile"><b>{{ money(income.total.repair_external) }}</b><span>сторонний ремонт{% if income.total.share.repair_external %} · {{ income.total.share.repair_external }} %{% endif %}</span></div>
+    <div class="tile"><b>{{ money(income.total.repair_renters) }}</b><span>ремонт арендаторам{% if income.total.share.repair_renters %} · {{ income.total.share.repair_renters }} %{% endif %}</span></div>
+    {% if income.total.fines %}<div class="tile"><b>{{ money(income.total.fines) }}</b><span>штрафов начислено<br><small class="muted">начисление, не приход</small></span></div>{% endif %}
+  </div>
+  {% if income.rows|length > 1 %}
+  <div class="table-wrap">
+  <table class="cards">
+    <tr><th>Точка</th><th class="num">Аренда</th><th class="num">Сторонний ремонт</th><th class="num">Ремонт арендаторам</th><th class="num">Всего</th><th class="num">Доля</th></tr>
+    {% for r in income.rows %}
+    <tr><td data-label="Точка">{% if can_view(staff, 'reports') and (r.location is none or r.location in place_ids) %}<a href="/reports/points/{{ place_ids[r.location] if r.location is not none else 'none' }}">{{ r.location or 'без точки' }}</a>{% else %}{{ r.location or 'без точки' }}{% endif %}</td>
+      <td class="num" data-label="Аренда">{{ money(r.rent) }}</td>
+      <td class="num" data-label="Сторонний ремонт">{{ money(r.repair_external) }}</td>
+      <td class="num" data-label="Ремонт арендаторам">{{ money(r.repair_renters) }}</td>
+      <td class="num" data-label="Всего"><b>{{ money(r.total) }}</b></td>
+      <td class="num" data-label="Доля">{% if income.total.total %}{{ (r.total * 100 / income.total.total)|round(1) }} %{% else %}—{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% endif %}
+  <p class="muted">Ближайшие 7 дней: ждём за аренду <b>{{ money(week.rent) }}</b> ({{ week.count }} платежей){% if week.plan_out %}, плановые расходы <b class="bad">{{ money(week.plan_out) }}</b>{% endif %}{% if week.plan_in %}, плановые приходы {{ money(week.plan_in) }}{% endif %}.
+    Ремонт в журнал денег не идёт — статьи ремонта считаются по оплаченным нарядам.</p>
+</section>
 <section class="card three">
   <div class="three-head"><h2>План на месяц
       {# Стрелки листают месяц: прошлый - целиком, вперёд - некуда, назад - до
