@@ -93,6 +93,13 @@ class TestIssueLogic(unittest.TestCase):
         self.assertEqual(logic.bot_client_state({**signed, "act_in_signed_at": "x",
                                                  "act_out_signed_at": "y"})["code"], "signed")
 
+    def test_bike_matches(self):
+        bike = {"code": "МБ-12", "motor_no": "60V 240W-2024A123", "frame_no": "FR-0099"}
+        for query in ("мб-12", "", "2024а123", "60в240w", "fr0099"):
+            self.assertTrue(logic.bike_matches(bike, query), query)
+        for query in ("МБ-13", "A777", "9"):
+            self.assertFalse(logic.bike_matches(bike, query), query)
+
     def test_issue_payment_default(self):
         self.assertEqual(logic.issue_payment_default(D(3000), D(0)), D(3000))
         self.assertEqual(logic.issue_payment_default(D(3000), D(500)), D(2500))
@@ -205,6 +212,28 @@ class TestIssueWizard(tw.WebCase):
         self.assertIn('value="3000"', page, "принять при выдаче - цена периода")
         until = (date.today() + timedelta(days=7)).strftime("%d.%m.%Y")
         self.assertIn(until, page)
+
+    def test_find_bike_by_motor_vin(self):
+        """VIN мотора с техники - сразу к велосипеду, как набрали с телефона:
+        кириллица, пробелы, «В» вместо «V»."""
+        self.run_(self.crm.update_bike(self.bike_id, motor_no="60V240W2024A123"))
+        second = self.run_(self.crm.create_bike(code="B-2", model="Kugoo V3",
+                                                motor_no="60V240W2024A777"))
+        page = self.issue(client=self.client_id, find="2024%D0%90123")   # кириллица А
+        self.assertIn("Выбран велосипед <b>№ B-1</b>", page)
+        page = self.issue(client=self.client_id, find="60%D0%92240W")    # «60В240W»
+        self.assertIn("Подходят несколько свободных", page)
+        self.assertIn(f"bike={second}", page)
+        self.assertIn("мотор 60V240W2024A777", page)
+        # на шаге велосипеда тот же поиск сужает список
+        page = self.issue(client=self.client_id, tariff=self.tariff_id, model="Kugoo V3",
+                          q="A777")
+        self.assertIn("№ B-2", page)
+        self.assertNotIn("№ B-1", page)
+        # занятый - объяснение, а не пустота
+        self.run_(self.crm.update_bike(second, status="repair"))
+        page = self.issue(client=self.client_id, find="A777")
+        self.assertIn("B-2 сейчас «В ремонте»", page)
 
     def test_wizard_from_bike_card_skips_bike_step(self):
         page = self.issue(bike=self.bike_id)

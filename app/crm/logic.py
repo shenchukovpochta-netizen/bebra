@@ -10743,6 +10743,23 @@ def vin_key(raw: Any) -> str:
     return re.sub(r"[^0-9A-Z]", "", text)
 
 
+def bike_matches(bike: Mapping[str, Any], query: Any) -> bool:
+    """Велосипед под поиском выдачи: номер в парке («МБ-12», без учёта
+    регистра) или кусок номера мотора либо рамы - тем же vin_key, что у
+    рабочей группы: оператор читает VIN с мотора и набирает его с
+    телефона кириллицей, с пробелами и «В» вместо «V». Кусок короче
+    VIN_MIN не ищется, как и в db.bikes: «1» нашёл бы полпарка."""
+    text = str(query or "").strip()
+    if not text:
+        return True
+    if text.lower() in str(bike.get("code") or "").lower():
+        return True
+    key = vin_key(text)
+    if len(key) < VIN_MIN:
+        return False
+    return any(key in vin_key(bike.get(field)) for field in ("motor_no", "frame_no"))
+
+
 def _ops_norm(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
 

@@ -92,6 +92,32 @@
 {% endif %}
 
 {# ─── шаг 2: тариф и модель ─── #}
+{% if step == 2 and client and not active and client.status == 'active' and not bike %}
+{# Поиск сразу по технике: номер в парке или VIN мотора (рамы) с самой
+   техники. Один найденный - выбран, несколько - список. #}
+<div class="card">
+  <form method="get" action="/issue" class="issue-bar">
+    <input type="hidden" name="client" value="{{ client.id }}">
+    {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
+    {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
+    {% if point %}<input type="hidden" name="location" value="{{ point }}">{% endif %}
+    <label style="margin:0;flex:1 1 260px">Найти велосипед по номеру или VIN мотора / рамы
+      <input name="find" value="{{ find or '' }}" placeholder="МБ-12 или 60V240W…" autocomplete="off"></label>
+    <button type="submit" class="ghost">Найти</button>
+  </form>
+  {% if found %}
+  <p class="muted">Подходят несколько свободных — выберите:</p>
+  <div class="choices">
+    {% for b in found %}
+    <a class="choice" href="/issue?client={{ client.id }}&bike={{ b.id }}{% if booking_id %}&booking={{ booking_id }}{% endif %}{% if started_param %}&started_on={{ started_param }}{% endif %}{% if point %}&location={{ point|urlencode }}{% endif %}">
+      <b>№ {{ b.code }}</b> {{ b.model }}
+      <small>{{ b.location or 'не на точке' }}{% if b.motor_no %} · мотор {{ b.motor_no }}{% endif %}{% if b.frame_no %} · рама {{ b.frame_no }}{% endif %}</small>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 {% if step == 2 and client and not active and client.status == 'active' %}
 <form method="get" action="/issue">
   <input type="hidden" name="client" value="{{ client.id }}">
@@ -156,7 +182,7 @@
     {% if booking_id %}<input type="hidden" name="booking" value="{{ booking_id }}">{% endif %}
     {% if started_param %}<input type="hidden" name="started_on" value="{{ started_param }}">{% endif %}
 
-    <label style="margin:0;flex:1 1 200px">Поиск по номеру <input name="q" value="{{ q or '' }}" placeholder="B-03"></label>
+    <label style="margin:0;flex:1 1 200px">Номер или VIN мотора / рамы <input name="q" value="{{ q or '' }}" placeholder="B-03 или 60V240W…"></label>
     <label style="margin:0;flex:0 1 220px">Точка выдачи <select name="location" onchange="this.form.submit()"><option value="">все точки</option>{% for loc in places %}<option value="{{ loc }}" {% if loc == point %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
     <button type="submit" class="ghost">Найти</button>
   </form>
@@ -173,7 +199,7 @@
       <label class="choice">
         <input type="radio" name="bike" value="{{ b.id }}" {% if loop.first %}checked{% endif %} required>
         <b>№ {{ b.code }}</b>
-        <small>{{ b.location or 'не на точке' }}{% if b.idle_days is not none %} · простаивает {{ b.idle_days }} дн.{% endif %} · {{ b.mileage_km or 0 }} км{% if b.frame_no %} · рама {{ b.frame_no }}{% endif %}</small>
+        <small>{{ b.location or 'не на точке' }}{% if b.idle_days is not none %} · простаивает {{ b.idle_days }} дн.{% endif %} · {{ b.mileage_km or 0 }} км{% if b.motor_no %} · мотор {{ b.motor_no }}{% endif %}{% if b.frame_no %} · рама {{ b.frame_no }}{% endif %}</small>
         {% if b.note %}<small>{{ b.note }}</small>{% endif %}
       </label>
       {% endfor %}

@@ -3041,6 +3041,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             # Дальше идти некуда: сначала закрыть аренду или снять блокировку.
             return render(request, "issue.html", **ctx)
         available = await crm.bikes(status="available")
+        # Поиск велосипеда сразу, до модели: номер в парке или VIN мотора
+        # (рамы), прочитанный с самой техники. Один - он и выбран, модель
+        # и тариф встают по нему; несколько - выбор списком.
+        find = (p.get("find") or "").strip()[:60]
+        ctx["find"] = find
+        if find and ctx["bike"] is None:
+            hits = [b for b in available if logic.bike_matches(b, find)]
+            if len(hits) == 1:
+                ctx["bike"] = hits[0]
+            elif hits:
+                ctx["found"] = hits[:30]
+            else:
+                busy = [b for b in await crm.bikes(q=find, limit=5)
+                        if logic.bike_matches(b, find)]
+                flash(request, (f"Велосипед {busy[0]['code']} сейчас "
+                                f"«{logic.BIKE_STATUSES.get(busy[0]['status'], busy[0]['status'])}»"
+                                " — выдать его нельзя." if busy else
+                                f"Свободного велосипеда с номером или VIN «{find}» нет."),
+                      "err")
         all_tariffs = await crm.tariffs(active_only=True)
         aliases = logic.model_aliases(await crm.bike_models())
         ctx["models"] = logic.model_availability(available)
@@ -3084,7 +3103,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             wanted = logic.catalogue_model(ctx["model"], aliases)
             rows = [dict(b) for b in available
                     if logic.catalogue_model(b.get("model"), aliases) == wanted
-                    and (not q or q.lower() in (b.get("code") or "").lower())]
+                    and logic.bike_matches(b, q)]
             # Клиент ждёт на точке выдачи, и велосипед с другой точки ему не
             # подать; сколько свободных на других - видно, выбор остаётся.
             here = [b for b in rows
