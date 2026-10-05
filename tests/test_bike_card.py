@@ -51,6 +51,32 @@ class TestBikeCard(tw.WebCase):
         fields.update(over)
         return _run(self.crm.create_work_order(**fields))
 
+    def test_delete_bike_created_by_mistake(self):
+        """Заведённый по ошибке удаляется вместе с журналами; с историей или
+        давно стоящий в парке - только списание."""
+        page = self.get_ok(f"/bikes/{self.bike_id}")
+        self.assertIn("Удалить велосипед B-1", page)
+        mistake = _run(self.crm.create_bike(code="B-77", model="Kugoo V3"))
+        r = self.client.post(f"/bikes/{mistake}/delete")
+        self.assertEqual(r.headers["location"], "/bikes")
+        self.assertIsNone(_run(self.crm.bike(mistake)))
+        self.assertFalse([x for x in self.crm.status_log_ if x["bike_id"] == mistake])
+        # был в аренде - нельзя
+        _run(self.crm.create_rental(client_id=self.client_id, bike_id=self.bike_id,
+                                    tariff_id=self.tariff_id, tariff_name="Неделя",
+                                    period_days=7, price=D(3000), billing="auto",
+                                    started_on=datetime.now(UTC).date(), contract_no=None,
+                                    created_by="t"))
+        self.assertIn("был в аренде", self.get_ok(f"/bikes/{self.bike_id}"))
+        self.client.post(f"/bikes/{self.bike_id}/delete")
+        self.assertIsNotNone(_run(self.crm.bike(self.bike_id)))
+        # давно в парке без истории - тоже нельзя, а «на сборке» - можно
+        old = _run(self.crm.create_bike(code="B-78", model="Kugoo V3"))
+        self.crm.bikes_[old]["created_at"] = datetime(2026, 1, 1, tzinfo=UTC)
+        self.assertIn("стоял в парке", _run(self.crm.delete_bike(old)))
+        self.crm.bikes_[old]["status"] = "new"
+        self.assertIsNone(_run(self.crm.delete_bike(old)))
+
     def test_tracker_block_follows_the_binding_not_the_checkbox(self):
         page = self.get_ok(f"/bikes/{self.bike_id}")
         self.assertIn("Привязанного трекера нет", page)

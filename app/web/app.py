@@ -2638,6 +2638,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         for o in orders:
             o["days"] = logic.order_days(o, today=date.today())
         return render(request, "bike.html", bike=bike, log=await crm.bike_log(bike_id),
+                      delete_problem=(await crm.bike_delete_problem(bike_id)
+                                      if may_edit(request, "bikes") else "нет права"),
                       rentals=await crm.bike_rentals(bike_id),
                       status_log=await crm.bike_status_log(bike_id),
                       nodes=await crm.repair_nodes(),
@@ -2755,6 +2757,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not name or not path.is_file():
             return render(request, "missing.html", status_code=404, what="Снимок")
         return FileResponse(path)
+
+    @app.post("/bikes/{bike_id}/delete")
+    async def bike_delete(request: Request, bike_id: int) -> Response:
+        """Удалить велосипед, заведённый по ошибке (db.delete_bike). С
+        историей - отказ: такой списывают, иначе поплыли бы прошлые простой
+        и выручка, а закрытые аренды потеряли бы технику."""
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        bike = await crm.bike(bike_id)
+        if bike is None:
+            return render(request, "missing.html", status_code=404, what="Велосипед")
+        problem = await crm.delete_bike(bike_id)
+        if problem:
+            flash(request, f"Удалить нельзя: {problem}. Такой велосипед списывают — "
+                           "статус «Списан», история остаётся.", "err")
+            return redirect(f"/bikes/{bike_id}")
+        log.info("велосипед %s (%s) удалён: %s", bike["code"], bike_id, who(request))
+        flash(request, f"Велосипед {bike['code']} удалён.")
+        return redirect("/bikes")
 
     @app.post("/bikes/{bike_id}/edit")
     async def bike_edit(request: Request, bike_id: int) -> Response:
@@ -4392,7 +4413,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         feedback = await crm.feedback_of_rental(rental_id)
         if feedback and feedback.get("comment") and not may_view(request, "clients"):
             feedback = {**feedback, "comment": None, "comment_hidden": True}
+        charged_until = await crm.rental_charged_until(rental_id)
         return render(request, "rental.html", rental=rental, summary=summary, bike=bike,
+                      term_changes=await crm.rental_changes(rental_id),
+                      charged_until=charged_until,
+                      charged_last=(charged_until - timedelta(days=1)
+                                    if charged_until else None),
                       order=(await crm.open_order_of(rental["bike_id"])
                              if rental.get("bike_id") else None),
                       days_running=logic.rental_days(rental, today=date.today()),
@@ -4690,6 +4716,46 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 or not path.is_file():
             return render(request, "missing.html", status_code=404, what="Фото")
         return FileResponse(path)
+
+    @app.post("/rentals/{rental_id}/term")
+    async def rental_term(request: Request, rental_id: int) -> Response:
+        """Правка срока: начало и следующее начисление (db.change_rental_term).
+        Сдвиг начисления вперёд - дни без списания, поэтому нужны и аренды,
+        и право на записи в журнал; причина обязательна и остаётся в журнале
+        правок срока."""
+        rental = await crm.rental(rental_id)
+        if rental is None:
+            return render(request, "missing.html", status_code=404, what="Аренда")
+        if not may_edit(request, "rentals"):
+            return denied(request, "rentals")
+        if not logic.can_act(request.state.staff, "money_edit"):
+            return denied(request, "money_edit")
+        data = await form(request)
+        back = f"/rentals/{rental_id}"
+        started = logic.check_date(data.get("started_on"), default=rental["started_on"])
+        billed = logic.check_date(data.get("billed_until"), default=rental["billed_until"])
+        note = " ".join((data.get("note") or "").split())[:300]
+        for check in (started, billed):
+            if not check.ok:
+                flash(request, check.error, "err")
+                return redirect(back)
+        if not note:
+            flash(request, "Напишите причину: она останется в журнале правок срока.", "err")
+            return redirect(back)
+        today = date.today()
+        problem = await crm.change_rental_term(rental_id, started_on=started.value,
+                                               billed_until=billed.value, note=note,
+                                               by=who(request), today=today)
+        if problem:
+            flash(request, problem, "err")
+            return redirect(back)
+        # Начисление сдвинули на сегодня или раньше - период начисляется
+        # сразу, а не дневным проходом завтра.
+        fresh = await crm.rental(rental_id)
+        if fresh and fresh.get("billing") == "auto" and fresh["billed_until"] <= today:
+            await service.charge_due(crm, rental=fresh, today=today)
+        flash(request, "Срок аренды изменён.")
+        return redirect(back)
 
     @app.post("/rentals/{rental_id}/tariff")
     async def rental_tariff(request: Request, rental_id: int) -> Response:
@@ -7272,12 +7338,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             prices.setdefault(str(tariff["model"]), []).append(tariff)
         # Названия в парке и в каталоге связаны текстом: расхождение
         # стоит показать здесь, а не выяснять на выдаче.
-        known = {m["title"] for m in bikes}
+        aliases = logic.model_aliases(bikes)
         park = {str(b.get("model") or "").strip()
                 for b in await crm.bikes(limit=10000)}
         return render(request, "models.html", bike_models=bikes,
                       battery_models=batteries, prices=prices,
-                      unknown_models=sorted(m for m in park if m and m not in known),
+                      unknown_models=sorted(m for m in park
+                                            if m and m.casefold() not in aliases),
                       matrix=logic.compat_matrix(
                           [m for m in bikes if m["active"]],
                           [m for m in batteries if m["active"]],
@@ -7341,6 +7408,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Модель убрана в архив." if model["active"]
                   else "Модель вернулась в каталог.")
             return redirect("/models")
+        if (data.get("action") or "") == "delete":
+            # Удалить можно только ненужную модель (db.delete_bike_model):
+            # нужную - в архив, иначе парк и цены потеряли бы её.
+            problem = await crm.delete_bike_model(model_id)
+            flash(request, problem or "Модель удалена из каталога.",
+                  "err" if problem else "ok")
+            return redirect("/models")
         note = logic.check_note(data.get("note"))
         if not note.ok:
             flash(request, note.error, "err")
@@ -7348,7 +7422,30 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         specs = model_specs(request, data)
         if specs is None:
             return redirect("/models")
-        await crm.update_bike_model(model_id, note=note.value, **specs)
+        fields: dict[str, Any] = {"note": note.value, **specs}
+        if "brand" in data:
+            fields["brand"] = (data.get("brand") or "").strip() or None
+        title = logic.check_name(data.get("title"), what="Название модели") \
+            if "title" in data else None
+        if title is not None and not title.ok:
+            flash(request, title.error, "err")
+            return redirect("/models")
+        # Заводское - до названия и только если его правили: переименование
+        # само ставит старое имя заводским, и нетронутое поле формы его не
+        # стирает.
+        original = await crm.bike_model(model_id) or {}
+        if "factory_title" in data:
+            factory = (data.get("factory_title") or "").strip() or None
+            if factory != original.get("factory_title"):
+                await crm.update_bike_model(model_id, factory_title=factory)
+        if title is not None:
+            # Название - каскадом за ним цены, заявки и акции; парк
+            # остаётся под старым именем, оно станет заводским.
+            problem = await crm.rename_bike_model(model_id, title.value)
+            if problem:
+                flash(request, problem, "err")
+                return redirect("/models")
+        await crm.update_bike_model(model_id, **fields)
         flash(request, "Модель сохранена.")
         return redirect("/models")
 

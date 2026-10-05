@@ -164,6 +164,32 @@ class TestPricingPanel(tw.WebCase):
         self.assertIn("Чужая модель", page)
         self.assertIn("которых нет в каталоге", page)
 
+    def test_catalog_rename_moves_prices_and_keeps_the_fleet(self):
+        """Название без «(Два АКБ)»: цены идут за новым именем, велосипеды
+        парка остаются под старым - оно становится заводским."""
+        model = next(m for m in tw.run(self.crm.bike_models()) if m["title"] == TRUCK)
+        r = self.client.post(f"/models/bikes/{model['id']}", data={
+            "title": "Truck +", "brand": "", "factory_title": "", "note": ""})
+        self.assertEqual(r.status_code, 303)
+        renamed = tw.run(self.crm.bike_model(model["id"]))
+        self.assertEqual((renamed["title"], renamed["factory_title"]), ("Truck +", TRUCK))
+        self.assertEqual({t["model"] for t in tw.run(self.crm.tariffs())},
+                         {"Truck +", KUGOO})
+        page = self.get_ok("/models")
+        self.assertNotIn("которых нет в каталоге", page, "парк нашёл модель по заводскому")
+        week = self.get_ok(f"/issue?client={self.client_id}&bike={self.truck}"
+                           f"&tariff={self.week_truck}")
+        self.assertIn("3 000 ₽", week, "выдача велосипеда со старым именем - по цене")
+        # удалить модель с велосипедами нельзя, ненужную - можно
+        self.client.post(f"/models/bikes/{model['id']}", data={"action": "delete"})
+        self.assertIsNotNone(tw.run(self.crm.bike_model(model["id"])))
+        spare = tw.run(self.crm.create_bike_model(title="Лишняя", brand=None,
+                                                  factory_title=None, battery_slots=2,
+                                                  note=None))
+        self.assertIn("Удалить", self.get_ok("/models"))
+        self.client.post(f"/models/bikes/{spare}", data={"action": "delete"})
+        self.assertIsNone(tw.run(self.crm.bike_model(spare)))
+
     def test_point_keeps_phone_hours_and_coordinates(self):
         self.client.post("/locations", data={
             "name": "Восстания", "city": "Казань",

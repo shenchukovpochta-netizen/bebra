@@ -63,6 +63,46 @@ METHODS = {
 # оплату первого периода от пополнения баланса (app/crm/learning.py).
 ISSUE_PAY_NOTE = "При выдаче № {code}"
 
+# Правка срока: следующее начисление не дальше квартала от сегодня (иначе
+# опечатка в годе дала бы год бесплатной езды), начало - не старше 10 лет.
+RENTAL_TERM_AHEAD_DAYS = 92
+RENTAL_TERM_BACK_DAYS = 3660
+
+
+def rental_term_problem(rental: Mapping[str, Any], *, started_on: date,
+                        billed_until: date, charged_until: date | None,
+                        today: date) -> str | None:
+    """Почему нельзя поставить аренде такие даты; None - можно.
+
+    `charged_until` - конец последнего начисленного периода (ledger). Ниже
+    него «следующее начисление» не опускается: следующий проход начислил
+    бы уже оплаченные дни второй раз. Вперёд - можно: дни до нового
+    начисления клиент катается без списания (бесплатные дни, перенос).
+    """
+    if rental.get("status") != "active":
+        return "Срок правится только у идущей аренды."
+    if started_on > today + timedelta(days=RENTAL_AHEAD_DAYS):
+        return f"Начало {started_on:%d.%m.%Y} слишком далеко впереди — проверьте год."
+    if started_on < today - timedelta(days=RENTAL_TERM_BACK_DAYS):
+        return f"Начало {started_on:%d.%m.%Y} — проверьте год."
+    if billed_until < started_on:
+        return "Следующее начисление не может быть раньше начала аренды."
+    if billed_until > today + timedelta(days=RENTAL_TERM_AHEAD_DAYS):
+        return (f"Следующее начисление дальше {RENTAL_TERM_AHEAD_DAYS} дней от сегодня "
+                "— проверьте дату: столько дней клиент ездил бы без списаний.")
+    if charged_until is not None and billed_until < charged_until:
+        last = charged_until - timedelta(days=1)
+        return (f"Уже начислено по {last:%d.%m.%Y}: следующее начисление не раньше "
+                f"{charged_until:%d.%m.%Y}, иначе те же дни списались бы второй раз. "
+                "Вернуть деньги за них - возвратом в журнале клиента.")
+    return None
+
+
+# Велосипед, заведённый по ошибке, удаляется в эти дни после заведения
+# (или пока он «на сборке»). Позже он уже стоял в операционном парке, и
+# удаление переписало бы прошлый простой - такой списывают.
+BIKE_DELETE_DAYS = 3
+
 BIKE_STATUSES = {
     "new": "Новое на сборке", "available": "Свободен", "rented": "В аренде",
     "repair": "В ремонте", "maintenance": "На ТО", "reserved": "Забронирован",

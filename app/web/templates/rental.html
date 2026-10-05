@@ -53,6 +53,44 @@
   <p class="muted">{% if summary.due %}К оплате сейчас — {{ money(summary.due) }}: {% if summary.overdue %}просрочка{% else %}следующий период{% endif %}.{% else %}Долга нет; платёж вперёд сдвинет «оплачено до».{% endif %} Ссылку на оплату картой выставляют из карточки клиента.</p>
 </section>
 {% endif %}
+{% if rental.status == 'active' and can_edit(staff, 'rentals') and can_act(staff, 'money_edit') %}
+<section class="card">
+  <h2>Изменить срок</h2>
+  {# Начало и следующее начисление. Вперёд - дни без списания (перенос,
+     компенсация за ремонт); назад - не раньше уже начисленного. #}
+  <form method="post" action="/rentals/{{ rental.id }}/term" class="grid2">
+    <label>Начало аренды <input type="date" name="started_on" value="{{ rental.started_on.isoformat() }}" required></label>
+    <label>Следующее начисление <input type="date" name="billed_until" value="{{ rental.billed_until.isoformat() }}" required></label>
+    <label class="wide">Причина <input name="note" maxlength="300" required placeholder="ошиблись датой выдачи, 3 дня за ремонт велосипеда…"></label>
+    <button type="submit">Сохранить срок</button>
+  </form>
+  <p class="muted">Следующее начисление — день, когда спишется новый период{% if charged_until %}; уже начислено по {{ charged_last|dmy }}, раньше {{ charged_until|dmy }} его не поставить{% endif %}. Сдвиг вперёд — дни без списания, деньги не трогаются. Правка остаётся в журнале ниже.</p>
+  {% if term_changes %}
+  <table class="cards">
+    <tr><th>Когда</th><th>Что</th><th>Было → стало</th><th>Причина</th></tr>
+    {% for c in term_changes %}
+    <tr><td data-label="Когда" class="nowrap">{{ c.created_at|dmy }}<br><small class="muted">{{ c.created_by or '' }}</small></td>
+      <td data-label="Что">{{ 'начало' if c.field == 'started_on' else 'следующее начисление' }}</td>
+      <td data-label="Было → стало" class="nowrap">{{ c.old_value|dmy if c.old_value else '—' }} → {{ c.new_value|dmy if c.new_value else '—' }}</td>
+      <td data-label="Причина">{{ c.note }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</section>
+{% elif term_changes %}
+<section class="card">
+  <h2>Правки срока</h2>
+  <table class="cards">
+    <tr><th>Когда</th><th>Что</th><th>Было → стало</th><th>Причина</th></tr>
+    {% for c in term_changes %}
+    <tr><td data-label="Когда" class="nowrap">{{ c.created_at|dmy }}</td>
+      <td data-label="Что">{{ 'начало' if c.field == 'started_on' else 'следующее начисление' }}</td>
+      <td data-label="Было → стало" class="nowrap">{{ c.old_value|dmy if c.old_value else '—' }} → {{ c.new_value|dmy if c.new_value else '—' }}</td>
+      <td data-label="Причина">{{ c.note }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
 {% if rental.status == 'active' and can_edit(staff, 'rentals') %}
 <section class="card">
   {% if money_ok %}

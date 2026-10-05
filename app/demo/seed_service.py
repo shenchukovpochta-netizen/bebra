@@ -28,7 +28,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from ..crm import logic
-from .core import P1, P2, P3
+from .core import MONSTER, MONSTER_A, P1, P2, P3
 from .world import MSK, StaffMember, at
 
 if TYPE_CHECKING:
@@ -481,7 +481,7 @@ class _Service:
     def pick_recipes(self, model: str, *, days: float, damage: bool) -> list[_Recipe]:
         rng = self.rng
         pool = [r for r in RECIPES
-                if (r.work != MONSTER_ONLY or model.startswith("Monster"))
+                if (r.work != MONSTER_ONLY or model in (MONSTER, MONSTER_A))
                 and (r.damage or not damage)]
         n = 1 if damage else rng.choices((1, 2, 3), weights=(60, 30, 10))[0]
         chosen: list[_Recipe] = []

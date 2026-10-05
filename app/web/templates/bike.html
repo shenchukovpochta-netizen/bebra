@@ -180,4 +180,19 @@
   {% endif %}
 </section>
 </div>
+{% if can_edit(staff, 'bikes') %}
+{# Удаление - для заведённого по ошибке: без аренд, ремонта, батарей и
+   трекера, пока на сборке или первые дни. С историей - списание. #}
+<section class="card">
+  <h2>Удалить велосипед</h2>
+  {% if delete_problem %}
+  <p class="muted">Удалить нельзя: {{ delete_problem }}. Велосипед с историей списывают — статус «Списан», история и деньги остаются.</p>
+  {% else %}
+  <form method="post" action="/bikes/{{ bike.id }}/delete" class="inline-form">
+    <button type="submit" class="danger" onclick="return confirm('Удалить велосипед {{ bike.code }} насовсем?')">Удалить велосипед {{ bike.code }}</button>
+  </form>
+  <p class="muted">Для заведённого по ошибке: у него нет ни аренд, ни ремонта. Удаление насовсем, вместе с его журналом статусов.</p>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock %}

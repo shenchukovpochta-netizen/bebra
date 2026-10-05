@@ -547,6 +547,49 @@ class FakeCrm:
         self._log_location(bid, None, self.bikes_[bid]["location"], by, at)
         return bid
 
+    def _bike_delete_problem(self, b):
+        bid = b["id"]
+        if any(r.get("bike_id") == bid for r in self.rentals_.values()) or any(
+                x.get("bike_id") == bid for x in self.rental_bikes_):
+            return "он был в аренде"
+        if (any(o.get("bike_id") == bid for o in self.orders_.values())
+                or any(x.get("bike_id") == bid for x in self.repair_items_)
+                or any(x.get("bike_id") == bid and x.get("kind") == "repair"
+                       for x in self.bike_log_)):
+            return "по нему есть ремонт"
+        if any(x.get("bike_id") == bid for x in self.batteries_.values()):
+            return "к нему привязаны аккумуляторы"
+        if any(t.get("bike_id") == bid for t in self.trackers_.values()) or any(
+                a.get("bike_id") == bid for a in self.alerts_.values()):
+            return "на нём трекер"
+        if any(i.get("bike_id") == bid for i in self.take_items_):
+            return "он есть в пересчёте"
+        if any(o.get("bike_id") == bid for o in self.ops_.values()) or any(
+                k.get("waitlist_bike_id") == bid for k in self.bookings_.values()):
+            return "он есть в отчётах точек или листе ожидания"
+        if b["status"] != "new" and b["created_at"] < self._now() - timedelta(
+                days=crm_logic.BIKE_DELETE_DAYS):
+            return (f"он заведён больше {crm_logic.BIKE_DELETE_DAYS} дней назад "
+                    "и уже стоял в парке")
+        return None
+
+    async def bike_delete_problem(self, bike_id):
+        b = self.bikes_.get(bike_id)
+        return "велосипеда нет" if b is None else self._bike_delete_problem(b)
+
+    async def delete_bike(self, bike_id):
+        b = self.bikes_.get(bike_id)
+        if b is None:
+            return "велосипеда нет"
+        problem = self._bike_delete_problem(b)
+        if problem:
+            return problem
+        self.bike_log_ = [x for x in self.bike_log_ if x.get("bike_id") != bike_id]
+        self.status_log_ = [x for x in self.status_log_ if x.get("bike_id") != bike_id]
+        self.location_log_ = [x for x in self.location_log_ if x.get("bike_id") != bike_id]
+        del self.bikes_[bike_id]
+        return None
+
     async def update_bike(self, bike_id, *, by=None, keep_rented_location=False,
                           from_location=None, not_status=(), **fields):
         if bike_id not in self.bikes_:
@@ -1000,6 +1043,40 @@ class FakeCrm:
             r["issue_period_days"] = r.get("period_days")
             r["issue_base_price"] = r.get("base_price") or r.get("price")
         r.update(fields)
+
+    async def rental_charged_until(self, rental_id):
+        ends = [x["period_to"] for x in self.ledger_
+                if x["rental_id"] == rental_id and x["kind"] == "charge" and x["period_to"]]
+        return max(ends, default=None)
+
+    async def change_rental_term(self, rental_id, *, started_on, billed_until, note, by,
+                                 today):
+        r = self.rentals_.get(rental_id)
+        if r is None:
+            return "Аренды нет."
+        problem = crm_logic.rental_term_problem(
+            r, started_on=started_on, billed_until=billed_until,
+            charged_until=await self.rental_charged_until(rental_id), today=today)
+        if problem:
+            return problem
+        changes = [(f, r[f], v) for f, v in (("started_on", started_on),
+                                             ("billed_until", billed_until)) if r[f] != v]
+        if not changes:
+            return None
+        r.update(started_on=started_on, billed_until=billed_until, notified_on=None,
+                 notified_kind=None, updated_at=self._now())
+        log = getattr(self, "rental_changes_", None)
+        if log is None:
+            log = self.rental_changes_ = []
+        for f, old, new in changes:
+            log.append({"id": self._id(), "rental_id": rental_id, "field": f,
+                        "old_value": old, "new_value": new, "note": note,
+                        "created_by": by, "created_at": self._now()})
+        return None
+
+    async def rental_changes(self, rental_id):
+        return sorted((dict(x) for x in getattr(self, "rental_changes_", [])
+                       if x["rental_id"] == rental_id), key=lambda x: -x["id"])
 
     async def close_rental(self, rental_id, *, closed_on, note, bike_status="available",
                            closed_by=None, mileage_end=None, return_location=None):
@@ -2741,9 +2818,63 @@ class FakeCrm:
         for model in self.bike_models_.values():
             if active_only and not model["active"]:
                 continue
-            rows.append({**model, "bikes": sum(1 for b in self.bikes_.values()
-                                               if b["model"] == model["title"])})
+            names = {str(n).strip().casefold()
+                     for n in (model["title"], model.get("factory_title")) if n}
+            rows.append({**model, "bikes": sum(
+                1 for b in self.bikes_.values()
+                if str(b.get("model") or "").strip().casefold() in names)})
         return sorted(rows, key=lambda m: (not m["active"], m["title"]))
+
+    async def rename_bike_model(self, model_id, title):
+        row = self.bike_models_.get(model_id)
+        if row is None:
+            return "Модели нет."
+        old = row["title"]
+        if title == old:
+            return None
+        if any(m["id"] != model_id and title.casefold() in
+               {str(m["title"]).casefold(), str(m.get("factory_title") or "").casefold()}
+               for m in self.bike_models_.values()):
+            return "Такое название уже есть в каталоге."
+        if any(str(b.get("model") or "").strip().casefold() == old.casefold()
+               for b in self.bikes_.values()):
+            factory = (row.get("factory_title") or "").strip()
+            if factory and factory.casefold() != old.casefold():
+                return "заводское название уже другое"
+            row["factory_title"] = old
+        row["title"] = title
+        for t in self.tariffs_.values():
+            if t.get("model") == old and (t.get("kind") or "bike") == "bike":
+                t["model"] = title
+        for b in self.bookings_.values():
+            if b.get("model") == old:
+                b["model"] = title
+        for promo in self.promos_.values():
+            if (promo.get("params") or {}).get("model") == old:
+                promo["params"]["model"] = title
+        return None
+
+    async def delete_bike_model(self, model_id):
+        row = self.bike_models_.get(model_id)
+        if row is None:
+            return "Модели нет."
+        names = {str(n).strip().casefold()
+                 for n in (row["title"], row.get("factory_title")) if n}
+        if any(str(b.get("model") or "").strip().casefold() in names
+               for b in self.bikes_.values()):
+            return "В парке есть велосипеды этой модели - уберите модель в архив."
+        if any(t.get("model") == row["title"] and t["active"]
+               and (t.get("kind") or "bike") == "bike" for t in self.tariffs_.values()):
+            return "У модели есть действующие цены - выключите их в «Тарифах»."
+        if any(b.get("model") == row["title"] and b["status"] == "new"
+               for b in self.bookings_.values()):
+            return "На модель есть открытая заявка клиента."
+        if any((p.get("params") or {}).get("model") == row["title"] and p["active"]
+               for p in self.promos_.values()):
+            return "На модель настроена действующая акция."
+        del self.bike_models_[model_id]
+        self.compat_ = {k: v for k, v in self.compat_.items() if k[0] != model_id}
+        return None
 
     async def bike_model(self, model_id):
         model = self.bike_models_.get(model_id)

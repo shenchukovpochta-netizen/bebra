@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -455,6 +455,61 @@ class CrmDB:
             order by b.code
             limit ${len(args)}
             """, *args))
+
+    # Что держит велосипед в истории: удалить такой нельзя, только списать.
+    _BIKE_TIES = (
+        ("select exists (select 1 from crm.rentals where bike_id = $1) or exists "
+         "(select 1 from crm.rental_bikes where bike_id = $1)", "он был в аренде"),
+        ("select exists (select 1 from crm.work_orders where bike_id = $1) or exists "
+         "(select 1 from crm.repair_items where bike_id = $1) or exists "
+         "(select 1 from crm.bike_log where bike_id = $1 and kind = 'repair')",
+         "по нему есть ремонт"),
+        ("select exists (select 1 from crm.batteries where bike_id = $1)",
+         "к нему привязаны аккумуляторы"),
+        ("select exists (select 1 from crm.trackers where bike_id = $1) or exists "
+         "(select 1 from crm.tracker_alerts where bike_id = $1)", "на нём трекер"),
+        ("select exists (select 1 from crm.stock_take_items where bike_id = $1)",
+         "он есть в пересчёте"),
+        ("select exists (select 1 from crm.ops_reports where bike_id = $1) or exists "
+         "(select 1 from crm.bookings where waitlist_bike_id = $1)",
+         "он есть в отчётах точек или листе ожидания"),
+    )
+
+    async def _bike_delete_problem(self, conn: Any, row: Any) -> str | None:
+        for sql, why in self._BIKE_TIES:
+            if await conn.fetchval(sql, row["id"]):
+                return why
+        if row["status"] != "new" and row["created_at"] < datetime.now(UTC) - timedelta(
+                days=logic.BIKE_DELETE_DAYS):
+            return (f"он заведён больше {logic.BIKE_DELETE_DAYS} дней назад и уже стоял "
+                    "в парке")
+        return None
+
+    async def bike_delete_problem(self, bike_id: int) -> str | None:
+        """Почему велосипед нельзя удалить; None - можно (заведён по ошибке)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("select * from crm.bikes where id = $1", bike_id)
+            if row is None:
+                return "велосипеда нет"
+            return await self._bike_delete_problem(conn, row)
+
+    async def delete_bike(self, bike_id: int) -> str | None:
+        """Удалить велосипед, заведённый по ошибке: без аренд, ремонта,
+        батарей, трекера и пересчёта, и пока он на сборке или заведён
+        недавно. Вместе с ним уходят его журналы статусов, мест и заметок -
+        они пишутся триггером при заведении. Возвращает причину отказа."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select * from crm.bikes where id = $1 for update", bike_id)
+            if row is None:
+                return "велосипеда нет"
+            problem = await self._bike_delete_problem(conn, row)
+            if problem:
+                return problem
+            for table in ("bike_log", "bike_status_log", "bike_location_log"):
+                await conn.execute(f"delete from crm.{table} where bike_id = $1", bike_id)
+            await conn.execute("delete from crm.bikes where id = $1", bike_id)
+        return None
 
     async def bike(self, bike_id: int) -> dict | None:
         return _row(await self.pool.fetchrow(
@@ -1269,6 +1324,52 @@ class CrmDB:
         await self.pool.execute(
             f"update crm.rentals set {sets}, updated_at = now() where id = $1",
             rental_id, *values)
+
+    async def rental_charged_until(self, rental_id: int) -> date | None:
+        """Конец последнего начисленного периода аренды (граница не входит)."""
+        return await self.pool.fetchval(
+            "select max(period_to) from crm.ledger where rental_id = $1 and kind = 'charge'",
+            rental_id)
+
+    async def change_rental_term(self, rental_id: int, *, started_on: date,
+                                 billed_until: date, note: str, by: str,
+                                 today: date) -> str | None:
+        """Новые начало и «следующее начисление» - одной транзакцией с
+        записью в журнал правок срока. Проверка - под замком строки аренды
+        (logic.rental_term_problem): проход начислений между чтением и
+        записью иначе сдвинул бы границу. Возвращает причину отказа."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select * from crm.rentals where id = $1 for update", rental_id)
+            if row is None:
+                return "Аренды нет."
+            charged = await conn.fetchval(
+                "select max(period_to) from crm.ledger where rental_id = $1 "
+                "and kind = 'charge'", rental_id)
+            problem = logic.rental_term_problem(dict(row), started_on=started_on,
+                                                billed_until=billed_until,
+                                                charged_until=charged, today=today)
+            if problem:
+                return problem
+            changes = [(f, row[f], v) for f, v in (("started_on", started_on),
+                                                   ("billed_until", billed_until))
+                       if row[f] != v]
+            if not changes:
+                return None
+            await conn.execute(
+                "update crm.rentals set started_on = $2, billed_until = $3, "
+                "notified_on = null, notified_kind = null, updated_at = now() "
+                "where id = $1", rental_id, started_on, billed_until)
+            await conn.executemany(
+                "insert into crm.rental_changes (rental_id, field, old_value, new_value, "
+                "note, created_by) values ($1, $2, $3, $4, $5, $6)",
+                [(rental_id, f, old, new, note, by) for f, old, new in changes])
+        return None
+
+    async def rental_changes(self, rental_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.rental_changes where rental_id = $1 order by id desc",
+            rental_id))
 
     async def log_rental_intent(self, rental_id: int, intent: str, by: str | None) -> None:
         """Отметка «что ответил клиент» - в журнал, который только дописывается."""
@@ -3964,7 +4065,11 @@ class CrmDB:
             f"""
             select m.*, count(b.id) as bikes
             from crm.bike_models m
-            left join crm.bikes b on b.model = m.title
+            -- Парк назван клиентским или заводским именем модели
+            -- (logic.model_aliases): считаются оба.
+            left join crm.bikes b
+                   on lower(btrim(b.model)) in (lower(m.title),
+                                                lower(coalesce(m.factory_title, '')))
             {where}
             group by m.id
             order by m.active desc, m.title
@@ -3990,6 +4095,79 @@ class CrmDB:
         return int(await self.pool.fetchval(
             f"insert into crm.bike_models ({', '.join(cols)}) "
             f"values ({places}) returning id", *values))
+
+    async def rename_bike_model(self, model_id: int, title: str) -> str | None:
+        """Новое название модели каталога - одной транзакцией за ним цены,
+        заявки и акции. Парк не переименовывается (на него ссылается
+        закрытая история): велосипеды, названные старым именем, находят
+        модель по заводскому, которым это имя и становится. Возвращает
+        причину отказа или None."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select * from crm.bike_models where id = $1 for update", model_id)
+            if row is None:
+                return "Модели нет."
+            old = row["title"]
+            if title == old:
+                return None
+            if await conn.fetchval(
+                    "select exists (select 1 from crm.bike_models where id <> $1 and "
+                    "(lower(title) = lower($2) or lower(coalesce(factory_title, '')) "
+                    "= lower($2)))", model_id, title):
+                return "Такое название уже есть в каталоге."
+            if await conn.fetchval(
+                    "select exists (select 1 from crm.bikes "
+                    "where lower(btrim(model)) = lower($1))", old):
+                factory = (row["factory_title"] or "").strip()
+                if factory and factory.casefold() != old.casefold():
+                    return (f"В парке велосипеды записаны как «{old}», а заводское "
+                            f"название уже «{factory}»: после переименования они "
+                            "потеряли бы цену. Заведите новую модель или уберите "
+                            "заводское название.")
+                await conn.execute(
+                    "update crm.bike_models set factory_title = $2 where id = $1",
+                    model_id, old)
+            await conn.execute("update crm.bike_models set title = $2 where id = $1",
+                               model_id, title)
+            await conn.execute(
+                "update crm.tariffs set model = $2 where model = $1 "
+                "and coalesce(kind, 'bike') = 'bike'", old, title)
+            await conn.execute("update crm.bookings set model = $2 where model = $1",
+                               old, title)
+            await conn.execute(
+                "update crm.promos set params = jsonb_set(params, '{model}', "
+                "to_jsonb($2::text)) where params->>'model' = $1", old, title)
+        return None
+
+    async def delete_bike_model(self, model_id: int) -> str | None:
+        """Удалить модель из каталога - только ненужную: ни велосипеда в
+        парке под её именем, ни действующей цены, ни открытой заявки, ни
+        живой акции. Иначе - причина: такую убирают в архив."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select * from crm.bike_models where id = $1 for update", model_id)
+            if row is None:
+                return "Модели нет."
+            names = [n.casefold() for n in (row["title"], row["factory_title"])
+                     if (n or "").strip()]
+            if await conn.fetchval(
+                    "select count(*) from crm.bikes "
+                    "where lower(btrim(model)) = any($1::text[])", names):
+                return "В парке есть велосипеды этой модели - уберите модель в архив."
+            if await conn.fetchval(
+                    "select count(*) from crm.tariffs where model = $1 and active "
+                    "and coalesce(kind, 'bike') = 'bike'", row["title"]):
+                return "У модели есть действующие цены - выключите их в «Тарифах»."
+            if await conn.fetchval(
+                    "select count(*) from crm.bookings where model = $1 and status = 'new'",
+                    row["title"]):
+                return "На модель есть открытая заявка клиента."
+            if await conn.fetchval(
+                    "select count(*) from crm.promos where params->>'model' = $1 "
+                    "and active", row["title"]):
+                return "На модель настроена действующая акция."
+            await conn.execute("delete from crm.bike_models where id = $1", model_id)
+        return None
 
     async def update_bike_model(self, model_id: int, **fields: Any) -> None:
         if not fields:

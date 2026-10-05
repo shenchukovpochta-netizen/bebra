@@ -42,10 +42,11 @@ DAY = timedelta(days=1)
 # ───────────────────────── справочники мира ─────────────────────────
 
 P1, P2, P3 = "Павлюхина", "Адоратского", "Проспект Победы"
-MONSTER = "Monster Truck + (Два АКБ)"
-MONSTER_A = "Monster Truck + с задними амортизаторами"
-KUGOO = "Kugoo V3 Pro (Два АКБ)"
-KUGOO_P = "Kugoo V3 Pro + (Два АКБ)"
+# Названия - как в каталоге схемы: демо берёт его сидом, а не своим.
+MONSTER = "Truck +"
+MONSTER_A = "Truck + с задними амортизаторами"
+KUGOO = "Kugoo V3 Pro"
+KUGOO_P = "Kugoo V3 Pro +"
 BAT_MONSTER = "АКБ Monster 60V 20Ah"
 BAT_KUGOO = "АКБ Kugoo 60V 21Ah"
 
@@ -954,7 +955,7 @@ class Sim:
                   t: datetime, *, status: str) -> Bike:
         rng = self.rng
         n = self.nid("bikes")
-        prefix = "MT" if batch.model.startswith("Monster") else "KG"
+        prefix = "MT" if batch.model in (MONSTER, MONSTER_A) else "KG"
         made = purchase["purchased_on"]
         frame = f"{prefix}{made:%y%m}{rng.randrange(10**6):06d}{n:03d}"
         motor = f"M1200-{made:%y%m}-{rng.randrange(10**5):05d}{n % 10}"

@@ -688,6 +688,108 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(logic.client_in_group(row, "bought"))
         self.assertEqual(logic.client_kinds(row), {"bike", "scooter"})
 
+    async def test_catalog_titles_v2_and_rename_on_postgres(self):
+        """Старые имена каталога «(Два АКБ)» и «Monster» уходят один раз: цены
+        и заявки идут за новым именем, парк остаётся под старым - оно
+        становится заводским. Сид каталога не возвращает старые имена."""
+        new_names = {"Truck +", "Truck + с задними амортизаторами", "Kugoo V3 Pro",
+                     "Kugoo V3 Pro +"}
+        self.assertEqual({m["title"] for m in await self.crm.bike_models()}, new_names,
+                         "свежая установка сразу с новыми именами")
+        # Установка, застанная со старыми именами (как у владельца сейчас)
+        await self.pool.execute(
+            "update crm.bike_models set title = 'Monster Truck + (Два АКБ)', "
+            "brand = 'Monster' where title = 'Truck +'")
+        await self.pool.execute(
+            "update crm.tariffs set model = 'Monster Truck + (Два АКБ)' "
+            "where model = 'Truck +'")
+        await self.pool.execute(
+            "delete from crm.settings where key = 'catalog_titles_v2'")
+        bike = await self.crm.create_bike(code="MT-1", model="Monster Truck + (Два АКБ)")
+        client = await self.crm.create_client(full_name="Курьер", phone="+79990000011")
+        await self.crm.create_booking(client_id=client, model="Monster Truck + (Два АКБ)",
+                                      tariff_id=None, location_id=None,
+                                      wanted_on=date.today())
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        models = {m["title"]: m for m in await self.crm.bike_models()}
+        self.assertEqual(set(models), new_names, "старые имена не вернулись сидом")
+        truck = models["Truck +"]
+        self.assertEqual((truck["factory_title"], truck["brand"], truck["bikes"]),
+                         ("Monster Truck + (Два АКБ)", None, 1))
+        tariffs = await self.crm.tariffs(active_only=True)
+        self.assertEqual(len([t for t in tariffs if t["model"] == "Truck +"]), 3)
+        self.assertFalse([t for t in tariffs if "Два АКБ" in str(t["model"])])
+        self.assertEqual((await self.crm.open_booking_of(client))["model"], "Truck +")
+        self.assertEqual((await self.crm.bike(bike))["model"], "Monster Truck + (Два АКБ)",
+                         "парк не переименовывается")
+        aliases = logic.model_aliases(await self.crm.bike_models())
+        self.assertEqual(logic.catalogue_model("Monster Truck + (Два АКБ)", aliases),
+                         "Truck +")
+        # Переименование в панели - тем же каскадом; удаление - только ненужной
+        self.assertIsNone(await self.crm.rename_bike_model(truck["id"], "Трак Плюс"))
+        self.assertEqual(len([t for t in await self.crm.tariffs(active_only=True)
+                              if t["model"] == "Трак Плюс"]), 3)
+        self.assertEqual(await self.crm.rename_bike_model(
+            models["Kugoo V3 Pro"]["id"], "Monster Truck + (Два АКБ)"),
+            "Такое название уже есть в каталоге.",
+            "имя, занятое заводским другой модели, не принимается")
+        self.assertIn("в парке", (await self.crm.delete_bike_model(truck["id"])).lower())
+        spare = models["Kugoo V3 Pro +"]["id"]
+        self.assertIn("цены", await self.crm.delete_bike_model(spare))
+        await self.pool.execute("update crm.tariffs set active = false "
+                                "where model = 'Kugoo V3 Pro +'")
+        self.assertIsNone(await self.crm.delete_bike_model(spare))
+        self.assertIsNone(await self.crm.bike_model(spare))
+
+    async def test_delete_bike_on_postgres(self):
+        """Удаление ошибочно заведённого: журналы триггеров уходят с ним, с
+        арендой - отказ; давно заведённый в парке - отказ."""
+        await self.seed()
+        mistake = await self.crm.create_bike(code="B-77", model="Kugoo V3",
+                                             location="Павлюхина")
+        self.assertIsNone(await self.crm.bike_delete_problem(mistake))
+        self.assertIsNone(await self.crm.delete_bike(mistake))
+        self.assertIsNone(await self.crm.bike(mistake))
+        self.assertEqual(await self.pool.fetchval(
+            "select count(*) from crm.bike_status_log where bike_id = $1", mistake), 0)
+        await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no=None, by="test")
+        self.assertEqual(await self.crm.delete_bike(self.bike_id), "он был в аренде")
+        old = await self.crm.create_bike(code="B-78", model="Kugoo V3")
+        await self.pool.execute("update crm.bikes set created_at = now() - interval "
+                                "'10 days' where id = $1", old)
+        self.assertIn("стоял в парке", await self.crm.delete_bike(old))
+
+    async def test_rental_term_on_postgres(self):
+        """Правка срока на настоящей базе: вперёд - без денег и с журналом;
+        ниже начисленного - отказ; следующий проход не задваивает период."""
+        await self.seed()
+        start = date.today() - timedelta(days=2)
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=await self.crm.tariff(self.tariff_id),
+            started_on=start, contract_no=None, by="test")
+        self.assertEqual(await self.crm.rental_charged_until(rid), start + timedelta(days=7))
+        self.assertIn("не раньше", await self.crm.change_rental_term(
+            rid, started_on=start, billed_until=start + timedelta(days=6), note="x",
+            by="t", today=date.today()))
+        self.assertIsNone(await self.crm.change_rental_term(
+            rid, started_on=start, billed_until=start + timedelta(days=10),
+            note="ремонт", by="staff:admin", today=date.today()))
+        rental = await self.crm.rental(rid)
+        self.assertEqual(rental["billed_until"], start + timedelta(days=10))
+        self.assertEqual(rental["balance"], D("-3000.00"))
+        [change] = await self.crm.rental_changes(rid)
+        self.assertEqual((change["field"], change["new_value"], change["created_by"]),
+                         ("billed_until", start + timedelta(days=10), "staff:admin"))
+        # проход начислений на день нового начисления - один период, не два
+        await service.charge_due(self.crm, rental=rental, today=start + timedelta(days=10))
+        await service.charge_due(self.crm, rental=await self.crm.rental(rid),
+                                 today=start + timedelta(days=10))
+        self.assertEqual(await self.crm.client_balance(self.client_id), D("-6000.00"))
+
     async def test_quick_repair_form_on_postgres(self):
         """Форма стороннего ремонта из бота на настоящей базе: карточка
         клиента, наряд задним числом по дате обращения, закрытие днём
@@ -1535,29 +1637,29 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
     async def test_catalog_and_prices_from_the_owner_table(self):
         """Каталог, цены и пункты приезжают со схемой и не двоятся."""
         models = {m["title"]: m for m in await self.crm.bike_models()}
-        self.assertIn("Monster Truck + (Два АКБ)", models)
-        self.assertEqual(models["Kugoo V3 Pro (Два АКБ)"]["speed_kmh"], 60)
-        self.assertEqual(models["Kugoo V3 Pro (Два АКБ)"]["motor_watt"], 1200)
-        self.assertEqual(models["Monster Truck + (Два АКБ)"]["size_note"],
+        self.assertIn("Truck +", models)
+        self.assertEqual(models["Kugoo V3 Pro"]["speed_kmh"], 60)
+        self.assertEqual(models["Kugoo V3 Pro"]["motor_watt"], 1200)
+        self.assertEqual(models["Truck +"]["size_note"],
                          "120х43х110")
 
         tariffs = await self.crm.tariffs(active_only=True)
-        truck = logic.tariffs_for_model(tariffs, "Monster Truck + (Два АКБ)")
+        truck = logic.tariffs_for_model(tariffs, "Truck +")
         self.assertEqual({int(t["period_days"]): t["price"] for t in truck},
                          {7: D("3000.00"), 14: D("5400.00"), 30: D("11000.00")})
-        kugoo = logic.tariffs_for_model(tariffs, "Kugoo V3 Pro (Два АКБ)")
+        kugoo = logic.tariffs_for_model(tariffs, "Kugoo V3 Pro")
         self.assertEqual({int(t["period_days"]): t["price"] for t in kugoo},
                          {7: D("3500.00"), 14: D("6000.00"), 30: D("12500.00")})
 
         # Второй такой же срок у той же модели база не примет.
         with self.assertRaises(asyncpg.UniqueViolationError):
             await self.crm.create_tariff("Неделя", 7, D("4000"), None,
-                                         model="Kugoo V3 Pro (Два АКБ)")
+                                         model="Kugoo V3 Pro")
         # А выключенный тариф места не занимает: цену можно переиграть.
         old_id = int(kugoo[0]["id"])
         await self.crm.update_tariff(old_id, active=False)
         new_id = await self.crm.create_tariff("Неделя", 7, D("4000"), None,
-                                              model="Kugoo V3 Pro (Два АКБ)")
+                                              model="Kugoo V3 Pro")
         self.assertNotEqual(new_id, old_id)
 
         points = {p["name"]: p for p in await self.crm.locations()}
@@ -2621,14 +2723,14 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         заново, уже активным."""
         rows = await self.pool.fetch(
             "select id from crm.tariffs where kind = 'bike' and model = "
-            "'Monster Truck + (Два АКБ)' and period_days = 7")
+            "'Truck +' and period_days = 7")
         self.assertEqual(len(rows), 1, "сид кладёт ровно одну строку")
         await self.pool.execute("update crm.tariffs set active = false where id = $1",
                                 rows[0]["id"])
         await Database(self.pool).apply_schema(SCHEMA, force=True)
         again = await self.pool.fetch(
             "select id, active from crm.tariffs where kind = 'bike' and model = "
-            "'Monster Truck + (Два АКБ)' and period_days = 7")
+            "'Truck +' and period_days = 7")
         self.assertEqual(len(again), 1, "перезапуск не вставил вторую строку")
         self.assertFalse(again[0]["active"], "выключил владелец - выключенным и остаётся")
 
@@ -2639,9 +2741,9 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.settings()).get("tariffs_seeded"), "1")
         seeded = await self.crm.tariffs()
         self.assertEqual(len(seeded), 12)
-        month = next(t for t in seeded if t["model"] == "Monster Truck + (Два АКБ)"
+        month = next(t for t in seeded if t["model"] == "Truck +"
                      and t["period_days"] == 30)
-        week = next(t for t in seeded if t["model"] == "Kugoo V3 Pro (Два АКБ)"
+        week = next(t for t in seeded if t["model"] == "Kugoo V3 Pro"
                     and t["period_days"] == 7)
         await self.crm.update_tariff(month["id"], period_days=28)
         await self.crm.update_tariff(week["id"], model="Kugoo V3")
@@ -2653,7 +2755,7 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
 
         after = await self.crm.tariffs()
         self.assertEqual(len(after), 12, "старые связки не вернулись")
-        self.assertFalse([t for t in after if t["model"] == "Monster Truck + (Два АКБ)"
+        self.assertFalse([t for t in after if t["model"] == "Truck +"
                           and t["period_days"] == 30])
         # Живая установка до отметки: тарифы есть - только отметка.
         await self.pool.execute("delete from crm.settings where key = 'tariffs_seeded'")

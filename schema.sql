@@ -1555,21 +1555,34 @@ begin
   end if;
 end $$;
 
--- Каталог моделей и цены - из таблицы владельца. on conflict do nothing:
--- правки в панели важнее сида, перезаписывать их при каждом старте нельзя.
-insert into crm.bike_models (title, brand, battery_slots, weight_kg, speed_kmh,
-                             range_km, charge_hours, wheel_size, motor_watt,
-                             max_load_kg, size_note, description)
-values
-  ('Monster Truck + (Два АКБ)', 'Monster', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
-   '120х43х110', 'Работаем 7/0, бесплатное обслуживание'),
-  ('Monster Truck + с задними амортизаторами', 'Monster', 2, 52, 60, 70, 6,
-   '16 дюймов', 1200, 120, '120х43х110', 'Работаем 7/0, бесплатное обслуживание'),
-  ('Kugoo V3 Pro (Два АКБ)', 'Kugoo', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
-   '125х43х110', 'Работаем 7/0, бесплатное обслуживание'),
-  ('Kugoo V3 Pro + (Два АКБ)', 'Kugoo', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
-   '125х43х110', 'Работаем 7/0, бесплатное обслуживание')
-on conflict (title) do nothing;
+-- Каталог моделей - из таблицы владельца, один раз на установку
+-- (settings.bike_models_seeded). Раньше сид шёл с on conflict (title) do
+-- nothing на каждом изменении схемы: модель, которую владелец
+-- переименовал или удалил, вставала заново под старым именем. Есть в
+-- каталоге хоть одна строка - только отметка.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'bike_models_seeded') then
+    if not exists (select 1 from crm.bike_models) then
+      insert into crm.bike_models (title, brand, battery_slots, weight_kg, speed_kmh,
+                                   range_km, charge_hours, wheel_size, motor_watt,
+                                   max_load_kg, size_note, description)
+      values
+        ('Truck +', null, 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
+         '120х43х110', 'Работаем 7/0, бесплатное обслуживание'),
+        ('Truck + с задними амортизаторами', null, 2, 52, 60, 70, 6,
+         '16 дюймов', 1200, 120, '120х43х110', 'Работаем 7/0, бесплатное обслуживание'),
+        ('Kugoo V3 Pro', 'Kugoo', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
+         '125х43х110', 'Работаем 7/0, бесплатное обслуживание'),
+        ('Kugoo V3 Pro +', 'Kugoo', 2, 52, 60, 70, 6, '16 дюймов', 1200, 120,
+         '125х43х110', 'Работаем 7/0, бесплатное обслуживание')
+      on conflict (title) do nothing;
+    end if;
+    insert into crm.settings (key, value, updated_by)
+    values ('bike_models_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
 
 -- Цены владельца приезжают ниже, вместе с видом тарифа и его
 -- индексом: до них у таблицы нет ни колонки kind, ни уникального
@@ -1867,18 +1880,18 @@ begin
       insert into crm.tariffs (name, model, period_days, price, sort, kind)
       select v.name, v.model, v.period_days, v.price, v.sort, 'bike'
         from (values
-          ('Неделя', 'Monster Truck + (Два АКБ)', 7, 3000, 10),
-          ('Две недели', 'Monster Truck + (Два АКБ)', 14, 5400, 20),
-          ('Месяц', 'Monster Truck + (Два АКБ)', 30, 11000, 30),
-          ('Неделя', 'Monster Truck + с задними амортизаторами', 7, 3300, 11),
-          ('Две недели', 'Monster Truck + с задними амортизаторами', 14, 5900, 21),
-          ('Месяц', 'Monster Truck + с задними амортизаторами', 30, 12000, 31),
-          ('Неделя', 'Kugoo V3 Pro (Два АКБ)', 7, 3500, 12),
-          ('Две недели', 'Kugoo V3 Pro (Два АКБ)', 14, 6000, 22),
-          ('Месяц', 'Kugoo V3 Pro (Два АКБ)', 30, 12500, 32),
-          ('Неделя', 'Kugoo V3 Pro + (Два АКБ)', 7, 3500, 13),
-          ('Две недели', 'Kugoo V3 Pro + (Два АКБ)', 14, 6000, 23),
-          ('Месяц', 'Kugoo V3 Pro + (Два АКБ)', 30, 12500, 33)
+          ('Неделя', 'Truck +', 7, 3000, 10),
+          ('Две недели', 'Truck +', 14, 5400, 20),
+          ('Месяц', 'Truck +', 30, 11000, 30),
+          ('Неделя', 'Truck + с задними амортизаторами', 7, 3300, 11),
+          ('Две недели', 'Truck + с задними амортизаторами', 14, 5900, 21),
+          ('Месяц', 'Truck + с задними амортизаторами', 30, 12000, 31),
+          ('Неделя', 'Kugoo V3 Pro', 7, 3500, 12),
+          ('Две недели', 'Kugoo V3 Pro', 14, 6000, 22),
+          ('Месяц', 'Kugoo V3 Pro', 30, 12500, 32),
+          ('Неделя', 'Kugoo V3 Pro +', 7, 3500, 13),
+          ('Две недели', 'Kugoo V3 Pro +', 14, 6000, 23),
+          ('Месяц', 'Kugoo V3 Pro +', 30, 12500, 33)
              ) as v(name, model, period_days, price, sort);
     end if;
     insert into crm.settings (key, value, updated_by)
@@ -3113,3 +3126,78 @@ create index if not exists cash_plan_due_idx on crm.cash_plan (due_on) where don
 alter table crm.inbox_threads drop constraint if exists inbox_threads_channel_check;
 alter table crm.inbox_threads add constraint inbox_threads_channel_check
   check (channel in ('tg', 'max', 'avito', 'wa', 'tgp'));
+
+-- Названия каталога без «(Два АКБ)» и «Monster» (просьба владельца,
+-- 10.2026), один раз (settings.catalog_titles_v2) и только у строк, которые
+-- ещё носят поставочное имя. Тем же каскадом, что переименование в панели
+-- (db.rename_bike_model): цены, заявки и акции идут за новым названием;
+-- парк не переименовывается - на него ссылается закрытая история, - а
+-- старое имя становится заводским, и модель парка находит каталог
+-- (logic.model_aliases). Строку, у которой заводское имя уже другое, а парк
+-- назван старым, не трогаем: связь с парком порвалась бы. Пара, упёршаяся
+-- в уникальный индекс (такое имя или цена уже есть), пропускается, а не
+-- роняет старт схемы.
+do $$
+declare
+  pair record;
+  m record;
+begin
+  if exists (select 1 from crm.settings where key = 'catalog_titles_v2') then
+    return;
+  end if;
+  for pair in select * from (values
+      ('Monster Truck + (Два АКБ)', 'Truck +'),
+      ('Monster Truck + с задними амортизаторами', 'Truck + с задними амортизаторами'),
+      ('Kugoo V3 Pro (Два АКБ)', 'Kugoo V3 Pro'),
+      ('Kugoo V3 Pro + (Два АКБ)', 'Kugoo V3 Pro +')) as v(old_title, new_title)
+  loop
+    select * into m from crm.bike_models where title = pair.old_title;
+    continue when not found;
+    continue when exists (
+      select 1 from crm.bike_models
+       where id <> m.id and (lower(title) = lower(pair.new_title)
+                             or lower(coalesce(factory_title, '')) = lower(pair.new_title)));
+    begin
+      if exists (select 1 from crm.bikes
+                  where lower(btrim(model)) = lower(pair.old_title)) then
+        continue when m.factory_title is not null
+                  and lower(btrim(m.factory_title)) <> lower(pair.old_title);
+        update crm.bike_models set factory_title = pair.old_title where id = m.id;
+      end if;
+      update crm.bike_models
+         set title = pair.new_title,
+             brand = case when brand = 'Monster' then null else brand end
+       where id = m.id;
+      update crm.tariffs set model = pair.new_title
+       where model = pair.old_title and coalesce(kind, 'bike') = 'bike';
+      update crm.bookings set model = pair.new_title where model = pair.old_title;
+      update crm.promos
+         set params = jsonb_set(params, '{model}', to_jsonb(pair.new_title::text))
+       where params->>'model' = pair.old_title;
+    exception when unique_violation then
+      raise notice 'каталог: «%» не переименована - такое имя или цена уже есть',
+        pair.old_title;
+    end;
+  end loop;
+  insert into crm.settings (key, value, updated_by)
+  values ('catalog_titles_v2', '1', 'schema')
+  on conflict (key) do nothing;
+end $$;
+
+-- Правка срока аренды из карточки (db.change_rental_term): дата начала и
+-- «следующее начисление» (billed_until). Деньги этим не пишутся - журнал
+-- остаётся журналом, - но сдвиг начисления вперёд это дни без списания,
+-- поэтому каждая правка остаётся строкой: что было, что стало, кто и
+-- почему. Сократить уже начисленный период нельзя: следующий проход
+-- начислил бы те же дни второй раз.
+create table if not exists crm.rental_changes (
+  id          bigserial primary key,
+  rental_id   bigint      not null references crm.rentals (id) on delete cascade,
+  field       text        not null check (field in ('started_on', 'billed_until')),
+  old_value   date,
+  new_value   date,
+  note        text        not null,
+  created_by  text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists rental_changes_idx on crm.rental_changes (rental_id, id);

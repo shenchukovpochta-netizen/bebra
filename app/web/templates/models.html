@@ -23,6 +23,9 @@
     <tr class="{% if not m.active %}muted{% endif %}">
       <td colspan="5">
         <form method="post" action="/models/bikes/{{ m.id }}" class="grid2">
+          <label>Название для клиента <input name="title" value="{{ m.title }}" required></label>
+          <label>Бренд <input name="brand" value="{{ m.brand or '' }}"></label>
+          <label class="wide">Заводское название <small class="muted">— как модель записана в парке, если иначе</small> <input name="factory_title" value="{{ m.factory_title or '' }}"></label>
           <label>Вес, кг <input name="weight_kg" value="{{ m.weight_kg or '' }}"></label>
           <label>Скорость, км/ч <input name="speed_kmh" value="{{ m.speed_kmh or '' }}"></label>
           <label>Пробег на АКБ, км <input name="range_km" value="{{ m.range_km or '' }}"></label>
@@ -36,6 +39,8 @@
           <label class="wide">Заметка <input name="note" value="{{ m.note or '' }}"></label>
           <button type="submit">Сохранить</button>
           <button type="submit" name="action" value="toggle" class="ghost">{{ 'В архив' if m.active else 'Вернуть' }}</button>
+          {% if not m.bikes %}<button type="submit" name="action" value="delete" class="ghost danger"
+            onclick="return confirm('Удалить модель «{{ m.title }}» из каталога?')">Удалить</button>{% endif %}
         </form>
       </td>
     </tr>
