@@ -64,6 +64,7 @@ from ..crm import (
     readiness,
     service,
     tasks,
+    team,
 )
 from ..services import contract as contract_service
 from ..services import tochka
@@ -1403,7 +1404,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             shift_open=shift_open, today=today,
             repair_norm=logic.repair_norm_default(settings),
             booking_url=booking_issue_url)
+        # Свой месяц: план и начисленное видит сам сотрудник - только своё.
+        first = today.replace(day=1)
+        own_plan = (await crm.staff_plans(first)).get(int(staff["id"]))
+        own_month = None
+        if own_plan:
+            span = logic.month_bounds(first, today=today)
+            since, until = month_window(first)
+            facts = (await crm.team_facts(since, until)).get(int(staff["id"])) or {}
+            own_month = {"title": team.month_name(first),
+                         "metrics": [m for m in team.progress(own_plan, facts,
+                                                              days=span["days"],
+                                                              passed=span["passed"])
+                                     if m["plan"] is not None],
+                         "pay": team.salary(own_plan, facts)}
         return render(request, "my.html", groups=groups, point=point, today=today,
+                      own_month=own_month,
                       task_lists=tasks.my_lists(staff, await crm.tasks(status="open"),
                                                 today=today),
                       people=await team_people(),
@@ -1419,6 +1435,89 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Куда вернуться: только свои страницы, адрес из формы - чужая строка."""
         back = data.get("back") or ""
         return back if back in ("/my", "/tasks") else "/my"
+
+    # ─────────── команда: план, факт, зарплата (app/crm/team.py) ───────────
+
+    def month_window(first: date) -> tuple[datetime, datetime]:
+        since = datetime.combine(first, datetime.min.time()).astimezone()
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        until = min(datetime.combine(nxt, datetime.min.time()).astimezone(),
+                    datetime.now().astimezone())
+        return since, until
+
+    async def team_month(request: Request) -> tuple[date, dict, datetime, datetime]:
+        today = date.today()
+        first = team.month_of(request.query_params.get("month"), today=today)
+        since, until = month_window(first)
+        return first, logic.month_bounds(first, today=today), since, until
+
+    def team_money(request: Request) -> bool:
+        return logic.is_owner(request.state.staff) or may_view(request, "finance")
+
+    @app.get("/team")
+    async def team_page(request: Request) -> Response:
+        """«Команда»: каждый сотрудник за месяц - план, факт, темп и
+        начисленное по его условиям."""
+        first, span, since, until = await team_month(request)
+        rows = team.rows(await crm.staff_all(), await crm.team_facts(since, until),
+                         await crm.staff_plans(first), days=span["days"],
+                         passed=span["passed"])
+        return render(request, "team.html", rows=rows, total=team.totals(rows), span=span,
+                      month_title=team.month_name(first), money_ok=team_money(request))
+
+    @app.get("/team.{ext}")
+    async def team_export(request: Request, ext: str) -> Response:
+        if not team_money(request):
+            return denied(request, "finance")
+        first, span, since, until = await team_month(request)
+        rows = team.rows(await crm.staff_all(), await crm.team_facts(since, until),
+                         await crm.staff_plans(first), days=span["days"],
+                         passed=span["passed"])
+        header = ["Сотрудник", "Роль", "Точка", "Выдачи", "Платежей принято",
+                  "Нарядов", "Работа нарядов", "Задач", "Принёс денег", "Оклад",
+                  "За выдачи", "% нарядов", "% денег", "Задачи", "Начислено"]
+        data = [[r["name"], r["role"], r["location"] or "", r["facts"].get("issues", 0),
+                 r["facts"].get("payments", 0), r["facts"].get("orders", 0),
+                 r["facts"].get("orders_works", 0), r["facts"].get("tasks", 0),
+                 r["revenue"], r["pay"]["base"], r["pay"]["issues"], r["pay"]["orders"],
+                 r["pay"]["revenue"], r["pay"]["tasks"], r["pay"]["total"]] for r in rows]
+        return await table(ext, f"team-{first:%Y-%m}", header, data)
+
+    @app.get("/team/{staff_id}")
+    async def team_member(request: Request, staff_id: str) -> Response:
+        person = await by_id(crm.staff_by_id, staff_id)
+        if person is None:
+            return render(request, "missing.html", status_code=404, what="Сотрудник")
+        first, span, since, until = await team_month(request)
+        facts = (await crm.team_facts(since, until)).get(int(person["id"])) or {}
+        plan = (await crm.staff_plans(first)).get(int(person["id"]))
+        return render(request, "team_member.html", person=person, span=span, plan=plan,
+                      month_title=team.month_name(first),
+                      facts=facts, role=logic.role_title(person),
+                      metrics=team.progress(plan, facts, days=span["days"],
+                                            passed=span["passed"]),
+                      pay=team.salary(plan, facts), revenue=team.revenue(facts),
+                      detail=await crm.team_detail(person, since, until),
+                      money_ok=team_money(request), may_plan=may_edit(request, "staff"))
+
+    @app.post("/team/{staff_id}/plan")
+    async def team_plan_save(request: Request, staff_id: str) -> Response:
+        if not may_edit(request, "staff"):
+            return denied(request, "staff")
+        person = await by_id(crm.staff_by_id, staff_id)
+        if person is None:
+            return render(request, "missing.html", status_code=404, what="Сотрудник")
+        data = await form(request)
+        first = team.month_of(data.get("month"), today=date.today())
+        back = f"/team/{person['id']}?month={first:%Y-%m}"
+        fields, problem = team.parse_plan(data)
+        if problem:
+            flash(request, problem, "err")
+            return redirect(back)
+        assert fields is not None
+        await crm.set_staff_plan(int(person["id"]), first, by=who(request), **fields)
+        flash(request, f"План и условия на {team.month_name(first)} сохранены.")
+        return redirect(back)
 
     @app.get("/tasks")
     async def tasks_page(request: Request) -> Response:

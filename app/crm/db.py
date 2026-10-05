@@ -91,6 +91,11 @@ DEAL_FIELDS = frozenset({
 # Задача дня: что правится в карточке. Статус - своими методами (взять,
 # сделано, отменить): у каждого перехода своё условие в самом UPDATE.
 TASK_FIELDS = frozenset({"title", "note", "assignee_id", "location", "due_on", "pay"})
+# План месяца и условия оплаты сотрудника (app/crm/team.py).
+STAFF_PLAN_FIELDS = frozenset({
+    "plan_issues", "plan_orders", "plan_tasks", "plan_revenue",
+    "salary_base", "per_issue", "order_pct", "revenue_pct",
+})
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
@@ -6649,3 +6654,99 @@ class CrmDB:
             "update crm.tasks set status = 'open', done_at = null, done_by = null, "
             "updated_at = now() where id = $1 and status <> 'open' returning id", task_id)
         return row is not None
+
+    # ─────────────── команда: план и факт сотрудника (app/crm/team.py) ───────────────
+
+    async def staff_plans(self, month: date) -> dict[int, dict]:
+        """План и условия на месяц: своя строка месяца, иначе последняя
+        прежняя (own = false) - условия не вводят заново каждый месяц."""
+        rows = await self.pool.fetch(
+            "select distinct on (staff_id) *, month = $1 as own from crm.staff_plans "
+            "where month <= $1 order by staff_id, month desc", month)
+        return {int(r["staff_id"]): dict(r) for r in rows}
+
+    async def set_staff_plan(self, staff_id: int, month: date, *, by: str,
+                             **fields: Any) -> None:
+        unknown = set(fields) - STAFF_PLAN_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        cols = sorted(fields)
+        values = [fields[c] for c in cols]
+        names = ", ".join(cols)
+        marks = ", ".join(f"${i + 4}" for i in range(len(cols)))
+        sets = ", ".join(f"{c} = excluded.{c}" for c in cols)
+        await self.pool.execute(
+            f"insert into crm.staff_plans (staff_id, month, updated_by, {names}) "
+            f"values ($1, $2, $3, {marks}) on conflict (staff_id, month) do update set "
+            f"{sets}, updated_by = excluded.updated_by, updated_at = now()",
+            staff_id, month, by, *values)
+
+    async def team_facts(self, since: datetime, until: datetime) -> dict[int, dict]:
+        """Сделанное каждым сотрудником за окно: выдачи и принятые платежи -
+        по автору записи (staff:<логин>), наряды - по технику, задачи - по
+        тому, кто сделал. Банк и автозачисление ничьи."""
+        rows = await self.pool.fetch(
+            """
+            with i as (select created_by, count(*) as n from crm.rentals
+                        where created_at >= $1 and created_at < $2 group by 1),
+                 p as (select created_by, sum(amount) as amount, count(*) as n
+                         from crm.ledger
+                        where kind = 'payment' and created_at >= $1 and created_at < $2
+                        group by 1),
+                 o as (select tech_id, count(*) as n, coalesce(sum(total), 0) as total,
+                              coalesce(sum(coalesce(total, 0) - coalesce(cost, 0)), 0)
+                                as works,
+                              coalesce(sum(total) filter (where payer = 'client'), 0)
+                                as client_total
+                         from crm.work_orders
+                        where status = 'done' and closed_at >= $1 and closed_at < $2
+                          and tech_id is not null
+                        group by 1),
+                 t as (select done_by, count(*) as n, coalesce(sum(pay), 0) as pay
+                         from crm.tasks
+                        where status = 'done' and done_at >= $1 and done_at < $2
+                          and done_by is not null
+                        group by 1)
+            select s.id as staff_id, coalesce(i.n, 0) as issues,
+                   coalesce(p.amount, 0) as payments, coalesce(p.n, 0) as payments_n,
+                   coalesce(o.n, 0) as orders, coalesce(o.total, 0) as orders_total,
+                   coalesce(o.works, 0) as orders_works,
+                   coalesce(o.client_total, 0) as client_orders_total,
+                   coalesce(t.n, 0) as tasks, coalesce(t.pay, 0) as tasks_pay
+              from crm.staff s
+              left join i on i.created_by = 'staff:' || s.login
+              left join p on p.created_by = 'staff:' || s.login
+              left join o on o.tech_id = s.id
+              left join t on t.done_by = s.id
+            """, since, until)
+        return {int(r["staff_id"]): dict(r) for r in rows}
+
+    async def team_detail(self, staff: dict, since: datetime, until: datetime,
+                          limit: int = 300) -> dict[str, list[dict]]:
+        """Что именно сделал сотрудник за окно - для его карточки."""
+        actor = f"staff:{staff['login']}"
+        rentals = await self.pool.fetch(
+            "select r.id, r.created_at, r.tariff_name, c.full_name, b.code as bike_code "
+            "from crm.rentals r join crm.clients c on c.id = r.client_id "
+            "left join crm.bikes b on b.id = r.bike_id "
+            "where r.created_by = $1 and r.created_at >= $2 and r.created_at < $3 "
+            "order by r.created_at desc limit $4", actor, since, until, limit)
+        payments = await self.pool.fetch(
+            "select l.id, l.created_at, l.amount, l.method, l.client_id, c.full_name "
+            "from crm.ledger l join crm.clients c on c.id = l.client_id "
+            "where l.kind = 'payment' and l.created_by = $1 and l.created_at >= $2 "
+            "and l.created_at < $3 order by l.created_at desc limit $4",
+            actor, since, until, limit)
+        orders = await self.pool.fetch(
+            "select o.id, o.no, o.closed_at, o.total, o.cost, o.payer, o.object_note, "
+            "b.code as bike_code from crm.work_orders o "
+            "left join crm.bikes b on b.id = o.bike_id "
+            "where o.tech_id = $1 and o.status = 'done' and o.closed_at >= $2 "
+            "and o.closed_at < $3 order by o.closed_at desc limit $4",
+            int(staff["id"]), since, until, limit)
+        tasks = await self.pool.fetch(
+            "select id, title, done_at, pay, location from crm.tasks "
+            "where done_by = $1 and status = 'done' and done_at >= $2 and done_at < $3 "
+            "order by done_at desc limit $4", int(staff["id"]), since, until, limit)
+        return {"rentals": _rows(rentals), "payments": _rows(payments),
+                "orders": _rows(orders), "tasks": _rows(tasks)}

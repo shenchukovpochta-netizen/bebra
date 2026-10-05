@@ -78,6 +78,7 @@ class FakeCrm:
         self.inbox_threads_: dict[int, dict] = {}
         self.deals_: dict[int, dict] = {}
         self.tasks_: dict[int, dict] = {}
+        self.staff_plans_: dict[tuple, dict] = {}
         self.deal_log_: list[dict] = []
         self.inbox_messages_: dict[int, dict] = {}
         self.franchisees_: dict[int, dict] = {}
@@ -4807,6 +4808,75 @@ class FakeCrm:
             return False
         t.update(status="open", done_at=None, done_by=None, updated_at=self._now())
         return True
+
+    # ─── команда: план и факт сотрудника ───
+    async def staff_plans(self, month):
+        out = {}
+        for (sid, m), row in sorted(self.staff_plans_.items(), key=lambda kv: kv[0][1]):
+            if m <= month:
+                out[sid] = {**row, "own": m == month}
+        return out
+
+    async def set_staff_plan(self, staff_id, month, *, by, **fields):
+        unknown = set(fields) - {"plan_issues", "plan_orders", "plan_tasks", "plan_revenue",
+                                 "salary_base", "per_issue", "order_pct", "revenue_pct"}
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        assert month.day == 1
+        row = self.staff_plans_.setdefault((staff_id, month), {
+            "staff_id": staff_id, "month": month, "plan_issues": None, "plan_orders": None,
+            "plan_tasks": None, "plan_revenue": None, "salary_base": Decimal(0),
+            "per_issue": Decimal(0), "order_pct": Decimal(0), "revenue_pct": Decimal(0)})
+        row.update(fields, updated_by=by, updated_at=self._now())
+
+    async def team_facts(self, since, until):
+        def inside(moment):
+            return moment is not None and since <= moment < until
+        out = {}
+        for sid, person in self.staff.items():
+            actor = f"staff:{person['login']}"
+            pays = [x for x in self.ledger_ if x["kind"] == "payment"
+                    and x.get("created_by") == actor and inside(x["created_at"])]
+            orders = [o for o in self.orders_.values() if o.get("tech_id") == sid
+                      and o.get("status") == "done" and inside(o.get("closed_at"))]
+            done = [t for t in self.tasks_.values() if t.get("done_by") == sid
+                    and t["status"] == "done" and inside(t.get("done_at"))]
+            out[sid] = {
+                "staff_id": sid,
+                "issues": sum(1 for r in self.rentals_.values()
+                              if r.get("created_by") == actor and inside(r.get("created_at"))),
+                "payments": sum((x["amount"] for x in pays), Decimal(0)),
+                "payments_n": len(pays), "orders": len(orders),
+                "orders_total": sum((Decimal(o.get("total") or 0) for o in orders), Decimal(0)),
+                "orders_works": sum((Decimal(o.get("total") or 0) - Decimal(o.get("cost") or 0)
+                                     for o in orders), Decimal(0)),
+                "client_orders_total": sum((Decimal(o.get("total") or 0) for o in orders
+                                            if o.get("payer") == "client"), Decimal(0)),
+                "tasks": len(done),
+                "tasks_pay": sum((Decimal(t.get("pay") or 0) for t in done), Decimal(0))}
+        return out
+
+    async def team_detail(self, staff, since, until, limit=300):
+        def inside(moment):
+            return moment is not None and since <= moment < until
+        actor = f"staff:{staff['login']}"
+        sid = int(staff["id"])
+        rentals = [{"id": r["id"], "created_at": r["created_at"],
+                    "tariff_name": r.get("tariff_name"),
+                    "full_name": self.clients_[r["client_id"]]["full_name"],
+                    "bike_code": (self.bikes_.get(r.get("bike_id")) or {}).get("code")}
+                   for r in self.rentals_.values()
+                   if r.get("created_by") == actor and inside(r.get("created_at"))]
+        payments = [{**x, "full_name": self.clients_[x["client_id"]]["full_name"]}
+                    for x in self.ledger_ if x["kind"] == "payment"
+                    and x.get("created_by") == actor and inside(x["created_at"])]
+        orders = [{**o, "bike_code": (self.bikes_.get(o.get("bike_id")) or {}).get("code")}
+                  for o in self.orders_.values() if o.get("tech_id") == sid
+                  and o.get("status") == "done" and inside(o.get("closed_at"))]
+        tasks = [dict(t) for t in self.tasks_.values() if t.get("done_by") == sid
+                 and t["status"] == "done" and inside(t.get("done_at"))]
+        return {"rentals": rentals[:limit], "payments": payments[:limit],
+                "orders": orders[:limit], "tasks": tasks[:limit]}
 
     # ─── сделки: воронка «Входящих» ───
     _DEAL_FIELDS = {"title", "name", "phone", "responsible_id", "location", "note",

@@ -13,6 +13,21 @@
 <p class="muted">Своя точка не задана — показаны задачи всех точек.
   {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
 {% endif %}
+{% if own_month %}
+<section class="card my-month">
+  <h2>Мой {{ own_month.title }}</h2>
+  <div class="tiles">
+    {% for m in own_month.metrics %}
+    <div class="tile {% if m.ahead is false %}warn{% endif %}">
+      <b>{% if m.money %}{{ money(m.fact) }}{% else %}{{ m.fact }}{% endif %}</b>
+      <span>{{ m.title|lower }} · план {% if m.money %}{{ money(m.plan) }}{% else %}{{ m.plan }}{% endif %} · {{ m.percent }} %</span>
+      <span class="bar-track"><span class="bar-fill {% if m.ahead %}ok{% else %}bad{% endif %}" style="width: {{ [m.percent, 100]|min }}%"></span></span>
+    </div>
+    {% endfor %}
+    <div class="tile"><b>{{ money(own_month.pay.total) }}</b><span>начислено на сегодня</span></div>
+  </div>
+</section>
+{% endif %}
 {{ tk.add_form(people, locations, staff, task_money, '/my') }}
 {% if task_lists.mine %}
 <section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">

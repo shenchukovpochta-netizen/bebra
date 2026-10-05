@@ -2504,6 +2504,9 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     ("/franchisees", "franchise"),
     ("/import", "import"),
     ("/staff", "staff"),
+    # Команда: план, факт и зарплата сотрудников - тот же раздел, кто
+    # ведёт людей, тот и видит их выработку.
+    ("/team", "staff"),
     ("/profiles", "staff"),
     ("/company", "settings"),
     # Готовность установки: что не настроено - вкладка тех же настроек.

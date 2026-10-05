@@ -3060,3 +3060,27 @@ create table if not exists crm.tasks (
 );
 create index if not exists tasks_open_idx on crm.tasks (due_on, id) where status = 'open';
 create index if not exists tasks_done_idx on crm.tasks (done_by, done_at) where status = 'done';
+
+-- Команда (app/crm/team.py): план месяца и условия оплаты сотрудника.
+-- Строка - на месяц (первое число): правка не переписывает прошлые
+-- месяцы, а месяц без своей строки живёт по последней прежней - условия
+-- не надо вводить заново каждый месяц. Факт плана не хранится: выдачи,
+-- принятые платежи, закрытые наряды и сделанные задачи считаются из своих
+-- таблиц по автору (`created_by` = staff:<логин>, наряд - техник, задача -
+-- `done_by`). Зарплата - расчёт, а не запись: в ledger она не идёт, журнал
+-- это деньги клиентов.
+create table if not exists crm.staff_plans (
+  staff_id     bigint      not null references crm.staff (id) on delete cascade,
+  month        date        not null check (extract(day from month) = 1),
+  plan_issues  integer     check (plan_issues is null or plan_issues >= 0),
+  plan_orders  integer     check (plan_orders is null or plan_orders >= 0),
+  plan_tasks   integer     check (plan_tasks is null or plan_tasks >= 0),
+  plan_revenue numeric(12,2) check (plan_revenue is null or plan_revenue >= 0),
+  salary_base  numeric(12,2) not null default 0 check (salary_base >= 0),
+  per_issue    numeric(12,2) not null default 0 check (per_issue >= 0),
+  order_pct    numeric(5,2)  not null default 0 check (order_pct between 0 and 100),
+  revenue_pct  numeric(5,2)  not null default 0 check (revenue_pct between 0 and 100),
+  updated_by   text,
+  updated_at   timestamptz not null default now(),
+  primary key (staff_id, month)
+);

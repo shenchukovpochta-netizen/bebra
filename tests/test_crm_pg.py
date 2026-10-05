@@ -595,6 +595,44 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncpg.CheckViolationError):
             await self.crm.create_task(title="", by="t")
 
+    async def test_team_on_postgres(self):
+        """Команда на настоящей базе: факт по автору записи, условия месяца
+        наследуются следующим, карточка - списки сделанного."""
+        await self.seed()
+        tech = await self.crm.access_profile_by_code("tech")
+        anna = await self.crm.create_staff("anna", "hash", "Анна", "manager", tech["id"])
+        person = await self.crm.staff_by_id(anna)
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no=None, by="staff:anna")
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("3000"),
+                                  rental_id=rid, created_by="staff:anna")
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("500"),
+                                  created_by="bank")
+        task = await self.crm.create_task(title="Ремонт АКБ", by="t", pay=D("250"))
+        await self.crm.finish_task(task, anna)
+        first = date.today().replace(day=1)
+        await self.crm.set_staff_plan(anna, first, by="staff:admin", plan_issues=10,
+                                      salary_base=D("20000"), per_issue=D("300"))
+        await self.crm.set_staff_plan(anna, first, by="staff:admin", revenue_pct=D("10"))
+        since = datetime.combine(first, datetime.min.time()).astimezone()
+        until = datetime.now().astimezone() + timedelta(minutes=1)
+        facts = (await self.crm.team_facts(since, until))[anna]
+        self.assertEqual((facts["issues"], facts["payments"], facts["tasks"],
+                          facts["tasks_pay"]), (1, D("3000.00"), 1, D("250.00")))
+        plan = (await self.crm.staff_plans(first))[anna]
+        self.assertEqual((plan["plan_issues"], plan["salary_base"], plan["revenue_pct"],
+                          plan["own"]), (10, D("20000.00"), D("10.00"), True))
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        self.assertFalse((await self.crm.staff_plans(nxt))[anna]["own"])
+        self.assertNotIn(anna, await self.crm.staff_plans(first - timedelta(days=1)))
+        detail = await self.crm.team_detail(person, since, until)
+        self.assertEqual(([r["id"] for r in detail["rentals"]], len(detail["payments"]),
+                          [t["id"] for t in detail["tasks"]]), ([rid], 1, [task]))
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.set_staff_plan(anna, first, by="t", order_pct=D("150"))
+
     async def test_quick_repair_form_on_postgres(self):
         """Форма стороннего ремонта из бота на настоящей базе: карточка
         клиента, наряд задним числом по дате обращения, закрытие днём

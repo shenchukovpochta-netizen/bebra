@@ -687,3 +687,11 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .task-add form{margin-top:12px}
 .team-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
 .team-cols .card h2{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+
+/* Команда (team_member.html): прогресс плана полосой в плитке. */
+.bar-track{display:block;height:6px;border-radius:3px;background:var(--line);margin:6px 0 2px;overflow:hidden}
+.bar-fill{display:block;height:100%;border-radius:3px;background:var(--brand)}
+.bar-fill.ok{background:var(--ok)}
+.bar-fill.bad{background:var(--bad)}
+b.ok{color:var(--ok)}
+b.bad{color:var(--bad)}

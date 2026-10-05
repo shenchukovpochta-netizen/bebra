@@ -58,6 +58,7 @@ NAV: tuple[Group, ...] = (
     Group("Главное", (
         Item("Задачи дня", "/my", "square-check", match=("/my", "/tasks")),
         Item("Сводка", "/", "dashboard", section="dashboard"),
+        Item("Команда", "/team", "briefcase", section="staff"),
         Item("Выдача", "/issue", "circle-plus", section="issue", not_owner=True, children=(
             Item("Быстрая выдача", "/issue", "circle-plus", section="issue",
                  not_owner=True),

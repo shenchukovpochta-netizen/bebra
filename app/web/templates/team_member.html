@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}{{ person.name }} — Команда — {{ app_title }}{% endblock %}
+{% block content %}
+{# Сотрудник за месяц (app/crm/team.py): прогресс по плану, начисленное
+   и что именно сделано. План и условия - строкой на месяц. #}
+<div class="bar"><h1>{{ person.name }} <small class="muted">{{ role }}{% if person.location %} · {{ person.location }}{% endif %} · {{ month_title }}</small></h1>
+  <nav class="tabs">
+    {% if span.prev_key %}<a href="/team/{{ person.id }}?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
+    {% if span.next_key %}<a href="/team/{{ person.id }}?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
+  </nav>
+  <a class="btn ghost" href="/team?month={{ span.key }}">← Команда</a>
+</div>
+<div class="tiles">
+  {% for m in metrics %}{% if money_ok or not m.money %}
+  <div class="tile {% if m.ahead is false %}warn{% endif %}">
+    <b>{% if m.money %}{{ money(m.fact) }}{% else %}{{ m.fact }}{% endif %}</b>
+    <span>{{ m.title|lower }}{% if m.plan is not none %} · план {% if m.money %}{{ money(m.plan) }}{% else %}{{ m.plan }}{% endif %} · {{ m.percent }} %{% endif %}</span>
+    {% if m.plan is not none %}<span class="bar-track"><span class="bar-fill {% if m.ahead %}ok{% else %}bad{% endif %}" style="width: {{ [m.percent, 100]|min }}%"></span></span>
+    <small class="muted">к сегодня по темпу — {% if m.money %}{{ money(m.pace) }}{% else %}{{ m.pace }}{% endif %}</small>{% endif %}
+  </div>
+  {% endif %}{% endfor %}
+</div>
+<div class="cols">
+{% if money_ok %}
+<section class="card">
+  <h2>Начислено за {{ month_title }}</h2>
+  <dl>
+    <dt>Оклад</dt><dd>{{ money(pay.base) }}</dd>
+    <dt>За выдачи</dt><dd>{{ money(pay.issues) }}{% if plan and plan.per_issue %} <small class="muted">({{ facts.issues or 0 }} × {{ money(plan.per_issue) }})</small>{% endif %}</dd>
+    <dt>% от работы нарядов</dt><dd>{{ money(pay.orders) }}{% if plan and plan.order_pct %} <small class="muted">({{ plan.order_pct }} % от {{ money(facts.orders_works or 0) }})</small>{% endif %}</dd>
+    <dt>% от принесённых денег</dt><dd>{{ money(pay.revenue) }}{% if plan and plan.revenue_pct %} <small class="muted">({{ plan.revenue_pct }} % от {{ money(revenue) }})</small>{% endif %}</dd>
+    <dt>За задачи</dt><dd>{{ money(pay.tasks) }}</dd>
+    <dt><b>Итого</b></dt><dd><b>{{ money(pay.total) }}</b></dd>
+  </dl>
+  {% if plan and not plan.own %}<p class="muted">Своих условий на этот месяц нет — действуют условия с {{ plan.month.strftime('%m.%Y') }}.</p>
+  {% elif not plan %}<p class="muted">Условия оплаты не заданы.</p>{% endif %}
+</section>
+{% endif %}
+{% if may_plan %}
+<section class="card">
+  <h2>План и условия на {{ month_title }}</h2>
+  <form method="post" action="/team/{{ person.id }}/plan" class="grid2">
+    <input type="hidden" name="month" value="{{ span.key }}">
+    <label>План выдач <input name="plan_issues" inputmode="numeric" value="{{ plan.plan_issues if plan and plan.plan_issues is not none else '' }}"></label>
+    <label>План нарядов <input name="plan_orders" inputmode="numeric" value="{{ plan.plan_orders if plan and plan.plan_orders is not none else '' }}"></label>
+    <label>План задач <input name="plan_tasks" inputmode="numeric" value="{{ plan.plan_tasks if plan and plan.plan_tasks is not none else '' }}"></label>
+    <label>План денег, ₽ <input name="plan_revenue" inputmode="decimal" value="{{ plan.plan_revenue if plan and plan.plan_revenue is not none else '' }}"></label>
+    <label>Оклад, ₽ <input name="salary_base" inputmode="decimal" value="{{ plan.salary_base if plan else '' }}"></label>
+    <label>За выдачу, ₽ <input name="per_issue" inputmode="decimal" value="{{ plan.per_issue if plan else '' }}"></label>
+    <label>% от работы нарядов <input name="order_pct" inputmode="decimal" value="{{ plan.order_pct if plan else '' }}"></label>
+    <label>% от принесённых денег <input name="revenue_pct" inputmode="decimal" value="{{ plan.revenue_pct if plan else '' }}"></label>
+    <button type="submit">Сохранить на {{ month_title }}</button>
+  </form>
+  <p class="muted">Пустой план — не планируется. Сохранение пишет только этот месяц: прошлые
+    считаются по своим условиям, следующие — по этим, пока их не поменяют.</p>
+</section>
+{% endif %}
+</div>
+<div class="cols">
+<section class="card">
+  <h2>Задачи <span class="muted">· {{ detail.tasks|length }}</span></h2>
+  {% if detail.tasks %}<table class="cards"><tr><th>Задача</th><th>Сделана</th>{% if money_ok %}<th class="num">Цена</th>{% endif %}</tr>
+  {% for t in detail.tasks %}<tr><td data-label="Задача"><a href="/tasks/{{ t.id }}">{{ t.title }}</a></td><td data-label="Сделана" class="nowrap">{{ t.done_at|dmy }}</td>{% if money_ok %}<td class="num" data-label="Цена">{{ money(t.pay) if t.pay is not none else '—' }}</td>{% endif %}</tr>{% endfor %}
+  </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+</section>
+<section class="card">
+  <h2>Наряды <span class="muted">· {{ detail.orders|length }}</span></h2>
+  {% if detail.orders %}<table class="cards"><tr><th>Наряд</th><th>Закрыт</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}</tr>
+  {% for o in detail.orders %}<tr><td data-label="Наряд"><a href="/orders/{{ o.id }}">{{ o.no }}</a> <small class="muted">{{ ('№ ' ~ o.bike_code) if o.bike_code else (o.object_note or '') }}{% if o.payer == 'client' %} · клиентский{% endif %}</small></td><td data-label="Закрыт" class="nowrap">{{ o.closed_at|dmy }}</td>{% if money_ok %}<td class="num" data-label="Сумма">{{ money(o.total) }}</td>{% endif %}</tr>{% endfor %}
+  </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+</section>
+</div>
+<div class="cols">
+<section class="card">
+  <h2>Выдачи <span class="muted">· {{ detail.rentals|length }}</span></h2>
+  {% if detail.rentals %}<table class="cards"><tr><th>Клиент</th><th>Велосипед</th><th>Когда</th></tr>
+  {% for r in detail.rentals %}<tr><td data-label="Клиент"><a href="/rentals/{{ r.id }}">{{ r.full_name }}</a></td><td data-label="Велосипед">{{ r.bike_code or '—' }}</td><td data-label="Когда" class="nowrap">{{ r.created_at|dmy }}</td></tr>{% endfor %}
+  </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+</section>
+{% if money_ok %}
+<section class="card">
+  <h2>Принятые платежи <span class="muted">· {{ detail.payments|length }}</span></h2>
+  {% if detail.payments %}<table class="cards"><tr><th>Клиент</th><th>Когда</th><th class="num">Сумма</th></tr>
+  {% for x in detail.payments %}<tr><td data-label="Клиент"><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a></td><td data-label="Когда" class="nowrap">{{ x.created_at|dmy }}</td><td class="num" data-label="Сумма">{{ money(x.amount) }}</td></tr>{% endfor %}
+  </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+</section>
+{% endif %}
+</div>
+{% endblock %}
