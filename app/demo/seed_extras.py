@@ -167,6 +167,7 @@ async def populate(conn: asyncpg.Connection, world: World, *,
     await _inbox(conn, c)
     await _ops_group(conn, c)
     await _saved_views(conn, c)
+    await _team(conn, c)
     await _settings(conn, c)
     await _notices(conn, c)
     await _claims(conn, c)
@@ -2177,6 +2178,55 @@ async def _saved_views(conn: asyncpg.Connection, c: _Ctx) -> None:
                 [(c.ids.take("saved_views"), owner.id, section, name, urlencode(query),
                   c.now - timedelta(days=40 - 5 * i))
                  for i, (section, name, query) in enumerate(views)])
+
+
+async def _team(conn: asyncpg.Connection, c: _Ctx) -> None:
+    """Поручения «Задач дня» и план месяца команды (app/crm/tasks.py,
+    app/crm/team.py): своё, незакреплённое точки, просроченное и сделанное
+    сегодня - чтобы «Все задачи», «Команда» и «Критично» не были пустыми.
+    Имена и цифры вымышленные, как всё в демо."""
+    s = c.w.staff
+    today = _msk(c.now).date()
+    owner = s["demo"]
+    tasks = (
+        ("Закупить колодки и камеры на неделю", owner, None, today + timedelta(days=1),
+         None, None),
+        ("Напомнить о продлении курьерам с оплатой до завтра", s["operator"], core.P1,
+         today, D("150"), None),
+        ("Ремонт АКБ 48 В из подменного фонда", None, core.P2, today + timedelta(days=2),
+         D("400"), None),
+        ("Обзвонить должников точки", s["operator2"], core.P2, today - timedelta(days=1),
+         None, None),
+        ("Перебрать мотор-колесо подменного велосипеда", s["mechanic"], core.P1, today,
+         D("300"), c.now - timedelta(hours=2)),
+    )
+    for title, who, point, due, pay, done_at in tasks:
+        await conn.execute(
+            """
+            insert into crm.tasks (title, assignee_id, location, due_on, pay, status,
+                                   created_by, created_by_id, created_at, taken_at,
+                                   done_at, done_by)
+            values ($1, $2::bigint, $3, $4, $5, $6, 'staff:demo', $7, $8::timestamptz,
+                    case when $2::bigint is not null then $8::timestamptz end,
+                    $9::timestamptz,
+                    case when $9::timestamptz is not null then $2::bigint end)
+            """, title, who.id if who else None, point, due, pay,
+            "done" if done_at else "open", owner.id,
+            c.now - timedelta(days=1, hours=3), done_at)
+    first = today.replace(day=1)
+    plans = (("operator", 40, None, 10, D("150000"), D("25000"), D("300"), D(0), D(1)),
+             ("operator2", 30, None, 10, D("110000"), D("25000"), D("300"), D(0), D(1)),
+             ("operator3", 25, None, 8, D("90000"), D("22000"), D("300"), D(0), D(1)),
+             ("mechanic", None, 25, 10, None, D("30000"), D(0), D("30"), D(0)),
+             ("mechanic2", None, 20, 8, None, D("28000"), D(0), D("30"), D(0)))
+    await conn.executemany(
+        """
+        insert into crm.staff_plans (staff_id, month, plan_issues, plan_orders, plan_tasks,
+                                     plan_revenue, salary_base, per_issue, order_pct,
+                                     revenue_pct, updated_by)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'staff:demo')
+        on conflict (staff_id, month) do nothing
+        """, [(s[login].id, first, *rest) for login, *rest in plans if login in s])
 
 
 async def _settings(conn: asyncpg.Connection, c: _Ctx) -> None:
