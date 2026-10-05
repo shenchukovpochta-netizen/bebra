@@ -49,6 +49,7 @@ from ..crm import (
     banking,
     billing,
     company,
+    deals,
     doctemplates,
     firstrun,
     franchise,
@@ -3102,8 +3103,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       hook_on=bool(getattr(cfg, "inbox_hook_token", "")),
                       views=await views_of(request, "/inbox"))
 
-    @app.get("/incoming")
-    async def incoming_page(request: Request) -> Response:
+    @app.get("/incoming/feed")
+    async def incoming_feed(request: Request) -> Response:
         """Всё, что клиент прислал сам, одной лентой (app/crm/incoming.py):
         сообщения, заявки на аренду, «Я оплатил». Раздела у ленты нет - она
         открыта всем, а каждая её часть читается, только если открыт её
@@ -3127,6 +3128,126 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             booking_url=booking_issue_url if may_edit(request, "issue") else None)
         return render(request, "incoming.html", rows=rows,
                       incoming_counts=incoming.counts(rows))
+
+    # ─────────── воронка: сделки по этапам (app/crm/deals.py) ───────────
+
+    async def deal_people() -> list[dict]:
+        return [s for s in await crm.staff_all() if s.get("active")]
+
+    @app.get("/incoming")
+    async def incoming_page(request: Request) -> Response:
+        """«Входящие» доской, как в CRM продаж: от заявки до сдачи. Без
+        права на выдачу - лента: доска это путь к аренде."""
+        if not may_view(request, "issue"):
+            return await incoming_feed(request)
+        try:
+            await deals.sync(crm, db=db)
+        except Exception:                                   # noqa: BLE001
+            # Доска без свежей сверки лучше, чем «Входящие» с ошибкой.
+            log.exception("сделки: сверка не прошла")
+        p = request.query_params
+        staff = request.state.staff
+        inbox_ok = may_view(request, "inbox")
+        q, who_f = (p.get("q") or "").strip(), p.get("who") or ""
+        place = p.get("location") or ""
+        rows = [d for d in (deals.dress(r, inbox_ok=inbox_ok)
+                            for r in await crm.deals(closed_days=deals.CLOSED_DAYS))
+                if deals.matches(d, q=q, who=who_f, me=int(staff["id"]), location=place)]
+        return render(request, "deals.html", columns=deals.board(rows), q=q, who=who_f,
+                      place=place, people=await deal_people(),
+                      locations=await crm.locations(active_only=True),
+                      may_move=may_edit(request, "issue"), inbox_ok=inbox_ok,
+                      closed_days=deals.CLOSED_DAYS)
+
+    @app.post("/deals")
+    async def deal_add(request: Request) -> Response:
+        if not may_edit(request, "issue"):
+            return denied(request, "issue")
+        data = await form(request)
+        name = (data.get("name") or "").strip()[:200] or None
+        phone = (data.get("phone") or "").strip()[:40] or None
+        title = (data.get("title") or "").strip()[:300] or None
+        if not (name or phone):
+            flash(request, "Впишите имя или телефон: сделке нужен человек.", "err")
+            return redirect("/incoming")
+        staff = request.state.staff
+        deal_id = await deals.quick_add(
+            crm, name=name, phone=phone, title=title, by=who(request),
+            responsible_id=logic.parse_id(data.get("responsible")) or int(staff["id"]),
+            location=(data.get("location") or "").strip() or staff.get("location"))
+        return redirect(f"/deals/{deal_id}")
+
+    async def deal_or_none(raw: Any) -> dict | None:
+        return await by_id(crm.deal, raw)
+
+    @app.get("/deals/{deal_id}")
+    async def deal_card(request: Request, deal_id: str) -> Response:
+        deal = await deal_or_none(deal_id)
+        if deal is None:
+            return render(request, "missing.html", status_code=404, what="Сделка")
+        inbox_ok = may_view(request, "inbox")
+        view = deals.dress(deal, inbox_ok=inbox_ok)
+        issue_url = None
+        if may_edit(request, "issue") and deal.get("stage") in deals.EARLY:
+            if deal.get("client_id"):
+                issue_url = f"/issue?client={int(deal['client_id'])}"
+            elif view.get("phone_shown"):
+                issue_url = "/issue?" + urlencode({"phone": view["phone_shown"]})
+        moves = [(code, deals.STAGES[code]) for code in deals.MANUAL
+                 if code != deal.get("stage") and deals.can_move(deal, code) is None]
+        return render(request, "deal.html", deal=view, log_rows=await crm.deal_log(deal["id"]),
+                      people=await deal_people(),
+                      locations=await crm.locations(active_only=True),
+                      may_move=may_edit(request, "issue"), inbox_ok=inbox_ok,
+                      moves=moves, issue_url=issue_url, stages=deals.STAGES)
+
+    @app.post("/deals/{deal_id}/stage")
+    async def deal_stage(request: Request, deal_id: str) -> Response:
+        """Перенос карточки: перетаскиванием на доске (ответ JSON) или
+        кнопкой в карточке (переход обратно)."""
+        wants_json = "application/json" in (request.headers.get("accept") or "")
+        if not may_edit(request, "issue"):
+            if wants_json:
+                return JSONResponse({"ok": False, "error": "Нет права менять выдачу."},
+                                    status_code=403)
+            return denied(request, "issue")
+        deal = await deal_or_none(deal_id)
+        if deal is None:
+            if wants_json:
+                return JSONResponse({"ok": False, "error": "Сделки нет."}, status_code=404)
+            return render(request, "missing.html", status_code=404, what="Сделка")
+        data = await form(request)
+        problem = await deals.move(crm, deal, data.get("stage") or "", by=who(request))
+        if wants_json:
+            return JSONResponse({"ok": problem is None, "error": problem},
+                                status_code=200 if problem is None else 409)
+        if problem:
+            flash(request, problem, "err")
+        back = data.get("back") or ""
+        return redirect("/incoming" if back == "board" else f"/deals/{deal['id']}")
+
+    @app.post("/deals/{deal_id}")
+    async def deal_save(request: Request, deal_id: str) -> Response:
+        if not may_edit(request, "issue"):
+            return denied(request, "issue")
+        deal = await deal_or_none(deal_id)
+        if deal is None:
+            return render(request, "missing.html", status_code=404, what="Сделка")
+        data = await form(request)
+        fields: dict[str, Any] = {
+            "title": (data.get("title") or "").strip()[:300] or None,
+            "note": (data.get("note") or "").strip()[:2000] or None,
+            "responsible_id": logic.parse_id(data.get("responsible")),
+            "location": (data.get("location") or "").strip() or None,
+        }
+        if not deal.get("client_id") and not deal.get("thread_id"):
+            # Имя и телефон правятся только у сделки «вручную»: у обращения
+            # они из канала, у клиента - в его карточке.
+            fields["name"] = (data.get("name") or "").strip()[:200] or None
+            fields["phone"] = (data.get("phone") or "").strip()[:40] or None
+        await crm.update_deal(int(deal["id"]), **fields)
+        flash(request, "Сделка сохранена.")
+        return redirect(f"/deals/{deal['id']}")
 
     @app.get("/inbox/{thread_id}")
     async def inbox_card(request: Request, thread_id: int) -> Response:

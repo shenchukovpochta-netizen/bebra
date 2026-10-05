@@ -69,7 +69,7 @@ NAV: tuple[Group, ...] = (
         # Сообщения, заявки на аренду и «Я оплатил» - один пункт: для
         # точки это одно и то же - клиент ждёт ответа (app/crm/incoming.py).
         Item("Входящие", "/incoming", "inbox", any_of=("inbox", "issue", "claims"),
-             match=("/incoming", "/inbox", "/bookings", "/claims"), badge="incoming"),
+             match=("/incoming", "/inbox", "/bookings", "/claims", "/deals"), badge="incoming"),
     )),
     Group("Клиенты", (
         Item("Клиенты", "/clients", "users", section="clients",

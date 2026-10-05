@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Входящие — {{ app_title }}{% endblock %}
+{% block content %}
+{# Воронка «Входящих» (app/crm/deals.py): заявка -> касание -> договор ->
+   аренда -> продление или сдача. Ранние этапы переносит человек
+   (перетаскиванием или кнопкой в карточке), «В аренде», «Повторное
+   продление» и «Сдал» ставит сама аренда. #}
+<div class="bar"><h1>Входящие</h1>
+  <form method="get" class="search">
+    <input name="q" value="{{ q }}" placeholder="имя, телефон, суть">
+    <select name="who">
+      <option value="">все ответственные</option>
+      <option value="me" {% if who == 'me' %}selected{% endif %}>мои</option>
+      <option value="none" {% if who == 'none' %}selected{% endif %}>без ответственного</option>
+      {% for s in people %}<option value="{{ s.id }}" {% if who == s.id|string %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+    </select>
+    {% if locations|length > 1 %}<select name="location">
+      <option value="">все точки</option>
+      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+      <option value="none" {% if place == 'none' %}selected{% endif %}>без точки</option>
+    </select>{% endif %}
+    <button type="submit">Найти</button>
+  </form>
+  {% if can_view(staff, 'issue') and not is_owner(staff) %}<a class="btn ghost" href="/issue">Выдача</a>{% endif %}
+</div>
+{% with active = 'deals' %}{% include "_incoming_tabs.html" %}{% endwith %}
+<div class="board" id="board" {% if may_move %}data-move="1"{% endif %}>
+  {% for col in columns %}
+  <section class="board-col s-{{ col.code }}" data-stage="{{ col.code }}" {% if col.auto %}data-auto="1"{% endif %}>
+    <header><b>{{ col.title }}</b><span>{{ col.count }}</span></header>
+    {% if col.code == 'new' and may_move %}
+    <details class="board-add">
+      <summary>Быстрое добавление</summary>
+      <form method="post" action="/deals">
+        <input name="name" placeholder="Имя" maxlength="200">
+        <input name="phone" placeholder="Телефон" inputmode="tel" maxlength="40">
+        <input name="title" placeholder="Что хочет: модель, срок, ремонт" maxlength="300">
+        <select name="responsible">
+          {% for s in people %}<option value="{{ s.id }}" {% if s.id == staff.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+        </select>
+        {% if locations|length > 1 %}<select name="location">
+          <option value="">без точки</option>
+          {% for l in locations %}<option value="{{ l.name }}" {% if staff.location == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+        </select>{% endif %}
+        <button type="submit">Добавить</button>
+      </form>
+    </details>
+    {% endif %}
+    <div class="board-cards">
+      {% for d in col.cards %}
+      <a class="deal{% if d.waiting %} wait{% endif %}" href="/deals/{{ d.id }}" data-id="{{ d.id }}"
+         {% if may_move and not col.auto %}draggable="true"{% endif %}>
+        <span class="deal-top"><b>{{ d.who }}</b><span class="deal-when">{{ d.when }}</span></span>
+        {% if d.title %}<span class="deal-title">{{ d.title }}</span>{% endif %}
+        {% if d.bike_code %}<span class="deal-title">№ {{ d.bike_code }}{% if d.bike_model and d.bike_model != d.title %} · {{ d.bike_model }}{% endif %}</span>{% endif %}
+        <span class="deal-tags">
+          <span class="tag src-{{ d.source }}">{{ d.source_title }}</span>
+          {% if d.responsible_name %}<span class="tag ghost">{{ d.responsible_name }}</span>{% endif %}
+          {% if d.location and locations|length > 1 %}<span class="tag ghost">{{ d.location }}</span>{% endif %}
+          {% if d.waiting %}<span class="tag bad">ждёт ответа</span>{% endif %}
+        </span>
+      </a>
+      {% else %}<p class="muted board-empty">Пусто</p>{% endfor %}
+      {% if col.more %}<p class="muted board-empty">и ещё {{ col.more }} — найдите поиском</p>{% endif %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+<p class="muted">Сообщения из Telegram, MAX, Авито и WhatsApp и заявки из кабинета
+  встают в колонку «Новая заявка» сами; ответ из панели или из чата переносит их в «1-е касание»,
+  подписанный в боте договор — в «Заключение договора». «В аренде», «Повторное продление»
+  и «Сдал» ставит аренда: оформите выдачу, и карточка переедет. «Сдал» и «Не взял» видны
+  {{ closed_days }} дней.</p>
+{% if may_move %}
+<script>
+(function () {
+  // Перетаскивание карточки на ранний этап. Отказ сервера (этап ставит
+  // аренда) - сообщением и возвратом доски к правде из базы.
+  var board = document.getElementById('board');
+  if (!board) return;
+  var dragged = null;
+  board.addEventListener('dragstart', function (e) {
+    var card = e.target.closest('.deal');
+    if (!card) return;
+    dragged = card;
+    card.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', card.dataset.id);
+  });
+  board.addEventListener('dragend', function () {
+    if (dragged) dragged.classList.remove('dragging');
+    board.querySelectorAll('.drop').forEach(function (c) { c.classList.remove('drop'); });
+  });
+  board.querySelectorAll('.board-col').forEach(function (col) {
+    if (col.dataset.auto) return;
+    col.addEventListener('dragover', function (e) { e.preventDefault(); col.classList.add('drop'); });
+    col.addEventListener('dragleave', function () { col.classList.remove('drop'); });
+    col.addEventListener('drop', function (e) {
+      e.preventDefault();
+      col.classList.remove('drop');
+      if (!dragged || dragged.closest('.board-col') === col) return;
+      var card = dragged;
+      var body = new URLSearchParams({stage: col.dataset.stage});
+      fetch('/deals/' + card.dataset.id + '/stage', {
+        method: 'POST', body: body, credentials: 'same-origin',
+        headers: {'Accept': 'application/json'}
+      }).then(function (r) { return r.json(); }).then(function (got) {
+        if (got.ok) {
+          col.querySelector('.board-cards').prepend(card);
+          var empty = col.querySelector('.board-empty');
+          if (empty) empty.remove();
+        } else {
+          alert(got.error || 'Не перенеслось.');
+          location.reload();
+        }
+      }).catch(function () { location.reload(); });
+    });
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Сделка {{ deal.id }} — {{ app_title }}{% endblock %}
+{% block content %}
+{# Карточка сделки воронки (app/crm/deals.py): откуда пришёл человек, на
+   каком он этапе и кто ведёт. Денег здесь нет - они в журнале клиента. #}
+<div class="bar"><h1>{{ deal.who }}</h1>
+  <a class="btn ghost" href="/incoming">← Воронка</a>
+  {% if issue_url %}<a class="btn" href="{{ issue_url }}">Оформить выдачу</a>{% endif %}
+</div>
+<div class="cols">
+<section class="card">
+  <h2><span class="tag">{{ deal.stage_title }}</span> <span class="muted">с {{ deal.stage_at|dmy }}</span></h2>
+  <dl>
+    <dt>Откуда</dt><dd>{{ deal.source_title }}</dd>
+    {% if deal.phone_shown %}<dt>Телефон</dt><dd><a href="tel:{{ deal.phone_shown }}">{{ deal.phone_shown }}</a></dd>{% endif %}
+    <dt>Клиент</dt><dd>{% if deal.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ deal.client_id }}">{{ deal.client_name }}</a>{% else %}{{ deal.client_name }}{% endif %}{% else %}<span class="muted">карточки нет</span>{% endif %}</dd>
+    {% if deal.thread_id %}<dt>Обращение</dt><dd>{% if inbox_ok %}<a href="/inbox/{{ deal.thread_id }}">открыть переписку</a>{% else %}есть{% endif %}{% if deal.waiting %} <span class="tag bad">ждёт ответа</span>{% endif %}{% if deal.subject_url and inbox_ok %} · <a href="{{ deal.subject_url }}" target="_blank" rel="noopener noreferrer">объявление</a>{% endif %}</dd>{% endif %}
+    {% if deal.booking_id %}<dt>Заявка на аренду</dt><dd><a href="/bookings">№ {{ deal.booking_id }}</a></dd>{% endif %}
+    {% if deal.rental_id %}<dt>Аренда</dt><dd>{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ deal.rental_id }}">№ {{ deal.rental_id }}</a>{% else %}№ {{ deal.rental_id }}{% endif %}{% if deal.bike_code %} · велосипед {{ deal.bike_code }}{% endif %}{% if deal.billed_until and deal.rental_status == 'active' %} · оплачено до {{ deal.billed_until|dmy }}{% endif %}</dd>{% endif %}
+    <dt>Ответственный</dt><dd>{{ deal.responsible_name or '—' }}</dd>
+    {% if deal.location %}<dt>Точка</dt><dd>{{ deal.location }}</dd>{% endif %}
+    {% if deal.closed_at %}<dt>Закрыта</dt><dd>{{ deal.closed_at|dmy }}</dd>{% endif %}
+  </dl>
+  {% if may_move and moves %}
+  <h3>Перенести</h3>
+  <div class="deal-stages">
+    {% for code, title in moves %}
+    <form method="post" action="/deals/{{ deal.id }}/stage">
+      <input type="hidden" name="stage" value="{{ code }}">
+      <button type="submit" class="{% if code in ('lost', 'deferred') %}ghost{% endif %}">{{ title }}</button>
+    </form>
+    {% endfor %}
+  </div>
+  {% elif deal.stage in ('rented', 'renewed', 'returned') %}
+  <p class="muted">Этап ставит аренда: выдача, продление, возврат.</p>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Сделка</h2>
+  {% if may_move %}
+  <form method="post" action="/deals/{{ deal.id }}" class="stack">
+    {% if not deal.client_id and not deal.thread_id %}
+    <label>Имя <input name="name" value="{{ deal.name or '' }}" maxlength="200"></label>
+    <label>Телефон <input name="phone" value="{{ deal.phone or '' }}" maxlength="40" inputmode="tel"></label>
+    {% endif %}
+    <label>Суть <input name="title" value="{{ deal.title or '' }}" maxlength="300" placeholder="модель, срок, ремонт"></label>
+    <label>Ответственный
+      <select name="responsible"><option value="">—</option>
+        {% for s in people %}<option value="{{ s.id }}" {% if deal.responsible_id == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+      </select></label>
+    <label>Точка
+      <select name="location"><option value="">без точки</option>
+        {% for l in locations %}<option value="{{ l.name }}" {% if deal.location == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+        {% if deal.location and deal.location not in locations|map(attribute='name')|list %}<option value="{{ deal.location }}" selected>{{ deal.location }}</option>{% endif %}
+      </select></label>
+    <label>Заметка <textarea name="note" rows="3" maxlength="2000">{{ deal.note or '' }}</textarea></label>
+    <button type="submit">Сохранить</button>
+  </form>
+  {% else %}
+  <dl>
+    <dt>Суть</dt><dd>{{ deal.title or '—' }}</dd>
+    {% if deal.note %}<dt>Заметка</dt><dd>{{ deal.note }}</dd>{% endif %}
+  </dl>
+  {% endif %}
+  <h3>История этапов</h3>
+  <table class="cards">
+    <tr><th>Когда</th><th>Этап</th><th>Кто</th></tr>
+    {% for row in log_rows %}
+    <tr><td data-label="Когда" class="nowrap">{{ row.at|dmy }}</td>
+      <td data-label="Этап">{% if row.from_stage %}{{ stages.get(row.from_stage, row.from_stage) }} → {% endif %}{{ stages.get(row.to_stage, row.to_stage) }}</td>
+      <td data-label="Кто">{{ 'сверка' if row.by == 'auto' else (row.by or '—') }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+</div>
+{% endblock %}

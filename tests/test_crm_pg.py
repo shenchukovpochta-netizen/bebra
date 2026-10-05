@@ -520,6 +520,50 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.crm.delete_access_profile(pid))
         self.assertIsNone(await self.crm.access_profile(pid))
 
+    async def test_deals_pipeline_on_postgres(self):
+        """Воронка на настоящей базе: сверка заводит сделку выдачей, закрывает
+        возвратом, уникальные индексы держат «одна открытая на клиента», а
+        имя и телефон человека без карточки стираются после срока."""
+        from app.crm import deals
+        await self.seed()
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today(), contract_no=None, by="test")
+        self.assertGreater(await deals.sync(self.crm), 0)
+        self.assertEqual(await deals.sync(self.crm), 0, "повтор ничего не задваивает")
+        [deal] = await self.crm.deals(open_only=True)
+        self.assertEqual((deal["stage"], deal["rental_id"], deal["client_name"],
+                          deal["bike_code"]), ("rented", rid, "Иванов Иван", "B-1"))
+        # вторая открытая сделка того же клиента - индекс, а не дубль
+        self.assertIsNone(await self.crm.create_deal(stage="new", by="t",
+                                                     client_id=self.client_id))
+        self.assertIsNone(await self.crm.create_deal(stage="new", by="t", rental_id=rid))
+        await service.close_rental(self.crm, await self.crm.rental(rid),
+                                   closed_on=date.today(), note=None, by="test")
+        await deals.sync(self.crm)
+        deal = await self.crm.deal(deal["id"])
+        self.assertEqual(deal["stage"], "returned")
+        self.assertIsNotNone(deal["closed_at"])
+        self.assertEqual([x["to_stage"] for x in await self.crm.deal_log(deal["id"])],
+                         ["rented", "returned"])
+        # перенос руками и правка
+        walk_in = await deals.quick_add(self.crm, name="Пётр", phone="8 999 111-22-33",
+                                        title="Kugoo", by="staff:t")
+        self.assertIsNone(await deals.move(self.crm, await self.crm.deal(walk_in), "lost",
+                                           by="staff:t"))
+        lost = await self.crm.deal(walk_in)
+        self.assertEqual((lost["stage"], lost["phone"]), ("lost", "+79991112233"))
+        self.assertTrue(await self.crm.update_deal(walk_in, note="дорого"))
+        await self.pool.execute("update crm.deals set closed_at = now() - interval '200 days' "
+                                "where id = $1", walk_in)
+        self.assertEqual(await self.crm.purge_deal_contacts(days=deals.PURGE_DAYS), 1)
+        purged = await self.crm.deal(walk_in)
+        self.assertEqual((purged["name"], purged["phone"], purged["note"]),
+                         (None, None, "дорого"))
+        self.assertEqual(len(await self.crm.deals(closed_days=30)), 1,
+                         "давно закрытые не на доске")
+
     async def test_quick_repair_form_on_postgres(self):
         """Форма стороннего ремонта из бота на настоящей базе: карточка
         клиента, наряд задним числом по дате обращения, закрытие днём

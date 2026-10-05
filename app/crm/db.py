@@ -83,6 +83,11 @@ REFERRAL_FIELDS = frozenset({"status", "client_id", "bonus", "ledger_id", "note"
                              "signed_at", "rented_at", "paid_at"})
 TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
                          "found", "missing", "extra", "closed_at"})
+# Что в сделке правится руками (карточка) и сверкой (ссылки на факты).
+DEAL_FIELDS = frozenset({
+    "title", "name", "phone", "responsible_id", "location", "note",
+    "client_id", "thread_id", "booking_id", "rental_id",
+})
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
@@ -6439,3 +6444,113 @@ class CrmDB:
                                     where m.thread_id = t.id)
                 """, days)
             return len(gone)
+
+    # ─────────────────── сделки: воронка «Входящих» ───────────────────
+
+    _DEAL_SELECT = """
+        select d.*, c.full_name as client_name, c.phone as client_phone,
+               c.tg_id as client_tg_id,
+               s.name as responsible_name, s.login as responsible_login,
+               t.channel as thread_channel, t.status as thread_status,
+               t.waiting_since, t.subject_url,
+               r.status as rental_status, r.billed_until, r.started_on,
+               bk.code as bike_code, bk.model as bike_model
+          from crm.deals d
+          left join crm.clients c on c.id = d.client_id
+          left join crm.staff s on s.id = d.responsible_id
+          left join crm.inbox_threads t on t.id = d.thread_id
+          left join crm.rentals r on r.id = d.rental_id
+          left join crm.bikes bk on bk.id = r.bike_id
+    """
+
+    async def deals(self, *, open_only: bool = False, client_id: int | None = None,
+                    closed_days: int | None = None, limit: int = 5000) -> list[dict]:
+        """Сделки доски. open_only - только открытые (сверка); closed_days -
+        открытые и закрытые за столько дней (доска)."""
+        conds: list[str] = []
+        args: list[Any] = []
+        if open_only:
+            conds.append("d.closed_at is null")
+        elif closed_days is not None:
+            args.append(closed_days)
+            conds.append(f"(d.closed_at is null or d.closed_at > now() - "
+                         f"make_interval(days => ${len(args)}))")
+        if client_id is not None:
+            args.append(client_id)
+            conds.append(f"d.client_id = ${len(args)}")
+        where = ("where " + " and ".join(conds)) if conds else ""
+        args.append(limit)
+        return _rows(await self.pool.fetch(
+            f"{self._DEAL_SELECT} {where} order by d.stage_at desc, d.id desc "
+            f"limit ${len(args)}", *args))
+
+    async def deal(self, deal_id: int) -> dict | None:
+        return _row(await self.pool.fetchrow(
+            f"{self._DEAL_SELECT} where d.id = $1", deal_id))
+
+    async def create_deal(self, *, stage: str, by: str, at: datetime | None = None,
+                          **fields: Any) -> int | None:
+        """Новая сделка. None - такая уже есть (уникальные индексы: то же
+        обращение, заявка, аренда или открытая сделка клиента)."""
+        _set_clause(fields, DEAL_FIELDS | {"source"}, 1)
+        moment = at or datetime.now(UTC)
+        closed = stage in ("returned", "lost")
+        cols = ["stage", "created_by", "stage_at", "closed_at", *fields]
+        values = [stage, by, moment, moment if closed else None, *fields.values()]
+        marks = ", ".join(f"${i}" for i in range(1, len(values) + 1))
+        async with self.pool.acquire() as conn, conn.transaction():
+            deal_id = await conn.fetchval(
+                f"insert into crm.deals ({', '.join(cols)}) values ({marks}) "
+                "on conflict do nothing returning id", *values)
+            if deal_id is None:
+                return None
+            await conn.execute(
+                "insert into crm.deal_log (deal_id, from_stage, to_stage, by, at) "
+                "values ($1, null, $2, $3, $4)", deal_id, stage, by, moment)
+            return int(deal_id)
+
+    async def move_deal(self, deal_id: int, stage: str, *, by: str,
+                        at: datetime | None = None, close: bool = False,
+                        fields: dict[str, Any] | None = None) -> bool:
+        """Этап сделки и запись в историю - одной транзакцией. Тот же этап
+        - ничего (False): повторная сверка историю не множит. Закрытая
+        сделка, перенесённая на ранний этап, снова открыта."""
+        fields = dict(fields or {})
+        sets, values = _set_clause(fields, DEAL_FIELDS, 5) if fields else ("", [])
+        async with self.pool.acquire() as conn, conn.transaction():
+            old = await conn.fetchval(
+                "select stage from crm.deals where id = $1 for update", deal_id)
+            if old is None or old == stage:
+                return False
+            await conn.execute(
+                "update crm.deals set stage = $2, stage_at = coalesce($3, now()), "
+                "closed_at = case when $4 then coalesce($3, now()) end, "
+                f"updated_at = now(){', ' + sets if sets else ''} where id = $1",
+                deal_id, stage, at, close, *values)
+            await conn.execute(
+                "insert into crm.deal_log (deal_id, from_stage, to_stage, by, at) "
+                "values ($1, $2, $3, $4, coalesce($5, now()))",
+                deal_id, old, stage, by, at)
+            return True
+
+    async def update_deal(self, deal_id: int, **fields: Any) -> bool:
+        if not fields:
+            return False
+        sets, values = _set_clause(fields, DEAL_FIELDS, 2)
+        row = await self.pool.fetchrow(
+            f"update crm.deals set {sets}, updated_at = now() where id = $1 "
+            "returning id", deal_id, *values)
+        return row is not None
+
+    async def deal_log(self, deal_id: int) -> list[dict]:
+        return _rows(await self.pool.fetch(
+            "select * from crm.deal_log where deal_id = $1 order by at, id", deal_id))
+
+    async def purge_deal_contacts(self, *, days: int) -> int:
+        """Имя и телефон человека без карточки в давно закрытой сделке:
+        срок хранения ПДн из чужого канала не ждёт."""
+        rows = await self.pool.fetch(
+            "update crm.deals set name = null, phone = null "
+            "where client_id is null and closed_at < now() - make_interval(days => $1) "
+            "and (name is not null or phone is not null) returning id", days)
+        return len(rows)

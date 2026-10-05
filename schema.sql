@@ -2979,3 +2979,56 @@ update crm.rental_bikes rb
  where r.id = rb.rental_id
    and r.status = 'closed'
    and rb.returned_on is null;
+
+-- Сделки - воронка «Входящих» (app/crm/deals.py): путь человека от первого
+-- сообщения до сдачи велосипеда. Новая заявка -> 1-е касание -> Заключение
+-- договора -> В аренде -> Повторное продление / Сдал; с ранних этапов -
+-- Отложенный спрос или Не взял. Сделка - не клиент и не аренда: она
+-- ссылается на них (обращение, заявка из кабинета, карточка, аренда), а
+-- этапы «В аренде», «Повторное продление» и «Сдал» ставит сама аренда -
+-- руками их не переставить. Ранние этапы двигает человек, перетаскиванием.
+-- Денег здесь нет: журнал по-прежнему ledger.
+create table if not exists crm.deals (
+  id             bigserial primary key,
+  stage          text        not null default 'new'
+                 check (stage in ('new', 'touch', 'contract', 'rented', 'renewed',
+                                  'returned', 'deferred', 'lost')),
+  title          text,                    -- что хочет: модель, объявление Авито
+  name           text,                    -- от кого, пока карточки нет
+  phone          text,
+  source         text        not null default 'manual',
+  client_id      bigint      references crm.clients (id) on delete set null,
+  thread_id      bigint      references crm.inbox_threads (id) on delete set null,
+  booking_id     bigint      references crm.bookings (id) on delete set null,
+  rental_id      bigint      references crm.rentals (id),
+  responsible_id bigint      references crm.staff (id) on delete set null,
+  location       text,
+  note           text,
+  created_by     text,
+  created_at     timestamptz not null default now(),
+  stage_at       timestamptz not null default now(),   -- когда попала на этап
+  updated_at     timestamptz not null default now(),
+  closed_at      timestamptz                           -- Сдал / Не взял
+);
+-- Обращение, заявка и аренда - каждая в одной сделке; у клиента одна
+-- открытая: второе сообщение того же человека - та же сделка, а не новая.
+create unique index if not exists deals_thread_idx
+  on crm.deals (thread_id) where thread_id is not null;
+create unique index if not exists deals_booking_idx
+  on crm.deals (booking_id) where booking_id is not null;
+create unique index if not exists deals_rental_idx
+  on crm.deals (rental_id) where rental_id is not null;
+create unique index if not exists deals_client_open
+  on crm.deals (client_id) where client_id is not null and closed_at is null;
+create index if not exists deals_stage_idx on crm.deals (stage, stage_at desc);
+
+-- История переходов сделки: кто и когда перенёс (или аренда сама).
+create table if not exists crm.deal_log (
+  id         bigserial primary key,
+  deal_id    bigint      not null references crm.deals (id) on delete cascade,
+  from_stage text,
+  to_stage   text        not null,
+  by         text,
+  at         timestamptz not null default now()
+);
+create index if not exists deal_log_deal_idx on crm.deal_log (deal_id, at);

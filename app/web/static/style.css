@@ -641,3 +641,40 @@ table.staff-table td .inline-form:first-child{margin-top:0}
   table.staff-table td.actions{text-align:left}
   details.menu .menu-body{left:0;right:auto;width:min(280px,calc(100vw - 60px))}
 }
+
+/* Воронка «Входящих» (deals.html): колонки этапов, как доска CRM продаж.
+   Доска шире экрана - листается вбок, колонка - вниз. */
+.board{display:flex;gap:12px;overflow-x:auto;padding:4px 0 12px;margin-top:12px;align-items:flex-start;scroll-snap-type:x proximity}
+.board-col{flex:0 0 250px;background:var(--head);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 200px);scroll-snap-align:start}
+.board-col>header{padding:10px 12px 8px;border-bottom:3px solid var(--line-strong);display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.board-col>header b{font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+.board-col>header span{font-size:12px;color:var(--muted)}
+.board-col.s-new>header{border-color:var(--blue)}
+.board-col.s-touch>header{border-color:var(--amber)}
+.board-col.s-contract>header{border-color:var(--brand-soft)}
+.board-col.s-rented>header{border-color:var(--brand)}
+.board-col.s-renewed>header{border-color:var(--ok)}
+.board-col.s-returned>header{border-color:var(--ink)}
+.board-col.s-deferred>header{border-color:var(--muted)}
+.board-col.s-lost>header{border-color:var(--bad)}
+.board-col.drop{outline:2px dashed var(--brand);outline-offset:-2px}
+.board-cards{padding:8px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;min-height:80px}
+.board-empty{text-align:center;font-size:12px;margin:8px 0}
+.board-add{padding:8px 8px 0}
+.board-add summary{cursor:pointer;font-size:13px;color:var(--brand-dark);font-weight:600}
+.board-add form{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.board-add input,.board-add select{width:100%}
+.deal{display:flex;flex-direction:column;gap:3px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;box-shadow:var(--shadow);font-size:13px;color:var(--text)}
+.deal:hover{text-decoration:none;border-color:var(--line-strong)}
+.deal[draggable=true]{cursor:grab}
+.deal.dragging{opacity:.5}
+.deal.wait{border-left:3px solid var(--bad)}
+.deal-top{display:flex;justify-content:space-between;gap:6px}
+.deal-when{color:var(--muted);font-size:11px;white-space:nowrap}
+.deal-title{color:var(--muted);overflow-wrap:anywhere}
+.deal-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.deal-tags .tag{font-size:11px;padding:0 8px}
+.tag.ghost{background:var(--hover);color:var(--muted)}
+.deal-stages{display:flex;flex-wrap:wrap;gap:6px}
+.deal-stages form{margin:0}
+@media (max-width:640px){.board-col{flex-basis:82vw}}

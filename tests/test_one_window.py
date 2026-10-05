@@ -219,10 +219,13 @@ class TestOneWindowPages(WebCase):
 
     def test_incoming_one_menu_item(self):
         self.login()
-        page = self.get_ok("/incoming")
+        board = self.get_ok("/incoming")
+        self.assertIn("Воронка", board)
+        self.assertIn("Иванов Иван", board, "идущая аренда - сделка «В аренде»")
+        page = self.get_ok("/incoming/feed")
         self.assertIn("Иванов Иван", page)
         self.assertIn("нажал «Я оплатил»", page)
-        self.assertRegex(page, r"Все · 2")
+        self.assertRegex(page, r"Лента · 2")
         menu = page.split("<main>")[0]
         self.assertIn('href="/incoming"', menu)
         for gone in ('href="/bookings"', 'href="/claims"', 'href="/inbox"'):

@@ -76,6 +76,8 @@ class FakeCrm:
         self.settings_: dict[str, str] = {}
         self.ops_: dict[int, dict] = {}
         self.inbox_threads_: dict[int, dict] = {}
+        self.deals_: dict[int, dict] = {}
+        self.deal_log_: list[dict] = []
         self.inbox_messages_: dict[int, dict] = {}
         self.franchisees_: dict[int, dict] = {}
         self.franchise_snapshots_: dict[tuple, dict] = {}
@@ -4724,6 +4726,126 @@ class FakeCrm:
 
     async def drop_company_mark(self, kind):
         self.marks_.pop(kind, None)
+
+    # ─── сделки: воронка «Входящих» ───
+    _DEAL_FIELDS = {"title", "name", "phone", "responsible_id", "location", "note",
+                    "client_id", "thread_id", "booking_id", "rental_id"}
+
+    def _deal_row(self, d):
+        client = self.clients_.get(d.get("client_id")) or {}
+        staff = self.staff.get(d.get("responsible_id")) or {}
+        thread = self.inbox_threads_.get(d.get("thread_id")) or {}
+        rental = self.rentals_.get(d.get("rental_id")) or {}
+        bike = self.bikes_.get(rental.get("bike_id")) or {}
+        return {**d, "client_name": client.get("full_name"),
+                "client_phone": client.get("phone"), "client_tg_id": client.get("tg_id"),
+                "responsible_name": staff.get("name"), "responsible_login": staff.get("login"),
+                "thread_channel": thread.get("channel"), "thread_status": thread.get("status"),
+                "waiting_since": thread.get("waiting_since"),
+                "subject_url": thread.get("subject_url"),
+                "rental_status": rental.get("status"), "billed_until": rental.get("billed_until"),
+                "started_on": rental.get("started_on"), "bike_code": bike.get("code"),
+                "bike_model": bike.get("model")}
+
+    def _deal_conflict(self, fields, skip=None):
+        """Те же уникальные индексы, что в базе: обращение, заявка, аренда -
+        в одной сделке; у клиента одна открытая."""
+        for d in self.deals_.values():
+            if d["id"] == skip:
+                continue
+            for key in ("thread_id", "booking_id", "rental_id"):
+                if fields.get(key) is not None and d.get(key) == fields[key]:
+                    return True
+            if (fields.get("client_id") is not None and d.get("client_id") == fields["client_id"]
+                    and d.get("closed_at") is None and fields.get("closed_at") is None):
+                return True
+        return False
+
+    async def deals(self, *, open_only=False, client_id=None, closed_days=None, limit=5000):
+        edge = self._now() - timedelta(days=closed_days) if closed_days is not None else None
+        rows = []
+        for d in self.deals_.values():
+            if open_only and d.get("closed_at") is not None:
+                continue
+            if edge is not None and d.get("closed_at") is not None and d["closed_at"] <= edge:
+                continue
+            if client_id is not None and d.get("client_id") != client_id:
+                continue
+            rows.append(self._deal_row(d))
+        rows.sort(key=lambda r: (r["stage_at"], r["id"]), reverse=True)
+        return rows[:limit]
+
+    async def deal(self, deal_id):
+        d = self.deals_.get(deal_id)
+        return self._deal_row(d) if d else None
+
+    async def create_deal(self, *, stage, by, at=None, **fields):
+        unknown = set(fields) - self._DEAL_FIELDS - {"source"}
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        moment = at or self._now()
+        row = {"id": None, "stage": stage, "title": None, "name": None, "phone": None,
+               "source": "manual", "client_id": None, "thread_id": None, "booking_id": None,
+               "rental_id": None, "responsible_id": None, "location": None, "note": None,
+               "created_by": by, "created_at": self._now(), "stage_at": moment,
+               "updated_at": self._now(),
+               "closed_at": moment if stage in ("returned", "lost") else None}
+        row.update(fields)
+        if self._deal_conflict(row):
+            return None
+        row["id"] = self._id()
+        self.deals_[row["id"]] = row
+        self.deal_log_.append({"id": self._id(), "deal_id": row["id"], "from_stage": None,
+                               "to_stage": stage, "by": by, "at": moment})
+        return row["id"]
+
+    async def move_deal(self, deal_id, stage, *, by, at=None, close=False, fields=None):
+        d = self.deals_.get(deal_id)
+        if d is None or d["stage"] == stage:
+            return False
+        fields = dict(fields or {})
+        unknown = set(fields) - self._DEAL_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        moment = at or self._now()
+        if self._deal_conflict({**fields, "closed_at": moment if close else None},
+                               skip=deal_id):
+            raise UniqueError("deals")
+        old = d["stage"]
+        d.update(fields, stage=stage, stage_at=moment, updated_at=self._now(),
+                 closed_at=moment if close else None)
+        self.deal_log_.append({"id": self._id(), "deal_id": deal_id, "from_stage": old,
+                               "to_stage": stage, "by": by, "at": moment})
+        return True
+
+    async def update_deal(self, deal_id, **fields):
+        d = self.deals_.get(deal_id)
+        if d is None or not fields:
+            return False
+        unknown = set(fields) - self._DEAL_FIELDS
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        check = {k: v for k, v in fields.items()
+                 if k in ("thread_id", "booking_id", "rental_id", "client_id")}
+        if check and self._deal_conflict({**check, "closed_at": d.get("closed_at")},
+                                         skip=deal_id):
+            raise UniqueError("deals")
+        d.update(fields, updated_at=self._now())
+        return True
+
+    async def deal_log(self, deal_id):
+        return sorted((dict(x) for x in self.deal_log_ if x["deal_id"] == deal_id),
+                      key=lambda x: (x["at"], x["id"]))
+
+    async def purge_deal_contacts(self, *, days):
+        edge = self._now() - timedelta(days=days)
+        hit = 0
+        for d in self.deals_.values():
+            if (d.get("client_id") is None and d.get("closed_at") is not None
+                    and d["closed_at"] < edge and (d.get("name") or d.get("phone"))):
+                d.update(name=None, phone=None)
+                hit += 1
+        return hit
 
 
 def _num(value):
