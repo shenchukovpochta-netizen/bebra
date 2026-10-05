@@ -22,7 +22,7 @@
     </select>
     <button type="submit">Найти</button>
   </form>
-  {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Форма</a>{% endif %}
+  {% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'rentals') %}<a class="btn ghost" href="/rentals/new">Повторная выдача</a>{% endif %}
   <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}&q={{ q|urlencode }}{{ lq }}">Excel</a>
   <a class="btn ghost" href="/rentals.csv?status={{ status }}&view={{ view }}&q={{ q|urlencode }}{{ lq }}">CSV</a>
 </div>

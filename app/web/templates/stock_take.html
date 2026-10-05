@@ -42,21 +42,29 @@
 {% endif %}
 
 <div class="card">
-<table>
-  <tr><th>№</th><th class="opt">Что</th><th class="opt">Модель</th><th>Числится</th><th class="opt">Точка</th><th>Отметка</th><th class="opt">Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
+<table class="cards">
+  <tr><th>№</th><th class="opt">Предмет</th><th class="opt">Модель</th><th>Статус</th><th class="opt">Точка</th><th>Отметка</th><th>Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
   {% for i in items %}
-  <tr>
-    <td>{% if i.bike_id %}<a href="/bikes/{{ i.bike_id }}">{{ i.bike_code or i.code }}</a>
+  <tr id="item-{{ i.id }}">
+    <td data-label="№">{% if i.bike_id %}<a href="/bikes/{{ i.bike_id }}">{{ i.bike_code or i.code }}</a>
       {% elif i.battery_id %}<a href="/batteries/{{ i.battery_id }}">{{ i.battery_code or i.code }}</a>
       {% else %}{{ i.code or '—' }}{% endif %}</td>
-    <td class="opt muted">{% if i.battery_id %}АКБ{% elif i.bike_id %}велосипед{% else %}—{% endif %}</td>
-    <td class="opt">{{ i.bike_model or i.battery_model or '—' }}</td>
-    <td>{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}
+    <td class="opt muted" data-label="Предмет">{% if i.battery_id %}АКБ{% elif i.bike_id %}велосипед{% else %}—{% endif %}</td>
+    <td class="opt" data-label="Модель">{{ i.bike_model or i.battery_model or '—' }}</td>
+    <td data-label="Статус">{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}
       {% elif i.battery_status %}{{ BATTERY_STATUSES[i.battery_status] }}
       {% else %}нет в парке{% endif %}</td>
-    <td class="opt">{{ i.bike_location or i.battery_location or '—' }}</td>
-    <td><span class="tag take-{{ i.state }}">{{ TAKE_STATES[i.state] }}</span></td>
-    <td class="opt">{{ i.note or '' }}</td>
+    <td class="opt" data-label="Точка">{{ i.bike_location or i.battery_location or '—' }}</td>
+    <td data-label="Отметка"><span class="tag take-{{ i.state }}">{{ TAKE_STATES[i.state] }}</span></td>
+    <td data-label="Комментарий">
+      {% if editable %}
+      {# Комментарий - своей формой: отметка его не трогает, пустой стирает. #}
+      <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/note" class="inline-form">
+        <input type="text" name="note" value="{{ i.note or '' }}" maxlength="500" placeholder="комментарий" aria-label="Комментарий к {{ i.bike_code or i.battery_code or i.code }}">
+        <button type="submit" class="ghost small">Сохранить</button>
+      </form>
+      {% else %}{{ i.note or '' }}{% endif %}
+    </td>
     {% if editable %}
     <td>
       {% if i.state == 'extra' %}

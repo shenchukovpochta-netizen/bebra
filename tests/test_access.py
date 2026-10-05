@@ -294,7 +294,7 @@ class TestAccessInPanel(tw.WebCase):
         self.assertNotIn("3 000", page)
         self.assertIn("платёж сегодня", page, "срок возврата механику нужен")
         self.assertNotIn("Быстрая выдача", page)
-        self.assertNotIn(">Форма<", page)
+        self.assertNotIn(">Повторная выдача<", page)
 
     def test_rental_card_without_finance_shows_no_rubles(self):
         rental_id = tw.run(self.crm.create_rental(

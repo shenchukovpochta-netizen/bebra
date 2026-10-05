@@ -595,6 +595,13 @@ STAFF_TERMS: dict[str, tuple[str, int]] = {
 }
 
 
+def is_owner(staff: Mapping[str, Any] | None) -> bool:
+    """Владелец - встроенная роль «Владелец», а не любой с правом на всё.
+    Ему меню прячет то, что делают на точке руками (выдачу): права это не
+    отнимает, адрес открывается как прежде."""
+    return (staff or {}).get("profile_code") == "owner"
+
+
 def staff_expired(staff: Mapping[str, Any] | None, *, now: datetime | None = None) -> bool:
     """Срок доступа прошёл. Без срока - бессрочно."""
     until = (staff or {}).get("expires_at")

@@ -88,7 +88,7 @@ class TestTree(unittest.TestCase):
 
     def test_rights_cut_the_menu(self):
         tech = labels(nav.menu(TECH, "/"))
-        for label in ("Наряды", "Остатки", "Приходы", "Велосипеды", "Мои задачи"):
+        for label in ("Наряды", "Остатки", "Приходы", "Велосипеды", "Задачи дня"):
             self.assertIn(label, tech)
         for label in ("Клиенты", "Выдача", "Финансы", "Касса", "Сотрудники", "Роли",
                       "Настройки", "Входящие", "Франчайзи"):
@@ -101,8 +101,21 @@ class TestTree(unittest.TestCase):
         self.assertNotIn("Склад", only_reports)
         self.assertEqual(nav.menu({"perms": {}}, "/"),
                          [{"title": "Главное", "items": [
-                             {"label": "Мои задачи", "href": "/my", "icon": "square-check",
+                             {"label": "Задачи дня", "href": "/my", "icon": "square-check",
                               "on": False, "open": False, "children": [], "badge": 0}]}])
+
+    def test_owner_does_not_see_the_counter_work(self):
+        """Владельцу выдача в меню лишняя - её делают на точке. Права это
+        не отнимает: адрес /issue открыт ему по-прежнему."""
+        self.assertNotIn("Выдача", labels(nav.menu(OWNER, "/")))
+        self.assertTrue(logic.can_edit(OWNER, "issue"))
+        menu = nav.menu(MANAGER, "/rentals/new")
+        issue = next(it for g in menu for it in g["items"] if it["label"] == "Выдача")
+        self.assertEqual([c["label"] for c in issue["children"]],
+                         ["Быстрая выдача", "Повторная выдача"])
+        self.assertEqual([c["label"] for c in issue["children"] if c["on"]],
+                         ["Повторная выдача"])
+        self.assertIn("Сверка с отчётами", labels(nav.menu(MANAGER, "/")))
 
     def test_parent_opens_on_its_child(self):
         menu = nav.menu(OWNER, "/parts/write-offs")

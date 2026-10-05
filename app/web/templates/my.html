@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Мои задачи — {{ app_title }}{% endblock %}
+{% block title %}Задачи дня — {{ app_title }}{% endblock %}
 {% block content %}
 {# Задачи этого сотрудника (app/crm/mytasks.py): наряды - по технику,
    аренды, заявки и тревоги - по его точке. Группа есть, только когда её
    раздел открыт профилем; строка ведёт в карточку записи. #}
-<div class="bar"><h1>Мои задачи
+<div class="bar"><h1>Задачи дня
     <small class="muted">{{ today.strftime('%d.%m') }} · {% if point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
   {% if can_view(staff, 'dashboard') %}<a class="btn ghost" href="/">Сводка</a>{% endif %}</div>
 {% if not point %}

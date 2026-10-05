@@ -36,6 +36,12 @@ class Item:
     match: tuple[str, ...] = ()         # адреса, на которых пункт горит
     badge: str | None = None            # ключ счётчика
     children: tuple[Item, ...] = ()
+    # Не показывать владельцу: то, что делают на точке руками (выдача), в
+    # его меню лишнее. Права не отнимаются - адрес открывается как прежде.
+    not_owner: bool = False
+    # Пункт для записи, а не для просмотра (новая аренда): механик с
+    # просмотром аренд его не видит.
+    edit: bool = False
 
     @property
     def prefixes(self) -> tuple[str, ...]:
@@ -50,9 +56,16 @@ class Group:
 
 NAV: tuple[Group, ...] = (
     Group("Главное", (
-        Item("Мои задачи", "/my", "square-check"),
+        Item("Задачи дня", "/my", "square-check"),
         Item("Сводка", "/", "dashboard", section="dashboard"),
-        Item("Выдача", "/issue", "circle-plus", section="issue"),
+        Item("Выдача", "/issue", "circle-plus", section="issue", not_owner=True, children=(
+            Item("Быстрая выдача", "/issue", "circle-plus", section="issue",
+                 not_owner=True),
+            # Старая форма аренды (Аренды -> «Форма»): клиенту, который уже
+            # был, и редкие случаи - аренда без велосипеда, ручное начисление.
+            Item("Повторная выдача", "/rentals/new", "key", section="rentals",
+                 not_owner=True, edit=True),
+        )),
         # Сообщения, заявки на аренду и «Я оплатил» - один пункт: для
         # точки это одно и то же - клиент ждёт ответа (app/crm/incoming.py).
         Item("Входящие", "/incoming", "inbox", any_of=("inbox", "issue", "claims"),
@@ -62,7 +75,7 @@ NAV: tuple[Group, ...] = (
         Item("Клиенты", "/clients", "users", section="clients",
              match=("/clients", "/signings")),
         Item("Аренды", "/rentals", "key", section="rentals"),
-        Item("Группа точек", "/ops", "message", section="rentals"),
+        Item("Сверка с отчётами", "/ops", "message", section="rentals"),
         Item("Рассылки", "/mailing", "send", section="mailing"),
         Item("Акции", "/promos", "tag", section="promos"),
     )),
@@ -129,9 +142,13 @@ INCOMING_PARTS: dict[str, str] = {"message": "inbox", "booking": "issue", "claim
 
 
 def visible(item: Item, staff: Mapping[str, Any] | None) -> bool:
+    if item.not_owner and logic.is_owner(staff):
+        return False
     if item.children:
         return any(visible(child, staff) for child in item.children)
     if item.section and not logic.can_view(staff, item.section):
+        return False
+    if item.edit and item.section and not logic.can_edit(staff, item.section):
         return False
     if any(not logic.can_view(staff, code) for code in item.also):
         return False

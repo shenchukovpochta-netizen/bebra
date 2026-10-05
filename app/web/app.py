@@ -782,6 +782,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
         can_act=logic.can_act, visible_sections=logic.visible_sections,
+        is_owner=logic.is_owner,
         home_for=logic.home_for,
         today=date.today, timedelta=timedelta, bot_enabled=bot is not None,
         RENTAL_BACKDATE_DAYS=logic.RENTAL_BACKDATE_DAYS,
@@ -9487,6 +9488,26 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not await crm.set_take_item(take_id, item_id, state=state.value):
             flash(request, "Строки уже нет.", "err")
         return redirect(f"/stock-takes/{take_id}")
+
+    @app.post("/stock-takes/{take_id}/items/{item_id}/note")
+    async def stock_take_item_note(request: Request, take_id: int,
+                                   item_id: int) -> Response:
+        """Комментарий строки, пока пересчёт идёт: «на ремонте у Марата»,
+        «номер стёрт». Закрытая ведомость - документ, её не правят."""
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        if not may_edit(request, "bikes"):
+            return denied(request, "bikes")
+        if not logic.take_is_open(take):
+            flash(request, "Пересчёт закрыт.", "err")
+            return redirect(f"/stock-takes/{take_id}")
+        note = logic.check_note((await form(request)).get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+        elif not await crm.set_take_item_note(take_id, item_id, note.value):
+            flash(request, "Строки уже нет.", "err")
+        return redirect(f"/stock-takes/{take_id}#item-{item_id}")
 
     @app.post("/stock-takes/{take_id}/items/{item_id}/delete")
     async def stock_take_item_delete(request: Request, take_id: int,

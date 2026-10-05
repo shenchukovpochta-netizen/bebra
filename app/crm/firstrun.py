@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from . import readiness
+from . import logic, readiness
 
 # Шаги по порядку: код -> заголовок.
 STEPS: dict[str, str] = {
@@ -102,7 +102,7 @@ CONNECT_HOW: dict[str, tuple[str, ...]] = {
 def is_owner(staff: Mapping[str, Any] | None) -> bool:
     """Встречает мастер только владельца - встроенный профиль, а не любого
     с правом на настройки: заводить входы и цены - его решение."""
-    return (staff or {}).get("profile_code") == "owner"
+    return logic.is_owner(staff)
 
 
 def hidden(settings: Mapping[str, Any]) -> bool:

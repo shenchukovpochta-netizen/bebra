@@ -157,6 +157,31 @@ class TestStockTakeInPanel(tw.WebCase):
         item = tw.run(self.crm.take_item_of_bike(take["id"], self.b2))
         self.assertEqual(item["state"], "found")
 
+    def test_comment_is_added_kept_and_cleared(self):
+        """Комментарий пишется своей формой: отметка его не трогает, пустой
+        - стирает, закрытая ведомость его уже не принимает."""
+        self.start()
+        take = self.take()
+        item = tw.run(self.crm.take_item_of_bike(take["id"], self.b2))
+        page = self.get_ok(f"/stock-takes/{take['id']}")
+        self.assertIn(f'/stock-takes/{take["id"]}/items/{item["id"]}/note', page)
+        self.assertIn("<th>Предмет</th>".replace("<th>", '<th class="opt">'), page)
+        self.assertIn("<th>Статус</th>", page)
+        self.client.post(f"/stock-takes/{take['id']}/items/{item['id']}/note",
+                         data={"note": "на ремонте у Марата"})
+        self.client.post(f"/stock-takes/{take['id']}/items/{item['id']}",
+                         data={"state": "found"})
+        item = tw.run(self.crm.take_item_of_bike(take["id"], self.b2))
+        self.assertEqual((item["state"], item["note"]), ("found", "на ремонте у Марата"))
+        self.assertIn('value="на ремонте у Марата"', self.get_ok(f"/stock-takes/{take['id']}"))
+        self.client.post(f"/stock-takes/{take['id']}/items/{item['id']}/note",
+                         data={"note": ""})
+        self.assertIsNone(tw.run(self.crm.take_item_of_bike(take["id"], self.b2))["note"])
+        self.client.post(f"/stock-takes/{take['id']}/close")
+        self.client.post(f"/stock-takes/{take['id']}/items/{item['id']}/note",
+                         data={"note": "поздно"})
+        self.assertIsNone(tw.run(self.crm.take_item_of_bike(take["id"], self.b2))["note"])
+
     def test_scan_of_a_bike_from_another_point_is_extra(self):
         self.start(scope="location", location="Адоратского")
         take = self.take()

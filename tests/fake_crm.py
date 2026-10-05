@@ -1640,6 +1640,13 @@ class FakeCrm:
                 return True
         return False
 
+    async def set_take_item_note(self, take_id, item_id, note):
+        for item in self.take_items_:
+            if item["take_id"] == take_id and item["id"] == item_id:
+                item["note"] = note
+                return True
+        return False
+
     async def mark_take_all(self, take_id, *, state):
         source = "found" if state == "expected" else "expected"
         hit = 0

@@ -4,16 +4,16 @@
 {# Лента всего, что ждёт ответа: сообщения, заявки на аренду, «Я оплатил».
    Кто ждёт дольше - выше; строка ведёт на экран, где с этим работают. #}
 <div class="bar"><h1>Входящие</h1>
-  {% if can_view(staff, 'issue') %}<a class="btn ghost" href="/issue">Выдача</a>{% endif %}</div>
+  {% if can_view(staff, 'issue') and not is_owner(staff) %}<a class="btn ghost" href="/issue">Выдача</a>{% endif %}</div>
 {% with active = 'all' %}{% include "_incoming_tabs.html" %}{% endwith %}
 <div class="card">
 <div class="table-wrap">
 <table class="cards">
-  <tr><th>Что</th><th>Кто</th><th>Суть</th><th>Ждёт с</th><th>Состояние</th></tr>
+  <tr><th>Откуда</th><th>От кого</th><th>Суть</th><th>Ждёт с</th><th>Состояние</th></tr>
   {% for r in rows %}
   <tr class="{% if r.hot %}warn-row{% endif %}">
-    <td data-label="Что"><span class="tag {% if r.kind == 'claim' %}rented{% elif r.kind == 'booking' %}available{% endif %}">{{ r.tag }}</span></td>
-    <td data-label="Кто"><a href="{{ r.url }}"><b>{{ r.who }}</b></a>{% if r.phone %}<br><a class="muted" href="tel:{{ r.phone }}">{{ r.phone }}</a>{% endif %}</td>
+    <td data-label="Откуда"><span class="tag {% if r.kind == 'claim' %}rented{% elif r.kind == 'booking' %}available{% endif %}">{{ r.tag }}</span></td>
+    <td data-label="От кого"><a href="{{ r.url }}"><b>{{ r.who }}</b></a>{% if r.phone %}<br><a class="muted" href="tel:{{ r.phone }}">{{ r.phone }}</a>{% endif %}</td>
     <td data-label="Суть"><a href="{{ r.url }}">{{ r.what or '—' }}</a></td>
     <td class="nowrap" data-label="Ждёт с">{{ r.since|dmy if r.since else '—' }}</td>
     <td data-label="Состояние">{{ r.state }}</td>

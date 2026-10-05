@@ -2203,6 +2203,17 @@ class CrmDB:
             take_id, item_id, state, note)
         return row is not None
 
+    async def set_take_item_note(self, take_id: int, item_id: int,
+                                 note: str | None) -> bool:
+        """Комментарий строки пересчёта («стоит у Марата на ремонте»).
+        Отдельно от отметки: пустой комментарий его стирает, а отметка
+        комментарий не трогает."""
+        row = await self.pool.fetchrow(
+            "update crm.stock_take_items set note = $3 "
+            "where take_id = $1 and id = $2 returning id",
+            take_id, item_id, note)
+        return row is not None
+
     async def mark_take_all(self, take_id: int, *, state: str) -> int:
         """Кнопка «всё на месте» и обратная ей: одним запросом по ведомости."""
         source = "found" if state == "expected" else "expected"

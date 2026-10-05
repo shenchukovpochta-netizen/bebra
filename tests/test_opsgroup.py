@@ -649,7 +649,7 @@ class TestOpsInPanel(tw.WebCase if HAVE_WEB else unittest.TestCase):
         self.assertIn("Детали: колодки - 1 упаковка", page)
         self.assertNotIn("Павлюхина 26.09", self.get_ok("/ops?kind=fix"))
         self.assertNotIn("03.08 - 10.08", self.get_ok("/ops?bad=1"), "совпавшая - не 👎")
-        self.assertIn("Группа точек", self.get_ok(f"/rentals/{self.rental_id}"))
+        self.assertIn("Сверка с отчётами", self.get_ok(f"/rentals/{self.rental_id}"))
 
     def test_tracker_sim_phone(self):
         tid = tw.run(self.crm.create_tracker(device_id="861", alias="T-1"))
