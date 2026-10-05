@@ -1,4 +1,4 @@
-"""Клиент API Wazzup (v3): WhatsApp во «Входящих».
+"""Клиент API Wazzup (v3): WhatsApp, Telegram (аккаунт) и Авито во «Входящих».
 
 Входящие приходят сами - вебхуком на `/hook/inbox/<токен>` панели. Этот
 клиент нужен процессу бота (`app/crm/inbox.py`) для трёх дел: узнать
@@ -32,8 +32,16 @@ TIMEOUT = 20
 MESSAGE_LIMIT = 4000
 # Каналы Wazzup, которые мы читаем как WhatsApp: обычный номер и WABA.
 WHATSAPP_TRANSPORTS = ("whatsapp", "wapi")
+# Транспорт канала Wazzup -> канал «Входящих»: WhatsApp, личный Telegram
+# (аккаунт менеджера, а не бот - отдельный канал tgp) и Авито.
+TRANSPORT_KINDS = {"whatsapp": "wa", "wapi": "wa", "tgapi": "tgp", "telegram": "tgp",
+                   "avito": "avito"}
+# Канал «Входящих» -> chatType в запросе отправки.
+CHAT_TYPES = {"wa": "whatsapp", "tgp": "telegram", "avito": "avito"}
 _CHANNEL_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 _CHAT_ID = re.compile(r"\d{10,15}")
+# chatId Telegram и Авито - номер или строка чата Авито («u2i-...»).
+_OTHER_CHAT = re.compile(r"[A-Za-z0-9_@.:~+-]{1,128}")
 
 
 class WazzupError(Exception):
@@ -60,18 +68,21 @@ def chat_id(phone: Any) -> str | None:
 
 
 def parse_channels(raw: Any) -> list[dict]:
-    """Каналы WhatsApp из GET /channels: id, номер, живой ли."""
+    """Каналы из GET /channels: WhatsApp, Telegram и Авито - id, вид
+    («wa», «tgp», «avito»), номер (у WhatsApp и Telegram), живой ли."""
     out = []
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
             continue
         cid = channel_id_ok(item.get("channelId"))
         transport = str(item.get("transport") or "").lower()
-        if cid is None or transport not in WHATSAPP_TRANSPORTS:
+        kind = TRANSPORT_KINDS.get(transport)
+        if cid is None or kind is None:
             continue
         plain = re.sub(r"\D", "", str(item.get("plainId") or ""))[:15]
         state = str(item.get("state") or "")[:40]
-        out.append({"id": cid, "phone": f"+{plain}" if plain else None,
+        out.append({"id": cid, "kind": kind,
+                    "phone": f"+{plain}" if plain and kind != "avito" else None,
                     "state": state, "active": state == "active"})
     return out
 
@@ -132,7 +143,7 @@ class WazzupClient:
         return data
 
     async def channels(self) -> list[dict]:
-        """Номера WhatsApp, подключённые в кабинете Wazzup."""
+        """Каналы WhatsApp, Telegram и Авито, подключённые в кабинете Wazzup."""
         return parse_channels(await self._call("GET", "channels"))
 
     async def set_webhook(self, uri: str) -> None:
@@ -144,23 +155,34 @@ class WazzupClient:
                               "contactsAndDealsCreation": False}})
 
     async def send_text(self, channel_id: str, phone: str, text: str, *,
-                        crm_message_id: str) -> dict:
-        """Ответ в WhatsApp. Повтор с тем же crm_message_id Wazzup не
-        отправляет - тогда это «уже ушло», а не сбой."""
+                        crm_message_id: str, kind: str = "wa") -> dict:
+        """Ответ в WhatsApp, Telegram или Авито (`kind` - канал «Входящих»).
+        У WhatsApp адрес - телефон, у остальных - номер чата из вебхука.
+        Повтор с тем же crm_message_id Wazzup не отправляет - тогда это
+        «уже ушло», а не сбой."""
         text = str(text or "").strip()
         if not text:
             raise WazzupError("пустой ответ")
         if len(text) > MESSAGE_LIMIT:
             raise WazzupError(f"ответ длиннее {MESSAGE_LIMIT} знаков")
+        chat_type = CHAT_TYPES.get(kind)
+        if chat_type is None:
+            raise WazzupError("в этот канал Wazzup не пишет")
         cid = channel_id_ok(channel_id)
         if cid is None:
-            raise WazzupError("не выбран номер WhatsApp в Wazzup")
-        chat = chat_id(phone)
-        if chat is None:
-            raise WazzupError("у обращения нет телефона WhatsApp")
+            raise WazzupError("не выбран канал в Wazzup")
+        if kind == "wa":
+            chat = chat_id(phone)
+            if chat is None:
+                raise WazzupError("у обращения нет телефона WhatsApp")
+        else:
+            raw = str(phone or "").strip()
+            chat = raw if _OTHER_CHAT.fullmatch(raw) else None
+            if chat is None:
+                raise WazzupError("у обращения нет номера чата")
         try:
             data = await self._call("POST", "message", allow_empty=True, json={
-                "channelId": cid, "chatType": "whatsapp", "chatId": chat,
+                "channelId": cid, "chatType": chat_type, "chatId": chat,
                 "text": text, "crmMessageId": crm_message_id})
         except WazzupError as exc:
             if exc.code == "repeatedCrmMessageId":

@@ -2467,7 +2467,8 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
     if at is not None and at > now:
         at = now
     client = None
-    if channel == "tg" and ext.isdigit():
+    if channel in ("tg", "tgp") and ext.isdigit():
+        # Личный Telegram через Wazzup - тот же номер пользователя Telegram.
         client = await crm.client_by_tg(int(ext))
     elif channel == "max" and ext.isdigit():
         client = await crm.client_by_max(int(ext))
@@ -2483,7 +2484,8 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
         subject=logic._cut(subject, logic.INBOX_SUBJECT_MAX),
         subject_url=logic.safe_avito_url(subject_url),
         client_id=client["id"] if client else None, at=at, announce=announce,
-        ext_channel=logic.wazzup_channel(ext_channel) if channel == "wa" else None)
+        ext_channel=(logic.wazzup_channel(ext_channel)
+                     if channel in logic.WAZZUP_CHAT_TYPES else None))
     if got is None:
         raise ServiceError("Это обращение заведено другим источником того же канала.")
     return got

@@ -88,7 +88,21 @@ class TestClientGroups(unittest.TestCase):
         pick = {g: [r["id"] for r in self.ROWS if logic.client_in_group(r, g)]
                 for g in logic.CLIENT_GROUPS}
         self.assertEqual(pick, {"all": [1, 2, 3, 4], "active": [1, 4], "former": [2],
-                                "never": [3], "debt": [2, 4]})
+                                "never": [3], "debt": [2, 4], "bought": [], "repair": []})
+
+    def test_bought_repair_and_kinds(self):
+        bought = {"id": 5, "rentals_count": 1, "bought": True}
+        fixer = {"id": 6, "rentals_count": 0, "external_repairs": 2,
+                 "repair_objects": "Самокат Kugoo M4 | АКБ 60В от самоката"}
+        self.assertTrue(logic.client_in_group(bought, "bought"))
+        self.assertFalse(logic.client_in_group(fixer, "bought"))
+        self.assertTrue(logic.client_in_group(fixer, "repair"))
+        self.assertEqual(logic.client_kinds(fixer), {"scooter", "battery"},
+                         "«АКБ от самоката» - это АКБ")
+        self.assertEqual(logic.client_kinds(bought), {"bike"}, "арендатор - велосипед")
+        self.assertEqual(logic.tech_kinds("трицикл | что-то своё"), {"tricycle", "other"})
+        self.assertEqual(logic.top_values(["A", "B", "A", None, "C", "B", "A"], limit=2),
+                         ["A", "B"])
 
     def test_tiles(self):
         tiles = logic.client_tiles(self.ROWS)
@@ -243,13 +257,39 @@ class TestOneWindowPages(WebCase):
         self.assertEqual(self.client.get("/incoming").status_code, 403)
         self.assertNotIn('href="/incoming"', self.get_ok("/me"))
 
+    def test_clients_bought_repair_model(self):
+        from app.crm import service
+        fixer = run(self.crm.create_client(full_name="Самокатчик", phone="+79990000005"))
+        run(service.open_order(self.crm, bike=None, payer="client",
+                               client=run(self.crm.client(fixer)), complaint="мотор",
+                               object_note="Самокат Kugoo M4", tech_id=None, estimate=D(0),
+                               by="t"))
+        # «Бывший Клиент» выкупил свой велосипед: последняя аренда - его
+        self.crm.bikes_[self.bike_id]["status"] = "sold"
+        self.login()
+        repair = self.get_ok("/clients?group=repair")
+        self.assertIn("Самокатчик", repair)
+        self.assertNotIn("Иванов Иван", repair)
+        self.assertIn("Самокат Kugoo M4", repair)
+        bought = self.get_ok("/clients?group=bought")
+        self.assertIn("Бывший Клиент", bought)
+        self.assertNotIn("Самокатчик", bought)
+        scooters = self.get_ok("/clients?kind=scooter")
+        self.assertIn("Самокатчик", scooters)
+        self.assertNotIn("Иванов Иван", scooters)
+        model = self.get_ok("/clients?model=Kugoo+V3")
+        self.assertIn("Иванов Иван", model)
+        self.assertNotIn("Самокатчик", model)
+        self.assertIn("Самокатчик", self.get_ok("/clients?model=чужая"),
+                      "неизвестная модель - фильтра нет")
+
     def test_clients_summary(self):
         self.login()
         page = self.get_ok("/clients")
         self.assertIn("клиентов за всё время", page)
         found = dict(re.findall(r'group=(\w+)" (?:class="on")?\s*>[^<]*· (\d+)<', page))
         self.assertEqual(found, {"all": "3", "active": "1", "former": "1", "never": "1",
-                                 "debt": "1"})
+                                 "debt": "1", "bought": "0", "repair": "0"})
         active = self.get_ok("/clients?group=active")
         self.assertIn("Иванов Иван", active)
         self.assertNotIn("Бывший Клиент", active)

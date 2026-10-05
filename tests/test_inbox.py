@@ -445,9 +445,13 @@ class TestParseInbound(unittest.TestCase):
             message(messageId="w-6", type="missing_call", text=None),
             message(messageId="w-7", type="audio", text=None, contact="не словарь"),
             "мусор"]})
-        self.assertEqual(skipped, 4)
-        self.assertEqual([i["msg_id"] for i in items], ["w-1", "w-3", "w-6", "w-7"])
-        wa, av, call, voice = items
+        self.assertEqual(skipped, 3)
+        self.assertEqual([i["msg_id"] for i in items], ["w-1", "w-3", "w-5", "w-6", "w-7"])
+        wa, av, tgp, call, voice = items
+        # Telegram через Wazzup - личный аккаунт, отдельный канал, не бот
+        self.assertEqual((tgp["channel"], tgp["ext_id"], tgp["ext_channel"]),
+                         ("tgp", "79001234567", "ch-1"))
+        self.assertEqual(av["ext_channel"], "ch-1", "ответ в Авито - через тот же канал")
         self.assertEqual((wa["channel"], wa["ext_id"], wa["phone"], wa["name"]),
                          ("wa", "+79001234567", "+79001234567", "Ильдар"))
         self.assertEqual(wa["at"], datetime(2026, 9, 24, 10, 0, tzinfo=UTC))

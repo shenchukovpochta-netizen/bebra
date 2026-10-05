@@ -133,8 +133,9 @@ class TestClient(unittest.IsolatedAsyncioTestCase):
             {"channelId": "tg-1", "transport": "telegram", "plainId": "x", "state": "active"},
             "мусор"]), (200, None))
         channels = await client.channels()
-        self.assertEqual([(c["id"], c["phone"], c["active"]) for c in channels],
-                         [(CH1, "+79991110000", True), (CH2, "+79992220000", False)])
+        self.assertEqual([(c["id"], c["kind"], c["phone"], c["active"]) for c in channels],
+                         [(CH1, "wa", "+79991110000", True), (CH2, "wa", "+79992220000", False),
+                          ("tg-1", "tgp", None, True)])
         await client.set_webhook("https://crm.example.ru/hook/inbox/t")
         method, url, kwargs = self.server.calls[1]
         self.assertEqual((method, url), ("PATCH", "https://api.wazzup24.com/v3/webhooks"))
@@ -146,6 +147,24 @@ class TestClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRules(unittest.TestCase):
+    def test_pick_channel_by_kind(self):
+        channels = [{"id": "wa-1", "kind": "wa", "active": True},
+                    {"id": "tg-1", "kind": "tgp", "active": True},
+                    {"id": "av-1", "kind": "avito", "active": True}]
+        self.assertEqual(logic.wazzup_pick_channel(None, channels), "wa-1")
+        self.assertEqual(logic.wazzup_pick_channel(None, channels, kind="tgp"), "tg-1")
+        self.assertEqual(logic.wazzup_pick_channel("av-2", channels, kind="avito"), "av-2")
+        live = {"live": True, "channels": channels}
+        thread = {"channel": "tgp", "origin": "hook", "ext_id": "5001",
+                  "ext_channel": "tg-1", "status": "new"}
+        self.assertEqual(logic.inbox_can_reply(thread, avito_ok=False, wa=live), (True, ""))
+        self.assertFalse(logic.inbox_can_reply({**thread, "ext_channel": None},
+                                               avito_ok=False, wa=live)[0])
+        avito = {**thread, "channel": "avito", "ext_channel": "av-1"}
+        self.assertEqual(logic.inbox_can_reply(avito, avito_ok=False, wa=live), (True, ""),
+                         "Авито из Wazzup отвечает Wazzup, опрос Авито не нужен")
+        self.assertFalse(logic.inbox_can_reply(avito, avito_ok=True, wa=None)[0])
+
     def test_hook_url(self):
         self.assertEqual(logic.wazzup_hook_url("https://CRM.mybike.ru/", "ab-12"),
                          "https://crm.mybike.ru/hook/inbox/ab-12")
@@ -251,7 +270,7 @@ class FakeWazzup:
         self.raw_channels = channels if channels is not None else [
             {"id": CH1, "phone": "+79991110000", "state": "active", "active": True}]
         self.error, self.hook_error, self.message_id = error, hook_error, message_id
-        self.sent, self.hooks = [], []
+        self.sent, self.hooks, self.kinds = [], [], []
 
     async def channels(self):
         if self.error:
@@ -263,10 +282,11 @@ class FakeWazzup:
             raise self.hook_error
         self.hooks.append(uri)
 
-    async def send_text(self, channel_id, phone, text, *, crm_message_id):
+    async def send_text(self, channel_id, phone, text, *, crm_message_id, kind="wa"):
         if self.error:
             raise self.error
         self.sent.append((channel_id, phone, text, crm_message_id))
+        self.kinds.append(kind)
         return {"messageId": self.message_id}
 
 
@@ -307,6 +327,27 @@ class TestBotSide(unittest.IsolatedAsyncioTestCase):
         message = self.crm.inbox_messages_[mid]
         self.assertEqual((message["status"], message["ext_id"]), ("sent", "wz-9"))
 
+    async def test_telegram_and_avito_through_wazzup(self):
+        """Личный Telegram и Авито из Wazzup отвечают через тот же канал
+        Wazzup: адрес - номер чата, а не телефон; из n8n (без канала) -
+        никуда."""
+        await self.crm.set_setting("inbox_wazzup_state", state()["inbox_wazzup_state"],
+                                   by="t")
+        for channel, chat in (("tgp", "5001"), ("avito", "u2i-abc~1")):
+            with self.subTest(channel=channel):
+                _, mid = await self.queued(channel=channel, ext_id=chat, phone=None,
+                                           ext_channel=CH2)
+                fake = FakeWazzup()
+                await inbox.send_once(None, self.crm, cfg(), wazzup=fake)
+                self.assertEqual(fake.sent[0][:3], (CH2, chat, "Да, свободен"))
+                self.assertEqual(fake.kinds, [channel])
+                self.assertEqual(self.crm.inbox_messages_[mid]["status"], "sent")
+        _, mid = await self.queued(channel="avito", ext_id="n8n-chat", phone=None)
+        fake = FakeWazzup()
+        await inbox.send_once(None, self.crm, cfg(), wazzup=fake)
+        self.assertEqual(fake.sent, [])
+        self.assertEqual(self.crm.inbox_messages_[mid]["status"], "failed")
+
     async def test_old_thread_uses_the_only_number(self):
         await self.crm.set_setting("inbox_wazzup_state", state()["inbox_wazzup_state"],
                                    by="t")
@@ -321,7 +362,7 @@ class TestBotSide(unittest.IsolatedAsyncioTestCase):
             {"id": CH1, "active": True}, {"id": CH2, "active": True}]})
         cases = ((None, None, "Wazzup не подключён"),
                  (FakeWazzup(ready=False), None, "Wazzup не подключён"),
-                 (FakeWazzup(), two, "с какого нашего номера"),
+                 (FakeWazzup(), two, "с какого нашего канала"),
                  (FakeWazzup(error=wz.WazzupError("401 — Wazzup не принял ключ API", 401)),
                   None, "Wazzup: 401"))
         for fake, raw, why in cases:

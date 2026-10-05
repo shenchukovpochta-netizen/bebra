@@ -1148,11 +1148,18 @@ class TestInboxHook(InboxCase):
         self.assertEqual(by_channel["wa"]["ext_id"], "+79001112233")
         self.assertEqual(by_channel["wa"]["phone"], "+79001112233")
         self.assertIsNone(by_channel["avito"]["subject_url"])
-        # и через форму Wazzup Telegram тоже не заводится
+        # Telegram из Wazzup - личный аккаунт менеджера: своё обращение
+        # канала tgp, а не разговор бота, и бот в него не пишет
         wazzup = {"messages": [{"messageId": "wz-tg", "chatType": "telegram",
-                                "chatId": "5001", "type": "text", "text": "x"}]}
-        self.assertEqual(self.counts(self.hook(wazzup)), (0, 0, 1))
-        self.assertEqual({t["channel"] for t in self.threads()}, {"wa", "avito"})
+                                "chatId": "5001", "type": "text", "text": "x",
+                                "contact": {"name": "Чужой", "username": "chuzhoy_tg"}}]}
+        self.assertEqual(self.counts(self.hook(wazzup)), (1, 0, 0))
+        by_channel = {t["channel"]: t for t in self.threads()}
+        self.assertEqual(set(by_channel), {"wa", "avito", "tgp"})
+        self.assertEqual((by_channel["tgp"]["origin"], by_channel["tgp"]["username"]),
+                         ("hook", "chuzhoy_tg"))
+        ok, why = logic.inbox_can_reply(by_channel["tgp"], avito_ok=True)
+        self.assertFalse(ok, "без канала Wazzup ответа нет")
 
     def test_batch_is_capped(self):
         items = [{"channel": "wa", "ext_id": f"+7900{i:07d}", "text": f"№{i}"}

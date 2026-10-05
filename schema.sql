@@ -3106,3 +3106,10 @@ create table if not exists crm.cash_plan (
   created_at    timestamptz not null default now()
 );
 create index if not exists cash_plan_due_idx on crm.cash_plan (due_on) where done_at is null;
+
+-- Личный Telegram через Wazzup (app/crm/logic.py, канал tgp): не бот, а
+-- аккаунт менеджера. Отдельный канал, а не tg: хук не должен писать в
+-- разговоры бота, а номер чата Wazzup и tg_id бота - разные пространства.
+alter table crm.inbox_threads drop constraint if exists inbox_threads_channel_check;
+alter table crm.inbox_threads add constraint inbox_threads_channel_check
+  check (channel in ('tg', 'max', 'avito', 'wa', 'tgp'));

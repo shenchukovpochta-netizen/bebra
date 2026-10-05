@@ -647,12 +647,65 @@ def check_staff_term(term: Any, until: Any, *, today: date | None = None,
 CLIENT_GROUPS: dict[str, str] = {
     "all": "Все за всё время", "active": "Действующие", "former": "Бывшие",
     "never": "Ни разу не брали", "debt": "Должники",
+    "bought": "Выкупили", "repair": "Сторонний ремонт",
 }
+
+# Вид техники стороннего ремонта - по словам в объекте наряда: отдельной
+# колонки у наряда нет, а мастер пишет «самокат Kugoo», «АКБ 60В».
+# Порядок важен: «аккумулятор самоката» - это АКБ, а не самокат.
+TECH_KINDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("battery", "АКБ", ("акб", "аккум", "батаре")),
+    ("tricycle", "Трицикл", ("трицикл", "трёхколёс", "трехколес", "трайк")),
+    ("scooter", "Самокат", ("самокат", "scooter", "kugoo", "ninebot", "xiaomi")),
+    ("bike", "Велосипед", ("велосипед", "вело", "bike", "байк")),
+)
+TECH_KIND_TITLES = {code: title for code, title, _ in TECH_KINDS} | {"other": "Другое"}
+
+
+def tech_kinds(text: Any) -> set[str]:
+    """Виды техники в тексте объектов наряда (через « | »)."""
+    out: set[str] = set()
+    for part in str(text or "").lower().split(" | "):
+        if not part.strip():
+            continue
+        for code, _title, words in TECH_KINDS:
+            if any(w in part for w in words):
+                out.add(code)
+                break
+        else:
+            out.add("other")
+    return out
+
+
+def top_values(values: Iterable[Any], *, limit: int = 10) -> list[str]:
+    """Самые частые непустые значения, частые первыми - «основные модели»."""
+    counts: dict[str, int] = {}
+    for v in values:
+        if v:
+            counts[str(v)] = counts.get(str(v), 0) + 1
+    return [k for k, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]]
+
+
+def client_kinds(row: Mapping[str, Any]) -> set[str]:
+    """Чем клиент пользуется: арендатор - велосипедом (парк - электровелосипеды),
+    клиент ремонта - тем, что приносил."""
+    kinds = tech_kinds(row.get("repair_objects"))
+    if int(row.get("rentals_count") or 0) > 0 or row.get("rental_id"):
+        kinds.add("bike")
+    return kinds
 
 
 def client_in_group(row: Mapping[str, Any], group: str) -> bool:
     """Клиент в группе: действующий - с идущей арендой, бывший - брал, но
-    сейчас без велосипеда, «ни разу» - карточка без единой аренды."""
+    сейчас без велосипеда, «ни разу» - карточка без единой аренды.
+    «Выкупили» - последняя аренда проданного велосипеда его (закрыта с
+    велосипедом «продан (выкуп)»): арендатор, выкупивший свой велосипед,
+    а не покупатель из amoCRM. «Сторонний ремонт» - чинил у нас чужую
+    технику за свой счёт."""
+    if group == "bought":
+        return bool(row.get("bought"))
+    if group == "repair":
+        return int(row.get("external_repairs") or 0) > 0
     if group == "active":
         return bool(row.get("rental_id"))
     if group == "former":
@@ -11157,7 +11210,12 @@ def ops_query(text: Any) -> str | None:
 
 INBOX_CHANNELS: dict[str, str] = {
     "tg": "Telegram", "max": "MAX", "avito": "Авито", "wa": "WhatsApp",
+    # Личный Telegram менеджера через Wazzup - не бот: отдельный канал, чтобы
+    # хук не мог писать в разговоры бота (их ведёт только сам бот).
+    "tgp": "Telegram (аккаунт)",
 }
+# Каналы, в которые отвечает Wazzup: канал «Входящих» -> chatType.
+WAZZUP_CHAT_TYPES = {"wa": "whatsapp", "tgp": "telegram", "avito": "avito"}
 INBOX_ORIGINS = ("bot", "max_bot", "avito_api", "hook")
 INBOX_STATUSES: dict[str, str] = {
     "new": "Новое", "work": "В работе", "done": "Разобрано", "spam": "Спам",
@@ -11187,7 +11245,7 @@ HOOK_BATCH_LIMIT = 200
 HOOK_FAIL_LIMIT = 20
 # Хук принимает только эти каналы: Telegram и MAX пишет сам бот, и чужой
 # запрос с утёкшим токеном не должен заводить обращения на чужие tg_id.
-HOOK_CHANNELS = ("avito", "wa")
+HOOK_CHANNELS = ("avito", "wa", "tgp")
 _TG_USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
 
 
@@ -11243,7 +11301,7 @@ def inbox_links(thread: Mapping[str, Any]) -> dict[str, str | None]:
     phone = inbox_phone(thread.get("channel"), thread.get("phone"))
     digits = re.sub(r"\D", "", phone or "")
     # Логин MAX - не логин Telegram: t.me по нему вёл бы к постороннему.
-    is_tg = thread.get("channel") in (None, "tg")
+    is_tg = thread.get("channel") in (None, "tg", "tgp")
     return {
         "tg": (f"https://t.me/{username}"
                if is_tg and _TG_USERNAME.fullmatch(username) else None),
@@ -11272,6 +11330,17 @@ def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool,
         if thread.get("origin") != "max_bot":
             return False, "В MAX ответит только MAX-бот тем, кто писал ему."
         return True, ""
+    if channel in ("avito", "tgp") and thread.get("origin") == "hook" \
+            and wazzup_channel(thread.get("ext_channel")):
+        # Пришло через Wazzup: ответ туда же, через тот же канал Wazzup.
+        if not (wa and wa.get("live")):
+            return False, "Wazzup не на связи - ответьте в приложении."
+        if wazzup_pick_channel(thread.get("ext_channel"), wa.get("channels"),
+                               kind=channel) is None:
+            return False, "Канал Wazzup, через который писал человек, не найден."
+        return True, ""
+    if channel == "tgp":
+        return False, "Ответьте в своём Telegram: этот чат пришёл без Wazzup."
     if channel == "avito":
         if thread.get("origin") != "avito_api":
             # Чат Авито из шлюза или n8n: его номер - номер шлюза, а не
@@ -11376,7 +11445,8 @@ def _wa_phone(raw: Any) -> str | None:
 def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = None,
                   phone: Any = None, text: Any = None, kind: str = "text",
                   subject: Any = None, subject_url: Any = None,
-                  at: Any = None, ext_channel: Any = None) -> dict | None:
+                  at: Any = None, ext_channel: Any = None,
+                  username: Any = None) -> dict | None:
     ext = _cut(ext_id, 100)
     if channel not in HOOK_CHANNELS or not ext:
         return None
@@ -11390,10 +11460,14 @@ def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = 
         "subject_url": safe_avito_url(subject_url),
         "at": _moment(at),
     }
-    # Номер канала Wazzup: через какой наш WhatsApp писал человек.
-    own = wazzup_channel(ext_channel) if channel == "wa" else None
+    # Номер канала Wazzup: через какой наш WhatsApp, Telegram или Авито
+    # писал человек - туда же уйдёт ответ.
+    own = wazzup_channel(ext_channel) if channel in WAZZUP_CHAT_TYPES else None
     if own:
         item["ext_channel"] = own
+    login = str(username or "").strip().lstrip("@")
+    if channel == "tgp" and _TG_USERNAME.fullmatch(login):
+        item["username"] = login
     return item
 
 
@@ -11409,7 +11483,8 @@ _GREEN_KINDS = {"textMessage": "text", "extendedTextMessage": "text",
                 "contactMessage": "other", "locationMessage": "other"}
 _WAZZUP_KINDS = {"text": "text", "image": "image", "audio": "voice",
                  "document": "file", "missing_call": "call"}
-_WAZZUP_CHANNELS = {"whatsapp": "wa", "whatsgroup": None, "avito": "avito"}
+_WAZZUP_CHANNELS = {"whatsapp": "wa", "whatsgroup": None, "avito": "avito",
+                    "telegram": "tgp", "tgapi": "tgp", "telegroup": None}
 _WAZZUP_CHANNEL_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
@@ -11474,13 +11549,20 @@ def _wazzup(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
         channel = _WAZZUP_CHANNELS.get(str(message.get("chatType") or ""))
         contact = message.get("contact") if isinstance(message.get("contact"), dict) else {}
         chat = message.get("chatId")
-        phone = wa_intl(chat) if channel == "wa" else None
+        if channel == "wa":
+            phone = wa_intl(chat)
+        elif channel == "tgp":
+            # Телефон у контакта Telegram бывает, если человек его открыл.
+            phone = contact.get("phone")
+        else:
+            phone = None
         item = _inbound_item(
             channel or "", phone if channel == "wa" else chat,
             msg_id=message.get("messageId"), name=contact.get("name"), phone=phone,
             text=message.get("text"),
             kind=_WAZZUP_KINDS.get(str(message.get("type") or ""), "other"),
-            at=message.get("dateTime"), ext_channel=message.get("channelId"))
+            at=message.get("dateTime"), ext_channel=message.get("channelId"),
+            username=contact.get("username"))
         if item is None:
             skipped += 1
         else:
@@ -11665,6 +11747,9 @@ def wazzup_state(settings: Mapping[str, Any], *,
     for item in data.get("channels") if isinstance(data.get("channels"), list) else []:
         if isinstance(item, dict) and wazzup_channel(item.get("id")):
             channels.append({"id": wazzup_channel(item.get("id")),
+                             # Отметка до Telegram и Авито знала только WhatsApp.
+                             "kind": (item.get("kind") if item.get("kind")
+                                      in WAZZUP_CHAT_TYPES else "wa"),
                              "phone": str(item.get("phone") or "")[:20] or None,
                              "state": str(item.get("state") or "")[:40],
                              "active": bool(item.get("active"))})
@@ -11717,13 +11802,14 @@ def wazzup_fingerprint(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
 
 
-def wazzup_pick_channel(own: Any, channels: Any) -> str | None:
-    """С какого нашего номера отвечать: тем, через который писал человек;
-    не знаем - единственным живым номером WhatsApp, иначе никаким."""
+def wazzup_pick_channel(own: Any, channels: Any, *, kind: str = "wa") -> str | None:
+    """С какого нашего канала отвечать: тем, через который писал человек;
+    не знаем - единственным живым каналом этого вида, иначе никаким."""
     mine = wazzup_channel(own)
     if mine:
         return mine
-    alive = [c for c in channels or [] if isinstance(c, Mapping) and c.get("active")]
+    alive = [c for c in channels or [] if isinstance(c, Mapping) and c.get("active")
+             and (c.get("kind") or "wa") == kind]
     return wazzup_channel(alive[0].get("id")) if len(alive) == 1 else None
 
 

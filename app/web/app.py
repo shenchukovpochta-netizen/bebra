@@ -1739,7 +1739,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                              "count": len(late), "url": "/tasks", "section": None,
                              "names": [t["title"] for t in late[:3]]})
         if may_view(request, "bikes"):
-            issues = await integrity_data(request)
+            # Те же правила, что у отчёта «Расхождения», на уже прочитанном
+            # парке и арендах сводки - без второго чтения всего парка.
+            issues = logic.integrity_issues(
+                fleet, rentals, await crm.open_orders_by_bike(),
+                await crm.debtors(200) if may_view(request, "finance") else [],
+                batteries=own_batteries)
             if issues:
                 critical.append({"code": "integrity", "title": "Расхождения парка и аренд",
                                  "count": len(issues), "url": "/reports/integrity",
@@ -2186,10 +2191,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         found = (everyone if not (q or status) else
                  await crm.clients(q=q or None, status=status or None, limit=100000))
         found = [r for r in found if logic.client_in_group(r, group)]
+        # Вид техники и модель: основные модели - самые частые у клиентов
+        # (последняя аренда), остальные в списке не нужны.
+        kind = p.get("kind") if p.get("kind") in logic.TECH_KIND_TITLES else ""
+        models = logic.top_values((r.get("last_model") for r in everyone), limit=10)
+        model = p.get("model") if p.get("model") in models else ""
+        if kind:
+            found = [r for r in found if kind in logic.client_kinds(r)]
+        if model:
+            found = [r for r in found if r.get("last_model") == model]
         # С фильтром риска - по всей группе: иначе первые по алфавиту молча
         # прятали бы рискованных с фамилией на «Я».
         found = await clients_by_risk(found, risk)
         return {"q": q, "status": status, "risk": risk, "group": group,
+                "kind": kind, "model": model, "models": models,
                 "tiles": logic.client_tiles(everyone), "found": found}
 
     def client_groups(request: Request) -> dict[str, str]:
@@ -2216,6 +2231,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "clients.html", rows=tools["rows"], tools=tools,
                       q=data["q"], status=data["status"], risk=data["risk"],
                       group=data["group"], tiles=data["tiles"],
+                      kind=data["kind"], model=data["model"], models=data["models"],
+                      kinds=logic.TECH_KIND_TITLES,
                       groups=client_groups(request),
                       views=await views_of(request, "/clients"))
 
@@ -3766,7 +3783,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     ext_id=item["ext_id"], kind=item["kind"], text=item["text"],
                     msg_id=item["msg_id"], name=item["name"], phone=item["phone"],
                     subject=item["subject"], subject_url=item["subject_url"],
-                    at=item["at"], announce=True, ext_channel=item.get("ext_channel"))
+                    at=item["at"], announce=True, ext_channel=item.get("ext_channel"),
+                    username=item.get("username"))
             except (service.ServiceError, UnicodeError, ValueError, DataError):
                 # Негодное сообщение - в пропущенные, пачка идёт дальше.
                 # Сбой базы - наоборот 500: шлюз повторит доставку, а уже

@@ -55,8 +55,8 @@
 </table>
 </div>
 <p class="muted">Сюда попадают: вопросы в поддержку и заявки из Telegram- и MAX-бота,
-  гости, нажавшие тему, где нужен человек, чаты Авито (когда подключён API) и WhatsApp
-  через Wazzup{% if wazzup.live %} — номера {% for c in wazzup.channels %}{{ c.phone or '—' }}{% if not c.active %} (не в сети){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}, ответ прямо отсюда{% endif %}
+  гости, нажавшие тему, где нужен человек, чаты Авито (когда подключён API), а через Wazzup —
+  WhatsApp, Telegram-аккаунт и Авито{% if wazzup.live %} — каналы {% for c in wazzup.channels %}{{ {'wa': 'WhatsApp', 'tgp': 'Telegram', 'avito': 'Авито'}.get(c.kind, c.kind) }}{% if c.phone %} {{ c.phone }}{% endif %}{% if not c.active %} (не в сети){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}, ответ прямо отсюда{% endif %}
   или другой шлюз{% if not hook_on %} (хук выключен: пустой <code>secrets/inbox_hook_token</code>){% endif %}.
   Переписка хранится {{ INBOX_KEEP_DAYS }} дней в зашифрованном виде.</p>
 </div>

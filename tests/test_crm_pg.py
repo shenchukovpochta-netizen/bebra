@@ -667,6 +667,27 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             await self.crm.add_cash_plan(due_on=date.today(), title="x", amount=D("0"),
                                          direction="out", repeat_months=0, by="t")
 
+    async def test_client_groups_on_postgres(self):
+        """Колонки групп клиентов на настоящей базе: модель последней аренды,
+        выкуп (последняя аренда проданного велосипеда), сторонний ремонт."""
+        await self.seed()
+        client = await self.crm.client(self.client_id)
+        rid = await service.open_rental(
+            self.crm, client=client, bike=await self.crm.bike(self.bike_id),
+            tariff=await self.crm.tariff(self.tariff_id), started_on=date.today(),
+            contract_no=None, by="t")
+        await service.close_rental(self.crm, await self.crm.rental(rid),
+                                   closed_on=date.today(), note="выкуп", bike_status="sold",
+                                   by="t")
+        await service.open_order(self.crm, bike=None, payer="client", client=client,
+                                 complaint="мотор", object_note="Самокат Kugoo",
+                                 tech_id=None, estimate=D(0), by="t")
+        [row] = await self.crm.clients(q="Иванов")
+        self.assertEqual((row["last_model"], row["bought"], row["external_repairs"],
+                          row["repair_objects"]), ("Kugoo V3", True, 1, "Самокат Kugoo"))
+        self.assertTrue(logic.client_in_group(row, "bought"))
+        self.assertEqual(logic.client_kinds(row), {"bike", "scooter"})
+
     async def test_quick_repair_form_on_postgres(self):
         """Форма стороннего ремонта из бота на настоящей базе: карточка
         клиента, наряд задним числом по дате обращения, закрытие днём

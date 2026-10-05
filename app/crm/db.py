@@ -797,7 +797,17 @@ class CrmDB:
                    coalesce(ra.days, 0) as rented_days,
                    ra.first_on, ra.last_on,
                    r.id as rental_id, r.billed_until, r.price, r.period_days,
-                   r.tariff_name, b.code as bike_code, b.model as bike_model
+                   r.tariff_name, b.code as bike_code, b.model as bike_model,
+                   lm.model as last_model,
+                   coalesce(wo.repairs, 0) as repairs_count,
+                   coalesce(wo.external, 0) as external_repairs,
+                   wo.objects as repair_objects,
+                   exists (select 1 from crm.rentals rb
+                             join crm.bikes bb on bb.id = rb.bike_id
+                            where rb.client_id = c.id and rb.status = 'closed'
+                              and bb.status = 'sold'
+                              and rb.id = (select max(x.id) from crm.rentals x
+                                            where x.bike_id = bb.id)) as bought
             from crm.clients c
             left join (select client_id, sum(amount) as balance,
                               sum(amount) filter (where kind = 'payment') as paid
@@ -813,6 +823,18 @@ class CrmDB:
                        from crm.rentals group by client_id) ra on ra.client_id = c.id
             left join crm.rentals r on r.client_id = c.id and r.status = 'active'
             left join crm.bikes b on b.id = r.bike_id
+            -- Модель последней аренды и ремонт за счёт клиента: группы
+            -- «выкупили» и «сторонний ремонт» и фильтр по модели/виду техники.
+            left join lateral (select bl.model from crm.rentals rl
+                                 join crm.bikes bl on bl.id = rl.bike_id
+                                where rl.client_id = c.id
+                                order by rl.id desc limit 1) lm on true
+            left join (select client_id, count(*) as repairs,
+                              count(*) filter (where bike_id is null) as external,
+                              string_agg(distinct object_note, ' | ')
+                                filter (where bike_id is null) as objects
+                         from crm.work_orders where payer = 'client'
+                        group by client_id) wo on wo.client_id = c.id
             {where}
             order by c.full_name
             limit ${len(args)}

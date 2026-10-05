@@ -668,8 +668,30 @@ class FakeCrm:
                          "period_days": r["period_days"] if r else None,
                          "tariff_name": r["tariff_name"] if r else None,
                          "bike_code": b["code"] if b else None,
-                         "bike_model": b["model"] if b else None})
+                         "bike_model": b["model"] if b else None,
+                         **self._client_extra(c["id"], mine)})
         return sorted(rows, key=lambda c: c["full_name"])[:limit]
+
+    def _client_extra(self, client_id, mine):
+        """Как в SQL: модель последней аренды, ремонт за счёт клиента и выкуп
+        (последняя аренда проданного велосипеда - его)."""
+        last = max(mine, key=lambda x: x["id"], default=None)
+        last_bike = self.bikes_.get(last["bike_id"]) if last and last.get("bike_id") else None
+        orders = [o for o in self.orders_.values()
+                  if o.get("client_id") == client_id and o.get("payer") == "client"]
+        external = [o for o in orders if o.get("bike_id") is None]
+        bought = False
+        for x in mine:
+            bike = self.bikes_.get(x.get("bike_id"))
+            if x["status"] != "closed" or not bike or bike["status"] != "sold":
+                continue
+            if x["id"] == max(y["id"] for y in self.rentals_.values()
+                              if y.get("bike_id") == bike["id"]):
+                bought = True
+        notes = sorted({o.get("object_note") for o in external if o.get("object_note")})
+        return {"last_model": last_bike["model"] if last_bike else None,
+                "repairs_count": len(orders), "external_repairs": len(external),
+                "repair_objects": " | ".join(notes) or None, "bought": bought}
 
     async def client(self, client_id):
         c = self.clients_.get(client_id)

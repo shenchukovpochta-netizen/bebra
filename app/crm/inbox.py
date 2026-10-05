@@ -164,22 +164,27 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
                 status, sent_id = "sent", str(got.get("id") or "") or None
             except Exception as exc:                    # noqa: BLE001
                 error = f"Авито: {str(exc)[:180]}"
-    elif channel == "wa" and origin == "hook" and wazzup is not None and wazzup.ready:
-        # Номер - тот, через который писал человек; старое обращение без
-        # номера - единственным живым номером WhatsApp в Wazzup.
+    elif (origin == "hook" and channel in logic.WAZZUP_CHAT_TYPES
+          and wazzup is not None and wazzup.ready
+          and (channel == "wa" or message.get("thread_ext_channel"))):
+        # Канал - тот, через который писал человек; старое обращение
+        # WhatsApp без номера - единственным живым номером в Wazzup.
+        # Telegram и Авито без канала Wazzup пришли из n8n: туда не пишем.
         state = logic.wazzup_state(await crm.settings())
-        own = logic.wazzup_pick_channel(message.get("thread_ext_channel"), state["channels"])
+        own = logic.wazzup_pick_channel(message.get("thread_ext_channel"), state["channels"],
+                                        kind=channel)
         if own is None:
-            error = "WhatsApp: неизвестно, с какого нашего номера отвечать"
+            error = "Wazzup: неизвестно, с какого нашего канала отвечать"
         else:
             try:
                 # crmMessageId - строка очереди: повтор той же строки Wazzup
                 # второй раз не отправит, а ответит «уже было». Время создания
                 # в номере: после восстановления базы из копии номера строк
                 # идут заново, и новый ответ с номером старого «ушёл» бы молча.
+                chat = (message.get("thread_phone") or ext) if channel == "wa" else ext
                 got = await wazzup.send_text(
-                    own, message.get("thread_phone") or ext, text,
-                    crm_message_id=wazzup_message_id(message))
+                    own, chat, text, crm_message_id=wazzup_message_id(message),
+                    kind=channel)
                 status, sent_id = "sent", str(got.get("messageId") or "") or None
             except Exception as exc:                    # noqa: BLE001
                 error = f"Wazzup: {str(exc)[:180]}"

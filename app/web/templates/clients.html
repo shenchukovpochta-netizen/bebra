@@ -3,7 +3,7 @@
 {% block title %}Клиенты — {{ app_title }}{% endblock %}
 {% block content %}
 {% set money_ok = can_view(staff, 'finance') %}
-{% set keep = 'q=' ~ (q|urlencode) ~ '&status=' ~ (status|urlencode) ~ '&risk=' ~ (risk|urlencode) %}
+{% set keep = 'q=' ~ (q|urlencode) ~ '&status=' ~ (status|urlencode) ~ '&risk=' ~ (risk|urlencode) ~ '&kind=' ~ (kind|urlencode) ~ '&model=' ~ (model|urlencode) %}
 <div class="bar">
   <h1>Клиенты</h1>
   <form method="get" class="search">
@@ -13,6 +13,8 @@
       {% for code, label in CLIENT_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
     <select name="risk"><option value="">любой риск</option>{% for code, label in RISK_LEVELS.items() %}<option value="{{ code }}" {% if risk == code %}selected{% endif %}>{{ 'нет истории' if code == 'none' else 'риск ' ~ label }}</option>{% endfor %}</select>
+    <select name="kind"><option value="">любая техника</option>{% for code, label in kinds.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    {% if models %}<select name="model"><option value="">любая модель</option>{% for m in models %}<option value="{{ m }}" {% if model == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>{% endif %}
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'clients') %}<a class="btn" href="/clients/new">+ Клиент</a>{% endif %}
@@ -27,6 +29,8 @@
   <a class="tile good" href="/clients?group=active"><b>{{ tiles.active }}</b><span>действующих — сейчас в аренде</span></a>
   <a class="tile" href="/clients?group=former"><b>{{ tiles.former }}</b><span>бывших — брали, сейчас без велосипеда</span></a>
   <a class="tile" href="/clients?group=never"><b>{{ tiles.never }}</b><span>ни разу не брали</span></a>
+  {% if tiles.bought %}<a class="tile" href="/clients?group=bought"><b>{{ tiles.bought }}</b><span>выкупили велосипед</span></a>{% endif %}
+  {% if tiles.repair %}<a class="tile" href="/clients?group=repair"><b>{{ tiles.repair }}</b><span>сторонний ремонт<br><small class="muted">чинили у нас свою технику</small></span></a>{% endif %}
   {% if money_ok %}
   <a class="tile {% if tiles.debt %}warn{% endif %}" href="/clients?group=debt"><b>{{ tiles.debt }}</b><span>должников<br><small class="muted">на {{ money(tiles.debt_sum) }}</small></span></a>
   <div class="tile"><b>{{ money(tiles.paid) }}</b><span>оплатили за всё время<br><small class="muted">{{ '{:,}'.format(tiles.days)|replace(',', ' ') }} дней с велосипедом</small></span></div>{% endif %}
@@ -54,7 +58,9 @@
       {% if c.status != 'active' %}<span class="tag bad">{{ CLIENT_STATUSES[c.status] }}</span>{% endif %}
       {% if c.tg_id %}<br><small class="muted">Telegram{% if c.username %} @{{ c.username }}{% endif %}</small>{% endif %}</td>
     <td data-label="Телефон"><a href="tel:{{ c.phone }}">{{ c.phone }}</a></td>
-    <td data-label="Сейчас">{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a><br>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">без велосипеда</span>{% endif %}</td>
+    <td data-label="Сейчас">{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a>{% if c.bike_model %} <small class="muted">{{ c.bike_model }}</small>{% endif %}<br>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">без велосипеда{% if c.last_model %} · брал {{ c.last_model }}{% endif %}</span>{% endif %}
+      {% if c.bought %}<br><span class="tag">выкупил</span>{% endif %}
+      {% if c.external_repairs %}<br><small class="muted">ремонт: {{ c.repair_objects or (c.external_repairs ~ ' нар.') }}</small>{% endif %}</td>
     <td class="num" data-label="Аренд">{{ c.rentals_count or 0 }}</td>
     <td class="num" data-label="Дней">{{ c.rented_days or 0 }}</td>
     <td data-label="С нами с">{{ c.first_on|dmy if c.first_on else '—' }}</td>
@@ -68,6 +74,9 @@
   {{ list.footer(tools, '/clients', 9 if money_ok else 7) }}
 </table>
 </div>
-<p class="muted">Действующие — с идущей арендой, бывшие — брали велосипед, но сейчас без него{% if money_ok %}, должники — с минусом на балансе (и действующие, и бывшие){% endif %}. «Дней» — сколько дней клиент был с велосипедом за все аренды, идущая — по сегодня.</p>
+<p class="muted">Действующие — с идущей арендой, бывшие — брали велосипед, но сейчас без него{% if money_ok %}, должники — с минусом на балансе (и действующие, и бывшие){% endif %}. «Дней» — сколько дней клиент был с велосипедом за все аренды, идущая — по сегодня.
+  «Выкупили» — арендаторы, чья аренда закрыта с велосипедом «продан (выкуп)»; покупатели без аренды живут в amoCRM.
+  «Сторонний ремонт» — чинили у нас свою технику; вид техники берётся из объекта наряда (самокат, АКБ, трицикл, велосипед).
+  Модель — велосипед последней аренды.</p>
 </div>
 {% endblock %}

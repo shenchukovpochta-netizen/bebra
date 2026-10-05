@@ -51,7 +51,7 @@ MANUAL = ("new", "touch", "contract", "deferred", "lost")
 CLOSED = ("returned", "lost")
 SOURCES: dict[str, str] = {
     "tg": "Telegram", "max": "MAX", "avito": "Авито", "wa": "WhatsApp",
-    "booking": "Заявка", "rental": "Выдача", "manual": "Вручную",
+    "tgp": "Telegram", "booking": "Заявка", "rental": "Выдача", "manual": "Вручную",
 }
 # Закрытые на доске - за этот срок: «Сдал» копится сотнями.
 CLOSED_DAYS = 30
