@@ -283,13 +283,27 @@ class TestMyTasksPage(WebCase):
         self.assertNotIn("Клиент Павлюхина", page)
         self.assertEqual(self.client.get("/clients").status_code, 403)
 
-    def test_owner_without_point_sees_every_point(self):
+    def test_owner_sees_team_not_call_lists(self):
+        oper = run(self.crm.staff_by_login("oper"))
+        run(self.crm.create_task(title="Обзвонить должников", by="staff:admin",
+                                 assignee_id=oper["id"]))
         self.login()
         page = self.get_ok("/my")
-        self.assertIn("Клиент Павлюхина", page)
-        self.assertIn("Клиент Адоратского", page)
-        self.assertIn("Своя точка не задана", page)
+        self.assertNotIn("Клиент Павлюхина", page, "прозвон точек - не владельцу")
+        self.assertNotIn("позвонить", page)
+        self.assertNotIn("Своя точка не задана", page)
+        board = page.split('class="team-cols"')[1]
+        self.assertIn("Оператор", board)
+        self.assertIn("Механик", board)
+        self.assertIn("Обзвонить должников", board, "поручение - в колонке сотрудника")
         self.assertIn('href="/my"', self.get_ok("/"), "ссылка на сводке")
+        # тот же список у оператора - на месте
+        self.client.post("/logout")
+        self.login("oper", "password-1")
+        page = self.get_ok("/my")
+        self.assertIn("Клиент Павлюхина", page)
+        self.assertIn("Обзвонить должников", page)
+        self.assertNotIn('class="team-cols"', page)
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")

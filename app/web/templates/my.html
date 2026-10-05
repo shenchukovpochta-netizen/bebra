@@ -4,12 +4,13 @@
 {% block content %}
 {# Задачи этого сотрудника (app/crm/mytasks.py): наряды - по технику,
    аренды, заявки и тревоги - по его точке. Группа есть, только когда её
-   раздел открыт профилем; строка ведёт в карточку записи. #}
+   раздел открыт профилем; строка ведёт в карточку записи. Владельцу -
+   не прозвон и выдачи точек, а поручения по сотрудникам (team_board). #}
 <div class="bar"><h1>Задачи дня
-    <small class="muted">{{ today.strftime('%d.%m') }} · {% if point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
+    <small class="muted">{{ today.strftime('%d.%m') }} · {% if team_board %}команда{% elif point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
   <a class="btn ghost" href="/tasks">Все задачи</a>
   {% if can_view(staff, 'dashboard') %}<a class="btn ghost" href="/">Сводка</a>{% endif %}</div>
-{% if not point %}
+{% if not point and not team_board %}
 <p class="muted">Своя точка не задана — показаны задачи всех точек.
   {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
 {% endif %}
@@ -41,6 +42,21 @@
   <ul class="my-items">{% for t in task_lists.free %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
 </section>
 {% endif %}
+{% if team_board %}
+<p class="muted">Прозвон, выдачи и наряды команда видит в своих «Задачах дня»{% if can_view(staff, 'dashboard') %}, общая картина — на <a href="/">сводке</a>{% endif %}.
+  Здесь — поручения по сотрудникам.</p>
+<div class="team-cols">
+  {% for p in team_board.people %}
+  <section class="card my-group {% if p.hot %}hot{% endif %}">
+    <h2><a href="/team/{{ p.id }}">{{ p.name }}</a> <small class="muted">{{ [p.role, p.location or '', p.tasks|length|string]|select|join(' · ') }}</small></h2>
+    {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
+    {% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
+  </section>
+  {% else %}
+  <section class="card"><p class="muted">Сотрудников пока нет — их заводят в <a href="/staff">«Сотрудниках»</a>.</p></section>
+  {% endfor %}
+</div>
+{% endif %}
 {% for g in groups %}
 <section class="card my-group {{ g.level }}">
   <h2>{{ g.title }} <span class="muted">· {{ g.count }}</span></h2>
@@ -54,7 +70,7 @@
   </ul>
   {% if g.more %}<p class="muted">и ещё {{ g.more }} — <a href="{{ g.url }}">весь список</a></p>{% endif %}
 </section>
-{% else %}{% if not task_lists.mine and not task_lists.free %}
+{% else %}{% if not task_lists.mine and not task_lists.free and not team_board %}
 <section class="card">
   <p>На сегодня задач нет: нарядов на вас нет, заявок на выдачу, просрочек и
     новых тревог{% if point %} на «{{ point }}»{% endif %} тоже.</p>

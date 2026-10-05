@@ -1376,9 +1376,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Задачи этого сотрудника на сегодня (app/crm/mytasks.py): наряды
         по технику, аренды, заявки и тревоги - по его точке. Открыта всем:
         раздела у неё нет, а группа - тому, кто по ней действует
-        (mytasks). Источник читается, только если его группа будет видна."""
+        (mytasks). Источник читается, только если его группа будет видна.
+        Владельцу - не прозвон и выдачи команды, а поручения по сотрудникам:
+        рабочие списки точек живут у тех, кто по ним действует."""
         staff = request.state.staff
         today = date.today()
+        owner = logic.is_owner(staff)
+        open_tasks = await crm.tasks(status="open")
+        people = await team_people()
+        common = {"today": today, "task_lists": tasks.my_lists(staff, open_tasks, today=today),
+                  "people": people, "locations": await crm.locations(active_only=True),
+                  "task_money": tasks.manages(staff)}
+        if owner:
+            board = tasks.overview(open_tasks, people, staff=staff, today=today)
+            board["people"] = [p for p in board["people"] if int(p["id"]) != int(staff["id"])]
+            return render(request, "my.html", groups=[], point=None, own_month=None,
+                          team_board=board, **common)
         settings = await crm.settings()
         expiring: list[dict] = []
         search = None
@@ -1419,13 +1432,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                                               passed=span["passed"])
                                      if m["plan"] is not None],
                          "pay": team.salary(own_plan, facts)}
-        return render(request, "my.html", groups=groups, point=point, today=today,
-                      own_month=own_month,
-                      task_lists=tasks.my_lists(staff, await crm.tasks(status="open"),
-                                                today=today),
-                      people=await team_people(),
-                      locations=await crm.locations(active_only=True),
-                      task_money=tasks.manages(staff))
+        return render(request, "my.html", groups=groups, point=point, own_month=own_month,
+                      team_board=None, **common)
 
     # ─────────── задачи дня: поручения (app/crm/tasks.py) ───────────
 
