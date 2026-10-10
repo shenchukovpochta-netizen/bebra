@@ -2,7 +2,7 @@
 {% block title %}{{ take.no }} — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>{{ take.no }} · {{ take_title(take) }}</h1>
-  <nav class="tabs"><a href="/stock-takes">Все пересчёты</a></nav>
+  <a class="btn ghost" href="/stock-takes">← Все пересчёты</a>
 </div>
 
 <div class="tiles">
@@ -56,7 +56,7 @@
       {% else %}нет в парке{% endif %}</td>
     <td class="opt" data-label="Точка">{{ i.bike_location or i.battery_location or '—' }}</td>
     <td data-label="Отметка"><span class="tag take-{{ i.state }}">{{ TAKE_STATES[i.state] }}</span></td>
-    <td data-label="Комментарий">
+    <td data-label="Комментарий"{% if not editable and not i.note %} class="opt"{% endif %}>
       {% if editable %}
       {# Комментарий - своей формой: отметка его не трогает, пустой стирает. #}
       <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/note" class="inline-form">

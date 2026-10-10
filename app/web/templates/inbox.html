@@ -22,7 +22,7 @@
 {% if avito.configured and not avito.live %}<p class="flash err">Авито: опрос не работает{% if avito.error %} — {{ avito.error }}{% endif %}{% if avito.at %} (последняя отметка {{ avito.at|dmy }}){% endif %}. Ответить в Авито из панели сейчас нельзя.</p>{% endif %}
 {% if wazzup.configured and not wazzup.live %}<p class="flash err">WhatsApp (Wazzup): связи нет{% if wazzup.error %} — {{ wazzup.error }}{% endif %}{% if wazzup.at %} (последняя отметка {{ wazzup.at|dmy }}){% endif %}. Ответить в WhatsApp из панели сейчас нельзя.</p>
 {% elif wazzup.live and wazzup.hook_error %}<p class="flash err">WhatsApp (Wazzup): ответы уходят, но входящие не придут — {{ wazzup.hook_error }}.</p>{% endif %}
-<nav class="tabs">
+<nav class="tabs seg">
   {% for code, label in (('open', 'Открытые'), ('new', 'Новые'), ('work', 'В работе'), ('done', 'Разобранные'), ('spam', 'Спам'), ('all', 'Все')) %}
   <a href="/inbox?tab={{ code }}{% if channel %}&channel={{ channel }}{% endif %}" class="{% if tab == code %}on{% endif %}">{{ label }}</a>
   {% endfor %}

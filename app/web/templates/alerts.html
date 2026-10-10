@@ -38,7 +38,7 @@
   </form>
 
   <div class="table-wrap">
-  <table>
+  <table class="cards">
     <tr>
       {{ list.th('Уровень', 'level', tools) }}
       {{ list.th('Что случилось', 'title', tools) }}
@@ -50,12 +50,12 @@
     </tr>
     {% for a in rows %}
     <tr class="{% if a.needs and a.level == 'urgent' %}bad-row{% elif a.needs %}warn-row{% endif %}">
-      <td>{% if a.level == 'urgent' %}<span class="tag bad">● Срочно</span>{% else %}<span class="tag">Жёлтый</span>{% endif %}</td>
-      <td><b>{{ a.title }}</b>{% if a.note %}<br><small class="muted">{{ a.note }}</small>{% endif %}</td>
-      <td>{% if a.bike_code %}<a href="/bikes/{{ a.bike_id }}">№ {{ a.bike_code }}</a>{% else %}<a href="/trackers/{{ a.tracker_id }}">{{ a.alias or a.device_id }}</a>{% endif %}</td>
-      <td class="opt">{% if a.rental_id %}<a href="/rentals/{{ a.rental_id }}">{{ a.client_name }}</a>{% else %}<span class="muted">не выдан</span>{% endif %}</td>
-      <td class="muted nowrap">{{ a.created_at|dmy }}</td>
-      <td>
+      <td data-label="Уровень">{% if a.level == 'urgent' %}<span class="tag bad">● Срочно</span>{% else %}<span class="tag warn">● Жёлтый</span>{% endif %}</td>
+      <td data-label="Что случилось"><b>{{ a.title }}</b>{% if a.note %}<br><small class="muted">{{ a.note }}</small>{% endif %}</td>
+      <td data-label="Велосипед">{% if a.bike_code %}<a href="/bikes/{{ a.bike_id }}">№ {{ a.bike_code }}</a>{% else %}<a href="/trackers/{{ a.tracker_id }}">{{ a.alias or a.device_id }}</a>{% endif %}</td>
+      <td class="opt" data-label="Клиент">{% if a.rental_id %}<a href="/rentals/{{ a.rental_id }}">{{ a.client_name }}</a>{% else %}<span class="muted">не выдан</span>{% endif %}</td>
+      <td class="muted nowrap" data-label="Когда">{{ a.created_at|dmy }}</td>
+      <td data-label="Состояние">
         {% if not a.open %}<span class="tag">закрыта {{ a.handled_at|dmy }}</span>
         {% else %}<span class="tag {% if a.state == 'new' %}bad{% endif %}">{{ ALERT_STATES[a.state] }}</span>
           {% if a.state == 'snoozed' and a.snooze_until %}<br><small class="muted">до {{ a.snooze_until|dmy }}</small>{% endif %}

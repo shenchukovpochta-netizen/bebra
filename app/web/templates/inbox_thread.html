@@ -27,7 +27,7 @@
   </form>
   {% if can_view(staff, 'clients') %}
   <form method="post" action="/inbox/{{ t.id }}/client" class="inline-form">
-    <input name="client" placeholder="№ карточки или телефон" size="18" required>
+    <input name="client" placeholder="№ карточки или телефон" size="26" required>
     <button type="submit" class="ghost">Привязать к клиенту</button>
   </form>
   {% if t.client_id %}

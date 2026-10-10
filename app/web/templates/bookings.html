@@ -28,7 +28,7 @@
         {% if b.status == 'new' and can_edit(staff, 'issue') %}
         <a class="btn" href="{{ b.issue_url }}">Выдать</a>
         <form method="post" action="/bookings/{{ b.id }}/cancel" class="inline-form" style="margin-top:6px">
-          <input name="note" placeholder="причина — уйдёт клиенту" size="18">
+          <input name="note" placeholder="причина — уйдёт клиенту" size="26">
           <button type="submit" class="ghost danger">Снять</button>
         </form>
         {% endif %}

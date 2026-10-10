@@ -19,20 +19,20 @@
 </form>
 
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>Когда</th><th>Что</th><th></th><th>Велосипед</th><th>Клиент</th><th>Суть</th><th class="opt">Кто написал</th></tr>
   {% for r in rows %}
   <tr class="{% if not r.ok %}warn-row{% endif %}">
-    <td>{{ r.created_at|dmy }}</td>
-    <td>{{ OPS_KINDS.get(r.kind, r.kind) }}</td>
-    <td>{% if r.ok %}👍{% else %}👎{% endif %}</td>
-    <td>{% if r.bike_id %}<a href="/bikes/{{ r.bike_id }}">№ {{ r.bike_code }}</a>{% else %}—{% endif %}</td>
-    <td>{% if r.rental_id %}<a href="/rentals/{{ r.rental_id }}">{{ r.full_name or 'аренда' }}</a>{% else %}{{ r.full_name or '—' }}{% endif %}</td>
-    <td>{{ ops_report_summary(r) }}{% if r.note %}<br><span class="muted">{{ r.note }}</span>{% endif %}</td>
-    <td class="opt muted">{{ r.author or '' }}</td>
+    <td data-label="Когда">{{ r.created_at|dmy }}</td>
+    <td data-label="Что">{{ OPS_KINDS.get(r.kind, r.kind) }}</td>
+    <td data-label="Сверка">{% if r.ok %}👍{% else %}👎{% endif %}</td>
+    <td data-label="Велосипед">{% if r.bike_id %}<a href="/bikes/{{ r.bike_id }}">№ {{ r.bike_code }}</a>{% else %}—{% endif %}</td>
+    <td data-label="Клиент">{% if r.rental_id %}<a href="/rentals/{{ r.rental_id }}">{{ r.full_name or 'аренда' }}</a>{% else %}{{ r.full_name or '—' }}{% endif %}</td>
+    <td data-label="Суть">{{ ops_report_summary(r) }}{% if r.note %}<br><span class="muted">{{ r.note }}</span>{% endif %}</td>
+    <td class="opt muted" data-label="Кто написал">{{ r.author or '' }}</td>
   </tr>
   {% if r.kind == 'daily' and r.data.parts %}
-  <tr><td></td><td colspan="6" class="muted">Детали: {{ r.data.parts|join(', ') }}</td></tr>
+  <tr><td colspan="7" class="muted">Детали: {{ r.data.parts|join(', ') }}</td></tr>
   {% endif %}
   {% else %}<tr><td colspan="7" class="muted">Сообщений из группы ещё не было.</td></tr>{% endfor %}
 </table>

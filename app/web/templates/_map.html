@@ -31,7 +31,7 @@
     if (note) { note.hidden = false; }
     return;
   }
-  var colors = {alarm: '#d32f2f', rented: '#FF5907', parked: '#2e7d32', offline: '#777'};
+  var colors = {alarm: '#FF4D5E', rented: '#FF5907', parked: '#16B8A8', offline: '#7C8794'};
   function popup(p) {
     var box = document.createElement('div');
     var name = document.createElement('b');
@@ -55,7 +55,7 @@
   if (line.length > 1) {
     L.polyline(line, {color: '#FF5907', weight: 3, opacity: 0.8}).addTo(map);
     line.forEach(function (p) { bounds.push(p); });
-    L.circleMarker(line[0], {radius: 5, color: '#2e7d32', fillColor: '#2e7d32',
+    L.circleMarker(line[0], {radius: 5, color: '#16B8A8', fillColor: '#16B8A8',
                              fillOpacity: 0.9}).addTo(map).bindPopup('начало');
   }
   points.forEach(function (p) {
