@@ -42,7 +42,7 @@
   --info:#7CCBFF;--infobg:rgba(5,172,255,.12);
   --chip:#222934;--glass:rgba(23,28,35,.82);
   --invert:#E6ECEE;--on-invert:#12161C;
-  --shadow:none;--pop:0 18px 48px rgba(0,0,0,.45);
+  --shadow:0 0 #0000;--pop:0 18px 48px rgba(0,0,0,.45);
   color-scheme:dark;
 }}
 :root[data-theme=dark]{
@@ -56,7 +56,7 @@
   --info:#7CCBFF;--infobg:rgba(5,172,255,.12);
   --chip:#222934;--glass:rgba(23,28,35,.82);
   --invert:#E6ECEE;--on-invert:#12161C;
-  --shadow:none;--pop:0 18px 48px rgba(0,0,0,.45);
+  --shadow:0 0 #0000;--pop:0 18px 48px rgba(0,0,0,.45);
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -107,8 +107,8 @@ body.with-side{display:grid;grid-template-columns:248px minmax(0,1fr);min-height
 .side-search input{margin:0;padding:9px 10px 9px 34px;border-radius:var(--r3);border:0;
   box-shadow:inset 0 0 0 1px var(--line);background:var(--card);color:var(--text);font-size:14px}
 .side nav{display:flex;flex-direction:column}
-.side .grp{margin:18px 13px 6px;font:600 10px/1 var(--font-mono);letter-spacing:.14em;
-  text-transform:uppercase;color:var(--faint)}
+.side .grp{margin:18px 13px 6px;font:500 11px/1 var(--font-mono);letter-spacing:.07em;
+  text-transform:uppercase;color:var(--muted)}
 .nav-link{position:relative;display:flex;align-items:center;gap:12px;height:40px;padding:0 12px;margin:1px 0;border-radius:var(--r3);
   color:var(--muted);font-weight:600;font-size:14px;line-height:1.2;cursor:pointer;list-style:none;white-space:nowrap}
 .nav-link span{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
@@ -127,10 +127,22 @@ body.with-side{display:grid;grid-template-columns:248px minmax(0,1fr);min-height
 .nav-sub[open]>summary .badge{display:none}
 .nav-kids{padding:2px 0 4px 14px;margin-left:8px;border-left:1px solid var(--line)}
 .nav-kids .nav-link{font-size:13.5px;height:36px}
-.nav-kids .nav-link.on::before{left:-25px}
-.side-foot{margin-top:auto;padding-top:12px;display:flex;flex-direction:column;gap:2px}
-.side-tool{display:flex;align-items:center;gap:12px;height:38px;padding:0 12px;border:0;border-radius:var(--r3);
-  background:transparent;color:var(--faint);font:600 13px/1 var(--font-text);cursor:pointer;justify-content:flex-start}
+.nav-kids .nav-link.on::before{left:-33px}
+.side-foot{position:sticky;bottom:-12px;z-index:1;margin:auto -10px -12px;padding:8px 10px 12px;display:flex;flex-direction:column;gap:2px;
+  background:var(--bg2);border-top:1px solid var(--line)}
+.side-tool{display:flex;align-items:center;gap:12px;height:44px;padding:0 12px;border:0;border-radius:var(--r3);
+  background:transparent;color:var(--muted);font:600 14px/1 var(--font-text);cursor:pointer;justify-content:flex-start;min-height:0}
+.side-tool:hover{filter:none}
+.side-theme{display:none}
+.brand .bolt{display:none}
+/* значок темы: солнце в тёмной (уйти в светлую), луна в светлой - и в шапке, и в меню */
+.when-light{display:none}
+:root[data-theme=light] .when-light{display:inline-block}
+:root[data-theme=light] .when-dark{display:none}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]) .when-light{display:inline-block}
+  :root:not([data-theme=dark]) .when-dark{display:none}
+}
 .side-tool:hover{background:var(--card);color:var(--text)}
 .burger{display:none;cursor:pointer;padding:6px 8px;border-radius:8px;line-height:1;color:var(--muted)}
 .burger .ico{width:22px;height:22px}
@@ -143,7 +155,11 @@ body.with-side{display:grid;grid-template-columns:248px minmax(0,1fr);min-height
   :root[data-rail="1"] .nav-link span,:root[data-rail="1"] .nav-link .chev,
   :root[data-rail="1"] .side-me .who-text,:root[data-rail="1"] .side-tool span{display:none}
   :root[data-rail="1"] .side-head{padding:4px 0 16px;justify-content:center}
-  :root[data-rail="1"] .brand .logo{height:14px;max-width:44px}
+  :root[data-rail="1"] .brand .logo,:root[data-rail="1"] .brand-sub{display:none}
+  :root[data-rail="1"] .brand .bolt{display:block;height:26px;width:auto}
+  :root[data-rail="1"] .nav-sub[open]>.nav-kids{margin:2px 0 6px;padding:4px 0;border-radius:var(--r2);
+    background:color-mix(in srgb,var(--card) 60%,transparent);box-shadow:inset 0 0 0 1px var(--line)}
+  :root[data-rail="1"] .side-foot{margin:auto -10px -12px}
   :root[data-rail="1"] .side-me{justify-content:center;box-shadow:none;padding:6px 0}
   :root[data-rail="1"] .nav-link,:root[data-rail="1"] .side-tool{justify-content:center;padding:0;height:44px}
   :root[data-rail="1"] .nav-link .badge{position:absolute;top:4px;right:4px;min-width:16px;height:16px;font-size:9.5px;padding:0 4px}
@@ -179,14 +195,6 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
   background:transparent;box-shadow:inset 0 0 0 1px var(--line);color:var(--muted);cursor:pointer}
 .top-btn:hover{background:var(--card);color:var(--text);text-decoration:none}
 .top-btn .badge{position:absolute;top:-6px;right:-6px;box-shadow:0 0 0 2px var(--bg)}
-/* значок темы: солнце в тёмной (уйти в светлую), луна в светлой */
-.top-btn .when-light{display:none}
-:root[data-theme=light] .top-btn .when-light{display:inline-block}
-:root[data-theme=light] .top-btn .when-dark{display:none}
-@media (prefers-color-scheme:light){
-  :root:not([data-theme=dark]) .top-btn .when-light{display:inline-block}
-  :root:not([data-theme=dark]) .top-btn .when-dark{display:none}
-}
 
 /* ── телефон: колонка - шапка с бургером, меню - поверх страницы,
    главные разделы - панелью внизу. Галочка вместо скрипта. ── */
@@ -197,24 +205,29 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
     background:var(--glass);background:color-mix(in srgb,var(--bg2) 88%,transparent);
     -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);overflow:visible}
   .side-head{padding:0}
-  .burger{display:block}
+  .burger{display:grid;place-items:center;width:44px;height:44px;padding:0;border-radius:var(--r3);box-shadow:inset 0 0 0 1px var(--line)}
   .side nav,.side-me,.side-search,.side-foot{display:none}
-  .nav-toggle:checked ~ .side{position:fixed;inset:0;z-index:60;overflow-y:auto;background:var(--bg2);
-    padding:10px 14px calc(90px + env(safe-area-inset-bottom,0px))}
+  .nav-toggle:checked ~ .side{position:fixed;inset:0;align-self:auto;height:auto;z-index:60;overflow-y:auto;overscroll-behavior:contain;
+    background:var(--bg2);padding:10px 14px calc(90px + env(safe-area-inset-bottom,0px))}
   .nav-toggle:checked ~ .side nav{display:flex}
   .nav-toggle:checked ~ .side .side-me{display:flex;margin-top:12px}
   .nav-toggle:checked ~ .side .side-search{display:block}
-  .nav-toggle:checked ~ .side .side-foot{display:none}
+  .nav-toggle:checked ~ .side .side-foot{display:flex;position:static;margin:12px 0 0;padding:8px 0 0}
+  .side-theme{display:flex}
+  .side-rail{display:none}
+  .nav-toggle:checked ~ .tabbar label.tab{color:var(--text);background:var(--card);box-shadow:inset 0 0 0 1px var(--line)}
+  .nav-toggle:checked ~ .tabbar .tab.on{color:var(--muted);background:none;box-shadow:none}
+  .nav-toggle:checked ~ .tabbar .tab.on::before{display:none}
   .top{position:static;height:auto;min-height:0;padding:10px 16px 0;border:0;background:none;
     -webkit-backdrop-filter:none;backdrop-filter:none}
   .top-search,.top-right{display:none}
   .top-fill{display:none}
-  .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:70;display:flex;justify-content:space-around;gap:2px;
+  .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:70;display:flex;justify-content:space-around;gap:4px;
     padding:6px calc(6px + env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) calc(6px + env(safe-area-inset-left,0px));
     border-top:1px solid var(--line);background:var(--glass);
     -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
   .tab{position:relative;flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
-    height:52px;padding:6px 2px;border-radius:var(--r2);color:var(--muted);font:600 10.5px/1.1 var(--font-text);cursor:pointer;margin:0}
+    height:52px;padding:6px 4px;border-radius:var(--r2);color:var(--muted);font:600 10px/1.1 var(--font-text);cursor:pointer;margin:0}
   .tab span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .tab .ico{width:21px;height:21px}
   .tab:hover{text-decoration:none;color:var(--text)}
@@ -234,6 +247,7 @@ main{width:100%;max-width:1360px;margin:0 auto;padding:28px 32px 56px}
 h1{font:700 26px/1.1 var(--font-text);margin:0 0 20px;letter-spacing:-.03em;text-wrap:balance}
 h2{font:700 15px/1.5 var(--font-text);color:var(--text);margin:0 0 16px;letter-spacing:-.01em;text-wrap:balance}
 h3{font:700 14px/1.3 var(--font-text);margin:16px 0 8px}
+h3>nav.tabs{margin-left:10px;vertical-align:middle}
 /* Подпись к заголовку («533 · за всё время») - строкой под ним: сводка
    раздела, как «12 всего · 11 в работе» в образце. */
 h1 small{display:block;margin-top:8px;font:600 14px/1.5 var(--font-text);letter-spacing:0;text-transform:none;color:var(--muted)}
@@ -286,9 +300,15 @@ a.task.hot,a.task.warn,a.task.info{color:var(--text)}
 .tile{display:block;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px 18px;color:var(--text);
   position:relative;overflow:hidden;box-shadow:var(--shadow);transition:background .2s,border-color .2s}
 a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var(--hover)}
-.tile b{display:block;font:700 28px/1.12 var(--font-mono);letter-spacing:-.04em;margin-bottom:8px;white-space:nowrap;font-variant-numeric:tabular-nums}
-.tile span{color:var(--muted);font:600 12px/1.45 var(--font-mono);letter-spacing:-.01em}
-.tile small{display:block;font-size:11.5px;margin-top:3px}
+.tile{display:flex;flex-direction:column}
+.tile b{display:block;order:1;font:700 28px/1.12 var(--font-mono);line-height:32px;letter-spacing:-.04em;margin:8px 0 4px;white-space:nowrap;font-variant-numeric:tabular-nums}
+/* Подпись плитки - метка образца над числом: span раскрывается (contents),
+   его текст встаёт первым, пояснение <small> - под числом. Разметка
+   плитки прежняя: <b>число</b><span>подпись<br><small>…</small></span>. */
+.tile>span:not(.bar-track){display:contents;color:var(--muted);font:500 11px/1.4 var(--font-mono);text-transform:uppercase;letter-spacing:.07em}
+.tile>span>br{display:none}
+.tile small,.tile>.bar-track{order:2}
+.tile small{display:block;margin-top:2px;color:var(--muted);text-transform:none;letter-spacing:0;font:600 12px/1.45 var(--font-mono)}
 .tile.hot{box-shadow:inset 0 2px 0 var(--bad),var(--shadow)}
 .tile.hot b{color:var(--bad)}
 .tile.good{box-shadow:inset 0 2px 0 var(--ok),var(--shadow)}.tile.good b{color:var(--ok)}
@@ -310,9 +330,11 @@ td a{color:var(--text);font-weight:600}
 td a:hover{color:var(--link);text-decoration:none}
 td:first-child>a:first-child,td:first-child>b>a:first-child{font-weight:700}
 td a.btn,td a.tag{font-weight:700}
+td small a{font-weight:500}
 td a.btn:hover{color:var(--on-accent)}
 td a.btn.ghost,td a.btn.ghost:hover{color:var(--text)}
-.card>table{display:block;overflow-x:auto}
+.card>table{display:block;overflow-x:auto;width:auto}
+.card>table>tbody{display:table;width:100%}
 /* Карточка, в которой только таблица, - таблица до краёв карточки. */
 .card:has(>table:only-child),.card:has(>.table-wrap:only-child){padding:6px 10px}
 /* Таблица с редактируемыми строками: сами <form> стоят за таблицей, а
@@ -372,6 +394,10 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
   main{padding:16px 14px 40px}
   .card{padding:16px}
   h1{font-size:22px}
+  /* плитки - по две в ряд, как KPI образца на телефоне */
+  .tiles,.tiles.wide{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .tile{padding:16px 16px 12px}
+  .tile b{font-size:clamp(17px,5.6vw,21px);line-height:26px}
   table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:100%}
   table.cards tr{border:1px solid var(--line);border-radius:var(--r2);padding:8px 12px;margin:0 0 8px;background:var(--card)}
   table.cards td{border:0;padding:2px 0;line-height:1.4;text-align:left;white-space:normal;
@@ -479,6 +505,12 @@ button.ghost.danger{background:transparent;color:var(--bad);box-shadow:inset 0 0
 /* Вкладки над плитками и таблицей, а не в шапке: без зазора «План замены»
    ложился на верх плитки. */
 main>nav.tabs{margin-bottom:16px}
+.bar>nav.tabs:has(>a:nth-child(5)){order:3;flex:1 1 100%}
+nav.tabs:has(>a:nth-child(5)){display:flex;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding:0;border-radius:0;
+  background:none;box-shadow:none;border-bottom:1px solid var(--line)}
+nav.tabs:has(>a:nth-child(5))>a{position:relative;flex:0 0 auto;min-height:42px;padding:0 14px;border-radius:0;font-size:14px;white-space:nowrap}
+nav.tabs:has(>a:nth-child(5))>a.on{background:none;box-shadow:none}
+nav.tabs:has(>a:nth-child(5))>a.on::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--accent)}
 /* Вкладки - переключатель образца: рамка вокруг, выбранная - своей плашкой. */
 .tabs{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border-radius:var(--r3);background:var(--card);box-shadow:inset 0 0 0 1px var(--line);max-width:100%}
 .tabs a{display:inline-flex;align-items:center;min-height:30px;padding:4px 12px;border-radius:8px;color:var(--muted);font-weight:600;font-size:13px;background:transparent}
@@ -506,7 +538,8 @@ body:has(.login){background:#12161C}
 .login-logo .logo{height:34px;width:auto;color:var(--text)}
 .login-box h1{margin:22px 0 18px;font:700 30px/1.05 var(--font-head);text-transform:uppercase}
 .login-box button{width:100%;padding:11px}
-@media (max-width:760px){.login{grid-template-columns:1fr;align-items:end;padding-bottom:20px}.login-box{grid-column:1}.login-art svg{left:-20%;top:-30%;height:90%}}
+body:has(.login) .demo-banner{color:#E6ECEE;background:rgba(5,172,255,.12)}
+@media (max-width:760px){.login{grid-template-columns:1fr;align-items:start;min-height:0;overflow:visible;padding:4px 0 20px}.login-box{grid-column:1}.login-art{display:none}}
 pre.report{white-space:pre-wrap;word-break:break-word;font:500 12.5px/1.6 var(--font-mono);background:var(--bg);border:1px solid var(--line);border-radius:var(--r2);padding:14px 16px;max-height:70vh;overflow:auto}
 label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check input{width:auto;margin:0}
 .checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px 16px}
@@ -841,7 +874,10 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .task-add form{margin-top:12px}
 .team-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
 .team-cols>.card{margin-bottom:0}
-.team-cols .card h2{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.team-cols{margin-bottom:20px}
+.team-cols .card h2{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.team-cols .card h2 a{color:var(--text)}
+.team-cols .card h2 a:hover{color:var(--link);text-decoration:none}
 
 /* Команда (team_member.html): прогресс плана полосой в плитке. */
 .bar-track{display:block;height:4px;border-radius:4px;background:var(--card2);margin:8px 0 2px;overflow:hidden}
@@ -872,7 +908,14 @@ h1.hero-title{font:700 30px/1.1 var(--font-text);letter-spacing:-.03em;margin:0 
 .hero-chips .task{transition:background .2s,transform .2s}
 .hero-chips .task:hover{background:var(--card);transform:translateY(-1px)}
 .hero-chips .task .n{order:2;min-width:24px;height:24px;padding:0 7px;border-radius:99px;display:grid;place-items:center;
-  background:var(--badbg);color:var(--bad);font:700 12px/1 var(--font-mono);text-align:center}
+  background:var(--accentbg);color:var(--accent-ink);font:700 12px/1 var(--font-mono);text-align:center}
+.hero-chips .task:is(.hc-overdue,.hc-theft,.hc-search,.hc-tasks_late) .n{background:var(--badbg);color:var(--bad)}
 .hero-chips .task .t{font-size:13px;font-weight:600}
 .hero-chips .task .t small{display:none}
-@media (max-width:640px){.hero{padding:22px 18px}h1.hero-title{font-size:24px}}
+@media (max-width:640px){
+  .hero{padding:20px 18px}h1.hero-title{font-size:20px}
+  /* плашки - одной строкой с прокруткой вбок, как в образце */
+  .hero-chips{flex-wrap:nowrap;overflow-x:auto;margin:0 -18px;padding:4px 18px;scrollbar-width:none}
+  .hero-chips::-webkit-scrollbar{display:none}
+  .hero-chips .task{flex:0 0 auto;white-space:nowrap}
+}

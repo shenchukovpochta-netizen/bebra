@@ -9,7 +9,7 @@
 {# Тема и свёрнутое меню - выбор человека в этом браузере (localStorage),
    ставятся до первой отрисовки: иначе светлая мигала бы тёмной. Только за
    входом: страница входа живёт без скриптов и идёт за системной темой. #}
-{% if staff %}<script id="theme-boot">try{var d=document.documentElement,t=localStorage.getItem('crm-theme');if(t==='light'||t==='dark')d.dataset.theme=t;if(localStorage.getItem('crm-rail')==='1')d.dataset.rail='1'}catch(e){}</script>{% endif %}
+{% if staff %}<script id="theme-boot">try{var d=document.documentElement,t=localStorage.getItem('crm-theme');if(t==='light'||t==='dark'){d.dataset.theme=t;addEventListener('DOMContentLoaded',function(){document.querySelectorAll('meta[name=theme-color]').forEach(function(m){m.content=t==='dark'?'{{ THEME_COLOR }}':'{{ THEME_COLOR_LIGHT }}'})})}if(localStorage.getItem('crm-rail')==='1')d.dataset.rail='1'}catch(e){}</script>{% endif %}
 <link rel="stylesheet" href="/static/fonts.css?v={{ static_v }}">
 <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
 {# Значок на главный экран: манифест, значки и цвет полосы браузера.
@@ -19,8 +19,8 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png?v={{ static_v }}">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={{ static_v }}">
-<meta name="theme-color" content="{{ THEME_COLOR_LIGHT }}" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: dark)">
+{% block themecolor %}<meta name="theme-color" content="{{ THEME_COLOR_LIGHT }}" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: dark)">{% endblock %}
 <meta name="application-name" content="{{ app_short }}">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -43,12 +43,12 @@
 <input type="checkbox" id="navtoggle" class="nav-toggle" hidden>
 <aside class="side">
   <div class="side-head">
-    <a class="brand" href="{{ home_for(staff) }}" title="{{ app_title }}">{% include "_logo.html" %}<span class="brand-sub">CRM</span></a>
+    <a class="brand" href="{{ home_for(staff) }}" title="{{ app_title }}">{% include "_logo.html" %}{% include "_bolt.html" %}<span class="brand-sub">CRM</span></a>
     <label for="navtoggle" class="burger" title="Меню">{{ ico('menu') }}</label>
   </div>
   {# Кто вошёл и в какой роли - карточкой: права у каждого свои, и «под
      кем я сижу» должно быть видно сразу. Роль - название профиля. #}
-  <a href="/me" class="side-me {% if request.url.path.startswith('/me') %}on{% endif %}">
+  <a href="/me" class="side-me {% if request.url.path.startswith('/me') %}on{% endif %}" title="{{ staff.name or staff.login }} · {{ role_title(staff) }}">
     <span class="avatar">{{ (who[0][:1] ~ (who[1][:1] if who|length > 1 else ''))|upper }}</span>
     <span class="who-text"><b>{{ staff.name or staff.login }}</b><small>{{ role_title(staff) }}</small></span>
   </a>
@@ -80,7 +80,8 @@
     {% endfor %}
   </nav>
   <div class="side-foot">
-    <button type="button" class="side-tool" data-act="rail" title="Свернуть меню до значков">{{ ico('panel-left') }}<span>Свернуть меню</span></button>
+    <button type="button" class="side-tool side-theme" data-act="theme" title="Светлая или тёмная тема">{{ ico('sun', 'when-dark') }}{{ ico('moon', 'when-light') }}<span>Тема</span></button>
+    <button type="button" class="side-tool side-rail" data-act="rail" title="Свернуть или развернуть меню">{{ ico('panel-left') }}<span>Свернуть меню</span></button>
   </div>
 </aside>
 {# Пункты, которые ищут чаще всего, - для шапки (Входящие со счётчиком) и
@@ -155,6 +156,9 @@
         : window.matchMedia('(prefers-color-scheme: dark)').matches;
       root.dataset.theme = dark ? 'light' : 'dark';
       keep('crm-theme', root.dataset.theme);
+      document.querySelectorAll('meta[name=theme-color]').forEach(function (m) {
+        m.content = dark ? '{{ THEME_COLOR_LIGHT }}' : '{{ THEME_COLOR }}';
+      });
     } else if (b.dataset.act === 'rail') {
       var on = root.dataset.rail === '1';
       if (on) delete root.dataset.rail; else root.dataset.rail = '1';

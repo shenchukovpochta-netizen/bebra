@@ -11,7 +11,7 @@
 <section class="card">
   <h2>Три числа по месяцам</h2>
   <div class="table-wrap"><table>
-    <tr><th>Месяц</th><th>Простой</th>{% if money_ok %}<th>Чек/день</th><th>Потери</th><th>КПД</th>{% endif %}<th>Дней аренды</th><th>Дней парка</th></tr>
+    <tr><th>Месяц</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th><th class="num">Потери</th><th class="num">КПД</th>{% endif %}<th class="num">Дней аренды</th><th class="num">Дней парка</th></tr>
     {% for m in months_metrics %}{% set l = fleet_losses(m) %}
     <tr><td>{{ m.month.strftime('%m.%Y') }}{{ coverage.mark(m.coverage) }}</td>
       <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
@@ -29,7 +29,7 @@
 <section class="card">
   <h2>Деньги по месяцам</h2>
   <div class="table-wrap"><table>
-    <tr><th>Месяц</th><th>Поступило</th><th>Начислено</th><th>Возвраты</th><th>Ремонт</th></tr>
+    <tr><th>Месяц</th><th class="num">Поступило</th><th class="num">Начислено</th><th class="num">Возвраты</th><th class="num">Ремонт</th></tr>
     {% for m in months %}
     <tr><td>{{ m.month.strftime('%m.%Y') }}</td><td class="num ok">{{ money(m.paid) }}</td>
       <td class="num">{{ money(m.charged) }}</td><td class="num">{{ money(m.refunded) }}</td><td class="num">{{ money(m.repairs) }}</td></tr>

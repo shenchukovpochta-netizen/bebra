@@ -4,9 +4,9 @@
 {# Сотрудник за месяц (app/crm/team.py): прогресс по плану, начисленное
    и что именно сделано. План и условия - строкой на месяц. #}
 <div class="bar"><h1>{{ person.name }} <small class="muted">{{ role }}{% if person.location %} · {{ person.location }}{% endif %} · {{ month_title }}</small></h1>
-  <nav class="tabs">
-    {% if span.prev_key %}<a href="/team/{{ person.id }}?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
-    {% if span.next_key %}<a href="/team/{{ person.id }}?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
+  <nav class="inline-form" aria-label="Месяц">
+    {% if span.prev_key %}<a class="btn ghost small" href="/team/{{ person.id }}?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
+    {% if span.next_key %}<a class="btn ghost small" href="/team/{{ person.id }}?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
   </nav>
   <a class="btn ghost" href="/team?month={{ span.key }}">← Команда</a>
 </div>

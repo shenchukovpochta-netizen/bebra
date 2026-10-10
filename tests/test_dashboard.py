@@ -173,7 +173,7 @@ class TestExpiringWidget(tw.WebCase):
         page = self.get_ok("/")
         self.assertIn("Задачи на сегодня", page)
         self.assertIn("Просрочка или платёж сегодня", page)
-        self.assertIn('class="task hot" href="/"', page)
+        self.assertIn('class="task hot hc-overdue" href="/"', page)
         self.assertIn("Иванов Иван", page)
         # заявка из кабинета на сегодня - в тот же список
         client = tw.run(self.crm.create_client(full_name="Петров Пётр",
@@ -269,10 +269,10 @@ class TestExpiringWidget(tw.WebCase):
     def test_reports_show_losses_column(self):
         # В сводке отчётов - четыре главные колонки, КПД и дни - на полной
         # странице по месяцам.
-        self.assertIn("<th>Потери</th>", self.get_ok("/reports"))
+        self.assertIn(">Потери</th>", self.get_ok("/reports"))
         page = self.get_ok("/reports/months")
-        self.assertIn("<th>Потери</th>", page)
-        self.assertIn("<th>КПД</th>", page)
+        self.assertIn(">Потери</th>", page)
+        self.assertIn(">КПД</th>", page)
 
 
 if __name__ == "__main__":

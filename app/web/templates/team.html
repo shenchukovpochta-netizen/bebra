@@ -4,9 +4,9 @@
 {# «Команда» (app/crm/team.py): сотрудник за месяц - план, факт, темп и
    начисленное по его условиям. Факт - из своих таблиц по автору записи. #}
 <div class="bar"><h1>Команда <small class="muted">{{ month_title }}</small></h1>
-  <nav class="tabs">
-    {% if span.prev_key %}<a href="/team?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
-    {% if span.next_key %}<a href="/team?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
+  <nav class="inline-form" aria-label="Месяц">
+    {% if span.prev_key %}<a class="btn ghost small" href="/team?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
+    {% if span.next_key %}<a class="btn ghost small" href="/team?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
   </nav>
   {% if money_ok %}<a class="btn ghost" href="/team.xlsx?month={{ span.key }}">Excel</a>{% endif %}
 </div>

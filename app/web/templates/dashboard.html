@@ -47,11 +47,11 @@
   <p class="hero-sum"><b>Критично — {{ hot|length + crit|length }}.</b> Начните с этого: остальное ниже, в задачах на сегодня.</p>
   <div class="tasks hero-chips">
     {% for t in hot %}
-    <a class="task hot" href="{{ t.url }}" {% if t.names %}title="{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}"{% endif %}><span class="n">{{ t.count }}</span>
+    <a class="task hot hc-{{ t.code }}" href="{{ t.url }}" {% if t.names %}title="{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}"{% endif %}><span class="n">{{ t.count }}</span>
       <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span></a>
     {% endfor %}
     {% for c in crit %}
-    <a class="task hot" href="{{ c.url }}" {% if c.names %}title="{{ c.names|join(', ') }}{% if c.count > c.names|length %} и ещё {{ c.count - c.names|length }}{% endif %}"{% endif %}><span class="n">{{ c.count }}</span>
+    <a class="task hot hc-{{ c.code }}" href="{{ c.url }}" {% if c.names %}title="{{ c.names|join(', ') }}{% if c.count > c.names|length %} и ещё {{ c.count - c.names|length }}{% endif %}"{% endif %}><span class="n">{{ c.count }}</span>
       <span class="t">{{ c.title }}{% if c.names %}<small class="muted">{{ c.names|join(', ') }}{% if c.count > c.names|length %} и ещё {{ c.count - c.names|length }}{% endif %}</small>{% endif %}</span></a>
     {% endfor %}
   </div>
@@ -125,7 +125,7 @@
   {% endif %}
 </section>
 
-<div class="tiles">
+<div class="tiles wide">
   {% if can_view(staff, 'rentals') %}<a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>{% endif %}
   {% if can_view(staff, 'clients') %}<a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>{% endif %}
   <a class="tile" href="/bikes?status=available"><b>{{ bikes.get('available', 0) }}</b><span>свободных из {{ counts.bikes }}</span></a>
@@ -199,8 +199,7 @@
     отдельно и расходится с ними.</p>
   {% endif %}
   <h3>Деньги по дням
-    <span class="muted">· <a href="/?chart=days&month={{ span.key }}" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a> ·
-      <a href="/?chart=cumulative&month={{ span.key }}" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></span></h3>
+    <nav class="tabs"><a href="/?chart=days&month={{ span.key }}" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a><a href="/?chart=cumulative&month={{ span.key }}" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></nav></h3>
   {% set shown = chart_total if chart_view == 'cumulative' else chart.days %}
   <div class="bars" role="img"
        aria-label="Деньги по дням месяца, план {{ money(chart.plan_per_day) }} в день">

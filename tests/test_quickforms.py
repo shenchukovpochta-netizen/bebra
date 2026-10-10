@@ -76,6 +76,15 @@ def repair(**over: str) -> str:
     return "\n".join(out)
 
 
+# Выдача начисляет периоды до настоящего сегодня: с зашитой датой начала
+# тест через неделю видел второй период и ловил «долг», которого нет.
+NOW = date.today()
+
+
+def issue_now(**over: str) -> str:
+    return issue(**{"start": NOW.strftime("%d.%m"), **over})
+
+
 def issue(**over: str) -> str:
     fields = {"Телефон клиента": "+7 900 111-22-33", "Велосипед №": "15",
               "Срок, дней": "7", "Пробег, км": "4300", "Аккумулятор №": "-",
@@ -308,11 +317,11 @@ class TestIssue(QuickCase):
                                                  by="staff:anna")
 
     async def test_issue_with_cash(self):
-        preview = await quickforms.preview_issue(self.crm, self.admin, issue(), today=TODAY)
+        preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
         self.assertTrue(preview.ok, preview.text)
         self.assertIn("Иванов Иван", preview.text)
         self.assertIn("в кассу смены", preview.text)
-        result = await quickforms.apply_issue(self.crm, self.admin, issue(), today=TODAY,
+        result = await quickforms.apply_issue(self.crm, self.admin, issue_now(), today=NOW,
                                               panel_url="https://crm.example.ru/")
         self.assertIn("Выдача оформлена", result)
         rental = await self.crm.active_rental_of(self.client_id)
@@ -327,39 +336,39 @@ class TestIssue(QuickCase):
 
     async def test_battery_goes_with_the_bike(self):
         battery = await self.crm.create_battery(code="A-1")
-        await quickforms.apply_issue(self.crm, self.admin, issue(battery="A-1"), today=TODAY)
+        await quickforms.apply_issue(self.crm, self.admin, issue_now(battery="A-1"), today=NOW)
         self.assertEqual((await self.crm.battery(battery))["status"], "rented")
 
     async def test_what_stops_an_issue(self):
         cases = [
-            (issue(phone="+7 900 000-00-00"), "в CRM нет"),
-            (issue(bike="99"), "в парке нет"),
-            (issue(term="5"), "нет тарифа на 5 дн. Есть: 7"),
-            (issue(mileage="100"), "Пробег"),
-            (issue(battery="Z-9"), "Аккумулятора"),
+            (issue_now(phone="+7 900 000-00-00"), "в CRM нет"),
+            (issue_now(bike="99"), "в парке нет"),
+            (issue_now(term="5"), "нет тарифа на 5 дн. Есть: 7"),
+            (issue_now(mileage="100"), "Пробег"),
+            (issue_now(battery="Z-9"), "Аккумулятора"),
         ]
         for text, said in cases:
-            preview = await quickforms.preview_issue(self.crm, self.admin, text, today=TODAY)
+            preview = await quickforms.preview_issue(self.crm, self.admin, text, today=NOW)
             self.assertFalse(preview.ok, said)
             self.assertIn(said, preview.text)
         await self.crm.update_client(self.client_id, status="blacklist")
-        preview = await quickforms.preview_issue(self.crm, self.admin, issue(), today=TODAY)
+        preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
         self.assertIn("чёрном списке", preview.text)
 
     async def test_busy_bike_and_running_rental(self):
-        await quickforms.apply_issue(self.crm, self.admin, issue(), today=TODAY)
+        await quickforms.apply_issue(self.crm, self.admin, issue_now(), today=NOW)
         with self.assertRaises(quickforms.FormError) as err:
-            await quickforms.apply_issue(self.crm, self.admin, issue(), today=TODAY)
+            await quickforms.apply_issue(self.crm, self.admin, issue_now(), today=NOW)
         self.assertIn("уже идёт аренда", str(err.exception))
         other = await self.crm.create_client(full_name="Петров", phone="+79002223344")
         del other
         preview = await quickforms.preview_issue(
-            self.crm, self.admin, issue(phone="+79002223344"), today=TODAY)
+            self.crm, self.admin, issue_now(phone="+79002223344"), today=NOW)
         self.assertIn("только свободный", preview.text)
 
     async def test_without_payment_period_is_a_debt(self):
-        await quickforms.apply_issue(self.crm, self.admin, issue(pay="0", method="0"),
-                                     today=TODAY)
+        await quickforms.apply_issue(self.crm, self.admin, issue_now(pay="0", method="0"),
+                                     today=NOW)
         self.assertEqual(await self.crm.client_balance(self.client_id), D(-3000))
 
 

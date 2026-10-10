@@ -551,12 +551,13 @@ class TestTemplate(unittest.TestCase):
 
     def test_step_chips_in_the_dark(self):
         """Тёмная тема: «готово» - не светлая плашка с зелёным текстом,
-        «сейчас» - не цвет страницы. По этим плашкам ходят по мастеру."""
-        from tests.test_phone import TestCardStyles
-        dark = "".join(body for head, body in TestCardStyles().blocks()
-                       if head == "@media (prefers-color-scheme:dark)")
-        self.assertIn(".steps>.done{background:#1F3A21}", dark)
-        self.assertIn(".steps>.now{background:var(--brand)", dark)
+        «сейчас» - не цвет страницы. По этим плашкам ходят по мастеру.
+        Цвета - токенами темы (тинт «хорошо» и оранжевый акцент), а не
+        светлыми hex: те же правила рисуют и тёмную."""
+        css = (Path(__file__).resolve().parent.parent / "app/web/static/style.css").read_text()
+        self.assertIn(".steps>.done{background:var(--okbg);color:var(--ok)}", css)
+        self.assertIn(".steps>.now{background:var(--accent);color:#fff}", css)
+        self.assertNotIn(".steps>.done{background:#", css)
 
 
 @unittest.skipUnless(tw.HAVE_WEB, "fastapi не установлен")

@@ -337,7 +337,7 @@ class TestAccessInPanel(tw.WebCase):
         page = self.get_ok("/reports")
         self.assertIn("Что ломается", page, "отчёт по узлам - работа механика")
         self.assertIn("Какая модель дороже", page)
-        for money in ("Деньги по месяцам", "Должники", "Чек/день", "<th>Потери</th>",
+        for money in ("Деньги по месяцам", "Должники", "Чек/день", ">Потери</th>",
                       "амортизация в месяц"):
             self.assertNotIn(money, page, money)
 

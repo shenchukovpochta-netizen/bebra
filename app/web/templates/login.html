@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Вход · {{ app_title }}{% endblock %}
+{# Обложка входа тёмная в любой теме - и полоса браузера над ней тёмная. #}
+{% block themecolor %}<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: dark)">{% endblock %}
 {% block content %}
 <div class="login">
   <div class="login-art">{% include "_bolt.html" %}</div>
