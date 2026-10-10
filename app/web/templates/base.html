@@ -40,7 +40,8 @@
    <details>: без скрипта, и раскрыта та, где открыта страница. #}
 {% macro ico(name, cls='') %}<svg class="ico {{ cls }}" aria-hidden="true"><use href="/static/icons.svg?v={{ static_v }}#i-{{ name }}"/></svg>{% endmacro %}
 {% set who = (staff.name or staff.login).split() %}
-<input type="checkbox" id="navtoggle" class="nav-toggle" hidden>
+<a class="skip-link" href="#content">К содержимому</a>
+<input type="checkbox" id="navtoggle" class="nav-toggle" aria-label="Меню">
 <aside class="side">
   <div class="side-head">
     <a class="brand" href="{{ home_for(staff) }}" title="{{ app_title }}">{% include "_logo.html" %}{% include "_bolt.html" %}<span class="brand-sub">CRM</span></a>
@@ -93,21 +94,22 @@
 <div class="page">
 <header class="top">
   {# Крошки: где я и куда назад - из того же дерева меню. #}
-  {% if crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep">›</span>{% endif %}{% endfor %}</nav>{% else %}<span class="top-fill"></span>{% endif %}
+  {% if crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep" aria-hidden="true">›</span>{% endif %}{% endfor %}</nav>{% else %}<span class="top-fill"></span>{% endif %}
   {% if can_view(staff, 'bikes') %}
   <form class="top-search" method="get" action="/bikes" role="search">
     {{ ico('search') }}<input name="q" placeholder="Велосипед: номер, VIN рамы или мотора" aria-label="Найти велосипед по номеру" autocomplete="off"><kbd title="Нажмите «/», чтобы искать">/</kbd>
   </form>
   {% endif %}
   <div class="top-right">
-    {% for it in inbox %}<a class="top-btn" href="{{ it.href }}" title="{{ it.label }}">{{ ico('bell') }}{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>{% endfor %}
+    {% for it in inbox %}<a class="top-btn" href="{{ it.href }}" title="{{ it.label }}" aria-label="{{ it.label }}{% if it.badge %}: {{ it.badge }}{% endif %}">{{ ico('bell') }}{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>{% endfor %}
     <button type="button" class="top-btn" data-act="theme" title="Светлая или тёмная тема">{{ ico('sun', 'when-dark') }}{{ ico('moon', 'when-light') }}</button>
   </div>
 </header>
 {% endif %}
 <main>
+<span id="content" tabindex="-1"></span>
 {% if demo %}{% include "_demo_banner.html" %}{% endif %}
-{% if not staff and crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep">›</span>{% endif %}{% endfor %}</nav>{% endif %}
+{% if not staff and crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep" aria-hidden="true">›</span>{% endif %}{% endfor %}</nav>{% endif %}
 {% for kind, text in flash %}
   <div class="flash {{ kind }}">{{ text }}</div>
 {% endfor %}

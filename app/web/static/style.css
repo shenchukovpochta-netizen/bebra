@@ -20,8 +20,8 @@
   /* светлая */
   --bg:#EEF3F2;--bg2:#F5F9F8;--card:#FFFFFF;--card2:#F2F6F5;--hover:#F2F6F5;--head:#F5F9F8;
   --line:rgba(32,40,50,.09);--line-strong:rgba(32,40,50,.16);
-  --text:#1D242D;--muted:#5F6A75;--faint:#818C97;--link:#CB4000;
-  --ok:#09756C;--okbg:rgba(15,158,147,.12);
+  --text:#1D242D;--muted:#5F6A75;--faint:#818C97;--link:#BC3E00;
+  --ok:#086E65;--okbg:rgba(15,158,147,.12);
   --bad:#C52535;--badbg:rgba(217,52,69,.1);
   --warn:#8B6308;--warnbg:rgba(245,200,75,.22);
   --accent:#FF5907;--accentbg:rgba(255,90,31,.1);--on-accent:#fff;--accent-ink:#BC3E00;
@@ -86,7 +86,7 @@ body.with-side{display:grid;grid-template-columns:248px minmax(0,1fr);min-height
 .brand{display:flex;align-items:baseline;gap:8px;color:var(--text);min-width:0}
 .brand:hover{text-decoration:none}
 .brand .logo{height:19px;width:auto;display:block;color:var(--text)}
-.brand-sub{font:700 10px/1 var(--font-mono);letter-spacing:.16em;color:var(--accent)}
+.brand-sub{font:700 10px/1 var(--font-mono);letter-spacing:.16em;color:var(--accent-ink)}
 .ico{width:18px;height:18px;flex:0 0 18px;display:inline-block;vertical-align:middle}
 /* Кто вошёл: кружок с инициалами, имя и роль - название профиля прав. */
 .side-me{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:8px;border-radius:var(--r2);
@@ -151,9 +151,9 @@ body.with-side{display:grid;grid-template-columns:248px minmax(0,1fr);min-height
    точкой над значком, подпункты раздела - значками под ним. */
 @media (min-width:1001px){
   :root[data-rail="1"] .side{padding:16px 10px 12px;overflow-x:hidden}
-  :root[data-rail="1"] .side .brand-sub,:root[data-rail="1"] .side .grp,
-  :root[data-rail="1"] .nav-link span,:root[data-rail="1"] .nav-link .chev,
-  :root[data-rail="1"] .side-me .who-text,:root[data-rail="1"] .side-tool span{display:none}
+  :root[data-rail="1"] .side .brand-sub,:root[data-rail="1"] .side .grp,:root[data-rail="1"] .nav-link .chev{display:none}
+  :root[data-rail="1"] .nav-link span,:root[data-rail="1"] .side-me .who-text,:root[data-rail="1"] .side-tool span{
+    position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
   :root[data-rail="1"] .side-head{padding:4px 0 16px;justify-content:center}
   :root[data-rail="1"] .brand .logo,:root[data-rail="1"] .brand-sub{display:none}
   :root[data-rail="1"] .brand .bolt{display:block;height:26px;width:auto}
@@ -261,7 +261,7 @@ h2 small{font-weight:500}
 .crumbs a{color:var(--muted)}
 .crumbs a:hover{color:var(--text);text-decoration:none}
 .crumbs>:last-child{color:var(--text)}
-.crumbs .sep{color:var(--faint)}
+.crumbs .sep{color:var(--muted)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px;margin-bottom:20px;min-width:0;box-shadow:var(--shadow)}
 .card.narrow{max-width:560px}
 @media (min-width:861px){.card.narrow{max-width:min(560px,calc((100% - 20px)/2))}}
@@ -311,6 +311,7 @@ a.task.hot,a.task.warn,a.task.info{color:var(--text)}
 a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var(--hover)}
 .tile{display:grid;grid-template-rows:minmax(32px,auto);align-content:start;align-items:end}
 .tile>b,.tile small,.tile>.bar-track{align-self:start}
+.tile>b{min-width:0}
 .tile b{display:block;order:1;font:700 28px/1.12 var(--font-mono);line-height:32px;letter-spacing:-.04em;margin:8px 0 4px;white-space:nowrap;font-variant-numeric:tabular-nums}
 /* Подпись плитки - метка образца над числом: span раскрывается (contents),
    его текст встаёт первым, пояснение <small> - под числом. Разметка
@@ -476,14 +477,14 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
 label{display:block;margin:0 0 12px;font-size:12.5px;font-weight:600;color:var(--muted)}
 /* Скрытое остаётся скрытым: правило ниже задаёт полям display, а
    авторский стиль сильнее браузерного [hidden]{display:none}. Без
-   этой строки технический чекбокс меню вылезал полем во всю ширину. */
+   этой строки скрытые поля форм вылезали бы полем во всю ширину. */
 [hidden]{display:none !important}
 /* Поле - как поле образца: подложка чуть светлее карточки и тонкая
    внутренняя рамка, фокус - оранжевой рамкой. */
 input,select,textarea{display:block;width:100%;margin-top:6px;min-height:40px;padding:8px 12px;border:0;border-radius:var(--r3);
   background:var(--card2);box-shadow:inset 0 0 0 1px var(--line);color:var(--text);font:500 14px/1.4 var(--font-text)}
 textarea{min-height:72px}
-input::placeholder,textarea::placeholder{color:var(--faint)}
+input::placeholder,textarea::placeholder{color:var(--muted)}
 input:focus,select:focus,textarea:focus{outline:0;box-shadow:inset 0 0 0 1.5px var(--accent)}
 select{-webkit-appearance:none;appearance:none;padding-right:32px;cursor:pointer;
   background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
@@ -495,6 +496,19 @@ input[type=checkbox]{-webkit-appearance:none;appearance:none;width:18px;height:1
 input[type=checkbox]:checked{box-shadow:none;background:var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center/12px no-repeat}
 input[type=checkbox]:disabled{opacity:.5;cursor:not-allowed}
 input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* Галочка меню телефона: невидима, но в порядке Tab - иначе с клавиатуры
+   меню не открыть (бургер и «Меню» внизу - её подписи). На компьютере
+   меню всегда открыто, и галочка из обхода убрана. */
+input.nav-toggle{position:fixed;top:0;left:0;width:1px;height:1px;min-height:0;margin:0;padding:0;opacity:0;pointer-events:none}
+input.nav-toggle:focus-visible ~ .side .burger{outline:2px solid var(--accent);outline-offset:2px}
+@media (min-width:1001px){input.nav-toggle{display:none}}
+/* «К содержимому» - первая остановка Tab, видна только в фокусе */
+.skip-link{position:fixed;top:8px;left:8px;z-index:200;padding:10px 16px;border-radius:var(--r3);background:var(--accent);color:#fff;
+  font-weight:700;transform:translateY(-150%);transition:transform .25s}
+.skip-link:focus{transform:none;text-decoration:none}
+#content:focus{outline:0}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;
+  transition-duration:.001ms!important;scroll-behavior:auto!important}}
 input[type=file]{padding:6px 10px;color:var(--muted)}
 input[type=file]::file-selector-button{margin:0 10px 0 0;height:28px;padding:0 12px;border:0;border-radius:8px;background:var(--card);
   color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong);font:700 12.5px var(--font-text);cursor:pointer}
@@ -608,6 +622,7 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 .choice:hover{border-color:var(--line-strong)}
 .choice:has(input:checked),.choice.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--accentbg)}
 .choice.dim{opacity:.55}
+.choice:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
 .issue-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px}
 .issue-bar .spacer{flex:1 1 auto}
 .who{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline;margin-bottom:10px}
