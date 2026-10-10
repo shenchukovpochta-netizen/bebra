@@ -32,7 +32,7 @@
     <td class="opt muted" data-label="Кто написал">{{ r.author or '' }}</td>
   </tr>
   {% if r.kind == 'daily' and r.data.parts %}
-  <tr><td colspan="7" class="muted">Детали: {{ r.data.parts|join(', ') }}</td></tr>
+  <tr><td></td><td colspan="6" class="muted">Детали: {{ r.data.parts|join(', ') }}</td></tr>
   {% endif %}
   {% else %}<tr><td colspan="7" class="muted">Сообщений из группы ещё не было.</td></tr>{% endfor %}
 </table>
