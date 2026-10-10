@@ -20,7 +20,7 @@
 <div class="card">
   <h2>Что заказать</h2>
   <table>
-    <tr><th>Позиция</th><th>Сколько</th><th>Откуда потребность</th><th class="opt">Наряд</th></tr>
+    <tr><th>Позиция</th><th class="num">Сколько</th><th>Откуда потребность</th><th class="opt">Наряд</th></tr>
     {% for n in needs %}
     <tr class="{% if n.covered %}muted{% endif %}">
       <td>{% if n.part_id %}<a href="/parts/{{ n.part_id }}">{{ n.title }}</a>{% else %}{{ n.title }} <small class="muted">нет в номенклатуре</small>{% endif %}</td>
@@ -43,7 +43,7 @@
 <div class="card">
   <h2>Заказ {{ current.no }} <span class="tag">{{ PART_ORDER_STATUSES[current.status] }}</span></h2>
   <table>
-    <tr><th>Позиция</th><th>Кол-во</th>{% if money_ok %}<th>Цена</th><th>Сумма</th>{% endif %}<th>Откуда</th><th></th></tr>
+    <tr><th>Позиция</th><th class="num">Кол-во</th>{% if money_ok %}<th class="num">Цена</th><th class="num">Сумма</th>{% endif %}<th>Откуда</th><th></th></tr>
     {% for i in items %}
     <tr>
       <td><a href="/parts/{{ i.part_id }}">{{ i.title }}</a></td>
@@ -75,7 +75,7 @@
 <div class="card">
   <h2>Заказы</h2>
   <table>
-    <tr><th>№</th><th>Дата</th><th>Поставщик</th><th>Позиций</th>{% if money_ok %}<th>Сумма</th>{% endif %}<th>Статус</th><th></th></tr>
+    <tr><th>№</th><th>Дата</th><th>Поставщик</th><th class="num">Позиций</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}<th>Статус</th><th></th></tr>
     {% for o in orders %}
     <tr>
       <td>{{ o.no }}</td>

@@ -18,12 +18,12 @@
   --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --r:16px;--r2:12px;--r3:10px;
   /* светлая */
-  --bg:#EEF3F2;--bg2:#F5F9F8;--card:#FFFFFF;--card2:#F2F6F5;--hover:#F5F9F8;--head:#F5F9F8;
+  --bg:#EEF3F2;--bg2:#F5F9F8;--card:#FFFFFF;--card2:#F2F6F5;--hover:#F2F6F5;--head:#F5F9F8;
   --line:rgba(32,40,50,.09);--line-strong:rgba(32,40,50,.16);
   --text:#1D242D;--muted:#5F6A75;--faint:#818C97;--link:#CB4000;
   --ok:#09756C;--okbg:rgba(15,158,147,.12);
   --bad:#C52535;--badbg:rgba(217,52,69,.1);
-  --warn:#8B6308;--warnbg:rgba(245,200,75,.22);--warnrow:rgba(245,200,75,.14);--badrow:rgba(217,52,69,.07);
+  --warn:#8B6308;--warnbg:rgba(245,200,75,.22);
   --accent:#FF5907;--accentbg:rgba(255,90,31,.1);--on-accent:#fff;--accent-ink:#BC3E00;
   --info:#0B6E99;--infobg:rgba(5,172,255,.1);
   --chip:#F2F6F5;--glass:rgba(255,255,255,.82);
@@ -32,12 +32,12 @@
   color-scheme:light;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){
-  --bg:#12161C;--bg2:#171C23;--card:#1C222B;--card2:#222934;--hover:#202630;--head:#171C23;
+  --bg:#12161C;--bg2:#171C23;--card:#1C222B;--card2:#222934;--hover:#222934;--head:#171C23;
   --line:rgba(220,235,240,.08);--line-strong:rgba(220,235,240,.14);
   --text:#E6ECEE;--muted:#8A96A3;--faint:#687583;--link:#FF8F56;
   --ok:#25F9E7;--okbg:rgba(37,249,231,.12);
   --bad:#FF6473;--badbg:rgba(255,77,94,.12);
-  --warn:#F5C84B;--warnbg:rgba(245,200,75,.12);--warnrow:rgba(245,200,75,.06);--badrow:rgba(255,77,94,.08);
+  --warn:#F5C84B;--warnbg:rgba(245,200,75,.12);
   --accentbg:rgba(255,90,31,.14);--accent-ink:#FF6F28;
   --info:#7CCBFF;--infobg:rgba(5,172,255,.12);
   --chip:#222934;--glass:rgba(23,28,35,.82);
@@ -46,12 +46,12 @@
   color-scheme:dark;
 }}
 :root[data-theme=dark]{
-  --bg:#12161C;--bg2:#171C23;--card:#1C222B;--card2:#222934;--hover:#202630;--head:#171C23;
+  --bg:#12161C;--bg2:#171C23;--card:#1C222B;--card2:#222934;--hover:#222934;--head:#171C23;
   --line:rgba(220,235,240,.08);--line-strong:rgba(220,235,240,.14);
   --text:#E6ECEE;--muted:#8A96A3;--faint:#687583;--link:#FF8F56;
   --ok:#25F9E7;--okbg:rgba(37,249,231,.12);
   --bad:#FF6473;--badbg:rgba(255,77,94,.12);
-  --warn:#F5C84B;--warnbg:rgba(245,200,75,.12);--warnrow:rgba(245,200,75,.06);--badrow:rgba(255,77,94,.08);
+  --warn:#F5C84B;--warnbg:rgba(245,200,75,.12);
   --accentbg:rgba(255,90,31,.14);--accent-ink:#FF6F28;
   --info:#7CCBFF;--infobg:rgba(5,172,255,.12);
   --chip:#222934;--glass:rgba(23,28,35,.82);
@@ -264,7 +264,14 @@ h2 small{font-weight:500}
 .crumbs .sep{color:var(--faint)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px;margin-bottom:20px;min-width:0;box-shadow:var(--shadow)}
 .card.narrow{max-width:560px}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media (min-width:861px){.card.narrow{max-width:min(560px,calc((100% - 20px)/2))}}
+/* поля карточки - ровно 24 со всех сторон: последний абзац не добавляет свой отступ */
+.card>:first-child{margin-top:0}
+.card>:last-child{margin-bottom:0}
+/* Пары карточек - по высоте своего содержимого: растянутая до соседки
+   карточка оставляла пустоту в полторы тысячи пикселей. */
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+.cols.stretch{align-items:stretch}
 .cols>.card{margin-bottom:0}
 .cols+*{margin-top:20px}
 @media (max-width:860px){.cols{grid-template-columns:1fr}}
@@ -295,12 +302,15 @@ a.task.hot,a.task.warn,a.task.info{color:var(--text)}
 .kind{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
 .kind b{font:700 15px/1.25 var(--font-text)}
 .kind small{color:var(--muted);font-size:12px;line-height:1.4}
-.kind small.when{flex:1;color:var(--link)}
-.kind .btn{align-self:flex-start;height:32px;padding:0 12px;font-size:13px;margin-top:4px}
+.kind small.when{flex:1;color:var(--text);font-weight:600}
+.kind .btn{align-self:flex-start;min-height:32px;padding:4px 12px;font-size:13px;margin-top:4px;
+  background:transparent;color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong)}
+.kind .btn:hover{background:var(--card2);filter:none}
 .tile{display:block;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px 18px;color:var(--text);
   position:relative;overflow:hidden;box-shadow:var(--shadow);transition:background .2s,border-color .2s}
 a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var(--hover)}
-.tile{display:flex;flex-direction:column}
+.tile{display:grid;grid-template-rows:minmax(32px,auto);align-content:start;align-items:end}
+.tile>b,.tile small,.tile>.bar-track{align-self:start}
 .tile b{display:block;order:1;font:700 28px/1.12 var(--font-mono);line-height:32px;letter-spacing:-.04em;margin:8px 0 4px;white-space:nowrap;font-variant-numeric:tabular-nums}
 /* Подпись плитки - метка образца над числом: span раскрывается (contents),
    его текст встаёт первым, пояснение <small> - под числом. Разметка
@@ -309,10 +319,7 @@ a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var
 .tile>span>br{display:none}
 .tile small,.tile>.bar-track{order:2}
 .tile small{display:block;margin-top:2px;color:var(--muted);text-transform:none;letter-spacing:0;font:600 12px/1.45 var(--font-mono)}
-.tile.hot{box-shadow:inset 0 2px 0 var(--bad),var(--shadow)}
-.tile.hot b{color:var(--bad)}
-.tile.good{box-shadow:inset 0 2px 0 var(--ok),var(--shadow)}.tile.good b{color:var(--ok)}
-.tile.warn{box-shadow:inset 0 2px 0 var(--warn),var(--shadow)}.tile.warn b{color:var(--warn)}
+.tile.hot b{color:var(--bad)}.tile.good b{color:var(--ok)}.tile.warn b{color:var(--warn)}
 
 /* Таблица - как таблица данных образца: шапка мелким моно капсом, строка
    повыше, числа моноширинным вправо, наведение - чуть светлее. */
@@ -324,6 +331,12 @@ tr:last-child td{border-bottom:0}
 tr:hover>td{background:var(--hover)}
 td.num,th.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
 td.num{font-family:var(--font-mono);font-weight:600;font-size:13px;letter-spacing:-.01em}
+td.num small{white-space:normal}
+.table-wrap>table>tbody>tr>th,.table-wrap>table>tbody>tr>td{padding-left:10px;padding-right:10px}
+/* выбор клиента в строке выписки - не шире колонки: длинный вариант раздувал таблицу */
+td .inline-form select{max-width:300px;text-overflow:ellipsis}
+/* номер рамы, VIN мотора и «где» - одной строкой: их читают и копируют целиком */
+td[data-label="VIN мотора"],td[data-label="Рама"],td[data-label="Где"]{white-space:nowrap}
 /* Имя в первой колонке - текстом, а не оранжевой ссылкой: в образце
    кликабельна вся строка, а цветом выделено только важное. */
 td a{color:var(--text);font-weight:600}
@@ -394,6 +407,8 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
   main{padding:16px 14px 40px}
   .card{padding:16px}
   h1{font-size:22px}
+  dl{grid-template-columns:minmax(0,40%) minmax(0,1fr);gap:0 12px}
+  dt{overflow-wrap:anywhere}
   /* плитки - по две в ряд, как KPI образца на телефоне */
   .tiles,.tiles.wide{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .tile{padding:16px 16px 12px}
@@ -424,9 +439,12 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
   table.cards tr.total{border-width:2px}
   table.cards tr.list-foot{border:0;border-top:2px solid var(--line);border-radius:0;padding:8px 0 0}
   table.cards tr.list-foot td{border:0;padding:0;line-height:2}
-  table.cards tr.warn-row{background:var(--warnrow)}
-  table.cards tr.bad-row{background:var(--badrow)}
-  table.cards tr.warn-row td,table.cards tr.bad-row td{background:none}
+  table.cards tr.warn-row{box-shadow:inset 3px 0 0 var(--warn)}
+  table.cards tr.bad-row{box-shadow:inset 3px 0 0 var(--bad)}
+  table.cards tr.warn-row>td:first-child,table.cards tr.bad-row>td:first-child{box-shadow:none}
+  /* список-карточки - сами строки на фоне страницы, без второй рамки вокруг */
+  .card:has(>table.cards),.card:has(>.table-wrap>table.cards){background:none;border:0;padding:0;box-shadow:none}
+  table.cards tr:hover>td{background:none}
   .table-wrap:has(>table.cards)~.scroll-hint{display:none}
   /* Вкладки без пробелов между ссылками строкой не переносятся и
      раздвигали страницу вбок («Настройки»); «В ремонте» рвалось надвое. */
@@ -442,10 +460,12 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
    аренде», жёлтый «ждёт», красный «плохо», голубой «справка», серый -
    закрыто. Одни правила на обе темы: тинты и цвета - токены. ── */
 .tag{display:inline-flex;align-items:center;gap:6px;min-height:22px;padding:2px 8px;border-radius:6px;background:var(--card2);color:var(--muted);
-  font:600 11.5px/1.3 var(--font-text);vertical-align:middle;white-space:nowrap}
+  font:600 11.5px/1.3 var(--font-text);letter-spacing:0;vertical-align:middle;white-space:nowrap}
+.badge{letter-spacing:0}
 .tag.ok,.tag.available,.tag.active,.tag.order-done,.tag.take-found,.tag.ref-paid,.tag.risk-low,.tag.intent-renew,
 .tag.bot-signed,.tag.bot-renting{background:var(--okbg);color:var(--ok)}
-.tag.rented,.tag.order-in_work,.tag.ref-rented,.tag.new{background:var(--accentbg);color:var(--accent-ink)}
+.tag.new{background:var(--accentbg);color:var(--accent-ink)}
+.tag.rented,.tag.order-in_work,.tag.ref-rented{background:var(--card2);color:var(--text)}
 .tag.warn,.tag.repair,.tag.reserved,.tag.order-new,.tag.take-extra,.tag.risk-medium,.tag.bot-pending,.tag.bot-registering,
 .tag.bot-approved,.tag.bot-none{background:var(--warnbg);color:var(--warn)}
 .tag.bad,.tag.lost,.tag.risk-high,.tag.take-missing{background:var(--badbg);color:var(--bad)}
@@ -464,11 +484,26 @@ input,select,textarea{display:block;width:100%;margin-top:6px;min-height:40px;pa
   background:var(--card2);box-shadow:inset 0 0 0 1px var(--line);color:var(--text);font:500 14px/1.4 var(--font-text)}
 textarea{min-height:72px}
 input::placeholder,textarea::placeholder{color:var(--faint)}
-input:focus,select:focus,textarea:focus{outline:0;box-shadow:inset 0 0 0 1.5px var(--accent),0 0 0 3px var(--accentbg)}
+input:focus,select:focus,textarea:focus{outline:0;box-shadow:inset 0 0 0 1.5px var(--accent)}
+select{-webkit-appearance:none;appearance:none;padding-right:32px;cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px;background-repeat:no-repeat}
+select[multiple]{background-image:none;padding-right:12px}
 input[type=checkbox],input[type=radio]{display:inline-block;width:auto;min-height:0;margin:0;padding:0;box-shadow:none;background:none;accent-color:var(--accent)}
-input[type=file]{padding:7px 10px}
+input[type=checkbox]{-webkit-appearance:none;appearance:none;width:18px;height:18px;flex:0 0 18px;border-radius:5px;
+  box-shadow:inset 0 0 0 1.5px var(--line-strong);background:transparent;vertical-align:middle;cursor:pointer}
+input[type=checkbox]:checked{box-shadow:none;background:var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center/12px no-repeat}
+input[type=checkbox]:disabled{opacity:.5;cursor:not-allowed}
+input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input[type=file]{padding:6px 10px;color:var(--muted)}
+input[type=file]::file-selector-button{margin:0 10px 0 0;height:28px;padding:0 12px;border:0;border-radius:8px;background:var(--card);
+  color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong);font:700 12.5px var(--font-text);cursor:pointer}
+input[type=file]::file-selector-button:hover{background:var(--hover)}
 input[type=color]{padding:3px;min-height:40px}
 td input,td select{margin:0;min-height:32px;padding:4px 8px;width:auto;display:inline-block}
+td .grid2 input:not([type=checkbox]):not([type=radio]),td .grid2 select,td .grid2 textarea{display:block;width:100%;margin-top:6px}
+tr:has(>td button,>td .btn,>td form)>td{vertical-align:middle}
+td button,td .btn{min-height:32px;padding:5px 12px;font-size:12.5px}
 /* Кнопки: одна главная (залитая) и спокойные второстепенные - белые с
    серой рамкой. Раньше второстепенные были оранжевой обводкой, и на
    экране с «Excel», «CSV», «Найти» и «+ Наряд» главного не было видно. */
@@ -496,7 +531,7 @@ button.ghost.danger{background:transparent;color:var(--bad);box-shadow:inset 0 0
 .search input,.search select{margin:0;width:auto}
 /* Строка поиска с лупой, «Найти» - второстепенной: главная кнопка
    страницы - «+ Велосипед», «+ Наряд», а не поиск. */
-.search input[name=q]{min-width:260px;padding-left:36px;background:var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238A837B' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E") no-repeat 12px center/16px}
+.search input[name=q]{min-width:260px;padding-left:36px;background:var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238A96A3' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E") no-repeat 12px center/16px}
 .search button[type=submit]{background:transparent;color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong)}
 .search button[type=submit]:hover{background:var(--card2);filter:none}
 /* Шапка с поиском: заголовок - своей строкой, под ним панель поиска и
@@ -552,12 +587,13 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 .three-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:14px}.three-head h2{margin:0}
 
 /* ── быстрая выдача: шаги и плитки выбора ── */
-.steps{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
-.steps>span,.steps>a{display:inline-flex;align-items:center;min-height:30px;padding:4px 12px;border-radius:999px;font-size:13px;font-weight:600;
-  background:var(--card2);color:var(--muted);white-space:nowrap}
-.steps>.done{background:var(--okbg);color:var(--ok)}
-.steps>.now{background:var(--accent);color:#fff}
-.steps>.todo{background:transparent;box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--muted);font-weight:500}
+.steps{display:inline-flex;flex-wrap:nowrap;gap:2px;padding:3px;margin-bottom:18px;border-radius:var(--r3);background:var(--card);
+  box-shadow:inset 0 0 0 1px var(--line);max-width:100%;overflow-x:auto;scrollbar-width:none}
+.steps>span,.steps>a{display:inline-flex;align-items:center;min-height:30px;padding:4px 12px;border-radius:8px;font-size:13px;font-weight:600;
+  background:transparent;color:var(--muted);white-space:nowrap}
+.steps>.done{color:var(--ok)}
+.steps>.now{background:var(--card2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong)}
+.steps>.todo{font-weight:500}
 /* шаги мастера первого запуска - ссылки: любой шаг открывается сразу */
 .steps>a:hover{text-decoration:none;filter:brightness(.95)}
 /* В тёмной теме светлый фон «готово» гасил зелёный текст, а тёмный «сейчас»
@@ -581,7 +617,8 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 
 /* тёмная тема: белый на светлом --bad читается хуже среднего (2,6:1) - фон темнее, 5,8:1 */
 .risk-why{margin:6px 0 0;padding-left:18px;font-size:13px}
-.risk-why li.bad{color:var(--bad)}.risk-why li.good{color:var(--ok)}.risk-why li.note{color:var(--muted)}
+.risk-why li.bad{color:var(--bad)}.risk-why li.good{color:var(--ok)}
+.risk-why li.note{color:var(--muted);padding:0;margin:0;background:none;box-shadow:none;border-radius:0;font-size:inherit}
 
 /* ── намерение клиента: сводка и карточка аренды ── */
 .intent form{display:inline-flex;flex-wrap:wrap;gap:4px;margin:4px 0 0}
@@ -602,9 +639,9 @@ fieldset[disabled] button{opacity:.45;cursor:not-allowed}
 fieldset[disabled] input,fieldset[disabled] select,fieldset[disabled] textarea{opacity:.7}
 
 /* ── строки, которые ждут: жёлтая - скоро, красная - в розыске ── */
-tr.warn-row td{background:var(--warnrow)}
+tr.warn-row>td:first-child{box-shadow:inset 3px 0 0 var(--warn)}
 /* Строка в розыске краснее жёлтой: её ищут, а не листают. */
-tr.bad-row td{background:var(--badrow)}
+tr.bad-row>td:first-child{box-shadow:inset 3px 0 0 var(--bad)}
 
 /* Пересчёт считают с телефоном в руках: на узком экране от строки нужны
    номер, отметка и кнопка, остальное уводим. */
@@ -691,12 +728,20 @@ tr.list-foot td{border-top:2px solid var(--line);font-size:13px}
 tr.list-foot .spacer{display:inline-block;width:18px}
 tr.list-foot a{margin:0 2px}
 tr.list-foot a.on{font-weight:700;color:var(--text)}
+@media (hover:none),(max-width:640px){
+  tr.list-foot a{display:inline-flex;align-items:center;justify-content:center;min-width:40px;min-height:40px;padding:0 8px;
+    border-radius:8px;box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--text)}
+  tr.list-foot a.on{background:var(--card2)}
+}
 .saved-views{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
              margin:8px 0;font-size:13px}
 .saved-views .inline-form{display:inline-flex;gap:4px;margin:0}
 .saved-views .btn,.saved-views button{min-height:30px;padding:4px 12px;font-size:12.5px;font-weight:600;border-radius:999px}
-.saved-views button.danger{padding:4px 8px;box-shadow:none;background:transparent}
-.saved-views input.mini{padding:5px 10px;font-size:13px}
+.saved-views .inline-form:has(>button.danger){margin-left:-36px;margin-right:4px}
+.saved-views a.btn.ghost:has(+.inline-form>button.danger){padding-right:34px}
+.saved-views button.danger{min-height:28px;width:28px;padding:0;border-radius:99px;box-shadow:none;background:transparent;color:var(--muted);font-size:15px}
+.saved-views button.danger:hover{color:var(--bad);background:var(--badbg)}
+.saved-views input.mini{text-align:left;min-height:30px;padding:4px 12px;border-radius:99px;font-size:13px}
 /* Входящие: лента переписки */
 /* Лента идёт в DOM от новых к старым, а column-reverse рисует её сверху
    вниз и открывает прокрутку снизу: последнее сообщение видно сразу,
@@ -787,11 +832,12 @@ details.menu>summary{list-style:none;cursor:pointer;width:34px;height:34px;borde
 details.menu>summary::-webkit-details-marker{display:none}
 details.menu>summary:hover,details.menu[open]>summary{background:var(--card2);border-color:var(--line-strong);color:var(--text)}
 details.menu .menu-body{position:absolute;right:0;top:40px;z-index:30;width:280px;padding:12px;
-  background:var(--card);border:1px solid var(--line-strong);border-radius:var(--r2);
-  box-shadow:var(--pop);display:grid;gap:12px;white-space:normal}
+  background:var(--card);background:var(--glass);border:1px solid var(--line-strong);border-radius:14px;
+  -webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);box-shadow:var(--pop);display:grid;gap:12px;white-space:normal}
 details.menu .menu-body form{display:grid;gap:6px;margin:0}
 details.menu .menu-body form+form{border-top:1px solid var(--line);padding-top:12px}
 details.menu .menu-body label{margin:0}
+details.menu .menu-body input:not([type=checkbox]):not([type=radio]),details.menu .menu-body select{display:block;width:100%;margin-top:6px;min-height:36px}
 details.menu .menu-body button{justify-self:start}
 
 /* ── окно поверх страницы: «Добавить сотрудника» ── */

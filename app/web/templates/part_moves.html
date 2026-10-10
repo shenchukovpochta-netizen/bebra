@@ -10,7 +10,7 @@
 </div>
 <div class="card">
 <table>
-  <tr><th>Когда</th><th>Позиция</th><th>Что</th><th>Кол-во</th>{% if can_view(staff, 'finance') %}<th>Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
+  <tr><th>Когда</th><th>Позиция</th><th>Что</th><th class="num">Кол-во</th>{% if can_view(staff, 'finance') %}<th class="num">Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
   {% for m in rows %}
   <tr>
     <td>{{ m.created_at|dmy }}</td>

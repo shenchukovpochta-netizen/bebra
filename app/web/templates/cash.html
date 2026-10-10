@@ -14,7 +14,7 @@
     <div class="tile"><b>{{ money(state.other) }}</b><span>не в ящике<br><small class="muted">{% for code, sum in state.by_method.items() %}{{ METHODS.get(code, code) }} {{ money(sum) }}{% if not loop.last %} · {% endif %}{% else %}переводом и картой{% endfor %}</small></span></div>
     <div class="tile"><b>{{ money(state.revenue) }}</b><span>выручка за смену<br><small class="muted">наличные и не в ящике вместе</small></span></div>
   </div>
-  <p><a class="btn" href="/cash/{{ current.id }}">Открыть смену</a>
+  <p class="inline-form"><a class="btn" href="/cash/{{ current.id }}">Открыть смену</a>
     <span class="muted">Открыл {{ current.opened_by or '' }} · {{ current.opened_at|dmy }} · размен {{ money(current.opening) }}</span></p>
 </section>
 {% endfor %}

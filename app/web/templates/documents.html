@@ -11,15 +11,15 @@
 <section class="card">
   <h2>Шаблоны <span class="muted">· своих {{ summary.mine }} из {{ summary.total }}</span></h2>
   <div class="table-wrap">
-  <table>
+  <table class="cards">
     <tr><th>Документ</th><th>Чей шаблон</th><th></th></tr>
     {% for r in rows %}
     <tr class="{% if r.code_only %}muted{% endif %}">
-      <td><b>{{ r.title }}</b><br><small class="muted">{{ r.hint }}</small>
+      <td data-label="Документ"><b>{{ r.title }}</b><br><small class="muted">{{ r.hint }}</small>
         {% if r.active %}<br><small class="muted">{{ r.active.original or r.active.filename }} ·
           {{ (r.active.size_bytes / 1024)|round|int }} КБ ·
           {{ r.active.uploaded_at|dmy }}{% if r.active.uploaded_by %} · {{ r.active.uploaded_by }}{% endif %}</small>{% endif %}</td>
-      <td>
+      <td data-label="Чей шаблон">
         {% if r.code_only %}<span class="tag">собирается кодом</span>
         {% elif r.mine %}<span class="tag ok">ваш</span>
         {% else %}<span class="tag">наш</span>{% endif %}
@@ -39,7 +39,7 @@
         <form method="post" action="/documents/{{ r.kind }}" class="inline-form"
               enctype="multipart/form-data">
           <input type="file" name="template" accept=".docx">
-          <button type="submit" name="action" value="upload">Загрузить свой</button>
+          <button type="submit" name="action" value="upload" class="ghost">Загрузить свой</button>
         </form>
         {% endif %}
         {% endif %}

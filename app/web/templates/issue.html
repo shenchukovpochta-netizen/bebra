@@ -32,14 +32,14 @@
    оператору остаётся велосипед и деньги. #}
 <div class="card">
   <h2>Заявки из кабинета <span class="muted">· {{ bookings|length }}</span></h2>
-  <table>
+  <table class="cards">
     <tr><th>Когда</th><th>Клиент</th><th>Что просит</th><th></th></tr>
     {% for b in bookings %}
     <tr>
-      <td class="nowrap">{{ b.wanted_on|dmy }}</td>
-      <td>{{ b.full_name }}<br><small class="muted">{{ b.phone }}</small></td>
-      <td>{{ booking_line(b) }}</td>
-      <td><a class="btn" href="{{ b.issue_url }}">Выдать</a></td>
+      <td class="nowrap" data-label="Когда">{{ b.wanted_on|dmy }}</td>
+      <td data-label="Клиент">{{ b.full_name }}<br><small class="muted">{{ b.phone }}</small></td>
+      <td data-label="Что просит">{{ booking_line(b) }}</td>
+      <td class="actions"><a class="btn" href="{{ b.issue_url }}">Выдать</a></td>
     </tr>
     {% endfor %}
   </table>

@@ -555,8 +555,8 @@ class TestTemplate(unittest.TestCase):
         Цвета - токенами темы (тинт «хорошо» и оранжевый акцент), а не
         светлыми hex: те же правила рисуют и тёмную."""
         css = (Path(__file__).resolve().parent.parent / "app/web/static/style.css").read_text()
-        self.assertIn(".steps>.done{background:var(--okbg);color:var(--ok)}", css)
-        self.assertIn(".steps>.now{background:var(--accent);color:#fff}", css)
+        self.assertIn(".steps>.done{color:var(--ok)}", css)
+        self.assertIn(".steps>.now{background:var(--card2);color:var(--text)", css)
         self.assertNotIn(".steps>.done{background:#", css)
 
 

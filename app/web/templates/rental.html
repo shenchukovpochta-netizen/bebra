@@ -98,7 +98,7 @@
   <form method="post" action="/rentals/{{ rental.id }}/tariff" class="grid2">
     <label>Тариф <select name="tariff_id">{% for t in tariffs %}<option value="{{ t.id }}" {% if t.id == rental.tariff_id %}selected{% endif %}>{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}</select></label>
     {% if can_act(staff, 'money_edit') %}<label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% endif %}
-    <button type="submit">Применить со следующего периода</button>
+    <button type="submit" class="ghost">Применить со следующего периода</button>
   </form>
   {% endif %}
   <h2>Розыск</h2>
@@ -111,7 +111,7 @@
     <button type="submit" name="action" value="theft" class="danger">Признать потерянным</button>
     {% else %}
     <label class="wide">Комментарий <input name="note" placeholder="не отвечает с 10.09, адрес не подтверждён"></label>
-    <button type="submit" name="action" value="start">Объявить в розыск</button>
+    <button type="submit" class="ghost" name="action" value="start">Объявить в розыск</button>
     {% endif %}
   </form>
 
@@ -128,7 +128,7 @@
     <label>Пробег снятого, км <input name="mileage_old" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% endif %}"></label>
     <label>Пробег нового, км <input name="mileage_new" inputmode="numeric" placeholder="с дисплея"></label>
     <label>Где меняли <select name="swap_location">{% if not home %}<option value="">не указано</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
-    <button type="submit">Заменить</button>
+    <button type="submit" class="ghost">Заменить</button>
   </form>
   <p class="muted">Деньги, даты и договор остаются те же. Снятый велосипед по умолчанию уходит туда, куда указывает причина: поломка — в ремонт, ТО — на ТО, — и остаётся на точке, где меняли. Новый встаёт на точку аренды.</p>
   {% endif %}
@@ -143,7 +143,7 @@
     <label>Снять <select name="old_id"><option value="">ничего не снимать</option>{% for b in batteries %}<option value="{{ b.id }}">№ {{ b.code }}</option>{% endfor %}</select></label>
     <label>Выдать <select name="battery_id">{% for b in free_batteries %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
     <label>Снятая уходит <select name="old_status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'repair' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select></label>
-    <button type="submit">{% if batteries %}Заменить батарею{% else %}Выдать батарею{% endif %}</button>
+    <button type="submit" class="ghost">{% if batteries %}Заменить батарею{% else %}Выдать батарею{% endif %}</button>
   </form>
   {% endif %}
   {% endif %}
@@ -187,7 +187,7 @@
     <label>Доп. аккумулятор <select name="battery_id">
       {% for b in can_add %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if money_ok %} · +{{ money(b.extra_price) }}{% endif %}</option>{% endfor %}
     </select></label>
-    <button type="submit">Выдать за деньги</button>
+    <button type="submit" class="ghost">Выдать за деньги</button>
   </form>
   <p class="muted">Не больше {{ max_extra }} доп. аккумуляторов на аренду.
     Новая цена действует со следующего начисления: текущий период уже

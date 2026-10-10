@@ -49,19 +49,19 @@
 
 <section class="card">
   <h2>Работы и запчасти</h2>
-  <table>
-    <tr><th>Работа</th><th>Узел</th><th>Кол-во</th>{% if money_ok %}<th>Клиенту</th><th>Себест.</th>{% endif %}<th></th></tr>
+  <table class="cards">
+    <tr><th>Работа</th><th>Узел</th><th class="num">Кол-во</th>{% if money_ok %}<th class="num">Клиенту</th><th class="num">Себест.</th>{% endif %}<th></th></tr>
     {% for i in items %}
     <tr>
-      <td>{{ i.title }}</td>
-      <td class="muted">{{ REPAIR_NODES.get(i.node, '—') }}</td>
-      <td class="num">{{ i.qty }}</td>
-      {% if money_ok %}<td class="num">{{ money(i.price * i.qty) }}</td><td class="num muted">{{ money((i.parts_cost + i.labor_cost) * i.qty) }}</td>{% endif %}
-      <td>{% if can and open_now %}<form method="post" action="/orders/{{ order.id }}/items/{{ i.id }}/delete"><button type="submit" class="ghost">убрать</button></form>{% endif %}</td>
+      <td data-label="Работа">{{ i.title }}</td>
+      <td class="muted" data-label="Узел">{{ REPAIR_NODES.get(i.node, '—') }}</td>
+      <td class="num" data-label="Кол-во">{{ i.qty }}</td>
+      {% if money_ok %}<td class="num" data-label="Клиенту">{{ money(i.price * i.qty) }}</td><td class="num muted" data-label="Себест.">{{ money((i.parts_cost + i.labor_cost) * i.qty) }}</td>{% endif %}
+      <td class="actions">{% if can and open_now %}<form method="post" action="/orders/{{ order.id }}/items/{{ i.id }}/delete"><button type="submit" class="icon" title="Убрать строку" aria-label="Убрать строку">×</button></form>{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="6" class="muted">Строк пока нет.</td></tr>{% endfor %}
     {% if items and money_ok %}
-    <tr><td colspan="3"><b>Итого</b></td><td class="num"><b>{{ money(totals.total) }}</b></td><td class="num muted">{{ money(totals.cost) }}</td><td></td></tr>
+    <tr class="total"><td colspan="3"><b>Итого</b></td><td class="num" data-label="Клиенту"><b>{{ money(totals.total) }}</b></td><td class="num muted" data-label="Себест.">{{ money(totals.cost) }}</td><td></td></tr>
     {% endif %}
   </table>
   {% if can and open_now %}
@@ -72,7 +72,7 @@
   <form method="post" action="/orders/{{ order.id }}/parts" class="grid2">
     <label class="wide">Со склада <select name="part_id">{% for p in parts %}<option value="{{ p.id }}" {% if p.stock <= 0 %}disabled{% endif %}>{{ p.title }} · на полке {{ p.stock }} {{ p.unit }} · {{ money(p.price) }}</option>{% endfor %}</select></label>
     <label>Количество <input name="qty" value="1" size="4"></label>
-    <button type="submit">Списать в наряд</button>
+    <button type="submit" class="ghost">Списать в наряд</button>
   </form>
   {% endif %}
   <form method="post" action="/orders/{{ order.id }}/items" class="grid2">

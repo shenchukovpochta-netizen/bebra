@@ -32,7 +32,7 @@
 
 <div class="card">
 <table class="cards">
-  <tr><th>№</th><th>Модель</th><th class="opt">Ёмкость</th><th>Статус</th><th class="num">Дней</th><th>Где</th><th class="opt">Циклов</th><th class="opt">Износ</th><th>У кого</th></tr>
+  <tr><th>№</th><th>Модель</th><th class="opt">Ёмкость</th><th>Статус</th><th class="num">Дней</th><th>Где</th><th class="opt num">Циклов</th><th class="opt num">Износ</th><th>У кого</th></tr>
   {% for b in rows %}
   <tr class="{% if b.in_search %}bad-row{% elif b.tired %}warn-row{% endif %}">
     <td data-label="№"><a href="/batteries/{{ b.id }}">{{ b.code }}</a>{% if b.in_search %} <span class="tag bad">розыск</span>{% endif %}</td>

@@ -9,13 +9,13 @@
     {% elif passport.done %}<span class="tag ok">сверен</span>
     {% else %}<span class="tag bad">не сверен</span>{% endif %}
   </h2>
-  <table>
+  <table class="cards">
     <tr><th>Поле</th><th>Что в нём</th><th>Сверено</th><th></th></tr>
     {% for r in passport.rows %}
     <tr>
-      <td>{{ r.title }}</td>
-      <td>{% if r.filled %}{{ r.value }}{% else %}<span class="muted">не заполнено</span>{% endif %}</td>
-      <td>{% if r.ok %}<span class="tag ok">✓ {{ r.at[:10] }}</span>
+      <td data-label="Поле">{{ r.title }}</td>
+      <td data-label="Что в нём">{% if r.filled %}{{ r.value }}{% else %}<span class="muted">не заполнено</span>{% endif %}</td>
+      <td data-label="Сверено">{% if r.ok %}<span class="tag ok">✓ {{ r.at[:10] }}</span>
         {% if r.photo %}<br><a href="{{ base }}/photo/{{ r.field }}" target="_blank" rel="noopener">снимок</a>{% endif %}
         {% elif r.at %}<span class="tag bad">нужен снимок</span>
         {% else %}<span class="muted">—</span>{% endif %}</td>
