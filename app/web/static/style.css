@@ -314,9 +314,12 @@ a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var
 .tile>b,.tile small,.tile>.bar-track{align-self:start}
 /* Ряд плиток делит строки «подпись / число / пояснение» (subgrid): длинная
    подпись в две строки опускает числа всего ряда разом, а короткая не
-   оставляет пустой полосы над числом. Без subgrid - запасной вариант выше. */
+   оставляет пустой полосы над числом. Без subgrid - запасной вариант выше.
+   Строк пять, а не три: у плиток парка под числом два пояснения (процент и
+   норма), а лишнему элементу subgrid новой строки не даёт - он ложился
+   поверх предыдущего. Пустые строки ряда схлопываются в ноль. */
 @supports (grid-template-rows:subgrid){
-  .tile{grid-row:span 3;grid-template-rows:subgrid;row-gap:0;align-items:start}
+  .tile{grid-row:span 5;grid-template-rows:subgrid;row-gap:0;align-items:start}
 }
 .tile>b{min-width:0}
 .tile b{display:block;order:1;font:700 28px/1.12 var(--font-mono);line-height:32px;letter-spacing:-.04em;margin:8px 0 4px;white-space:nowrap;font-variant-numeric:tabular-nums}
