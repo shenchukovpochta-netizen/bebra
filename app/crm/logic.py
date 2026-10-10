@@ -2729,6 +2729,21 @@ def check_profile_name(raw: Any) -> Check:
     return check_name(raw, what="Название роли")
 
 
+# Приветствие на сводке - по часу Москвы: вся система живёт в одном поясе.
+GREETINGS = ((5, "Доброе утро"), (12, "Добрый день"), (18, "Добрый вечер"),
+             (23, "Доброй ночи"))
+
+
+def greeting(hour: int) -> str:
+    """«Добрый день» по часу суток: утро с 5, день с 12, вечер с 18, ночь
+    с 23 и до 5 утра."""
+    text = GREETINGS[-1][1]
+    for start, words in GREETINGS:
+        if hour >= start:
+            text = words
+    return text
+
+
 def role_title(staff: dict | None) -> str:
     """Роль сотрудника словами - название его профиля доступа («Мастер»).
 

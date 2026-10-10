@@ -6,16 +6,20 @@
 <title>{% block title %}{{ app_title }} · CRM{% endblock %}</title>
 {# Метка сборки в адресе: без неё браузер держит старые стили после
    обновления панели, и новая разметка едет по чужой таблице. #}
+{# Тема и свёрнутое меню - выбор человека в этом браузере (localStorage),
+   ставятся до первой отрисовки: иначе светлая мигала бы тёмной. Только за
+   входом: страница входа живёт без скриптов и идёт за системной темой. #}
+{% if staff %}<script id="theme-boot">try{var d=document.documentElement,t=localStorage.getItem('crm-theme');if(t==='light'||t==='dark')d.dataset.theme=t;if(localStorage.getItem('crm-rail')==='1')d.dataset.rail='1'}catch(e){}</script>{% endif %}
 <link rel="stylesheet" href="/static/fonts.css?v={{ static_v }}">
 <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
 {# Значок на главный экран: манифест, значки и цвет полосы браузера.
-   Полоса - цвета шапки панели в обеих темах: на телефоне сверху всегда
-   тёмная шапка, и светлая полоса над ней выглядела бы щелью.
-   Service worker нет намеренно - см. web_manifest в app.py. #}
+   Полоса - цвета шапки панели своей темы: на телефоне шапка светлая в
+   светлой теме и тёмная в тёмной, и полоса другого цвета над ней
+   выглядела бы щелью. Service worker нет намеренно - см. web_manifest. #}
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png?v={{ static_v }}">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png?v={{ static_v }}">
-<meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="{{ THEME_COLOR_LIGHT }}" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="{{ THEME_COLOR }}" media="(prefers-color-scheme: dark)">
 <meta name="application-name" content="{{ app_short }}">
 <meta name="mobile-web-app-capable" content="yes">
@@ -61,32 +65,66 @@
       {% for it in g['items'] %}
       {% if it.children %}
       <details class="nav-sub" {% if it.open %}open{% endif %}>
-        <summary class="nav-link">{{ ico(it.icon) }}<span>{{ it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}{{ ico('chevron', 'chev') }}</summary>
+        <summary class="nav-link" title="{{ it.label }}">{{ ico(it.icon) }}<span>{{ it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}{{ ico('chevron', 'chev') }}</summary>
         <div class="nav-kids">
           {% for c in it.children %}
-          <a class="nav-link {% if c.on %}on{% endif %}" href="{{ c.href }}" {% if c.on %}aria-current="page"{% endif %}>{{ ico(c.icon) }}<span>{{ c.label }}</span>{% if c.badge %}<em class="badge">{{ c.badge }}</em>{% endif %}</a>
+          <a class="nav-link {% if c.on %}on{% endif %}" href="{{ c.href }}" title="{{ c.label }}" {% if c.on %}aria-current="page"{% endif %}>{{ ico(c.icon) }}<span>{{ c.label }}</span>{% if c.badge %}<em class="badge">{{ c.badge }}</em>{% endif %}</a>
           {% endfor %}
         </div>
       </details>
       {% else %}
-      <a class="nav-link {% if it.on %}on{% endif %}" href="{{ it.href }}" {% if it.on %}aria-current="page"{% endif %}>{{ ico(it.icon) }}<span>{{ it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>
+      <a class="nav-link {% if it.on %}on{% endif %}" href="{{ it.href }}" title="{{ it.label }}" {% if it.on %}aria-current="page"{% endif %}>{{ ico(it.icon) }}<span>{{ it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>
       {% endif %}
       {% endfor %}
     </div>
     {% endfor %}
   </nav>
+  <div class="side-foot">
+    <button type="button" class="side-tool" data-act="rail" title="Свернуть меню до значков">{{ ico('panel-left') }}<span>Свернуть меню</span></button>
+  </div>
 </aside>
+{# Пункты, которые ищут чаще всего, - для шапки (Входящие со счётчиком) и
+   нижней панели телефона. Из того же дерева меню: закрытого правами
+   раздела там нет и здесь не будет. #}
+{% set flat = [] %}
+{% for g in nav_menu or [] %}{% for it in g['items'] %}{% if it.children %}{% for c in it.children %}{% set _ = flat.append(c) %}{% endfor %}{% else %}{% set _ = flat.append(it) %}{% endif %}{% endfor %}{% endfor %}
+{% set inbox = (flat|selectattr('href', 'equalto', '/incoming')|list)[:1] %}
+<div class="page">
+<header class="top">
+  {# Крошки: где я и куда назад - из того же дерева меню. #}
+  {% if crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep">›</span>{% endif %}{% endfor %}</nav>{% else %}<span class="top-fill"></span>{% endif %}
+  {% if can_view(staff, 'bikes') %}
+  <form class="top-search" method="get" action="/bikes" role="search">
+    {{ ico('search') }}<input name="q" placeholder="Велосипед: номер, VIN рамы или мотора" aria-label="Найти велосипед по номеру" autocomplete="off"><kbd title="Нажмите «/», чтобы искать">/</kbd>
+  </form>
+  {% endif %}
+  <div class="top-right">
+    {% for it in inbox %}<a class="top-btn" href="{{ it.href }}" title="{{ it.label }}">{{ ico('bell') }}{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>{% endfor %}
+    <button type="button" class="top-btn" data-act="theme" title="Светлая или тёмная тема">{{ ico('sun', 'when-dark') }}{{ ico('moon', 'when-light') }}</button>
+  </div>
+</header>
 {% endif %}
 <main>
 {% if demo %}{% include "_demo_banner.html" %}{% endif %}
-{# Крошки: где я и куда назад - из того же дерева меню. #}
-{% if crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep">›</span>{% endif %}{% endfor %}</nav>{% endif %}
+{% if not staff and crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep">›</span>{% endif %}{% endfor %}</nav>{% endif %}
 {% for kind, text in flash %}
   <div class="flash {{ kind }}">{{ text }}</div>
 {% endfor %}
 {% if learn and request.url.path != '/learn' %}{% include "_learn_card.html" %}{% endif %}
 {% block content %}{% endblock %}
 </main>
+{% if staff %}
+</div>
+{# Телефон: главные разделы внизу под большим пальцем, остальное - «Меню»
+   (та же галочка, что у кнопки в шапке). Первые четыре из списка, какие
+   открыты правами этого человека. #}
+{% set tabs = [] %}
+{% for href in ('/my', '/', '/incoming', '/clients', '/issue', '/service', '/bikes') %}{% for it in flat if it.href == href %}{% if tabs|length < 4 %}{% set _ = tabs.append(it) %}{% endif %}{% endfor %}{% endfor %}
+<nav class="tabbar" aria-label="Главные разделы">
+  {% for it in tabs %}<a class="tab {% if it.on %}on{% endif %}" href="{{ it.href }}">{{ ico(it.icon) }}<span>{{ it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>{% endfor %}
+  <label for="navtoggle" class="tab">{{ ico('dots') }}<span>Меню</span></label>
+</nav>
+{% endif %}
 {# Суммы идут на неразрывных пробелах (logic.money): «2 107 700 ₽» не
    рвётся, но в узкой плитке длинная сумма с копейками не влезала и
    обрезалась. Такой плитке шрифт уменьшается, пока сумма не встанет
@@ -105,6 +143,32 @@
     });
   }
   fit();
+  // Тема и свёрнутое меню: выбор живёт в этом браузере. Нет хранилища
+  // (приватное окно) - переключается до перезагрузки, и это не ошибка.
+  var root = document.documentElement;
+  function keep(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-act]');
+    if (!b) return;
+    if (b.dataset.act === 'theme') {
+      var dark = root.dataset.theme ? root.dataset.theme === 'dark'
+        : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      root.dataset.theme = dark ? 'light' : 'dark';
+      keep('crm-theme', root.dataset.theme);
+    } else if (b.dataset.act === 'rail') {
+      var on = root.dataset.rail === '1';
+      if (on) delete root.dataset.rail; else root.dataset.rail = '1';
+      keep('crm-rail', on ? '0' : '1');
+    }
+  });
+  // «/» - в поиск велосипеда, как в образце; в полях ввода «/» - просто знак.
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    var q = document.querySelector('.top-search input');
+    if (q && q.offsetParent) { e.preventDefault(); q.focus(); }
+  });
   // Ширина - по настоящему шрифту: до его загрузки мерили бы запасной.
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
   // Меню длинное: открытый пункт - в середину колонки, а не за её краем.

@@ -1,162 +1,320 @@
-/* МАЙБАЙК — фирменный стиль панели.
-   Цвета из брендбука: оранжевый FF5907 (акцент), D84400 (тёмный оранжевый),
-   FF8F56 и FFD0B8 (светлые оттенки), тёмный 211F1D, зелёный 17A51E, голубой 05ACFF.
-   Шрифты: Unbounded — логотип и заголовки, Onest — текст; лежат рядом
-   (static/fonts, подключаются в fonts.css), при сбое — системные. */
+/* МАЙБАЙК — панель в духе образца владельца («кабина пилота»): тёмная
+   тема с бирюзовым «хорошо» и оранжевым акцентом, светлая - зеркалом.
+   Акцент - фирменный оранжевый брендбука FF5907, логотип свой.
+   Шрифты: Manrope - текст, JetBrains Mono - числа и подписи колонок,
+   Unbounded - только заголовок входа (static/fonts, fonts.css).
+
+   Тема: по системе, а кнопка в шапке ставит data-theme на <html> и
+   помнит выбор в этом браузере (base.html). Поэтому тёмные значения
+   объявлены дважды: системная тёмная, если не выбрана светлая, и
+   выбранная тёмная. Цвета - только токенами ниже: правило с «тёмным»
+   цветом мимо токена в светлой теме и наоборот рисовало бы пятна. */
 :root{
   --brand:#FF5907;--brand-dark:#D84400;--brand-soft:#FF8F56;--brand-pale:#FFD0B8;
-  --ink:#211F1D;--ink-2:#3A3733;--green:#17A51E;--blue:#05ACFF;
-  --bg:#F5F5F3;--card:#FFFFFF;--text:#1E1C1A;--muted:#6F6A64;--line:#E8E5E0;--chip:#FFEFE6;
-  --line-strong:#DAD6D0;--hover:#F7F6F3;--head:#FAF9F7;--side:#141312;
-  --ok:#128A18;--warn:#B25E00;--bad:#D63A1E;--amber:#F2A516;
-  --shadow:0 1px 2px rgba(20,18,16,.05);
-  --font-head:"Unbounded","Onest",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  --font-text:"Onest",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  /* --ink - цвет полосы браузера и заставки (THEME_COLOR в app.py) */
+  --ink:#12161C;--green:#17A51E;--blue:#05ACFF;--amber:#F2A516;
+  --font-head:"Unbounded","Manrope",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-text:"Manrope",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --r:16px;--r2:12px;--r3:10px;
+  /* светлая */
+  --bg:#EEF3F2;--bg2:#F5F9F8;--card:#FFFFFF;--card2:#F2F6F5;--hover:#F5F9F8;--head:#F5F9F8;
+  --line:rgba(32,40,50,.09);--line-strong:rgba(32,40,50,.16);
+  --text:#1D242D;--muted:#5F6A75;--faint:#818C97;--link:#CB4000;
+  --ok:#09756C;--okbg:rgba(15,158,147,.12);
+  --bad:#C52535;--badbg:rgba(217,52,69,.1);
+  --warn:#8B6308;--warnbg:rgba(245,200,75,.22);--warnrow:rgba(245,200,75,.14);--badrow:rgba(217,52,69,.07);
+  --accent:#FF5907;--accentbg:rgba(255,90,31,.1);--on-accent:#fff;--accent-ink:#BC3E00;
+  --info:#0B6E99;--infobg:rgba(5,172,255,.1);
+  --chip:#F2F6F5;--glass:rgba(255,255,255,.82);
+  --invert:#1D242D;--on-invert:#fff;
+  --shadow:0 1px 2px rgba(20,30,40,.04);--pop:0 16px 40px rgba(20,30,40,.14);
+  color-scheme:light;
 }
-@media (prefers-color-scheme:dark){:root{
-  --bg:#141312;--card:#1E1C1A;--text:#F3EFEA;--muted:#A39C94;--line:#2F2C29;--chip:#3A2B22;
-  --line-strong:#3D3935;--hover:#262320;--head:#232120;--side:#0F0E0D;
-  --ok:#4CCB52;--warn:#FFB35C;--bad:#FF7A5C;--shadow:none;
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#12161C;--bg2:#171C23;--card:#1C222B;--card2:#222934;--hover:#202630;--head:#171C23;
+  --line:rgba(220,235,240,.08);--line-strong:rgba(220,235,240,.14);
+  --text:#E6ECEE;--muted:#8A96A3;--faint:#687583;--link:#FF8F56;
+  --ok:#25F9E7;--okbg:rgba(37,249,231,.12);
+  --bad:#FF6473;--badbg:rgba(255,77,94,.12);
+  --warn:#F5C84B;--warnbg:rgba(245,200,75,.12);--warnrow:rgba(245,200,75,.06);--badrow:rgba(255,77,94,.08);
+  --accentbg:rgba(255,90,31,.14);--accent-ink:#FF6F28;
+  --info:#7CCBFF;--infobg:rgba(5,172,255,.12);
+  --chip:#222934;--glass:rgba(23,28,35,.82);
+  --invert:#E6ECEE;--on-invert:#12161C;
+  --shadow:none;--pop:0 18px 48px rgba(0,0,0,.45);
+  color-scheme:dark;
 }}
+:root[data-theme=dark]{
+  --bg:#12161C;--bg2:#171C23;--card:#1C222B;--card2:#222934;--hover:#202630;--head:#171C23;
+  --line:rgba(220,235,240,.08);--line-strong:rgba(220,235,240,.14);
+  --text:#E6ECEE;--muted:#8A96A3;--faint:#687583;--link:#FF8F56;
+  --ok:#25F9E7;--okbg:rgba(37,249,231,.12);
+  --bad:#FF6473;--badbg:rgba(255,77,94,.12);
+  --warn:#F5C84B;--warnbg:rgba(245,200,75,.12);--warnrow:rgba(245,200,75,.06);--badrow:rgba(255,77,94,.08);
+  --accentbg:rgba(255,90,31,.14);--accent-ink:#FF6F28;
+  --info:#7CCBFF;--infobg:rgba(5,172,255,.12);
+  --chip:#222934;--glass:rgba(23,28,35,.82);
+  --invert:#E6ECEE;--on-invert:#12161C;
+  --shadow:none;--pop:0 18px 48px rgba(0,0,0,.45);
+  color-scheme:dark;
+}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 var(--font-text)}
-a{color:var(--brand-dark);text-decoration:none}a:hover{text-decoration:underline}
-@media (prefers-color-scheme:dark){a{color:var(--brand-soft)}}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:400 14px/1.5 var(--font-text);
+  -webkit-font-smoothing:antialiased;overflow-x:clip}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* Числа - моноширинным: суммы и счётчики не пляшут по ширине, как в образце. */
+.mono,code,kbd,.num{font-family:var(--font-mono)}
+::selection{background:var(--accentbg)}
 
-/* ── меню: тёмная колонка слева, как в примере владельца ──
-   Группы с подписью, пункт - значок и слово, открытая страница - залитая
-   «пилюля». Подпункты разделов (склад, сервис, настройки) раскрываются
+/* ── меню: колонка слева, как развёрнутая навигация образца ──
+   Группы с подписью, пункт - значок и слово, открытая страница - своей
+   плашкой с оранжевой меткой у края. Кнопка внизу сворачивает колонку
+   до рейки значков (data-rail на <html>, подпись - во всплывающей
+   подсказке). Подпункты разделов (склад, сервис, настройки) раскрываются
    на месте (<details>), счётчик справа - сколько там ждёт. Разметка -
    base.html, дерево - app/web/nav.py. */
-body.with-side{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:100vh}
-.side{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;scrollbar-width:thin;
-  scrollbar-color:#3A3733 transparent;
-  background:var(--side);color:#fff;display:flex;flex-direction:column;padding:16px 12px 24px}
-.side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 8px 14px}
-.brand{display:flex;align-items:baseline;gap:8px;color:#fff;min-width:0}
+body.with-side{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:100vh}
+:root[data-rail="1"] body.with-side{grid-template-columns:76px minmax(0,1fr)}
+.side{position:sticky;top:0;align-self:start;height:100vh;height:100dvh;overflow-y:auto;scrollbar-width:thin;
+  scrollbar-color:var(--line-strong) transparent;
+  background:var(--bg2);color:var(--text);display:flex;flex-direction:column;padding:16px 10px 12px;
+  border-right:1px solid var(--line)}
+.side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 8px 16px}
+.brand{display:flex;align-items:baseline;gap:8px;color:var(--text);min-width:0}
 .brand:hover{text-decoration:none}
-.brand .logo{height:20px;width:auto;display:block;color:#fff}
-.brand-sub{font:600 10px/1 var(--font-head);letter-spacing:.14em;color:var(--brand-soft)}
+.brand .logo{height:19px;width:auto;display:block;color:var(--text)}
+.brand-sub{font:700 10px/1 var(--font-mono);letter-spacing:.16em;color:var(--accent)}
 .ico{width:18px;height:18px;flex:0 0 18px;display:inline-block;vertical-align:middle}
 /* Кто вошёл: кружок с инициалами, имя и роль - название профиля прав. */
-.side-me{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:9px 10px;border-radius:12px;
-  background:rgba(255,255,255,.06);color:#fff}
-.side-me:hover{text-decoration:none;background:rgba(255,255,255,.1)}
-.side-me .avatar{flex:0 0 34px;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
-  justify-content:center;background:var(--brand);color:#fff;font:700 13px/1 var(--font-text)}
+.side-me{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:8px;border-radius:var(--r2);
+  color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+.side-me:hover{text-decoration:none;background:var(--card)}
+.side-me .avatar{position:relative;flex:0 0 34px;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+  background:linear-gradient(135deg,#3A4656,#252C36);color:#E6ECEE;font:800 12px/1 var(--font-text)}
+/* зелёная точка «в сети», как у аватара образца */
+.side-me .avatar::after{content:"";position:absolute;right:-1px;bottom:-1px;width:10px;height:10px;border-radius:50%;
+  background:var(--ok);box-shadow:0 0 0 2px var(--bg2)}
 .side-me .who-text{display:flex;flex-direction:column;min-width:0}
-.side-me b{font-size:14px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.side-me small{color:#B7B0A8;font-size:12px;line-height:1.3}
-.side-me.on{background:rgba(255,89,7,.22)}
-.side-search{position:relative;margin:0 0 6px}
-.side-search .ico{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:#8A837B;width:16px;height:16px}
-.side-search input{margin:0;padding:8px 10px 8px 34px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
-  background:rgba(255,255,255,.06);color:#fff;font-size:14px}
-.side-search input::placeholder{color:#8A837B}
-.side-search input:focus{outline:2px solid var(--brand);border-color:var(--brand);background:rgba(255,255,255,.1)}
+.side-me b{font-size:13px;font-weight:700;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-me small{color:var(--muted);font-size:12px;line-height:1.3}
+.side-me.on{background:var(--card);box-shadow:inset 0 0 0 1px var(--line-strong)}
+/* поиск в колонке - только на телефоне: на компьютере он в шапке */
+.side-search{position:relative;margin:0 0 6px;display:none}
+.side-search .ico{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted);width:16px;height:16px}
+.side-search input{margin:0;padding:9px 10px 9px 34px;border-radius:var(--r3);border:0;
+  box-shadow:inset 0 0 0 1px var(--line);background:var(--card);color:var(--text);font-size:14px}
 .side nav{display:flex;flex-direction:column}
-.side .grp{margin:18px 12px 6px;font:600 11px/1 var(--font-text);letter-spacing:.09em;
-  text-transform:uppercase;color:#7C766F}
-.nav-link{display:flex;align-items:center;gap:12px;padding:8px 12px;margin:1px 0;border-radius:10px;
-  color:#D4CEC7;font-weight:500;font-size:15px;line-height:1.25;cursor:pointer;list-style:none}
-.nav-link span{flex:1 1 auto;min-width:0}
-.nav-link .ico{color:#9C958D}
-.nav-link:hover{color:#fff;text-decoration:none;background:rgba(255,255,255,.06)}
-.nav-link:hover .ico{color:#fff}
-.nav-link.on{color:#fff;background:var(--brand);font-weight:600}
-.nav-link.on .ico{color:#fff}
-.badge{flex:0 0 auto;min-width:21px;height:21px;padding:0 6px;border-radius:999px;display:inline-flex;
-  align-items:center;justify-content:center;background:#E5484D;color:#fff;
-  font:700 11.5px/1 var(--font-text);font-style:normal}
-.badge.soft{background:rgba(255,255,255,.12);color:#fff}
-.nav-link.on .badge{background:#fff;color:var(--brand-dark)}
+.side .grp{margin:18px 13px 6px;font:600 10px/1 var(--font-mono);letter-spacing:.14em;
+  text-transform:uppercase;color:var(--faint)}
+.nav-link{position:relative;display:flex;align-items:center;gap:12px;height:40px;padding:0 12px;margin:1px 0;border-radius:var(--r3);
+  color:var(--muted);font-weight:600;font-size:14px;line-height:1.2;cursor:pointer;list-style:none;white-space:nowrap}
+.nav-link span{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.nav-link .ico{color:inherit}
+.nav-link:hover{color:var(--text);text-decoration:none;background:var(--card)}
+.nav-link.on{color:var(--text);background:var(--card);box-shadow:inset 0 0 0 1px var(--line)}
+.nav-link.on::before{content:"";position:absolute;left:-10px;top:10px;bottom:10px;width:3px;border-radius:3px;background:var(--accent)}
+.badge{flex:0 0 auto;min-width:18px;height:18px;padding:0 5px;border-radius:99px;display:inline-flex;
+  align-items:center;justify-content:center;background:var(--accent);color:#fff;
+  font:700 10.5px/1 var(--font-mono);font-style:normal}
+.badge.soft{background:var(--card2);color:var(--text)}
 .nav-sub>summary::-webkit-details-marker{display:none}
-.nav-sub>summary .chev{flex:0 0 16px;width:16px;height:16px;transition:transform .15s}
+.nav-sub>summary .chev{flex:0 0 16px;width:16px;height:16px;transition:transform .15s;opacity:.7}
 .nav-sub[open]>summary .chev{transform:rotate(180deg)}
-.nav-sub[open]>summary{color:#fff}
+.nav-sub[open]>summary{color:var(--text)}
 .nav-sub[open]>summary .badge{display:none}
-.nav-kids{padding:2px 0 4px 14px}
-.nav-kids .nav-link{font-size:14px;padding:7px 12px}
-.burger{display:none;cursor:pointer;padding:6px 8px;border-radius:8px;line-height:1;color:#CFC9C2}
+.nav-kids{padding:2px 0 4px 14px;margin-left:8px;border-left:1px solid var(--line)}
+.nav-kids .nav-link{font-size:13.5px;height:36px}
+.nav-kids .nav-link.on::before{left:-25px}
+.side-foot{margin-top:auto;padding-top:12px;display:flex;flex-direction:column;gap:2px}
+.side-tool{display:flex;align-items:center;gap:12px;height:38px;padding:0 12px;border:0;border-radius:var(--r3);
+  background:transparent;color:var(--faint);font:600 13px/1 var(--font-text);cursor:pointer;justify-content:flex-start}
+.side-tool:hover{background:var(--card);color:var(--text)}
+.burger{display:none;cursor:pointer;padding:6px 8px;border-radius:8px;line-height:1;color:var(--muted)}
 .burger .ico{width:22px;height:22px}
-.burger:hover{background:rgba(255,255,255,.08);color:#fff}
-/* На телефоне колонка превращается в шапку, меню открывается галочкой:
-   скрипт ради этого заводить незачем. */
+.burger:hover{background:var(--card);color:var(--text)}
+/* Рейка: только значки. Подпись пункта - в title (base.html), счётчик -
+   точкой над значком, подпункты раздела - значками под ним. */
+@media (min-width:1001px){
+  :root[data-rail="1"] .side{padding:16px 10px 12px;overflow-x:hidden}
+  :root[data-rail="1"] .side .brand-sub,:root[data-rail="1"] .side .grp,
+  :root[data-rail="1"] .nav-link span,:root[data-rail="1"] .nav-link .chev,
+  :root[data-rail="1"] .side-me .who-text,:root[data-rail="1"] .side-tool span{display:none}
+  :root[data-rail="1"] .side-head{padding:4px 0 16px;justify-content:center}
+  :root[data-rail="1"] .brand .logo{height:14px;max-width:44px}
+  :root[data-rail="1"] .side-me{justify-content:center;box-shadow:none;padding:6px 0}
+  :root[data-rail="1"] .nav-link,:root[data-rail="1"] .side-tool{justify-content:center;padding:0;height:44px}
+  :root[data-rail="1"] .nav-link .badge{position:absolute;top:4px;right:4px;min-width:16px;height:16px;font-size:9.5px;padding:0 4px}
+  :root[data-rail="1"] .nav-sub[open]>summary .badge{display:none}
+  :root[data-rail="1"] .nav-kids{padding:2px 0 4px;margin:0;border:0}
+  :root[data-rail="1"] .nav-kids .nav-link.on::before{left:-10px}
+  :root[data-rail="1"] .side-tool .ico{transform:scaleX(-1)}
+  :root[data-rail="1"] .side .grp+*{margin-top:0}
+  :root[data-rail="1"] .nav-group+.nav-group{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+}
+
+/* ── шапка над страницей: крошки, поиск велосипеда, Входящие, тема ── */
+.page{min-width:0;display:flex;flex-direction:column}
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;height:60px;padding:0 28px;
+  border-bottom:1px solid var(--line);background:var(--glass);
+  background:color-mix(in srgb,var(--bg) 84%,transparent);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+.top .crumbs{margin:0;flex:0 1 auto;min-width:0;flex-wrap:nowrap;overflow:hidden;white-space:nowrap}
+.top .crumbs>*{flex:0 0 auto}
+.top-fill{flex:0 1 auto}
+.top-search{flex:1 1 auto;max-width:520px;margin-left:auto;display:flex;align-items:center;gap:10px;height:38px;padding:0 12px;
+  border-radius:var(--r3);background:var(--card);box-shadow:inset 0 0 0 1px var(--line);color:var(--muted)}
+.top-search:focus-within{box-shadow:inset 0 0 0 1px var(--accent),0 0 0 3px var(--accentbg)}
+.top-search .ico{width:16px;height:16px;flex:0 0 16px}
+.top-search input{flex:1;min-width:0;margin:0;padding:0;border:0;background:transparent;box-shadow:none;color:var(--text);font:500 14px var(--font-text)}
+.top-search input:focus{box-shadow:none;outline:0}
+kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 5px;border-radius:5px;
+  box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--muted);font:600 11px/1 var(--font-mono)}
+.top-right{margin-left:12px;display:flex;gap:8px;align-items:center}
+.top-search+.top-right{margin-left:0}
+.top-fill+.top-right,.crumbs+.top-right{margin-left:auto}
+.top-btn{position:relative;display:grid;place-items:center;width:38px;height:38px;padding:0;border:0;border-radius:var(--r3);
+  background:transparent;box-shadow:inset 0 0 0 1px var(--line);color:var(--muted);cursor:pointer}
+.top-btn:hover{background:var(--card);color:var(--text);text-decoration:none}
+.top-btn .badge{position:absolute;top:-6px;right:-6px;box-shadow:0 0 0 2px var(--bg)}
+/* значок темы: солнце в тёмной (уйти в светлую), луна в светлой */
+.top-btn .when-light{display:none}
+:root[data-theme=light] .top-btn .when-light{display:inline-block}
+:root[data-theme=light] .top-btn .when-dark{display:none}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]) .top-btn .when-light{display:inline-block}
+  :root:not([data-theme=dark]) .top-btn .when-dark{display:none}
+}
+
+/* ── телефон: колонка - шапка с бургером, меню - поверх страницы,
+   главные разделы - панелью внизу. Галочка вместо скрипта. ── */
+.tabbar{display:none}
 @media (max-width:1000px){
-  body.with-side{display:block}
-  .side{position:static;height:auto;padding:10px 12px}
-  .side-head{padding-bottom:0}
+  body.with-side,:root[data-rail="1"] body.with-side{display:block}
+  .side{position:sticky;top:0;z-index:30;height:auto;padding:10px 14px;border-right:0;border-bottom:1px solid var(--line);
+    background:var(--glass);background:color-mix(in srgb,var(--bg2) 88%,transparent);
+    -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);overflow:visible}
+  .side-head{padding:0}
   .burger{display:block}
-  .side nav,.side-me,.side-search{display:none}
+  .side nav,.side-me,.side-search,.side-foot{display:none}
+  .nav-toggle:checked ~ .side{position:fixed;inset:0;z-index:60;overflow-y:auto;background:var(--bg2);
+    padding:10px 14px calc(90px + env(safe-area-inset-bottom,0px))}
   .nav-toggle:checked ~ .side nav{display:flex}
   .nav-toggle:checked ~ .side .side-me{display:flex;margin-top:12px}
   .nav-toggle:checked ~ .side .side-search{display:block}
+  .nav-toggle:checked ~ .side .side-foot{display:none}
+  .top{position:static;height:auto;min-height:0;padding:10px 16px 0;border:0;background:none;
+    -webkit-backdrop-filter:none;backdrop-filter:none}
+  .top-search,.top-right{display:none}
+  .top-fill{display:none}
+  .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:70;display:flex;justify-content:space-around;gap:2px;
+    padding:6px calc(6px + env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) calc(6px + env(safe-area-inset-left,0px));
+    border-top:1px solid var(--line);background:var(--glass);
+    -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+  .tab{position:relative;flex:1 1 0;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    height:52px;padding:6px 2px;border-radius:var(--r2);color:var(--muted);font:600 10.5px/1.1 var(--font-text);cursor:pointer;margin:0}
+  .tab span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tab .ico{width:21px;height:21px}
+  .tab:hover{text-decoration:none;color:var(--text)}
+  .tab.on{color:var(--text);background:var(--card);box-shadow:inset 0 0 0 1px var(--line)}
+  .tab.on::before{content:"";position:absolute;left:30%;right:30%;top:-7px;height:3px;border-radius:3px;background:var(--accent)}
+  .tab .badge{position:absolute;top:2px;left:calc(50% + 6px);min-width:16px;height:16px;font-size:9.5px;padding:0 4px}
+  body.with-side main{padding-bottom:calc(96px + env(safe-area-inset-bottom,0px))}
 }
 
 /* width:100% - main стоит в сетке рядом с меню с полями auto, и без явной
    ширины её задаёт самая широкая таблица: обёртка .table-wrap так и не
    начинает прокрутку, и вбок уезжает вся страница, а не одна таблица. */
-main{width:100%;max-width:1280px;margin:0 auto;padding:22px 28px 40px}
-/* Заголовки - тем же Onest, что текст: широкий Unbounded остаётся
-   логотипу и входу, а на рабочих экранах крупный гротеск читается легче. */
-h1{font:700 26px/1.2 var(--font-text);margin:0 0 14px;letter-spacing:-.015em}
-h2{font:600 16px/1.3 var(--font-text);color:var(--text);margin:0 0 12px;letter-spacing:-.005em}
-h3{font:600 15px/1.3 var(--font-text);margin:14px 0 8px}
-h1 small{font:500 14px/1 var(--font-text);letter-spacing:0;text-transform:none;color:var(--muted)}
-h2 small{font-weight:400}
-.bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:16px}
+main{width:100%;max-width:1360px;margin:0 auto;padding:28px 32px 56px}
+@media (min-width:1600px){main{padding:36px 48px 64px}}
+/* Заголовки - Manrope с плотной разрядкой, как заголовки разделов образца;
+   широкий Unbounded остаётся входу. */
+h1{font:700 26px/1.1 var(--font-text);margin:0 0 20px;letter-spacing:-.03em;text-wrap:balance}
+h2{font:700 15px/1.5 var(--font-text);color:var(--text);margin:0 0 16px;letter-spacing:-.01em;text-wrap:balance}
+h3{font:700 14px/1.3 var(--font-text);margin:16px 0 8px}
+/* Подпись к заголовку («533 · за всё время») - строкой под ним: сводка
+   раздела, как «12 всего · 11 в работе» в образце. */
+h1 small{display:block;margin-top:8px;font:600 14px/1.5 var(--font-text);letter-spacing:0;text-transform:none;color:var(--muted)}
+h1 small b{color:var(--text);font-weight:800}
+h1 .tag{vertical-align:middle;margin-left:6px}
+h2 small{font-weight:500}
+.bar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;margin-bottom:22px}
 .bar h1{margin:0;flex:1 1 auto}
-/* Крошки над заголовком: «Склад › Приходы» - где я и куда назад. */
-.crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 6px;font-size:13px;color:var(--muted)}
+/* Крошки: «Склад › Приходы» - где я и куда назад. */
+.crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 10px;font-size:13px;font-weight:600;color:var(--muted)}
 .crumbs a{color:var(--muted)}
-.crumbs a:hover{color:var(--text)}
-.crumbs>:last-child{color:var(--text);font-weight:500}
-.crumbs .sep{color:var(--line-strong)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:16px;min-width:0;box-shadow:var(--shadow)}
-.card.narrow{max-width:520px}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.crumbs a:hover{color:var(--text);text-decoration:none}
+.crumbs>:last-child{color:var(--text)}
+.crumbs .sep{color:var(--faint)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px;margin-bottom:20px;min-width:0;box-shadow:var(--shadow)}
+.card.narrow{max-width:560px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.cols>.card{margin-bottom:0}
+.cols+*{margin-top:20px}
 @media (max-width:860px){.cols{grid-template-columns:1fr}}
 
-/* Плитки: число и подпись. Тревожная - цветной полосой сверху и цветом
-   числа, а не заливкой: шесть оранжевых плиток подряд кричали, и глаз
-   не находил ту, что правда горит. */
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+/* Плитки: число и подпись, как плитки показателей образца - число
+   моноширинным, подпись мелким моно под ним. Тревожная - цветом числа и
+   тонкой полосой сверху, а не заливкой: шесть цветных плиток подряд
+   кричали бы, и глаз не находил ту, что правда горит. */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:20px;margin-bottom:24px}
 /* Плитки миллионов (план, журнал финансов): «2 084 600 ₽» в 160
    пикселей не влезает, и «₽» уезжал на свою строку. */
-.tiles.wide{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.tiles.wide{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 /* Готовность: две таблицы подряд - колонки одной ширины. */
 table.ready th:first-child{width:190px}
 table.ready th:last-child{width:110px}
 table.ready td:last-child{white-space:nowrap}
 /* Задачи на сегодня: число слева, дело справа, цвет по уровню. */
-.tasks{display:grid;gap:4px}
-.task{display:flex;gap:12px;align-items:baseline;padding:7px 10px;border-radius:10px;color:var(--text)}
-.task:hover{background:var(--chip);text-decoration:none}
-.task .n{font:700 20px/1 var(--font-text);min-width:36px;text-align:right}
-.task .t{display:flex;flex-direction:column;gap:2px;font-weight:500}
-.task .t small{font-weight:400;font-size:12px}
+.tasks{display:grid;gap:2px}
+.task{display:flex;gap:14px;align-items:baseline;padding:9px 12px;border-radius:var(--r3);color:var(--text)}
+.task:hover{background:var(--hover);text-decoration:none}
+.task .n{font:700 18px/1 var(--font-mono);min-width:36px;text-align:right}
+.task .t{display:flex;flex-direction:column;gap:3px;font-weight:600}
+.task .t small{font-weight:500;font-size:12px}
+a.task.hot,a.task.warn,a.task.info{color:var(--text)}
 .task.hot .n{color:var(--bad)}.task.warn .n{color:var(--warn)}.task.info .n{color:var(--muted)}
 /* Шаблоны акций - карточками: название, условие, кнопка «Создать». */
-.kinds{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-bottom:16px}
-.kind{display:flex;flex-direction:column;gap:5px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px}
-.kind b{font:600 15px/1.25 var(--font-text)}
-.kind small{color:var(--muted);font-size:12px;line-height:1.35}
-.kind small.when{flex:1;color:var(--brand-dark)}
-.kind .btn{align-self:flex-start;padding:5px 12px;font-size:13px;margin-top:4px}
-.tile{display:block;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:15px 16px 14px;color:var(--text);position:relative;overflow:hidden;box-shadow:var(--shadow)}
+.kinds{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-bottom:20px}
+.kind{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
+.kind b{font:700 15px/1.25 var(--font-text)}
+.kind small{color:var(--muted);font-size:12px;line-height:1.4}
+.kind small.when{flex:1;color:var(--link)}
+.kind .btn{align-self:flex-start;height:32px;padding:0 12px;font-size:13px;margin-top:4px}
+.tile{display:block;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px 18px;color:var(--text);
+  position:relative;overflow:hidden;box-shadow:var(--shadow);transition:background .2s,border-color .2s}
 a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var(--hover)}
-.tile b{display:block;font:700 26px/1.15 var(--font-text);letter-spacing:-.02em;margin-bottom:2px}
-.tile span{color:var(--muted);font-size:13px}
-.tile.hot{box-shadow:inset 0 3px 0 var(--bad),var(--shadow)}
+.tile b{display:block;font:700 28px/1.12 var(--font-mono);letter-spacing:-.04em;margin-bottom:8px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tile span{color:var(--muted);font:600 12px/1.45 var(--font-mono);letter-spacing:-.01em}
+.tile small{display:block;font-size:11.5px;margin-top:3px}
+.tile.hot{box-shadow:inset 0 2px 0 var(--bad),var(--shadow)}
 .tile.hot b{color:var(--bad)}
+.tile.good{box-shadow:inset 0 2px 0 var(--ok),var(--shadow)}.tile.good b{color:var(--ok)}
+.tile.warn{box-shadow:inset 0 2px 0 var(--warn),var(--shadow)}.tile.warn b{color:var(--warn)}
 
-table{width:100%;border-collapse:collapse;font-size:14px}
-th{text-align:left;color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;padding:9px 10px;border-bottom:1px solid var(--line);background:var(--head);white-space:nowrap}
-td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+/* Таблица - как таблица данных образца: шапка мелким моно капсом, строка
+   повыше, числа моноширинным вправо, наведение - чуть светлее. */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--muted);font:500 11px/1.3 var(--font-mono);text-transform:uppercase;letter-spacing:.06em;
+  padding:14px 14px 10px;border-bottom:1px solid var(--line);background:transparent;white-space:nowrap}
+td{padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}
 tr:hover>td{background:var(--hover)}
 td.num,th.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+td.num{font-family:var(--font-mono);font-weight:600;font-size:13px;letter-spacing:-.01em}
+/* Имя в первой колонке - текстом, а не оранжевой ссылкой: в образце
+   кликабельна вся строка, а цветом выделено только важное. */
+td a{color:var(--text);font-weight:600}
+td a:hover{color:var(--link);text-decoration:none}
+td:first-child>a:first-child,td:first-child>b>a:first-child{font-weight:700}
+td a.btn,td a.tag{font-weight:700}
+td a.btn:hover{color:var(--on-accent)}
+td a.btn.ghost,td a.btn.ghost:hover{color:var(--text)}
 .card>table{display:block;overflow-x:auto}
+/* Карточка, в которой только таблица, - таблица до краёв карточки. */
+.card:has(>table:only-child),.card:has(>.table-wrap:only-child){padding:6px 10px}
 /* Таблица с редактируемыми строками: сами <form> стоят за таблицей, а
    поля ссылаются на них атрибутом form - <form> внутри <tr> браузер
    выносит наружу, и строка разъезжается. Прокрутку в этом случае берёт
@@ -211,17 +369,19 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
    сортировать нечем. .opt и пустые ячейки не показываются: на узком
    экране их убирали и раньше, а подпись без значения - просто шум. */
 @media (max-width:640px){
-  main{padding:14px 12px}
-  .card{padding:12px}
+  main{padding:16px 14px 40px}
+  .card{padding:16px}
+  h1{font-size:22px}
   table.cards,table.cards tbody,table.cards tr,table.cards td{display:block;width:100%}
-  table.cards tr{border:1px solid var(--line);border-radius:12px;padding:7px 12px;margin:0 0 8px}
+  table.cards tr{border:1px solid var(--line);border-radius:var(--r2);padding:8px 12px;margin:0 0 8px;background:var(--card)}
   table.cards td{border:0;padding:2px 0;line-height:1.4;text-align:left;white-space:normal;
     overflow-wrap:anywhere}
   table.cards td[data-label]{display:flow-root;padding-left:116px}
   table.cards td[data-label]::before{content:attr(data-label);float:left;width:106px;
-    margin-left:-116px;padding-top:3px;color:var(--muted);font-size:11px;font-weight:600;
-    line-height:1.3;text-transform:uppercase;letter-spacing:.04em}
-  table.cards td:first-child{font-weight:600}
+    margin-left:-116px;padding-top:3px;color:var(--muted);font:500 10.5px/1.3 var(--font-mono);
+    text-transform:uppercase;letter-spacing:.05em}
+  table.cards td:first-child{font-weight:700}
+  table.cards td.num{text-align:left}
   /* Поле в ячейке - в её ширину: поле ширины по умолчанию вылезало за
      край карточки (цена недели в мастере первого запуска). */
   table.cards td input,table.cards td select{max-width:100%}
@@ -233,13 +393,13 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
   table.cards tr:has(>th):not(:has(a)){display:none}
   table.cards th{display:none}
   table.cards th:not(.opt):has(a){display:block;border:0;padding:4px 11px;border-radius:999px;
-    background:var(--chip);font-size:12px;letter-spacing:0;text-transform:none}
-  table.cards th.sorted:has(a){background:var(--brand);color:#fff}
+    background:var(--card2);font:600 12px/1.4 var(--font-text);letter-spacing:0;text-transform:none}
+  table.cards th.sorted:has(a){background:var(--invert);color:var(--on-invert)}
   table.cards tr.total{border-width:2px}
   table.cards tr.list-foot{border:0;border-top:2px solid var(--line);border-radius:0;padding:8px 0 0}
   table.cards tr.list-foot td{border:0;padding:0;line-height:2}
-  table.cards tr.warn-row{background:#FFF7EC}
-  table.cards tr.bad-row{background:#FFECEC}
+  table.cards tr.warn-row{background:var(--warnrow)}
+  table.cards tr.bad-row{background:var(--badrow)}
   table.cards tr.warn-row td,table.cards tr.bad-row td{background:none}
   .table-wrap:has(>table.cards)~.scroll-hint{display:none}
   /* Вкладки без пробелов между ссылками строкой не переносятся и
@@ -249,192 +409,183 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
      «клиент, телефон, № велосипеда…» обрезалась на середине. */
   .search input[name=q]{flex:1 1 100%}
 }
-@media (max-width:640px) and (prefers-color-scheme:dark){
-  table.cards tr.warn-row{background:#3A2E1C}
-  table.cards tr.bad-row{background:#40201F}
-}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
-.tag{display:inline-block;padding:2px 10px;border-radius:999px;background:var(--chip);font-size:12px;font-weight:600;line-height:1.6;vertical-align:middle;color:var(--brand-dark);white-space:nowrap}
-.tag.available,.tag.active{background:#E4F5E4;color:var(--ok)}
-.tag.rented{background:var(--brand);color:#fff}
-.tag.repair,.tag.reserved{background:var(--brand-pale);color:var(--brand-dark)}
-.tag.lost,.tag.sold,.tag.bad,.tag.closed{background:var(--ink);color:#fff}
-@media (prefers-color-scheme:dark){.tag.available,.tag.active{background:#1F3A21}.tag.lost,.tag.sold,.tag.bad,.tag.closed{background:#4A4540}}
 
-label{display:block;margin:0 0 10px;font-size:13px;color:var(--muted)}
+/* ── метки статусов: как метки этапов образца - плашка с тинтом и цветным
+   текстом. Цвет - смыслом: бирюзовый «хорошо», оранжевый «в работе / в
+   аренде», жёлтый «ждёт», красный «плохо», голубой «справка», серый -
+   закрыто. Одни правила на обе темы: тинты и цвета - токены. ── */
+.tag{display:inline-flex;align-items:center;gap:6px;min-height:22px;padding:2px 8px;border-radius:6px;background:var(--card2);color:var(--muted);
+  font:600 11.5px/1.3 var(--font-text);vertical-align:middle;white-space:nowrap}
+.tag.ok,.tag.available,.tag.active,.tag.order-done,.tag.take-found,.tag.ref-paid,.tag.risk-low,.tag.intent-renew,
+.tag.bot-signed,.tag.bot-renting{background:var(--okbg);color:var(--ok)}
+.tag.rented,.tag.order-in_work,.tag.ref-rented,.tag.new{background:var(--accentbg);color:var(--accent-ink)}
+.tag.warn,.tag.repair,.tag.reserved,.tag.order-new,.tag.take-extra,.tag.risk-medium,.tag.bot-pending,.tag.bot-registering,
+.tag.bot-approved,.tag.bot-none{background:var(--warnbg);color:var(--warn)}
+.tag.bad,.tag.lost,.tag.risk-high,.tag.take-missing{background:var(--badbg);color:var(--bad)}
+.tag.maintenance,.tag.order-waiting,.tag.intent-return,.tag.ref-signed{background:var(--infobg);color:var(--info)}
+.tag.sold,.tag.closed,.tag.written_off,.tag.order-cancelled,.tag.muted,.tag.ghost,.tag.take-expected,.tag.ref-click,
+.tag.risk-none{background:var(--card2);color:var(--muted)}
+
+label{display:block;margin:0 0 12px;font-size:12.5px;font-weight:600;color:var(--muted)}
 /* Скрытое остаётся скрытым: правило ниже задаёт полям display, а
    авторский стиль сильнее браузерного [hidden]{display:none}. Без
    этой строки технический чекбокс меню вылезал полем во всю ширину. */
 [hidden]{display:none !important}
-input,select,textarea{display:block;width:100%;margin-top:5px;padding:9px 12px;border:1px solid var(--line-strong);border-radius:10px;background:var(--card);color:var(--text);font:inherit}
-input::placeholder,textarea::placeholder{color:#A8A29B}
-input:focus,select:focus,textarea:focus{outline:0;border-color:var(--brand);box-shadow:0 0 0 3px rgba(255,89,7,.18)}
-td input,td select{margin:0;padding:5px 7px;width:auto;display:inline-block}
+/* Поле - как поле образца: подложка чуть светлее карточки и тонкая
+   внутренняя рамка, фокус - оранжевой рамкой. */
+input,select,textarea{display:block;width:100%;margin-top:6px;min-height:40px;padding:8px 12px;border:0;border-radius:var(--r3);
+  background:var(--card2);box-shadow:inset 0 0 0 1px var(--line);color:var(--text);font:500 14px/1.4 var(--font-text)}
+textarea{min-height:72px}
+input::placeholder,textarea::placeholder{color:var(--faint)}
+input:focus,select:focus,textarea:focus{outline:0;box-shadow:inset 0 0 0 1.5px var(--accent),0 0 0 3px var(--accentbg)}
+input[type=checkbox],input[type=radio]{display:inline-block;width:auto;min-height:0;margin:0;padding:0;box-shadow:none;background:none;accent-color:var(--accent)}
+input[type=file]{padding:7px 10px}
+input[type=color]{padding:3px;min-height:40px}
+td input,td select{margin:0;min-height:32px;padding:4px 8px;width:auto;display:inline-block}
 /* Кнопки: одна главная (залитая) и спокойные второстепенные - белые с
    серой рамкой. Раньше второстепенные были оранжевой обводкой, и на
    экране с «Excel», «CSV», «Найти» и «+ Наряд» главного не было видно. */
-button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 16px;border-radius:10px;border:1px solid var(--brand);background:var(--brand);color:#fff;font:600 14px/1.3 var(--font-text);cursor:pointer;white-space:nowrap}
-button:hover,.btn:hover{background:var(--brand-dark);border-color:var(--brand-dark);text-decoration:none}
-button.ghost,.btn.ghost{background:var(--card);border-color:var(--line-strong);color:var(--text)}
-button.ghost:hover,.btn.ghost:hover{background:var(--hover);border-color:#C9C4BD;color:var(--text)}
-button.small,.btn.small{padding:5px 10px;font-size:13px;border-radius:8px}
-button.icon{background:transparent;border:0;color:var(--muted);padding:4px 8px;font-size:22px;line-height:1}
-button.icon:hover{background:var(--hover);color:var(--text)}
-button:disabled,button:disabled:hover{background:var(--chip);border-color:var(--line);color:var(--muted);cursor:not-allowed}
-button.danger{border-color:var(--ink);background:var(--ink)}button.danger:hover{background:#000}
-button.ghost.danger{background:var(--card);color:var(--bad)}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;align-items:end}
+button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:8px 16px;border-radius:var(--r3);
+  border:0;background:var(--accent);color:var(--on-accent);font:700 13.5px/1.2 var(--font-text);cursor:pointer;white-space:nowrap;
+  transition:filter .2s,background .2s,transform .1s}
+button:hover,.btn:hover{filter:brightness(1.08);text-decoration:none}
+button:active,.btn:active{transform:scale(.98)}
+button.ghost,.btn.ghost{background:transparent;color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong)}
+button.ghost:hover,.btn.ghost:hover{background:var(--card2);filter:none;color:var(--text)}
+button.small,.btn.small{min-height:32px;padding:5px 12px;font-size:12.5px;border-radius:8px}
+button.icon{min-height:0;background:transparent;box-shadow:none;color:var(--muted);padding:4px 8px;font-size:22px;line-height:1}
+button.icon:hover{background:var(--card2);color:var(--text);filter:none}
+button:disabled,button:disabled:hover{opacity:.45;cursor:not-allowed;filter:none;transform:none}
+button.danger{background:var(--badbg);color:var(--bad);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--bad) 35%,transparent)}
+button.danger:hover{background:var(--bad);color:#fff;filter:none}
+button.ghost.danger{background:transparent;color:var(--bad);box-shadow:inset 0 0 0 1px var(--line-strong)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;align-items:end}
 .grid2 button{grid-column:1/-1;justify-self:start;margin-bottom:10px}
 .grid2 .wide{grid-column:1/-1}
 @media (max-width:600px){.grid2{grid-template-columns:1fr}}
-.inline-form{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.inline-form{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .inline-form input,.inline-form select{margin:0;width:auto}
-.search{display:flex;flex-wrap:wrap;gap:6px}
+.search{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .search input,.search select{margin:0;width:auto}
 /* Строка поиска с лупой, «Найти» - второстепенной: главная кнопка
    страницы - «+ Велосипед», «+ Наряд», а не поиск. */
-.search input[name=q]{min-width:240px;padding-left:36px;background:var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238A837B' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E") no-repeat 12px center/16px}
-.search button[type=submit]{background:var(--card);border-color:var(--line-strong);color:var(--text)}
-.search button[type=submit]:hover{background:var(--hover)}
+.search input[name=q]{min-width:260px;padding-left:36px;background:var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238A837B' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E") no-repeat 12px center/16px}
+.search button[type=submit]{background:transparent;color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong)}
+.search button[type=submit]:hover{background:var(--card2);filter:none}
 /* Шапка с поиском: заголовок - своей строкой, под ним панель поиска и
    действий, как в примере владельца; без поиска кнопки остаются справа. */
 .bar:has(>form.search)>h1{flex-basis:100%}
 /* Вкладки над плитками и таблицей, а не в шапке: без зазора «План замены»
    ложился на верх плитки. */
-main>nav.tabs{margin-bottom:12px}
-.tabs{display:inline-flex;flex-wrap:wrap;gap:6px}
-.tabs a{padding:6px 14px;border-radius:999px;color:var(--text);font-weight:500;font-size:14px;background:var(--card);border:1px solid var(--line-strong)}
-.tabs a:hover{text-decoration:none;background:var(--hover)}
-.tabs a.on{background:var(--ink);border-color:var(--ink);color:#fff}
-@media (prefers-color-scheme:dark){.tabs a.on{background:var(--brand);border-color:var(--brand)}}
-.flash{padding:10px 14px;border-radius:10px;margin-bottom:12px;background:#E4F5E4;color:#0F5A14;border-left:4px solid var(--green)}
-.flash.err{background:var(--brand-pale);color:#6B2400;border-left-color:var(--brand-dark)}
-@media (prefers-color-scheme:dark){.flash{background:#1F3A21;color:#CFF2D0}.flash.err{background:#4A2412;color:#FFD0B8}}
-dl{display:grid;grid-template-columns:max-content 1fr;gap:7px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
+main>nav.tabs{margin-bottom:16px}
+/* Вкладки - переключатель образца: рамка вокруг, выбранная - своей плашкой. */
+.tabs{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border-radius:var(--r3);background:var(--card);box-shadow:inset 0 0 0 1px var(--line);max-width:100%}
+.tabs a{display:inline-flex;align-items:center;min-height:30px;padding:4px 12px;border-radius:8px;color:var(--muted);font-weight:600;font-size:13px;background:transparent}
+.tabs a:hover{text-decoration:none;color:var(--text)}
+.tabs a.on{background:var(--card2);color:var(--text);box-shadow:inset 0 0 0 1px var(--line-strong)}
+/* Плашки - как плашки образца: тинт и тонкая рамка того же цвета. */
+.flash{padding:14px 18px;border-radius:14px;margin-bottom:18px;background:var(--okbg);color:var(--text);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ok) 40%,transparent)}
+.flash.err{background:var(--badbg);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--bad) 45%,transparent)}
+/* Пары «подпись - значение» - строками с линией, как карточка клиента образца. */
+dl{display:grid;grid-template-columns:max-content 1fr;gap:0 20px;margin:0}
+dt,dd{padding:8px 0;border-bottom:1px solid var(--line)}
+dt{color:var(--muted)}dd{margin:0;min-width:0}
+dl>dt:last-of-type,dl>dd:last-of-type{border-bottom:0}
 ul.inline{list-style:none;padding:0;margin:0 0 12px;display:flex;flex-wrap:wrap;gap:6px 18px}
 small{font-size:12px}
 
 /* ── вход: обложка брендбука — тёмный фон, «молния», логотип ── */
-body:has(.login){background:var(--ink)}
+body:has(.login){background:#12161C}
 .login{min-height:calc(100vh - 40px);display:grid;grid-template-columns:1fr minmax(320px,440px);align-items:center;gap:24px;position:relative;overflow:hidden}
 .login-art{position:absolute;inset:0;pointer-events:none}
 .login-art svg{position:absolute;left:8%;top:-10%;height:120%;color:var(--brand)}
 .login-art svg path{fill:var(--brand)}
-.login-box{position:relative;z-index:1;grid-column:2;background:var(--card);border-radius:18px;padding:28px 28px 22px;color:var(--text)}
+.login-box{position:relative;z-index:1;grid-column:2;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:30px 30px 24px;color:var(--text);box-shadow:var(--pop)}
 .login-logo .logo{height:34px;width:auto;color:var(--text)}
 .login-box h1{margin:22px 0 18px;font:700 30px/1.05 var(--font-head);text-transform:uppercase}
 .login-box button{width:100%;padding:11px}
 @media (max-width:760px){.login{grid-template-columns:1fr;align-items:end;padding-bottom:20px}.login-box{grid-column:1}.login-art svg{left:-20%;top:-30%;height:90%}}
-pre.report{white-space:pre-wrap;word-break:break-word;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;max-height:70vh;overflow:auto}
+pre.report{white-space:pre-wrap;word-break:break-word;font:500 12.5px/1.6 var(--font-mono);background:var(--bg);border:1px solid var(--line);border-radius:var(--r2);padding:14px 16px;max-height:70vh;overflow:auto}
 label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check input{width:auto;margin:0}
 .checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:2px 16px}
 .checks label.check{margin:4px 0}
 /* фото при сдаче: миниатюры рядами, клик - снимок целиком */
 .photos{display:flex;flex-wrap:wrap;gap:8px}
-.photos img{display:block;width:120px;height:90px;object-fit:cover;border-radius:10px;border:1px solid var(--line);background:var(--bg)}
-.stars{color:var(--brand);letter-spacing:.06em}
-.card.three{margin-bottom:16px}.card.three .tiles{margin-bottom:8px}.three-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:10px}.three-head h2{margin:0}.tile.good{box-shadow:inset 0 3px 0 var(--green),var(--shadow)}.tile.good b{color:var(--ok)}.tile.warn{box-shadow:inset 0 3px 0 var(--amber),var(--shadow)}.tile.warn b{color:var(--warn)}.tile small{display:block;font-size:12px;margin-top:2px}
-.tag.maintenance{background:#E8F4FF;color:#0B5A86}.tag.written_off{background:var(--ink);color:#fff}
+.photos img{display:block;width:120px;height:90px;object-fit:cover;border-radius:var(--r3);border:1px solid var(--line);background:var(--bg)}
+.stars{color:var(--accent);letter-spacing:.06em}
+.card.three{margin-bottom:20px}.card.three .tiles{margin-bottom:8px}
+.three-head{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:14px}.three-head h2{margin:0}
 
 /* ── быстрая выдача: шаги и плитки выбора ── */
 .steps{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
-.steps>span,.steps>a{padding:6px 12px;border-radius:999px;font-size:13px;font-weight:600;background:var(--chip);color:var(--brand-dark);white-space:nowrap}
-.steps>.done{background:#E4F5E4;color:var(--ok)}
-.steps>.now{background:var(--ink);color:#fff}
-.steps>.todo{background:transparent;border:1px dashed var(--line);color:var(--muted);font-weight:500}
+.steps>span,.steps>a{display:inline-flex;align-items:center;min-height:30px;padding:4px 12px;border-radius:999px;font-size:13px;font-weight:600;
+  background:var(--card2);color:var(--muted);white-space:nowrap}
+.steps>.done{background:var(--okbg);color:var(--ok)}
+.steps>.now{background:var(--accent);color:#fff}
+.steps>.todo{background:transparent;box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--muted);font-weight:500}
 /* шаги мастера первого запуска - ссылки: любой шаг открывается сразу */
 .steps>a:hover{text-decoration:none;filter:brightness(.95)}
 /* В тёмной теме светлый фон «готово» гасил зелёный текст, а тёмный «сейчас»
    сливался со страницей - по шагам мастера ходят именно по ним. */
-@media (prefers-color-scheme:dark){.steps>.done{background:#1F3A21}.steps>.now{background:var(--brand);color:#fff}}
+
 .choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:8px 0 14px}
-.choice{display:block;position:relative;border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--bg);color:var(--text);cursor:pointer;margin:0;font-size:14px}
+.choice{display:block;position:relative;border:1px solid var(--line);border-radius:var(--r2);padding:14px 16px;background:var(--card2);color:var(--text);cursor:pointer;margin:0;font-size:14px;transition:border-color .2s,background .2s}
 .choice input{position:absolute;opacity:0;width:0;height:0;margin:0}
-.choice b{display:block;font:600 16px/1.25 var(--font-text);letter-spacing:-.01em}
+.choice b{display:block;font:700 15px/1.25 var(--font-text);letter-spacing:-.01em}
 .choice small{display:block;color:var(--muted);font-size:12px;margin-top:3px}
-.choice .price{display:block;margin-top:6px;font-weight:600}
-.choice:hover{border-color:var(--brand-soft)}
-.choice:has(input:checked),.choice.on{border-color:var(--brand);box-shadow:inset 0 0 0 2px var(--brand);background:var(--card)}
+.choice .price{display:block;margin-top:6px;font:600 13px var(--font-mono)}
+.choice:hover{border-color:var(--line-strong)}
+.choice:has(input:checked),.choice.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--accentbg)}
 .choice.dim{opacity:.55}
 .issue-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:6px}
 .issue-bar .spacer{flex:1 1 auto}
 .who{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline;margin-bottom:10px}
-.who b{font:600 17px/1.2 var(--font-text)}
-.tag.bot-none{background:var(--brand-pale);color:var(--brand-dark)}
-.tag.bot-signed,.tag.bot-renting{background:#E4F5E4;color:var(--ok)}
-.tag.bot-pending,.tag.bot-registering,.tag.bot-approved{background:#FFF3D6;color:#7A4B00}
+.who b{font:700 17px/1.2 var(--font-text)}
+
 /* ── оценка риска клиента: выдача и карточка ── */
-.tag.risk-none{background:var(--chip);color:var(--brand-dark)}
-.tag.risk-low{background:#E4F5E4;color:var(--ok)}
-.tag.risk-medium{background:#FFF3D6;color:#7A4B00}
-.tag.risk-high{background:var(--bad);color:#fff}
+
 /* тёмная тема: белый на светлом --bad читается хуже среднего (2,6:1) - фон темнее, 5,8:1 */
-@media (prefers-color-scheme:dark){.tag.risk-low{background:#1F3A21}.tag.risk-medium{background:#4A3A18;color:#FFD9A0}.tag.risk-high{background:#B83A00}}
 .risk-why{margin:6px 0 0;padding-left:18px;font-size:13px}
 .risk-why li.bad{color:var(--bad)}.risk-why li.good{color:var(--ok)}.risk-why li.note{color:var(--muted)}
 
 /* ── намерение клиента: сводка и карточка аренды ── */
 .intent form{display:inline-flex;flex-wrap:wrap;gap:4px;margin:4px 0 0}
 .intent button{padding:3px 8px;font-size:12px;border-radius:7px}
-.tag.intent-renew{background:#E4F5E4;color:var(--ok)}
-.tag.intent-return{background:#E8F4FF;color:#0B5A86}
 
 /* ── профили доступа: матрица «раздел × уровень» ── */
 .perms{max-width:620px}
 .perms th:not(:first-child),.perms td:not(:first-child){width:1%;text-align:center;white-space:nowrap}
 .perms td:first-child{width:auto}
 .perms label.cell{display:block;margin:0;cursor:pointer;padding:2px 10px}
-.perms label.cell input{width:auto;margin:0;accent-color:var(--brand)}
-label.check input[type=checkbox]{accent-color:var(--brand)}
-.perms tr:hover td{background:var(--chip)}
-.tag.ok{background:#E4F5E4;color:var(--ok)}
-@media (prefers-color-scheme:dark){.tag.ok{background:#1F3A21}}
-.tag.warn{background:#FFF3D6;color:#7A4B00}
+.perms label.cell input{width:auto;margin:0}
+.perms tr:hover td{background:var(--hover)}
+
 /* Форма только для просмотра: fieldset[disabled] гасит поля, но рамку
    и отступы браузера в вёрстке карточки видеть не нужно. */
 fieldset.plain{border:0;margin:0;padding:0;min-width:0}
 fieldset[disabled] button{opacity:.45;cursor:not-allowed}
 fieldset[disabled] input,fieldset[disabled] select,fieldset[disabled] textarea{opacity:.7}
 
-/* ── сервис: наряды ── */
-.tag.order-new{background:#FFF3D6;color:#7A4B00}
-.tag.order-in_work{background:var(--brand);color:#fff}
-.tag.order-waiting{background:#E8F4FF;color:#0B5A86}
-.tag.order-done{background:#E4F5E4;color:var(--ok)}
-.tag.order-cancelled{background:var(--ink);color:#fff}
-tr.warn-row td{background:#FFF7EC}
+/* ── строки, которые ждут: жёлтая - скоро, красная - в розыске ── */
+tr.warn-row td{background:var(--warnrow)}
 /* Строка в розыске краснее жёлтой: её ищут, а не листают. */
-tr.bad-row td{background:#FFECEC}
-@media (prefers-color-scheme:dark){
-  .tag.order-new{background:#4A3A18;color:#FFD9A0}
-  .tag.order-waiting{background:#123048;color:#BEE2FF}
-  .tag.order-done{background:#1F3A21}
-  tr.warn-row td{background:#3A2E1C}
-  tr.bad-row td{background:#40201F}
-  .tag.take-found{background:#1F3A21}
-  .tag.take-extra{background:#4A3A18;color:#FFD9A0}
-}
-.tag.take-found{background:#E4F5E4;color:var(--ok)}
-.tag.take-missing{background:var(--ink);color:#fff}
-.tag.take-extra{background:#FFF3D6;color:#7A4B00}
-.tag.take-expected{background:var(--chip);color:var(--brand-dark)}
+tr.bad-row td{background:var(--badrow)}
+
 /* Пересчёт считают с телефоном в руках: на узком экране от строки нужны
    номер, отметка и кнопка, остальное уводим. */
 @media (max-width:700px){
   th.opt,td.opt{display:none}
 }
 tr.total td{border-top:2px solid var(--line);font-weight:600}
-.tag.ref-click{background:var(--chip);color:var(--brand-dark)}
-.tag.ref-signed{background:#E8F4FF;color:#0B5A86}
-.tag.ref-rented{background:var(--brand);color:#fff}
-.tag.ref-paid{background:#E4F5E4;color:var(--ok)}
 
 /* Карта парка: единственный экран со скриптом, высота задаётся здесь -
    у Leaflet без явной высоты контейнер схлопывается в ноль. */
-.map{height:min(60vh,520px);border-radius:12px;overflow:hidden;margin:4px 0 10px}
+.map{height:min(60vh,520px);border-radius:var(--r2);overflow:hidden;margin:4px 0 10px;border:1px solid var(--line)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 2px}
-.dot.rented{background:#FF5907}.dot.parked{background:#2e7d32}
-.dot.offline{background:#777}.dot.alarm{background:#d32f2f}
+.dot.rented{background:#FF5907}.dot.parked{background:#16B8A8}
+.dot.offline{background:#7C8794}.dot.alarm{background:#FF4D5E}
 /* Точка выдачи: подпись в тёмной плашке над местом, а не кружок - кружки
    на карте означают велосипеды. Легенда рисует ту же плашку квадратом. */
 .map-place-icon{background:none;border:0}
@@ -446,19 +597,19 @@ tr.total td{border-top:2px solid var(--line);font-weight:600}
 
 /* Предпросмотр рассылки: показываем ровно то, что уйдёт клиенту,
    поэтому переносы строк сохраняются как есть. */
-pre.preview{white-space:pre-wrap;font:inherit;background:var(--soft,#f3f1ee);
-  border-radius:10px;padding:12px 14px;margin:8px 0}
+pre.preview{white-space:pre-wrap;font:inherit;background:var(--card2);
+  border-radius:var(--r3);padding:12px 14px;margin:8px 0}
 
 /* Страница подписания: её открывает клиент с телефона, и кроме
    документов с кодом на ней ничего быть не должно. */
 .sign-body{background:var(--bg)}
 .sign-main{max-width:560px;margin:0 auto;padding:24px 16px 48px}
-.sign-logo{display:block;margin:8px 0 18px;color:var(--ink)}
+.sign-logo{display:block;margin:8px 0 18px;color:var(--text)}
 .sign-logo .logo{height:26px}
 .docs{list-style:none;padding:0;margin:8px 0}
 .docs li{padding:10px 0;border-bottom:1px solid var(--line)}
 .docs li:last-child{border-bottom:0}
-.code-input{font-size:28px;letter-spacing:8px;text-align:center}
+.code-input{font:600 28px var(--font-mono);letter-spacing:8px;text-align:center}
 .wide-btn{width:100%;margin-top:10px}
 pre.agreement{white-space:pre-wrap;font:inherit;font-size:14px;line-height:1.5}
 code.hash{font-size:12px;word-break:break-all}
@@ -474,14 +625,15 @@ p.small{font-size:13px}
       height:180px;padding:18px 0 0;margin:8px 0 12px;overflow-x:auto}
 .bar-col{flex:1 0 18px;display:flex;flex-direction:column;justify-content:flex-end;
          align-items:center;height:100%;min-width:18px}
-.bar-val{width:100%;min-height:2px;border-radius:4px 4px 0 0;
-         background:var(--ok);transition:height .2s}
-.bar-val.over{background:#E04B43}
-.bar-num{font-size:11px;line-height:1.2;margin-top:2px}
-.bar-day{font-size:10px;line-height:1.2}
+.bar-val{--c:var(--ok);width:100%;min-height:2px;border-radius:4px 4px 0 0;border-top:2px solid var(--c);
+         background:linear-gradient(180deg,color-mix(in srgb,var(--c) 42%,transparent),color-mix(in srgb,var(--c) 8%,transparent));
+         transition:height .2s}
+.bar-val.over{--c:var(--bad)}
+.bar-num{font:500 10.5px/1.2 var(--font-mono);margin-top:3px}
+.bar-day{font:500 10px/1.2 var(--font-mono);color:var(--muted)}
 .bar-norm{position:absolute;left:0;right:0;border-top:1px dashed var(--muted);
           pointer-events:none}
-.bar-norm span{position:absolute;right:0;top:-14px;font-size:10px;color:var(--muted);
+.bar-norm span{position:absolute;right:0;top:-14px;font:500 10px var(--font-mono);color:var(--muted);
                background:var(--card);padding:0 4px}
 @media (max-width:700px){
   .bars{height:140px}
@@ -491,81 +643,79 @@ p.small{font-size:13px}
 /* Деньги по дням: столбик «пришло» и точка накопленного долга.
    Будущие дни месяца остаются пустыми - месяц ещё идёт, и обрезать
    его значит делать вид, что он кончился. */
-.bar-val.over-ok{background:var(--ok)}
-.bar-val.future{background:var(--line)}
+.bar-val.over-ok{--c:var(--ok)}
+.bar-val.future{--c:var(--line-strong);background:var(--line)}
 .bar-col{position:relative}
 .bar-dot{position:absolute;left:50%;width:6px;height:6px;margin-left:-3px;
          border-radius:50%;background:var(--bad)}
 
 /* Сортируемый заголовок, подвал списка и свои фильтры. */
-th.sorted{background:var(--chip)}
+th.sorted{color:var(--text)}
 th a{color:inherit;text-decoration:none}
 th a:hover{text-decoration:underline}
 .caret{margin-left:4px;font-size:10px}
 tr.list-foot td{border-top:2px solid var(--line);font-size:13px}
 tr.list-foot .spacer{display:inline-block;width:18px}
 tr.list-foot a{margin:0 2px}
-tr.list-foot a.on{font-weight:700;text-decoration:underline}
+tr.list-foot a.on{font-weight:700;color:var(--text)}
 .saved-views{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
              margin:8px 0;font-size:13px}
 .saved-views .inline-form{display:inline-flex;gap:4px;margin:0}
-.saved-views .btn,.saved-views button{padding:4px 12px;font-size:13px;font-weight:500;border-radius:999px}
-.saved-views button.danger{padding:4px 8px;border-color:transparent;background:transparent}
+.saved-views .btn,.saved-views button{min-height:30px;padding:4px 12px;font-size:12.5px;font-weight:600;border-radius:999px}
+.saved-views button.danger{padding:4px 8px;box-shadow:none;background:transparent}
 .saved-views input.mini{padding:5px 10px;font-size:13px}
 /* Входящие: лента переписки */
 /* Лента идёт в DOM от новых к старым, а column-reverse рисует её сверху
    вниз и открывает прокрутку снизу: последнее сообщение видно сразу,
    без скрипта. */
 .thread{display:flex;flex-direction:column-reverse;gap:8px;margin-bottom:12px;max-height:60vh;overflow:auto}
-.thread .msg{border:1px solid var(--line,#ddd);border-radius:8px;padding:6px 10px;max-width:85%;word-break:break-word}
+.thread .msg{border:1px solid var(--line);border-radius:var(--r2);padding:8px 12px;max-width:85%;word-break:break-word;background:var(--card2)}
 .thread .msg .body{white-space:pre-wrap}
-.thread .msg.out{align-self:flex-end;background:var(--brand-pale);color:#3A1A08}
-@media (prefers-color-scheme:dark){.thread .msg.out{background:#4A2412;color:#FFD0B8}}
-.thread .msg.event{align-self:center;border-style:dashed}
+.thread .msg.out{align-self:flex-end;background:var(--accentbg);border-color:transparent}
+.thread .msg.event{align-self:center;border-style:dashed;background:transparent}
 
 /* Демо-стенд: плашка на каждой странице и входы под ролями. Голубая, а
    не оранжевая: это пояснение, а не ошибка, и с flash её путать нельзя. */
-.demo-banner{padding:9px 14px;border-radius:10px;margin-bottom:14px;font-size:14px;
-  background:#E8F4FF;color:#0B4A6E;border-left:4px solid var(--blue)}
-@media (prefers-color-scheme:dark){.demo-banner{background:#11303F;color:#CDEBFF}}
+.demo-banner{padding:12px 18px;border-radius:14px;margin-bottom:20px;font-size:13.5px;
+  background:var(--infobg);color:var(--text);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 35%,transparent)}
 .demo-logins{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
 .demo-logins p{margin:0 0 8px}
 .demo-logins form{margin:0 0 6px}
 .login-box .demo-logins button{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;
   justify-content:space-between;text-align:left;padding:8px 12px;font-weight:500}
-.demo-logins code{font-size:13px}
+.demo-logins code{font-size:12.5px}
 
 /* ── обучение новичка: карточка шага на каждой странице и список шагов ── */
-.card.learn{border-left:4px solid var(--brand)}
+.card.learn{box-shadow:inset 3px 0 0 var(--accent)}
 .learn-head{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;margin-bottom:8px}
 .learn-head a{margin-left:auto;font-size:13px}
 .learn p{margin:0 0 8px}
 .learn-now{font-size:15px}
-.learn-fresh{margin:0 0 8px;padding:6px 10px;border-radius:9px;background:#E4F5E4;color:var(--ok);font-weight:600}
+.learn-fresh{margin:0 0 8px;padding:6px 10px;border-radius:9px;background:var(--okbg);color:var(--ok);font-weight:600}
 .learn-steps{list-style:none;margin:0;padding:0;display:grid;gap:10px}
-.learn-steps li{border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-.learn-steps li.now{border-color:var(--brand);box-shadow:inset 4px 0 0 var(--brand)}
+.learn-steps li{border:1px solid var(--line);border-radius:var(--r2);padding:12px 14px}
+.learn-steps li.now{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
 .learn-steps li.done{opacity:.8}
 .learn-steps p{margin:6px 0}
 .learn-step-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
-.learn-mark{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;background:var(--chip);font-weight:700;font-size:13px}
-.learn-steps li.done .learn-mark{background:#E4F5E4;color:var(--ok)}
+.learn-mark{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;background:var(--card2);font:700 12px var(--font-mono)}
+.learn-steps li.done .learn-mark{background:var(--okbg);color:var(--ok)}
 .learn-tracks{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:12px 0}
 .learn-list{margin:4px 0 8px;padding-left:20px;font-size:13px}
 .learn-tracks form{margin:0}
-@media (prefers-color-scheme:dark){.learn-fresh,.learn-steps li.done .learn-mark{background:#1F3A21}}
 
 /* ── мои задачи: группа - карточка, строка - ссылка в карточку записи ── */
-.my-group.hot{border-left:4px solid var(--bad)}
-.my-group.warn{border-left:4px solid var(--warn)}
+.my-group.hot{box-shadow:inset 3px 0 0 var(--bad),var(--shadow)}
+.my-group.warn{box-shadow:inset 3px 0 0 var(--warn),var(--shadow)}
+.my-group.info{box-shadow:inset 3px 0 0 var(--ok),var(--shadow)}
 .my-items{list-style:none;margin:0;padding:0;display:grid;gap:2px}
-.my-items li{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;justify-content:space-between;padding:7px 10px;border-radius:10px}
-.my-items li:hover{background:var(--chip)}
+.my-items li{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;justify-content:space-between;padding:9px 12px;border-radius:var(--r3)}
+.my-items li:hover{background:var(--hover)}
 .my-items li>a:first-child{display:flex;flex-direction:column;gap:2px;color:var(--text);min-width:0}
 .my-items li>a:first-child:hover{text-decoration:none}
 .my-items li small{font-size:12px}
 .my-items li.hot b{color:var(--bad)}
-.my-items .tel{white-space:nowrap;font-size:13px}
+.my-items .tel{white-space:nowrap;font:500 12.5px var(--font-mono)}
 .term-date{font-size:12px}.term-date summary{cursor:pointer;color:var(--muted)}
 .term-date input{margin-top:4px}
 
@@ -573,13 +723,13 @@ tr.list-foot a.on{font-weight:700;text-decoration:underline}
 .block-sep{margin:24px 0 12px}
 /* Отчёты: «Главное» и свёрнутые блоки */
 details.fold{padding:0;margin-bottom:10px}
-details.fold>summary{cursor:pointer;padding:14px 18px;font-weight:600;list-style:none}
+details.fold>summary{cursor:pointer;padding:16px 22px;font-weight:700;list-style:none}
 details.fold>summary::-webkit-details-marker{display:none}
 details.fold>summary::before{content:"▸";display:inline-block;width:1.1em;color:var(--muted)}
 details.fold[open]>summary::before{content:"▾"}
 details.fold>summary small{font-weight:400}
-details.fold>:not(summary){margin-left:18px;margin-right:18px}
-details.fold>:last-child{margin-bottom:14px}
+details.fold>:not(summary){margin-left:22px;margin-right:22px}
+details.fold>:last-child{margin-bottom:18px}
 table.headline td b{font-size:15px}
 /* «Главное» на телефоне: строка - подпись, под ней «сейчас · прошлый ·
    цель» в одну строку, а не столбик из четырёх подписей. */
@@ -591,32 +741,31 @@ table.headline td b{font-size:15px}
 }
 
 /* ── пояснение на странице: не ошибка и не успех, а «как тут устроено» ── */
-.note{padding:10px 14px;border-radius:10px;margin:0 0 14px;font-size:14px;
-  background:#EEF6FF;color:#0B4A6E;border:1px solid #D5E8FA}
-@media (prefers-color-scheme:dark){.note{background:#11303F;color:#CDEBFF;border-color:#1B4458}}
+.note{padding:14px 18px;border-radius:14px;margin:0 0 18px;font-size:13.5px;
+  background:var(--infobg);color:var(--text);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--blue) 35%,transparent)}
 .req{color:var(--bad)}
 p.small,.small{font-size:13px}
 
 /* ── меню строки «⋯»: редкие действия не стоят кнопками в каждой ячейке ── */
 details.menu{position:relative;display:inline-block;text-align:left}
-details.menu>summary{list-style:none;cursor:pointer;width:34px;height:34px;border-radius:9px;
+details.menu>summary{list-style:none;cursor:pointer;width:34px;height:34px;border-radius:var(--r3);
   display:flex;align-items:center;justify-content:center;font-size:20px;line-height:1;
   color:var(--muted);border:1px solid transparent}
 details.menu>summary::-webkit-details-marker{display:none}
-details.menu>summary:hover,details.menu[open]>summary{background:var(--hover);border-color:var(--line-strong);color:var(--text)}
+details.menu>summary:hover,details.menu[open]>summary{background:var(--card2);border-color:var(--line-strong);color:var(--text)}
 details.menu .menu-body{position:absolute;right:0;top:40px;z-index:30;width:280px;padding:12px;
-  background:var(--card);border:1px solid var(--line);border-radius:12px;
-  box-shadow:0 12px 32px rgba(20,18,16,.16);display:grid;gap:12px;white-space:normal}
+  background:var(--card);border:1px solid var(--line-strong);border-radius:var(--r2);
+  box-shadow:var(--pop);display:grid;gap:12px;white-space:normal}
 details.menu .menu-body form{display:grid;gap:6px;margin:0}
 details.menu .menu-body form+form{border-top:1px solid var(--line);padding-top:12px}
 details.menu .menu-body label{margin:0}
 details.menu .menu-body button{justify-self:start}
 
 /* ── окно поверх страницы: «Добавить сотрудника» ── */
-dialog.modal{border:0;border-radius:16px;padding:0;width:min(600px,calc(100vw - 24px));
+dialog.modal{border:1px solid var(--line-strong);border-radius:var(--r);padding:0;width:min(600px,calc(100vw - 24px));
   max-height:calc(100vh - 32px);background:var(--card);color:var(--text);
-  box-shadow:0 24px 64px rgba(20,18,16,.28)}
-dialog.modal::backdrop{background:rgba(20,18,16,.5)}
+  box-shadow:var(--pop)}
+dialog.modal::backdrop{background:rgba(8,10,14,.55);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
 dialog.modal>form{padding:20px 22px 18px}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
 .modal-head h2{margin:0;font-size:20px}
@@ -644,37 +793,42 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 
 /* Воронка «Входящих» (deals.html): колонки этапов, как доска CRM продаж.
    Доска шире экрана - листается вбок, колонка - вниз. */
-.board{display:flex;gap:12px;overflow-x:auto;padding:4px 0 12px;margin-top:12px;align-items:flex-start;scroll-snap-type:x proximity}
-.board-col{flex:0 0 250px;background:var(--head);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 200px);scroll-snap-align:start}
-.board-col>header{padding:10px 12px 8px;border-bottom:3px solid var(--line-strong);display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-.board-col>header b{font-size:12px;text-transform:uppercase;letter-spacing:.03em}
-.board-col>header span{font-size:12px;color:var(--muted)}
-.board-col.s-new>header{border-color:var(--blue)}
-.board-col.s-touch>header{border-color:var(--amber)}
-.board-col.s-contract>header{border-color:var(--brand-soft)}
-.board-col.s-rented>header{border-color:var(--brand)}
-.board-col.s-renewed>header{border-color:var(--ok)}
-.board-col.s-returned>header{border-color:var(--ink)}
-.board-col.s-deferred>header{border-color:var(--muted)}
-.board-col.s-lost>header{border-color:var(--bad)}
-.board-col.drop{outline:2px dashed var(--brand);outline-offset:-2px}
-.board-cards{padding:8px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;min-height:80px}
+.board{display:flex;gap:16px;overflow-x:auto;padding:4px 0 12px;margin-top:16px;align-items:flex-start;scroll-snap-type:x proximity}
+.board-col{--dot:var(--faint);flex:0 0 260px;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;max-height:calc(100vh - 220px);scroll-snap-align:start}
+.board-col>header{padding:14px 16px 8px;display:flex;align-items:center;gap:8px}
+.board-col>header::before{content:"";flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:var(--dot)}
+.board-col>header b{font-size:13px;font-weight:700}
+.board-col>header span{min-width:20px;height:18px;padding:0 6px;border-radius:6px;display:inline-grid;place-items:center;
+  background:var(--card2);color:var(--muted);font:600 11px/1 var(--font-mono)}
+.board-col.s-new{--dot:var(--blue)}
+.board-col.s-touch{--dot:var(--warn)}
+.board-col.s-contract{--dot:var(--brand-soft)}
+.board-col.s-rented{--dot:var(--accent)}
+.board-col.s-renewed{--dot:var(--ok)}
+.board-col.s-returned{--dot:var(--muted)}
+.board-col.s-deferred{--dot:var(--faint)}
+.board-col.s-lost{--dot:var(--bad)}
+.board-col.drop{outline:2px dashed var(--accent);outline-offset:-2px}
+.board-cards{padding:6px 12px 12px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;min-height:80px}
 .board-empty{text-align:center;font-size:12px;margin:8px 0}
 .board-add{padding:8px 8px 0}
-.board-add summary{cursor:pointer;font-size:13px;color:var(--brand-dark);font-weight:600}
+.board-add{padding:0 12px 12px}
+.board-add summary{cursor:pointer;font-size:13px;color:var(--link);font-weight:700}
 .board-add form{display:flex;flex-direction:column;gap:6px;margin-top:8px}
 .board-add input,.board-add select{width:100%}
-.deal{display:flex;flex-direction:column;gap:3px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;box-shadow:var(--shadow);font-size:13px;color:var(--text)}
-.deal:hover{text-decoration:none;border-color:var(--line-strong)}
+.deal{display:flex;flex-direction:column;gap:4px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;font-size:13px;color:var(--text);transition:border-color .2s}
+.deal:hover{text-decoration:none;border-color:var(--line-strong);transform:translateY(-1px)}
+.deal{transition:border-color .2s,transform .2s}
+.deal b{font-weight:700}
 .deal[draggable=true]{cursor:grab}
 .deal.dragging{opacity:.5}
-.deal.wait{border-left:3px solid var(--bad)}
+.deal.wait{border-color:color-mix(in srgb,var(--bad) 55%,transparent)}
 .deal-top{display:flex;justify-content:space-between;gap:6px}
-.deal-when{color:var(--muted);font-size:11px;white-space:nowrap}
+.deal-when{color:var(--muted);font:500 11px var(--font-mono);white-space:nowrap}
 .deal-title{color:var(--muted);overflow-wrap:anywhere}
 .deal-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
 .deal-tags .tag{font-size:11px;padding:0 8px}
-.tag.ghost{background:var(--hover);color:var(--muted)}
+
 .deal-stages{display:flex;flex-wrap:wrap;gap:6px}
 .deal-stages form{margin:0}
 @media (max-width:640px){.board-col{flex-basis:82vw}}
@@ -682,16 +836,43 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 /* Задачи дня (_tasks.html): кнопки строки справа, форма свёрнута. */
 .task-acts{display:flex;gap:6px;align-items:center}
 .task-acts form{margin:0}
-.task-acts button{padding:4px 12px;font-size:13px}
+.task-acts button{min-height:30px;padding:4px 12px;font-size:12.5px}
 .task-add summary{cursor:pointer}
 .task-add form{margin-top:12px}
-.team-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.team-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.team-cols>.card{margin-bottom:0}
 .team-cols .card h2{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
 
 /* Команда (team_member.html): прогресс плана полосой в плитке. */
-.bar-track{display:block;height:6px;border-radius:3px;background:var(--line);margin:6px 0 2px;overflow:hidden}
-.bar-fill{display:block;height:100%;border-radius:3px;background:var(--brand)}
+.bar-track{display:block;height:4px;border-radius:4px;background:var(--card2);margin:8px 0 2px;overflow:hidden}
+.bar-fill{display:block;height:100%;border-radius:4px;background:var(--accent)}
 .bar-fill.ok{background:var(--ok)}
 .bar-fill.bad{background:var(--bad)}
 b.ok{color:var(--ok)}
 b.bad{color:var(--bad)}
+
+/* ── сводка: приветствие и «Критично» плашками, как шапка образца ──
+   Вместо картинки образца - тёплое свечение фирменного оранжевого. */
+.hero{--hc:var(--ok);position:relative;overflow:hidden;padding:30px 32px 28px;background:var(--card)}
+.hero.alarm{--hc:var(--accent)}
+.hero::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(600px 300px at 0% 50%,color-mix(in srgb,var(--hc) 12%,transparent),transparent 70%)}
+.hero::after{content:"";position:absolute;right:-90px;top:-120px;width:340px;height:340px;border-radius:50%;pointer-events:none;
+  background:radial-gradient(circle,color-mix(in srgb,var(--hc) 22%,transparent),transparent 64%);filter:blur(10px)}
+.hero>*{position:relative;z-index:1}
+.hero-kicker{display:flex;align-items:center;gap:8px;margin:0 0 12px;font:500 11px/1 var(--font-mono);letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted)}
+.hero-kicker .live{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px var(--okbg)}
+h1.hero-title{font:700 30px/1.1 var(--font-text);letter-spacing:-.03em;margin:0 0 10px}
+.hero-sum{margin:0 0 20px;font-size:15px;color:var(--muted);max-width:760px}
+.hero-sum b{color:var(--accent-ink)}.hero-sum b.ok{color:var(--ok)}
+.hero-chips{display:flex;flex-wrap:wrap;gap:8px}
+.hero-chips .task{display:inline-flex;align-items:center;gap:10px;min-height:38px;padding:6px 8px 6px 14px;border-radius:999px;
+  background:var(--card2);box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--text)}
+.hero-chips .task{transition:background .2s,transform .2s}
+.hero-chips .task:hover{background:var(--card);transform:translateY(-1px)}
+.hero-chips .task .n{order:2;min-width:24px;height:24px;padding:0 7px;border-radius:99px;display:grid;place-items:center;
+  background:var(--badbg);color:var(--bad);font:700 12px/1 var(--font-mono);text-align:center}
+.hero-chips .task .t{font-size:13px;font-weight:600}
+.hero-chips .task .t small{display:none}
+@media (max-width:640px){.hero{padding:22px 18px}h1.hero-title{font-size:24px}}

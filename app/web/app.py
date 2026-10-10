@@ -655,7 +655,9 @@ class CachedStatic(StaticFiles):
 # панели на телефоне: полоса браузера и заставка сливаются с ней.
 MANIFEST_ICONS = (("icon-192.png", "192x192", "any"), ("icon-512.png", "512x512", "any"),
                   ("icon-maskable-512.png", "512x512", "maskable"))
-THEME_COLOR = "#211F1D"
+THEME_COLOR = "#12161C"
+# Светлая тема: шапка на телефоне светлая, и полоса браузера - её цвета.
+THEME_COLOR_LIGHT = "#F5F9F8"
 
 
 def app_names(title: str) -> tuple[str, str]:
@@ -693,6 +695,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     code_v = franchise.code_stamp()
     templates.env.globals.update(
         static_v=static_v, app_short=app_names(cfg.title)[1], THEME_COLOR=THEME_COLOR,
+        THEME_COLOR_LIGHT=THEME_COLOR_LIGHT,
         # «Скоро платёж» подсвечивается с того же дня, с которого бот шлёт
         # «истекает через N дней», а не с зашитых двух.
         REMIND_BEFORE_DAYS=cfg.remind_before_days,
@@ -746,6 +749,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         CLIENT_GROUPS=logic.CLIENT_GROUPS,
         RISK_LEVELS=logic.RISK_LEVELS,
         BILLING=logic.BILLING, role_title=logic.role_title,
+        greeting=lambda: logic.greeting(datetime.now().hour),
+        greeting_time=lambda: datetime.now().strftime('%d.%m, %H:%M'),
         role_summary=logic.role_summary, app_title=cfg.title,
         ORDER_STATUSES=logic.ORDER_STATUSES, PAYERS=logic.PAYERS,
         ORDER_MANUAL_STATUSES=logic.ORDER_MANUAL_STATUSES,

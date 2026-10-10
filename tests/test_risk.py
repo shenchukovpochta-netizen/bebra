@@ -533,44 +533,71 @@ class TestRiskOnPostgres(unittest.IsolatedAsyncioTestCase):
 # ─────────────────────────── панель ───────────────────────────
 
 class TestRiskBadgeContrast(unittest.TestCase):
-    """Значок читается в тёмной теме: белый на светлом --bad тёмной темы
-    был 2,6:1 - «высокий» оператор читал хуже «среднего». «Нет истории» -
-    общий нейтральный вид `.tag` панели, его цвет не наш."""
+    """Метки читаются в обеих темах: белый на светлом --bad тёмной темы
+    был 2,6:1 - «высокий» оператор читал хуже «среднего». Метка - тинт
+    (rgba) поверх карточки и цветной текст, поэтому фон считается
+    наложением тинта на --card той же темы. Проверяются все цветные
+    метки, риск - в их числе."""
 
     CSS = Path(__file__).resolve().parent.parent / "app/web/static/style.css"
 
     @staticmethod
-    def luminance(color: str) -> float:
-        rgb = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
-        rgb = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
-        return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    def luminance(rgb: tuple) -> float:
+        out = []
+        for c in rgb[:3]:
+            c /= 255
+            out.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
 
-    def test_dark_theme_badges_are_readable(self):
+    @staticmethod
+    def color(value: str) -> tuple:
+        value = value.strip().replace(" ", "")
+        if value.lower() == "#fff":
+            value = "#FFFFFF"
+        if value.startswith("#"):
+            return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5)) + (1.0,)
+        r, g, b, a = re.fullmatch(r"rgba\((\d+),(\d+),(\d+),([\d.]+)\)", value).groups()
+        return int(r), int(g), int(b), float(a)
+
+    @staticmethod
+    def tokens(body: str) -> dict:
+        return dict(re.findall(r"(--[\w-]+):([^;]+);", body))
+
+    def themes(self, text: str) -> dict:
+        light = self.tokens(re.search(r":root\{([^}]*)\}", text).group(1))
+        chosen = re.search(r":root\[data-theme=dark\]\{([^}]*)\}", text).group(1)
+        system = re.search(r"prefers-color-scheme:dark\)\{"
+                           r":root:not\(\[data-theme=light\]\)\{([^}]*)\}", text).group(1)
+        self.assertEqual(self.tokens(chosen), self.tokens(system),
+                         "тёмная по системе и тёмная кнопкой - одни значения")
+        return {"light": light, "dark": {**light, **self.tokens(chosen)}}
+
+    def resolve(self, tokens: dict, value: str) -> tuple:
+        value = value.strip()
+        while value.startswith("var("):
+            value = tokens[value[4:-1]].strip()
+        return self.color(value)
+
+    def test_tags_are_readable_in_both_themes(self):
         text = self.CSS.read_text()
-        dark_lines = [x for x in text.splitlines()
-                      if x.startswith("@media (prefers-color-scheme:dark)")]
-        root = re.search(r":root\{([^}]*)\}", text).group(1)
-        dark_root = re.search(r"prefers-color-scheme:dark\)\{:root\{([^}]*)\}", text).group(1)
-        names = dict(re.findall(r"(--[\w-]+):(#[0-9A-Fa-f]{6})", root))
-        names.update(re.findall(r"(--[\w-]+):(#[0-9A-Fa-f]{6})", dark_root))
-
-        def props(level, lines):
-            out = {}
-            for line in lines:
-                for body in re.findall(rf"\.tag\.risk-{level}\{{([^}}]*)\}}", line):
-                    out.update(re.findall(r"(background|color):([^;}]+)", body))
-            return out
-
-        light_lines = [x for x in text.splitlines() if x not in dark_lines]
-        for level in ("low", "medium", "high"):
-            with self.subTest(level):
-                got = {**props(level, light_lines), **props(level, dark_lines)}
-                bg, fg = (names.get(v[4:-1], v) if v.startswith("var(") else v
-                          for v in (got["background"], got["color"]))
-                bg, fg = ("#FFFFFF" if c.lower() == "#fff" else c for c in (bg, fg))
+        rules = re.findall(r"((?:\.tag\.[\w-]+,?\s*)+)\{([^}]*)\}", text)
+        checked = set()
+        for selectors, body in rules:
+            props = dict(re.findall(r"(background|color):([^;}]+)", body))
+            if "background" not in props or "color" not in props:
+                continue
+            names = re.findall(r"\.tag\.([\w-]+)", selectors)
+            for theme, tokens in self.themes(text).items():
+                card = self.resolve(tokens, "var(--card)")
+                bg = self.resolve(tokens, props["background"])
+                bg = tuple(round(bg[i] * bg[3] + card[i] * (1 - bg[3])) for i in range(3))
+                fg = self.resolve(tokens, props["color"])
                 a, b = sorted((self.luminance(bg), self.luminance(fg)))
-                self.assertGreaterEqual((b + 0.05) / (a + 0.05), 4.5, f"{bg} / {fg}")
-
+                with self.subTest(tags=names[0], theme=theme):
+                    self.assertGreaterEqual((b + 0.05) / (a + 0.05), 4.5, f"{names} {theme}")
+            checked.update(names)
+        self.assertLessEqual({"risk-low", "risk-medium", "risk-high", "rented", "bad", "ok"},
+                             checked)
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
