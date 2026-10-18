@@ -192,8 +192,9 @@ class TestPlanInPanel(tw.WebCase):
 
     def test_dashboard_shows_the_plan(self):
         page = self.get_ok("/")
-        self.assertIn("План на месяц", page)
-        self.assertIn("плана выполнено", page)
+        self.assertIn("План-факт месяца", page)
+        self.assertIn("% плана", page)
+        self.assertIn("к прошлому месяцу", page)
 
     def test_plan_is_saved(self):
         r = self.client.post("/plan", data={"plan_rented": "120",
@@ -232,7 +233,7 @@ class TestPlanInPanel(tw.WebCase):
                                          tzinfo=UTC)
         page = self.get_ok("/?month=2001-01")
         self.assertNotIn('title="прошлый месяц"', page)
-        self.assertIn(f'/?month={past_first:%Y-%m}" title="следующий месяц"', page)
+        self.assertIn(f'/?month={past_first:%Y-%m}#plan" title="следующий месяц"', page)
 
     def test_free_norm_is_saved_and_shown_on_the_tiles(self):
         r = self.client.post("/plan", data={"plan_rented": "120", "plan_check": "600",
@@ -257,7 +258,7 @@ class TestPlanInPanel(tw.WebCase):
                                      "Пётр", "manager", profile["id"]))
         self.client.post("/logout")
         self.login("petr", "password-1")
-        self.assertNotIn("План на месяц", self.get_ok("/"))
+        self.assertNotIn("План-факт месяца", self.get_ok("/"))
         self.assertEqual(self.client.post("/plan", data={"plan_rented": "1"}).status_code,
                          403)
 

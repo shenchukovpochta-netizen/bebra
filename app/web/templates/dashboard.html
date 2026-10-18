@@ -1,8 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
-{# Сводка режется профилем: без доступа к финансам рубли не показываются
-   вовсе, иначе право «смотреть сводку» обходило бы право на деньги. #}
+{# Сводка - картина сети, а не список дел (app/crm/dashboard.py): что
+   горит, план-факт месяца, деньги вперёд, парк и точки. Дела точки -
+   прозвон, заявки, «Я оплатил» - в «Задачах дня» и во «Входящих».
+   Режется профилем: без доступа к финансам рубли не показываются вовсе,
+   иначе право «смотреть сводку» обходило бы право на деньги. #}
 {% set money_ok = can_view(staff, 'finance') %}
+{% set m = money_data %}
 {% if bot_state and bot_state.ok is sameas false %}
 <p class="flash err">Бот не отвечает: {{ bot_state.error }}. Клиенты не получают
   кабинет и напоминания, коды подписания не уходят. Проверьте контейнер bot.</p>
@@ -19,175 +23,58 @@
   </div>
 </section>
 {% endif %}
-{# Задачи на сегодня: горящее сверху. Разделы, закрытые профилем, в
-   список не попадают - иначе строка вела бы в «нет доступа». #}
-{# Перевозка ведёт в отчёт по точкам (там же выбор велосипедов), простой -
-   в готовую форму акции: и строка видна тем, кому открыт её адрес. #}
-{% set task_ok = {'overdue': 'rentals', 'soon': 'rentals', 'theft': 'rentals', 'search': 'rentals',
-                  'orders': 'service', 'bookings': 'issue', 'bookings_later': 'issue',
-                  'claims': 'claims', 'alerts_urgent': 'trackers', 'alerts': 'trackers',
-                  'transfer': 'reports', 'idle_promo': 'promos'} %}
-{% set visible = tasks|selectattr('code', 'in', task_ok)|list %}
-{% set my_tasks = [] %}
-{# edit - строка ведёт в форму: видна тому, кто может её сохранить. #}
-{% for t in visible %}{% if can_view(staff, task_ok[t.code]) and (not t.edit or can_edit(staff, task_ok[t.code])) %}{% set _ = my_tasks.append(t) %}{% endif %}{% endfor %}
-{# Критично: горящее из задач и то, чего в них нет - просроченные
-   поручения, расхождения парка, кто ждёт ответа. #}
-{% set hot = my_tasks|selectattr('level', 'equalto', 'hot')|list %}
-{% set crit = [] %}
-{% for c in critical %}{% if c.section is none or can_view(staff, c.section) %}{% set _ = crit.append(c) %}{% endif %}{% endfor %}
-{# Шапка сводки - приветствие и «Критично» плашками со счётчиком, как
-   приветствие образца: что горит, видно до первой прокрутки, а кого
-   звать - во всплывающей подсказке и в списке по ссылке. #}
+{# Месяц сводки - один на план-факт и точки: стрелки листают оба блока,
+   прошлый месяц - целиком, вперёд - некуда, назад - до начала истории. #}
+{% macro month_nav(anchor) %}<span class="muted month-nav">{% if span.prev_key %}<a href="/?month={{ span.prev_key }}#{{ anchor }}" title="прошлый месяц" aria-label="прошлый месяц">‹</a>{% endif %} {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a href="/?month={{ span.next_key }}#{{ anchor }}" title="следующий месяц" aria-label="следующий месяц">›</a>{% endif %}</span>{% if coverage.partial %} <span class="tag" title="в счёте {{ coverage.days }} дн. из {{ coverage.of }}">неполный · {% if coverage.from %}с {{ coverage.from.strftime('%d.%m') }}{% else %}{{ coverage.days }} дн.{% endif %}</span>{% endif %}{% endmacro %}
+{% set mq = '' if span.is_current else '?month=' ~ span.key %}
+
+{# Шапка - приветствие и «Критично» тремя группами: клиенты, задачи,
+   проблемы. Строка - тому, кому открыт её раздел; ведёт туда, где это
+   решают, кого звать - во всплывающей подсказке. #}
 {% set who_parts = (staff.name or staff.login).split() %}
-<section class="card hero{% if hot or crit %} alarm{% endif %}">
+<section class="card hero{% if critical.count %} alarm{% endif %}">
   <p class="hero-kicker"><span class="live"></span>сейчас · {{ greeting_time() }}</p>
   <h1 class="hero-title">{{ greeting() }}, {{ who_parts[1] if who_parts|length > 2 else who_parts[0] }}</h1>
-  {% if hot or crit %}
-  <p class="hero-sum"><b>Критично — {{ hot|length + crit|length }}.</b> Начните с этого: остальное ниже, в задачах на сегодня.</p>
-  <div class="tasks hero-chips">
-    {% for t in hot %}
-    <a class="task hot hc-{{ t.code }}" href="{{ t.url }}" {% if t.names %}title="{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}"{% endif %}><span class="n">{{ t.count }}</span>
-      <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span></a>
-    {% endfor %}
-    {% for c in crit %}
-    <a class="task hot hc-{{ c.code }}" href="{{ c.url }}" {% if c.names %}title="{{ c.names|join(', ') }}{% if c.count > c.names|length %} и ещё {{ c.count - c.names|length }}{% endif %}"{% endif %}><span class="n">{{ c.count }}</span>
-      <span class="t">{{ c.title }}{% if c.names %}<small class="muted">{{ c.names|join(', ') }}{% if c.count > c.names|length %} и ещё {{ c.count - c.names|length }}{% endif %}</small>{% endif %}</span></a>
-    {% endfor %}
+  {% if critical.count %}
+  <p class="hero-sum"><b>Критично — {{ critical.count }}.</b> Клиенты, задачи и проблемы, которые не ждут: каждая плашка ведёт туда, где это решают.</p>
+  {% for g in critical.groups %}
+  <div class="hero-group hg-{{ g.code }}">
+    <span class="hero-label">{{ g.title }}</span>
+    <div class="tasks hero-chips">
+      {% for t in g.rows %}
+      <a class="task{% if t.hot %} hot{% endif %} hc-{{ t.code }}" href="{{ t.url }}" {% if t.names %}title="{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}"{% endif %}><span class="n">{{ t.count }}</span>
+        <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span></a>
+      {% endfor %}
+    </div>
   </div>
+  {% endfor %}
   {% else %}
-  <p class="hero-sum"><b class="ok">Критичного нет.</b> Просрочек, потерь и брошенных сообщений не видно — задачи на сегодня ниже.</p>
+  <p class="hero-sum"><b class="ok">Критичного нет.</b> Просрочек, розыска, просроченных поручений, расхождений и брошенных сообщений не видно.</p>
   {% endif %}
 </section>
-{% set my_tasks = my_tasks|rejectattr('level', 'equalto', 'hot')|list %}
-<section class="card">
-  <h2>Задачи на сегодня <span class="muted">· {{ my_tasks|length }}</span></h2>
-  {% if my_tasks %}
-  <div class="tasks">
-    {% for t in my_tasks %}
-    <a class="task {{ t.level }}" href="{{ t.url }}">
-      <span class="n">{{ t.count }}</span>
-      <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span>
-    </a>
-    {% endfor %}
-  </div>
-  {% else %}<p class="muted">{% if hot or crit %}Остальное — выше, в «Критично».{% else %}Горящего нет: аренды оплачены, заявок и тревог нет, наряды идут в срок.{% endif %}</p>{% endif %}
-  <p class="muted">Здесь задачи всей сети. <a href="/my">Задачи дня</a> — только по вашей точке и вашим нарядам.</p>
-</section>
-<section class="card three">
-  <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }}/день{% endif %}</span></div>
-  <div class="tiles">
-    <a class="tile" href="/bikes"><b>{{ operational }}</b><span>операционный парк<br><small class="muted">без утерянных, проданных, списанных</small></span></a>
-    <div class="tile {% if metrics.idle_percent is none %}{% elif metrics.idle_ok %}good{% else %}warn{% endif %}">
-      <b>{% if metrics.idle_percent is none %}—{% else %}{{ metrics.idle_percent }} %{% endif %}</b>
-      <span>простой парка<br><small class="muted">{% if metrics.operational_days %}свободны {{ metrics.idle_breakdown.available|round(0)|int }} · ремонт {{ metrics.idle_breakdown.repair|round(0)|int }} · ТО {{ metrics.idle_breakdown.maintenance|round(0)|int }} велосипеде-дней{% else %}журнал статусов ещё пуст{% endif %}</small></span>
-    </div>
-    {% if money_ok %}
-    <div class="tile {% if metrics.avg_check is none %}{% elif metrics.check_ok %}good{% else %}warn{% endif %}">
-      <b>{% if metrics.avg_check is none %}—{% else %}{{ money(metrics.avg_check) }}{% endif %}</b>
-      <span>средний чек в день<br><small class="muted">{% if metrics.rented_days %}на {{ metrics.rented_days|round(0)|int }} велосипеде-дней аренды{% else %}аренд за период не было{% endif %}</small></span>
-    </div>
-    <div class="tile {% if metrics.operational_days %}{% if losses.lost %}warn{% else %}good{% endif %}{% endif %}">
-      <b>{% if metrics.operational_days %}{{ money(losses.lost) }}{% else %}—{% endif %}</b>
-      <span>потеряно на простое<br><small class="muted">{% if metrics.operational_days %}ремонт {{ money(losses.by_status.repair) }} · свободны {{ money(losses.by_status.available) }}{% if losses.efficiency_percent is not none %} · КПД парка {{ losses.efficiency_percent }} %{% endif %}{% else %}журнал статусов ещё пуст{% endif %}</small></span>
-    </div>
-    {% endif %}
-    {% if money_ok and can_view(staff, 'reports') %}
-    <a class="tile" href="/reports"><b>{{ money(amortization) }}</b><span>отложить на парк в этом месяце<br><small class="muted">амортизация рам и АКБ</small></span></a>
-    {% endif %}
-  </div>
-  {% if idle_by_location %}
-  <ul class="inline">
-    {% for l in idle_by_location %}<li><a href="/bikes?location={{ l.location|urlencode if l.location != 'не на точке' else 'none' }}&status=available">{{ l.location }}: свободных <b>{{ l.free }}</b>, в ремонте и на ТО <b>{{ l.repair }}</b></a></li>{% endfor %}
-  </ul>
-  {% endif %}
-  {# Те же три числа по точкам и за то же окно: сумма строк - плитки выше.
-     Блок есть, только когда точек больше одной, - иначе он их повторял бы. #}
-  {% if points %}
-  {% set rep_ok = can_view(staff, 'reports') %}
-  <h3>По точкам за 30 дней{% if rep_ok %} <small class="muted">· <a href="/reports/points">отчёт по точкам</a></small>{% endif %}</h3>
-  <div class="table-wrap">
-  <table>
-    <tr><th>Точка</th><th class="num">Парк</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th><th class="num">Выручка</th>{% endif %}</tr>
-    {% for r in points.rows %}{% set m = r.metrics %}
-    <tr>
-      <td>{% if rep_ok and not r.orphan %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}</td>
-      <td class="num">{{ r.fleet }}</td>
-      <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
-      {% if money_ok %}
-      <td class="num {% if m.avg_check is none %}muted{% elif m.check_ok %}ok{% else %}bad{% endif %}">{% if m.avg_check is none %}—{% else %}{{ money(m.avg_check) }}{% endif %}</td>
-      <td class="num">{{ money(r.paid) }}</td>
-      {% endif %}
-    </tr>
-    {% endfor %}
-  </table>
-  </div>
-  {% endif %}
-</section>
-
-<div class="tiles wide">
-  {% if can_view(staff, 'rentals') %}<a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>{% endif %}
-  {% if can_view(staff, 'clients') %}<a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>{% endif %}
-  <a class="tile" href="/bikes?status=available"><b>{{ bikes.get('available', 0) }}</b><span>свободных из {{ counts.bikes }}</span></a>
-  {% if inbox_waiting is not none %}<a class="tile {% if inbox_waiting %}hot{% endif %}" href="/inbox"><b>{{ inbox_waiting }}</b><span>входящих ждут ответа</span></a>{% endif %}
-  {% if can_view(staff, 'claims') %}<a class="tile {% if counts.claims %}hot{% endif %}" href="/claims"><b>{{ counts.claims }}</b><span>заявок на зачисление</span></a>{% endif %}
-  {% if money_ok %}
-  <div class="tile"><b>{{ money(month.get('payment', 0)) }}</b><span>поступило за месяц</span></div>
-  <div class="tile"><b>{{ money(-(month.get('charge', 0) + month.get('fine', 0))) }}</b><span>начислено за месяц</span></div>
-  {% if month.get('bonus', 0) %}
-  {# Баллы стоят рядом с деньгами, но деньгами не притворяются: подпись
-     говорит, что это скидка, и показывает её долю от оплат. #}
-  <div class="tile"><b>{{ money(month.get('bonus', 0)) }}</b><span>оплачено баллами<br>
-    <small class="muted">{{ bonus_share }} % от оплат месяца · не деньги, наша скидка</small></span></div>
-  {% endif %}
-  {% endif %}
-</div>
 
 {% if money_ok %}
-<section class="card">
-  <div class="three-head"><h2>Доход по статьям <span class="muted">{{ span.first.strftime('%m.%Y') }}{% if span.is_current %}, по сегодня{% endif %}</span></h2>
-    <span class="muted"><a href="/finance/calendar">платёжный календарь</a></span></div>
-  <div class="tiles">
-    <div class="tile"><b>{{ money(income.total.total) }}</b><span>всего пришло</span></div>
-    <div class="tile"><b>{{ money(income.total.rent) }}</b><span>аренда{% if income.total.share.rent is not none %} · {{ income.total.share.rent }} %{% endif %}</span></div>
-    <div class="tile"><b>{{ money(income.total.repair_external) }}</b><span>сторонний ремонт{% if income.total.share.repair_external %} · {{ income.total.share.repair_external }} %{% endif %}</span></div>
-    <div class="tile"><b>{{ money(income.total.repair_renters) }}</b><span>ремонт арендаторам{% if income.total.share.repair_renters %} · {{ income.total.share.repair_renters }} %{% endif %}</span></div>
-    {% if income.total.fines %}<div class="tile"><b>{{ money(income.total.fines) }}</b><span>штрафов начислено<br><small class="muted">начисление, не приход</small></span></div>{% endif %}
-  </div>
-  {% if income.rows|length > 1 %}
-  <div class="table-wrap">
-  <table class="cards">
-    <tr><th>Точка</th><th class="num">Аренда</th><th class="num">Сторонний ремонт</th><th class="num">Ремонт арендаторам</th><th class="num">Всего</th><th class="num">Доля</th></tr>
-    {% for r in income.rows %}
-    <tr><td data-label="Точка">{% if can_view(staff, 'reports') and (r.location is none or r.location in place_ids) %}<a href="/reports/points/{{ place_ids[r.location] if r.location is not none else 'none' }}">{{ r.location or 'без точки' }}</a>{% else %}{{ r.location or 'без точки' }}{% endif %}</td>
-      <td class="num" data-label="Аренда">{{ money(r.rent) }}</td>
-      <td class="num" data-label="Сторонний ремонт">{{ money(r.repair_external) }}</td>
-      <td class="num" data-label="Ремонт арендаторам">{{ money(r.repair_renters) }}</td>
-      <td class="num" data-label="Всего"><b>{{ money(r.total) }}</b></td>
-      <td class="num" data-label="Доля">{% if income.total.total %}{{ (r.total * 100 / income.total.total)|round(1) }} %{% else %}—{% endif %}</td></tr>
-    {% endfor %}
-  </table>
-  </div>
-  {% endif %}
-  <p class="muted">Ближайшие 7 дней: ждём за аренду <b>{{ money(week.rent) }}</b> ({{ week.count }} платежей){% if week.plan_out %}, плановые расходы <b class="bad">{{ money(week.plan_out) }}</b>{% endif %}{% if week.plan_in %}, плановые приходы {{ money(week.plan_in) }}{% endif %}.
-    Ремонт в журнал денег не идёт — статьи ремонта считаются по оплаченным нарядам.</p>
-</section>
-<section class="card three">
-  <div class="three-head"><h2>План на месяц
-      {# Стрелки листают месяц: прошлый - целиком, вперёд - некуда, назад - до
-         первого месяца истории. #}
-      <span class="muted">{% if span.prev_key %}<a href="/?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %} {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a href="/?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}</span></h2>
+{% set p = m.progress %}{% set vs = m.vs_prev %}
+{# План-факт месяца: план (велосипеды × чек), факт против ровного темпа и
+   против того же отрезка прошлого месяца, доход по статьям, деньги по
+   дням. Форма плана - под «Изменить план»: её открывают раз в месяц. #}
+<section class="card three" id="plan">
+  <div class="three-head"><h2>План-факт месяца {{ month_nav('plan') }}</h2>
     <span class="muted">{{ plan.rented }} велосипедов в аренде по {{ money(plan.check) }} в день{% if plan.source == 'points' %} · сумма планов {{ plan.points.count }} точек{% endif %}</span></div>
+  {# Четыре плитки: план и сколько осталось, факт с полосой (черта -
+     ровный темп на сегодня), прогноз, прошлый месяц за тот же отрезок. #}
   <div class="tiles wide">
-    <div class="tile"><b>{{ money(progress.target) }}</b><span>план месяца</span></div>
-    <div class="tile {% if progress.ahead %}good{% else %}warn{% endif %}"><b>{{ money(progress.fact) }}</b><span>{% if span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}<br><small class="muted">ровным темпом было бы <span class="nowrap">{{ money(progress.pace) }}</span></small></span></div>
-    <div class="tile"><b>{% if progress.percent is none %}—{% else %}{{ progress.percent }} %{% endif %}</b><span>плана выполнено</span></div>
+    <div class="tile"><b>{{ money(p.target) }}</b><span>план месяца
+      {% if span.is_current %}<br><small class="muted">осталось собрать <span class="nowrap">{{ money(p.left) }}</span> за {{ p.days_left }} дн.{% if p.need_rented %} — это {{ p.need_rented }} велосипедов в аренде каждый день по цели{% endif %}</small>{% endif %}</span></div>
+    <div class="tile {% if p.ahead %}good{% else %}warn{% endif %}"><b>{{ money(p.fact) }}</b><span>{% if span.is_current %}пришло с начала месяца{% else %}пришло за месяц{% endif %}
+      <br><small class="muted">{% if p.percent is not none %}{{ p.percent }} % плана · {% endif %}ровным темпом было бы <span class="nowrap">{{ money(p.pace) }}</span></small></span>
+      {% if p.target %}<span class="bar-track pace-track" title="полоса — пришло, черта — ровный темп на сегодня"><span class="bar-fill {% if p.ahead %}ok{% else %}bad{% endif %}" style="width: {{ [p.percent or 0, 100]|min }}%"></span>{% if span.is_current %}<span class="pace" style="left: {{ [(p.pace * 100 / p.target)|round(1), 100]|min }}%"></span>{% endif %}</span>{% endif %}</div>
     {% if span.is_current %}
-    <div class="tile {% if progress.forecast_ok %}good{% else %}warn{% endif %}"><b>{{ money(progress.forecast) }}</b><span>прогноз по темпу<br><small class="muted">столько придёт к концу месяца, если ничего не менять</small></span></div>
-    <div class="tile"><b>{{ money(progress.left) }}</b><span>осталось собрать за {{ progress.days_left }} дн.{% if progress.need_rented %}<br><small class="muted">это {{ progress.need_rented }} велосипедов каждый день по цели</small>{% endif %}</span></div>
+    <div class="tile {% if p.forecast_ok %}good{% else %}warn{% endif %}"><b>{{ money(p.forecast) }}</b><span>прогноз по темпу<br><small class="muted">столько придёт к концу месяца, если ничего не менять</small></span></div>
     {% endif %}
+    <div class="tile {% if vs.percent is none %}{% elif vs.up %}good{% elif vs.diff < 0 %}warn{% endif %}"><b>{% if vs.percent is none %}—{% else %}{{ '+' if vs.diff > 0 else ('−' if vs.diff < 0 else '') }}{{ vs.percent|abs }} %{% endif %}</b><span>к прошлому месяцу<br><small class="muted">{{ m.prev.label }}: {{ money(vs.prev) }}{% if m.prev_whole is not none %}, весь месяц {{ money(m.prev_whole) }}{% endif %}</small></span></div>
   </div>
-  {% if progress.need_rented > operational %}
+  {% if p.need_rented > operational %}
   <p class="muted bad">Столько велосипедов в парке нет: план этого месяца уже
     не вытянуть — либо поднимать чек, либо признать и поставить достижимый.</p>
   {% endif %}
@@ -198,9 +85,50 @@
     {{ money(plan.points.per_day * span.days) }} за месяц: общий план задан
     отдельно и расходится с ними.</p>
   {% endif %}
+
+  <h3>Доход по статьям <small class="muted">· против {{ m.prev.label }}</small></h3>
+  {# Таблицей и на телефоне: доля и прошлый период там уходят (opt), а
+     сумма и изменение остаются в строке статьи. #}
+  <div class="table-wrap">
+  <table class="compact">
+    <tr><th>Статья</th><th class="num">{{ span.first.strftime('%m.%Y') }}</th><th class="num opt">Доля</th><th class="num opt">{{ m.prev.label }}</th><th class="num">Изменение</th></tr>
+    {% for r in m.lines %}
+    <tr {% if r.code == 'total' %}class="total"{% endif %}>
+      <td data-label="Статья">{% if r.code == 'total' %}<b>{{ r.title }}</b>{% else %}{{ r.title }}{% endif %}</td>
+      <td class="num" data-label="{{ span.first.strftime('%m.%Y') }}">{% if r.code == 'total' %}<b>{{ money(r.now) }}</b>{% else %}{{ money(r.now) }}{% endif %}</td>
+      <td class="num muted opt" data-label="Доля">{% if r.share is none %}—{% else %}{{ r.share }} %{% endif %}</td>
+      <td class="num opt" data-label="{{ m.prev.label }}">{{ money(r.prev) }}</td>
+      <td class="num {% if r.diff > 0 %}ok{% elif r.diff < 0 %}bad{% else %}muted{% endif %}" data-label="Изменение">{% if not r.diff %}—{% else %}{{ '+' if r.diff > 0 else '−' }}{{ money(r.diff|abs) }}{% if r.percent is not none %} <small>· {{ r.percent|abs }} %</small>{% endif %}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  <p class="muted">Аренда — платежи журнала, ремонт — оплаченные клиентами наряды
+    (в журнал денег он не идёт).{% if m.income.total.fines %} Штрафов начислено {{ money(m.income.total.fines) }} — это начисление, не приход.{% endif %}
+    Начислено за месяц {{ money(-(m.month.get('charge', 0) + m.month.get('fine', 0))) }}{% if m.month.get('bonus', 0) %}; оплачено баллами {{ money(m.month.get('bonus', 0)) }} — {{ m.bonus_share }} % от оплат, не деньги, наша скидка{% endif %}.</p>
+  {% if m.income.rows|length > 1 %}
+  <details class="more">
+    <summary>Доход по точкам</summary>
+    <div class="table-wrap">
+    <table class="cards">
+      <tr><th>Точка</th><th class="num">Аренда</th><th class="num">Сторонний ремонт</th><th class="num">Ремонт арендаторам</th><th class="num">Всего</th><th class="num">Доля</th></tr>
+      {% for r in m.income.rows %}
+      <tr><td data-label="Точка">{% if can_view(staff, 'reports') and (r.location is none or r.location in place_ids) %}<a href="/reports/points/{{ place_ids[r.location] if r.location is not none else 'none' }}?month={{ span.key }}">{{ r.location or NO_POINT_TITLE }}</a>{% else %}{{ r.location or NO_POINT_TITLE }}{% endif %}</td>
+        <td class="num" data-label="Аренда">{{ money(r.rent) }}</td>
+        <td class="num" data-label="Сторонний ремонт">{{ money(r.repair_external) }}</td>
+        <td class="num" data-label="Ремонт арендаторам">{{ money(r.repair_renters) }}</td>
+        <td class="num" data-label="Всего"><b>{{ money(r.total) }}</b></td>
+        <td class="num" data-label="Доля">{% if m.income.total.total %}{{ (r.total * 100 / m.income.total.total)|round(1) }} %{% else %}—{% endif %}</td></tr>
+      {% endfor %}
+    </table>
+    </div>
+  </details>
+  {% endif %}
+
+  {% set chart = m.chart %}
   <h3>Деньги по дням
-    <nav class="tabs"><a href="/?chart=days&month={{ span.key }}" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a><a href="/?chart=cumulative&month={{ span.key }}" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></nav></h3>
-  {% set shown = chart_total if chart_view == 'cumulative' else chart.days %}
+    <nav class="tabs"><a href="/?chart=days&month={{ span.key }}#plan" {% if chart_view != 'cumulative' %}class="on"{% endif %}>по дням</a><a href="/?chart=cumulative&month={{ span.key }}#plan" {% if chart_view == 'cumulative' %}class="on"{% endif %}>накопительно</a></nav></h3>
+  {% set shown = m.chart_total if chart_view == 'cumulative' else chart.days %}
   <div class="bars" role="img"
        aria-label="Деньги по дням месяца, план {{ money(chart.plan_per_day) }} в день">
     {% for d in shown %}
@@ -229,122 +157,264 @@
   {% endif %}
 
   {% if can_edit(staff, 'finance') %}
-  <form method="post" action="/plan" class="grid2">
-    {# Общий план не задан (сумма точек или умолчание от парка): поле
-       пустое, расчёт - подсказкой. Со значением сохранение норм
-       записало бы его явным планом, и сумма точек, расписанных по
-       одной, не заступила бы никогда. #}
-    <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented if plan.source == 'settings' else '' }}" size="5"{% if plan.source != 'settings' %} placeholder="{{ 'сумма точек' if plan.source == 'points' else 'от парка' }}: {{ plan.rented }}"{% endif %}></label>
-    <label>Чек в день <input name="plan_check" value="{{ plan.base_check }}" size="8"></label>
-    <label>Норма в ремонте <input name="plan_repair" value="{{ plan.repair }}" size="5"></label>
-    <label>Норма подменных <input name="plan_spare" value="{{ plan.spare }}" size="5"></label>
-    <label>Норма свободных <input name="plan_free" value="{{ plan.free }}" size="5"></label>
-    <button type="submit">Сохранить план</button>
-  </form>
-  <p class="muted">Умолчания взяты из трёх чисел: парк {{ plan.fleet }} при простое
-    меньше {{ IDLE_TARGET_PERCENT }} % и чеке {{ money(CHECK_TARGET) }}. План —
-    то, что двигают, а не то, что придумывают с нуля.</p>
-  <p class="muted">Нормы ремонта и подменных попадают на плитки парка ниже и
-    на график сервиса: превышение видно сразу, а не в конце месяца.</p>
-  <p class="muted">Пустое «Велосипедов в аренде» — общий план не задан: тогда
-    он складывается из планов точек, если план есть у каждой открытой точки
-    (задаётся на странице точки в отчёте «По точкам»), иначе считается от
-    парка. Заданный здесь план главнее суммы точек.</p>
+  <details class="more" id="plan-form">
+    <summary>Изменить план</summary>
+    <form method="post" action="/plan" class="grid2">
+      {# Общий план не задан (сумма точек или умолчание от парка): поле
+         пустое, расчёт - подсказкой. Со значением сохранение норм
+         записало бы его явным планом, и сумма точек, расписанных по
+         одной, не заступила бы никогда. #}
+      <label>Велосипедов в аренде <input name="plan_rented" value="{{ plan.rented if plan.source == 'settings' else '' }}" size="5"{% if plan.source != 'settings' %} placeholder="{{ 'сумма точек' if plan.source == 'points' else 'от парка' }}: {{ plan.rented }}"{% endif %}></label>
+      <label>Чек в день <input name="plan_check" value="{{ plan.base_check }}" size="8"></label>
+      <label>Норма в ремонте <input name="plan_repair" value="{{ plan.repair }}" size="5"></label>
+      <label>Норма подменных <input name="plan_spare" value="{{ plan.spare }}" size="5"></label>
+      <label>Норма свободных <input name="plan_free" value="{{ plan.free }}" size="5"></label>
+      <button type="submit">Сохранить план</button>
+    </form>
+    <p class="muted">Умолчания взяты из трёх чисел: парк {{ plan.fleet }} при простое
+      меньше {{ IDLE_TARGET_PERCENT }} % и чеке {{ money(CHECK_TARGET) }}. План —
+      то, что двигают, а не то, что придумывают с нуля. Нормы ремонта и
+      подменных попадают на плитки парка ниже и на график сервиса.</p>
+    <p class="muted">Пустое «Велосипедов в аренде» — общий план не задан: тогда
+      он складывается из планов точек, если план есть у каждой открытой точки
+      (задаётся на странице точки в отчёте «По точкам»), иначе считается от
+      парка. Заданный здесь план главнее суммы точек.</p>
+  </details>
   {% endif %}
 </section>
-{% endif %}
 
-{% if can_view(staff, 'rentals') %}
-{# Во всю ширину: у строки четыре кнопки, в половине экрана они
-   обрезались. #}
-<section class="card" id="expiring">
-  <h2>Истекает аренда <small class="muted">· просрочка и ближайшие {{ before_days }} дн.</small></h2>
-  {# Прогноз считается по «оплачено до» каждой идущей аренды, а сказавшие
-     «продлю» из него выпадают: их велосипед не вернётся. #}
-  <p class="muted">Свободных сейчас <b>{{ forecast.now }}</b> · к завтрашнему дню <b>{{ forecast['1'] }}</b>, через два дня <b>{{ forecast['2'] }}</b>{% if money_ok %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}{% endif %}</p>
-  {% if expiring %}
-  <table>
-    <tr><th>Клиент</th><th>Велосипед</th><th>Оплачено</th>{% if money_ok %}<th>Баланс</th>{% endif %}<th>Клиент сказал</th></tr>
-    {% for r in expiring %}
-    <tr>
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}<br><a class="muted" href="tel:{{ r.phone }}">{{ r.phone }}</a>{% if not r.tg_id %} <span class="muted" title="без Telegram">·</span>{% endif %}</td>
-      <td>{{ r.bike_code or '—' }}</td>
-      <td>{% with summary=r.summary %}{% include "_summary.html" %}{% endwith %}</td>
-      {% if money_ok %}<td class="num {% if r.balance < 0 %}bad{% endif %}">{{ money(r.balance) }}</td>{% endif %}
-      <td class="intent">
-        {% if r.intent %}<span class="tag intent-{{ r.intent }}">{{ r.intent_label }}</span>{% endif %}
-        {% if can_edit(staff, 'rentals') %}<form method="post" action="/rentals/{{ r.id }}/intent"><input type="hidden" name="next" value="/"><button name="intent" value="renew" class="ghost" title="Клиент продлевает">✓ продлит</button><button name="intent" value="return" class="ghost" title="Клиент сдаёт велосипед">↩ сдаёт</button><button name="intent" value="snooze" class="ghost" title="Скрыть до завтра">⏰ завтра</button></form>{% if r.tg_id %}<form method="post" action="/rentals/{{ r.id }}/remind" class="inline-form"><input type="hidden" name="next" value="/"><button type="submit" class="ghost" title="Напомнить клиенту в боте сейчас">🔔</button></form>{% endif %}{% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% if expiring_total > expiring|length %}<p><a href="/?expiring=all#expiring">Показать все {{ expiring_total }}</a> <span class="muted">· здесь {{ expiring|length }} самых срочных</span></p>{% endif %}
-  {% else %}<p class="muted">Все аренды оплачены, платежей на ближайшие дни нет.</p>{% endif %}
-</section>
-{% endif %}
-
-{% if can_view(staff, 'claims') %}
-<section class="card">
-  <h2>Заявки на зачисление</h2>
-  {% if claims %}
-  <table>
-    <tr><th>#</th><th>Клиент</th><th>Ожидается</th><th>Чек</th><th></th></tr>
-    {% for c in claims %}
-    <tr>
-      <td>{{ c.id }}</td>
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ c.client_id }}">{{ c.full_name }}</a>{% else %}{{ c.full_name }}{% endif %}<br><small class="muted">{{ c.created_at|dmy }}</small></td>
-      <td class="num">{{ money(c.amount_hint) }}</td>
-      <td>{% if c.receipt_file_id %}есть{% else %}—{% endif %}</td>
-      <td>{% if can_edit(staff, 'claims') %}<a class="btn" href="/claims">Обработать</a>{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% else %}<p class="muted">Открытых заявок нет.</p>{% endif %}
-</section>
-{% endif %}
-
-<div class="cols">
-<section class="card">
-  <h2>Парк <span class="muted">· операционный {{ operational }}</span></h2>
+{% set cal = m.calendar %}
+{# Платёжный календарь на две недели - тем же построителем, что
+   /finance/calendar: аренда по «оплачено до» и цене периода, плановые
+   строки, остаток. Это план, а не деньги: в ledger ничего не идёт. #}
+<section class="card three" id="calendar">
+  <div class="three-head"><h2>Платёжный календарь <span class="muted">{{ cal.start.strftime('%d.%m') }} — {{ cal.end.strftime('%d.%m') }}</span></h2>
+    <span class="muted"><a href="/finance/calendar{% if m.start_raw %}?start={{ m.start_raw|urlencode }}{% endif %}">весь календарь и плановые платежи</a></span></div>
   <div class="tiles">
-    {% for t in tiles %}
+    <div class="tile good"><b>{{ money(cal.total.rent) }}</b><span>ждём за аренду</span></div>
+    {% if cal.total.plan_in %}<div class="tile"><b>{{ money(cal.total.plan_in) }}</b><span>плановые приходы</span></div>{% endif %}
+    <div class="tile {% if cal.total.plan_out %}warn{% endif %}"><b>{{ money(cal.total.plan_out) }}</b><span>плановые расходы</span></div>
+    <div class="tile"><b>{{ money(cal.net) }}</b><span>итог за {{ cal.days|length }} дней</span></div>
+    <div class="tile {% if cal.debts %}warn{% endif %}"><b>{{ money(cal.debts) }}</b><span>долги к сбору<br><small class="muted">когда отдадут — неизвестно, в итог не входят</small></span></div>
+  </div>
+  <form method="get" action="/#calendar" class="inline-form cal-start">
+    {% if not span.is_current %}<input type="hidden" name="month" value="{{ span.key }}">{% endif %}
+    <label>Остаток на сегодня, ₽ <input name="start" value="{{ m.start_raw }}" inputmode="decimal" placeholder="на счёте и в кассе" size="12"></label>
+    <button type="submit" class="ghost">Показать</button>
+  </form>
+  {% if cal.gap %}<p class="flash err">Кассовый разрыв {{ cal.gap|dmy }}: при остатке {{ money(cal.opening) }} в этот день денег не хватит. Перенесите расход или соберите долги.</p>
+  {% elif cal.opening is none %}<p class="muted">Впишите остаток — календарь покажет, хватит ли денег на каждый день и где кассовый разрыв.</p>{% endif %}
+  {# Две недели столбиками в одном масштабе: зелёный - придёт (аренда и
+     плановые приходы), красный - уйдёт. Под днём - остаток, если он
+     введён; день разрыва подписан красным. Суммы - в подсказке и в
+     таблице «По дням» ниже. #}
+  {% set wd = ['пн','вт','ср','чт','пт','сб','вс'] %}
+  <div class="bars cal-bars" role="img" aria-label="Приход и расход по дням на {{ m.strip|length }} дней">
+    {% for d in m.strip %}
+    <div class="bar-col{% if d.weekend %} weekend{% endif %}" title="{{ d.day|dmy }}: придёт {{ money(d.came) }}{% if d.rent_count %} ({{ d.rent_count }} аренд){% endif %}{% if d.plan_out %}, уйдёт {{ money(d.plan_out) }}{% endif %}{% if cal.opening is not none %}, остаток {{ money(d.balance) }}{% endif %}">
+      <div class="bar-num">{% if d.came %}{{ d.short }}{% endif %}</div>
+      <div class="cal-pair">
+        <div class="bar-val" style="height:{{ d.in_height }}%"></div>
+        {% if d.plan_out %}<div class="bar-val over" style="height:{{ d.out_height }}%"></div>{% endif %}
+      </div>
+      <div class="bar-day {% if d.gap or d.negative %}bad{% endif %}">{{ d.day.day }}<br>{{ wd[d.day.weekday()] }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% set plans = [] %}
+  {% for d in cal.days %}{% for i in d.entries if i.kind == 'plan' %}{% set _ = plans.append(i) %}{% endfor %}{% endfor %}
+  {% if plans %}
+  <ul class="inline">
+    {% for i in plans %}<li><span class="muted">{{ i.day.strftime('%d.%m') }}</span> <b class="{% if i.direction == 'out' %}bad{% else %}ok{% endif %}">{{ '−' if i.direction == 'out' else '+' }}{{ money(i.amount) }}</b> {{ i.title }}{% if i.overdue %} <span class="muted">(просрочен)</span>{% endif %}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  <details class="more">
+    <summary>По дням</summary>
+    <div class="table-wrap">
+    <table class="cal-mini">
+      <tr><th>День</th><th class="num">Придёт</th><th class="num">Уйдёт</th><th class="num">{% if cal.opening is not none %}Остаток{% else %}Накопительно{% endif %}</th></tr>
+      {# Дни без движения скрыты: остаток в них тот же, что накануне. #}
+      {% for d in cal.days %}{% if d.entries or loop.first %}
+      <tr class="{% if cal.opening is not none and d.balance < 0 %}warn-row{% endif %}">
+        <td class="nowrap"><b>{{ d.day.strftime('%d.%m') }}</b> <span class="muted">{{ wd[d.day.weekday()] }}</span></td>
+        <td class="num nowrap">{% if d.rent or d.plan_in %}{{ money(d.rent + d.plan_in) }}{% if d.rent_count %} <span class="muted">· {{ d.rent_count }}</span>{% endif %}{% else %}—{% endif %}</td>
+        <td class="num nowrap">{% if d.plan_out %}<span class="bad">−{{ money(d.plan_out) }}</span>{% else %}—{% endif %}</td>
+        <td class="num nowrap {% if d.balance < 0 %}bad{% endif %}">{{ money(d.balance) }}</td>
+      </tr>
+      {% endif %}{% endfor %}
+    </table>
+    </div>
+  </details>
+  <p class="muted">Ждём следующий период каждой идущей аренды в день «оплачено до»
+    по цене периода. Не ждём ручное начисление, «сдаёт» и розыск.</p>
+</section>
+{% endif %}
+
+{# Три числа парка (CRM.md, «Три числа парка») за 30 дней до этой минуты -
+   то же окно, что у отчёта «По точкам». #}
+<section class="card three" id="three">
+  <div class="three-head"><h2>Три числа</h2><span class="muted">за последние 30 дней · цели: простой &lt; {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }}/день{% endif %}</span></div>
+  <div class="tiles">
+    <a class="tile" href="/bikes"><b>{{ operational }}</b><span>операционный парк<br><small class="muted">без утерянных, проданных, списанных</small></span></a>
+    <div class="tile {% if metrics.idle_percent is none %}{% elif metrics.idle_ok %}good{% else %}warn{% endif %}">
+      <b>{% if metrics.idle_percent is none %}—{% else %}{{ metrics.idle_percent }} %{% endif %}</b>
+      <span>простой парка<br><small class="muted">{% if metrics.operational_days %}свободны {{ metrics.idle_breakdown.available|round(0)|int }} · ремонт {{ metrics.idle_breakdown.repair|round(0)|int }} · ТО {{ metrics.idle_breakdown.maintenance|round(0)|int }} велосипеде-дней{% else %}журнал статусов ещё пуст{% endif %}</small></span>
+    </div>
+    {% if money_ok %}
+    <div class="tile {% if metrics.avg_check is none %}{% elif metrics.check_ok %}good{% else %}warn{% endif %}">
+      <b>{% if metrics.avg_check is none %}—{% else %}{{ money(metrics.avg_check) }}{% endif %}</b>
+      <span>средний чек в день<br><small class="muted">{% if metrics.rented_days %}на {{ metrics.rented_days|round(0)|int }} велосипеде-дней аренды{% else %}аренд за период не было{% endif %}</small></span>
+    </div>
+    <div class="tile {% if metrics.operational_days %}{% if losses.lost %}warn{% else %}good{% endif %}{% endif %}">
+      <b>{% if metrics.operational_days %}{{ money(losses.lost) }}{% else %}—{% endif %}</b>
+      <span>потеряно на простое<br><small class="muted">{% if metrics.operational_days %}ремонт {{ money(losses.by_status.repair) }} · свободны {{ money(losses.by_status.available) }}{% if losses.efficiency_percent is not none %} · КПД парка {{ losses.efficiency_percent }} %{% endif %}{% else %}журнал статусов ещё пуст{% endif %}</small></span>
+    </div>
+    {% endif %}
+    {% if money_ok and can_view(staff, 'reports') %}
+    <a class="tile" href="/reports"><b>{{ money(amortization) }}</b><span>отложить на парк в этом месяце<br><small class="muted">амортизация рам и АКБ</small></span></a>
+    {% endif %}
+  </div>
+</section>
+
+{# Велопарк сейчас: статусы с долей от операционного парка и нормами
+   плана (как на рабочем столе сервиса), вне оборота - отдельно, прогноз
+   освобождения, простой по точкам, модели и что сделать с парком. #}
+<section class="card three" id="fleet">
+  <div class="three-head"><h2>Велопарк <span class="muted">· операционный {{ operational }}</span></h2>
+    <span class="muted"><a href="/bikes">весь парк</a></span></div>
+  <div class="tiles park">
+    {% for t in park.tiles %}
     <div class="tile {% if t.bad %}warn{% endif %}">
       <b>{% if t.code == 'spare' %}{{ t.value }}{% else %}<a href="/bikes?status={{ t.code }}">{{ t.value }}</a>{% endif %}</b>
       <span>{{ t.title|lower }}
-        {% if t.percent is not none %}<br><small class="muted">{{ t.percent }} %</small>{% endif %}
+        {% if t.percent is not none and t.code != 'new' %}<br><small class="muted">{{ t.percent }} % парка</small>{% endif %}
         {% if t.norm %}<br><small class="{% if t.bad %}bad{% else %}muted{% endif %}">норма {{ t.norm }}{% if t.over %} · +{{ t.diff }} сверх{% elif t.under %} · {{ t.diff }} до нормы{% endif %}</small>{% endif %}
       </span>
     </div>
     {% endfor %}
   </div>
   <ul class="inline">
-    {% for code, label in BIKE_STATUSES.items() %}
-      <li><a href="/bikes?status={{ code }}">{{ label }}: <b>{{ bikes.get(code, 0) }}</b></a></li>
-    {% endfor %}
+    {% for o in park.out %}<li><a href="/bikes?status={{ o.code }}">{{ o.title }}: <b>{{ o.value }}</b></a></li>{% endfor %}
+    <li class="muted">вне оборота: в простой и проценты не входят никогда</li>
   </ul>
-  <p class="muted">Проценты — от операционного парка: потерянные, проданные
-    и списанные в знаменатель не попадают никогда.</p>
-  {% if standing %}
-  <h3>Стоят дольше всех{% if money_ok %} <span class="muted">· −{{ money(loss_today.amount) }} в день</span>{% endif %}</h3>
-  <table>
-    <tr><th>Велосипед</th><th>Статус</th><th>Суток</th>{% if money_ok %}<th>Потеряно</th>{% endif %}</tr>
-    {% for b in standing %}
-    <tr>
-      <td><a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="muted">{{ b.model }}</span></td>
-      <td>{{ BIKE_STATUSES[b.status] }}</td>
-      <td class="num">{{ b.idle_days }}</td>
-      {% if money_ok %}<td class="num {% if b.lost %}bad{% endif %}">{% if b.lost %}−{{ money(b.lost) }}{% else %}—{% endif %}</td>{% endif %}
+  <p>Свободных сейчас <b>{{ forecast.now }}</b> · к завтрашнему дню <b>{{ forecast['1'] }}</b>, через два дня <b>{{ forecast['2'] }}</b>{% if money_ok %} · теряем ≈ <b>{{ money(loss_today.amount) }}</b> в день: {{ loss_today.idle }} простаивают по цели {{ money(CHECK_TARGET) }}{% endif %}
+    <br><small class="muted">Прогноз — по «оплачено до»: сказавшие «продлю» в него не входят, их велосипед не вернётся.</small></p>
+  {% if idle_by_location %}
+  <h3>Простой по точкам</h3>
+  <ul class="inline">
+    {% for l in idle_by_location %}<li><a href="/bikes?location={{ l.location|urlencode if l.location != 'не на точке' else 'none' }}&status=available">{{ l.location }}: свободных <b>{{ l.free }}</b>, в ремонте и на ТО <b>{{ l.repair }}</b></a></li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if models.rows %}
+  {% set mt = models.total %}
+  {# Число ведёт в список парка с поиском по модели и статусом; у «Итого» -
+     только статус. Ноль - не ссылка: пустой список ничего не объяснит. #}
+  {% macro bikes_link(r, total, status, value) %}{% if value %}<a href="/bikes?{% if not total %}q={{ r.model|urlencode }}&{% endif %}status={{ status }}">{{ value }}</a>{% else %}0{% endif %}{% endmacro %}
+  <h3>По моделям</h3>
+  <div class="table-wrap">
+  {# Таблицей и на телефоне: моделей бывает десяток, карточками это экран
+     прокрутки. Парк, бронь, сборка, подменные и загрузка там уходят (opt). #}
+  <table class="compact">
+    <tr><th>Модель</th><th class="num opt">Парк</th><th class="num">В аренде</th><th class="num">Свободны</th><th class="num">Ремонт и ТО</th>{% if mt.reserved %}<th class="num opt">Бронь</th>{% endif %}{% if mt.new %}<th class="num opt">На сборке</th>{% endif %}{% if mt.spare %}<th class="num opt">Подменные</th>{% endif %}<th class="num opt">Загрузка</th></tr>
+    {% for r in models.rows + [mt] %}{% set total = loop.last %}
+    <tr {% if total %}class="total"{% endif %}>
+      <td data-label="Модель">{% if total %}<b>Итого</b>{% else %}<a href="/bikes?q={{ r.model|urlencode }}">{{ r.model or '—' }}</a>{% endif %}</td>
+      <td class="num opt" data-label="Парк">{{ r.fleet }}</td>
+      <td class="num" data-label="В аренде">{{ bikes_link(r, total, 'rented', r.rented) }}</td>
+      <td class="num" data-label="Свободны">{{ bikes_link(r, total, 'available', r.free) }}</td>
+      <td class="num" data-label="Ремонт и ТО">{{ bikes_link(r, total, 'repair', r.repair) }}</td>
+      {% if mt.reserved %}<td class="num opt" data-label="Бронь">{{ r.reserved }}</td>{% endif %}
+      {% if mt.new %}<td class="num opt" data-label="На сборке">{{ r.new }}</td>{% endif %}
+      {% if mt.spare %}<td class="num opt" data-label="Подменные">{{ r.spare }}</td>{% endif %}
+      <td class="num opt" data-label="Загрузка">{% if r.load is none %}—{% else %}{{ r.load }} %{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
-  <p class="muted">Деньги здесь — оценка по цели {{ money(CHECK_TARGET) }} в день:
-    велосипед, который стоит, не заработал ничего, и «сколько бы он принёс» —
-    единственный честный способ это назвать.</p>
+  </div>
+  <p class="muted">Загрузка — доля в аренде от операционного парка модели сейчас.
+    Модель — как записана в парке; что покупать, считает отчёт «Что купить».</p>
   {% endif %}
-  <p>{% if can_edit(staff, 'issue') %}<a class="btn" href="/issue">⚡ Быстрая выдача</a> {% endif %}{% if can_edit(staff, 'clients') %}<a class="btn ghost" href="/clients/new">+ Клиент</a> {% endif %}{% if can_edit(staff, 'bikes') %}<a class="btn ghost" href="/bikes/new">+ Велосипед</a>{% endif %}</p>
+  {% if advice %}
+  {# Перевозка ведёт в отчёт по точкам (там же выбор велосипедов), простой -
+     в готовую форму акции: строка видна тем, кому открыт её адрес. #}
+  <h3>Что сделать с парком</h3>
+  <div class="tasks">
+    {% for t in advice %}
+    <a class="task {{ t.level }}" href="{{ t.url }}"><span class="n">{{ t.count }}</span>
+      <span class="t">{{ t.title }}{% if t.names %}<small class="muted">{{ t.names|join(', ') }}{% if t.count > t.names|length %} и ещё {{ t.count - t.names|length }}{% endif %}</small>{% endif %}</span></a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if standing %}
+  <details class="more">
+    <summary>Стоят дольше всех{% if money_ok %} · −{{ money(loss_today.amount) }} в день{% endif %}</summary>
+    <div class="table-wrap">
+    <table class="cards">
+      <tr><th>Велосипед</th><th>Статус</th><th class="num">Суток</th>{% if money_ok %}<th class="num">Потеряно</th>{% endif %}</tr>
+      {% for b in standing %}
+      <tr>
+        <td data-label="Велосипед"><a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="muted">{{ b.model }}</span></td>
+        <td data-label="Статус">{{ BIKE_STATUSES[b.status] }}</td>
+        <td class="num" data-label="Суток">{{ b.idle_days }}</td>
+        {% if money_ok %}<td class="num {% if b.lost %}bad{% endif %}" data-label="Потеряно">{% if b.lost %}−{{ money(b.lost) }}{% else %}—{% endif %}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+    <p class="muted">Деньги здесь — оценка по цели {{ money(CHECK_TARGET) }} в день:
+      велосипед, который стоит, не заработал ничего, и «сколько бы он принёс» —
+      единственный честный способ это назвать.</p>
+  </details>
+  {% endif %}
+  {% if can_edit(staff, 'bikes') %}<p><a class="btn ghost" href="/bikes/new">+ Велосипед</a></p>{% endif %}
 </section>
+
+{# Точки за месяц сводки - тем же построителем, что /reports/points?month=:
+   строки точек и «без точки» складываются в общие числа месяца, план
+   точки - тем же ровным темпом, что у плана сети. Блок - когда точек
+   больше одной: с одной он повторял бы общие числа. #}
+{% if points %}
+{% set rep_ok = can_view(staff, 'reports') %}
+{% set planned = money_ok and points.planned %}
+<section class="card three" id="points">
+  <div class="three-head"><h2>По точкам {{ month_nav('points') }}</h2>
+    {% if rep_ok %}<span class="muted"><a href="/reports/points?month={{ span.key }}">отчёт по точкам</a></span>{% endif %}</div>
+  <div class="table-wrap">
+  <table class="cards">
+    <tr><th>Точка</th><th class="num">Парк<br>сейчас</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th><th class="num">Выручка</th>{% endif %}{% if planned %}<th class="num">План</th><th class="num">Выпол&shy;нено</th>{% endif %}</tr>
+    {% for r in points.rows + [points.total] %}{% set pm = r.metrics %}
+    <tr {% if r.total %}class="total"{% endif %}>
+      <td data-label="Точка">{% if r.total %}<b>Итого</b>{% elif rep_ok and not r.orphan %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}?month={{ span.key }}">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}{% if r.closed %} <span class="tag">закрыта</span>{% endif %}</td>
+      <td class="num" data-label="Парк сейчас">{{ r.fleet }}</td>
+      <td class="num {% if pm.idle_percent is none %}muted{% elif pm.idle_ok %}ok{% else %}bad{% endif %}" data-label="Простой">{% if pm.idle_percent is none %}—{% else %}{{ pm.idle_percent }} %{% endif %}</td>
+      {% if money_ok %}
+      <td class="num {% if pm.avg_check is none %}muted{% elif pm.check_ok %}ok{% else %}bad{% endif %}" data-label="Чек/день">{% if pm.avg_check is none %}—{% else %}{{ money(pm.avg_check) }}{% endif %}</td>
+      <td class="num" data-label="Выручка">{{ money(r.paid) }}</td>
+      {% endif %}
+      {% if planned %}{% set pp = r.plan %}
+      <td class="num {% if not pp %}muted{% endif %}" data-label="План">{% if pp %}{{ money(pp.target) }}{% else %}—{% endif %}</td>
+      <td class="num {% if not pp or pp.percent is none %}muted{% elif pp.ahead %}ok{% else %}bad{% endif %}"{% if pp %} title="ровным темпом {{ money(pp.pace) }}"{% endif %} data-label="Выполнено">{% if pp and pp.percent is not none %}{{ pp.percent }} %{% else %}—{% endif %}</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  <p class="muted">Простой и чек — формулы трёх чисел, ограниченные точкой: дни — по
+    журналу мест, деньги — по точке аренды. Строка «{{ NO_POINT_TITLE }}» (когда в
+    ней что-то есть) и «Итого» сводят точки с общими числами месяца{% if money_ok %}:
+    выручка «Итого» — это «пришло» в план-факте выше{% endif %}.{% if planned %} План
+    точки задаётся на её странице.{% endif %}</p>
+</section>
+{% endif %}
+
+<div class="tiles wide">
+  {% if can_view(staff, 'rentals') %}<a class="tile" href="/rentals"><b>{{ counts.rentals }}</b><span>аренд идёт</span></a>{% endif %}
+  {% if can_view(staff, 'clients') %}<a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>{% endif %}
+  {% if inbox_waiting is not none %}<a class="tile {% if inbox_waiting %}hot{% endif %}" href="/inbox"><b>{{ inbox_waiting }}</b><span>входящих ждут ответа</span></a>{% endif %}
+</div>
+
 {% if money_ok %}
-<section class="card">
+<section class="card" id="debtors">
   <h2>Должники</h2>
   {% if debtors %}
   <table>{% for d in debtors %}<tr><td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ d.id }}">{{ d.full_name }}</a>{% else %}{{ d.full_name }}{% endif %}</td><td class="num bad">{{ money(d.balance) }}</td></tr>{% endfor %}</table>
@@ -357,5 +427,4 @@
   {% endif %}
 </section>
 {% endif %}
-</div>
 {% endblock %}

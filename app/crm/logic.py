@@ -10658,6 +10658,10 @@ def waitlist_note(booking: Mapping[str, Any], *, today: date) -> str:
 # «info» - работа есть, но не горит.
 
 TASK_LEVELS = ("hot", "warn", "info")
+# Куда ведут просрочка и «истекает на днях»: аренды по «оплачено до» -
+# просроченные и платящие сегодня сверху, телефон и «продлит/сдаёт» - в
+# карточке. Списка на сводке больше нет: сводка - картина, а не прозвон.
+EXPIRING_URL = "/rentals?sort=paid"
 
 
 def _names(rows: Iterable[Mapping[str, Any]], key: str = "full_name",
@@ -10706,8 +10710,8 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
                if (r.get("summary") or {}).get("days_left") is not None
                and (r.get("summary") or {}).get("days_left") <= 0]
     soon = [r for r in expiring if r not in overdue]
-    add("overdue", "Просрочка или платёж сегодня — позвонить", overdue, "/", "hot")
-    add("soon", "Истекает на днях — напомнить", soon, "/", "warn")
+    add("overdue", "Просрочка или платёж сегодня — позвонить", overdue, EXPIRING_URL, "hot")
+    add("soon", "Истекает на днях — напомнить", soon, EXPIRING_URL, "warn")
 
     search = search or {}
     theft = [r for r in search.get("searching", []) if r.get("theft")]

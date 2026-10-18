@@ -158,7 +158,8 @@ class TestMyTasks(unittest.TestCase):
                                  today=TODAY)[0]
         self.assertEqual((len(group["rows"]), group["more"], group["count"]),
                          (mytasks.GROUP_LIMIT, 5, mytasks.GROUP_LIMIT + 5))
-        self.assertEqual(group["url"], "/rentals", "без сводки - список аренд")
+        self.assertEqual(group["url"], logic.EXPIRING_URL,
+                         "весь список - аренды по «оплачено до», а не сводка")
 
 
 class TestProfilesAndTerms(unittest.TestCase):
