@@ -107,8 +107,10 @@
   <div class="bars" role="img" aria-label="Деньги точки по дням">
     {% for d in chart.days %}
     <div class="bar-col" title="{{ d.day|dmy }}: пришло {{ money(d.paid) }}{% if d.debt %}, долг {{ money(d.debt) }}{% endif %}">
-      <div class="bar-val" style="height:{{ d.height }}%"></div>
-      {% if d.debt %}<div class="bar-dot" style="bottom:{{ d.debt_height }}%" aria-hidden="true"></div>{% endif %}
+      <div class="bar-area">
+        <div class="bar-val" style="height:{{ d.height }}%"></div>
+        {% if d.debt %}<div class="bar-dot" style="bottom:{{ d.debt_height }}%" aria-hidden="true"></div>{% endif %}
+      </div>
       <div class="bar-day muted">{{ d.day.day }}</div>
     </div>
     {% endfor %}

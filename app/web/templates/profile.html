@@ -12,8 +12,11 @@
   <section class="card">
     <label style="max-width:420px">Название роли <input name="name" value="{{ profile.name }}" {% if profile.built_in or not can_manage %}disabled{% endif %} required></label>
     <h2>Разделы</h2>
+    {# На телефоне уровни - коротким словом: «смотреть и менять» в одну
+       строку уводил последнюю колонку за край, и роль казалась пустой. #}
+    {% set LEVELS_SHORT = {'': 'Нет', 'view': 'Вид', 'edit': 'Правка'} %}
     <table class="perms">
-      <tr><th>Раздел</th>{% for level in LEVEL_ORDER %}<th>{{ LEVELS[level] }}</th>{% endfor %}</tr>
+      <tr><th>Раздел</th>{% for level in LEVEL_ORDER %}<th title="{{ LEVELS[level] }}"><span class="long">{{ LEVELS[level] }}</span><span class="short">{{ LEVELS_SHORT.get(level, LEVELS[level]) }}</span></th>{% endfor %}</tr>
       {% for code, label in SECTIONS.items() %}
       {% set cur = perms.sections.get(code, '') %}
       <tr>

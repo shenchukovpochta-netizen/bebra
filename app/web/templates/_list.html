@@ -21,8 +21,9 @@
     <b>Итого {{ tools.total }}</b>{% if tools.shown != tools.total %} · показано {{ tools.shown }}{% endif %}
     {% if extra %}· {{ extra }}{% endif %}
     <span class="spacer"></span>
-    строк:
-    {% for size in LIST_SIZES %}<a href="?{{ tools.q_rows }}{% if tools.q_rows %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}
+    {# Одним куском: на телефоне «300» уезжала на свою строку одна. #}
+    <span class="nowrap">строк:
+    {% for size in LIST_SIZES %}<a href="?{{ tools.q_rows }}{% if tools.q_rows %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}</span>
     {% if tools.pages > 1 %}
     <span class="spacer"></span>
     {% if tools.page > 1 %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}page={{ tools.page - 1 }}">←</a>{% endif %}

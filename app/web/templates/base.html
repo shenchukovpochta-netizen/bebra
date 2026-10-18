@@ -184,6 +184,28 @@
     var top = on.getBoundingClientRect().top - side.getBoundingClientRect().top;
     if (top > side.clientHeight - 80) side.scrollTop = top - side.clientHeight / 2;
   }
+  // Лента вкладок или шагов шире экрана: открытая - в середину ленты, а
+  // не за краем; край, за которым ещё пункты, тает (more / more-back в
+  // style.css). scrollLeft, а не scrollIntoView: страница не дёргается
+  // по вертикали.
+  var strips = document.querySelectorAll('nav.tabs, .steps');
+  function edges(n) {
+    var wide = n.scrollWidth > n.clientWidth + 1;
+    n.classList.toggle('more', wide && n.scrollLeft + n.clientWidth < n.scrollWidth - 4);
+    n.classList.toggle('more-back', wide && n.scrollLeft > 4);
+  }
+  strips.forEach(function (n) {
+    var a = n.querySelector('a.on, .now');
+    if (a && n.scrollWidth > n.clientWidth + 1) {
+      n.scrollLeft += a.getBoundingClientRect().left - n.getBoundingClientRect().left
+                      - (n.clientWidth - a.offsetWidth) / 2;
+    }
+    edges(n);
+    n.addEventListener('scroll', function () { edges(n); }, {passive: true});
+  });
+  function allEdges() { strips.forEach(edges); }
+  window.addEventListener('resize', allEdges);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(allEdges);
 })();
 </script>
 {% endif %}
