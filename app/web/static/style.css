@@ -223,7 +223,11 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
   .top-search,.top-right{display:none}
   .top-fill{display:none}
   /* Крошка - цель под палец. Высотой, а не полями с минусом: у .crumbs
-     overflow:hidden, и выступ за неё обрезался бы вместе с зоной нажатия. */
+     overflow:hidden, и выступ за неё обрезался бы вместе с зоной нажатия.
+     Та же высота у самой ленты: без ссылки в крошках (список, где
+     последняя крошка - текст) шапка была на 20 px ниже карточки, и при
+     переходе в карточку страница прыгала. */
+  .top .crumbs{min-height:40px}
   .top .crumbs a{display:inline-flex;align-items:center;min-height:40px}
   .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:70;display:flex;justify-content:space-around;gap:4px;
     padding:6px calc(6px + env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) calc(6px + env(safe-area-inset-left,0px));
@@ -718,11 +722,12 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
 .perms label.cell input{width:auto;margin:0}
 .perms tr:hover td{background:var(--hover)}
 /* На телефоне уровни - коротким словом (profile.html), колонки
-   помещаются в экран без прокрутки, а кружок - с целью под палец. */
-.perms .short{display:none}
+   помещаются в экран без прокрутки, а кружок - с целью под палец.
+   Пояснение под матрицей называет уровень тем же словом, что колонка. */
+:is(.perms,.perms-note) .short{display:none}
 @media (max-width:640px){
-  .perms .long{display:none}
-  .perms .short{display:inline}
+  :is(.perms,.perms-note) .long{display:none}
+  :is(.perms,.perms-note) .short{display:inline}
   .perms th:not(:first-child),.perms td:not(:first-child){padding-left:2px;padding-right:2px;white-space:normal}
   .perms td:not(:first-child){padding-top:0;padding-bottom:0;vertical-align:middle}
   .perms label.cell{min-height:44px;min-width:40px;display:flex;align-items:center;justify-content:center;padding:0 4px}
@@ -796,7 +801,7 @@ p.small{font-size:13px}
          transition:height .2s}
 .bar-val.over{--c:var(--bad)}
 .bar-num{font:500 10.5px/1.2 var(--font-mono);margin-top:3px}
-.bar-day{font:500 10px/1.2 var(--font-mono);color:var(--muted)}
+.bar-day{font:500 10px/12px var(--font-mono);height:12px;color:var(--muted)}
 .bar-norm{position:absolute;left:0;right:0;border-top:1px dashed var(--muted);
           pointer-events:none}
 .bar-norm span{position:absolute;right:0;top:-14px;font:500 10px var(--font-mono);color:var(--muted);
@@ -805,6 +810,12 @@ p.small{font-size:13px}
    долга считаются от неё. От всей колонки точка нуля ложилась на число
    дня под столбиком. */
 .bar-area{position:relative;flex:1 1 0;min-height:0;width:100%;display:flex;align-items:flex-end}
+/* Линия плана у графика с областью столбика - доля той же области:
+   над подписью дня (12 px) и под отступом сверху (18 px). От всей
+   высоты графика столбик ровно на плане рисовался на 7 px ниже линии,
+   и выполненные дни выглядели невыполненными. График без области
+   (сервис) живёт по старой формуле - процентом от всей высоты. */
+.bars:has(>.bar-col>.bar-area)>.bar-norm{bottom:calc(12px + (100% - 30px) * var(--p, 0) / 100)}
 /* Телефон: месяц - в ширину экрана, без прокрутки вбок. Колонки делят
    ширину поровну (по 18 px тридцать дней - 660 px против 328), а у
    длинных графиков подписан каждый пятый день, у двухмесячных -
@@ -843,6 +854,8 @@ tr.list-foot a.on{font-weight:700;color:var(--text)}
 .saved-views{display:flex;flex-wrap:wrap;align-items:center;gap:6px;
              margin:8px 0;font-size:13px}
 .saved-views .inline-form{display:inline-flex;gap:4px;margin:0}
+/* пара «фильтр + крестик» переносится только целиком */
+.saved-views .view{display:inline-flex;align-items:center;gap:6px;max-width:100%}
 .saved-views .btn,.saved-views button{min-height:30px;padding:4px 12px;font-size:12.5px;font-weight:600;border-radius:999px}
 .saved-views .inline-form:has(>button.danger){margin-left:-36px;margin-right:4px}
 .saved-views a.btn.ghost:has(+.inline-form>button.danger){padding-right:34px}
@@ -1029,6 +1042,9 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 
 .deal-stages{display:flex;flex-wrap:wrap;gap:6px}
 .deal-stages form{margin:0}
+/* «ещё N» у авто-этапа - только на телефоне (ниже): на компьютере
+   колонка листается сама. */
+.board-more{display:none}
 /* Телефон: этапы - столбиком, сделки этапа - списком под ним, вся доска
    листается одной прокруткой страницы. Колонками вбок с прокруткой
    внутри каждой было три направления прокрутки на одном экране. Пустой
@@ -1039,6 +1055,13 @@ table.staff-table td .inline-form:first-child{margin-top:0}
   .board-cards{overflow:visible;min-height:0}
   .board-col:not(:has(.deal)) .board-cards{padding:0}
   .board-col:not(:has(.deal)) .board-empty{display:none}
+  /* авто-этап - три свежие карточки и «ещё N» (deals.html) */
+  .board-cards:has(>.board-more>input:not(:checked))>.deal:nth-child(n+4){display:none}
+  .board-more{position:relative;display:flex;align-items:center;justify-content:center;min-height:40px;margin:0;
+    border:1px dashed var(--line-strong);border-radius:12px;color:var(--link);font-size:13px;font-weight:700;cursor:pointer}
+  .board-more:has(>input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+  .board-more>input{position:absolute;opacity:0;width:1px;height:1px;margin:0;pointer-events:none}
+  .board-more:has(>input:checked)>span:first-of-type,.board-more:not(:has(>input:checked))>span+span{display:none}
 }
 
 /* Задачи дня (_tasks.html): кнопки строки справа, форма свёрнута. */
@@ -1104,10 +1127,13 @@ h1.hero-title{font:700 30px/1.1 var(--font-text);letter-spacing:-.03em;margin:0 
   .tabs a,.steps>a,.steps>span{min-height:40px}
   .task-acts button{min-height:40px;padding:8px 16px}
   .saved-views .btn,.saved-views button,.saved-views input.mini{min-height:40px}
-  /* крестик фильтра - своей кнопкой рядом, а не внутри «таблетки»: в
-     28 пикселях у края палец попадал в сам фильтр */
-  .saved-views .inline-form:has(>button.danger){margin-left:0;margin-right:0}
-  .saved-views a.btn.ghost:has(+.inline-form>button.danger){padding-right:12px}
+  /* крестик фильтра - внутри своей «таблетки», но целью 40 px: в 28
+     пикселях у края палец попадал в сам фильтр, а отдельной кнопкой
+     между двумя таблетками было не понять, какую он уберёт. Между
+     парами - отступ шире, чем между текстом и крестиком. */
+  .saved-views{column-gap:10px}
+  .saved-views .inline-form:has(>button.danger){margin-left:-50px;margin-right:4px}
+  .saved-views a.btn.ghost:has(+.inline-form>button.danger){padding-right:48px}
   .saved-views button.danger{width:40px;min-height:40px}
   label.check{min-height:40px}
   /* стрелки месяца у графиков (сводка, сервис) - кнопкой, а не значком */

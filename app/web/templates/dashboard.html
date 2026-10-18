@@ -218,7 +218,9 @@
     </div>
     {% endfor %}
     {% if chart_view != 'cumulative' and chart.plan_per_day %}
-    <div class="bar-norm" style="bottom:{{ chart.plan_height }}%" aria-hidden="true">
+    {# Линия плана - в той же системе, что столбики: доля области
+       столбика (--p), а не всей высоты графика; правило - в style.css. #}
+    <div class="bar-norm" style="--p:{{ chart.plan_height }}" aria-hidden="true">
       <span>план {{ money(chart.plan_per_day) }}/день</span></div>
     {% endif %}
   </div>

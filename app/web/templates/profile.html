@@ -31,7 +31,8 @@
     {% for code, label in ACTIONS.items() %}
     <label class="check"><input type="checkbox" name="a_{{ code }}" value="1" {% if perms.actions.get(code) %}checked{% endif %} {% if profile.built_in or not can_manage %}disabled{% endif %}> {{ label }}</label>
     {% endfor %}
-    <p class="muted">«Смотреть и менять» в разделе «Сотрудники» — это полный доступ: такой человек сможет выдать себе любые права. Давайте его только тем, кому доверяете парк целиком.</p>
+    {# Уровень назван так же, как его колонка: на телефоне - коротким словом. #}
+    <p class="muted perms-note">«<span class="long">Смотреть и менять</span><span class="short">{{ LEVELS_SHORT['edit'] }}</span>» в разделе «Сотрудники» — это полный доступ: такой человек сможет выдать себе любые права. Давайте его только тем, кому доверяете парк целиком.</p>
     {% if can_manage and not profile.built_in %}
     <div class="issue-bar"><span class="spacer"></span><button type="submit">Сохранить права</button></div>
     {% endif %}

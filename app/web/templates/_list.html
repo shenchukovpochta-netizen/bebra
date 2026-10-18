@@ -40,10 +40,15 @@
 <div class="saved-views">
   <span class="muted">Мои фильтры:</span>
   {% for v in saved %}
-  <a class="btn ghost" href="{{ section }}{% if v.query %}?{{ v.query }}{% endif %}">★ {{ v.name }}</a>
-  <form method="post" action="/views/{{ v.id }}/delete" class="inline-form">
-    <button type="submit" class="ghost danger" title="убрать фильтр">×</button>
-  </form>
+  {# Фильтр и его крестик - одной парой: порознь перенос строки ставил
+     крестик перед чужим фильтром, а удаление - одним нажатием. #}
+  <span class="view">
+    <a class="btn ghost" href="{{ section }}{% if v.query %}?{{ v.query }}{% endif %}">★ {{ v.name }}</a>
+    <form method="post" action="/views/{{ v.id }}/delete" class="inline-form">
+      <button type="submit" class="ghost danger" title="убрать фильтр «{{ v.name }}»"
+              aria-label="убрать фильтр «{{ v.name }}»">×</button>
+    </form>
+  </span>
   {% else %}<span class="muted">пока нет</span>{% endfor %}
   {% if tools.query %}
   <form method="post" action="/views" class="inline-form">

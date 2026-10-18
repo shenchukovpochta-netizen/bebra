@@ -61,6 +61,14 @@
         </span>
       </a>
       {% else %}<p class="muted board-empty">Пусто</p>{% endfor %}
+      {# Телефон: этапы идут столбиком, и авто-этапы («В аренде»,
+         «Повторное продление», «Сдал») по сотне карточек отодвигали
+         «Отложено» и «Не взял» на двадцать экранов вниз. Там видны три
+         свежие карточки, остальные - по «ещё N»; переключатель без
+         скрипта, на компьютере его нет (колонка листается сама). #}
+      {% if col.auto and col.cards|length > 3 %}
+      <label class="board-more"><input type="checkbox"><span>ещё {{ col.cards|length - 3 }}</span><span>свернуть</span></label>
+      {% endif %}
       {% if col.more %}<p class="muted board-empty">и ещё {{ col.more }} — найдите поиском</p>{% endif %}
     </div>
   </section>
