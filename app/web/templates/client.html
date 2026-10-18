@@ -21,7 +21,7 @@
     <dt>Telegram</dt><dd>{% if client.tg_id %}✅ ID {{ client.tg_id }}{% if client.username %} · @{{ client.username }}{% endif %}{% else %}<span class="muted">не привязан — клиент отправляет боту /cabinet и делится контактом</span>{% endif %}</dd>
     <dt>Договор</dt><dd>{{ client.contract_no or '—' }}{% if has_contract and can_act(staff, 'client_docs') %} · <a href="/clients/{{ client.id }}/contract">скачать подписанный</a>{% endif %}</dd>
     {% if bot_user %}<dt>В боте</dt><dd>статус {{ bot_user.status }}, шаг {{ bot_user.state }}{% if bot_user.rent_until %}, срок по форме выдачи до {{ bot_user.rent_until|dmy }}{% endif %}</dd>{% endif %}
-    <dt>Источник</dt><dd>{{ {'bot': 'из бота', 'import': 'импорт из таблицы'}.get(client.source, 'заведён в панели') }} · {{ client.created_at|dmy }}</dd>
+    <dt>Заведён</dt><dd>{{ CLIENT_SOURCES.get(client.source) or CLIENT_SOURCES['manual'] }} · {{ client.created_at|dmy }}</dd>
     {% if claim and can_view(staff, 'claims') %}<dt>Заявка</dt><dd class="warn">#{{ claim.id }} на зачисление ждёт проверки — <a href="/claims">обработать</a></dd>{% endif %}
   </dl>
 </section>

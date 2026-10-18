@@ -746,7 +746,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
-        CLIENT_GROUPS=logic.CLIENT_GROUPS,
+        CLIENT_GROUPS=logic.CLIENT_GROUPS, CLIENT_SOURCES=logic.CLIENT_SOURCES,
         RISK_LEVELS=logic.RISK_LEVELS,
         BILLING=logic.BILLING, role_title=logic.role_title,
         greeting=lambda: logic.greeting(datetime.now().hour),
@@ -2317,7 +2317,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 row.append((c.get("risk") or {}).get("label"))
             rows.append(row)
         head = ["ФИО", "Телефон", "Группы", "Вид техники", "Модель (последняя аренда)",
-                "Купил", "Техника в ремонте", "Первая аренда", "Последний день аренды",
+                "Купил", "Что чинил у нас", "Первая аренда", "Последний день аренды",
                 "Аренд", "Дней с велосипедом", "Оплатил за всё время", "Долг",
                 "Баланс", "Откуда узнал", "Как заведён", "Статус", "Telegram",
                 "Велосипед сейчас", "Тариф", "Оплачено до", "Договор", "Добавлен"]

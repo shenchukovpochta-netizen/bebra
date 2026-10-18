@@ -45,7 +45,7 @@
 <div class="card">
 {# Разделение по видам техники: счётчики - внутри выбранной группы и
    поиска. Клиент с самокатом и АКБ считается в обоих видах. #}
-<nav class="tabs seg kinds" aria-label="Вид техники">
+<nav class="tabs seg tech-kinds" aria-label="Вид техники">
   <a href="/clients?{{ base|safe }}&group={{ group }}&kind=" {% if not kind %}class="on"{% endif %}>Вся техника · {{ kind_total }}</a>
   {% for code in kind_order %}{% if kind_counts[code] or kind == code %}<a href="/clients?{{ base|safe }}&group={{ group }}&kind={{ code }}" {% if kind == code %}class="on"{% endif %}>{{ kinds[code] }} · {{ kind_counts[code] }}</a>{% endif %}{% endfor %}
 </nav>
@@ -70,8 +70,11 @@
       {% if c.tg_id %}<br><small class="muted">Telegram{% if c.username %} @{{ c.username }}{% endif %}</small>{% endif %}</td>
     <td data-label="Телефон"><a href="tel:{{ c.phone }}">{{ c.phone }}</a></td>
     <td data-label="Вид техники">{% if c.kinds %}{{ c.kinds|join(', ') }}{% else %}<span class="muted">—</span>{% endif %}
-      {% if c.bought_model %}<br><small class="muted">купил {{ c.bought_model }}</small>
-      {% elif c.last_model %}<br><small class="muted">{{ c.last_model if c.rental_id else 'брал ' ~ c.last_model }}</small>{% endif %}
+      {# Модель - чем ездит сейчас, иначе чем ездил; «купил» - своей строкой:
+         выкупивший раньше может снова быть в аренде на другом велосипеде. #}
+      {% if c.rental_id %}{% if c.bike_model or c.last_model %}<br><small class="muted">{{ c.bike_model or c.last_model }}</small>{% endif %}
+      {% elif c.last_model and c.last_model != c.bought_model %}<br><small class="muted">брал {{ c.last_model }}</small>{% endif %}
+      {% if c.bought_model %}<br><small class="muted">купил {{ c.bought_model }}</small>{% endif %}
       {% if c.external_repairs %}<br><small class="muted">ремонт: {{ c.repair_objects or (c.external_repairs ~ ' нар.') }}</small>{% endif %}</td>
     <td data-label="Сейчас">{% if c.rental_id %}<a href="/rentals/{{ c.rental_id }}">{{ c.bike_code or c.tariff_name }}</a><br>{% with summary=c.summary %}{% include "_summary.html" %}{% endwith %}{% else %}<span class="muted">без велосипеда</span>{% endif %}</td>
     <td class="num" data-label="Аренд">{{ c.rentals_count or 0 }}</td>

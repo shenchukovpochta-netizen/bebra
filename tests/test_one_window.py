@@ -381,7 +381,7 @@ class TestOneWindowPages(WebCase):
         self.fixer()
         self.login()
         page = self.get_ok("/clients")
-        kinds = page.split('class="tabs seg kinds"')[1].split("</nav>")[0]
+        kinds = page.split('class="tabs seg tech-kinds"')[1].split("</nav>")[0]
         self.assertEqual(re.findall(r">([^<]+) · (\d+)</a>", kinds),
                          [("Вся техника", "4"), ("Велосипед", "2"), ("Самокат", "1")],
                          "виды со счётчиками, пустые не показываются")
@@ -389,7 +389,7 @@ class TestOneWindowPages(WebCase):
         self.assertIn('data-label="Вид техники">Самокат', page)
         self.assertIn('data-label="Вид техники">Велосипед', page)
         repair = self.get_ok("/clients?group=repair")
-        kinds = repair.split('class="tabs seg kinds"')[1].split("</nav>")[0]
+        kinds = repair.split('class="tabs seg tech-kinds"')[1].split("</nav>")[0]
         self.assertEqual(re.findall(r">([^<]+) · (\d+)</a>", kinds),
                          [("Вся техника", "1"), ("Самокат", "1")],
                          "счётчики - внутри группы")
@@ -399,6 +399,37 @@ class TestOneWindowPages(WebCase):
         self.assertNotIn("Бывший Клиент", scooters)
         # вкладка группы помнит выбранный вид
         self.assertIn("&kind=scooter&group=repair", scooters)
+
+    def test_renter_who_bought_keeps_current_model(self):
+        """Выкупил велосипед раньше и снова в аренде на другом: под видом -
+        модель, на которой ездит сейчас, и «купил …» своей строкой."""
+        buyer = run(self.crm.create_client(full_name="Выкупивший", phone="+79990000007"))
+        sold = run(self.crm.create_bike(code="B-3", model="Monster"))
+        run(self.crm.create_rental(client_id=buyer, bike_id=sold,
+                                   tariff_id=self.tariff_id, tariff_name="Неделя",
+                                   period_days=7, price=D(3000), billing="auto",
+                                   started_on=date.today() - timedelta(days=60),
+                                   contract_no=None, created_by="t"))
+        run(self.crm.close_rental(max(self.crm.rentals_),
+                                  closed_on=date.today() - timedelta(days=40), note=None))
+        self.crm.bikes_[sold]["status"] = "sold"
+        now = run(self.crm.create_bike(code="B-4", model="Kugoo V3"))
+        run(self.crm.create_rental(client_id=buyer, bike_id=now,
+                                   tariff_id=self.tariff_id, tariff_name="Неделя",
+                                   period_days=7, price=D(3000), billing="auto",
+                                   started_on=date.today() - timedelta(days=2),
+                                   contract_no=None, created_by="t"))
+        self.login()
+        page = self.get_ok("/clients?group=active")
+        row = next(r for r in page.split("<tr>") if "Выкупивший" in r)
+        cell = row.split('data-label="Вид техники">')[1].split("</td>")[0]
+        self.assertIn('<small class="muted">Kugoo V3</small>', cell, "модель идущей аренды")
+        self.assertIn('<small class="muted">купил Monster</small>', cell)
+        former = self.get_ok("/clients?group=former")
+        row = next(r for r in former.split("<tr>") if "Бывший Клиент" in r)
+        self.assertIn("брал ", row.split('data-label="Вид техники">')[1].split("</td>")[0])
+        # как заведена карточка - те же слова, что в выгрузке (logic.CLIENT_SOURCES)
+        self.assertIn("<dt>Заведён</dt><dd>в панели · ", self.get_ok(f"/clients/{self.other}"))
 
     def test_export_is_the_whole_base(self):
         """«Все клиенты» в Excel/CSV - вся база, а не страница списка, с
@@ -429,7 +460,7 @@ class TestOneWindowPages(WebCase):
                           "в панели"))
         self.assertEqual(former["Модель (последняя аренда)"], "Kugoo V3")
         fixer = rows["Самокатчик"]
-        self.assertEqual((fixer["Группы"], fixer["Вид техники"], fixer["Техника в ремонте"]),
+        self.assertEqual((fixer["Группы"], fixer["Вид техники"], fixer["Что чинил у нас"]),
                          ("Ремонтировались у нас, Ни разу не брали", "Самокат",
                           "Самокат Kugoo M4"))
         self.assertEqual(rows["Иванов Иван"]["Группы"], "Арендаторы вело")
