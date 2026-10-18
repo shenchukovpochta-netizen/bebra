@@ -1675,10 +1675,15 @@ class FakeCrm:
         rows = [t for t in self.takes_.values() if t["status"] == "open"]
         return dict(rows[-1]) if rows else None
 
+    async def open_stock_takes(self):
+        return [dict(t) for t in sorted(self.takes_.values(), key=lambda t: t["id"])
+                if t["status"] == "open"]
+
     async def create_stock_take(self, *, scope, location, note, bike_ids, created_by,
                                 what="bikes", battery_ids=None):
-        if any(t["status"] == "open" for t in self.takes_.values()):
-            raise UniqueError("stock_takes_one_open")
+        if crm_logic.take_conflict(await self.open_stock_takes(), scope=scope,
+                                   location=location) is not None:
+            return None
         battery_ids = list(battery_ids or [])
         take_id = self._id()
         self.takes_[take_id] = {
@@ -1702,6 +1707,30 @@ class FakeCrm:
     async def update_stock_take(self, take_id, **fields):
         if take_id in self.takes_:
             self.takes_[take_id].update(fields)
+
+    def _take_open(self, take_id):
+        take = self.takes_.get(take_id)
+        return bool(take) and take["status"] == "open"
+
+    async def set_stock_take_note(self, take_id, note):
+        if not self._take_open(take_id):
+            return False
+        self.takes_[take_id]["note"] = note
+        return True
+
+    async def take_units(self):
+        units = [{"kind": "bike", "id": b["id"], "code": b.get("code"),
+                  "model": b.get("model"), "status": b.get("status"),
+                  "location": b.get("location"), "motor_no": b.get("motor_no"),
+                  "frame_no": b.get("frame_no"), "serial_no": None}
+                 for b in self.bikes_.values()]
+        for a in self.batteries_.values():
+            model = self.battery_models_.get(a.get("model_id")) or {}
+            units.append({"kind": "battery", "id": a["id"], "code": a.get("code"),
+                          "model": model.get("title"), "status": a.get("status"),
+                          "location": a.get("location"), "motor_no": None,
+                          "frame_no": None, "serial_no": a.get("serial_no")})
+        return units
 
     def _take_item_row(self, item):
         bike = self.bikes_.get(item.get("bike_id"))
@@ -1737,14 +1766,20 @@ class FakeCrm:
                      and i.get("battery_id") == battery_id), None)
 
     async def set_take_item(self, take_id, item_id, *, state, note=None):
+        if not self._take_open(take_id):
+            return False
         for item in self.take_items_:
             if item["take_id"] == take_id and item["id"] == item_id:
+                if item["state"] == "extra":
+                    return False
                 item["state"] = state
                 item["note"] = note or item["note"]
                 return True
         return False
 
     async def set_take_item_note(self, take_id, item_id, note):
+        if not self._take_open(take_id):
+            return False
         for item in self.take_items_:
             if item["take_id"] == take_id and item["id"] == item_id:
                 item["note"] = note
@@ -1752,6 +1787,8 @@ class FakeCrm:
         return False
 
     async def mark_take_all(self, take_id, *, state):
+        if not self._take_open(take_id):
+            return 0
         source = "found" if state == "expected" else "expected"
         hit = 0
         for item in self.take_items_:
@@ -1762,6 +1799,8 @@ class FakeCrm:
 
     async def add_take_item(self, take_id, *, bike_id, code, state="extra", note=None,
                             battery_id=None):
+        if not self._take_open(take_id):
+            return None
         if bike_id is not None and any(
                 i["take_id"] == take_id and i["bike_id"] == bike_id
                 for i in self.take_items_):
@@ -1778,12 +1817,17 @@ class FakeCrm:
         return item_id
 
     async def delete_take_item(self, take_id, item_id):
+        if not self._take_open(take_id):
+            return False
         before = len(self.take_items_)
         self.take_items_ = [i for i in self.take_items_
-                            if not (i["take_id"] == take_id and i["id"] == item_id)]
+                            if not (i["take_id"] == take_id and i["id"] == item_id
+                                    and i["state"] == "extra")]
         return len(self.take_items_) < before
 
-    async def close_stock_take(self, take_id, *, counts, closed_at):
+    async def close_stock_take(self, take_id, *, closed_at):
+        if not self._take_open(take_id):
+            return None
         missing = {"bikes": [], "batteries": []}
         for item in self.take_items_:
             if item["take_id"] == take_id and item["state"] == "expected":
@@ -1792,13 +1836,13 @@ class FakeCrm:
                     missing["bikes"].append(int(item["bike_id"]))
                 if item.get("battery_id") is not None:
                     missing["batteries"].append(int(item["battery_id"]))
+        counts = crm_logic.take_counts(
+            [i for i in self.take_items_ if i["take_id"] == take_id])
         self.takes_[take_id].update({
-            "status": "done", "closed_at": closed_at,
-            "expected": int(counts.get("total") or 0),
-            "found": int(counts.get("found") or 0),
-            "missing": int(counts.get("missing") or 0),
-            "extra": int(counts.get("extra") or 0)})
-        return missing
+            "status": "done", "closed_at": closed_at, "expected": counts["total"],
+            "found": counts["found"], "missing": counts["missing"],
+            "extra": counts["extra"]})
+        return {**missing, "counts": counts}
 
     # ─────────────────────── отчёты сервиса ───────────────────────
 

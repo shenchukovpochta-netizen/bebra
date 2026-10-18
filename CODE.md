@@ -702,7 +702,7 @@ where lang is null and faq_lang is not null`.
 | Одна активная аренда на велосипед | `schema.sql` | `rentals_active_bike_idx` on `(bike_id) where status = 'active' and bike_id is not null` |
 | Одно начисление на период аренды | `schema.sql` | `ledger_charge_period_idx` on `(rental_id, period_from) where kind = 'charge' and period_from is not null` |
 | Один открытый наряд на велосипед | `schema.sql` | `work_orders_one_open` on `(bike_id) where bike_id is not null and status in ('new','in_work','approve','waiting')` |
-| Одна открытая ведомость пересчёта | `schema.sql` | `stock_takes_one_open` on `((status)) where status = 'open'` |
+| Одна открытая ведомость пересчёта на точку | `schema.sql` | `stock_takes_one_open_place` on `(coalesce(location, '')) where status = 'open'`; «весь парк рядом с любой» - `db.create_stock_take` под замком таблицы |
 | Одна открытая смена на точку | `schema.sql` | `cash_shifts_one_open` on `(coalesce(location, '')) where status = 'open'` |
 | Одна цена на вид, модель и срок | `schema.sql` | `tariffs_kind_model_period_idx` on `(kind, coalesce(model,''), period_days) where active` |
 
@@ -1037,7 +1037,7 @@ pydantic читает в int и «+N», « N», «N.0», «1_000».
 
 ```python
 logic.SECTIONS       # код -> название раздела
-logic.ACTIONS        # money_edit, client_docs
+logic.ACTIONS        # money_edit, client_docs, stock_take
 logic.SECTION_PATHS  # префикс адреса -> код раздела
 logic.section_for(path) -> str | None
 logic.can_view(staff, code) / can_edit(staff, code) / can_act(staff, action)
@@ -1045,7 +1045,9 @@ logic.can_view(staff, code) / can_edit(staff, code) / can_act(staff, action)
 
 Страж один на все маршруты, это middleware `auth`: GET и HEAD требуют `can_view`, любой
 другой метод `can_edit`. Поэтому дыра «страницу закрыли, а POST оставили» в новом
-обработчике не заводится. Исключения перечислены константами рядом: `PUBLIC` (вход, статика,
+обработчике не заводится. Запись, которую открывает действие, а не правка раздела, -
+`logic.ACTION_WRITES` (префикс -> действие) и `logic.can_write`: `/stock-takes` пишет тот,
+кто видит парк и имеет `stock_take`; чья точка, проверяет обработчик (`take_may_count`). Исключения перечислены константами рядом: `PUBLIC` (вход, статика,
 `/healthz`, `/sign/<токен>` для клиента) и `ALWAYS_OPEN` (`/logout`, `/me`, `/me/password`).
 
 `section_for` сравнивает по префиксу, и точка в разделителях обязательна: `/clients.csv`
@@ -1739,7 +1741,7 @@ signature» съедала их до `put_marks`, и png лежал в архи�
 | чистая логика | `tests/test_logic.py`, `tests/test_crm_logic.py`, `tests/test_i18n.py`, `tests/test_config.py` | только stdlib |
 | SQL без базы | `tests/test_sql.py`, `tests/test_crm_sql.py` | записывающий пул, `pglast` |
 | панель и бот на заглушке | `tests/test_web.py` и ещё около семидесяти файлов | `tests/fake_crm.py`, фейковый бот |
-| живой Postgres | `tests/test_crm_pg.py`, `tests/test_web_pg.py`, `tests/test_points_pg.py`, `tests/test_tariff_buy_pg.py` | `pgserver`, `asyncpg`, `httpx` |
+| живой Postgres | `tests/test_crm_pg.py`, `tests/test_web_pg.py`, `tests/test_points_pg.py`, `tests/test_tariff_buy_pg.py`, `tests/test_stock_take_pg.py` | `pgserver`, `asyncpg`, `httpx` |
 | скрипты установки и обновления | `tests/test_scripts.py` | `bash`, `openssl`; `update.sh` - на заглушках `docker` и `curl` в `PATH`, полный проход - с `rsync`; откат из его текста - на `pgserver` настоящим `pg_dump`: заливка возвращает дамп, сбой посреди заливки оставляет базу как была; работавший `bot-max` пересобирается и возвращается откатом; Caddyfile из compose - заглушкой, а с `caddy` в `PATH` ещё и настоящим `caddy adapt` (без него один тест пропускается) |
 | франшиза | `tests/test_franchise.py`, `tests/test_franchise_web.py` | ответ `/hook/metrics` без полей клиента, враждебные ответы франчайзи, роялти в Decimal, опрос через HTTP-сервер на 127.0.0.1, запись на `pgserver` |
 | демо-стенд: сид | `tests/test_demo_seed.py`, `tests/test_demo_service.py`, `tests/test_demo_extras.py` | `pgserver`: три числа в коридорах, «По точкам» = общим, журналы = статусам, детерминизм, только намеренные расхождения, телефоны +7 000, живой день после сброса в 04:00 |

@@ -3,6 +3,7 @@
 {% block content %}
 <div class="bar"><h1>{{ take.no }} · {{ take_title(take) }}</h1>
   <a class="btn ghost" href="/stock-takes">← Все пересчёты</a>
+  <a class="btn ghost" href="/stock-takes/{{ take.id }}.xlsx">Excel</a>
 </div>
 
 <div class="tiles">
@@ -22,35 +23,80 @@
   не нашли {{ by_kind.batteries.missing }}.</p>
 {% endif %}
 
-{% set editable = take.status == 'open' and can_edit(staff, 'bikes') %}
 {% if editable %}
 <div class="card">
   <h2>Отметить по номеру</h2>
   {# Считают с телефоном в руках: прочитал номер на раме - ввёл. Экран
-     сразу говорит, ждали эту единицу здесь или нет. #}
-  <form method="post" action="/stock-takes/{{ take.id }}/scan" class="grid2">
-    <label class="wide">Номер {% if take.what == 'batteries' %}на корпусе{% elif take.what == 'all' %}на раме или на корпусе{% else %}на раме{% endif %}<input type="text" name="code" autofocus autocomplete="off" placeholder="510001"></label>
+     сразу говорит, ждали эту единицу здесь или нет. Enter со сканера
+     отправляет форму, и поле снова в фокусе для следующего номера. #}
+  <form method="post" action="/stock-takes/{{ take.id }}/scan" class="take-scan">
+    <input type="hidden" name="show" value="{{ show }}">
+    <label>Номер {% if take.what == 'batteries' %}на корпусе{% elif take.what == 'all' %}на раме или на корпусе{% else %}на раме{% endif %}
+      <input type="text" name="code" autofocus autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="send" maxlength="5000" placeholder="МБ-001, мб-1 или номер мотора"></label>
     <button type="submit">Отметить</button>
   </form>
-  <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
-    <input type="hidden" name="state" value="found"><button type="submit" class="ghost">Всё на месте</button>
-  </form>
-  <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
-    <input type="hidden" name="state" value="expected"><button type="submit" class="ghost">Снять отметки</button>
-  </form>
+  <p class="muted">Номер можно набрать как удобно: регистр, раскладка, дефис и
+    нули впереди не важны — «мб-1», «MB 001» и «МБ-001» один номер. Подходит
+    и номер мотора, рамы или аккумулятора. Несколько номеров — через пробел,
+    запятую или с новой строки.</p>
+  <details class="take-list">
+    <summary>Ввести списком</summary>
+    <form method="post" action="/stock-takes/{{ take.id }}/scan">
+      <input type="hidden" name="show" value="{{ show }}">
+      <label>Номера — по одному в строке или через запятую
+        <textarea name="code" rows="5" maxlength="5000" autocomplete="off" spellcheck="false" placeholder="МБ-001&#10;МБ-002&#10;АКБ-0017"></textarea></label>
+      <button type="submit">Отметить все</button>
+    </form>
+  </details>
+  <div class="take-tools">
+    <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
+      <input type="hidden" name="show" value="{{ show }}">
+      <input type="hidden" name="state" value="found"><button type="submit" class="ghost small">Всё на месте</button>
+    </form>
+    <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
+      <input type="hidden" name="show" value="{{ show }}">
+      <input type="hidden" name="state" value="expected"><button type="submit" class="ghost small">Снять отметки</button>
+    </form>
+  </div>
 </div>
 {% endif %}
 
+{% if editable or take.note %}
+<div class="card" id="take-note">
+  <h2>Комментарий к пересчёту</h2>
+  {% if editable %}
+  {# Что считали, где, кто помогал, почему расхождение - то, что через
+     месяц не вспомнить. Правится, пока ведомость идёт; пустой стирает. #}
+  <form method="post" action="/stock-takes/{{ take.id }}/note">
+    <input type="hidden" name="show" value="{{ show }}">
+    <textarea name="note" rows="3" maxlength="2000" aria-label="Комментарий к пересчёту" placeholder="Что считали, где, кто помогал, почему расхождение">{{ take.note or '' }}</textarea>
+    <button type="submit" class="ghost small">Сохранить комментарий</button>
+  </form>
+  {% else %}
+  <p class="take-note">{{ take.note }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% set all_rows = counts.total + counts.extra %}
+<nav class="tabs take-show" aria-label="Какие строки показать">
+  {% for code, label in TAKE_SHOW.items() %}
+  {% set n = all_rows if not code else counts[code] %}
+  {% if not code or n or show == code %}
+  <a href="/stock-takes/{{ take.id }}{% if code %}?show={{ code }}{% endif %}" {% if show == code %}class="on"{% endif %}>{{ label }} <span class="muted">{{ n }}</span></a>
+  {% endif %}
+  {% endfor %}
+</nav>
+
 <div class="card">
-<table class="cards">
-  <tr><th>№</th><th class="opt">Предмет</th><th class="opt">Модель</th><th>Статус</th><th class="opt">Точка</th><th>Отметка</th><th>Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
+<table class="cards take-table">
+  <tr><th>№</th><th>Наименование</th><th>Статус</th><th class="opt">Точка</th><th>Отметка</th><th>Комментарий</th>{% if editable %}<th></th>{% endif %}</tr>
   {% for i in items %}
   <tr id="item-{{ i.id }}">
     <td data-label="№">{% if i.bike_id %}<a href="/bikes/{{ i.bike_id }}">{{ i.bike_code or i.code }}</a>
       {% elif i.battery_id %}<a href="/batteries/{{ i.battery_id }}">{{ i.battery_code or i.code }}</a>
       {% else %}{{ i.code or '—' }}{% endif %}</td>
-    <td class="opt muted" data-label="Предмет">{% if i.battery_id %}АКБ{% elif i.bike_id %}велосипед{% else %}—{% endif %}</td>
-    <td class="opt" data-label="Модель">{{ i.bike_model or i.battery_model or '—' }}</td>
+    <td data-label="Наименование">{{ take_item_title(i) }}</td>
     <td data-label="Статус">{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}
       {% elif i.battery_status %}{{ BATTERY_STATUSES[i.battery_status] }}
       {% else %}нет в парке{% endif %}</td>
@@ -59,31 +105,35 @@
     <td data-label="Комментарий"{% if not editable and not i.note %} class="opt"{% endif %}>
       {% if editable %}
       {# Комментарий - своей формой: отметка его не трогает, пустой стирает. #}
-      <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/note" class="inline-form">
+      <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/note" class="inline-form take-row-note">
+        <input type="hidden" name="show" value="{{ show }}">
         <input type="text" name="note" value="{{ i.note or '' }}" maxlength="500" placeholder="комментарий" aria-label="Комментарий к {{ i.bike_code or i.battery_code or i.code }}">
         <button type="submit" class="ghost small">Сохранить</button>
       </form>
       {% else %}{{ i.note or '' }}{% endif %}
     </td>
     {% if editable %}
-    <td>
+    <td class="actions">
       {% if i.state == 'extra' %}
       <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/delete">
-        <button type="submit" class="ghost">убрать</button>
+        <input type="hidden" name="show" value="{{ show }}">
+        <button type="submit" class="ghost small">убрать</button>
       </form>
       {% elif i.state == 'found' %}
       <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}">
-        <input type="hidden" name="state" value="expected"><button type="submit" class="ghost">снять</button>
+        <input type="hidden" name="show" value="{{ show }}">
+        <input type="hidden" name="state" value="expected"><button type="submit" class="ghost small">снять</button>
       </form>
       {% else %}
       <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}">
-        <input type="hidden" name="state" value="found"><button type="submit" class="ghost">на месте</button>
+        <input type="hidden" name="show" value="{{ show }}">
+        <input type="hidden" name="state" value="found"><button type="submit" class="ghost small">на месте</button>
       </form>
       {% endif %}
     </td>
     {% endif %}
   </tr>
-  {% else %}<tr><td colspan="9" class="muted">Ведомость пуста.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="7" class="muted">{% if show %}Таких строк нет.{% else %}Ведомость пуста.{% endif %}</td></tr>{% endfor %}
 </table>
 </div>
 

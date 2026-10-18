@@ -359,7 +359,7 @@ create table if not exists crm.access_profiles (
 );
 
 insert into crm.access_profiles (code, name, perms, built_in) values
-  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit","franchise":"edit"},"actions":{"money_edit":true,"client_docs":true}}'::jsonb, true)
+  ('owner',   'Владелец', '{"sections":{"dashboard":"edit","issue":"edit","inbox":"edit","clients":"edit","rentals":"edit","bikes":"edit","batteries":"edit","trackers":"edit","cash":"edit","mailing":"edit","promos":"edit","service":"edit","claims":"edit","finance":"edit","tariffs":"edit","reports":"edit","import":"edit","staff":"edit","inventory":"edit","settings":"edit","franchise":"edit"},"actions":{"money_edit":true,"client_docs":true,"stock_take":true}}'::jsonb, true)
 on conflict (code) do update set
   -- встроенный профиль всегда подтягивается к коду, остальные - нет:
   -- их матрицу правит владелец, и перезапись затирала бы его настройку.
@@ -378,8 +378,8 @@ do $$
 begin
   if to_regclass('crm.settings') is null then
     insert into crm.access_profiles (code, name, perms, built_in) values
-      ('manager', 'Администратор', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{}}'::jsonb, false),
-      ('tech',    'Мастер',   '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
+      ('manager', 'Администратор', '{"sections":{"dashboard":"view","issue":"edit","clients":"edit","rentals":"edit","bikes":"view","batteries":"view","trackers":"view","cash":"edit","mailing":"view","promos":"view","service":"view","claims":"edit","finance":"view","tariffs":"view","reports":"view","inventory":"view"},"actions":{"stock_take":true}}'::jsonb, false),
+      ('tech',    'Мастер',  '{"sections":{"dashboard":"view","bikes":"edit","batteries":"edit","trackers":"view","service":"edit","rentals":"view","reports":"view","inventory":"edit"},"actions":{}}'::jsonb, false)
     on conflict do nothing;
   end if;
 end $$;
@@ -802,10 +802,15 @@ create table if not exists crm.stock_takes (
   closed_at  timestamptz
 );
 create index if not exists stock_takes_idx on crm.stock_takes (started_at desc);
--- Открытая ведомость одна: два пересчёта разом делят парк пополам,
--- и в каждом половина техники оказывается «не найдена».
-create unique index if not exists stock_takes_one_open on crm.stock_takes ((status))
-  where status = 'open';
+-- Два пересчёта одной техники разом делят её пополам, и в каждом половина
+-- оказывается «не найдена». Открытая ведомость - одна на точку (весь парк -
+-- ключ ''): точки считают одновременно, их техника не пересекается. Была
+-- одна на всю сеть, и вторая точка ждала, пока досчитает первая. «Весь
+-- парк рядом с любой другой» индексом не выразить - это сверяет
+-- db.create_stock_take под замком таблицы.
+drop index if exists crm.stock_takes_one_open;
+create unique index if not exists stock_takes_one_open_place
+  on crm.stock_takes ((coalesce(location, ''))) where status = 'open';
 
 -- Строка ведомости. bike_id пуст у «лишних»: нашли то, чего в парке нет,
 -- и записать это надо до того, как заведут карточку.
@@ -2928,7 +2933,7 @@ do $$
 begin
   if not exists (select 1 from crm.settings where key = 'task_profiles_seeded') then
     insert into crm.access_profiles (code, name, perms, built_in) values
-      ('tasks_operator', 'Администратор: только задачи', '{"sections":{"issue":"edit","clients":"edit","rentals":"edit","cash":"edit","claims":"edit","bikes":"view","batteries":"view","trackers":"view"},"actions":{}}'::jsonb, false),
+      ('tasks_operator', 'Администратор: только задачи', '{"sections":{"issue":"edit","clients":"edit","rentals":"edit","cash":"edit","claims":"edit","bikes":"view","batteries":"view","trackers":"view"},"actions":{"stock_take":true}}'::jsonb, false),
       ('tasks_tech', 'Мастер: только задачи', '{"sections":{"service":"edit","bikes":"edit","batteries":"edit","inventory":"edit","trackers":"view"},"actions":{}}'::jsonb, false)
     on conflict do nothing;
     insert into crm.settings (key, value, updated_by)
@@ -3201,3 +3206,27 @@ create table if not exists crm.rental_changes (
   created_at  timestamptz not null default now()
 );
 create index if not exists rental_changes_idx on crm.rental_changes (rental_id, id);
+
+-- ────── пересчёт своей точки ──────
+--
+-- Пересчёт своей точки - отдельное действие профиля (stock_take), а не
+-- право менять парк: администратору парк только смотреть, и считать он
+-- не мог вовсе. Ролям администратора действие выдаётся один раз на
+-- установку (settings.stock_take_action_v1): оно новое, и решения
+-- владельца «не давать» ещё не было; снятое потом галочкой не вернётся.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'stock_take_action_v1') then
+    update crm.access_profiles
+       set perms = jsonb_set(case when jsonb_typeof(perms->'actions') = 'object'
+                                  then perms
+                                  else jsonb_set(perms, '{actions}', '{}'::jsonb) end,
+                             '{actions,stock_take}', 'true'::jsonb),
+           updated_at = now()
+     where code in ('manager', 'tasks_operator') and not built_in
+       and jsonb_typeof(perms) = 'object';
+    insert into crm.settings (key, value, updated_by)
+    values ('stock_take_action_v1', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
