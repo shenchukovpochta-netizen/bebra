@@ -293,6 +293,8 @@ h2 small{font-weight:500}
 .tiles{--tile-gap:20px;row-gap:0;margin-top:calc(0px - var(--tile-gap))}
 .tiles>.tile{margin-top:var(--tile-gap)}
 .card>.tiles:first-child{margin-top:calc(0px - var(--tile-gap))}
+/* после пары карточек (.cols+* - 20 px) плитки отступают ровно так же */
+.cols+.tiles{margin-top:0}
 /* Плитки миллионов (план, журнал финансов): «2 084 600 ₽» в 160
    пикселей не влезает, и «₽» уезжал на свою строку. */
 .tiles.wide{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
