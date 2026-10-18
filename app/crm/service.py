@@ -2491,6 +2491,34 @@ async def inbox_in(crm: Any, vault: Vault | None, *, channel: str, origin: str,
     return got
 
 
+async def wazzup_contact(crm: Any, req: dict) -> dict | None:
+    """Wazzup просит контакт для чата (createContact, `logic.wazzup_crm_request`):
+    найти или завести обращение этого чата и привязать карточку клиента -
+    по Telegram или телефону, как у сообщений. Карточку клиента НЕ заводит:
+    обращение - разговор, а не клиент. Ничего не шлёт и в ledger не пишет.
+
+    Первый пригодный чат из contactData - ключ обращения (канал и номер
+    чата; у WhatsApp - телефон), повтор приходит в ту же строку. None -
+    в теле нет чата, который принимает хук.
+    """
+    chat = req["chats"][0] if req.get("chats") else None
+    if chat is None:
+        return None
+    channel, ext = chat["channel"], chat["ext_id"]
+    client = None
+    if channel == "tgp" and ext.isascii() and ext.isdigit():
+        # Личный Telegram через Wazzup - тот же номер пользователя Telegram.
+        client = await crm.client_by_tg(int(ext))
+    if client is None and chat.get("phone"):
+        client = await crm.client_by_phone(chat["phone"])
+    got = await crm.inbox_contact(
+        channel=channel, origin="hook", ext_id=ext, name=chat.get("name"),
+        username=chat.get("username"), phone=chat.get("phone"),
+        client_id=client["id"] if client else None, ext_channel=chat.get("ext_channel"))
+    return {"thread_id": got["id"], "client_id": got["client_id"],
+            "created": got["created"], "foreign": got["foreign"]}
+
+
 async def inbox_reply(crm: Any, vault: Vault | None, thread: dict, text: Any, *,
                       by: str, avito_ok: bool, wa: dict | None = None) -> int:
     """Ответ из панели - строкой в очередь; отправляет процесс бота."""

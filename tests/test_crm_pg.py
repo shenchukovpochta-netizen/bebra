@@ -3485,6 +3485,75 @@ async def _inbox_story(crm) -> tuple[list, dict]:
     return steps, picture
 
 
+async def _wazzup_story(crm) -> list:
+    """Заявки из окна чата Wazzup - для базы и для FakeCrm: обращение без
+    сообщения (новые каналы, чужой чат опроса Авито), сделка из него по
+    правилам воронки и сигнал о ней. Только наблюдаемое: id у двух
+    реализаций свои."""
+    from app.crm import deals
+    steps: list = []
+    client = await crm.create_client(full_name="Каримов Азиз", phone="+79001234567")
+    for channel, ext in (("ig", "anna.kzn"), ("vk", "42"), ("viber", "uX9+ab/c=="),
+                         ("wa", "+79001234567")):
+        got = await crm.inbox_contact(
+            channel=channel, origin="hook", ext_id=ext, name="Имя в канале",
+            username="anna.kzn" if channel == "ig" else None,
+            phone="+79001234567" if channel == "wa" else None,
+            client_id=client if channel == "wa" else None, ext_channel="ch-1")
+        steps.append((channel, got["created"], got["foreign"],
+                      got["client_id"] == client if got["client_id"] else None))
+    again = await crm.inbox_contact(channel="ig", origin="hook", ext_id="anna.kzn",
+                                    name="Анна")
+    steps.append((again["created"], again["foreign"]))
+    await crm.inbox_record(channel="avito", origin="avito_api", ext_id="chat-1",
+                           direction="in", body_enc="e1")
+    foreign = await crm.inbox_contact(channel="avito", origin="hook", ext_id="chat-1",
+                                      name="Подложное имя")
+    steps.append((foreign["created"], foreign["foreign"]))
+    threads = {(t["channel"], t["ext_id"]): t for t in await crm.inbox_threads(limit=50)}
+    picture = []
+    for key, t in threads.items():
+        picture.append((key, t["name"], t["username"], t["ext_channel"],
+                        t["announced_at"] is not None, t["status"],
+                        t["waiting_since"] is None, len(await crm.inbox_messages(t["id"]))))
+    steps.append(sorted(picture))
+
+    def req(ref):
+        return logic.wazzup_crm_request({"createDeal": {"contacts": [ref]}})
+
+    ig = threads[("ig", "anna.kzn")]["id"]
+    first = await deals.from_wazzup(crm, req(f"thread-{ig}"))
+    second = await deals.from_wazzup(crm, req(f"thread-{ig}"))
+    steps.append((first["created"], second["created"],
+                  first["deal"]["id"] == second["deal"]["id"], first["deal"]["stage"],
+                  first["deal"]["source"], first["deal"]["created_by"],
+                  first["deal"]["name"], first["deal"]["thread_id"] == ig))
+    wa = threads[("wa", "+79001234567")]["id"]
+    by_thread = await deals.from_wazzup(crm, req(f"thread-{wa}"))
+    by_card = await deals.from_wazzup(crm, req(f"client-{client}"))
+    steps.append((by_thread["created"], by_card["created"],
+                  by_thread["deal"]["id"] == by_card["deal"]["id"],
+                  by_thread["deal"]["client_id"] == client, by_thread["deal"]["name"]))
+    # «Не взял» без карточки - та же сделка снова в «Новой заявке»
+    await crm.move_deal(int(first["deal"]["id"]), "lost", by="t", close=True)
+    back = await deals.from_wazzup(crm, req(f"thread-{ig}"))
+    steps.append((back["deal"]["id"] == first["deal"]["id"], back["deal"]["stage"],
+                  back["deal"]["closed_at"] is None))
+    # давний разговор - сигнал «новая заявка из Wazzup»
+    vk = threads[("vk", "42")]["id"]
+    await crm.update_inbox_thread(vk, announced_at=datetime.now(UTC) - timedelta(days=2))
+    await deals.from_wazzup(crm, req(f"thread-{vk}"))
+    await crm.create_deal(stage="new", by="auto", source="manual", name="Без сигнала")
+    pending = await crm.deals_to_announce()
+    steps.append([(d["source"], d["created_by"]) for d in pending])
+    await crm.update_deal(int(pending[0]["id"]), announced_at=datetime.now(UTC))
+    steps.append(await crm.deals_to_announce())
+    steps.append(sorted((d["source"], d["stage"], d["created_by"], d["closed_at"] is None)
+                        for d in await crm.deals()))
+    steps.append([len(await crm.deals(thread_id=t)) for t in (ig, wa, vk)])
+    return steps
+
+
 async def _inbox_purge_story(crm, age) -> tuple[int, dict]:
     """Чистка по сроку - для базы и FakeCrm. `age(messages, threads)`
     состаривает строки: у двух реализаций время хранится по-разному."""
@@ -4277,6 +4346,29 @@ class TestInboxOnPostgres(unittest.IsolatedAsyncioTestCase):
         real_steps, real_picture = await _inbox_story(self.crm)
         self.assertEqual(fake_steps, real_steps)
         self.assertEqual(fake_picture, real_picture)
+
+    async def test_wazzup_contacts_and_deals(self):
+        """createContact и createDeal на настоящей базе - то же, что у
+        FakeCrm, и схема принимает новые каналы, а чужие - нет."""
+        real = await _wazzup_story(self.crm)
+        self.assertEqual(await _wazzup_story(FakeCrm()), real)
+        (ig, vk, viber, wa, again, foreign, threads, first, client, back,
+         pending, after, all_deals, per_thread) = real
+        self.assertEqual([ig, vk, viber, wa],
+                         [("ig", True, False, None), ("vk", True, False, None),
+                          ("viber", True, False, None), ("wa", True, False, True)])
+        self.assertEqual((again, foreign), ((False, False), (False, True)))
+        self.assertEqual(first, (True, False, True, "new", "ig", "wazzup", "Анна", True))
+        self.assertEqual(client, (True, False, True, True, None),
+                         "у клиента одна открытая; имя из канала - не в сделку клиента")
+        self.assertEqual(back, (True, "new", True))
+        self.assertEqual(pending, [("vk", "wazzup")])
+        self.assertEqual(after, [])
+        self.assertEqual(per_thread, [1, 1, 1])
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.inbox_contact(channel="tg2", origin="hook", ext_id="1")
+        before = await self.count("ledger")
+        self.assertEqual(before, 0, "заявки из Wazzup денег не пишут")
 
     async def test_fake_crm_purges_the_same_way(self):
         old = datetime.now(UTC) - timedelta(days=logic.INBOX_KEEP_DAYS + 1)

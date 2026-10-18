@@ -55,6 +55,7 @@
         {% if d.bike_code %}<span class="deal-title">№ {{ d.bike_code }}{% if d.bike_model and d.bike_model != d.title %} · {{ d.bike_model }}{% endif %}</span>{% endif %}
         <span class="deal-tags">
           <span class="tag src-{{ d.source }}">{{ d.source_title }}</span>
+          {% if d.via_wazzup %}<span class="tag ghost">Wazzup</span>{% endif %}
           {% if d.responsible_name %}<span class="tag ghost">{{ d.responsible_name }}</span>{% endif %}
           {% if d.location and locations|length > 1 %}<span class="tag ghost">{{ d.location }}</span>{% endif %}
           {% if d.waiting %}<span class="tag bad">ждёт ответа</span>{% endif %}
@@ -66,8 +67,8 @@
   </section>
   {% endfor %}
 </div>
-<p class="muted">Сообщения из Telegram, MAX, Авито и WhatsApp и заявки из кабинета
-  встают в колонку «Новая заявка» сами; ответ из панели или из чата переносит их в «1-е касание»,
+<p class="muted">Сообщения из Telegram, MAX, Авито, WhatsApp и других каналов Wazzup, заявки
+  из кабинета и «Создать сделку» в окне чата Wazzup встают в колонку «Новая заявка» сами; ответ из панели или из чата переносит их в «1-е касание»,
   подписанный в боте договор — в «Заключение договора». «В аренде», «Повторное продление»
   и «Сдал» ставит аренда: оформите выдачу, и карточка переедет. «Сдал» и «Не взял» видны
   {{ closed_days }} дней.</p>

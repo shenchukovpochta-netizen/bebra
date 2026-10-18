@@ -11,7 +11,7 @@
 <section class="card">
   <h2><span class="tag">{{ deal.stage_title }}</span> <span class="muted">с {{ deal.stage_at|dmy }}</span></h2>
   <dl>
-    <dt>Откуда</dt><dd>{{ deal.source_title }}</dd>
+    <dt>Откуда</dt><dd>{{ deal.source_title }}{% if deal.via_wazzup %} <span class="muted">· заявка из Wazzup</span>{% endif %}</dd>
     {% if deal.phone_shown %}<dt>Телефон</dt><dd><a href="tel:{{ deal.phone_shown }}">{{ deal.phone_shown }}</a></dd>{% endif %}
     <dt>Клиент</dt><dd>{% if deal.client_id %}{% if can_view(staff, 'clients') %}<a href="/clients/{{ deal.client_id }}">{{ deal.client_name }}</a>{% else %}{{ deal.client_name }}{% endif %}{% else %}<span class="muted">карточки нет</span>{% endif %}</dd>
     {% if deal.thread_id %}<dt>Обращение</dt><dd>{% if inbox_ok %}<a href="/inbox/{{ deal.thread_id }}">открыть переписку</a>{% else %}есть{% endif %}{% if deal.waiting %} <span class="tag bad">ждёт ответа</span>{% endif %}{% if deal.subject_url and inbox_ok %} · <a href="{{ deal.subject_url }}" target="_blank" rel="noopener noreferrer">объявление</a>{% endif %}</dd>{% endif %}

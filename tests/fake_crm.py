@@ -4681,6 +4681,39 @@ class FakeCrm:
                 thread["status"] = "new"
         return {"thread_id": thread["id"], "created": created, "message_id": mid}
 
+    async def inbox_contact(self, *, channel, origin, ext_id, name=None, username=None,
+                            phone=None, client_id=None, ext_channel=None):
+        """Как в базе: тот же ключ (канал, адрес), что у сообщений, сигнала
+        нет, чужое обращение - как есть с foreign=True."""
+        assert channel in crm_logic.INBOX_CHANNELS and origin in crm_logic.INBOX_ORIGINS
+        assert client_id is None or client_id in self.clients_
+        now = self._now()
+        thread = next((t for t in self.inbox_threads_.values()
+                       if t["channel"] == channel and t["ext_id"] == ext_id), None)
+        if thread is None:
+            tid = self._id()
+            thread = self.inbox_threads_[tid] = {
+                "id": tid, "channel": channel, "origin": origin, "ext_id": ext_id,
+                "name": name, "username": username, "phone": phone, "subject": None,
+                "subject_url": None, "client_id": client_id, "client_manual": False,
+                "status": "new", "note": None, "waiting_since": None, "last_in_at": None,
+                "last_out_at": None, "announced_at": now, "ext_cursor": None,
+                "handled_by": None, "handled_at": None, "ext_channel": ext_channel,
+                "created_at": now, "updated_at": now}
+            return {"id": tid, "client_id": client_id, "created": True, "foreign": False}
+        if thread["origin"] != origin:
+            return {"id": thread["id"], "client_id": thread["client_id"], "created": False,
+                    "foreign": True}
+        for key, value in (("name", name), ("username", username), ("phone", phone),
+                           ("ext_channel", ext_channel)):
+            if value is not None:
+                thread[key] = value
+        if thread["client_id"] is None and not thread.get("client_manual"):
+            thread["client_id"] = client_id
+        thread["updated_at"] = now
+        return {"id": thread["id"], "client_id": thread["client_id"], "created": False,
+                "foreign": False}
+
     def _inbox_row(self, t):
         c = self.clients_.get(t.get("client_id")) if t.get("client_id") else None
         last = [m for m in self.inbox_messages_.values()
@@ -5075,7 +5108,7 @@ class FakeCrm:
 
     # ─── сделки: воронка «Входящих» ───
     _DEAL_FIELDS = {"title", "name", "phone", "responsible_id", "location", "note",
-                    "client_id", "thread_id", "booking_id", "rental_id"}
+                    "client_id", "thread_id", "booking_id", "rental_id", "announced_at"}
 
     def _deal_row(self, d):
         client = self.clients_.get(d.get("client_id")) or {}
@@ -5107,8 +5140,10 @@ class FakeCrm:
                 return True
         return False
 
-    async def deals(self, *, open_only=False, client_id=None, closed_days=None, limit=5000):
-        edge = self._now() - timedelta(days=closed_days) if closed_days is not None else None
+    async def deals(self, *, open_only=False, client_id=None, closed_days=None,
+                    thread_id=None, limit=5000):
+        edge = (self._now() - timedelta(days=closed_days)
+                if closed_days is not None and not open_only else None)
         rows = []
         for d in self.deals_.values():
             if open_only and d.get("closed_at") is not None:
@@ -5116,6 +5151,8 @@ class FakeCrm:
             if edge is not None and d.get("closed_at") is not None and d["closed_at"] <= edge:
                 continue
             if client_id is not None and d.get("client_id") != client_id:
+                continue
+            if thread_id is not None and d.get("thread_id") != thread_id:
                 continue
             rows.append(self._deal_row(d))
         rows.sort(key=lambda r: (r["stage_at"], r["id"]), reverse=True)
@@ -5134,7 +5171,7 @@ class FakeCrm:
                "source": "manual", "client_id": None, "thread_id": None, "booking_id": None,
                "rental_id": None, "responsible_id": None, "location": None, "note": None,
                "created_by": by, "created_at": self._now(), "stage_at": moment,
-               "updated_at": self._now(),
+               "updated_at": self._now(), "announced_at": self._now(),
                "closed_at": moment if stage in ("returned", "lost") else None}
         row.update(fields)
         if self._deal_conflict(row):
@@ -5182,6 +5219,11 @@ class FakeCrm:
     async def deal_log(self, deal_id):
         return sorted((dict(x) for x in self.deal_log_ if x["deal_id"] == deal_id),
                       key=lambda x: (x["at"], x["id"]))
+
+    async def deals_to_announce(self, limit=20):
+        rows = sorted((self._deal_row(d) for d in self.deals_.values()
+                       if d.get("announced_at") is None), key=lambda d: d["id"])
+        return rows[:limit]
 
     async def purge_deal_contacts(self, *, days):
         edge = self._now() - timedelta(days=days)

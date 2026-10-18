@@ -246,27 +246,36 @@ def check_avito(settings: Mapping[str, Any], now: datetime) -> dict[str, Any]:
 
 
 def check_wazzup(settings: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """Wazzup: WhatsApp, Telegram-аккаунт, Авито, Instagram, ВКонтакте и
+    Viber во «Входящих» и заявки из окна чата Wazzup в воронке. Судим по
+    отметке процесса бота (inbox.wazzup_once): панель в Wazzup не ходит."""
+    title = "Wazzup: WhatsApp и другие каналы"
     state = logic.wazzup_state(settings, now=now)
     if not state["configured"]:
-        return item("wazzup", "WhatsApp (Wazzup)", OFF,
-                    "Сообщения WhatsApp во «Входящие» не приходят, ответ - только "
-                    "с телефона.",
+        return item("wazzup", title, OFF,
+                    "Сообщения WhatsApp, Instagram, ВКонтакте и других каналов Wazzup "
+                    "во «Входящие» не приходят, ответ - только с телефона.",
                     how="ключ «Интеграции → API» Wazzup в secrets/wazzup_api_key, "
                         "токен хука и домен панели (INSTALL.md, «Входящие: Авито и "
-                        "WhatsApp»).",
+                        "WhatsApp» → «Wazzup по шагам»).",
                     href="/inbox", link="Входящие", required=False)
     if not state["live"]:
-        return item("wazzup", "WhatsApp (Wazzup)", WARN,
+        return item("wazzup", title, WARN,
                     "Wazzup не отвечает" + (f": {state['error']}" if state["error"]
                                             else "") + ".",
                     at=state["at"], href="/inbox", link="Входящие", required=False)
     if state["hook_error"]:
-        return item("wazzup", "WhatsApp (Wazzup)", WARN,
-                    f"Ответы уходят, входящие - нет: {state['hook_error']}.",
+        return item("wazzup", title, WARN,
+                    f"Ответы уходят, входящие и заявки - нет: {state['hook_error']}.",
                     at=state["at"], href="/inbox", link="Входящие", required=False)
-    numbers = ", ".join(c["phone"] or "—" for c in state["channels"]) or "номеров нет"
-    return item("wazzup", "WhatsApp (Wazzup)", OK,
-                f"Сообщения приходят, ответ - из «Входящих». Номера: {numbers}.",
+    channels = ", ".join(
+        logic.INBOX_CHANNELS.get(c["kind"], c["kind"]) + (f" {c['phone']}" if c["phone"]
+                                                          else "")
+        + ("" if c["active"] else " (не в сети)")
+        for c in state["channels"]) or "каналов нет"
+    return item("wazzup", title, OK,
+                "Сообщения приходят, ответ - из «Входящих», «Создать сделку» в окне "
+                f"чата Wazzup ставит заявку в воронку. Каналы: {channels}.",
                 at=state["at"], href="/inbox", link="Входящие", required=False)
 
 

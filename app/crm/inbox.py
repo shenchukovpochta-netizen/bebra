@@ -6,8 +6,11 @@ best-effort: сбой CRM не должен стоить человеку отв
 
 Ответ из панели - строка в очереди `crm.inbox_messages`. Панель в
 интернет не ходит, отправляет процесс бота этим циклом: Telegram - своим
-ботом, MAX - клиентом MAX, Авито - через API, WhatsApp - через Wazzup
-(`wazzup_once` раз в час сверяет номера и подписку хука). Застрявшее «отправляется»
+ботом, MAX - клиентом MAX, Авито - через API, WhatsApp и остальные каналы
+Wazzup (Telegram-аккаунт, Instagram, ВКонтакте, Viber) - через Wazzup
+(`wazzup_once` раз в час сверяет каналы и подписку хука). Тот же круг шлёт
+сигналы в служебный чат: «новое обращение» и «новая заявка из Wazzup»
+(сделка, заведённая кнопкой в окне чата Wazzup). Застрявшее «отправляется»
 (перезапуск, не записанный итог) само не повторяется, а становится
 «не ушло»: отправка не идемпотентна, и повтор после таймаута - второе
 сообщение человеку. Повторяет человек кнопкой.
@@ -61,6 +64,12 @@ ANNOUNCE_TRIES = 3
 WAZZUP_EVERY = 3600
 WAZZUP_RETRY = 600
 WAZZUP_RESUBSCRIBE = timedelta(hours=24)
+# Вид подписки в отметке: сменился (добавились заявки) - подписываем заново
+# сразу после обновления, не дожидаясь суток.
+WAZZUP_SUBS = "messages+crm"
+# Ключ памяти неудач для сводки о заявках: 0 - сводка обращений, номера
+# обращений - плюс, сделок - минус, а этого числа не бывает ни у кого.
+DEALS_BURST_KEY = -(2 ** 62)
 
 
 async def record(crm: Any, cfg: Any, **fields: Any) -> dict | None:
@@ -199,7 +208,8 @@ async def send_once(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
     return True
 
 
-# Память неудачных сигналов: номер обращения (0 - сводка) -> попыток.
+# Память неудачных сигналов: номер обращения (0 - сводка) или минус номер
+# сделки из Wazzup (DEALS_BURST_KEY - их сводка) -> попыток.
 # Сбой отправки (лимит Telegram, сеть) повторяется со следующим кругом,
 # но не вечно: бота могли выгнать из чата.
 _announce_fails: dict[int, int] = {}
@@ -246,6 +256,53 @@ async def announce_once(bot: Any, crm: Any, cfg: Any, *, limit: int = ANNOUNCE_L
                         logic.inbox_no(key) if key else "пачке", tries)
         _announce_fails.pop(key, None)
         await _announced(crm, group)
+        done += len(group)
+    return done
+
+
+async def _deals_announced(crm: Any, deals: list[dict]) -> None:
+    now = datetime.now(UTC)
+    for deal in deals:
+        await crm.update_deal(int(deal["id"]), announced_at=now)
+        _announce_fails.pop(-int(deal["id"]), None)
+
+
+async def announce_deals_once(bot: Any, crm: Any, cfg: Any, *,
+                              limit: int = ANNOUNCE_LIMIT) -> int:
+    """Сигнал «новая заявка из Wazzup» - тем же уведомлением, в тот же чат и
+    с той же памятью неудач, что «новое обращение» (announce_once). Сделку
+    к сигналу помечает сам хук и только когда о том же разговоре сигнала
+    не было (logic.wazzup_deal_signal). Без имени, телефона и текста.
+    Выключено или чата нет - отметка сразу; больше ANNOUNCE_BURST - сводкой.
+    Ключ памяти неудач - минус номер сделки (у сводки - DEALS_BURST_KEY):
+    с ключами обращений они не пересекаются.
+    """
+    deals = await crm.deals_to_announce(limit)
+    if not deals:
+        return 0
+    state = await notices.settings(crm)
+    chat = notices.chat_for(state, "inbox_new", getattr(cfg, "admin_chat_id", None))
+    if not state.get("inbox_new", {}).get("enabled", True) or bot is None or not chat:
+        await _deals_announced(crm, deals)
+        return len(deals)
+    batches = ([(DEALS_BURST_KEY, deals, f"🧲 Новых заявок из Wazzup: {len(deals)}.\n"
+                                         "Откройте воронку «Входящих» в панели.")]
+               if len(deals) > ANNOUNCE_BURST else
+               [(-int(d["id"]), [d], logic.wazzup_deal_team_text(d)) for d in deals])
+    done = 0
+    for key, group, text in batches:
+        try:
+            ok = await notices.send_team(crm, bot, "inbox_new", text, chat)
+        except Exception:                               # noqa: BLE001
+            ok = False
+        if not ok:
+            tries = _announce_fails[key] = _announce_fails.get(key, 0) + 1
+            if tries < ANNOUNCE_TRIES:
+                continue
+            log.warning("входящие: сигнал о заявке %s не ушёл за %s попыток",
+                        "(пачка)" if key == DEALS_BURST_KEY else -key, tries)
+        _announce_fails.pop(key, None)
+        await _deals_announced(crm, group)
         done += len(group)
     return done
 
@@ -398,19 +455,22 @@ def wazzup_message_id(message: dict) -> str:
 
 async def wazzup_once(crm: Any, wazzup: Any, cfg: Any, *,
                       now: datetime | None = None) -> dict:
-    """Сверить Wazzup: живой ли ключ, какие номера WhatsApp, подписан ли хук.
+    """Сверить Wazzup: живой ли ключ, какие каналы, подписан ли хук.
 
-    Подписка - на `https://<CRM_DOMAIN>/hook/inbox/<токен>`: Wazzup, как
-    подключённый своим ключом API, шлёт вебхук без заголовка авторизации.
-    Подписываем, когда адрес сменился или сутки не подписывали. В настройку
-    ложится отпечаток адреса, а не адрес: в нём токен хука.
+    Подписка - на `https://<CRM_DOMAIN>/hook/inbox/<токен>`: сообщения и
+    «создать контакт / сделку» из окна чата. Wazzup, как подключённый своим
+    ключом API, шлёт вебхук без заголовка авторизации. Подписываем, когда
+    адрес сменился, сутки не подписывали или подписка прежнего вида (без
+    заявок: `subs` в отметке). В настройку ложится отпечаток адреса, а не
+    адрес: в нём токен хука.
     """
     now = now or datetime.now(UTC)
     prev = logic._json_dict((await crm.settings()).get("inbox_wazzup_state"))
     state: dict[str, Any] = {"ok": False, "at": now.isoformat(), "error": "",
                              "channels": prev.get("channels") or [],
                              "hook": prev.get("hook"), "hooked_at": prev.get("hooked_at"),
-                             "hook_error": prev.get("hook_error") or ""}
+                             "hook_error": prev.get("hook_error") or "",
+                             "subs": prev.get("subs")}
     try:
         state["channels"] = await wazzup.channels()
         state["ok"] = True
@@ -426,10 +486,11 @@ async def wazzup_once(crm: Any, wazzup: Any, cfg: Any, *,
         mark = logic.wazzup_fingerprint(url)
         hooked = logic._moment(prev.get("hooked_at"))
         if (prev.get("hook") != mark or prev.get("hook_error") or hooked is None
-                or now - hooked >= WAZZUP_RESUBSCRIBE):
+                or prev.get("subs") != WAZZUP_SUBS or now - hooked >= WAZZUP_RESUBSCRIBE):
             try:
                 await wazzup.set_webhook(url)
-                state.update(hook=mark, hooked_at=now.isoformat(), hook_error="")
+                state.update(hook=mark, hooked_at=now.isoformat(), hook_error="",
+                             subs=WAZZUP_SUBS)
             except WazzupError as exc:
                 state["hook_error"] = f"подписка хука: {str(exc)[:250]}"
     await crm.set_setting("inbox_wazzup_state", json.dumps(state, ensure_ascii=False),
@@ -474,6 +535,7 @@ async def inbox_loop(bot: Any, crm: Any, cfg: Any, *, db: Any = None,
                                        avito=avito, wazzup=wazzup):
                     break
             await announce_once(bot, crm, cfg)
+            await announce_deals_once(bot, crm, cfg)
             if avito is not None and avito.ready and time.monotonic() >= next_avito:
                 next_avito = time.monotonic() + poll_every
                 try:

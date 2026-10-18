@@ -4145,6 +4145,10 @@ CLIENT_CHANNELS: dict[str, str] = {
     "yandex_maps": "Яндекс Карты",
     "referral": "Сарафан (по приглашению)",
     "channel": "Наш Telegram-канал",
+    # Соцсети, которые приходят во «Входящие» через Wazzup: реклама там -
+    # отдельный канал привлечения, и отчёт «куда давать рекламу» их видит.
+    "instagram": "Instagram",
+    "vk": "ВКонтакте",
     "site": "Сайт",
     "other": "Другое",
 }
@@ -11276,7 +11280,8 @@ def ops_query(text: Any) -> str | None:
 
 # ─────────────────── входящие обращения ───────────────────
 #
-# Одна лента на всех, кто написал сам: Telegram, MAX, Авито, WhatsApp.
+# Одна лента на всех, кто написал сам: Telegram, MAX, Авито, WhatsApp и
+# остальные каналы Wazzup (Instagram, ВКонтакте, Viber).
 # Обращение - не клиент и не деньги: оно ничего не пишет в журнал и не
 # создаёт аренд. Раздел по умолчанию только у встроенного «Владельца».
 
@@ -11285,9 +11290,15 @@ INBOX_CHANNELS: dict[str, str] = {
     # Личный Telegram менеджера через Wazzup - не бот: отдельный канал, чтобы
     # хук не мог писать в разговоры бота (их ведёт только сам бот).
     "tgp": "Telegram (аккаунт)",
+    # Остальные каналы Wazzup: приходят только хуком, отвечает Wazzup.
+    "ig": "Instagram", "vk": "ВКонтакте", "viber": "Viber",
 }
 # Каналы, в которые отвечает Wazzup: канал «Входящих» -> chatType.
-WAZZUP_CHAT_TYPES = {"wa": "whatsapp", "tgp": "telegram", "avito": "avito"}
+WAZZUP_CHAT_TYPES = {"wa": "whatsapp", "tgp": "telegram", "avito": "avito",
+                     "ig": "instagram", "vk": "vk", "viber": "viber"}
+# Каналы Wazzup, у которых адрес ответа - номер чата из вебхука, а не
+# телефон: без канала Wazzup (пришли из n8n) им отвечают вне панели.
+WAZZUP_CHAT_ONLY = tuple(code for code in WAZZUP_CHAT_TYPES if code != "wa")
 INBOX_ORIGINS = ("bot", "max_bot", "avito_api", "hook")
 INBOX_STATUSES: dict[str, str] = {
     "new": "Новое", "work": "В работе", "done": "Разобрано", "spam": "Спам",
@@ -11307,9 +11318,11 @@ INBOX_KEEP_DAYS = 90
 INBOX_TEXT_MAX = 4000
 INBOX_NAME_MAX = 120
 INBOX_SUBJECT_MAX = 200
-# Длина ответа по каналу: у Авито жёсткий предел 1000 знаков, у Telegram
-# и MAX запас под обёртку «Ответ оператора».
-INBOX_REPLY_LIMITS: dict[str, int] = {"tg": 3500, "max": 3500, "avito": 1000, "wa": 3500}
+# Длина ответа по каналу: у Авито и Instagram жёсткий предел 1000 знаков,
+# у Telegram и MAX запас под обёртку «Ответ оператора»; ВКонтакте (4096) и
+# Viber (7000) держим как WhatsApp - один размер ответа на всё.
+INBOX_REPLY_LIMITS: dict[str, int] = {"tg": 3500, "max": 3500, "avito": 1000, "wa": 3500,
+                                      "tgp": 3500, "ig": 1000, "vk": 3500, "viber": 3500}
 # Хук: тело до 64 КиБ, до 50 сообщений за раз, после 20 неудачных
 # токенов с адреса - пауза, как у входа в панель.
 HOOK_MAX_BYTES = 64 * 1024
@@ -11317,8 +11330,10 @@ HOOK_BATCH_LIMIT = 200
 HOOK_FAIL_LIMIT = 20
 # Хук принимает только эти каналы: Telegram и MAX пишет сам бот, и чужой
 # запрос с утёкшим токеном не должен заводить обращения на чужие tg_id.
-HOOK_CHANNELS = ("avito", "wa", "tgp")
+HOOK_CHANNELS = ("avito", "wa", "tgp", "ig", "vk", "viber")
 _TG_USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
+# Логин Instagram: буквы, цифры, точка и подчёркивание, до 30 знаков.
+_IG_USERNAME = re.compile(r"[A-Za-z0-9._]{1,30}")
 
 
 def inbox_no(thread_id: Any) -> str:
@@ -11368,17 +11383,25 @@ def safe_avito_url(url: Any) -> str | None:
 
 
 def inbox_links(thread: Mapping[str, Any]) -> dict[str, str | None]:
-    """Куда ответить вне панели: t.me по @, wa.me по цифрам телефона."""
+    """Куда ответить вне панели: t.me по @, wa.me по цифрам телефона,
+    профиль Instagram по логину и ВКонтакте по номеру пользователя."""
+    channel = thread.get("channel")
     username = str(thread.get("username") or "").lstrip("@")
-    phone = inbox_phone(thread.get("channel"), thread.get("phone"))
+    phone = inbox_phone(channel, thread.get("phone"))
     digits = re.sub(r"\D", "", phone or "")
     # Логин MAX - не логин Telegram: t.me по нему вёл бы к постороннему.
-    is_tg = thread.get("channel") in (None, "tg", "tgp")
+    is_tg = channel in (None, "tg", "tgp")
+    ext = str(thread.get("ext_id") or "")
     return {
         "tg": (f"https://t.me/{username}"
                if is_tg and _TG_USERNAME.fullmatch(username) else None),
         "wa": f"https://wa.me/{digits}" if digits else None,
         "avito": safe_avito_url(thread.get("subject_url")),
+        "ig": (f"https://instagram.com/{username}"
+               if channel == "ig" and _IG_USERNAME.fullmatch(username) else None),
+        "vk": (f"https://vk.com/id{ext}"
+               if channel == "vk" and ext.isascii() and ext.isdigit() and len(ext) <= 12
+               else None),
     }
 
 
@@ -11402,7 +11425,7 @@ def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool,
         if thread.get("origin") != "max_bot":
             return False, "В MAX ответит только MAX-бот тем, кто писал ему."
         return True, ""
-    if channel in ("avito", "tgp") and thread.get("origin") == "hook" \
+    if channel in WAZZUP_CHAT_ONLY and thread.get("origin") == "hook" \
             and wazzup_channel(thread.get("ext_channel")):
         # Пришло через Wazzup: ответ туда же, через тот же канал Wazzup.
         if not (wa and wa.get("live")):
@@ -11413,6 +11436,9 @@ def inbox_can_reply(thread: Mapping[str, Any], *, avito_ok: bool,
         return True, ""
     if channel == "tgp":
         return False, "Ответьте в своём Telegram: этот чат пришёл без Wazzup."
+    if channel in ("ig", "vk", "viber"):
+        return False, (f"Этот чат {INBOX_CHANNELS[channel]} пришёл без канала Wazzup - "
+                       "ответьте в самом приложении и отметьте «ответил вне панели».")
     if channel == "avito":
         if thread.get("origin") != "avito_api":
             # Чат Авито из шлюза или n8n: его номер - номер шлюза, а не
@@ -11538,7 +11564,8 @@ def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = 
     if own:
         item["ext_channel"] = own
     login = str(username or "").strip().lstrip("@")
-    if channel == "tgp" and _TG_USERNAME.fullmatch(login):
+    if (channel == "tgp" and _TG_USERNAME.fullmatch(login)) or (
+            channel == "ig" and _IG_USERNAME.fullmatch(login)):
         item["username"] = login
     return item
 
@@ -11555,8 +11582,11 @@ _GREEN_KINDS = {"textMessage": "text", "extendedTextMessage": "text",
                 "contactMessage": "other", "locationMessage": "other"}
 _WAZZUP_KINDS = {"text": "text", "image": "image", "audio": "voice",
                  "document": "file", "missing_call": "call"}
+# chatType Wazzup -> канал «Входящих». Группы (whatsgroup, telegroup и
+# любые другие, которых здесь нет) - не обращения: мимо, в счёт пропущенных.
 _WAZZUP_CHANNELS = {"whatsapp": "wa", "whatsgroup": None, "avito": "avito",
-                    "telegram": "tgp", "tgapi": "tgp", "telegroup": None}
+                    "telegram": "tgp", "tgapi": "tgp", "telegroup": None,
+                    "instagram": "ig", "vk": "vk", "viber": "viber"}
 _WAZZUP_CHANNEL_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
@@ -11618,13 +11648,14 @@ def _wazzup(payload: Mapping[str, Any]) -> tuple[list[dict], int]:
         if not isinstance(message, dict) or message.get("isEcho"):
             skipped += 1
             continue
-        channel = _WAZZUP_CHANNELS.get(str(message.get("chatType") or ""))
+        channel = _WAZZUP_CHANNELS.get(str(message.get("chatType") or "").lower())
         contact = message.get("contact") if isinstance(message.get("contact"), dict) else {}
         chat = message.get("chatId")
         if channel == "wa":
             phone = wa_intl(chat)
-        elif channel == "tgp":
-            # Телефон у контакта Telegram бывает, если человек его открыл.
+        elif channel in ("tgp", "viber", "vk", "ig"):
+            # Телефон у контакта бывает, если человек его открыл; из номера
+            # чата его не выводим: у ВКонтакте и Viber это не телефон.
             phone = contact.get("phone")
         else:
             phone = None
@@ -11682,6 +11713,163 @@ def parse_inbound(payload: Any) -> tuple[list[dict], int]:
             items.append(item)
     skipped += max(len(raw_items) - HOOK_BATCH_LIMIT, 0)
     return items, skipped
+
+
+# ─────────── Wazzup: «создать контакт / сделку» из окна чата ───────────
+#
+# С подпиской contactsAndDealsCreation Wazzup шлёт на тот же хук тела
+# {"createContact": {...}} и {"createDeal": {...}} - в теле ровно один вид:
+# менеджер нажал кнопку в окне чата Wazzup или (если так настроено в
+# Wazzup) пришёл новый чат. В ответ ждёт созданную сущность - id, имя,
+# ссылку - не дольше 30 секунд. Контакт у нас - обращение этого чата
+# (карточку клиента хук не заводит: обращение - разговор, а не клиент),
+# сделка - сделка воронки в «Новой заявке». Всё из тела - чужая строка.
+
+WAZZUP_CRM_KINDS = {"createContact": "contact", "createDeal": "deal"}
+# Сколько чатов и ссылок разбирать из одного тела: у контакта их единицы.
+WAZZUP_CRM_ITEMS = 10
+# Наш id контакта для Wazzup: обращение или карточка клиента.
+_WAZZUP_REF = re.compile(r"(thread|client)-([1-9][0-9]{0,17})")
+# Сигнал «новая заявка из Wazzup» молчит, если о том же разговоре сигнал
+# был не раньше этого: второе сообщение в чат о том же человеке не нужно.
+WAZZUP_DEAL_QUIET_HOURS = 12
+
+
+def _echo(value: Any, depth: int = 0) -> Any:
+    """Чужое значение - обратно Wazzup «как пришло», но без мусора: строки
+    обрезаны и чисты, вложенность - два уровня, списки и словари - коротко.
+    NaN и бесконечность JSON в ответ не пропустит - вместо них None."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < 10 ** 18 else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return clean_text(value)[:300]
+    if depth >= 2:
+        return None
+    if isinstance(value, Mapping):
+        return {clean_text(k)[:40]: _echo(v, depth + 1)
+                for k, v in list(value.items())[:20]}
+    if isinstance(value, list):
+        return [_echo(v, depth + 1) for v in value[:WAZZUP_CRM_ITEMS]]
+    return None
+
+
+def wazzup_ref(value: Any) -> tuple[str, int] | None:
+    """Наш id контакта из тела Wazzup: «thread-12» -> ("thread", 12)."""
+    if not isinstance(value, str):
+        return None
+    match = _WAZZUP_REF.fullmatch(value.strip())
+    return (match.group(1), int(match.group(2))) if match else None
+
+
+def wazzup_crm_request(payload: Any) -> dict | None:
+    """Тело «создать контакт / сделку» -> разобранный запрос, иначе None.
+
+    None - это не такой запрос (сообщения, статусы, проверка адреса, два
+    вида сразу): им занимается parse_inbound. Пригодные чаты (`chats`) -
+    те же каналы, что принимает хук сообщений: группы, Telegram и MAX
+    бота мимо. `refs` - наши id из `contacts` сделки. Пустые chats и refs -
+    хук ответит «пропущено», а не 500.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    found = [key for key in WAZZUP_CRM_KINDS if key in payload]
+    if len(found) != 1:
+        return None
+    body = _dict(payload.get(found[0]))
+    raw_data = body.get("contactData")
+    raw_data = raw_data if isinstance(raw_data, list) else None
+    chats: list[dict] = []
+    for raw in (raw_data or [])[:WAZZUP_CRM_ITEMS]:
+        data = _dict(raw)
+        channel = _WAZZUP_CHANNELS.get(str(data.get("chatType") or "").lower())
+        chat = data.get("chatId")
+        phone = wa_intl(chat) if channel == "wa" else data.get("phone")
+        item = _inbound_item(channel or "", phone if channel == "wa" else chat,
+                             name=data.get("name") or body.get("name"), phone=phone,
+                             username=data.get("username"),
+                             ext_channel=data.get("channelId"))
+        if item is not None and all((c["channel"], c["ext_id"])
+                                    != (item["channel"], item["ext_id"]) for c in chats):
+            chats.append(item)
+    contacts = body.get("contacts")
+    contacts = contacts if isinstance(contacts, list) else None
+    refs: list[tuple[str, int]] = []
+    for raw in (contacts or [])[:WAZZUP_CRM_ITEMS]:
+        ref = wazzup_ref(raw)
+        if ref is not None and ref not in refs:
+            refs.append(ref)
+    return {"kind": WAZZUP_CRM_KINDS[found[0]],
+            "name": _cut(body.get("name"), INBOX_NAME_MAX),
+            "responsible": _echo(body.get("responsibleUserId")),
+            "contact_data": _echo(raw_data) if raw_data is not None else None,
+            "contacts": _echo(contacts) if contacts is not None else None,
+            "source": _cut(body.get("source"), 40),
+            "chats": chats, "refs": refs}
+
+
+def wazzup_panel_url(domain: Any, path: str) -> str | None:
+    """Абсолютная ссылка в панель для Wazzup («открыть в CRM»): только по
+    домену панели (CRM_DOMAIN), без него ссылки нет."""
+    host = panel_host(domain)
+    return f"https://{host}{path}" if host else None
+
+
+def wazzup_contact_reply(req: Mapping[str, Any], *, contact_id: str, name: str,
+                         uri: str | None) -> dict[str, Any]:
+    """Ответ на createContact - контакт в том виде, в каком его ждёт Wazzup."""
+    out: dict[str, Any] = {"id": contact_id}
+    if req.get("responsible") is not None:
+        out["responsibleUserId"] = req["responsible"]
+    out.update(name=name, contactData=req.get("contact_data") or [])
+    if uri:
+        out["uri"] = uri
+    return out
+
+
+def wazzup_deal_reply(req: Mapping[str, Any], *, deal_id: int, contact_id: str | None,
+                      uri: str | None, closed: bool = False) -> dict[str, Any]:
+    """Ответ на createDeal: сделка - «Заявка № N», контакты - как пришли
+    (или наш id контакта, если пришли данными чата)."""
+    out: dict[str, Any] = {"id": f"deal-{int(deal_id)}"}
+    if req.get("responsible") is not None:
+        out["responsibleUserId"] = req["responsible"]
+    out.update(name=f"Заявка № {int(deal_id)}",
+               contacts=req.get("contacts") or ([contact_id] if contact_id else []))
+    if uri:
+        out["uri"] = uri
+    out["closed"] = bool(closed)
+    return out
+
+
+def wazzup_deal_signal(thread: Mapping[str, Any] | None, *, now: datetime) -> bool:
+    """Нужен ли сигнал «новая заявка из Wazzup» в служебный чат.
+
+    Не нужен, если о том же разговоре сигнал уже ушёл или уйдёт: человек
+    ждёт ответа (сигнал «новое обращение» дан), сигнал обращения стоит в
+    очереди, отметка моложе WAZZUP_DEAL_QUIET_HOURS (сюда же - контакт,
+    только что заведённый Wazzup: его первое сообщение даст свой сигнал).
+    Спаму сигналов нет. Сделка без обращения (только карточка) - сигнал.
+    """
+    if thread is None:
+        return True
+    if thread.get("status") == "spam" or thread.get("waiting_since") is not None:
+        return False
+    announced = thread.get("announced_at")
+    if not isinstance(announced, datetime):
+        return False
+    return now - announced > timedelta(hours=WAZZUP_DEAL_QUIET_HOURS)
+
+
+def wazzup_deal_team_text(deal: Mapping[str, Any]) -> str:
+    """Сигнал о заявке из Wazzup. Как у обращений - без имени, телефона и
+    текста: номер сделки и канал."""
+    source = INBOX_CHANNELS.get(str(deal.get("source") or ""))
+    line = f"🧲 Новая заявка из Wazzup: сделка № {int(deal.get('id') or 0)}"
+    return line + (f" · {source}" if source else "") + "\nОткройте воронку «Входящих» в панели."
 
 
 def inbox_team_text(thread: Mapping[str, Any]) -> str:

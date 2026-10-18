@@ -1,10 +1,11 @@
-"""Клиент API Wazzup (v3): WhatsApp, Telegram (аккаунт) и Авито во «Входящих».
+"""Клиент API Wazzup (v3): каналы Wazzup во «Входящих» - WhatsApp, Telegram
+(аккаунт), Авито, Instagram, ВКонтакте и Viber.
 
-Входящие приходят сами - вебхуком на `/hook/inbox/<токен>` панели. Этот
+Входящие приходят сами - вебхуком на `/hook/inbox/<токен>` панели: и
+сообщения, и просьбы «создать контакт / сделку» из окна чата Wazzup. Этот
 клиент нужен процессу бота (`app/crm/inbox.py`) для трёх дел: узнать
-номера WhatsApp, подключённые в Wazzup (`channels`), подписать хук на
-новые сообщения (`set_webhook`) и отправить ответ из панели
-(`send_text`). Панель в интернет не ходит.
+каналы, подключённые в Wazzup (`channels`), подписать хук (`set_webhook`)
+и отправить ответ из панели (`send_text`). Панель в интернет не ходит.
 
 Особенности, на которых легко споткнуться:
 - ключ - «Интеграции → API» в кабинете Wazzup, заголовок
@@ -33,15 +34,21 @@ MESSAGE_LIMIT = 4000
 # Каналы Wazzup, которые мы читаем как WhatsApp: обычный номер и WABA.
 WHATSAPP_TRANSPORTS = ("whatsapp", "wapi")
 # Транспорт канала Wazzup -> канал «Входящих»: WhatsApp, личный Telegram
-# (аккаунт менеджера, а не бот - отдельный канал tgp) и Авито.
+# (аккаунт менеджера, а не бот - отдельный канал tgp), Авито, Instagram,
+# ВКонтакте и Viber. Чего здесь нет (группы, новые транспорты) - не читаем.
 TRANSPORT_KINDS = {"whatsapp": "wa", "wapi": "wa", "tgapi": "tgp", "telegram": "tgp",
-                   "avito": "avito"}
+                   "avito": "avito", "instagram": "ig", "vk": "vk", "viber": "viber"}
 # Канал «Входящих» -> chatType в запросе отправки.
-CHAT_TYPES = {"wa": "whatsapp", "tgp": "telegram", "avito": "avito"}
+CHAT_TYPES = {"wa": "whatsapp", "tgp": "telegram", "avito": "avito",
+              "ig": "instagram", "vk": "vk", "viber": "viber"}
+# У каких каналов plainId - телефон: у Instagram это логин, у ВКонтакте -
+# номер сообщества, и «+» перед ним выдал бы его за номер телефона.
+PHONE_KINDS = ("wa", "tgp", "viber")
 _CHANNEL_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 _CHAT_ID = re.compile(r"\d{10,15}")
-# chatId Telegram и Авито - номер или строка чата Авито («u2i-...»).
-_OTHER_CHAT = re.compile(r"[A-Za-z0-9_@.:~+-]{1,128}")
+# chatId остальных каналов - номер (Telegram, ВКонтакте), логин (Instagram)
+# или строка чата Авито («u2i-...»); у Viber бывает base64 с «=» и «/».
+_OTHER_CHAT = re.compile(r"[A-Za-z0-9_@.:~+=/-]{1,128}")
 
 
 class WazzupError(Exception):
@@ -68,8 +75,9 @@ def chat_id(phone: Any) -> str | None:
 
 
 def parse_channels(raw: Any) -> list[dict]:
-    """Каналы из GET /channels: WhatsApp, Telegram и Авито - id, вид
-    («wa», «tgp», «avito»), номер (у WhatsApp и Telegram), живой ли."""
+    """Каналы из GET /channels - id, вид канала «Входящих» («wa», «tgp»,
+    «avito», «ig», «vk», «viber»), номер (только где plainId - телефон),
+    живой ли. Незнакомый транспорт и мусор пропускаются."""
     out = []
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
@@ -79,10 +87,11 @@ def parse_channels(raw: Any) -> list[dict]:
         kind = TRANSPORT_KINDS.get(transport)
         if cid is None or kind is None:
             continue
-        plain = re.sub(r"\D", "", str(item.get("plainId") or ""))[:15]
+        plain = re.sub(r"\D", "", str(item.get("plainId") or ""))
+        phone = (f"+{plain}" if kind in PHONE_KINDS and _CHAT_ID.fullmatch(plain)
+                 else None)
         state = str(item.get("state") or "")[:40]
-        out.append({"id": cid, "kind": kind,
-                    "phone": f"+{plain}" if plain and kind != "avito" else None,
+        out.append({"id": cid, "kind": kind, "phone": phone,
                     "state": state, "active": state == "active"})
     return out
 
@@ -143,20 +152,22 @@ class WazzupClient:
         return data
 
     async def channels(self) -> list[dict]:
-        """Каналы WhatsApp, Telegram и Авито, подключённые в кабинете Wazzup."""
+        """Каналы, подключённые в кабинете Wazzup (см. TRANSPORT_KINDS)."""
         return parse_channels(await self._call("GET", "channels"))
 
     async def set_webhook(self, uri: str) -> None:
-        """Подписать адрес на новые сообщения. Wazzup тут же пришлёт на
-        него проверку {"test": true} и без 200 подписку не примет."""
+        """Подписать адрес на новые сообщения и на «создать контакт /
+        сделку» из окна чата Wazzup (заявки в воронку). Wazzup тут же
+        пришлёт на него проверку {"test": true} и без 200 подписку не
+        примет."""
         await self._call("PATCH", "webhooks", allow_empty=True, json={
             "webhooksUri": uri,
             "subscriptions": {"messagesAndStatuses": True,
-                              "contactsAndDealsCreation": False}})
+                              "contactsAndDealsCreation": True}})
 
     async def send_text(self, channel_id: str, phone: str, text: str, *,
                         crm_message_id: str, kind: str = "wa") -> dict:
-        """Ответ в WhatsApp, Telegram или Авито (`kind` - канал «Входящих»).
+        """Ответ в канал Wazzup (`kind` - канал «Входящих», CHAT_TYPES).
         У WhatsApp адрес - телефон, у остальных - номер чата из вебхука.
         Повтор с тем же crm_message_id Wazzup не отправляет - тогда это
         «уже ушло», а не сбой."""

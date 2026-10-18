@@ -36,6 +36,21 @@ class TestRules(unittest.TestCase):
         self.assertIn("ставит аренда", deals.can_move({"stage": "rented"}, "lost"))
         self.assertEqual(deals.can_move({"stage": "new"}, "zzz"), "Такого этапа нет.")
 
+    def test_wazzup_channels_and_mark(self):
+        """Каналы Wazzup подписаны в «Откуда», заявка из окна чата Wazzup
+        отмечена; сделка на карточку без обращения - «Wazzup»."""
+        from app.crm import logic
+        for code in logic.WAZZUP_CHAT_TYPES:
+            self.assertIn(code, deals.SOURCES, code)
+        card = deals.dress({"source": "ig", "created_by": deals.WAZZUP_BY, "stage": "new"},
+                           inbox_ok=True)
+        self.assertEqual((card["source_title"], card["via_wazzup"]), ("Instagram", True))
+        bare = deals.dress({"source": "wazzup", "created_by": deals.WAZZUP_BY}, inbox_ok=True)
+        self.assertEqual((bare["source_title"], bare["via_wazzup"]), ("Wazzup", False))
+        synced = deals.dress({"source": "vk", "created_by": "auto"}, inbox_ok=True)
+        self.assertEqual((synced["source_title"], synced["via_wazzup"]),
+                         ("ВКонтакте", False))
+
     def test_renewed_is_second_period_from_issue(self):
         rental = {"started_on": date(2026, 9, 1), "billed_until": date(2026, 9, 8),
                   "period_days": 7, "issue_period_days": 7}

@@ -303,6 +303,7 @@ services:
       CONTRACT_CHAT_ID: ${CONTRACT_CHAT_ID}
       CRM_TITLE: ${CRM_TITLE:-МАЙБАЙК}
       # Непустой домен = панель за Caddy: адрес клиента из X-Forwarded-For.
+      # По нему же - ссылка «открыть в CRM» у контакта и сделки в Wazzup.
       CRM_DOMAIN: ${CRM_DOMAIN:-}
       # Кому верить по X-Forwarded-For. Пусто - частные сети, в которых
       # и живёт compose. «Верить всем» нельзя: uvicorn берёт первый адрес

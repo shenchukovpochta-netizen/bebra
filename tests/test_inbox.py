@@ -147,7 +147,7 @@ class TestInboxBasics(unittest.TestCase):
                   "subject_url": "https://www.avito.ru/kazan/x_1"}
         self.assertEqual(logic.inbox_links(thread), {
             "tg": "https://t.me/ildar_h", "wa": "https://wa.me/79001234567",
-            "avito": "https://www.avito.ru/kazan/x_1"})
+            "avito": "https://www.avito.ru/kazan/x_1", "ig": None, "vk": None})
         # иностранный номер - как есть, без подмены кода страны
         self.assertEqual(logic.inbox_links({"phone": "+998 90 123 45 67"})["wa"],
                          "https://wa.me/998901234567")
@@ -155,7 +155,8 @@ class TestInboxBasics(unittest.TestCase):
             self.assertIsNone(logic.inbox_links({"username": username})["tg"], username)
         empty = logic.inbox_links({"phone": "не скажу",
                                    "subject_url": "javascript:alert(1)"})
-        self.assertEqual(empty, {"tg": None, "wa": None, "avito": None})
+        self.assertEqual(empty, {"tg": None, "wa": None, "avito": None, "ig": None,
+                                 "vk": None})
 
     def test_can_reply_matrix(self):
         # Каналы, куда отвечает сам процесс бота, и чем это доказано.
