@@ -85,6 +85,44 @@ class TestTeamRules(unittest.TestCase):
         self.assertEqual(team.parse_plan({"plan_tasks": "-1"}, team.PERIOD_FIELDS)[1],
                          "Числа плана - не меньше нуля.")
 
+    def test_parse_plan_whole_counts(self):
+        """Штуки - целыми: «1,3» не усекается молча до 1 (доля месяца бывает
+        дробной, свой план - нет), «5,0» - это 5; деньги - с копейками."""
+        got, problem = team.parse_plan({"plan_tasks": "1,3"}, team.PERIOD_FIELDS)
+        self.assertIsNone(got)
+        self.assertEqual(problem, "Выдачи, наряды и задачи - целым числом.")
+        self.assertIsNotNone(team.parse_plan({"plan_issues": "2.5"})[1], "и у месяца")
+        got, problem = team.parse_plan({"plan_issues": "5,0", "plan_revenue": "1500,5"},
+                                       team.PERIOD_FIELDS)
+        self.assertIsNone(problem)
+        self.assertEqual((got["plan_issues"], got["plan_revenue"]), (5, D("1500.50")))
+
+    def test_money_fields_without_finance(self):
+        """Без права на деньги форма - только штуки, а запись берёт рубли
+        и условия прежними: иначе сохранение штук стёрло бы их."""
+        self.assertEqual(team.form_keys("week", False),
+                         ("plan_issues", "plan_orders", "plan_tasks"))
+        self.assertEqual(team.form_keys("month", False),
+                         ("plan_issues", "plan_orders", "plan_tasks"))
+        self.assertEqual(team.form_keys("month", True), team.PLAN_FIELDS)
+        self.assertEqual(team.form_keys("day", True), team.PERIOD_FIELDS)
+        saved = {"plan_issues": 10, "plan_revenue": D("90000"), "salary_base": D("20000"),
+                 "per_issue": D("300"), "order_pct": D("0"), "revenue_pct": D("2"),
+                 "own": False, "staff_id": 1}
+        got = team.keep_money("month", {"plan_issues": 12, "plan_orders": None,
+                                        "plan_tasks": None}, saved)
+        self.assertEqual(got, {"plan_issues": 12, "plan_orders": None, "plan_tasks": None,
+                               "plan_revenue": D("90000"), "salary_base": D("20000"),
+                               "per_issue": D("300"), "order_pct": D("0"),
+                               "revenue_pct": D("2")})
+        got = team.keep_money("month", {"plan_issues": 1}, None)
+        self.assertEqual((got["plan_revenue"], got["salary_base"]), (None, D("0.00")),
+                         "плана не было: денег не планируется, условия - ноль")
+        got = team.keep_money("week", {"plan_issues": 3, "plan_revenue": D("1")},
+                              {"plan_revenue": D("50000")})
+        self.assertEqual(got, {"plan_issues": 3, "plan_revenue": D("50000")},
+                         "рубли из запроса не читаются; у недели условий нет")
+
 
 class TestPeriodPlans(unittest.TestCase):
     """План недели и дня: доля плана месяца по дням, свой план главнее."""
@@ -114,6 +152,13 @@ class TestPeriodPlans(unittest.TestCase):
         self.assertEqual((ahead["passed"], ahead["future"]), (0, True))
         self.assertEqual(team.period_span("day", TODAY, today=TODAY)["title"],
                          "четверг, 15 октября")
+        self.assertEqual(team.period_title("week", date(2026, 12, 28),
+                                           today=date(2027, 1, 2)),
+                         "28 декабря 2026 – 3 января 2027", "через Новый год - год у обеих")
+        self.assertEqual(team.period_title("week", date(2026, 12, 28), today=TODAY),
+                         "28 декабря 2026 – 3 января 2027")
+        self.assertEqual(team.period_title("week", date(2025, 10, 13), today=TODAY),
+                         "13–19 октября 2025")
         self.assertEqual(team.period_months("week", date(2026, 9, 28)), [self.SEP, self.OCT])
 
     def test_month_share_by_days(self):
@@ -167,6 +212,21 @@ class TestPeriodPlans(unittest.TestCase):
                          (100, "month"))
         self.assertTrue(by_name["Анна"]["ahead"])
         self.assertFalse(by_name["Борис"]["behind"], "день идёт: 0 из 7 - ещё не отставание")
+
+    def test_row_green_only_when_all_on_pace(self):
+        """Идущий день: выдача сделана, денег ноль - не зелёный, хоть и не
+        красный; зелёный - только когда в темпе всё запланированное."""
+        plans = {1: {"plan_issues": D("1.0"), "plan_revenue": D("2903")}}
+        row = team.rows([{"id": 1, "name": "Волков"}], {1: {"issues": 1}}, plans,
+                        days=1, passed=1, open_day=True)[0]
+        self.assertEqual(row["percent"], 50)
+        self.assertEqual((row["ahead"], row["behind"]), (False, False))
+        row = team.rows([{"id": 1, "name": "Волков"}],
+                        {1: {"issues": 1, "payments": D("3000")}}, plans,
+                        days=1, passed=1, open_day=True)[0]
+        self.assertTrue(row["ahead"])
+        row = team.rows([{"id": 1, "name": "Без плана"}], {}, {}, days=1, passed=1)[0]
+        self.assertFalse(row["ahead"])
 
     def test_progress_fractional_and_pace(self):
         plan = {"plan_tasks": D("1.3")}
@@ -281,13 +341,24 @@ class TestTeamPages(WebCase):
         card = self.get_ok(f"/team/{anna}?week={monday.isoformat()}")
         self.assertIn("Аналитика помесячно", card)
         self.assertIn('name="plan_issues" inputmode="numeric" value="5"', card)
-        self.assertIn("из плана месяца", card)
+        # пустое поле задач - доля месяца (подсказка без числа: дробь в поле
+        # звала бы её ввести), у нарядов месяца плана нет - и подсказки нет
+        self.assertIn('name="plan_tasks" inputmode="numeric" value="" '
+                      'placeholder="из плана месяца"', card)
+        self.assertIn('name="plan_orders" inputmode="numeric" value="">', card)
         # ошибка ввода - та же карточка, сообщение у формы дня и набранное
         r = self.client.post(f"/team/{anna}/plan", data={
             "period": "day", "day": today.isoformat(), "plan_issues": "много"})
         self.assertEqual(r.status_code, 400)
         self.assertIn("Числа плана - цифрами.", r.text)
         self.assertIn('value="много"', r.text)
+        self.assertEqual(run(self.crm.staff_period_plans("day", today)), {})
+        # дробь в штуках не усекается молча
+        r = self.client.post(f"/team/{anna}/plan", data={
+            "period": "day", "day": today.isoformat(), "plan_tasks": "1,3"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Выдачи, наряды и задачи - целым числом.", r.text)
+        self.assertIn('value="1,3"', r.text)
         self.assertEqual(run(self.crm.staff_period_plans("day", today)), {})
         r = self.client.post(f"/team/{anna}/plan", data={"period": "day",
                                                           "day": today.isoformat(),
@@ -299,7 +370,9 @@ class TestTeamPages(WebCase):
         self.client.post(f"/team/{anna}/plan", data={"period": "week",
                                                      "week": monday.isoformat()})
         self.assertEqual(run(self.crm.staff_period_plans("week", monday)), {})
-        self.assertIn("снова из плана месяца", self.get_ok(f"/team/{anna}"))
+        title = team.period_title("week", monday, today=date.today())
+        self.assertIn(f'<div class="flash ok">План недели {title} - снова из плана месяца.',
+                      self.get_ok(f"/team/{anna}"))
         # ошибка в форме месяца - тоже на месте, с набранными условиями
         r = self.client.post(f"/team/{anna}/plan", data={"month": f"{today:%Y-%m}",
                                                           "salary_base": "20000",
@@ -320,11 +393,16 @@ class TestTeamPages(WebCase):
         self.assertEqual(run(self.crm.staff_period_plans("week", monday)), {})
 
     def test_week_view_without_finance(self):
-        """Неделя и день без права на «Финансы»: рублей нет, как у месяца."""
+        """Неделя и день без права на «Финансы»: рублей нет, как у месяца, -
+        ни в таблицах, ни в формах; сохранение штук рубли и условия не стирает."""
         anna = self.make_anna()
-        run(self.crm.set_staff_period_plan(anna, "week",
-                                           date.today() - timedelta(days=date.today().weekday()),
-                                           by="t", plan_revenue=D("50000")))
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        run(self.crm.set_staff_period_plan(anna, "week", monday, by="t",
+                                           plan_revenue=D("50000")))
+        run(self.crm.set_staff_plan(anna, today.replace(day=1), by="t", plan_issues=20,
+                                    plan_revenue=D("155000"), salary_base=D("20000"),
+                                    revenue_pct=D("2")))
         profile = run(self.crm.access_profile_by_code("manager"))
         sections = {**profile["perms"]["sections"], "staff": "edit", "finance": ""}
         pid = run(self.crm.create_access_profile("Кадры", {"sections": sections,
@@ -338,6 +416,26 @@ class TestTeamPages(WebCase):
         card = self.get_ok(f"/team/{anna}")
         self.assertNotIn("Принёс денег", card, "ни в неделе, ни в аналитике")
         self.assertNotIn("Начислено", card)
+        for field in ("plan_revenue", "salary_base", "per_issue", "order_pct", "revenue_pct"):
+            self.assertNotIn(f'name="{field}"', card, "денежных полей в формах нет")
+        self.assertNotIn("50000", card)
+        self.assertNotIn("155000", card)
+        self.assertIn('name="plan_issues"', card, "штуки планировать можно")
+        # сохранение недели и месяца: рубли и условия прежние, из запроса не берутся
+        r = self.client.post(f"/team/{anna}/plan", data={
+            "period": "week", "week": monday.isoformat(), "plan_issues": "4",
+            "plan_revenue": "1"})
+        self.assertEqual(r.status_code, 303)
+        own = run(self.crm.staff_period_plans("week", monday))[anna]
+        self.assertEqual((own["plan_issues"], own["plan_revenue"]), (4, D("50000")))
+        r = self.client.post(f"/team/{anna}/plan", data={
+            "month": f"{today:%Y-%m}", "plan_issues": "25", "salary_base": "0"})
+        self.assertEqual(r.status_code, 303)
+        plan = run(self.crm.staff_plans(today.replace(day=1)))[anna]
+        self.assertEqual((plan["plan_issues"], plan["plan_revenue"], plan["salary_base"],
+                          plan["revenue_pct"]), (25, D("155000"), D("20000"), D("2")))
+        self.assertIn(f"План на {team.month_name(today.replace(day=1))} сохранён.",
+                      self.get_ok(f"/team/{anna}"))
 
     def test_menu_and_export(self):
         self.login()

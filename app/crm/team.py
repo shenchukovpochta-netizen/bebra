@@ -25,7 +25,11 @@
 дням (`month_share`): каждый день берёт 1/N плана своего месяца, поэтому
 неделя на стыке месяцев складывается из двух планов. Своё число главнее
 выведенного, пустое поле своего плана - тоже доля месяца, ноль - «не
-планируется». Факт недели и дня - тот же db.team_facts по датам окна.
+планируется»; свой план - целые штуки (доля бывает дробной: 1,3 в день).
+Факт недели и дня - тот же db.team_facts по датам окна.
+
+Рубли плана и условия оплаты - владельцу или с «Финансами»: без этого
+права форма их не показывает, а сохранение берёт прежние из базы.
 """
 
 from __future__ import annotations
@@ -48,6 +52,10 @@ METRICS: tuple[tuple[str, str, str, bool], ...] = (
 TERMS = ("salary_base", "per_issue", "order_pct", "revenue_pct")
 PERIOD_FIELDS = tuple(m[0] for m in METRICS)
 PLAN_FIELDS = PERIOD_FIELDS + TERMS
+COUNT_FIELDS = tuple(m[0] for m in METRICS if not m[3])
+# Рубли плана и условия оплаты: без права на деньги их нет ни в форме,
+# ни в сохранении (form_keys, keep_money).
+MONEY_FIELDS = tuple(m[0] for m in METRICS if m[3]) + TERMS
 ZERO = Decimal("0.00")
 
 # Период «Команды»: месяц (с условиями оплаты), неделя и день (только план).
@@ -94,10 +102,16 @@ def period_start(kind: str, raw: Any, *, today: date) -> date:
 
 
 def period_title(kind: str, start: date, *, today: date) -> str:
-    year = f" {start.year}" if start.year != today.year else ""
+    """«четверг, 15 октября», «12–18 октября»; год - когда он не текущий.
+    Неделя через Новый год - год у обеих дат: 3 января уже другого года."""
     if kind == "day":
+        year = f" {start.year}" if start.year != today.year else ""
         return f"{WEEKDAYS[start.weekday()]}, {start.day} {MONTHS_GEN[start.month - 1]}{year}"
     last = start + timedelta(days=6)
+    if last.year != start.year:
+        return (f"{start.day} {MONTHS_GEN[start.month - 1]} {start.year} – "
+                f"{last.day} {MONTHS_GEN[last.month - 1]} {last.year}")
+    year = f" {last.year}" if last.year != today.year else ""
     if last.month == start.month:
         return f"{start.day}–{last.day} {MONTHS_GEN[last.month - 1]}{year}"
     return (f"{start.day} {MONTHS_GEN[start.month - 1]} – "
@@ -246,7 +260,9 @@ def rows(people: Iterable[Mapping[str, Any]], facts: Mapping[int, Mapping[str, A
             "percent": (round(sum(m["percent"] for m in planned) / len(planned))
                         if planned else None),
             "behind": any(m["ahead"] is False for m in planned),
-            "ahead": any(m["ahead"] for m in planned),
+            # Зелёный - только когда в темпе всё запланированное: один
+            # сделанный показатель при нуле денег - не «всё в порядке».
+            "ahead": bool(planned) and all(m["ahead"] is True for m in planned),
             "plan": plan, "pay": salary(plan, f), "revenue": revenue(f),
             "source": plan_source(planned),
             "inherited": bool(plan) and plan.get("own") is False})
@@ -355,11 +371,32 @@ def totals(team: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             "pay": logic.to_money(sum((r["pay"]["total"] for r in team), ZERO))}
 
 
+def form_keys(kind: str, money_ok: bool) -> tuple[str, ...]:
+    """Поля формы плана: месяц - план и условия, неделя и день - план.
+    Без права на деньги - только штуки."""
+    keys = PLAN_FIELDS if kind == "month" else PERIOD_FIELDS
+    return keys if money_ok else tuple(k for k in keys if k not in MONEY_FIELDS)
+
+
+def keep_money(kind: str, fields: Mapping[str, Any],
+               saved: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Форма без права на деньги рублей не несёт, а запись пишет строку
+    целиком: деньги плана и условия - прежние из базы (`saved` - действующая
+    строка: своя или унаследованная у месяца, своя у недели и дня), иначе
+    сохранение штук молча стёрло бы денежный план и оклад."""
+    out = dict(fields)
+    for key in PLAN_FIELDS if kind == "month" else PERIOD_FIELDS:
+        if key in MONEY_FIELDS:
+            got = (saved or {}).get(key)
+            out[key] = ZERO if got is None and key in TERMS else got
+    return out
+
+
 def parse_plan(data: Mapping[str, str], keys: tuple[str, ...] = PLAN_FIELDS
                ) -> tuple[dict[str, Any] | None, str | None]:
     """План и условия из формы. Пустой план месяца - «не планируется»,
     недели и дня (keys=PERIOD_FIELDS) - «как в плане месяца»; пустое
-    условие - ноль."""
+    условие - ноль. Штуки - целыми: «1,3» не усекается до 1 молча."""
     what = "плана и условий" if set(keys) & set(TERMS) else "плана"
     out: dict[str, Any] = {}
     for key in keys:
@@ -377,7 +414,9 @@ def parse_plan(data: Mapping[str, str], keys: tuple[str, ...] = PLAN_FIELDS
             return None, "Процент - от 0 до 100."
         if value > Decimal("100000000"):
             return None, "Слишком большое число."
-        if key in ("plan_issues", "plan_orders", "plan_tasks"):
+        if key in COUNT_FIELDS:
+            if value != value.to_integral_value():
+                return None, "Выдачи, наряды и задачи - целым числом."
             out[key] = int(value)
         else:
             out[key] = value.quantize(Decimal("0.01"))

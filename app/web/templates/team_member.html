@@ -41,7 +41,7 @@
 {% if may_plan %}
 {% macro mval(key) %}{% if month_typed is not none %}{{ month_typed[key] }}{% elif plan and plan[key] is not none %}{{ plan[key] }}{% endif %}{% endmacro %}
 <section class="card" id="plan-month">
-  <h2>План и условия на {{ month_title }}</h2>
+  <h2>{{ 'План и условия' if money_ok else 'План' }} на {{ month_title }}</h2>
   {% if month_problem %}<div class="flash err" role="alert">{{ month_problem }}</div>{% endif %}
   <form method="post" action="/team/{{ person.id }}/plan" class="grid2">
     <input type="hidden" name="period" value="month">
@@ -51,16 +51,19 @@
     <label>План выдач <input name="plan_issues" inputmode="numeric" value="{{ mval('plan_issues') }}"></label>
     <label>План нарядов <input name="plan_orders" inputmode="numeric" value="{{ mval('plan_orders') }}"></label>
     <label>План задач <input name="plan_tasks" inputmode="numeric" value="{{ mval('plan_tasks') }}"></label>
+    {% if money_ok %}
     <label>План денег, ₽ <input name="plan_revenue" inputmode="decimal" value="{{ mval('plan_revenue') }}"></label>
     <label>Оклад, ₽ <input name="salary_base" inputmode="decimal" value="{{ mval('salary_base') }}"></label>
     <label>За выдачу, ₽ <input name="per_issue" inputmode="decimal" value="{{ mval('per_issue') }}"></label>
     <label>% от работы нарядов <input name="order_pct" inputmode="decimal" value="{{ mval('order_pct') }}"></label>
     <label>% от принесённых денег <input name="revenue_pct" inputmode="decimal" value="{{ mval('revenue_pct') }}"></label>
+    {% endif %}
     <button type="submit">Сохранить на {{ month_title }}</button>
   </form>
   <p class="muted">Пустой план — не планируется. Сохранение пишет только этот месяц: прошлые
-    считаются по своим условиям, следующие — по этим, пока их не поменяют. План недели и
-    дня без своего — доля этого плана по дням.</p>
+    считаются по своим {{ 'условиям' if money_ok else 'планам' }}, следующие — по этим, пока их не поменяют. План недели и
+    дня без своего — доля этого плана по дням.{% if not money_ok %} План денег и условия
+    оплаты ставит владелец или сотрудник с «Финансами» — сохранение их не меняет.{% endif %}</p>
 </section>
 {% endif %}
 </div>
@@ -86,7 +89,7 @@
       </select>
       {% else %}
       <input type="hidden" name="week" value="{{ week.isoformat() }}">
-      <input type="date" name="day" value="{{ day.isoformat() }}" aria-label="День">
+      <input type="date" name="day" value="{{ day.isoformat() }}" min="2000-01-01" max="{{ day_max.isoformat() }}" aria-label="День">
       {% endif %}
       <button type="submit" class="ghost small">Показать</button>
     </form>
@@ -110,13 +113,13 @@
     <input type="hidden" name="month" value="{{ span.key }}">
     <input type="hidden" name="week" value="{{ week.isoformat() }}">
     <input type="hidden" name="day" value="{{ day.isoformat() }}">
-    {% for key, label, mode in (('plan_issues', 'План выдач', 'numeric'), ('plan_orders', 'План нарядов', 'numeric'), ('plan_tasks', 'План задач', 'numeric'), ('plan_revenue', 'План денег, ₽', 'decimal')) %}
-    <label>{{ label }} <input name="{{ key }}" inputmode="{{ mode }}" value="{% if p.typed is not none %}{{ p.typed[key] }}{% elif p.own and p.own[key] is not none %}{{ p.own[key] }}{% endif %}"{% if p.hint[key] %} placeholder="{{ p.hint[key] }} из плана месяца"{% endif %}></label>
-    {% endfor %}
+    {% for key, label, mode in (('plan_issues', 'План выдач', 'numeric'), ('plan_orders', 'План нарядов', 'numeric'), ('plan_tasks', 'План задач', 'numeric'), ('plan_revenue', 'План денег, ₽', 'decimal')) %}{% if money_ok or key != 'plan_revenue' %}
+    <label>{{ label }} <input name="{{ key }}" inputmode="{{ mode }}" value="{% if p.typed is not none %}{{ p.typed[key] }}{% elif p.own and p.own[key] is not none %}{{ p.own[key] }}{% endif %}"{% if key in p.hint %} placeholder="из плана месяца"{% endif %}></label>
+    {% endif %}{% endfor %}
     <button type="submit">Сохранить план {{ what }}</button>
   </form>
-  <p class="muted">Пустое поле — доля плана месяца (подсказка в поле), 0 — не планируется на
-    {{ 'эту неделю' if week_kind else 'этот день' }}. Все поля пустые — план {{ what }} снова из плана месяца.</p>
+  <p class="muted">Пустое поле — доля плана месяца (она в таблице выше), 0 — не планируется на
+    {{ 'эту неделю' if week_kind else 'этот день' }}; штуки — целыми. Все поля пустые — план {{ what }} снова из плана месяца.</p>
   {% endif %}
 </section>
 {% endfor %}

@@ -1457,12 +1457,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         since, until = month_window(first)
         return first, logic.month_bounds(first, today=today), since, until
 
-    async def team_period(kind: str, start: date, today: date, *,
-                          with_facts: bool = True) -> dict[str, Any]:
+    async def month_plans(first: date, cache: dict[date, dict[int, dict]] | None
+                          ) -> dict[int, dict]:
+        """Планы команды на месяц; `cache` - уже прочитанные на этой странице."""
+        if cache is None:
+            return await crm.staff_plans(first)
+        if first not in cache:
+            cache[first] = await crm.staff_plans(first)
+        return cache[first]
+
+    async def team_period(kind: str, start: date, today: date, *, with_facts: bool = True,
+                          cache: dict[date, dict[int, dict]] | None = None
+                          ) -> dict[str, Any]:
         """Неделя или день команды: границы, свои планы, планы месяцев
         периода, итоговый план каждого (свой поверх доли месяца) и факт."""
         span = team.period_span(kind, start, today=today)
-        months = {m: await crm.staff_plans(m) for m in team.period_months(kind, start)}
+        months = {m: await month_plans(m, cache) for m in team.period_months(kind, start)}
         own = await crm.staff_period_plans(kind, start)
         return {"span": span, "own": own, "months": months,
                 "plans": team.period_plans(kind, start, own, months),
@@ -1476,13 +1486,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         нет плана ни на один период - блока нет."""
         sid = int(staff["id"])
         first = today.replace(day=1)
-        month_plan = (await crm.staff_plans(first)).get(sid)
+        # «Задачи дня» - главная страница сотрудника: план месяца читается
+        # один раз на страницу (день и неделя берут его из кэша), а факт
+        # команды - только за период, на который у него есть план. Три
+        # окна (день, неделя, месяц) - три team_facts сознательно: окно
+        # недели бывает шире месяца (стык), вычесть одно из другого нельзя,
+        # а день и неделя - узкие диапазоны по индексам дат.
+        cache: dict[date, dict[int, dict]] = {}
+        month_plan = (await month_plans(first, cache)).get(sid)
         periods = []
         for kind, title in (("day", "Сегодня"), ("week", "Эта неделя")):
             start = today if kind == "day" else team.monday(today)
-            # «Задачи дня» - главная страница сотрудника: факт команды
-            # считается, только когда у него есть план на этот период.
-            got = await team_period(kind, start, today, with_facts=False)
+            got = await team_period(kind, start, today, with_facts=False, cache=cache)
             plan = got["plans"].get(sid)
             if plan:
                 facts = (await crm.team_facts(*days_window(start, got["span"]["days"])))
@@ -1578,20 +1593,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         span = logic.month_bounds(first, today=today)
         since, until = month_window(first)
         facts = (await crm.team_facts(since, until)).get(sid) or {}
-        plan = (await crm.staff_plans(first)).get(sid)
+        cache: dict[date, dict[int, dict]] = {}
+        plan = (await month_plans(first, cache)).get(sid)
         periods = []
         for kind, start in (("week", week), ("day", day)):
-            got = await team_period(kind, start, today)
+            got = await team_period(kind, start, today, cache=cache)
             pspan = got["span"]
             metrics = team.progress(got["plans"].get(sid), got["facts"].get(sid) or {},
                                     days=pspan["days"], passed=pspan["passed"],
                                     open_day=got["open_day"])
             derived = team.month_share({m: rows.get(sid) for m, rows in got["months"].items()},
                                        start, pspan["days"])
+            # Подсказка в пустом поле - без числа: оно в таблице над формой,
+            # а дробная доля («1,3») в поле звала бы ввести дробь.
             periods.append({"kind": kind, "span": pspan, "metrics": metrics,
                             "own": got["own"].get(sid),
-                            "hint": {k: team.number(v) for k, v in derived.items()
-                                     if v is not None},
+                            "hint": {k for k, v in derived.items() if v is not None},
                             "problem": problem if failed == kind else None,
                             "typed": typed if failed == kind else None})
         history = []
@@ -1599,7 +1616,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if m == first:
                 history.append((m, plan, facts))
                 continue
-            history.append((m, (await crm.staff_plans(m)).get(sid),
+            history.append((m, (await month_plans(m, cache)).get(sid),
                             (await crm.team_facts(*month_window(m))).get(sid) or {}))
         this_week = team.monday(today)
         week_options = sorted({this_week + timedelta(weeks=n) for n in range(-8, 9)} | {week})
@@ -1611,6 +1628,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       pay=team.salary(plan, facts), revenue=team.revenue(facts),
                       periods=periods, history=team.history(history, today=today),
                       week=week, day=day,
+                      day_max=today + timedelta(days=team.PLAN_AHEAD_DAYS),
                       week_options=[(w, team.period_title("week", w, today=today))
                                     for w in week_options],
                       month_problem=problem if failed == "month" else None,
@@ -1639,20 +1657,28 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         first, week, day = team_choice(data)
         back = (f"/team/{person['id']}?month={first:%Y-%m}&week={week.isoformat()}"
                 f"&day={day.isoformat()}#plan-{kind}")
-        keys = team.PLAN_FIELDS if kind == "month" else team.PERIOD_FIELDS
+        sid = int(person["id"])
+        # Рубли плана и условия - владельцу или с «Финансами»: без права их
+        # нет в форме, а пришедшие в запросе не читаются.
+        money_ok = team_money(request)
+        keys = team.form_keys(kind, money_ok)
         fields, problem = team.parse_plan(data, keys)
         if problem:
             return await team_member_page(
                 request, person, first, week, day, failed=kind, problem=problem,
                 typed={k: str(data.get(k) or "") for k in keys}, status_code=400)
         assert fields is not None
-        if kind == "month":
-            await crm.set_staff_plan(int(person["id"]), first, by=who(request), **fields)
-            flash(request, f"План и условия на {team.month_name(first)} сохранены.")
-            return redirect(back)
         start = week if kind == "week" else day
-        await crm.set_staff_period_plan(int(person["id"]), kind, start, by=who(request),
-                                        **fields)
+        if not money_ok:
+            saved = ((await crm.staff_plans(first)).get(sid) if kind == "month"
+                     else (await crm.staff_period_plans(kind, start)).get(sid))
+            fields = team.keep_money(kind, fields, saved)
+        if kind == "month":
+            await crm.set_staff_plan(sid, first, by=who(request), **fields)
+            flash(request, (f"План и условия на {team.month_name(first)} сохранены."
+                            if money_ok else f"План на {team.month_name(first)} сохранён."))
+            return redirect(back)
+        await crm.set_staff_period_plan(sid, kind, start, by=who(request), **fields)
         what = ("План недели " if kind == "week" else "План на ") + team.period_title(
             kind, start, today=date.today())
         if all(v is None for v in fields.values()):
