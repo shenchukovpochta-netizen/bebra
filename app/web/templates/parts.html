@@ -72,7 +72,7 @@
   <tr class="{% if not r.active %}muted{% endif %}">
     <td data-label="Позиция"><a href="/parts/{{ r.id }}">{{ r.title }}</a>{% if not r.active %} <small class="muted">архив</small>{% endif %}</td>
     <td class="opt" data-label="Узел">{{ r.node_title or '—' }}</td>
-    <td class="num {% if r.below %}bad{% elif r.at_min %}warn{% endif %}" data-label="На полке">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· не хватает {{ r.short }}</small>{% elif r.at_min %} <small>· на пределе</small>{% endif %}{% if r.transit %} <small class="muted">· в пути {{ r.transit }}</small>{% endif %}</td>
+    <td class="num {% if r.below %}bad{% elif r.at_min %}warn{% endif %}" data-label="На полке">{{ r.stock }} {{ r.unit }}{% if r.below %} <small>· <span class="nowrap">не хватает {{ r.short }}</span></small>{% elif r.at_min %} <small>· на пределе</small>{% endif %}{% if r.transit %} <small class="muted">· <span class="nowrap">в пути {{ r.transit }}</span></small>{% endif %}</td>
     <td class="num muted" data-label="Мин.">{{ r.min_stock }}</td>
     <td class="num opt {% if r.stale %}warn{% endif %}" data-label="Дней на складе">{{ r.days_on_stock if r.days_on_stock is not none else '—' }}</td>
     {% if money_ok %}

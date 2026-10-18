@@ -4,11 +4,15 @@
 <div class="card narrow">
 <h1>Новая батарея</h1>
 <form method="post" action="/batteries" class="grid2">
-  <label>Номер на корпусе <input name="code" required placeholder="9510001"></label>
+  {# Пример номера - подсказкой под полем, а не серым текстом в нём: в
+     поле его принимали за уже введённый номер. Напряжение и ёмкость -
+     подсказкой модели, если она выбрана, а не выдуманным числом. #}
+  <label class="wide">Номер на корпусе <input name="code" required>
+    <small class="muted">как на наклейке, например 9510001</small></label>
   <label>Модель <select name="model_id"><option value="">не указана</option>{% for m in models %}<option value="{{ m.id }}" {% if model and model.id == m.id %}selected{% endif %}>{{ m.title }}{% if m.capacity %} · {{ m.capacity }} А·ч{% endif %}</option>{% endfor %}</select></label>
   <label>Серийный номер <input name="serial_no"></label>
-  <label>Напряжение по табличке, В <input name="volts" inputmode="numeric" placeholder="60"></label>
-  <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal" placeholder="70"></label>
+  <label>Напряжение по табличке, В <input name="volts" inputmode="numeric"{% if model and model.voltage %} placeholder="{{ model.voltage }}"{% endif %}></label>
+  <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal"{% if model and model.capacity %} placeholder="{{ model.capacity }}"{% endif %}></label>
   <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
   <label>Цена покупки <input name="purchase_price" value="{{ model.price if model and model.price else '' }}"></label>
   <label>Куплена <input type="date" name="purchased_on"></label>

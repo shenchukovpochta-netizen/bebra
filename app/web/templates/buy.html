@@ -2,7 +2,7 @@
 {% block title %}Что купить — {{ app_title }}{% endblock %}
 {% block content %}
 {% macro n(v, suffix='') %}{% if v is none %}—{% else %}{{ v }}{{ suffix }}{% endif %}{% endmacro %}
-<div class="bar"><h1>Что купить <small class="muted">· {{ span.label }}</small></h1>
+<div class="bar"><h1>Что купить <small class="muted">{{ span.label }}</small></h1>
   {% with active = 'buy' %}{% include "_report_tabs.html" %}{% endwith %}
 </div>
 <div class="bar">

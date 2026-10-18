@@ -9,7 +9,7 @@
 {# Разрез - адресом страницы: период из _points_period.html его не теряет. #}
 {% set here = '/reports/tariffs/model' if by_model else '/reports/tariffs' %}
 {% macro n(v, suffix='') %}{% if v is none %}—{% else %}{{ v }}{{ suffix }}{% endif %}{% endmacro %}
-<div class="bar"><h1>Тарифы <small class="muted">· {{ span.label }}</small></h1>
+<div class="bar"><h1>Тарифы <small class="muted">{{ span.label }}</small></h1>
   {% with active = 'tariffs' %}{% include "_report_tabs.html" %}{% endwith %}
 </div>
 <div class="bar">
