@@ -37,8 +37,9 @@ STATUSES = {"open": "открыта", "done": "сделана", "cancelled": "о
 TITLE_MAX = 300
 NOTE_MAX = 2000
 # Куда кнопки задачи возвращают: только свои страницы (адрес из формы -
-# чужая строка), фильтр точки переносится.
+# чужая строка), фильтр точки и блок страницы, где нажали, переносятся.
 BACKS = ("/my", "/tasks")
+ANCHORS = ("owner", "points", "point", "common")
 NO_POINT = "none"
 
 
@@ -235,11 +236,11 @@ def counts_text(open_count: int, hot: int, people: int | None = None) -> str:
 
 
 def _sees(place: str, where: Any) -> bool:
-    """Незакреплённую задачу точки `place` видит она сама; без точки - все."""
-    if not place:
+    """Незакреплённую задачу точки `place` видит она сама, задачу без точки -
+    все. Люди «Без точки» видят все незакреплённые - как в своих «Задачах
+    дня» (`my_lists`), поэтому и переключатель на них их не режет."""
+    if not place or place == NO_POINT:
         return True
-    if place == NO_POINT:
-        return not where
     return not where or where == place
 
 
@@ -256,8 +257,10 @@ def points_board(tasks: Iterable[Mapping[str, Any]], people: Iterable[Mapping[st
     точка без людей тоже видна - пустой: владелец видит, что поручать
     там некому. Сам смотрящий в группы не входит - его задачи в «Задачах
     владельца». `location` - переключатель (`none` - без точки): группа
-    этой точки и общие задачи, которые она видит (свои и всей сети);
-    неизвестное значение - чужая строка, показывается всё."""
+    этой точки и общие задачи, которые видят её люди (её и всей сети; у
+    «Без точки» - все); неизвестное значение - чужая строка, показывается
+    всё. `place_title` - что выбрано словами для подзаголовка, `point` -
+    выбранная настоящая точка (у «Без точки» и «Все точки» пусто)."""
     me = _id(staff.get("id"))
     view = overview(tasks, people, staff=staff, today=today)
     cols = [c for c in view["people"] if _id(c["id"]) != me]
@@ -280,22 +283,27 @@ def points_board(tasks: Iterable[Mapping[str, Any]], people: Iterable[Mapping[st
         groups.append({"key": name or NO_POINT, "title": name or "Без точки",
                        "people": members, "open": opened, "hot": hot,
                        "counts": counts_text(opened, hot, len(members))})
-    keys = {g["key"] for g in groups}
-    place = location if location in keys else ""
+    titles = {g["key"]: g["title"] for g in groups}
+    place = location if location in titles else ""
     return {"points": [g for g in groups if not place or g["key"] == place],
-            "choices": [(g["key"], g["title"]) for g in groups], "place": place,
+            "choices": list(titles.items()), "place": place,
+            "place_title": titles.get(place, ""),
+            "point": place if place != NO_POINT else "",
             "free": [t for t in view["free"] if _sees(place, t.get("location"))]}
 
 
-def back_url(path: str, place: str = "") -> str:
-    return f"{path}?{urlencode({'location': place})}" if place else path
+def back_url(path: str, place: str = "", anchor: str = "") -> str:
+    url = f"{path}?{urlencode({'location': place})}" if place else path
+    return f"{url}#{anchor}" if anchor in ANCHORS else url
 
 
 def safe_back(raw: str | None) -> str:
     """Возврат после «Взять», «Сделано» и новой задачи: /my или /tasks,
-    фильтр точки собирается заново, остальное отбрасывается."""
-    path, _, query = (raw or "").partition("?")
+    фильтр точки и якорь блока (только из `ANCHORS`) собираются заново,
+    остальное отбрасывается."""
+    rest, _, anchor = (raw or "").partition("#")
+    path, _, query = rest.partition("?")
     if path not in BACKS:
         return BACKS[0]
     place = (parse_qs(query).get("location") or [""])[0].strip()[:200]
-    return back_url(path, place)
+    return back_url(path, place, anchor)

@@ -8,9 +8,10 @@
    его люди по их точке с открытыми поручениями (tasks.points_board).
    Сотруднику - его точка (свои поручения и рабочие группы
    app/crm/mytasks.py: группа есть, только когда её раздел открыт профилем)
-   и общие; задач владельца ему нет. Строка ведёт в карточку записи. #}
+   и общие; задач владельца ему нет. Строка ведёт в карточку записи.
+   Кнопки строки возвращают в тот же блок (якорь - tasks.ANCHORS). #}
 <div class="bar"><h1>Задачи дня
-    <small class="muted">{{ today.strftime('%d.%m') }} · {% if board %}вся сеть{% elif point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
+    <small class="muted">{{ today.strftime('%d.%m') }} · {% if board %}{{ board.place_title or 'вся сеть' }}{% elif point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
   <a class="btn ghost" href="/tasks">Все задачи</a>
   {% if can_view(staff, 'dashboard') %}<a class="btn ghost" href="/">Сводка</a>{% endif %}</div>
 {% if own_month %}
@@ -33,11 +34,14 @@
 {# а) задачи владельца: его поручения себе и новая задача #}
 <section class="my-block" id="owner">
   <div class="my-block-h"><h2>Задачи владельца <span class="muted">· {{ task_lists.mine|length }}</span></h2></div>
-  {{ tk.add_form(people, locations, staff, task_money, back) }}
+  {{ tk.add_form(people, locations, staff, task_money, back ~ '#owner') }}
+  {% if task_lists.mine %}
   <section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">
-    {% if task_lists.mine %}<ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, back) }}{% endfor %}</ul>
-    {% else %}<p class="muted">Своих задач нет. Поставить себе — «+ Поставить задачу», кому — «мне».</p>{% endif %}
+    <ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, back ~ '#owner') }}{% endfor %}</ul>
   </section>
+  {% else %}
+  <section class="card"><p class="muted">Своих задач нет. Поставить себе — «+ Поставить задачу», кому — «мне».</p></section>
+  {% endif %}
 </section>
 
 {# б) задачи админов и мастеров: по точке сотрудника, внутри - люди точки #}
@@ -58,7 +62,7 @@
       {% for p in g.people %}
       <section class="card my-group {% if p.hot %}hot{% endif %}">
         <h2><a href="/team/{{ p.id }}">{{ p.name }}</a> <small class="muted">{{ [p.role, p.counts]|select|join(' · ') }}</small></h2>
-        {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, back) }}{% endfor %}</ul>
+        {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, back ~ '#points') }}{% endfor %}</ul>
         {% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
       </section>
       {% else %}
@@ -73,16 +77,18 @@
 {% else %}
 {# б) задачи точки сотрудника: свои поручения и рабочие группы #}
 <section class="my-block" id="point">
-  <div class="my-block-h"><h2>{% if point %}Задачи точки «{{ point }}»{% else %}Задачи всех точек{% endif %}</h2></div>
+  <div class="my-block-h"><h2>{% if point %}Задачи точки «{{ point }}»{% else %}Задачи всех точек{% endif %}</h2>
+    {# общие ниже рабочих групп: на телефоне до них далеко - ссылка сразу #}
+    {% if free %}<a class="btn ghost small" href="#common">Общие задачи · {{ free|length }}</a>{% endif %}</div>
   {% if not point %}
   <p class="muted">Своя точка не задана — показаны задачи всех точек.
     {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
   {% endif %}
-  {{ tk.add_form(people, locations, staff, task_money, back) }}
+  {{ tk.add_form(people, locations, staff, task_money, back ~ '#point') }}
   {% if task_lists.mine %}
   <section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">
     <h2>Мои поручения <span class="muted">· {{ task_lists.mine|length }}</span></h2>
-    <ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, back) }}{% endfor %}</ul>
+    <ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, back ~ '#point') }}{% endfor %}</ul>
   </section>
   {% endif %}
   {% for g in groups %}
@@ -112,8 +118,8 @@
   <div class="my-block-h"><h2>Общие задачи <span class="muted">· {{ free|length }}</span></h2></div>
   <p class="muted">Не закреплены ни за кем: задачу точки видят все на ней, задачу без точки — вся сеть. «Взять» — и она ваша.</p>
   <section class="card my-group info">
-    {% if free %}<ul class="my-items">{% for t in free %}{{ tk.row(t, back, show_where=True) }}{% endfor %}</ul>
-    {% else %}<p class="muted">Свободных задач нет{% if board and board.place %} на этой точке{% elif not board and point %} на «{{ point }}»{% endif %}.</p>{% endif %}
+    {% if free %}<ul class="my-items">{% for t in free %}{{ tk.row(t, back ~ '#common', show_where=True) }}{% endfor %}</ul>
+    {% else %}<p class="muted">Свободных задач нет{% if board and board.point %} на «{{ board.point }}»{% elif not board and point %} на «{{ point }}»{% endif %}.</p>{% endif %}
   </section>
 </section>
 {% endblock %}

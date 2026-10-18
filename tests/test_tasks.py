@@ -128,16 +128,19 @@ class TestTaskRules(unittest.TestCase):
         everyone = [p["id"] for g in board["points"] for p in g["people"]]
         self.assertNotIn(1, everyone, "свои задачи - в «Задачах владельца»")
         self.assertEqual([t["id"] for t in board["free"]], [5, 6])
-        self.assertEqual(board["place"], "")
+        self.assertEqual((board["place"], board["place_title"], board["point"]), ("", "", ""))
         self.assertEqual(board["choices"][0], ("Павлюхина", "Павлюхина"))
         self.assertEqual(board["choices"][-1], ("none", "Без точки"))
         one = tasks.points_board(rows, people, staff=OWNER, today=TODAY,
                                  points=["Павлюхина", "Адоратского"], location="Адоратского")
         self.assertEqual([g["title"] for g in one["points"]], ["Адоратского"])
         self.assertEqual([t["id"] for t in one["free"]], [6], "чужая точка - нет, сеть - да")
+        self.assertEqual((one["place_title"], one["point"]), ("Адоратского", "Адоратского"))
         self.assertEqual(len(one["choices"]), 4, "переключатель помнит все точки")
         none = tasks.points_board(rows, people, staff=OWNER, today=TODAY, location="none")
-        self.assertEqual([t["id"] for t in none["free"]], [6])
+        self.assertEqual([t["id"] for t in none["free"]], [5, 6],
+                         "люди без точки видят все незакреплённые, как в своих /my")
+        self.assertEqual((none["place_title"], none["point"]), ("Без точки", ""))
         alien = tasks.points_board(rows, people, staff=OWNER, today=TODAY, location="<b>")
         self.assertEqual((alien["place"], len(alien["points"])), ("", 4))
 
@@ -152,8 +155,16 @@ class TestTaskRules(unittest.TestCase):
         self.assertEqual(tasks.safe_back("/my?location=Павлюхина&next=//evil.example"),
                          "/my?location=%D0%9F%D0%B0%D0%B2%D0%BB%D1%8E%D1%85%D0%B8%D0%BD%D0%B0")
         for bad in ("https://evil.example", "//evil.example/my", "/clients", None, "",
-                    "/my/../clients"):
+                    "/my/../clients", "/clients#common"):
             self.assertEqual(tasks.safe_back(bad), "/my", bad)
+        # якорь блока - только свой: кнопка возвращает туда, где нажали
+        self.assertEqual(tasks.safe_back("/my?location=none#common"), "/my?location=none#common")
+        self.assertEqual(tasks.safe_back("/my#owner"), "/my#owner")
+        self.assertEqual(tasks.safe_back("/my#x\"><script>"), "/my")
+        self.assertEqual(tasks.safe_back("/tasks?location=a#b#common"), "/tasks?location=a")
+        self.assertEqual(tasks.back_url("/my", "Павлюхина", "points"),
+                         "/my?location=%D0%9F%D0%B0%D0%B2%D0%BB%D1%8E%D1%85%D0%B8%D0%BD%D0%B0"
+                         "#points")
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")

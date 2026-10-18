@@ -309,6 +309,10 @@ class TestMyTasksPage(WebCase):
         run(crm.create_staff("floater", logic.hash_password("password-1"),
                                        "Подменный", "manager", manager["id"]))
         owner = run(crm.staff_by_login("admin"))
+        self.login()
+        empty = self.block(self.get_ok("/my"), "owner")
+        self.assertIn("Своих задач нет", empty)
+        self.assertNotIn("my-group", empty, "пустое - не предупреждение")
         run(crm.create_task(title="Обзвонить должников", by="staff:admin",
                             assignee_id=oper["id"]))
         run(crm.create_task(title="Сверить кассу", by="staff:admin", assignee_id=anna))
@@ -317,8 +321,8 @@ class TestMyTasksPage(WebCase):
         run(crm.create_task(title="Ремонт АКБ", by="staff:admin", location=P1))
         run(crm.create_task(title="Помыть витрину", by="staff:admin", location=P2))
         run(crm.create_task(title="Инвентаризация шлемов", by="staff:admin"))
-        self.login()
         page = self.get_ok("/my")
+        self.assertIn("· вся сеть</small>", page)
         self.assertNotIn("Клиент Павлюхина", page, "прозвон точек - не владельцу")
         self.assertNotIn("позвонить", page)
         self.assertNotIn("Своя точка не задана", page)
@@ -327,6 +331,7 @@ class TestMyTasksPage(WebCase):
                                              "Общие задачи"], "а, б, в - по порядку")
         mine = self.block(page, "owner")
         self.assertIn("Закупить колодки", mine)
+        self.assertIn("my-group warn", mine)
         self.assertIn("+ Поставить задачу", mine)
         self.assertNotIn("Обзвонить должников", mine)
         points = self.block(page, "points")
@@ -349,6 +354,7 @@ class TestMyTasksPage(WebCase):
         self.assertIn('href="/my"', self.get_ok("/"), "ссылка на сводке")
         # переключатель точки: её группа и общие, которые она видит
         page = self.get_ok(f"/my?location={P2}")
+        self.assertIn(f"· {P2}</small>", page, "подзаголовок - выбранная точка")
         points = self.block(page, "points")
         self.assertEqual(self.heads(points), [P2])
         self.assertIn("Анна", points)
@@ -357,19 +363,30 @@ class TestMyTasksPage(WebCase):
         self.assertIn("Инвентаризация шлемов", common, "без точки - видит вся сеть")
         self.assertNotIn("Ремонт АКБ", common)
         self.assertIn("Закупить колодки", self.block(page, "owner"), "свои - всегда")
-        none = self.block(self.get_ok("/my?location=none"), "points")
+        page_none = self.get_ok("/my?location=none")
+        self.assertIn("· Без точки</small>", page_none)
+        none = self.block(page_none, "points")
         self.assertIn("Подменный", none)
         self.assertNotIn("Оператор", none)
+        common = self.block(page_none, "common")
+        for word in ("Ремонт АКБ", "Помыть витрину", "Инвентаризация шлемов"):
+            self.assertIn(word, common, "люди без точки видят все незакреплённые")
         self.assertIn("Оператор", self.block(self.get_ok("/my?location=Марс"), "points"),
                       "чужая строка - показывается всё")
-        # кнопка возвращает на ту же точку, лишнее из адреса отбрасывается
+        # кнопка возвращает на ту же точку и в тот же блок, лишнее из
+        # адреса отбрасывается
         back = "/my?location=" + quote_plus(P2)
-        self.assertIn(f'value="{back}"', page)
+        self.assertIn(f'value="{back}#common"', page)
+        self.assertIn(f'value="{back}#owner"', page)
         task = next(t for t in crm.tasks_.values() if t["title"] == "Помыть витрину")
         r = self.client.post(f"/tasks/{task['id']}/take",
-                             data={"back": f"/my?location={P2}&next=https://evil.example"})
-        self.assertEqual(r.headers["location"], back)
+                             data={"back": f"/my?location={P2}&next=https://evil.example"
+                                           "#common"})
+        self.assertEqual(r.headers["location"], back + "#common")
         self.assertEqual(task["assignee_id"], owner["id"])
+        r = self.client.post(f"/tasks/{task['id']}/done",
+                             data={"back": f"/my?location={P2}#x\"><script>"})
+        self.assertEqual(r.headers["location"], back, "чужой якорь - отбрасывается")
 
     def test_staff_sees_his_point_and_common(self):
         crm = self.crm
@@ -399,6 +416,7 @@ class TestMyTasksPage(WebCase):
         self.assertIn("Инвентаризация шлемов", common)
         self.assertNotIn("Помыть витрину", common, "общая задача чужой точки")
         self.assertIn("Взять", common)
+        self.assertIn('href="#common">Общие задачи · 2</a>', point, "ссылка вниз, к общим")
         self.assertNotIn('class="team-cols"', page)
         # механик - свои наряды на своей точке, общие - те же
         self.client.post("/logout")
@@ -416,8 +434,12 @@ class TestMyTasksPage(WebCase):
         common = self.block(page, "common")
         self.assertIn("Помыть витрину", common)
         self.assertNotIn("Ремонт АКБ", common)
-        self.assertEqual(self.client.get("/my?location=" + P1).status_code, 200,
-                         "переключатель - только у владельца, сотруднику не мешает")
+        self.assertNotIn('aria-label="Точка"', page, "переключатель - только у владельца")
+        other = self.get_ok("/my?location=" + quote_plus(P1))
+        self.assertNotIn('aria-label="Точка"', other)
+        for anchor in ("point", "common"):
+            self.assertEqual(self.block(other, anchor), self.block(page, anchor),
+                             "фильтр из адреса блоки сотрудника не режет")
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
