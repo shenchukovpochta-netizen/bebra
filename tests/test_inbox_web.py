@@ -137,6 +137,19 @@ class TestInboxAccess(InboxCase):
         self.assertIn("Иван Курьеров", self.get_ok("/inbox"))
         self.get_ok(f"/inbox/{self.tg}")
 
+    def test_issue_from_thread_is_not_for_owner(self):
+        """Владелец сам не выдаёт: «Оформить выдачу» в обращении - тому,
+        кто выдаёт на точке и читает переписку."""
+        self.login()
+        page = self.get_ok(f"/inbox/{self.wa}")
+        self.assertNotIn("Оформить выдачу", page)
+        self.assertNotIn('href="/issue', page)
+        pid = run(self.crm.create_access_profile(
+            "Точка с перепиской", {"sections": {"inbox": "edit", "issue": "edit"},
+                                   "actions": {}}))
+        self.as_("point", pid)
+        self.assertIn('href="/issue?phone=%2B79001112233"', self.get_ok(f"/inbox/{self.wa}"))
+
     def test_tile_counts_only_waiting(self):
         self.login()
         for tid in (self.tg, self.wa, self.av):

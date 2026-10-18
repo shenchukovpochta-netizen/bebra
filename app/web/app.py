@@ -791,7 +791,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
         can_act=logic.can_act, visible_sections=logic.visible_sections,
-        is_owner=logic.is_owner,
+        is_owner=logic.is_owner, offers_issue=logic.offers_issue,
         home_for=logic.home_for,
         today=date.today, timedelta=timedelta, bot_enabled=bot is not None,
         RENTAL_BACKDATE_DAYS=logic.RENTAL_BACKDATE_DAYS,
@@ -3536,7 +3536,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             bookings=await crm.bookings(status="new") if "booking" in kinds else (),
             claims=await crm.pending_claims() if "claim" in kinds else (),
             today=date.today(), money_ok=may_view(request, "finance"),
-            booking_url=booking_issue_url if may_edit(request, "issue") else None)
+            # Владелец сам не выдаёт: его строка заявки ведёт в «Заявки на
+            # аренду», а не в мастер выдачи (logic.offers_issue).
+            booking_url=(booking_issue_url if logic.offers_issue(request.state.staff)
+                         else None))
         return render(request, "incoming.html", rows=rows,
                       incoming_counts=incoming.counts(rows))
 
@@ -3596,7 +3599,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         inbox_ok = may_view(request, "inbox")
         view = deals.dress(deal, inbox_ok=inbox_ok)
         issue_url = None
-        if may_edit(request, "issue") and deal.get("stage") in deals.EARLY:
+        if logic.offers_issue(request.state.staff) and deal.get("stage") in deals.EARLY:
             if deal.get("client_id"):
                 issue_url = f"/issue?client={int(deal['client_id'])}"
             elif view.get("phone_shown"):

@@ -115,7 +115,22 @@ class TestTree(unittest.TestCase):
                          ["Быстрая выдача", "Повторная выдача"])
         self.assertEqual([c["label"] for c in issue["children"] if c["on"]],
                          ["Повторная выдача"])
-        self.assertIn("Сверка с отчётами", labels(nav.menu(MANAGER, "/")))
+        self.assertIn("Сверка отчётов", labels(nav.menu(MANAGER, "/")))
+
+    def test_issue_crumbs_and_buttons_rule(self):
+        """Обе выдачи живут в пункте «Выдача» - крошки ведут туда, а не в
+        «Аренды». Кнопки выдачи на экранах - тому, кто выдаёт, и не
+        владельцу."""
+        self.assertEqual(nav.trail("/issue", MANAGER),
+                         [{"label": "Главное", "href": ""}, {"label": "Выдача", "href": ""},
+                          {"label": "Быстрая выдача", "href": "/issue"}])
+        self.assertEqual(nav.trail("/rentals/new", MANAGER),
+                         [{"label": "Главное", "href": ""}, {"label": "Выдача", "href": ""},
+                          {"label": "Повторная выдача", "href": "/rentals/new"}])
+        self.assertTrue(logic.offers_issue(MANAGER))
+        self.assertFalse(logic.offers_issue(OWNER), "владелец сам не выдаёт")
+        self.assertFalse(logic.offers_issue(TECH), "без права на выдачу")
+        self.assertFalse(logic.offers_issue(None))
 
     def test_parent_opens_on_its_child(self):
         menu = nav.menu(OWNER, "/parts/write-offs")
@@ -204,6 +219,62 @@ class TestMenuInPanel(tw.WebCase):
         self.assertIn('<nav class="crumbs" aria-label="Вы здесь"><span>Склад</span>', page)
         self.assertIn("<small>Владелец</small>", page)
         self.assertIn('action="/bikes" role="search"', page, "поиск велосипеда в меню")
+
+    def as_manager(self):
+        manager = tw.run(self.crm.access_profile_by_code("manager"))
+        tw.run(self.crm.create_staff("ivan", logic.hash_password("password-123"), "Иван",
+                                     "manager", manager["id"]))
+        self.client.post("/logout")
+        self.login("ivan", "password-123")
+
+    @staticmethod
+    def body(page):
+        """Сама страница, без меню и нижней панели: кнопки на экране."""
+        return page.split("<main>", 1)[1].split("</main>", 1)[0]
+
+    def test_issue_lives_in_its_menu_item(self):
+        """Выдача - пункт меню «Выдача» (быстрая и повторная), а не кнопки
+        в шапке «Аренд». Владельцу её не видно нигде: ни пункта, ни кнопок
+        в карточках клиента и велосипеда, заявках и ленте «Входящих». Права
+        не отнимаются - прямой адрес открыт."""
+        tw.run(self.crm.create_booking(client_id=self.client_id, model="Kugoo V3",
+                                       tariff_id=self.tariff_id, location_id=None,
+                                       wanted_on=date.today()))
+        for path in ("/rentals", f"/clients/{self.client_id}", f"/bikes/{self.bike_id}",
+                     "/bookings", "/incoming/feed", "/ops"):
+            with self.subTest(owner=path):
+                page = self.get_ok(path)
+                self.assertNotIn('href="/issue', page)
+                self.assertNotIn('href="/rentals/new', page)
+                self.assertNotIn("Выдача", self.menu_labels(page))
+        self.assertIn('href="/bookings"', self.body(self.get_ok("/incoming/feed")),
+                      "заявка в ленте ведёт в «Заявки на аренду», а не в мастер")
+        self.assertIn("<h1>Быстрая выдача</h1>", self.get_ok("/issue"))
+        page = self.get_ok("/rentals/new")
+        self.assertIn("<h1>Повторная выдача</h1>", page)
+        self.assertIn("<title>Повторная выдача", page)
+        page = self.get_ok("/ops")
+        self.assertIn("<h1>Сверка отчётов</h1>", page)
+        self.assertIn("Сверка отчётов", self.menu_labels(page))
+
+        self.as_manager()
+        rentals = self.get_ok("/rentals")
+        self.assertIn("Выдача", self.menu_labels(rentals))
+        self.assertIn("Быстрая выдача", self.menu_labels(rentals))
+        self.assertIn("Повторная выдача", self.menu_labels(rentals))
+        for word in ('href="/issue', 'href="/rentals/new', "Быстрая выдача",
+                     "Повторная выдача", ">Форма<"):
+            self.assertNotIn(word, self.body(rentals), "в «Арендах» кнопок выдачи нет")
+        self.assertIn(f'href="/issue?client={self.client_id}"',
+                      self.get_ok(f"/clients/{self.client_id}"))
+        self.assertIn(f'href="/issue?bike={self.bike_id}"',
+                      self.get_ok(f"/bikes/{self.bike_id}"))
+        self.assertIn('href="/issue?client=', self.body(self.get_ok("/bookings")))
+        self.assertIn('href="/issue?client=', self.body(self.get_ok("/incoming/feed")))
+        page = self.get_ok("/rentals/new")
+        self.assertIn('<nav class="crumbs" aria-label="Вы здесь"><span>Главное</span>'
+                      '<span class="sep" aria-hidden="true">›</span><span>Выдача</span>', page)
+        self.assertRegex(page, r'<a class="nav-link on" href="/rentals/new"')
 
     def test_parts_badge_counts_low_stock(self):
         """Счётчик «Заказ запчастей» - по остаткам, как у склада: сырые

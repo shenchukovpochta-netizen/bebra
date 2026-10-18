@@ -2,7 +2,7 @@
 {% block title %}Брони — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Заявки на аренду</h1>
-  <a class="btn ghost" href="/issue">Выдача</a>
+  {% if not is_owner(staff) %}<a class="btn ghost" href="/issue">Выдача</a>{% endif %}
 </div>
 {% with active = 'booking' %}{% include "_incoming_tabs.html" %}{% endwith %}
 {# Заявка - намерение, а не аренда: велосипед под неё не бронируется,
@@ -26,7 +26,7 @@
       <td class="opt muted" data-label="Заметка">{{ b.note or '' }}</td>
       <td data-label="Действия">
         {% if b.status == 'new' and can_edit(staff, 'issue') %}
-        <a class="btn" href="{{ b.issue_url }}">Выдать</a>
+        {% if offers_issue(staff) %}<a class="btn" href="{{ b.issue_url }}">Выдать</a>{% endif %}
         <form method="post" action="/bookings/{{ b.id }}/cancel" class="inline-form" style="margin-top:6px">
           <input name="note" placeholder="причина — уйдёт клиенту" size="26">
           <button type="submit" class="ghost danger">Снять</button>
@@ -37,9 +37,9 @@
     {% else %}<tr><td colspan="6" class="muted">Заявок ещё не было. Клиент подаёт её в кабинете кнопкой «Забронировать велосипед».</td></tr>{% endfor %}
   </table>
   <p class="muted">Клиент выбрал в кабинете модель, срок, точку и день; свободных
-    этой модели могло и не быть — тогда это лист ожидания. «Выдать» открывает
-    мастер с готовыми полями, заявка закроется самой выдачей. Снятая заявка
-    уходит клиенту сообщением с вашей причиной.</p>
+    этой модели могло и не быть — тогда это лист ожидания. {% if offers_issue(staff) %}«Выдать» открывает
+    мастер с готовыми полями, заявка закроется самой выдачей.{% else %}Заявка закроется
+    выдачей на точке.{% endif %} Снятая заявка уходит клиенту сообщением с вашей причиной.</p>
   <p class="muted">🔔 Освободилась модель заявки на её точке — бот сам зовёт
     клиента (сначала давние заявки, раз в сутки, днём): «уведомлён» — когда,
     «ответил» — нажал «Беру — приеду сегодня». Велосипед за ним не держится.

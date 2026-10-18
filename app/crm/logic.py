@@ -642,6 +642,14 @@ def is_owner(staff: Mapping[str, Any] | None) -> bool:
     return (staff or {}).get("profile_code") == "owner"
 
 
+def offers_issue(staff: Mapping[str, Any] | None) -> bool:
+    """Кнопка выдачи на экране (карточки клиента и велосипеда, заявки,
+    обращение, сделка): право на выдачу, и это не владелец. Владелец сам
+    не выдаёт - выдача живёт у точки, в пункте меню «Выдача»; прямой адрес
+    /issue ему по-прежнему открыт."""
+    return can_edit(staff, "issue") and not is_owner(staff)
+
+
 def staff_expired(staff: Mapping[str, Any] | None, *, now: datetime | None = None) -> bool:
     """Срок доступа прошёл. Без срока - бессрочно."""
     until = (staff or {}).get("expires_at")

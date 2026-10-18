@@ -176,7 +176,16 @@ class TestIssueWithPoint(PointsCase):
         self.assertEqual(booking["location_name"], DEK)
         page = self.get_ok("/issue")
         self.assertIn(f"location={quote(DEK)}", page, "ссылка из заявки несёт её точку")
+        self.assertNotIn("/issue?", self.get_ok("/bookings"), "владелец сам не выдаёт")
+        # «Выдать» в заявках - у администратора точки, с точкой заявки.
+        manager = tw.run(self.crm.access_profile_by_code("manager"))
+        tw.run(self.crm.create_staff("ivan", logic.hash_password("password-123"), "Иван",
+                                     "manager", manager["id"]))
+        self.client.post("/logout")
+        self.login("ivan", "password-123")
         self.assertIn(f"location={quote(DEK)}", self.get_ok("/bookings"))
+        self.client.post("/logout")
+        self.login()
         page = self.get_ok(f"/issue?client={self.client_id}&model=Kugoo+V3"
                            f"&booking={booking['id']}&location={DEK}")
         self.assertIn("её выбрал клиент в заявке", page)

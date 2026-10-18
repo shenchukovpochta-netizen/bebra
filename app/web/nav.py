@@ -62,8 +62,9 @@ NAV: tuple[Group, ...] = (
         Item("Выдача", "/issue", "circle-plus", section="issue", not_owner=True, children=(
             Item("Быстрая выдача", "/issue", "circle-plus", section="issue",
                  not_owner=True),
-            # Старая форма аренды (Аренды -> «Форма»): клиенту, который уже
-            # был, и редкие случаи - аренда без велосипеда, ручное начисление.
+            # Форма аренды (раньше - «Форма» в шапке «Аренд»): клиенту, который
+            # уже был, и редкие случаи - аренда без велосипеда, ручное
+            # начисление. В «Арендах» кнопок выдачи нет: выдача - этот пункт.
             Item("Повторная выдача", "/rentals/new", "key", section="rentals",
                  not_owner=True, edit=True),
         )),
@@ -76,7 +77,8 @@ NAV: tuple[Group, ...] = (
         Item("Клиенты", "/clients", "users", section="clients",
              match=("/clients", "/signings")),
         Item("Аренды", "/rentals", "key", section="rentals"),
-        Item("Сверка с отчётами", "/ops", "message", section="rentals"),
+        # Журнал рабочей группы точек в Telegram: формы точек, сверенные с базой.
+        Item("Сверка отчётов", "/ops", "message", section="rentals"),
         Item("Рассылки", "/mailing", "send", section="mailing"),
         Item("Акции", "/promos", "tag", section="promos"),
     )),
