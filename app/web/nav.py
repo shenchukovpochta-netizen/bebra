@@ -42,6 +42,9 @@ class Item:
     # Пункт для записи, а не для просмотра (новая аренда): механик с
     # просмотром аренд его не видит.
     edit: bool = False
+    # Подпись в нижней панели телефона, если полная не влезает в её
+    # ячейку: «Рабочий стол» там обрезался до «Рабочий ст…».
+    short: str | None = None
 
     @property
     def prefixes(self) -> tuple[str, ...]:
@@ -89,7 +92,7 @@ NAV: tuple[Group, ...] = (
     )),
     Group("Сервис", (
         Item("Сервис", "/service", "wrench", section="service", children=(
-            Item("Рабочий стол", "/service", "wrench", section="service"),
+            Item("Рабочий стол", "/service", "wrench", section="service", short="Сервис"),
             Item("Наряды", "/orders", "clipboard-list", section="service", badge="orders"),
             Item("Виды работ", "/work-types", "hammer", section="service"),
             Item("Отчёты", "/reports/techs", "chart", section="reports", also=("service",),
@@ -208,10 +211,11 @@ def menu(staff: Mapping[str, Any] | None, path: str,
         for item in group.items:
             if not visible(item, staff):
                 continue
-            children = [{"label": c.label, "href": c.href, "icon": c.icon,
+            children = [{"label": c.label, "short": c.short, "href": c.href, "icon": c.icon,
                          "on": c is on, "badge": badge_value(c, counts, staff)}
                         for c in item.children if visible(c, staff)]
-            items.append({"label": item.label, "href": item.href, "icon": item.icon,
+            items.append({"label": item.label, "short": item.short, "href": item.href,
+                          "icon": item.icon,
                           "on": item is on, "open": any(c["on"] for c in children),
                           "children": children,
                           "badge": badge_value(item, counts, staff)})
