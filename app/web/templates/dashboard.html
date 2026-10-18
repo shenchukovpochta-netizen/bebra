@@ -231,13 +231,13 @@
   <details class="more">
     <summary>По дням</summary>
     <div class="table-wrap">
-    <table class="cal-mini">
+    <table class="compact cal-mini">
       <tr><th>День</th><th class="num">Придёт</th><th class="num">Уйдёт</th><th class="num">{% if cal.opening is not none %}Остаток{% else %}Накопительно{% endif %}</th></tr>
       {# Дни без движения скрыты: остаток в них тот же, что накануне. #}
       {% for d in cal.days %}{% if d.entries or loop.first %}
       <tr class="{% if cal.opening is not none and d.balance < 0 %}warn-row{% endif %}">
         <td class="nowrap"><b>{{ d.day.strftime('%d.%m') }}</b> <span class="muted">{{ wd[d.day.weekday()] }}</span></td>
-        <td class="num nowrap">{% if d.rent or d.plan_in %}{{ money(d.rent + d.plan_in) }}{% if d.rent_count %} <span class="muted">· {{ d.rent_count }}</span>{% endif %}{% else %}—{% endif %}</td>
+        <td class="num nowrap">{% if d.rent or d.plan_in %}{{ money(d.rent + d.plan_in) }}{% if d.rent_count %} <span class="muted cal-cnt" title="аренд">· {{ d.rent_count }}</span>{% endif %}{% else %}—{% endif %}</td>
         <td class="num nowrap">{% if d.plan_out %}<span class="bad">−{{ money(d.plan_out) }}</span>{% else %}—{% endif %}</td>
         <td class="num nowrap {% if d.balance < 0 %}bad{% endif %}">{{ money(d.balance) }}</td>
       </tr>
@@ -307,9 +307,11 @@
   {% endif %}
   {% if models.rows %}
   {% set mt = models.total %}
-  {# Число ведёт в список парка с поиском по модели и статусом; у «Итого» -
-     только статус. Ноль - не ссылка: пустой список ничего не объяснит. #}
-  {% macro bikes_link(r, total, status, value) %}{% if value %}<a href="/bikes?{% if not total %}q={{ r.model|urlencode }}&{% endif %}status={{ status }}">{{ value }}</a>{% else %}0{% endif %}{% endmacro %}
+  {# Число ведёт в список парка с той же моделью (точным совпадением, не
+     поиском: «Truck +» не должен находить «Truck + с …») и статусом; у
+     «Итого» - только статус. «Ремонт и ТО» - оба статуса одной ссылкой.
+     Ноль и модель без названия - не ссылка: список их не повторит. #}
+  {% macro bikes_link(r, total, status, value) %}{% if value and (total or r.model) %}<a href="/bikes?{% if not total %}model={{ r.model|urlencode }}&{% endif %}status={{ status|urlencode }}">{{ value }}</a>{% else %}{{ value }}{% endif %}{% endmacro %}
   <h3>По моделям</h3>
   <div class="table-wrap">
   {# Таблицей и на телефоне: моделей бывает десяток, карточками это экран
@@ -318,11 +320,11 @@
     <tr><th>Модель</th><th class="num opt">Парк</th><th class="num">В аренде</th><th class="num">Свободны</th><th class="num">Ремонт и ТО</th>{% if mt.reserved %}<th class="num opt">Бронь</th>{% endif %}{% if mt.new %}<th class="num opt">На сборке</th>{% endif %}{% if mt.spare %}<th class="num opt">Подменные</th>{% endif %}<th class="num opt">Загрузка</th></tr>
     {% for r in models.rows + [mt] %}{% set total = loop.last %}
     <tr {% if total %}class="total"{% endif %}>
-      <td data-label="Модель">{% if total %}<b>Итого</b>{% else %}<a href="/bikes?q={{ r.model|urlencode }}">{{ r.model or '—' }}</a>{% endif %}</td>
+      <td data-label="Модель">{% if total %}<b>Итого</b>{% else %}{% if r.model %}<a href="/bikes?model={{ r.model|urlencode }}">{{ r.model }}</a>{% else %}—{% endif %}{% endif %}</td>
       <td class="num opt" data-label="Парк">{{ r.fleet }}</td>
       <td class="num" data-label="В аренде">{{ bikes_link(r, total, 'rented', r.rented) }}</td>
       <td class="num" data-label="Свободны">{{ bikes_link(r, total, 'available', r.free) }}</td>
-      <td class="num" data-label="Ремонт и ТО">{{ bikes_link(r, total, 'repair', r.repair) }}</td>
+      <td class="num" data-label="Ремонт и ТО">{{ bikes_link(r, total, 'repair,maintenance', r.repair) }}</td>
       {% if mt.reserved %}<td class="num opt" data-label="Бронь">{{ r.reserved }}</td>{% endif %}
       {% if mt.new %}<td class="num opt" data-label="На сборке">{{ r.new }}</td>{% endif %}
       {% if mt.spare %}<td class="num opt" data-label="Подменные">{{ r.spare }}</td>{% endif %}
@@ -412,6 +414,8 @@
   {% if can_view(staff, 'clients') %}<a class="tile" href="/clients"><b>{{ counts.clients }}</b><span>клиентов</span></a>{% endif %}
   {% if inbox_waiting is not none %}<a class="tile {% if inbox_waiting %}hot{% endif %}" href="/inbox"><b>{{ inbox_waiting }}</b><span>входящих ждут ответа</span></a>{% endif %}
 </div>
+{# Выдача со сводки ушла (владельцу она не нужна), завести клиента - нет. #}
+{% if can_edit(staff, 'clients') %}<p><a class="btn ghost" href="/clients/new">+ Клиент</a></p>{% endif %}
 
 {% if money_ok %}
 <section class="card" id="debtors">

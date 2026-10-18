@@ -1743,12 +1743,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             extra.append({"code": "tasks_late", "title": "Просроченные поручения",
                           "count": len(late), "url": "/tasks", "level": "hot",
                           "names": [t["title"] for t in late[:3]]})
+        # Должники - одним чтением на сводку: весь список нужен календарю
+        # (долги к сбору), первые 200 - расхождениям, как в их отчёте,
+        # первые 10 - блоку «Должники». Порядок у запроса один.
+        debtors = await crm.debtors(5000) if money_ok else []
         if may_view(request, "bikes"):
             # Те же правила, что у отчёта «Расхождения», на уже прочитанном
             # парке и арендах сводки - без второго чтения всего парка.
             issues = logic.integrity_issues(
-                fleet, rentals, await crm.open_orders_by_bike(),
-                await crm.debtors(200) if money_ok else [],
+                fleet, rentals, await crm.open_orders_by_bike(), debtors[:200],
                 batteries=own_batteries)
             if issues:
                 extra.append({"code": "integrity", "title": "Расхождения парка и аренд",
@@ -1762,13 +1765,17 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Деньги - только с правом на финансы, и запросы за ними тоже: без
         # права их всё равно некуда показать.
         money: dict[str, Any] = {}
+        # Деньги точек за месяц сводки - одно чтение на доход по статьям и
+        # на таблицу точек: окно у них одно.
+        month_money = (await crm.money_by_location(month_start, month_end)
+                       if money_ok or len(active_places) > 1 else None)
         if money_ok:
             # Прошлый период - тот же отрезок прошлого месяца (октябрь по
             # 18-е 15:00 против сентября по 18-е 15:00), закончившийся
             # месяц - против целого прошлого, как в «Главном» отчётов.
             prev = logic.report_prev_span(period, now=now)
             income = cashflow.income(
-                await crm.money_by_location(month_start, month_end),
+                month_money,
                 await crm.repair_income_by_location(month_start, month_end), active_places)
             income_prev = cashflow.income(
                 await crm.money_by_location(prev["start"], prev["end"]),
@@ -1780,8 +1787,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             month_totals = await crm.ledger_totals(since=span["first"], until=span["last"])
             # Платёжный календарь на две недели - тем же построителем, что
             # /finance/calendar; остаток на сегодня вводит человек.
-            debts = sum((-Decimal(d["balance"]) for d in await crm.debtors(5000)),
-                        Decimal(0))
+            debts = sum((-Decimal(d["balance"]) for d in debtors), Decimal(0))
             chart = logic.money_chart(
                 await crm.money_by_day(span["first"], span["last"]),
                 plan_per_day=plan["per_day"], today=span["today"])
@@ -1812,7 +1818,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         points = None
         if len(active_places) > 1:
             points = logic.points_plan(
-                await points_report(places, fleet, month_start, month_end),
+                await points_report(places, fleet, month_start, month_end,
+                                    money=month_money),
                 check=logic.month_plan(settings)["base_check"],
                 days=period["days"], passed=period["passed"])
         spare = sum(1 for b in fleet if b.get("spare")
@@ -1843,7 +1850,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       # Прогноз освобождения - по «оплачено до», сказавшие
                       # «продлю» из него выпадают: их велосипед не вернётся.
                       forecast=logic.forecast_summary(bikes_by.get("available", 0), soon),
-                      debtors=await crm.debtors(10) if money_ok else [])
+                      debtors=debtors[:10])
 
     # ─────────── платёжный календарь (app/crm/cashflow.py) ───────────
 
@@ -2086,12 +2093,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                    await crm.rental_revenue(since, until))
 
     async def points_report(places: list[dict], fleet: list[dict], since: datetime,
-                            until: datetime, *, full: bool = False) -> dict:
+                            until: datetime, *, full: bool = False,
+                            money: Any = None) -> dict:
         """Сравнение точек за [since, until): logic.points_rows поверх
         ответов *_by_location. Одна функция на сводку, отчёт и страницу
         точки - иначе числа одной точки на трёх экранах разошлись бы.
         Сводке нужны только три числа (full=False): аренды, долг, касса и
-        сервис - лишние запросы на каждое её открытие."""
+        сервис - лишние запросы на каждое её открытие. money - уже
+        прочитанный money_by_location за то же окно (сводка берёт его и
+        для дохода по статьям), иначе читается здесь."""
         extra: dict[str, Any] = {}
         if full:
             extra = {"rentals": await crm.rentals_by_location(since, until),
@@ -2101,7 +2111,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return logic.points_rows(
             places, bikes=fleet,
             days=await crm.bike_days_by_location(since, until),
-            money=await crm.money_by_location(since, until), **extra)
+            money=money if money is not None else await crm.money_by_location(since, until),
+            **extra)
 
     def idle_by_location(fleet: list[dict], names: list[str]) -> list[dict]:
         """Где стоят простаивающие велосипеды: по точкам, свободные отдельно
@@ -2504,13 +2515,24 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   "client": "full_name", "idle": "idle_days",
                   "frame": "frame_no", "motor": "motor_no"}
 
+    def bike_filter(request: Request) -> dict[str, Any]:
+        """Фильтры парка из адреса - одни на экран и на выгрузку. status
+        через запятую - несколько статусов («ремонт и ТО» со сводки), model -
+        модель ровно как в парке (ссылки «По моделям»), q - подстрока."""
+        p = request.query_params
+        status = p.get("status") or ""
+        return {"q": p.get("q") or None,
+                "status": (status.split(",") if "," in status else status) or None,
+                "location": p.get("location") or None,
+                "model": (p.get("model") or "").strip() or None}
+
     @app.get("/bikes")
     async def bikes(request: Request) -> Response:
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
         location = request.query_params.get("location") or ""
-        rows = await crm.bikes(q=q or None, status=status or None,
-                               location=location or None, limit=10000)
+        filters = bike_filter(request)
+        rows = await crm.bikes(**filters, limit=10000)
         since = await crm.bike_status_since()
         now = datetime.now(UTC)
         for bike in rows:
@@ -2519,7 +2541,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                  else None)
         tools = list_tools(request, rows, allowed=BIKE_SORTS)
         return render(request, "bikes.html", q=q, status=status, location=location,
-                      places=await filter_points(location),
+                      model=filters["model"] or "", places=await filter_points(location),
                       rows=tools["rows"], tools=tools,
                       views=await views_of(request, "/bikes"),
                       counts=await crm.bike_counts())
@@ -2530,10 +2552,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         видят, а не «всё вообще»."""
         if not may_view(request, "bikes"):
             return denied(request, "bikes")
-        rows = await crm.bikes(q=request.query_params.get("q") or None,
-                               status=request.query_params.get("status") or None,
-                               location=request.query_params.get("location") or None,
-                               limit=10000)
+        rows = await crm.bikes(**bike_filter(request), limit=10000)
         money_ok = may_view(request, "finance")
         header = ["Номер", "Модель", "Статус", "Точка", "Госномер", "Пробег, км",
                   "Номер рамы", "VIN мотора", "Клиент", "Заведён"]

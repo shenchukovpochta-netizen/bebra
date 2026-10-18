@@ -7,17 +7,22 @@
     <input name="q" value="{{ q }}" placeholder="номер, модель, рама, VIN, госномер">
     <select name="status"><option value="">все</option>
       {% for code, label in BIKE_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }} ({{ counts.get(code, 0) }})</option>{% endfor %}
+      <option value="repair,maintenance" {% if status == 'repair,maintenance' %}selected{% endif %}>ремонт и ТО ({{ counts.get('repair', 0) + counts.get('maintenance', 0) }})</option>
     </select>
     <select name="location"><option value="">любая точка</option>
       {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
       <option value="none" {% if location == 'none' %}selected{% endif %}>не на точке</option>
     </select>
+    {# Модель - точным совпадением (ссылки «По моделям» со сводки): поиск
+       подстрокой нашёл бы и «Truck + с амортизаторами» под «Truck +». #}
+    {% if model %}<input type="hidden" name="model" value="{{ model }}">
+    <a class="btn ghost" href="/bikes?q={{ q|urlencode }}&status={{ status|urlencode }}&location={{ location|urlencode }}" title="снять фильтр по модели">модель: {{ model }} ✕</a>{% endif %}
     <button type="submit">Найти</button>
   </form>
   {% if can_edit(staff, 'bikes') %}<a class="btn" href="/bikes/new">+ Велосипед</a>{% endif %}
   <a class="btn ghost" href="/stock-takes">Пересчёт</a>
-  <a class="btn ghost" href="/bikes.xlsx?q={{ q|urlencode }}&status={{ status }}&location={{ location|urlencode }}">Excel</a>
-  <a class="btn ghost" href="/bikes.csv?q={{ q|urlencode }}&status={{ status }}&location={{ location|urlencode }}">CSV</a>
+  <a class="btn ghost" href="/bikes.xlsx?q={{ q|urlencode }}&status={{ status|urlencode }}&location={{ location|urlencode }}&model={{ model|urlencode }}">Excel</a>
+  <a class="btn ghost" href="/bikes.csv?q={{ q|urlencode }}&status={{ status|urlencode }}&location={{ location|urlencode }}&model={{ model|urlencode }}">CSV</a>
 </div>
 <div class="card">
 {{ list.views(views, '/bikes', tools, staff) }}

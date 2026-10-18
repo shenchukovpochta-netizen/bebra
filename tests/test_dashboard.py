@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import sys
 import unittest
 from datetime import UTC, date, datetime, timedelta
@@ -435,13 +437,44 @@ class TestDashboardPage(tw.WebCase):
         page = self.get_ok("/")
         self.assertIn("Велопарк", page)
         self.assertIn("По моделям", page)
-        self.assertIn('href="/bikes?q=Kugoo%20V3&status=rented"', page)
+        self.assertIn('href="/bikes?model=Kugoo%20V3&status=rented"', page)
         self.assertIn('href="/bikes?status=lost">Утерян: <b>1</b>', page)
         self.assertIn("вне оборота", page)
         self.assertIn("Свободных сейчас <b>0</b>", page)
         self.assertIn("теряем ≈", page)
         self.assertIn("потеряно на простое", page)
         self.assertIn("Три числа", page)
+
+    def test_model_links_list_the_same_bikes(self):
+        """Число в «По моделям» - столько же строк по его ссылке. Модель
+        ищется точно, а не подстрокой: «Truck +» не находит «Truck + с
+        амортизаторами»; «Ремонт и ТО» - оба статуса одной ссылкой."""
+        for code, model, status in (
+                ("T-1", "Truck +", "repair"), ("T-2", "Truck +", "maintenance"),
+                ("T-3", "Truck +", "available"),
+                ("T-4", "Truck + с амортизаторами", "repair"),
+                ("T-5", "Truck + с амортизаторами", "available"),
+                ("T-6", "Truck + с амортизаторами", "available")):
+            tw.run(self.crm.create_bike(code=code, model=model, status=status))
+        page = self.get_ok("/")
+        block = page[page.index("По моделям"):]
+        block = block[:block.index("</table>")]
+        self.assertIn('href="/bikes?model=Truck%20%2B&status=repair%2Cmaintenance">2</a>',
+                      block)
+        self.assertIn('href="/bikes?model=Truck%20%2B">Truck +</a>', block)
+        links = re.findall(r'<a href="(/bikes\?[^"]+)">(\d+)</a>', block)
+        self.assertGreaterEqual(len(links), 6)
+        for href, count in links:
+            with self.subTest(href=href):
+                listing = self.get_ok(html.unescape(href))
+                self.assertIn(f"<b>Итого {count}</b>", listing)
+        # Фильтр модели виден в списке и уходит в выгрузку.
+        listing = self.get_ok("/bikes?model=Truck%20%2B")
+        self.assertIn("модель: Truck +", listing)
+        self.assertIn("/bikes.csv?q=&status=&location=&model=Truck%20%2B", listing)
+        csv = self.client.get("/bikes.csv?model=Truck%20%2B&status=available").text
+        self.assertIn("T-3", csv)
+        self.assertNotIn("T-5", csv)
 
     def test_points_by_month(self):
         self.history(70)

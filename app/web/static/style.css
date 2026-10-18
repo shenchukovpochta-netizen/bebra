@@ -331,6 +331,11 @@ a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var
 .tile small,.tile>.bar-track{order:2}
 .tile small{display:block;margin-top:2px;color:var(--muted);text-transform:none;letter-spacing:0;font:600 12px/1.45 var(--font-mono)}
 .tile.hot b{color:var(--bad)}.tile.good b{color:var(--ok)}.tile.warn b{color:var(--warn)}
+/* Число-ссылка красится как плитка, а не как ссылка: иначе «−8 до нормы»
+   у плитки парка выглядело бы обычным числом. Подпись .bad/.warn/.ok -
+   цветом, а не приглушённым .tile small. */
+.tile.hot b a,.tile.good b a,.tile.warn b a{color:inherit}
+.tile small.bad{color:var(--bad)}.tile small.warn{color:var(--warn)}.tile small.ok{color:var(--ok)}
 
 /* Таблица - как таблица данных образца: шапка мелким моно капсом, строка
    повыше, числа моноширинным вправо, наведение - чуть светлее. */
@@ -1039,7 +1044,10 @@ details.more[open]>summary{margin-bottom:10px}
   /* Таблицы сводки, что остаются таблицами на телефоне: поля уже,
      заголовок переносится - иначе пятая колонка уезжала за край. */
   table.compact th,table.compact td{padding-left:6px;padding-right:6px}
-  table.compact th{white-space:normal;letter-spacing:0}}
+  table.compact th{white-space:normal;letter-spacing:0}
+  /* «· 12 аренд» у суммы дня - подсказкой: на телефоне колонка «Придёт»
+     с ним выталкивала остаток за край. */
+  table.cal-mini .cal-cnt{display:none}}
 .cal-start{margin:0 0 12px}
 .cal-start label{display:inline-flex;align-items:center;gap:8px;margin:0}
 table.cal-mini td small{display:block;font-size:12px;line-height:1.35}

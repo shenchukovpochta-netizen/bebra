@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -415,14 +415,25 @@ class CrmDB:
 
     # ─────────────────────── парк ───────────────────────
 
-    async def bikes(self, *, status: str | None = None, q: str | None = None,
-                    location: str | None = None, limit: int = 500) -> list[dict]:
-        """Список с текущим арендатором - одним запросом, без N+1."""
+    async def bikes(self, *, status: str | Sequence[str] | None = None,
+                    q: str | None = None, location: str | None = None,
+                    model: str | None = None, limit: int = 500) -> list[dict]:
+        """Список с текущим арендатором - одним запросом, без N+1.
+
+        status - один статус или несколько («ремонт и ТО» одной ссылкой);
+        model - модель ровно как записана в парке (без пробелов по краям),
+        а не подстрока: «Truck +» не должен находить «Truck + с …»."""
         conds: list[str] = []
         args: list[Any] = []
-        if status:
+        if isinstance(status, str) and status:
             args.append(status)
             conds.append(f"b.status = ${len(args)}")
+        elif status:
+            args.append(list(status))
+            conds.append(f"b.status = any(${len(args)}::text[])")
+        if model:
+            args.append(model.strip())
+            conds.append(f"btrim(b.model) = ${len(args)}")
         if location == "none":
             conds.append("b.location is null")
         elif location:

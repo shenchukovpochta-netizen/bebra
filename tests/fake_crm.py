@@ -360,9 +360,11 @@ class FakeCrm:
                             if rental else None)
         return row
 
-    async def bikes(self, *, status=None, q=None, location=None, limit=500):
+    async def bikes(self, *, status=None, q=None, location=None, model=None, limit=500):
+        statuses = (status,) if isinstance(status, str) and status else tuple(status or ())
         rows = [self._bike_row(b) for b in self.bikes_.values()
-                if (not status or b["status"] == status)
+                if (not statuses or b["status"] in statuses)
+                and (not model or str(b["model"]).strip() == model.strip())
                 and (not location or (b.get("location") is None if location == "none"
                                       else b.get("location") == location))
                 and (not q or self._bike_matches(b, q))]
