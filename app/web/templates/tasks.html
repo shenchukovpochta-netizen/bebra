@@ -17,17 +17,17 @@
   {% endif %}
   <a class="btn ghost" href="/my">Задачи дня</a>
 </div>
-{{ tk.add_form(people, locations, staff, task_money, '/tasks') }}
+{{ tk.add_form(people, locations, staff, task_money, back) }}
 <section class="card my-group info">
   <h2>Не закреплено <span class="muted">· {{ view.free|length }}</span></h2>
-  {% if view.free %}<ul class="my-items">{% for t in view.free %}{{ tk.row(t, '/tasks') }}{% endfor %}</ul>
+  {% if view.free %}<ul class="my-items">{% for t in view.free %}{{ tk.row(t, back) }}{% endfor %}</ul>
   {% else %}<p class="muted">Все задачи разобраны по людям.</p>{% endif %}
 </section>
 <div class="team-cols">
   {% for p in view.people %}
   <section class="card my-group {% if p.hot %}hot{% endif %}">
     <h2><span>{{ p.name }}</span> <small class="muted">{{ p.role }}{% if p.location %} · {{ p.location }}{% endif %} · {{ p.tasks|length }}</small></h2>
-    {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, '/tasks') }}{% endfor %}</ul>
+    {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, back) }}{% endfor %}</ul>
     {% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
   </section>
   {% endfor %}

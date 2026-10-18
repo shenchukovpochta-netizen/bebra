@@ -93,6 +93,68 @@ class TestTaskRules(unittest.TestCase):
         self.assertEqual([t["id"] for t in only["free"]], [2])
         self.assertEqual([p["name"] for p in only["people"]], ["Админ"])
 
+    def test_points_board(self):
+        """Владельцу: группа - точка сотрудника (порядок справочника, потом
+        прочие, «Без точки» последней), сам он не в группах; общие -
+        незакреплённые, переключатель режет группы и общие."""
+        people = [{"id": 1, "name": "Владелец"},
+                  {"id": 2, "name": "Админ", "location": "Адоратского"},
+                  {"id": 3, "name": "Марат", "location": "Павлюхина"},
+                  {"id": 4, "name": "Подменный"},
+                  {"id": 5, "name": "Закрытая", "location": "Старая"}]
+        rows = [{"id": 1, "status": "open", "title": "своя", "assignee_id": 1},
+                {"id": 2, "status": "open", "title": "марату", "assignee_id": 3,
+                 "location": "Адоратского", "due_on": TODAY},
+                {"id": 3, "status": "open", "title": "марату 2", "assignee_id": 3},
+                {"id": 4, "status": "open", "title": "уволенному", "assignee_id": 9,
+                 "assignee_name": "Ушёл"},
+                {"id": 5, "status": "open", "title": "общая П", "assignee_id": None,
+                 "location": "Павлюхина"},
+                {"id": 6, "status": "open", "title": "общая сети", "assignee_id": None},
+                {"id": 7, "status": "done", "title": "сделана", "assignee_id": 3}]
+        board = tasks.points_board(rows, people, staff=OWNER, today=TODAY,
+                                   points=["Павлюхина", "Адоратского", "Победы"])
+        self.assertEqual([g["title"] for g in board["points"]],
+                         ["Павлюхина", "Адоратского", "Победы", "Старая", "Без точки"])
+        by = {g["key"]: g for g in board["points"]}
+        self.assertEqual([p["name"] for p in by["Павлюхина"]["people"]], ["Марат"])
+        self.assertEqual([t["id"] for t in by["Павлюхина"]["people"][0]["tasks"]], [2, 3],
+                         "все задачи человека - у его точки, а не у точки задачи")
+        self.assertEqual(by["Павлюхина"]["counts"], "1 сотрудник · 2 задачи · горит 1")
+        self.assertEqual(by["Победы"]["people"], [], "открытая точка без людей видна")
+        self.assertEqual(by["Победы"]["counts"], "0 сотрудников · задач нет")
+        self.assertEqual([p["name"] for p in by["none"]["people"]], ["Ушёл", "Подменный"],
+                         "без точки и отключённый исполнитель")
+        everyone = [p["id"] for g in board["points"] for p in g["people"]]
+        self.assertNotIn(1, everyone, "свои задачи - в «Задачах владельца»")
+        self.assertEqual([t["id"] for t in board["free"]], [5, 6])
+        self.assertEqual(board["place"], "")
+        self.assertEqual(board["choices"][0], ("Павлюхина", "Павлюхина"))
+        self.assertEqual(board["choices"][-1], ("none", "Без точки"))
+        one = tasks.points_board(rows, people, staff=OWNER, today=TODAY,
+                                 points=["Павлюхина", "Адоратского"], location="Адоратского")
+        self.assertEqual([g["title"] for g in one["points"]], ["Адоратского"])
+        self.assertEqual([t["id"] for t in one["free"]], [6], "чужая точка - нет, сеть - да")
+        self.assertEqual(len(one["choices"]), 4, "переключатель помнит все точки")
+        none = tasks.points_board(rows, people, staff=OWNER, today=TODAY, location="none")
+        self.assertEqual([t["id"] for t in none["free"]], [6])
+        alien = tasks.points_board(rows, people, staff=OWNER, today=TODAY, location="<b>")
+        self.assertEqual((alien["place"], len(alien["points"])), ("", 4))
+
+    def test_plural(self):
+        for n, word in ((1, "1 задача"), (2, "2 задачи"), (5, "5 задач"), (11, "11 задач"),
+                        (21, "21 задача"), (14, "14 задач"), (22, "22 задачи")):
+            self.assertEqual(tasks.plural(n, "задача", "задачи", "задач"), word)
+
+    def test_safe_back(self):
+        self.assertEqual(tasks.safe_back("/my"), "/my")
+        self.assertEqual(tasks.safe_back("/tasks?location=none"), "/tasks?location=none")
+        self.assertEqual(tasks.safe_back("/my?location=Павлюхина&next=//evil.example"),
+                         "/my?location=%D0%9F%D0%B0%D0%B2%D0%BB%D1%8E%D1%85%D0%B8%D0%BD%D0%B0")
+        for bad in ("https://evil.example", "//evil.example/my", "/clients", None, "",
+                    "/my/../clients"):
+            self.assertEqual(tasks.safe_back(bad), "/my", bad)
+
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
 class TestTaskPages(WebCase):

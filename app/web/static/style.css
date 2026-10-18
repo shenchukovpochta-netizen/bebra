@@ -960,6 +960,13 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .team-cols .card h2{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
 .team-cols .card h2 a{color:var(--text)}
 .team-cols .card h2 a:hover{color:var(--link);text-decoration:none}
+/* «Задачи дня» тремя блоками: задачи владельца, по точкам, общие. */
+.my-block{margin-bottom:28px}
+.my-block-h{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.my-block-h h2{margin:0;flex:1 1 auto;font-size:17px}
+.my-block>p.muted{margin:0 0 14px}
+.point-tasks h3{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;margin:18px 0 10px;font-size:15px}
+.point-tasks h3 small{font-weight:500;font-size:12.5px}
 
 /* Команда (team_member.html): прогресс плана полосой в плитке. */
 .bar-track{display:block;height:4px;border-radius:4px;background:var(--card2);margin:8px 0 2px;overflow:hidden}

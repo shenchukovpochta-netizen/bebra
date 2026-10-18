@@ -2,18 +2,17 @@
 {% import "_tasks.html" as tk %}
 {% block title %}Задачи дня — {{ app_title }}{% endblock %}
 {% block content %}
-{# Задачи этого сотрудника (app/crm/mytasks.py): наряды - по технику,
-   аренды, заявки и тревоги - по его точке. Группа есть, только когда её
-   раздел открыт профилем; строка ведёт в карточку записи. Владельцу -
-   не прозвон и выдачи точек, а поручения по сотрудникам (team_board). #}
+{# «Задачи дня» тремя видами, словами владельца: задачи владельца (его
+   поручения себе), задачи админов и мастеров по точкам, общие задачи
+   (незакреплённые - берёт свободный). Владельцу (board) - все три: точки -
+   его люди по их точке с открытыми поручениями (tasks.points_board).
+   Сотруднику - его точка (свои поручения и рабочие группы
+   app/crm/mytasks.py: группа есть, только когда её раздел открыт профилем)
+   и общие; задач владельца ему нет. Строка ведёт в карточку записи. #}
 <div class="bar"><h1>Задачи дня
-    <small class="muted">{{ today.strftime('%d.%m') }} · {% if team_board %}команда{% elif point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
+    <small class="muted">{{ today.strftime('%d.%m') }} · {% if board %}вся сеть{% elif point %}{{ point }}{% else %}все точки{% endif %}</small></h1>
   <a class="btn ghost" href="/tasks">Все задачи</a>
   {% if can_view(staff, 'dashboard') %}<a class="btn ghost" href="/">Сводка</a>{% endif %}</div>
-{% if not point and not team_board %}
-<p class="muted">Своя точка не задана — показаны задачи всех точек.
-  {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
-{% endif %}
 {% if own_month %}
 <section class="card my-month">
   <h2>Мой {{ own_month.title }}</h2>
@@ -29,51 +28,92 @@
   </div>
 </section>
 {% endif %}
-{{ tk.add_form(people, locations, staff, task_money, '/my') }}
-{% if task_lists.mine %}
-<section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">
-  <h2>Мои поручения <span class="muted">· {{ task_lists.mine|length }}</span></h2>
-  <ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
-</section>
-{% endif %}
-{% if task_lists.free %}
-<section class="card my-group info">
-  <h2>Не закреплено — можно взять <span class="muted">· {{ task_lists.free|length }}</span></h2>
-  <ul class="my-items">{% for t in task_lists.free %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
-</section>
-{% endif %}
-{% if team_board %}
-<p class="muted">Прозвон, выдачи и наряды команда видит в своих «Задачах дня»{% if can_view(staff, 'dashboard') %}, общая картина — на <a href="/">сводке</a>{% endif %}.
-  Здесь — поручения по сотрудникам.</p>
-<div class="team-cols">
-  {% for p in team_board.people %}
-  <section class="card my-group {% if p.hot %}hot{% endif %}">
-    <h2><a href="/team/{{ p.id }}">{{ p.name }}</a> <small class="muted">{{ [p.role, p.location or '', p.tasks|length|string]|select|join(' · ') }}</small></h2>
-    {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, '/my') }}{% endfor %}</ul>
-    {% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
+
+{% if board %}
+{# а) задачи владельца: его поручения себе и новая задача #}
+<section class="my-block" id="owner">
+  <div class="my-block-h"><h2>Задачи владельца <span class="muted">· {{ task_lists.mine|length }}</span></h2></div>
+  {{ tk.add_form(people, locations, staff, task_money, back) }}
+  <section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">
+    {% if task_lists.mine %}<ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, back) }}{% endfor %}</ul>
+    {% else %}<p class="muted">Своих задач нет. Поставить себе — «+ Поставить задачу», кому — «мне».</p>{% endif %}
   </section>
+</section>
+
+{# б) задачи админов и мастеров: по точке сотрудника, внутри - люди точки #}
+<section class="my-block" id="points">
+  <div class="my-block-h"><h2>Задачи админов и мастеров по точкам</h2>
+    {% if board.choices|length > 1 %}
+    <nav class="tabs seg" aria-label="Точка">
+      <a href="/my#points" class="{% if not board.place %}on{% endif %}">Все точки</a>
+      {% for key, title in board.choices %}<a href="/my?location={{ key|urlencode }}#points" class="{% if board.place == key %}on{% endif %}">{{ title }}</a>{% endfor %}
+    </nav>
+    {% endif %}</div>
+  <p class="muted">Прозвон, выдачи и наряды точка видит в своих «Задачах дня»{% if can_view(staff, 'dashboard') %}, общая картина — на <a href="/">сводке</a>{% endif %}.
+    Здесь — поручения людям, имя ведёт в его «Команду».</p>
+  {% for g in board.points %}
+  <div class="point-tasks">
+    <h3>{{ g.title }} <small class="muted">{{ g.counts }}</small></h3>
+    <div class="team-cols">
+      {% for p in g.people %}
+      <section class="card my-group {% if p.hot %}hot{% endif %}">
+        <h2><a href="/team/{{ p.id }}">{{ p.name }}</a> <small class="muted">{{ [p.role, p.counts]|select|join(' · ') }}</small></h2>
+        {% if p.tasks %}<ul class="my-items">{% for t in p.tasks %}{{ tk.row(t, back) }}{% endfor %}</ul>
+        {% else %}<p class="muted">Открытых задач нет.</p>{% endif %}
+      </section>
+      {% else %}
+      <section class="card"><p class="muted">На точке нет сотрудников: точку человеку задают в <a href="/staff">«Сотрудниках»</a>.</p></section>
+      {% endfor %}
+    </div>
+  </div>
   {% else %}
   <section class="card"><p class="muted">Сотрудников пока нет — их заводят в <a href="/staff">«Сотрудниках»</a>.</p></section>
   {% endfor %}
-</div>
+</section>
+{% else %}
+{# б) задачи точки сотрудника: свои поручения и рабочие группы #}
+<section class="my-block" id="point">
+  <div class="my-block-h"><h2>{% if point %}Задачи точки «{{ point }}»{% else %}Задачи всех точек{% endif %}</h2></div>
+  {% if not point %}
+  <p class="muted">Своя точка не задана — показаны задачи всех точек.
+    {% if can_edit(staff, 'staff') %}Задать её — в <a href="/staff">«Сотрудниках»</a>.{% else %}Её задаёт владелец в «Сотрудниках».{% endif %}</p>
+  {% endif %}
+  {{ tk.add_form(people, locations, staff, task_money, back) }}
+  {% if task_lists.mine %}
+  <section class="card my-group {% if task_lists.mine|selectattr('hot')|list %}hot{% else %}warn{% endif %}">
+    <h2>Мои поручения <span class="muted">· {{ task_lists.mine|length }}</span></h2>
+    <ul class="my-items">{% for t in task_lists.mine %}{{ tk.row(t, back) }}{% endfor %}</ul>
+  </section>
+  {% endif %}
+  {% for g in groups %}
+  <section class="card my-group {{ g.level }}">
+    <h2>{{ g.title }} <span class="muted">· {{ g.count }}</span></h2>
+    <ul class="my-items">
+      {% for i in g.rows %}
+      <li class="{% if i.hot %}hot{% endif %}">
+        <a href="{{ i.url }}"><b>{{ i.title }}</b>{% if i.sub %}<small class="muted">{{ i.sub }}</small>{% endif %}</a>
+        {% if i.phone %}<a class="tel" href="tel:{{ i.phone }}">{{ i.phone }}</a>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if g.more %}<p class="muted">и ещё {{ g.more }} — <a href="{{ g.url }}">весь список</a></p>{% endif %}
+  </section>
+  {% else %}{% if not task_lists.mine %}
+  <section class="card">
+    <p>На сегодня задач нет: поручений и нарядов на вас нет, заявок на выдачу, просрочек и
+      новых тревог{% if point %} на «{{ point }}»{% endif %} тоже.</p>
+  </section>
+  {% endif %}{% endfor %}
+</section>
 {% endif %}
-{% for g in groups %}
-<section class="card my-group {{ g.level }}">
-  <h2>{{ g.title }} <span class="muted">· {{ g.count }}</span></h2>
-  <ul class="my-items">
-    {% for i in g.rows %}
-    <li class="{% if i.hot %}hot{% endif %}">
-      <a href="{{ i.url }}"><b>{{ i.title }}</b>{% if i.sub %}<small class="muted">{{ i.sub }}</small>{% endif %}</a>
-      {% if i.phone %}<a class="tel" href="tel:{{ i.phone }}">{{ i.phone }}</a>{% endif %}
-    </li>
-    {% endfor %}
-  </ul>
-  {% if g.more %}<p class="muted">и ещё {{ g.more }} — <a href="{{ g.url }}">весь список</a></p>{% endif %}
+
+{# в) общие задачи: незакреплённые, берёт тот, кто свободен #}
+<section class="my-block" id="common">
+  <div class="my-block-h"><h2>Общие задачи <span class="muted">· {{ free|length }}</span></h2></div>
+  <p class="muted">Не закреплены ни за кем: задачу точки видят все на ней, задачу без точки — вся сеть. «Взять» — и она ваша.</p>
+  <section class="card my-group info">
+    {% if free %}<ul class="my-items">{% for t in free %}{{ tk.row(t, back, show_where=True) }}{% endfor %}</ul>
+    {% else %}<p class="muted">Свободных задач нет{% if board and board.place %} на этой точке{% elif not board and point %} на «{{ point }}»{% endif %}.</p>{% endif %}
+  </section>
 </section>
-{% else %}{% if not task_lists.mine and not task_lists.free and not team_board %}
-<section class="card">
-  <p>На сегодня задач нет: нарядов на вас нет, заявок на выдачу, просрочек и
-    новых тревог{% if point %} на «{{ point }}»{% endif %} тоже.</p>
-</section>
-{% endif %}{% endfor %}
 {% endblock %}
