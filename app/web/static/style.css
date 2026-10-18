@@ -725,7 +725,7 @@ label.check{display:flex;gap:8px;align-items:center;margin:10px 0}label.check in
   .perms .short{display:inline}
   .perms th:not(:first-child),.perms td:not(:first-child){padding-left:2px;padding-right:2px;white-space:normal}
   .perms td:not(:first-child){padding-top:0;padding-bottom:0;vertical-align:middle}
-  .perms label.cell{min-height:44px;display:flex;align-items:center;justify-content:center;padding:0 4px}
+  .perms label.cell{min-height:44px;min-width:40px;display:flex;align-items:center;justify-content:center;padding:0 4px}
 }
 
 /* Форма только для просмотра: fieldset[disabled] гасит поля, но рамку
