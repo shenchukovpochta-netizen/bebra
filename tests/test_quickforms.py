@@ -366,6 +366,18 @@ class TestIssue(QuickCase):
             self.crm, self.admin, issue_now(phone="+79002223344"), today=NOW)
         self.assertIn("только свободный", preview.text)
 
+    async def test_risk_line_only_when_enabled(self):
+        """Оценка риска в предпросмотре - только когда владелец включил её
+        показ: по умолчанию её нет и в боте."""
+        from datetime import timedelta
+        await self.crm.add_ledger(client_id=self.client_id, kind="fine", amount=-D(8000),
+                                  created_at=datetime.now(UTC) - timedelta(days=20))
+        preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
+        self.assertNotIn("Риск:", preview.text)
+        self.crm.settings_[logic.RISK_ENABLED_KEY] = "1"
+        preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
+        self.assertIn("Риск:", preview.text)
+
     async def test_without_payment_period_is_a_debt(self):
         await quickforms.apply_issue(self.crm, self.admin, issue_now(pay="0", method="0"),
                                      today=NOW)

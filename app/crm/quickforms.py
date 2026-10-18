@@ -387,7 +387,9 @@ async def preview_issue(crm: Any, staff: dict, text: str, *, today: date) -> Pre
     balance = await crm.client_balance(int(client["id"]))
     if balance:
         lines.append(f"На балансе сейчас: {_money(balance)}")
-    risk = await service.client_risk(crm, int(client["id"]), today=today)
+    # Риск - только когда владелец включил его показ (по умолчанию нет).
+    risk = (await service.client_risk(crm, int(client["id"]), today=today)
+            if logic.risk_enabled(await crm.settings()) else {})
     if risk.get("level") not in (None, "low"):
         line = f"Риск: {_esc(risk.get('badge'))}"
         if risk.get("deposit") and logic.can_view(staff, "finance"):

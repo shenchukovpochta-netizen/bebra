@@ -683,10 +683,16 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                  complaint="мотор", object_note="Самокат Kugoo",
                                  tech_id=None, estimate=D(0), by="t")
         [row] = await self.crm.clients(q="Иванов")
-        self.assertEqual((row["last_model"], row["bought"], row["external_repairs"],
-                          row["repair_objects"]), ("Kugoo V3", True, 1, "Самокат Kugoo"))
+        self.assertEqual((row["last_model"], row["bought"], row["bought_model"],
+                          row["external_repairs"], row["repair_objects"]),
+                         ("Kugoo V3", True, "Kugoo V3", 1, "Самокат Kugoo"))
         self.assertTrue(logic.client_in_group(row, "bought"))
         self.assertEqual(logic.client_kinds(row), {"bike", "scooter"})
+        self.assertEqual(logic.client_kind_titles(row), ["Велосипед", "Самокат"])
+        # у остальных клиентов покупки нет
+        other = [r for r in await self.crm.clients() if r["id"] != self.client_id]
+        self.assertTrue(all(r["bought_model"] is None and r["bought"] is False
+                            for r in other))
 
     async def test_catalog_titles_v2_and_rename_on_postgres(self):
         """Старые имена каталога «(Два АКБ)» и «Monster» уходят один раз: цены

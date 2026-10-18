@@ -682,12 +682,15 @@ def check_staff_term(term: Any, until: Any, *, today: date | None = None,
 
 
 # Сводка клиентов за всё время: группа - вкладка списка «Клиенты».
+# Названия и порядок - словами владельца: вся база, арендаторы, сдавшие,
+# купившие, ремонтировавшиеся, потом должники и «ни разу». Коды - те же,
+# что были: на них стоят сохранённые фильтры (?group=active).
 # Должники - поперёк остальных: должен и тот, кто сейчас в аренде, и тот,
 # кто давно сдал велосипед.
 CLIENT_GROUPS: dict[str, str] = {
-    "all": "Все за всё время", "active": "Действующие", "former": "Бывшие",
-    "never": "Ни разу не брали", "debt": "Должники",
-    "bought": "Выкупили", "repair": "Сторонний ремонт",
+    "all": "Все клиенты", "active": "Арендаторы вело", "former": "Сдали вело",
+    "bought": "Купили технику", "repair": "Ремонтировались у нас",
+    "debt": "Должники", "never": "Ни разу не брали",
 }
 
 # Вид техники стороннего ремонта - по словам в объекте наряда: отдельной
@@ -696,10 +699,18 @@ CLIENT_GROUPS: dict[str, str] = {
 TECH_KINDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("battery", "АКБ", ("акб", "аккум", "батаре")),
     ("tricycle", "Трицикл", ("трицикл", "трёхколёс", "трехколес", "трайк")),
-    ("scooter", "Самокат", ("самокат", "scooter", "kugoo", "ninebot", "xiaomi")),
+    ("scooter", "Самокат", ("самокат", "scooter")),
     ("bike", "Велосипед", ("велосипед", "вело", "bike", "байк")),
 )
+# Марка - только когда вида словами нет: «Kugoo M4» - самокат, но
+# «электровелосипед Kugoo V3 Pro» - велосипед (Kugoo делает и их).
+TECH_BRANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("scooter", ("kugoo", "ninebot", "xiaomi")),
+)
 TECH_KIND_TITLES = {code: title for code, title, _ in TECH_KINDS} | {"other": "Другое"}
+# Порядок показа: наш парк первым, «другое» последним. Порядок разбора
+# (TECH_KINDS) другой и важен сам по себе.
+TECH_KIND_ORDER = ("bike", "scooter", "tricycle", "battery", "other")
 
 
 def tech_kinds(text: Any) -> set[str]:
@@ -713,7 +724,9 @@ def tech_kinds(text: Any) -> set[str]:
                 out.add(code)
                 break
         else:
-            out.add("other")
+            brand = next((code for code, words in TECH_BRANDS
+                          if any(w in part for w in words)), "other")
+            out.add(brand)
     return out
 
 
@@ -727,21 +740,48 @@ def top_values(values: Iterable[Any], *, limit: int = 10) -> list[str]:
 
 
 def client_kinds(row: Mapping[str, Any]) -> set[str]:
-    """Чем клиент пользуется: арендатор - велосипедом (парк - электровелосипеды),
-    клиент ремонта - тем, что приносил."""
+    """Чем клиент пользуется: арендатор, сдавший и купивший - велосипедом
+    (парк - электровелосипеды, продаём из него же), клиент ремонта - тем,
+    что приносил. Наряд без слов в объекте - «другое», а не «ничего»:
+    иначе ремонтировавшийся выпадал бы из любого вида техники."""
     kinds = tech_kinds(row.get("repair_objects"))
-    if int(row.get("rentals_count") or 0) > 0 or row.get("rental_id"):
+    if int(row.get("external_repairs") or 0) > 0 and not kinds:
+        kinds.add("other")
+    if int(row.get("rentals_count") or 0) > 0 or row.get("rental_id") \
+            or row.get("bought"):
         kinds.add("bike")
     return kinds
 
 
+def client_kind_titles(row: Mapping[str, Any]) -> list[str]:
+    """Виды техники клиента словами, в порядке показа."""
+    kinds = client_kinds(row)
+    return [TECH_KIND_TITLES[k] for k in TECH_KIND_ORDER if k in kinds]
+
+
+def client_kind_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Сколько клиентов с каждым видом техники - переключатель над списком.
+    Клиент с самокатом и АКБ в обоих: виды - разрез, а не разбиение."""
+    counts = dict.fromkeys(TECH_KIND_ORDER, 0)
+    for row in rows:
+        for kind in client_kinds(row):
+            counts[kind] += 1
+    return counts
+
+
+def client_group_titles(row: Mapping[str, Any], groups: Mapping[str, str]) -> list[str]:
+    """В каких группах клиент (кроме «всех») - колонка выгрузки базы."""
+    return [title for code, title in groups.items()
+            if code != "all" and client_in_group(row, code)]
+
+
 def client_in_group(row: Mapping[str, Any], group: str) -> bool:
-    """Клиент в группе: действующий - с идущей арендой, бывший - брал, но
-    сейчас без велосипеда, «ни разу» - карточка без единой аренды.
-    «Выкупили» - последняя аренда проданного велосипеда его (закрыта с
-    велосипедом «продан (выкуп)»): арендатор, выкупивший свой велосипед,
-    а не покупатель из amoCRM. «Сторонний ремонт» - чинил у нас чужую
-    технику за свой счёт."""
+    """Клиент в группе: «арендатор вело» - с идущей арендой, «сдал вело» -
+    брал, но сейчас без велосипеда, «ни разу» - карточка без единой аренды.
+    «Купили технику» - последняя аренда проданного велосипеда его (закрыта
+    с велосипедом «продан (выкуп)»): арендатор, выкупивший свой велосипед,
+    а не покупатель из amoCRM. «Ремонтировались у нас» - чинил у нас свою
+    технику (не из нашего парка) за свой счёт."""
     if group == "bought":
         return bool(row.get("bought"))
     if group == "repair":
@@ -1939,6 +1979,18 @@ def risk_settings(raw: Mapping[str, Any] | None) -> dict[str, Decimal]:
         out[level] = value if value is not None and 0 < value <= MAX_AMOUNT \
             else Decimal(0)
     return out
+
+
+# Показ оценки риска - настройка владельца, по умолчанию выключен: блок
+# риска в списке клиентов, карточке, на выдаче и в быстрой форме бота
+# появляется только по галочке на странице «Риск клиента». Правило и
+# залог остаются - выключение прячет подсказку, а не считает иначе.
+RISK_ENABLED_KEY = "risk_enabled"
+
+
+def risk_enabled(raw: Mapping[str, Any] | None) -> bool:
+    """Показывать ли оценку риска клиента. Не задано - нет."""
+    return str((raw or {}).get(RISK_ENABLED_KEY) or "") == "1"
 
 
 def debt_track(days: Iterable[tuple[date, Any]], *, today: date) -> dict[str, Any]:
@@ -4147,6 +4199,13 @@ CLIENT_CHANNELS: dict[str, str] = {
     "channel": "Наш Telegram-канал",
     "site": "Сайт",
     "other": "Другое",
+}
+
+
+# Каким путём завелась карточка (clients.source) - словами выгрузки базы
+# клиентов; не путать с каналом привлечения выше.
+CLIENT_SOURCES: dict[str, str] = {
+    "manual": "в панели", "bot": "из бота", "import": "импорт из таблицы",
 }
 
 
