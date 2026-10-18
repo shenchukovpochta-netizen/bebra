@@ -319,6 +319,11 @@ class TestCrmSql(unittest.TestCase):
             self.db.create_staff("t", "h", "n", "manager", 1, location="П",
                                  expires_at=datetime(2026, 10, 1, tzinfo=UTC)),
             self.db.set_staff_expires(1, None),
+            # команда: план недели и дня (пустой - снимается)
+            self.db.staff_period_plans("week", today),
+            self.db.set_staff_period_plan(1, "week", today, by="me", plan_issues=5,
+                                          plan_revenue=d),
+            self.db.set_staff_period_plan(1, "day", today, by="me"),
             self.db.create_client(full_name="a", phone="+7", created_by="staff:me"),
         ]
 

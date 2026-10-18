@@ -96,6 +96,9 @@ STAFF_PLAN_FIELDS = frozenset({
     "plan_issues", "plan_orders", "plan_tasks", "plan_revenue",
     "salary_base", "per_issue", "order_pct", "revenue_pct",
 })
+# План недели и дня - те же числа, что у месяца, без условий оплаты.
+STAFF_PERIOD_PLAN_FIELDS = ("plan_issues", "plan_orders", "plan_tasks", "plan_revenue")
+STAFF_PERIOD_KINDS = ("week", "day")
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
     "payer", "client_id", "total", "cost", "closed_at", "paid_at", "log_id",
@@ -6881,10 +6884,46 @@ class CrmDB:
             f"{sets}, updated_by = excluded.updated_by, updated_at = now()",
             staff_id, month, by, *values)
 
+    async def staff_period_plans(self, kind: str, starts: date) -> dict[int, dict]:
+        """Свои планы недели (starts - понедельник) или дня всех сотрудников.
+        Без строки план периода выводится из месяца (team.period_plans)."""
+        if kind not in STAFF_PERIOD_KINDS:
+            raise ValueError(f"неизвестный период: {kind}")
+        rows = await self.pool.fetch(
+            "select * from crm.staff_period_plans where kind = $1 and starts = $2",
+            kind, starts)
+        return {int(r["staff_id"]): dict(r) for r in rows}
+
+    async def set_staff_period_plan(self, staff_id: int, kind: str, starts: date, *,
+                                    by: str, **fields: Any) -> None:
+        """План недели или дня - все четыре числа разом: пропущенное - пусто
+        («как в плане месяца»). Без единого числа строка удаляется."""
+        if kind not in STAFF_PERIOD_KINDS:
+            raise ValueError(f"неизвестный период: {kind}")
+        unknown = set(fields) - set(STAFF_PERIOD_PLAN_FIELDS)
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        values = [fields.get(c) for c in STAFF_PERIOD_PLAN_FIELDS]
+        if all(v is None for v in values):
+            await self.pool.execute(
+                "delete from crm.staff_period_plans where staff_id = $1 and kind = $2 "
+                "and starts = $3", staff_id, kind, starts)
+            return
+        await self.pool.execute(
+            "insert into crm.staff_period_plans (staff_id, kind, starts, updated_by, "
+            "plan_issues, plan_orders, plan_tasks, plan_revenue) "
+            "values ($1, $2, $3, $4, $5, $6, $7, $8) "
+            "on conflict (staff_id, kind, starts) do update set "
+            "plan_issues = excluded.plan_issues, plan_orders = excluded.plan_orders, "
+            "plan_tasks = excluded.plan_tasks, plan_revenue = excluded.plan_revenue, "
+            "updated_by = excluded.updated_by, updated_at = now()",
+            staff_id, kind, starts, by, *values)
+
     async def team_facts(self, since: datetime, until: datetime) -> dict[int, dict]:
         """Сделанное каждым сотрудником за окно: выдачи и принятые платежи -
         по автору записи (staff:<логин>), наряды - по технику, задачи - по
-        тому, кто сделал. Банк и автозачисление ничьи."""
+        тому, кто сделал. Банк и автозачисление ничьи. Окно любое - месяц,
+        неделя (и через границу месяца), день: считается по моментам."""
         rows = await self.pool.fetch(
             """
             with i as (select created_by, count(*) as n from crm.rentals

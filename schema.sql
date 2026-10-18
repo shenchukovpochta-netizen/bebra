@@ -3098,6 +3098,27 @@ create table if not exists crm.staff_plans (
   primary key (staff_id, month)
 );
 
+-- Команда: план сотрудника на неделю (с понедельника) и на день - те же
+-- четыре числа, что у месяца; условия оплаты только месячные. Строки нет -
+-- план периода выводится из плана месяца по доле дней (неделя на стыке
+-- берёт дни каждого месяца из своего), пустое число своей строки - тоже
+-- доля месяца, ноль - «не планируется». Явное число главнее выведенного.
+-- Строка без единого числа не хранится: это и есть «как в плане месяца».
+create table if not exists crm.staff_period_plans (
+  staff_id     bigint      not null references crm.staff (id) on delete cascade,
+  kind         text        not null check (kind in ('week', 'day')),
+  starts       date        not null,
+  plan_issues  integer     check (plan_issues is null or plan_issues >= 0),
+  plan_orders  integer     check (plan_orders is null or plan_orders >= 0),
+  plan_tasks   integer     check (plan_tasks is null or plan_tasks >= 0),
+  plan_revenue numeric(12,2) check (plan_revenue is null or plan_revenue >= 0),
+  updated_by   text,
+  updated_at   timestamptz not null default now(),
+  primary key (staff_id, kind, starts),
+  constraint staff_period_plans_week_monday
+    check (kind = 'day' or extract(isodow from starts) = 1)
+);
+
 -- Платёжный календарь (app/crm/cashflow.py): плановые расходы и приходы,
 -- которых в базе нет фактом, - аренда помещения, зарплата, закупка,
 -- налог. Ожидаемые платежи клиентов сюда не пишутся: они считаются из

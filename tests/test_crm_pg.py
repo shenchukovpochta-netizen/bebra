@@ -633,6 +633,59 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncpg.CheckViolationError):
             await self.crm.set_staff_plan(anna, first, by="t", order_pct=D("150"))
 
+    async def test_team_week_and_day_on_postgres(self):
+        """План недели и дня - своя таблица: неделя только с понедельника,
+        пустая строка снимается; факт недели через границу месяца - по
+        датам, а не по месяцу."""
+        await self.seed()
+        tech = await self.crm.access_profile_by_code("tech")
+        anna = await self.crm.create_staff("anna", "hash", "Анна", "manager", tech["id"])
+        monday = date(2026, 9, 28)
+        await self.crm.set_staff_period_plan(anna, "week", monday, by="staff:admin",
+                                             plan_issues=5, plan_revenue=D("20000"))
+        await self.crm.set_staff_period_plan(anna, "day", date(2026, 10, 1), by="t",
+                                             plan_tasks=2)
+        week = (await self.crm.staff_period_plans("week", monday))[anna]
+        self.assertEqual((week["plan_issues"], week["plan_orders"], week["plan_revenue"],
+                          week["updated_by"]), (5, None, D("20000.00"), "staff:admin"))
+        self.assertEqual(await self.crm.staff_period_plans("week", date(2026, 10, 5)), {})
+        self.assertEqual(list(await self.crm.staff_period_plans("day", date(2026, 10, 1))),
+                         [anna])
+        await self.crm.set_staff_period_plan(anna, "week", monday, by="t", plan_issues=7)
+        week = (await self.crm.staff_period_plans("week", monday))[anna]
+        self.assertEqual((week["plan_issues"], week["plan_revenue"]), (7, None),
+                         "форма пишет все четыре числа разом")
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.set_staff_period_plan(anna, "week", date(2026, 9, 30), by="t",
+                                                 plan_issues=1)
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.set_staff_period_plan(anna, "day", monday, by="t", plan_tasks=-1)
+        await self.crm.set_staff_period_plan(anna, "week", monday, by="t")
+        self.assertEqual(await self.crm.staff_period_plans("week", monday), {})
+        # выдачи 30.09 и 01.10: неделя 28.09-04.10 видит обе, октябрь - одну
+        for day in (date(2026, 9, 30), date(2026, 10, 1)):
+            rid = await self.crm.create_rental(
+                client_id=self.client_id, bike_id=None, tariff_id=self.tariff_id,
+                tariff_name="Неделя", period_days=7, price=D("3000"), billing="manual",
+                started_on=day, contract_no=None, created_by="staff:anna")
+            await self.pool.execute(
+                "update crm.rentals set created_at = $2::date + time '12:00', "
+                "status = 'closed', closed_on = $2::date where id = $1", rid, day)
+
+        def window(start, days):
+            since = datetime.combine(start, datetime.min.time()).astimezone()
+            return since, since + timedelta(days=days)
+        self.assertEqual((await self.crm.team_facts(*window(monday, 7)))[anna]["issues"], 2)
+        self.assertEqual(
+            (await self.crm.team_facts(*window(date(2026, 10, 1), 31)))[anna]["issues"], 1)
+        fake = FakeCrm()
+        sid = await fake.create_staff("anna", "h", "Анна", "manager")
+        await fake.set_staff_period_plan(sid, "week", monday, by="t", plan_issues=5)
+        self.assertEqual(set(await fake.staff_period_plans("week", monday)), {sid})
+        with self.assertRaises(ValueError):
+            await fake.set_staff_period_plan(sid, "week", date(2026, 9, 30), by="t",
+                                             plan_issues=1)
+
     async def test_income_and_cash_plan_on_postgres(self):
         """Доход по статьям: оплаченные клиентские наряды по точке, чужая
         техника отдельно от своей; плановые платежи календаря."""

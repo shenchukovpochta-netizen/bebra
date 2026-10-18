@@ -968,6 +968,11 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .bar-fill.bad{background:var(--bad)}
 b.ok{color:var(--ok)}
 b.bad{color:var(--bad)}
+/* Неделя и день сотрудника: листалка и выбор периода в одну строку,
+   форма плана отступает от таблицы. */
+.period-pick{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0 12px}
+.period-pick .tabs{flex:none}
+.plan-period table+form,.plan-period table+.flash{margin-top:16px}
 
 /* ── сводка: приветствие и «Критично» плашками, как шапка образца ──
    Вместо картинки образца - тёплое свечение фирменного оранжевого. */

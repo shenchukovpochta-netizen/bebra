@@ -1,22 +1,24 @@
 {% extends "base.html" %}
 {% block title %}{{ person.name }} — Команда — {{ app_title }}{% endblock %}
 {% block content %}
-{# Сотрудник за месяц (app/crm/team.py): прогресс по плану, начисленное
-   и что именно сделано. План и условия - строкой на месяц. #}
+{# Сотрудник (app/crm/team.py): месяц - прогресс по плану, начисленное,
+   план и условия строкой на месяц; неделя и день - план против факта и
+   свои планы (пустое поле - доля плана месяца); аналитика за полгода и
+   что именно сделано. Отказ формы - та же страница с набранными числами. #}
+{% set keep = 'month=' ~ span.key ~ '&week=' ~ week.isoformat() ~ '&day=' ~ day.isoformat() %}
 <div class="bar"><h1>{{ person.name }} <small class="muted">{{ role }}{% if person.location %} · {{ person.location }}{% endif %} · {{ month_title }}</small></h1>
-  <nav class="inline-form" aria-label="Месяц">
-    {% if span.prev_key %}<a class="btn ghost small" href="/team/{{ person.id }}?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
-    {% if span.next_key %}<a class="btn ghost small" href="/team/{{ person.id }}?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
+  <nav class="tabs" aria-label="Месяц">
+    {% if span.prev_key %}<a href="/team/{{ person.id }}?month={{ span.prev_key }}&amp;week={{ week.isoformat() }}&amp;day={{ day.isoformat() }}" title="прошлый месяц">‹</a>{% endif %}<a href="/team/{{ person.id }}?{{ keep }}" class="on">{{ span.first.strftime('%m.%Y') }}</a>{% if span.next_key %}<a href="/team/{{ person.id }}?month={{ span.next_key }}&amp;week={{ week.isoformat() }}&amp;day={{ day.isoformat() }}" title="следующий месяц">›</a>{% endif %}
   </nav>
   <a class="btn ghost" href="/team?month={{ span.key }}">← Команда</a>
 </div>
 <div class="tiles">
   {% for m in metrics %}{% if money_ok or not m.money %}
   <div class="tile {% if m.ahead is false %}warn{% endif %}">
-    <b>{% if m.money %}{{ money(m.fact) }}{% else %}{{ m.fact }}{% endif %}</b>
-    <span>{{ m.title|lower }}{% if m.plan is not none %} · план {% if m.money %}{{ money(m.plan) }}{% else %}{{ m.plan }}{% endif %} · {{ m.percent }} %{% endif %}</span>
+    <b>{{ m.fact_text }}</b>
+    <span>{{ m.title|lower }}{% if m.plan is not none %} · план {{ m.plan_text }} · {{ m.percent }} %{% endif %}</span>
     {% if m.plan is not none %}<span class="bar-track"><span class="bar-fill {% if m.ahead %}ok{% else %}bad{% endif %}" style="width: {{ [m.percent, 100]|min }}%"></span></span>
-    <small class="muted">к сегодня по темпу — {% if m.money %}{{ money(m.pace) }}{% else %}{{ m.pace }}{% endif %}</small>{% endif %}
+    <small class="muted">к сегодня по темпу — {{ m.pace_text }}</small>{% endif %}
   </div>
   {% endif %}{% endfor %}
 </div>
@@ -37,25 +39,113 @@
 </section>
 {% endif %}
 {% if may_plan %}
-<section class="card">
+{% macro mval(key) %}{% if month_typed is not none %}{{ month_typed[key] }}{% elif plan and plan[key] is not none %}{{ plan[key] }}{% endif %}{% endmacro %}
+<section class="card" id="plan-month">
   <h2>План и условия на {{ month_title }}</h2>
+  {% if month_problem %}<div class="flash err" role="alert">{{ month_problem }}</div>{% endif %}
   <form method="post" action="/team/{{ person.id }}/plan" class="grid2">
+    <input type="hidden" name="period" value="month">
     <input type="hidden" name="month" value="{{ span.key }}">
-    <label>План выдач <input name="plan_issues" inputmode="numeric" value="{{ plan.plan_issues if plan and plan.plan_issues is not none else '' }}"></label>
-    <label>План нарядов <input name="plan_orders" inputmode="numeric" value="{{ plan.plan_orders if plan and plan.plan_orders is not none else '' }}"></label>
-    <label>План задач <input name="plan_tasks" inputmode="numeric" value="{{ plan.plan_tasks if plan and plan.plan_tasks is not none else '' }}"></label>
-    <label>План денег, ₽ <input name="plan_revenue" inputmode="decimal" value="{{ plan.plan_revenue if plan and plan.plan_revenue is not none else '' }}"></label>
-    <label>Оклад, ₽ <input name="salary_base" inputmode="decimal" value="{{ plan.salary_base if plan else '' }}"></label>
-    <label>За выдачу, ₽ <input name="per_issue" inputmode="decimal" value="{{ plan.per_issue if plan else '' }}"></label>
-    <label>% от работы нарядов <input name="order_pct" inputmode="decimal" value="{{ plan.order_pct if plan else '' }}"></label>
-    <label>% от принесённых денег <input name="revenue_pct" inputmode="decimal" value="{{ plan.revenue_pct if plan else '' }}"></label>
+    <input type="hidden" name="week" value="{{ week.isoformat() }}">
+    <input type="hidden" name="day" value="{{ day.isoformat() }}">
+    <label>План выдач <input name="plan_issues" inputmode="numeric" value="{{ mval('plan_issues') }}"></label>
+    <label>План нарядов <input name="plan_orders" inputmode="numeric" value="{{ mval('plan_orders') }}"></label>
+    <label>План задач <input name="plan_tasks" inputmode="numeric" value="{{ mval('plan_tasks') }}"></label>
+    <label>План денег, ₽ <input name="plan_revenue" inputmode="decimal" value="{{ mval('plan_revenue') }}"></label>
+    <label>Оклад, ₽ <input name="salary_base" inputmode="decimal" value="{{ mval('salary_base') }}"></label>
+    <label>За выдачу, ₽ <input name="per_issue" inputmode="decimal" value="{{ mval('per_issue') }}"></label>
+    <label>% от работы нарядов <input name="order_pct" inputmode="decimal" value="{{ mval('order_pct') }}"></label>
+    <label>% от принесённых денег <input name="revenue_pct" inputmode="decimal" value="{{ mval('revenue_pct') }}"></label>
     <button type="submit">Сохранить на {{ month_title }}</button>
   </form>
   <p class="muted">Пустой план — не планируется. Сохранение пишет только этот месяц: прошлые
-    считаются по своим условиям, следующие — по этим, пока их не поменяют.</p>
+    считаются по своим условиям, следующие — по этим, пока их не поменяют. План недели и
+    дня без своего — доля этого плана по дням.</p>
 </section>
 {% endif %}
 </div>
+
+<div class="cols">
+{% for p in periods %}
+{% set week_kind = p.kind == 'week' %}
+<section class="card plan-period" id="plan-{{ p.kind }}">
+  <h2>{{ 'Неделя' if week_kind else 'День' }} <small class="muted">{{ p.span.title }}{% if p.span.is_current %} · {{ 'идёт' if week_kind else 'сегодня' }}{% endif %}</small></h2>
+  <div class="period-pick">
+    <nav class="tabs" aria-label="{{ 'Неделя' if week_kind else 'День' }}">
+      {% set prev_q = ('month=' ~ span.key ~ '&week=' ~ p.span.prev.isoformat() ~ '&day=' ~ day.isoformat()) if week_kind else ('month=' ~ span.key ~ '&week=' ~ week.isoformat() ~ '&day=' ~ p.span.prev.isoformat()) %}
+      <a href="/team/{{ person.id }}?{{ prev_q }}#plan-{{ p.kind }}" title="{{ 'прошлая неделя' if week_kind else 'день назад' }}">‹</a>
+      {% if p.span.next %}{% set next_q = ('month=' ~ span.key ~ '&week=' ~ p.span.next.isoformat() ~ '&day=' ~ day.isoformat()) if week_kind else ('month=' ~ span.key ~ '&week=' ~ week.isoformat() ~ '&day=' ~ p.span.next.isoformat()) %}
+      <a href="/team/{{ person.id }}?{{ next_q }}#plan-{{ p.kind }}" title="{{ 'следующая неделя' if week_kind else 'день вперёд' }}">›</a>{% endif %}
+    </nav>
+    <form method="get" action="/team/{{ person.id }}" class="inline-form">
+      <input type="hidden" name="month" value="{{ span.key }}">
+      {% if week_kind %}
+      <input type="hidden" name="day" value="{{ day.isoformat() }}">
+      <select name="week" aria-label="Неделя" onchange="this.form.submit()">
+        {% for w, title in week_options %}<option value="{{ w.isoformat() }}" {% if w == week %}selected{% endif %}>{{ title }}</option>{% endfor %}
+      </select>
+      {% else %}
+      <input type="hidden" name="week" value="{{ week.isoformat() }}">
+      <input type="date" name="day" value="{{ day.isoformat() }}" aria-label="День">
+      {% endif %}
+      <button type="submit" class="ghost small">Показать</button>
+    </form>
+  </div>
+  <table class="cards">
+    <tr><th>Показатель</th><th class="num">План</th><th class="num">Факт</th><th class="num">Выполнено</th></tr>
+    {% for m in p.metrics %}{% if money_ok or not m.money %}
+    <tr class="{% if m.ahead is false %}warn-row{% endif %}">
+      <td data-label="Показатель">{{ m.title }}</td>
+      <td class="num" data-label="План">{% if m.plan is not none %}{{ m.plan_text }}{% if m.source == 'month' %}<br><small class="muted">из плана месяца</small>{% endif %}{% else %}<span class="muted">не задан</span>{% endif %}</td>
+      <td class="num" data-label="Факт">{{ m.fact_text }}</td>
+      <td class="num" data-label="Выполнено">{% if m.percent is not none %}<b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% else %}<span class="muted">—</span>{% endif %}</td>
+    </tr>
+    {% endif %}{% endfor %}
+  </table>
+  {% if may_plan %}
+  {% set what = 'недели' if week_kind else 'дня' %}
+  {% if p.problem %}<div class="flash err" role="alert">{{ p.problem }}</div>{% endif %}
+  <form method="post" action="/team/{{ person.id }}/plan" class="grid2">
+    <input type="hidden" name="period" value="{{ p.kind }}">
+    <input type="hidden" name="month" value="{{ span.key }}">
+    <input type="hidden" name="week" value="{{ week.isoformat() }}">
+    <input type="hidden" name="day" value="{{ day.isoformat() }}">
+    {% for key, label, mode in (('plan_issues', 'План выдач', 'numeric'), ('plan_orders', 'План нарядов', 'numeric'), ('plan_tasks', 'План задач', 'numeric'), ('plan_revenue', 'План денег, ₽', 'decimal')) %}
+    <label>{{ label }} <input name="{{ key }}" inputmode="{{ mode }}" value="{% if p.typed is not none %}{{ p.typed[key] }}{% elif p.own and p.own[key] is not none %}{{ p.own[key] }}{% endif %}"{% if p.hint[key] %} placeholder="{{ p.hint[key] }} из плана месяца"{% endif %}></label>
+    {% endfor %}
+    <button type="submit">Сохранить план {{ what }}</button>
+  </form>
+  <p class="muted">Пустое поле — доля плана месяца (подсказка в поле), 0 — не планируется на
+    {{ 'эту неделю' if week_kind else 'этот день' }}. Все поля пустые — план {{ what }} снова из плана месяца.</p>
+  {% endif %}
+</section>
+{% endfor %}
+</div>
+
+<section class="card">
+  <h2>Аналитика помесячно <span class="muted">· {{ history|length }} мес.</span></h2>
+  {% if history %}
+  <div class="table-wrap">
+  <table class="cards">
+    <tr><th>Месяц</th>{% for key in ('issues', 'orders', 'tasks') %}<th class="num">{{ history[0].metrics[key].title }}</th>{% endfor %}
+      {% if money_ok %}<th class="num">Принёс денег</th><th class="num">Начислено</th>{% endif %}</tr>
+    {% for h in history %}
+    <tr>
+      <td data-label="Месяц"><a href="/team/{{ person.id }}?month={{ h.key }}">{{ h.title }}</a>{% if h.current %} <small class="muted">идёт</small>{% endif %}
+        {% if not h.has_plan %}<br><small class="muted">без плана</small>{% elif h.inherited %}<br><small class="muted">план прошлого месяца</small>{% endif %}</td>
+      {% for key in ('issues', 'orders', 'tasks', 'revenue') %}{% set m = h.metrics[key] %}{% if money_ok or not m.money %}
+      <td class="num" data-label="{{ m.title }}">{{ m.fact_text }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan_text }}</small><br><b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% endif %}</td>
+      {% endif %}{% endfor %}
+      {% if money_ok %}<td class="num" data-label="Начислено">{{ money(h.pay.total) }}</td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  <p class="muted">Факт / план и сколько плана сделано; у идущего месяца цвет — против темпа к
+    сегодняшнему дню. Месяцы до первой работы сотрудника не показаны.</p>
+  {% else %}<p class="muted">За последние полгода ни плана, ни сделанного.</p>{% endif %}
+</section>
+
 <div class="cols">
 <section class="card">
   <h2>Задачи <span class="muted">· {{ detail.tasks|length }}</span></h2>

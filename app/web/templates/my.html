@@ -17,16 +17,33 @@
 {% if own_month %}
 <section class="card my-month">
   <h2>Мой {{ own_month.title }}</h2>
+  {% if own_month.pay %}
   <div class="tiles">
     {% for m in own_month.metrics %}
     <div class="tile {% if m.ahead is false %}warn{% endif %}">
-      <b>{% if m.money %}{{ money(m.fact) }}{% else %}{{ m.fact }}{% endif %}</b>
-      <span>{{ m.title|lower }} · план {% if m.money %}{{ money(m.plan) }}{% else %}{{ m.plan }}{% endif %} · {{ m.percent }} %</span>
+      <b>{{ m.fact_text }}</b>
+      <span>{{ m.title|lower }} · план {{ m.plan_text }} · {{ m.percent }} %</span>
       <span class="bar-track"><span class="bar-fill {% if m.ahead %}ok{% else %}bad{% endif %}" style="width: {{ [m.percent, 100]|min }}%"></span></span>
     </div>
     {% endfor %}
     <div class="tile"><b>{{ money(own_month.pay.total) }}</b><span>начислено на сегодня</span></div>
   </div>
+  {% endif %}
+  {# Сегодня и эта неделя - план против факта коротко; план без своего -
+     доля плана месяца (app/crm/team.py, month_share). #}
+  {% if own_month.periods %}
+  <table class="cards my-plan">
+    <tr><th>Период</th>{% for key, title in own_month.columns %}<th class="num">{{ title }}</th>{% endfor %}</tr>
+    {% for p in own_month.periods %}
+    <tr><td data-label="Период"><b>{{ p.title }}</b>{% if p.source == 'month' %} <small class="muted">из плана месяца</small>{% endif %}</td>
+      {% for key, title in own_month.columns %}{% set m = p.metrics[key] %}
+      <td class="num" data-label="{{ title }}">{% if m.plan is not none %}{{ m.fact_text }} <small class="muted">из {{ m.plan_text }}</small>
+        <b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% else %}<span class="muted">—</span>{% endif %}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
 </section>
 {% endif %}
 {{ tk.add_form(people, locations, staff, task_money, '/my') }}

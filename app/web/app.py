@@ -1423,22 +1423,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             shift_open=shift_open, today=today,
             repair_norm=logic.repair_norm_default(settings),
             booking_url=booking_issue_url)
-        # Свой месяц: план и начисленное видит сам сотрудник - только своё.
-        first = today.replace(day=1)
-        own_plan = (await crm.staff_plans(first)).get(int(staff["id"]))
-        own_month = None
-        if own_plan:
-            span = logic.month_bounds(first, today=today)
-            since, until = month_window(first)
-            facts = (await crm.team_facts(since, until)).get(int(staff["id"])) or {}
-            own_month = {"title": team.month_name(first),
-                         "metrics": [m for m in team.progress(own_plan, facts,
-                                                              days=span["days"],
-                                                              passed=span["passed"])
-                                     if m["plan"] is not None],
-                         "pay": team.salary(own_plan, facts)}
-        return render(request, "my.html", groups=groups, point=point, own_month=own_month,
-                      team_board=None, **common)
+        return render(request, "my.html", groups=groups, point=point,
+                      own_month=await own_plan(staff, today), team_board=None, **common)
 
     # ─────────── задачи дня: поручения (app/crm/tasks.py) ───────────
 
@@ -1452,12 +1438,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────── команда: план, факт, зарплата (app/crm/team.py) ───────────
 
-    def month_window(first: date) -> tuple[datetime, datetime]:
-        since = datetime.combine(first, datetime.min.time()).astimezone()
-        nxt = (first + timedelta(days=32)).replace(day=1)
-        until = min(datetime.combine(nxt, datetime.min.time()).astimezone(),
+    def days_window(start: date, days: int) -> tuple[datetime, datetime]:
+        """Окно факта по датам (местная полночь) до этой минуты: неделя на
+        стыке месяцев - те же семь дней, что в календаре."""
+        since = datetime.combine(start, datetime.min.time()).astimezone()
+        until = min(datetime.combine(start + timedelta(days=days),
+                                     datetime.min.time()).astimezone(),
                     datetime.now().astimezone())
         return since, until
+
+    def month_window(first: date) -> tuple[datetime, datetime]:
+        nxt = (first + timedelta(days=32)).replace(day=1)
+        return days_window(first, (nxt - first).days)
 
     async def team_month(request: Request) -> tuple[date, dict, datetime, datetime]:
         today = date.today()
@@ -1465,18 +1457,87 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         since, until = month_window(first)
         return first, logic.month_bounds(first, today=today), since, until
 
+    async def team_period(kind: str, start: date, today: date, *,
+                          with_facts: bool = True) -> dict[str, Any]:
+        """Неделя или день команды: границы, свои планы, планы месяцев
+        периода, итоговый план каждого (свой поверх доли месяца) и факт."""
+        span = team.period_span(kind, start, today=today)
+        months = {m: await crm.staff_plans(m) for m in team.period_months(kind, start)}
+        own = await crm.staff_period_plans(kind, start)
+        return {"span": span, "own": own, "months": months,
+                "plans": team.period_plans(kind, start, own, months),
+                "facts": (await crm.team_facts(*days_window(start, span["days"]))
+                          if with_facts else {}),
+                "open_day": kind == "day" and span["is_current"]}
+
+    async def own_plan(staff: dict, today: date) -> dict | None:
+        """«Мой месяц» в «Задачах дня»: план месяца плитками, ниже - сегодня
+        и эта неделя против своего плана. Видит сам сотрудник, только своё;
+        нет плана ни на один период - блока нет."""
+        sid = int(staff["id"])
+        first = today.replace(day=1)
+        month_plan = (await crm.staff_plans(first)).get(sid)
+        periods = []
+        for kind, title in (("day", "Сегодня"), ("week", "Эта неделя")):
+            start = today if kind == "day" else team.monday(today)
+            # «Задачи дня» - главная страница сотрудника: факт команды
+            # считается, только когда у него есть план на этот период.
+            got = await team_period(kind, start, today, with_facts=False)
+            plan = got["plans"].get(sid)
+            if plan:
+                facts = (await crm.team_facts(*days_window(start, got["span"]["days"])))
+                metrics = team.progress(plan, facts.get(sid) or {},
+                                        days=got["span"]["days"], passed=got["span"]["passed"],
+                                        open_day=got["open_day"])
+                periods.append({"title": title, "span": got["span"],
+                                "metrics": {m["key"]: m for m in metrics},
+                                "source": team.plan_source(m for m in metrics
+                                                       if m["plan"] is not None)})
+        if not month_plan and not periods:
+            return None
+        metrics: list[dict] = []
+        pay = None
+        if month_plan:
+            span = logic.month_bounds(first, today=today)
+            facts = (await crm.team_facts(*month_window(first))).get(sid) or {}
+            metrics = [m for m in team.progress(month_plan, facts, days=span["days"],
+                                                passed=span["passed"])
+                       if m["plan"] is not None]
+            pay = team.salary(month_plan, facts)
+        columns = [(key, title) for _p, key, title, _m in team.METRICS
+                   if any(p["metrics"][key]["plan"] is not None for p in periods)]
+        return {"title": team.month_name(first), "metrics": metrics, "pay": pay,
+                "periods": periods, "columns": columns}
+
     def team_money(request: Request) -> bool:
         return logic.is_owner(request.state.staff) or may_view(request, "finance")
 
     @app.get("/team")
     async def team_page(request: Request) -> Response:
-        """«Команда»: каждый сотрудник за месяц - план, факт, темп и
-        начисленное по его условиям."""
+        """«Команда»: каждый сотрудник за месяц, неделю или день - план,
+        факт, темп; за месяц ещё начисленное по его условиям."""
+        today = date.today()
+        kind = team.period_kind(request.query_params.get("period"))
         first, span, since, until = await team_month(request)
-        rows = team.rows(await crm.staff_all(), await crm.team_facts(since, until),
-                         await crm.staff_plans(first), days=span["days"],
-                         passed=span["passed"])
+        period = None
+        if kind == "month":
+            rows = team.rows(await crm.staff_all(), await crm.team_facts(since, until),
+                             await crm.staff_plans(first), days=span["days"],
+                             passed=span["passed"])
+            member_q = f"month={span['key']}"
+        else:
+            start = team.period_start(kind, request.query_params.get(kind), today=today)
+            got = await team_period(kind, start, today)
+            period = got["span"]
+            rows = team.rows(await crm.staff_all(), got["facts"], got["plans"],
+                             days=period["days"], passed=period["passed"],
+                             open_day=got["open_day"])
+            # Карточка открывается на том же периоде: его месяц, неделя, день.
+            member_q = urlencode({"month": f"{start:%Y-%m}",
+                                  "week": team.monday(start).isoformat(),
+                                  **({"day": start.isoformat()} if kind == "day" else {})})
         return render(request, "team.html", rows=rows, total=team.totals(rows), span=span,
+                      kind=kind, period=period, periods=team.PERIODS, member_q=member_q,
                       month_title=team.month_name(first), money_ok=team_money(request))
 
     @app.get("/team.{ext}")
@@ -1497,40 +1558,107 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                  r["pay"]["revenue"], r["pay"]["tasks"], r["pay"]["total"]] for r in rows]
         return await table(ext, f"team-{first:%Y-%m}", header, data)
 
-    @app.get("/team/{staff_id}")
-    async def team_member(request: Request, staff_id: str) -> Response:
-        person = await by_id(crm.staff_by_id, staff_id)
-        if person is None:
-            return render(request, "missing.html", status_code=404, what="Сотрудник")
-        first, span, since, until = await team_month(request)
-        facts = (await crm.team_facts(since, until)).get(int(person["id"])) or {}
-        plan = (await crm.staff_plans(first)).get(int(person["id"]))
+    def team_choice(raw: Any) -> tuple[date, date, date]:
+        """Месяц, неделя и день карточки сотрудника - из адреса или формы."""
+        today = date.today()
+        return (team.month_of(raw.get("month"), today=today),
+                team.period_start("week", raw.get("week"), today=today),
+                team.period_start("day", raw.get("day"), today=today))
+
+    async def team_member_page(request: Request, person: dict, first: date, week: date,
+                               day: date, *, failed: str | None = None,
+                               problem: str | None = None, typed: dict | None = None,
+                               status_code: int = 200) -> Response:
+        """Карточка сотрудника: месяц (плитки, начислено, план и условия),
+        неделя и день (план против факта и их формы), аналитика за полгода
+        и списки сделанного. Отказ формы - та же страница с ошибкой у этой
+        формы и набранными числами, а не редирект с пустыми полями."""
+        today = date.today()
+        sid = int(person["id"])
+        span = logic.month_bounds(first, today=today)
+        since, until = month_window(first)
+        facts = (await crm.team_facts(since, until)).get(sid) or {}
+        plan = (await crm.staff_plans(first)).get(sid)
+        periods = []
+        for kind, start in (("week", week), ("day", day)):
+            got = await team_period(kind, start, today)
+            pspan = got["span"]
+            metrics = team.progress(got["plans"].get(sid), got["facts"].get(sid) or {},
+                                    days=pspan["days"], passed=pspan["passed"],
+                                    open_day=got["open_day"])
+            derived = team.month_share({m: rows.get(sid) for m, rows in got["months"].items()},
+                                       start, pspan["days"])
+            periods.append({"kind": kind, "span": pspan, "metrics": metrics,
+                            "own": got["own"].get(sid),
+                            "hint": {k: team.number(v) for k, v in derived.items()
+                                     if v is not None},
+                            "problem": problem if failed == kind else None,
+                            "typed": typed if failed == kind else None})
+        history = []
+        for m in team.history_months(first):
+            if m == first:
+                history.append((m, plan, facts))
+                continue
+            history.append((m, (await crm.staff_plans(m)).get(sid),
+                            (await crm.team_facts(*month_window(m))).get(sid) or {}))
+        this_week = team.monday(today)
+        week_options = sorted({this_week + timedelta(weeks=n) for n in range(-8, 9)} | {week})
         return render(request, "team_member.html", person=person, span=span, plan=plan,
                       month_title=team.month_name(first),
                       facts=facts, role=logic.role_title(person),
                       metrics=team.progress(plan, facts, days=span["days"],
                                             passed=span["passed"]),
                       pay=team.salary(plan, facts), revenue=team.revenue(facts),
+                      periods=periods, history=team.history(history, today=today),
+                      week=week, day=day,
+                      week_options=[(w, team.period_title("week", w, today=today))
+                                    for w in week_options],
+                      month_problem=problem if failed == "month" else None,
+                      month_typed=typed if failed == "month" else None,
                       detail=await crm.team_detail(person, since, until),
-                      money_ok=team_money(request), may_plan=may_edit(request, "staff"))
+                      money_ok=team_money(request), may_plan=may_edit(request, "staff"),
+                      status_code=status_code)
+
+    @app.get("/team/{staff_id}")
+    async def team_member(request: Request, staff_id: str) -> Response:
+        person = await by_id(crm.staff_by_id, staff_id)
+        if person is None:
+            return render(request, "missing.html", status_code=404, what="Сотрудник")
+        return await team_member_page(request, person, *team_choice(request.query_params))
 
     @app.post("/team/{staff_id}/plan")
     async def team_plan_save(request: Request, staff_id: str) -> Response:
+        """План месяца с условиями оплаты, или план недели или дня (period)."""
         if not may_edit(request, "staff"):
             return denied(request, "staff")
         person = await by_id(crm.staff_by_id, staff_id)
         if person is None:
             return render(request, "missing.html", status_code=404, what="Сотрудник")
         data = await form(request)
-        first = team.month_of(data.get("month"), today=date.today())
-        back = f"/team/{person['id']}?month={first:%Y-%m}"
-        fields, problem = team.parse_plan(data)
+        kind = team.period_kind(data.get("period"))
+        first, week, day = team_choice(data)
+        back = (f"/team/{person['id']}?month={first:%Y-%m}&week={week.isoformat()}"
+                f"&day={day.isoformat()}#plan-{kind}")
+        keys = team.PLAN_FIELDS if kind == "month" else team.PERIOD_FIELDS
+        fields, problem = team.parse_plan(data, keys)
         if problem:
-            flash(request, problem, "err")
-            return redirect(back)
+            return await team_member_page(
+                request, person, first, week, day, failed=kind, problem=problem,
+                typed={k: str(data.get(k) or "") for k in keys}, status_code=400)
         assert fields is not None
-        await crm.set_staff_plan(int(person["id"]), first, by=who(request), **fields)
-        flash(request, f"План и условия на {team.month_name(first)} сохранены.")
+        if kind == "month":
+            await crm.set_staff_plan(int(person["id"]), first, by=who(request), **fields)
+            flash(request, f"План и условия на {team.month_name(first)} сохранены.")
+            return redirect(back)
+        start = week if kind == "week" else day
+        await crm.set_staff_period_plan(int(person["id"]), kind, start, by=who(request),
+                                        **fields)
+        what = ("План недели " if kind == "week" else "План на ") + team.period_title(
+            kind, start, today=date.today())
+        if all(v is None for v in fields.values()):
+            flash(request, f"{what} - снова из плана месяца.")
+        else:
+            flash(request, f"{what} сохранён.")
         return redirect(back)
 
     @app.get("/tasks")
