@@ -127,6 +127,18 @@ class TestTree(unittest.TestCase):
         self.assertEqual(nav.trail("/rentals/new", MANAGER),
                          [{"label": "Главное", "href": ""}, {"label": "Выдача", "href": ""},
                           {"label": "Повторная выдача", "href": "/rentals/new"}])
+        # Владелец попадает сюда только по прямому адресу: крошки называют
+        # саму страницу, как заголовок, а в его меню не горит ничего - не
+        # соседние «Аренды».
+        self.assertEqual(nav.trail("/rentals/new", OWNER),
+                         [{"label": "Главное", "href": ""}, {"label": "Выдача", "href": ""},
+                          {"label": "Повторная выдача", "href": "/rentals/new"}])
+        self.assertEqual(nav.trail("/issue", OWNER)[-1]["label"], "Быстрая выдача")
+        self.assertEqual([it["label"] for g in nav.menu(OWNER, "/rentals/new")
+                          for it in g["items"] + [c for i in g["items"] for c in i["children"]]
+                          if it["on"]], [])
+        self.assertNotIn("Выдача", labels(nav.menu(OWNER, "/rentals/new")))
+        self.assertEqual(nav.trail("/rentals", OWNER)[-1]["label"], "Аренды")
         self.assertTrue(logic.offers_issue(MANAGER))
         self.assertFalse(logic.offers_issue(OWNER), "владелец сам не выдаёт")
         self.assertFalse(logic.offers_issue(TECH), "без права на выдачу")

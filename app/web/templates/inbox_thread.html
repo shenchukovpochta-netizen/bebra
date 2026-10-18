@@ -38,7 +38,7 @@
   {% endif %}
   {% if t.client_manual %}<p class="muted"><small>Карточку выбрали вручную — автопривязка по телефону её не меняет.</small></p>{% endif %}
   {% endif %}
-  {% if can_view(staff, 'issue') and not is_owner(staff) %}
+  {% if offers_issue(staff) %}
   <p>{% if t.client_id %}<a class="btn" href="/issue?client={{ t.client_id }}">Оформить выдачу</a>{% elif t.phone %}<a class="btn" href="/issue?phone={{ t.phone|urlencode }}">Оформить выдачу</a>{% endif %}</p>
   {% endif %}
   {% endif %}

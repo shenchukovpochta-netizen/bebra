@@ -149,6 +149,14 @@ class TestInboxAccess(InboxCase):
                                    "actions": {}}))
         self.as_("point", pid)
         self.assertIn('href="/issue?phone=%2B79001112233"', self.get_ok(f"/inbox/{self.wa}"))
+        # Выдачу только смотрит - оформить не сможет, и кнопки нет: правило
+        # то же, что у «Выдать» в карточках (logic.offers_issue).
+        pid = run(self.crm.create_access_profile(
+            "Переписка, выдача смотреть", {"sections": {"inbox": "edit", "issue": "view"},
+                                           "actions": {}}))
+        self.as_("viewer", pid)
+        page = self.get_ok(f"/inbox/{self.wa}")
+        self.assertNotIn("Оформить выдачу", page)
 
     def test_tile_counts_only_waiting(self):
         self.login()

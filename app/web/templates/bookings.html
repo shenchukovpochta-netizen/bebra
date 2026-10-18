@@ -2,7 +2,7 @@
 {% block title %}Брони — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Заявки на аренду</h1>
-  {% if not is_owner(staff) %}<a class="btn ghost" href="/issue">Выдача</a>{% endif %}
+  {% if can_view(staff, 'issue') and not is_owner(staff) %}<a class="btn ghost" href="/issue">Выдача</a>{% endif %}
 </div>
 {% with active = 'booking' %}{% include "_incoming_tabs.html" %}{% endwith %}
 {# Заявка - намерение, а не аренда: велосипед под неё не бронируется,
