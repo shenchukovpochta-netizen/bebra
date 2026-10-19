@@ -1225,6 +1225,26 @@ details.more[open]>summary{margin-bottom:10px}
 .cal-start label{display:inline-flex;align-items:center;gap:8px;margin:0}
 table.cal-mini td small{display:block;font-size:12px;line-height:1.35}
 
+/* ── аренда и деньги: редкие формы свёрнуты (details.card.fold) ──
+   Свёрнутый блок со списком-карточками остаётся карточкой: раздетый, он
+   клал заголовок-раскрывашку на фон страницы, а поле подписи ячейки
+   съедало правило свёрнутых блоков отчётов (5 px). Строки списка в нём -
+   через черту, как в карточке с формами. */
+@media (max-width:640px){
+  details.card.fold:is(:has(>table.cards),:has(>.table-wrap>table.cards)){background:var(--card);
+    border:1px solid var(--line);box-shadow:var(--shadow)}
+  details.card.fold table.cards tr:not(:has(>th),.list-foot){border:0;border-top:1px solid var(--line);
+    border-radius:0;margin:0;padding:10px 0;background:none}
+  details.card.fold table.cards tr.total{border-top-width:2px}
+  details.card.fold table.cards td[data-label]{padding-left:116px}
+  /* во всю ширину без полей блока: width:100% карточек плюс поля
+     выталкивали черту строк за край */
+  details.card.fold>table.cards{width:auto}
+  /* выбор клиента в строке выписки - во всю ширину ячейки, кнопки
+     строкой под ним */
+  table.cards td .inline-form select{flex:1 1 100%;max-width:100%}
+}
+
 /* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при
    фокусе и назад не возвращают. Масштаб пальцами не запрещаем
    (maximum-scale в viewport), а лечим причину. Поле кода подписи (28 px)
