@@ -10022,11 +10022,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, f"Списание {doc['no']} проведено.")
         return redirect("/parts/write-offs")
 
+    # Движения - постранично: триста строк одной лентой на телефоне - это
+    # двадцать пять экранов. Позиция в адресе - «все движения» с её
+    # карточки, где видны только последние.
+    PART_MOVE_SORTS = {"when": "created_at", "part": "part_title", "kind": "kind",
+                       "qty": "qty"}
+    PART_CARD_MOVES = 20
+
     @app.get("/parts/moves")
     async def part_moves_page(request: Request) -> Response:
         kind = request.query_params.get("kind") or ""
-        return render(request, "part_moves.html", kind=kind,
-                      rows=await crm.part_moves(kind=kind or None, limit=300))
+        part_id = logic.parse_id(request.query_params.get("part"))
+        part = await crm.part(part_id) if part_id else None
+        rows = await crm.part_moves(kind=kind or None,
+                                    part_id=part["id"] if part else None, limit=10000)
+        tools = list_tools(request, rows, allowed=PART_MOVE_SORTS)
+        return render(request, "part_moves.html", kind=kind, part=part,
+                      rows=tools["rows"], tools=tools)
 
     @app.get("/parts/{part_id}")
     async def part_card(request: Request, part_id: int) -> Response:
@@ -10036,7 +10048,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "part.html", part=part,
                       stock=await crm.part_stock(part_id),
                       transit=(await crm.parts_in_transit()).get(part_id, 0),
-                      moves=await crm.part_moves(part_id=part_id, limit=100),
+                      # Последние движения; все - ссылкой на «Движения склада»
+                      # с этой позицией: сотня строк под карточкой на телефоне
+                      # уводила «Пересчёт» на десяток экранов вниз.
+                      moves=await crm.part_moves(part_id=part_id, limit=PART_CARD_MOVES + 1),
+                      moves_shown=PART_CARD_MOVES,
                       nodes=await crm.repair_nodes())
 
     @app.post("/parts/{part_id}/edit")

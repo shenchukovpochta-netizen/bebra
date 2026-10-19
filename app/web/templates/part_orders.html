@@ -19,14 +19,14 @@
 
 <div class="card">
   <h2>Что заказать</h2>
-  <table>
+  <table class="cards">
     <tr><th>Позиция</th><th class="num">Сколько</th><th>Откуда потребность</th><th class="opt">Наряд</th></tr>
     {% for n in needs %}
     <tr class="{% if n.covered %}muted{% endif %}">
-      <td>{% if n.part_id %}<a href="/parts/{{ n.part_id }}">{{ n.title }}</a>{% else %}{{ n.title }} <small class="muted">нет в номенклатуре</small>{% endif %}</td>
-      <td class="num">{% if n.covered %}—{% else %}{{ n.qty }}{% endif %}{% if n.transit %} <small class="muted">· в пути {{ n.transit }}</small>{% endif %}</td>
-      <td>{{ NEED_SOURCES[n.source] }}{% if n.edge %} <small class="muted">· на пределе</small>{% endif %}{% if n.covered %} <small class="muted">· уже едет, заказывать не надо</small>{% endif %}</td>
-      <td class="opt">{% if n.work_order_no %}<a href="/orders/{{ n.work_order_id }}">{{ n.work_order_no }}</a>{% if n.bike_code %} · № {{ n.bike_code }}{% endif %}{% else %}—{% endif %}</td>
+      <td data-label="Позиция">{% if n.part_id %}<a href="/parts/{{ n.part_id }}">{{ n.title }}</a>{% else %}{{ n.title }} <small class="muted">нет в номенклатуре</small>{% endif %}</td>
+      <td class="num" data-label="Сколько">{% if n.covered %}—{% else %}{{ n.qty }}{% endif %}{% if n.transit %} <small class="muted">· в пути {{ n.transit }}</small>{% endif %}</td>
+      <td data-label="Откуда потребность">{{ NEED_SOURCES[n.source] }}{% if n.edge %} <small class="muted">· на пределе</small>{% endif %}{% if n.covered %} <small class="muted">· уже едет, заказывать не надо</small>{% endif %}</td>
+      <td class="opt" data-label="Наряд">{% if n.work_order_no %}<a href="/orders/{{ n.work_order_id }}">{{ n.work_order_no }}</a>{% if n.bike_code %} · № {{ n.bike_code }}{% endif %}{% else %}—{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">Потребностей нет: остатки в норме, наряды запчастей не ждут.</td></tr>{% endfor %}
   </table>
@@ -42,15 +42,15 @@
 {% if current %}
 <div class="card">
   <h2>Заказ {{ current.no }} <span class="tag">{{ PART_ORDER_STATUSES[current.status] }}</span></h2>
-  <table>
+  <table class="cards">
     <tr><th>Позиция</th><th class="num">Кол-во</th>{% if money_ok %}<th class="num">Цена</th><th class="num">Сумма</th>{% endif %}<th>Откуда</th><th></th></tr>
     {% for i in items %}
     <tr>
-      <td><a href="/parts/{{ i.part_id }}">{{ i.title }}</a></td>
-      <td class="num">{{ i.qty }} {{ i.unit }}</td>
-      {% if money_ok %}<td class="num">{{ money(i.price) }}</td><td class="num">{{ money(i.price * i.qty) }}</td>{% endif %}
-      <td>{{ NEED_SOURCES[i.source] }}{% if i.work_order_no %} · <a href="/orders/{{ i.work_order_id }}">{{ i.work_order_no }}</a>{% endif %}</td>
-      <td>{% if can_edit(staff, 'inventory') %}<form method="post" action="/part-orders/{{ current.id }}/items/{{ i.id }}/delete"><button type="submit" class="ghost">убрать</button></form>{% endif %}</td>
+      <td data-label="Позиция"><a href="/parts/{{ i.part_id }}">{{ i.title }}</a></td>
+      <td class="num" data-label="Кол-во">{{ i.qty }} {{ i.unit }}</td>
+      {% if money_ok %}<td class="num" data-label="Цена">{{ money(i.price) }}</td><td class="num" data-label="Сумма">{{ money(i.price * i.qty) }}</td>{% endif %}
+      <td data-label="Откуда">{{ NEED_SOURCES[i.source] }}{% if i.work_order_no %} · <a href="/orders/{{ i.work_order_id }}">{{ i.work_order_no }}</a>{% endif %}</td>
+      <td data-label="Действие">{%- if can_edit(staff, 'inventory') -%}<form method="post" action="/part-orders/{{ current.id }}/items/{{ i.id }}/delete"><button type="submit" class="ghost">убрать</button></form>{%- endif -%}</td>
     </tr>
     {% else %}<tr><td colspan="6" class="muted">Заказ пуст.</td></tr>{% endfor %}
   </table>
@@ -74,20 +74,20 @@
 
 <div class="card">
   <h2>Заказы</h2>
-  <table>
+  <table class="cards">
     <tr><th>№</th><th>Дата</th><th>Поставщик</th><th class="num">Позиций</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}<th>Статус</th><th></th></tr>
     {% for o in orders %}
     <tr>
-      <td>{{ o.no }}</td>
-      <td>{{ o.created_at|dmy }}</td>
-      <td>{{ o.supplier_name or '—' }}</td>
-      <td class="num">{{ o.lines }}</td>
-      {% if money_ok %}<td class="num">{{ money(o.total) }}</td>{% endif %}
-      <td><span class="tag order-{{ 'done' if o.status == 'received' else ('cancelled' if o.status == 'cancelled' else 'in_work') }}">{{ PART_ORDER_STATUSES[o.status] }}</span></td>
-      <td>
-        {% if can_edit(staff, 'inventory') and o.status == 'ordered' %}
+      <td data-label="№">{{ o.no }}</td>
+      <td data-label="Дата">{{ o.created_at|dmy }}</td>
+      <td data-label="Поставщик">{{ o.supplier_name or '' }}</td>
+      <td class="num" data-label="Позиций">{{ o.lines }}</td>
+      {% if money_ok %}<td class="num" data-label="Сумма">{{ money(o.total) }}</td>{% endif %}
+      <td data-label="Статус"><span class="tag order-{{ 'done' if o.status == 'received' else ('cancelled' if o.status == 'cancelled' else 'in_work') }}">{{ PART_ORDER_STATUSES[o.status] }}</span></td>
+      <td data-label="Действие">
+        {%- if can_edit(staff, 'inventory') and o.status == 'ordered' -%}
         <form method="post" action="/part-orders/{{ o.id }}/receive"><button type="submit" class="ghost">Принять на склад</button></form>
-        {% elif o.doc_id %}<a href="/parts/receipts">приход</a>{% endif %}
+        {%- elif o.doc_id -%}<a href="/parts/receipts">приход</a>{%- endif -%}
       </td>
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Заказов не было.</td></tr>{% endfor %}

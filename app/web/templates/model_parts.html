@@ -18,18 +18,18 @@
 </div>
 
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>Модель</th><th class="opt">Великов</th><th>Нарядов</th><th class="opt">Штук</th>
       {% if money_ok %}<th>Запчасти</th><th>На велосипед</th><th class="opt">На велосипед в день</th>{% endif %}</tr>
   {% for r in rows %}
   <tr>
-    <td>{{ r.model }}</td>
-    <td class="num opt">{{ r.bikes or '—' }}</td>
-    <td class="num">{{ r.orders }}</td>
-    <td class="num opt">{{ r.qty }}</td>
-    {% if money_ok %}<td class="num">{{ money(r.cost) }}</td>
-    <td class="num">{% if r.per_bike is none %}<span class="muted">—</span>{% else %}{{ money(r.per_bike) }}{% endif %}</td>
-    <td class="num opt muted">{% if r.per_bike_day is none %}—{% else %}{{ money(r.per_bike_day) }}{% endif %}</td>{% endif %}
+    <td data-label="Модель">{{ r.model }}</td>
+    <td class="num opt" data-label="Великов">{{ r.bikes or '—' }}</td>
+    <td class="num" data-label="Нарядов">{{ r.orders }}</td>
+    <td class="num opt" data-label="Штук">{{ r.qty }}</td>
+    {% if money_ok %}<td class="num" data-label="Запчасти">{{ money(r.cost) }}</td>
+    <td class="num" data-label="На велосипед">{%- if r.per_bike is not none -%}{{ money(r.per_bike) }}{%- endif -%}</td>
+    <td class="num opt muted" data-label="На велосипед в день">{% if r.per_bike_day is none %}—{% else %}{{ money(r.per_bike_day) }}{% endif %}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="{{ 7 if money_ok else 4 }}" class="muted">За период запчасти в наряды не уходили.</td></tr>{% endfor %}
 </table>

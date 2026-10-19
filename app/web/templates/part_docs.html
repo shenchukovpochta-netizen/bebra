@@ -15,13 +15,13 @@
     {% if kind == 'receipt' %}
     <label>Поставщик <select name="supplier_id"><option value="">не указан</option>{% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></label>
     {% endif %}
-    <table>
+    <table class="cards">
       <tr><th>Позиция</th><th>Кол-во</th>{% if kind == 'receipt' %}<th>Цена за единицу</th>{% endif %}</tr>
       {% for i in range(8 if kind == 'receipt' else 5) %}
       <tr>
-        <td><select name="part_id_{{ i }}"><option value="">—</option>{% for p in parts %}<option value="{{ p.id }}">{{ p.title }}</option>{% endfor %}</select></td>
-        <td><input name="qty_{{ i }}" size="4" inputmode="numeric"></td>
-        {% if kind == 'receipt' %}<td><input name="price_{{ i }}" size="8"></td>{% endif %}
+        <td data-label="Позиция"><select name="part_id_{{ i }}" aria-label="Позиция, строка {{ i + 1 }}"><option value="">—</option>{% for p in parts %}<option value="{{ p.id }}">{{ p.title }}</option>{% endfor %}</select></td>
+        <td data-label="Кол-во"><input name="qty_{{ i }}" size="4" inputmode="numeric" aria-label="Кол-во, строка {{ i + 1 }}"></td>
+        {% if kind == 'receipt' %}<td data-label="Цена за единицу"><input name="price_{{ i }}" size="8" inputmode="decimal" aria-label="Цена за единицу, строка {{ i + 1 }}"></td>{% endif %}
       </tr>
       {% endfor %}
     </table>
@@ -34,17 +34,17 @@
 {% endif %}
 
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>№</th><th>Дата</th>{% if kind == 'receipt' %}<th>Поставщик</th>{% endif %}<th>Позиций</th>{% if can_view(staff, 'finance') %}<th>Сумма</th>{% endif %}<th class="opt">Комментарий</th><th class="opt">Кто</th></tr>
   {% for r in rows %}
   <tr>
-    <td>{{ r.no }}</td>
-    <td>{{ r.created_at|dmy }}</td>
-    {% if kind == 'receipt' %}<td>{{ r.supplier_name or '—' }}</td>{% endif %}
-    <td class="num">{{ r.lines }}</td>
-    {% if can_view(staff, 'finance') %}<td class="num">{{ money(r.total) }}</td>{% endif %}
-    <td class="opt">{{ r.note or '' }}</td>
-    <td class="opt muted">{{ r.created_by or '' }}</td>
+    <td data-label="№">{{ r.no }}</td>
+    <td data-label="Дата">{{ r.created_at|dmy }}</td>
+    {% if kind == 'receipt' %}<td data-label="Поставщик">{{ r.supplier_name or '' }}</td>{% endif %}
+    <td class="num" data-label="Позиций">{{ r.lines }}</td>
+    {% if can_view(staff, 'finance') %}<td class="num" data-label="Сумма">{{ money(r.total) }}</td>{% endif %}
+    <td class="opt" data-label="Комментарий">{{ r.note or '' }}</td>
+    <td class="opt muted" data-label="Кто">{{ r.created_by or '' }}</td>
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Документов нет.</td></tr>{% endfor %}
 </table>

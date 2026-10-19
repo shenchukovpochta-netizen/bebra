@@ -1,27 +1,34 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Движения склада — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Движения склада</h1>
   {% with active = 'moves' %}{% include "_parts_tabs.html" %}{% endwith %}
   <form method="get" class="search">
+    {% if part %}<input type="hidden" name="part" value="{{ part.id }}">{% endif %}
     <select name="kind"><option value="">все движения</option>{% for code, label in MOVE_KINDS.items() %}<option value="{{ code }}" {% if kind == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
     <button type="submit">Показать</button>
   </form>
 </div>
+{% if part %}
+<p>Позиция <a href="/parts/{{ part.id }}">{{ part.title }}</a> ·
+  <a href="/parts/moves{% if kind %}?kind={{ kind|urlencode }}{% endif %}">все позиции</a></p>
+{% endif %}
 <div class="card">
-<table>
-  <tr><th>Когда</th><th>Позиция</th><th>Что</th><th class="num">Кол-во</th>{% if can_view(staff, 'finance') %}<th class="num">Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
+<table class="cards">
+  <tr>{{ list.th('Когда', 'when', tools) }}{{ list.th('Позиция', 'part', tools) }}{{ list.th('Что', 'kind', tools) }}{{ list.th('Кол-во', 'qty', tools, 'num') }}{% if can_view(staff, 'finance') %}<th class="num">Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
   {% for m in rows %}
   <tr>
-    <td>{{ m.created_at|dmy }}</td>
-    <td><a href="/parts/{{ m.part_id }}">{{ m.part_title }}</a></td>
-    <td>{{ MOVE_KINDS[m.kind] }}{% if m.note %} <small class="muted">{{ m.note }}</small>{% endif %}</td>
-    <td class="num {% if m.qty > 0 %}ok{% else %}bad{% endif %}">{{ '%+d'|format(m.qty) }} {{ m.part_unit }}</td>
-    {% if can_view(staff, 'finance') %}<td class="num">{{ money(m.cost) }}</td>{% endif %}
-    <td class="opt">{% if m.order_no %}<a href="/orders/{{ m.order_id }}">{{ m.order_no }}</a>{% else %}{{ m.doc_no or '—' }}{% endif %}</td>
-    <td class="opt muted">{{ m.created_by or '' }}</td>
+    <td data-label="Когда">{{ m.created_at|dmy }}</td>
+    <td data-label="Позиция"><a href="/parts/{{ m.part_id }}">{{ m.part_title }}</a></td>
+    <td data-label="Что">{{ MOVE_KINDS[m.kind] }}{% if m.note %} <small class="muted">{{ m.note }}</small>{% endif %}</td>
+    <td class="num {% if m.qty > 0 %}ok{% else %}bad{% endif %}" data-label="Кол-во">{{ '%+d'|format(m.qty) }} {{ m.part_unit }}</td>
+    {% if can_view(staff, 'finance') %}<td class="num" data-label="Себест.">{{ money(m.cost) }}</td>{% endif %}
+    <td class="opt" data-label="Документ">{% if m.order_no %}<a href="/orders/{{ m.order_id }}">{{ m.order_no }}</a>{% else %}{{ m.doc_no or '—' }}{% endif %}</td>
+    <td class="opt muted" data-label="Кто">{{ m.created_by or '' }}</td>
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Движений нет.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/parts/moves', 7) }}
 </table>
 </div>
 {% endblock %}
