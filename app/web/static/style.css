@@ -331,6 +331,11 @@ a.tile:hover{text-decoration:none;border-color:var(--line-strong);background:var
 .tile small,.tile>.bar-track{order:2}
 .tile small{display:block;margin-top:2px;color:var(--muted);text-transform:none;letter-spacing:0;font:600 12px/1.45 var(--font-mono)}
 .tile.hot b{color:var(--bad)}.tile.good b{color:var(--ok)}.tile.warn b{color:var(--warn)}
+/* Число-ссылка красится как плитка, а не как ссылка: иначе «−8 до нормы»
+   у плитки парка выглядело бы обычным числом. Подпись .bad/.warn/.ok -
+   цветом, а не приглушённым .tile small. */
+.tile.hot b a,.tile.good b a,.tile.warn b a{color:inherit}
+.tile small.bad{color:var(--bad)}.tile small.warn{color:var(--warn)}.tile small.ok{color:var(--ok)}
 
 /* Таблица - как таблица данных образца: шапка мелким моно капсом, строка
    повыше, числа моноширинным вправо, наведение - чуть светлее. */
@@ -991,13 +996,58 @@ h1.hero-title{font:700 30px/1.1 var(--font-text);letter-spacing:-.03em;margin:0 
 .hero-chips .task:hover{background:var(--card);transform:translateY(-1px)}
 .hero-chips .task .n{order:2;min-width:24px;height:24px;padding:0 7px;border-radius:99px;display:grid;place-items:center;
   background:var(--accentbg);color:var(--accent-ink);font:700 12px/1 var(--font-mono);text-align:center}
-.hero-chips .task:is(.hc-overdue,.hc-theft,.hc-search,.hc-tasks_late) .n{background:var(--badbg);color:var(--bad)}
+.hero-chips .task.hot .n{background:var(--badbg);color:var(--bad)}
 .hero-chips .task .t{font-size:13px;font-weight:600}
 .hero-chips .task .t small{display:none}
+/* «Критично» тремя группами: подпись группы слева, плашки справа. */
+.hero-group{display:flex;gap:6px 14px;align-items:center;margin-top:10px}
+.hero-label{flex:0 0 92px;font:500 11px/1.2 var(--font-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.hero-group .hero-chips{flex:1 1 auto;min-width:0}
 @media (max-width:640px){
+  .hero-group{flex-direction:column;align-items:stretch;margin-top:12px}
+  .hero-label{flex:none}
   .hero{padding:20px 18px}h1.hero-title{font-size:20px}
   /* плашки - одной строкой с прокруткой вбок, как в образце */
   .hero-chips{flex-wrap:nowrap;overflow-x:auto;margin:0 -18px;padding:4px 18px;scrollbar-width:none}
   .hero-chips::-webkit-scrollbar{display:none}
   .hero-chips .task{flex:0 0 auto;white-space:nowrap}
 }
+
+/* ── сводка: план-факт, календарь, парк ──
+   Месяц листается стрелками у заголовка; второстепенное (форма плана,
+   доход по точкам, «стоят дольше всех») - под раскрытием details.more. */
+.month-nav{white-space:nowrap}
+.month-nav a{display:inline-block;min-width:22px;text-align:center;font-weight:700}
+h2 .tag{vertical-align:middle;font-size:11px}
+details.more{margin:14px 0 4px}
+details.more>summary{cursor:pointer;color:var(--link);font-weight:700;list-style:none;padding:4px 0}
+details.more>summary::-webkit-details-marker{display:none}
+details.more>summary::before{content:"▸";display:inline-block;width:1.1em;color:var(--muted)}
+details.more[open]>summary::before{content:"▾"}
+details.more[open]>summary{margin-bottom:10px}
+/* Полоса плана: заливка - пришло, черта - где был бы ровный темп. */
+.bar-track.pace-track{position:relative;overflow:visible}
+.bar-track .pace{position:absolute;top:-4px;width:2px;height:12px;margin-left:-1px;border-radius:1px;background:var(--text)}
+/* Плитки парка - семь статусов одним рядом: числа короткие. */
+@media (min-width:641px){.tiles.park{grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:14px}
+  .tiles.park .tile{padding:18px 18px 14px}}
+/* Платёжный календарь столбиками: приход и расход дня рядом, в одном масштабе. */
+.cal-bars{height:150px}
+.cal-bars .bar-col{min-width:30px}
+.cal-pair{flex:1 1 auto;display:flex;align-items:flex-end;gap:2px;width:100%}
+.cal-pair .bar-val{flex:1 1 0}
+.cal-bars .bar-num{margin:0 0 3px;white-space:nowrap}
+.cal-bars .bar-day{margin-top:4px;text-align:center}
+.cal-bars .weekend .bar-day{color:var(--faint)}
+.cal-bars .bar-day.bad{color:var(--bad);font-weight:700}
+@media (max-width:640px){.cal-bars{gap:3px}.cal-bars .bar-col{min-width:18px}
+  /* Таблицы сводки, что остаются таблицами на телефоне: поля уже,
+     заголовок переносится - иначе пятая колонка уезжала за край. */
+  table.compact th,table.compact td{padding-left:6px;padding-right:6px}
+  table.compact th{white-space:normal;letter-spacing:0}
+  /* «· 12 аренд» у суммы дня - подсказкой: на телефоне колонка «Придёт»
+     с ним выталкивала остаток за край. */
+  table.cal-mini .cal-cnt{display:none}}
+.cal-start{margin:0 0 12px}
+.cal-start label{display:inline-flex;align-items:center;gap:8px;margin:0}
+table.cal-mini td small{display:block;font-size:12px;line-height:1.35}

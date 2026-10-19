@@ -159,7 +159,7 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
         soon = [r for r in rows if r not in overdue]
         groups.append(_group(
             "overdue", "Просрочка и платёж сегодня — позвонить", "hot", "rentals",
-            "/?expiring=all" if logic.can_view(staff, "dashboard") else "/rentals",
+            logic.EXPIRING_URL,
             [_rental_item(r, money_ok=money_ok, point=point) for r in overdue]))
         search = search or {}
         wanted = [r for r in (*search.get("searching", ()), *search.get("candidates", ()))
@@ -176,7 +176,7 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
              for r in wanted]))
         groups.append(_group(
             "soon", "Истекает на днях — напомнить", "warn", "rentals",
-            "/?expiring=all" if logic.can_view(staff, "dashboard") else "/rentals",
+            logic.EXPIRING_URL,
             [_rental_item(r, money_ok=money_ok, point=point) for r in soon]))
 
     if logic.can_view(staff, "trackers"):

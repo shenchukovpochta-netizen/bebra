@@ -20,7 +20,7 @@ import re
 import secrets
 import time
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -67,6 +67,7 @@ from ..crm import (
     tasks,
     team,
 )
+from ..crm import dashboard as dash  # «dashboard» - имя маршрута сводки
 from ..services import contract as contract_service
 from ..services import tochka
 from . import nav
@@ -147,8 +148,6 @@ TOO_LARGE_PAGE = (
 # чужие файлы или пускает в базу чужие данные, закрыто здесь одним
 # списком, а не проверкой в каждом обработчике: новый маршрут под тем же
 # префиксом закрыт сам.
-# Сколько истекающих аренд показывает сводка; остальные - по ссылке.
-EXPIRING_SHOWN = 12
 DEMO_BLOCKED_PATHS = frozenset({
     "/me/password",           # сменённый пароль запер бы демо для всех
     "/payments/acquiring",    # проверка эквайринга - запрос в банк
@@ -1682,150 +1681,176 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/")
     async def dashboard(request: Request) -> Response:
+        """Сводка - картина сети, а не список дел: «Критично» (клиенты,
+        задачи, проблемы), план-факт месяца, платёжный календарь на две
+        недели, три числа и парк, точки за месяц. Дела точки - прозвон,
+        заявки, «Я оплатил» - живут в «Задачах дня» и во «Входящих»."""
         rentals = await crm.active_rentals()
-        rows = []
-        for r in rentals:
-            s = summarize(r, r.get("balance", 0))
-            rows.append({**r, "summary": s})
+        rows = [{**r, "summary": summarize(r, r.get("balance", 0))} for r in rentals]
         today = date.today()
+        now = datetime.now().astimezone()
+        money_ok = may_view(request, "finance")
         expiring = logic.expiring(rows, today=today, before_days=cfg.remind_before_days)
         bikes_by = await crm.bike_counts()
         fleet = await crm.bikes(limit=10000)
         own_batteries = await crm.batteries(limit=10000)
-        # Одно окно на три числа и блок «По точкам»: итог точек обязан
-        # совпасть с плитками над ним, а два вызова now() разошлись бы.
-        window_end = datetime.now().astimezone()
-        window_start = window_end - timedelta(days=logic.POINTS_PERIOD_DAYS)
-        metrics = await period_metrics(since=window_start, until=window_end)
+        # Три числа - 30 дней до этой минуты, то же окно, что у отчёта «По
+        # точкам» по умолчанию.
+        metrics = await period_metrics(
+            since=now - timedelta(days=logic.POINTS_PERIOD_DAYS), until=now)
         settings = await crm.settings()
         places = await crm.locations()
+        active_places = [p["name"] for p in places if p.get("active")]
         operational = sum(bikes_by.get(s, 0) for s in logic.OPERATIONAL_STATUSES)
         plan = await network_plan(settings, bikes_by, places)
-        # Месяц листается стрелками: прошлый - целиком, текущий - по
-        # сегодняшний день, вперёд листать некуда, назад - до начала истории.
+        # Месяц сводки один на план-факт и точки: стрелки листают оба, и
+        # выручка точек в сумме - ровно факт плана. Окно - то же, что у
+        # отчёта «По точкам» за месяц (report_period): текущий - по эту
+        # минуту, вперёд листать некуда, назад - до начала истории.
+        floor = await history_floor(today)
         span = logic.month_bounds(
             logic.month_from(request.query_params.get("month"), today=today),
-            today=today, floor=await history_floor(today))
-        first, next_month = span["first"], span["next"]
-        month_metrics = await period_metrics(
-            since=datetime.combine(first, datetime.min.time()).astimezone(),
-            until=(datetime.now().astimezone() if span["is_current"] else
-                   datetime.combine(next_month, datetime.min.time()).astimezone()))
+            today=today, floor=floor)
+        period = logic.report_period({"month": span["key"]}, now=now, floor=floor)
+        month_start, month_end = period["start"], period["end"]
+        month_metrics = await period_metrics(since=month_start, until=month_end)
+        coverage = logic.month_coverage(month_start, month_end,
+                                        start=(await crm.history_starts())["status"])
         soon = logic.freeing_soon(rows, today=today)
-        # Плитки денег - за ТОТ ЖЕ месяц, что и всё остальное на сводке.
-        # Раньше здесь стояло первое число сегодняшнего месяца без верхней
-        # границы: оператор листал стрелкой на август, а плитки над планом
-        # продолжали показывать сентябрь.
-        month_totals = await crm.ledger_totals(since=first, until=span["last"])
-        # Деньги по дням месяца: столбики «пришло», линия накопленного
-        # долга и пунктир плана в день. Помесячных чисел мало - по ним
-        # не видно, в какой день всё пошло не так.
-        chart = logic.money_chart(
-            await crm.money_by_day(first, span["last"]),
-            plan_per_day=plan["per_day"], today=span["today"])
-        # Задачи на сегодня: один список поверх виджетов. Каждый источник
-        # читается тем же запросом, что и его раздел, - список не вправе
-        # показывать не то, что покажет раздел.
         bookings = await crm.bookings(status="new")
         # Переброска и простой - та же выборка, что в отчёте по точкам и на
-        # странице точки: строка задачи ведёт туда, где то же самое.
+        # странице точки: совет на сводке ведёт туда, где то же самое.
         advice = await point_advice(places, fleet, rentals=rows, bookings=bookings,
                                     settings=settings)
+        # «Критично» и советы по парку - из тех же задач, что у разделов
+        # (today_tasks). Заявки на выдачу и «Я оплатил» сюда не идут: это
+        # работа точки, она во «Входящих» и в «Задачах дня».
         tasks = logic.today_tasks(
             expiring=expiring,
             search=logic.search_rows(rentals, settings=logic.search_settings(settings),
                                      today=today),
             orders=await crm.work_orders(open_only=True, limit=500),
-            claims=await crm.pending_claims(),
-            bookings=bookings,
             alerts=await crm.tracker_alerts(open_only=True, limit=500),
             transfers=(advice["transfer"] or {}).get("moves", ()),
             idle=advice["idle"], today=today,
             repair_norm=logic.repair_norm_default(settings))
-        # Критичное сверх задач: просроченные поручения, расхождения парка,
-        # кто ждёт ответа. Каждая строка - тому, кому открыт её адрес.
-        critical: list[dict[str, Any]] = []
+        # Сверх задач: просроченные поручения, расхождения парка, кто ждёт
+        # ответа. Каждая строка - тому, кому открыт её раздел (dash.critical).
+        extra: list[dict[str, Any]] = []
         late = [t for t in await crm.tasks(status="open")
                 if t.get("due_on") is not None and t["due_on"] < today]
         if late:
-            critical.append({"code": "tasks_late", "title": "Просроченные поручения",
-                             "count": len(late), "url": "/tasks", "section": None,
-                             "names": [t["title"] for t in late[:3]]})
+            extra.append({"code": "tasks_late", "title": "Просроченные поручения",
+                          "count": len(late), "url": "/tasks", "level": "hot",
+                          "names": [t["title"] for t in late[:3]]})
+        # Должники - одним чтением на сводку: весь список нужен календарю
+        # (долги к сбору), первые 200 - расхождениям, как в их отчёте,
+        # первые 10 - блоку «Должники». Порядок у запроса один.
+        debtors = await crm.debtors(5000) if money_ok else []
         if may_view(request, "bikes"):
             # Те же правила, что у отчёта «Расхождения», на уже прочитанном
             # парке и арендах сводки - без второго чтения всего парка.
             issues = logic.integrity_issues(
-                fleet, rentals, await crm.open_orders_by_bike(),
-                await crm.debtors(200) if may_view(request, "finance") else [],
+                fleet, rentals, await crm.open_orders_by_bike(), debtors[:200],
                 batteries=own_batteries)
             if issues:
-                critical.append({"code": "integrity", "title": "Расхождения парка и аренд",
-                                 "count": len(issues), "url": "/reports/integrity",
-                                 "section": "bikes", "names": []})
-        waiting = (await crm.inbox_open_count()) if may_view(request, "inbox") else 0
+                extra.append({"code": "integrity", "title": "Расхождения парка и аренд",
+                              "count": len(issues), "url": "/reports/integrity",
+                              "level": "warn", "names": []})
+        waiting = (await crm.inbox_open_count()) if may_view(request, "inbox") else None
         if waiting:
-            critical.append({"code": "inbox", "title": "Ждут ответа в сообщениях",
-                             "count": waiting, "url": "/incoming", "section": "inbox",
-                             "names": []})
-        month_since = datetime.combine(first, datetime.min.time()).astimezone()
-        month_until = (datetime.now().astimezone() if span["is_current"] else
-                       datetime.combine(next_month, datetime.min.time()).astimezone())
-        income = cashflow.income(
-            await crm.money_by_location(month_since, month_until),
-            await crm.repair_income_by_location(month_since, month_until),
-            [p["name"] for p in places if p.get("active")])
-        week = cashflow.week_ahead(cashflow.calendar(
-            rows, await crm.cash_plan(until=today + timedelta(days=7)), start=today, days=7))
+            extra.append({"code": "inbox", "title": "Ждут ответа в сообщениях",
+                          "count": waiting, "url": "/incoming", "level": "warn",
+                          "names": []})
+        # Деньги - только с правом на финансы, и запросы за ними тоже: без
+        # права их всё равно некуда показать.
+        money: dict[str, Any] = {}
+        # Деньги точек за месяц сводки - одно чтение на доход по статьям и
+        # на таблицу точек: окно у них одно.
+        month_money = (await crm.money_by_location(month_start, month_end)
+                       if money_ok or len(active_places) > 1 else None)
+        if money_ok:
+            # Прошлый период - тот же отрезок прошлого месяца (октябрь по
+            # 18-е 15:00 против сентября по 18-е 15:00), закончившийся
+            # месяц - против целого прошлого, как в «Главном» отчётов.
+            prev = logic.report_prev_span(period, now=now)
+            income = cashflow.income(
+                month_money,
+                await crm.repair_income_by_location(month_start, month_end), active_places)
+            income_prev = cashflow.income(
+                await crm.money_by_location(prev["start"], prev["end"]),
+                await crm.repair_income_by_location(prev["start"], prev["end"]),
+                active_places)
+            prev_whole = None
+            if span["is_current"] and prev["end"] < month_start:
+                prev_whole = await crm.rental_revenue(prev["start"], month_start)
+            month_totals = await crm.ledger_totals(since=span["first"], until=span["last"])
+            # Платёжный календарь на две недели - тем же построителем, что
+            # /finance/calendar; остаток на сегодня вводит человек.
+            debts = sum((-Decimal(d["balance"]) for d in debtors), Decimal(0))
+            chart = logic.money_chart(
+                await crm.money_by_day(span["first"], span["last"]),
+                plan_per_day=plan["per_day"], today=span["today"])
+            cal = cashflow.calendar(
+                rows, await crm.cash_plan(until=today + timedelta(days=dash.CALENDAR_DAYS - 1)),
+                start=today, days=dash.CALENDAR_DAYS,
+                opening=cashflow.parse_opening(request.query_params.get("start")), debts=debts)
+            money = {
+                "prev": prev, "income": income,
+                "lines": dash.income_compare(income, income_prev),
+                "vs_prev": dash.change(month_metrics.get("revenue") or 0,
+                                       income_prev["total"]["rent"]),
+                "prev_whole": prev_whole, "month": month_totals,
+                # Доля баллов от оплат: «0,1 %» - это скидка, «20 %» - уже
+                # бизнес-модель, и это видно сразу.
+                "bonus_share": logic.bonus_totals(
+                    [{"kind": "all", "amount": month_totals.get("bonus", 0)}],
+                    month_totals.get("payment", 0))["share"],
+                "calendar": cal, "strip": dash.calendar_strip(cal),
+                "start_raw": request.query_params.get("start") or "",
+                "chart": chart, "chart_total": logic.cumulative(chart["days"]),
+                "progress": logic.plan_progress(
+                    plan, month_metrics, days_in_month=span["days"],
+                    days_passed=span["passed"])}
+        # Сравнение точек за месяц сводки - когда есть что сравнивать: с
+        # одной точкой таблица повторяла бы общие числа. Тот же построитель,
+        # что у /reports/points?month=, план точек - тем же ровным темпом.
+        points = None
+        if len(active_places) > 1:
+            points = logic.points_plan(
+                await points_report(places, fleet, month_start, month_end,
+                                    money=month_money),
+                check=logic.month_plan(settings)["base_check"],
+                days=period["days"], passed=period["passed"])
+        spare = sum(1 for b in fleet if b.get("spare")
+                    and b.get("status") in logic.OPERATIONAL_STATUSES)
         return render(request, "dashboard.html",
-                      critical=critical, income=income, week=week,
+                      critical=dash.critical(
+                          tasks, extra, can=lambda section: may_view(request, section)),
+                      advice=dash.fleet_advice(
+                          tasks, can_view=lambda section: may_view(request, section),
+                          can_edit=lambda section: may_edit(request, section)),
+                      setup=await setup_wanted(request.state.staff, settings),
+                      inbox_waiting=waiting, bot_state=await bot_health(),
+                      plan=plan, span=span, coverage=coverage, money_data=money,
+                      chart_view=request.query_params.get("chart") or "days",
                       place_ids={p["name"]: p["id"] for p in places},
-                      tasks=tasks, setup=await setup_wanted(request.state.staff, settings),
-                      inbox_waiting=(await crm.inbox_open_count()
-                                     if may_view(request, "inbox") else None),
-                      plan=plan, span=span, bot_state=await bot_health(),
-                      progress=logic.plan_progress(
-                          plan, month_metrics,
-                          days_in_month=span["days"],
-                          days_passed=span["passed"]),
-                      soon=soon,
-                      counts=await crm.counts(), bikes=bikes_by,
-                      operational=operational,
-                      tiles=logic.fleet_tiles(
-                          bikes_by, plan,
-                          spare=sum(1 for b in fleet if b.get("spare")
-                                    and b.get("status") in logic.OPERATIONAL_STATUSES)),
+                      counts=await crm.counts(), bikes=bikes_by, operational=operational,
+                      park=dash.fleet_tiles(bikes_by, plan, spare=spare),
+                      models=dash.fleet_by_model(fleet),
                       metrics=metrics, losses=logic.fleet_losses(metrics),
                       loss_today=logic.loss_per_day(bikes_by),
-                      # Кто именно стоит и почём: список с деньгами -
-                      # это решение, а плитка «в ремонте 7» - только повод
-                      # сходить в сервис и посмотреть.
+                      # Кто именно стоит и почём: список с деньгами - это
+                      # решение, а плитка «в ремонте 7» - только повод.
                       standing=await standing_bikes(fleet),
                       amortization=logic.amortization_total(fleet, own_batteries),
                       idle_by_location=idle_by_location(
                           fleet, logic.point_choices(places)),
-                      # Сравнение точек - когда есть что сравнивать: с одной
-                      # точкой блок повторял бы три числа над ним.
-                      points=(await points_report(places, fleet, window_start,
-                                                  window_end)
-                              if sum(1 for p in places if p.get("active")) > 1
-                              else None),
-                      claims=await crm.pending_claims(), rentals=rows,
-                      # Сводка - самые срочные: при полутора сотнях аренд на
-                      # «ближайшие два дня» приходится десятки строк, и блок
-                      # уезжал на весь экран. Весь список - по ссылке.
-                      expiring=(expiring if request.query_params.get("expiring") == "all"
-                                else expiring[:EXPIRING_SHOWN]),
-                      expiring_total=len(expiring), before_days=cfg.remind_before_days,
+                      points=points,
+                      # Прогноз освобождения - по «оплачено до», сказавшие
+                      # «продлю» из него выпадают: их велосипед не вернётся.
                       forecast=logic.forecast_summary(bikes_by.get("available", 0), soon),
-                      debtors=await crm.debtors(10),
-                      month=month_totals, chart=chart,
-                      chart_total=logic.cumulative(chart["days"]),
-                      chart_view=request.query_params.get("chart") or "days",
-                      # Доля баллов от оплат: «0,1 %» - это скидка,
-                      # «20 %» - уже бизнес-модель, и это видно сразу.
-                      bonus_share=logic.bonus_totals(
-                          [{"kind": "all", "amount": month_totals.get("bonus", 0)}],
-                          month_totals.get("payment", 0))["share"])
+                      debtors=debtors[:10])
 
     # ─────────── платёжный календарь (app/crm/cashflow.py) ───────────
 
@@ -1839,15 +1864,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         today = date.today()
         days = int(p.get("days")) if (p.get("days") or "").isdigit() else 30
         days = days if days in cashflow.HORIZONS else 30
-        opening = None
-        raw = (p.get("start") or "").replace(" ", "").replace("\u00a0", "").replace(",", ".")
-        if raw:
-            try:
-                value = Decimal(raw)
-                opening = (logic.to_money(value)
-                           if value.is_finite() and abs(value) < 10**10 else None)
-            except (InvalidOperation, ValueError):
-                opening = None
+        opening = cashflow.parse_opening(p.get("start"))
         place = p.get("location") or ""
         debts = sum((-Decimal(d["balance"]) for d in await crm.debtors(5000)), Decimal(0))
         cal = cashflow.calendar(
@@ -2076,12 +2093,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                    await crm.rental_revenue(since, until))
 
     async def points_report(places: list[dict], fleet: list[dict], since: datetime,
-                            until: datetime, *, full: bool = False) -> dict:
+                            until: datetime, *, full: bool = False,
+                            money: Any = None) -> dict:
         """Сравнение точек за [since, until): logic.points_rows поверх
         ответов *_by_location. Одна функция на сводку, отчёт и страницу
         точки - иначе числа одной точки на трёх экранах разошлись бы.
         Сводке нужны только три числа (full=False): аренды, долг, касса и
-        сервис - лишние запросы на каждое её открытие."""
+        сервис - лишние запросы на каждое её открытие. money - уже
+        прочитанный money_by_location за то же окно (сводка берёт его и
+        для дохода по статьям), иначе читается здесь."""
         extra: dict[str, Any] = {}
         if full:
             extra = {"rentals": await crm.rentals_by_location(since, until),
@@ -2091,7 +2111,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return logic.points_rows(
             places, bikes=fleet,
             days=await crm.bike_days_by_location(since, until),
-            money=await crm.money_by_location(since, until), **extra)
+            money=money if money is not None else await crm.money_by_location(since, until),
+            **extra)
 
     def idle_by_location(fleet: list[dict], names: list[str]) -> list[dict]:
         """Где стоят простаивающие велосипеды: по точкам, свободные отдельно
@@ -2494,13 +2515,24 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                   "client": "full_name", "idle": "idle_days",
                   "frame": "frame_no", "motor": "motor_no"}
 
+    def bike_filter(request: Request) -> dict[str, Any]:
+        """Фильтры парка из адреса - одни на экран и на выгрузку. status
+        через запятую - несколько статусов («ремонт и ТО» со сводки), model -
+        модель ровно как в парке (ссылки «По моделям»), q - подстрока."""
+        p = request.query_params
+        status = p.get("status") or ""
+        return {"q": p.get("q") or None,
+                "status": (status.split(",") if "," in status else status) or None,
+                "location": p.get("location") or None,
+                "model": (p.get("model") or "").strip() or None}
+
     @app.get("/bikes")
     async def bikes(request: Request) -> Response:
         q = request.query_params.get("q") or ""
         status = request.query_params.get("status") or ""
         location = request.query_params.get("location") or ""
-        rows = await crm.bikes(q=q or None, status=status or None,
-                               location=location or None, limit=10000)
+        filters = bike_filter(request)
+        rows = await crm.bikes(**filters, limit=10000)
         since = await crm.bike_status_since()
         now = datetime.now(UTC)
         for bike in rows:
@@ -2509,7 +2541,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                  else None)
         tools = list_tools(request, rows, allowed=BIKE_SORTS)
         return render(request, "bikes.html", q=q, status=status, location=location,
-                      places=await filter_points(location),
+                      model=filters["model"] or "", places=await filter_points(location),
                       rows=tools["rows"], tools=tools,
                       views=await views_of(request, "/bikes"),
                       counts=await crm.bike_counts())
@@ -2520,10 +2552,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         видят, а не «всё вообще»."""
         if not may_view(request, "bikes"):
             return denied(request, "bikes")
-        rows = await crm.bikes(q=request.query_params.get("q") or None,
-                               status=request.query_params.get("status") or None,
-                               location=request.query_params.get("location") or None,
-                               limit=10000)
+        rows = await crm.bikes(**bike_filter(request), limit=10000)
         money_ok = may_view(request, "finance")
         header = ["Номер", "Модель", "Статус", "Точка", "Госномер", "Пробег, км",
                   "Номер рамы", "VIN мотора", "Клиент", "Заведён"]

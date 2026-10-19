@@ -101,8 +101,6 @@ class TestCalendar(unittest.TestCase):
         self.assertEqual(other["total"]["rent"], D("0.00"), "аренда чужой точки не видна")
         self.assertEqual(other["total"]["plan_out"], D("10000.00"), "общий расход - всем")
         self.assertIsNone(other["gap"], "без остатка разрыва не определить")
-        week = cashflow.week_ahead(cal)
-        self.assertEqual((week["rent"], week["count"]), (D("3000.00"), 1))
 
     def test_parse_plan(self):
         got, problem = cashflow.parse_plan({"title": "Аренда", "due_on": "2026-10-10",
@@ -151,7 +149,7 @@ class TestCashPages(WebCase):
         self.assertIn("Критично", page)
         self.assertIn("Просроченные поручения", page)
         self.assertIn("Доход по статьям", page)
-        self.assertIn("сторонний ремонт", page)
+        self.assertIn("Сторонний ремонт", page)
 
     def test_rights(self):
         profile = run(self.crm.access_profile_by_code("tech"))

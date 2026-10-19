@@ -218,10 +218,16 @@ def parse_plan(data: Mapping[str, str], *, today: date
             "note": (data.get("note") or "").strip()[:500] or None}, None
 
 
-def week_ahead(cal: Mapping[str, Any], days: int = 7) -> dict[str, Any]:
-    """Сводке: ближайшая неделя календаря одной строкой."""
-    rows = list(cal["days"])[:days]
-    return {"rent": logic.to_money(sum((r["rent"] for r in rows), ZERO)),
-            "plan_out": logic.to_money(sum((r["plan_out"] for r in rows), ZERO)),
-            "plan_in": logic.to_money(sum((r["plan_in"] for r in rows), ZERO)),
-            "count": sum(r["rent_count"] for r in rows)}
+def parse_opening(raw: Any) -> Decimal | None:
+    """Остаток на сегодня из адреса («120 000», «-5000,50»). Мусор и
+    нелепые суммы - «не задан»: календарь откроется и без остатка, просто
+    без кассового разрыва. Один разбор на календарь и сводку."""
+    text = str(raw or "").replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    if not text:
+        return None
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return logic.to_money(value) if value.is_finite() and abs(value) < 10**10 else None
+

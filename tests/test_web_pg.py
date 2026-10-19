@@ -219,7 +219,7 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
         start = await self.crm.history_start()
         self.assertEqual(start.astimezone(logic.MOSCOW).date(), date(2025, 1, 31))
         self.assertNotIn('title="прошлый месяц"', await self.get_ok("/?month=2025-01"))
-        self.assertIn('/?month=2025-01" title="прошлый месяц"',
+        self.assertIn('/?month=2025-01#plan" title="прошлый месяц"',
                       await self.get_ok("/?month=2025-02"))
 
     async def test_first_run_wizard_on_a_fresh_schema(self):
@@ -303,7 +303,7 @@ class TestPanelOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ул. Декабристов, 1", point)
         self.assertIn("Денисов Дмитрий", await self.get_ok(
             "/rentals?location=%D0%94%D0%B5%D0%BA%D0%B0%D0%B1%D1%80%D0%B8%D1%81%D1%82%D0%BE%D0%B2"))
-        self.assertIn("По точкам за 30 дней", await self.get_ok("/"))
+        self.assertIn('id="points"', await self.get_ok("/"))
         self.assertIn("map-place", await self.get_ok("/map"))
 
         await self.post(f"/locations/{dek['id']}/rename", name="Декабристов 1")

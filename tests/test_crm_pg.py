@@ -3150,6 +3150,31 @@ class TestOpsAndFixesOnPostgres(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pg, want)
                 self.assertEqual([b["code"] for b in await fake.bikes(q=query)], pg)
 
+    async def test_bike_list_exact_model_and_several_statuses(self):
+        """Ссылки «По моделям» со сводки: модель - точным совпадением (без
+        пробелов по краям), а не подстрокой, статусов - несколько сразу
+        («ремонт и ТО»). Так же на заглушке."""
+        from tests.fake_crm import FakeCrm
+
+        fake = FakeCrm()
+        for crm in (self.crm, fake):
+            for code, model, status in (
+                    ("201", "Truck +", "repair"), ("202", "Truck + ", "maintenance"),
+                    ("203", "Truck +", "available"),
+                    ("204", "Truck + с амортизаторами", "repair")):
+                await crm.create_bike(code=code, model=model, status=status)
+        cases = (({"model": "Truck +"}, ["201", "202", "203"]),
+                 ({"model": "Truck +", "status": ["repair", "maintenance"]},
+                  ["201", "202"]),
+                 ({"model": "Truck +", "status": "repair"}, ["201"]),
+                 ({"status": ("repair", "maintenance")}, ["201", "202", "204"]),
+                 ({"model": "Truck"}, []))
+        for kwargs, want in cases:
+            with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
+                pg = [b["code"] for b in await self.crm.bikes(**kwargs)]
+                self.assertEqual(pg, want)
+                self.assertEqual([b["code"] for b in await fake.bikes(**kwargs)], pg)
+
     async def test_tech_work_groups_by_tech_like_the_fake(self):
         """Выработка техников: SQL группирует по имени и id, и два техника
         с одним именем - две строки. Заглушка склеивала их в одну."""

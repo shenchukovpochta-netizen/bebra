@@ -2385,7 +2385,7 @@ def intent_state(rental: dict, summary: dict, *, today: date) -> dict[str, Any]:
     Намерение записывается вместе с датой «оплачено до» на тот момент:
     сдвинулась дата - клиент заплатил или срок пересчитан, и старое «продлит»
     больше ничего не значит. Отложенная строка (snooze_until в будущем)
-    прячется из виджета до этой даты.
+    прячется из горящих до этой даты.
     """
     intent = rental.get("intent")
     if intent not in INTENTS or rental.get("intent_until") != summary.get("covered_until"):
@@ -2396,9 +2396,11 @@ def intent_state(rental: dict, summary: dict, *, today: date) -> dict[str, Any]:
 
 
 def expiring(rows: Iterable[dict], *, today: date, before_days: int) -> list[dict]:
-    """Строки виджета «истекает аренда»: у кого платёж в ближайшие
-    before_days дней или просрочка. Просроченные первыми. Отложенные
-    не показываются, намерение - только актуальное."""
+    """Аренды, которым пора напомнить: платёж в ближайшие before_days
+    дней или просрочка. Источник групп «Просрочка» и «Истекает на днях» в
+    «Задачах дня» и плашки просрочки в «Критично» сводки. Просроченные
+    первыми. Отложенные («⏰ завтра») не показываются, намерение - только
+    актуальное."""
     out = []
     for r in rows:
         s = r.get("summary") or {}
@@ -10658,6 +10660,10 @@ def waitlist_note(booking: Mapping[str, Any], *, today: date) -> str:
 # «info» - работа есть, но не горит.
 
 TASK_LEVELS = ("hot", "warn", "info")
+# Куда ведут просрочка и «истекает на днях»: аренды по «оплачено до» -
+# просроченные и платящие сегодня сверху, телефон и «продлит/сдаёт» - в
+# карточке. Списка на сводке больше нет: сводка - картина, а не прозвон.
+EXPIRING_URL = "/rentals?sort=paid"
 
 
 def _names(rows: Iterable[Mapping[str, Any]], key: str = "full_name",
@@ -10682,9 +10688,11 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
                 idle: Iterable[Mapping[str, Any]] = (),
                 today: date | None = None,
                 repair_norm: int = ORDER_STUCK_DAYS) -> list[dict[str, Any]]:
-    """Задачи на сегодня по данным сводки. Пустые группы не показываются.
+    """Плашки по данным сводки: из них dashboard.critical собирает
+    «Критично», а dashboard.fleet_advice - советы по парку (перевезти,
+    скидка на простой). Пустые группы не показываются.
 
-    `expiring` - строки виджета «истекает аренда» (с summary), `search` -
+    `expiring` - строки logic.expiring (с summary), `search` -
     результат search_rows, `orders` - открытые наряды, `bookings` - новые
     заявки, `alerts` - открытые тревоги, `transfers` - перевозки
     transfer_plan, `idle` - простои idle_promo_rows (самые долгие),
@@ -10706,8 +10714,8 @@ def today_tasks(*, expiring: Iterable[Mapping[str, Any]] = (),
                if (r.get("summary") or {}).get("days_left") is not None
                and (r.get("summary") or {}).get("days_left") <= 0]
     soon = [r for r in expiring if r not in overdue]
-    add("overdue", "Просрочка или платёж сегодня — позвонить", overdue, "/", "hot")
-    add("soon", "Истекает на днях — напомнить", soon, "/", "warn")
+    add("overdue", "Просрочка или платёж сегодня — позвонить", overdue, EXPIRING_URL, "hot")
+    add("soon", "Истекает на днях — напомнить", soon, EXPIRING_URL, "warn")
 
     search = search or {}
     theft = [r for r in search.get("searching", []) if r.get("theft")]

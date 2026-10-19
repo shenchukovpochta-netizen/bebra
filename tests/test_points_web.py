@@ -293,21 +293,31 @@ class TestPointsReport(PointsWebCase):
         self.assertEqual([cell("ИТОГО", c) for c in ("Парк сейчас", "Простой, %",
                                                      "Чек/день", "Выручка")],
                          ["6", "50.0", "405,56", "36500,00"])
-        # Сводка: те же числа в плитках трёх чисел и блок по точкам.
+        # Сводка: те же три числа за 30 дней в плитках, а точки - за месяц
+        # сводки, тем же построителем, что отчёт за месяц: «Итого» сводки
+        # и отчёта совпадают.
         dash = self.get_ok("/")
-        self.assertIn("По точкам за 30 дней", dash)
-        self.assertIn("50.0 %", dash)
         self.assertIn(tw.plain(logic.money(D("405.56"))), dash)
-        self.assertIn(tw.plain(logic.money(D(500))), dash)
-        self.assertIn('href="/reports/points"', dash)
+        key = date.today().strftime("%Y-%m")
+        block = dash[dash.index('id="points"'):]
+        self.assertIn(f'href="/reports/points?month={key}"', block)
+        month = self.table(f"/reports/points.csv?month={key}")
+        mhead = month["Точка"]
+        total = block[block.index('class="total"'):]
+        for column in ("Простой, %", "Выручка"):
+            value = month["ИТОГО"][mhead.index(column)]
+            shown = (f"{value} %" if column == "Простой, %"
+                     else tw.plain(logic.money(D(value.replace(",", ".")))))
+            self.assertIn(shown, total[:total.index("</tr>")], column)
+        self.assertIn(tw.plain(logic.money(D(36500))), total[:total.index("</tr>")])
 
     def test_dashboard_block_needs_two_points(self):
         self.story()
         tw.run(self.crm.update_location(self.ado, active=False))
-        self.assertIn("По точкам за 30 дней", self.get_ok("/"))
+        self.assertIn('id="points"', self.get_ok("/"))
         tw.run(self.crm.update_location(self.dek, active=False))
-        self.assertNotIn("По точкам за 30 дней", self.get_ok("/"),
-                         "с одной точкой блок повторял бы три числа над ним")
+        self.assertNotIn('id="points"', self.get_ok("/"),
+                         "с одной точкой блок повторял бы общие числа")
 
     def test_idle_line_follows_the_directory_order(self):
         self.bike("X-1", DEK)
