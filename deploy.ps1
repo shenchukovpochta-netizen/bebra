@@ -37,7 +37,7 @@ if (-not $SkipTests) {
 $root = @('docker-compose.yml', 'Dockerfile', 'pyproject.toml', 'requirements.txt',
           'schema.sql', 'bootstrap.sh', 'install.sh', 'update.sh', '.env.example', '.gitignore',
           'backup.sh', 'backup.Dockerfile',
-          'README.md', 'CLAUDE.md', 'INSTALL.md', 'GUIDE.md', 'CRM.md', 'CODE.md', 'FRANCHISE.md',
+          'README.md', 'CLAUDE.md', 'INSTALL.md', 'ROLLOUT.md', 'GUIDE.md', 'CRM.md', 'CODE.md', 'FRANCHISE.md',
           'instrukciya-po-botu.html',
           'consistency.py')
 $app = @('app/__init__.py', 'app/main.py', 'app/max_main.py', 'app/config.py',
