@@ -3150,6 +3150,86 @@ create table if not exists crm.staff_period_plans (
     check (kind = 'day' or extract(isodow from starts) = 1)
 );
 
+-- Команда по ролям: у мастера и администратора точки свои показатели и
+-- свой план (app/crm/team.py, roles_of - по доступу). Мастер: ремонт
+-- парка и сторонний ремонт (наряды по своему велосипеду и по чужой
+-- технике), сумма работ и выручка ремонта, рубли. Администратор: выдачи
+-- (plan_issues), продления, сдачи, новые клиенты и принятые деньги
+-- (plan_revenue - прежний «план денег»: деньги и раньше приносили
+-- платежи администратора). Задачи (plan_tasks) - у всех. Колонки те же в
+-- плане месяца и в плане недели и дня.
+alter table crm.staff_plans add column if not exists plan_orders_own integer
+  check (plan_orders_own is null or plan_orders_own >= 0);
+alter table crm.staff_plans add column if not exists plan_orders_ext integer
+  check (plan_orders_ext is null or plan_orders_ext >= 0);
+alter table crm.staff_plans add column if not exists plan_works numeric(12,2)
+  check (plan_works is null or plan_works >= 0);
+alter table crm.staff_plans add column if not exists plan_repair_revenue numeric(12,2)
+  check (plan_repair_revenue is null or plan_repair_revenue >= 0);
+alter table crm.staff_plans add column if not exists plan_extensions integer
+  check (plan_extensions is null or plan_extensions >= 0);
+alter table crm.staff_plans add column if not exists plan_returns integer
+  check (plan_returns is null or plan_returns >= 0);
+alter table crm.staff_plans add column if not exists plan_clients integer
+  check (plan_clients is null or plan_clients >= 0);
+alter table crm.staff_period_plans add column if not exists plan_orders_own integer
+  check (plan_orders_own is null or plan_orders_own >= 0);
+alter table crm.staff_period_plans add column if not exists plan_orders_ext integer
+  check (plan_orders_ext is null or plan_orders_ext >= 0);
+alter table crm.staff_period_plans add column if not exists plan_works numeric(12,2)
+  check (plan_works is null or plan_works >= 0);
+alter table crm.staff_period_plans add column if not exists plan_repair_revenue numeric(12,2)
+  check (plan_repair_revenue is null or plan_repair_revenue >= 0);
+alter table crm.staff_period_plans add column if not exists plan_extensions integer
+  check (plan_extensions is null or plan_extensions >= 0);
+alter table crm.staff_period_plans add column if not exists plan_returns integer
+  check (plan_returns is null or plan_returns >= 0);
+alter table crm.staff_period_plans add column if not exists plan_clients integer
+  check (plan_clients is null or plan_clients >= 0);
+
+-- Прежний план «все наряды» (plan_orders) один раз на установку
+-- (settings.team_roles_v1) переезжает в «Ремонт парка»: сторонний ремонт
+-- отдельно не планировался, а основная работа мастера - свой парк.
+-- Колонка остаётся с данными, но панель её больше не пишет и не читает.
+-- План денег мастера тем же разом переезжает в «Выручку ремонта»: по
+-- прежним правилам «принёс денег» - платежи плюс клиентские наряды, и у
+-- мастера, который денег не принимает, это и были деньги ремонта; теперь
+-- plan_revenue - принятые деньги администратора. Мастер - по доступу, как
+-- team.roles_of: меняет «Сервис» и не меняет ни выдачу, ни аренды, ни
+-- кассу (у кого оба права, план денег остаётся админским). Условия
+-- оплаты не трогаются: % денег мастеру не начисляется, карточка говорит
+-- об этом строкой (team.foreign_terms) и даёт обнулить.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'team_roles_v1') then
+    update crm.staff_plans set plan_orders_own = plan_orders
+     where plan_orders is not null and plan_orders_own is null;
+    update crm.staff_period_plans set plan_orders_own = plan_orders
+     where plan_orders is not null and plan_orders_own is null;
+    update crm.staff_plans sp
+       set plan_repair_revenue = sp.plan_revenue, plan_revenue = null
+      from crm.staff s join crm.access_profiles p on p.id = s.profile_id
+     where s.id = sp.staff_id and sp.plan_revenue is not null
+       and sp.plan_repair_revenue is null and p.code is distinct from 'owner'
+       and p.perms -> 'sections' ->> 'service' = 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'issue', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'rentals', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'cash', '') <> 'edit';
+    update crm.staff_period_plans sp
+       set plan_repair_revenue = sp.plan_revenue, plan_revenue = null
+      from crm.staff s join crm.access_profiles p on p.id = s.profile_id
+     where s.id = sp.staff_id and sp.plan_revenue is not null
+       and sp.plan_repair_revenue is null and p.code is distinct from 'owner'
+       and p.perms -> 'sections' ->> 'service' = 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'issue', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'rentals', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'cash', '') <> 'edit';
+    insert into crm.settings (key, value, updated_by)
+    values ('team_roles_v1', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
+
 -- Платёжный календарь (app/crm/cashflow.py): плановые расходы и приходы,
 -- которых в базе нет фактом, - аренда помещения, зарплата, закупка,
 -- налог. Ожидаемые платежи клиентов сюда не пишутся: они считаются из

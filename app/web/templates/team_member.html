@@ -1,17 +1,27 @@
 {% extends "base.html" %}
 {% block title %}{{ person.name }} — Команда — {{ app_title }}{% endblock %}
 {% block content %}
-{# Сотрудник (app/crm/team.py): месяц - прогресс по плану, начисленное,
-   план и условия строкой на месяц; неделя и день - план против факта и
-   свои планы (пустое поле - доля плана месяца); аналитика за полгода и
-   что именно сделано. Отказ формы - та же страница с набранными числами. #}
+{# Сотрудник (app/crm/team.py) по показателям своей роли (мастер,
+   администратор точки или оба; роль - по доступу): месяц - прогресс по
+   плану, начисленное по условиям роли, план и условия строкой на месяц;
+   неделя и день - план против факта и свои планы (пустое поле - доля
+   плана месяца); аналитика за полгода и что именно сделано. Владелец -
+   без плана и зарплаты, только сделанное сам. Отказ формы - та же
+   страница с набранными числами. #}
 {% set keep = 'month=' ~ span.key ~ '&week=' ~ week.isoformat() ~ '&day=' ~ day.isoformat() %}
-<div class="bar"><h1>{{ person.name }} <small class="muted">{{ role }}{% if person.location %} · {{ person.location }}{% endif %} · {{ month_title }}</small></h1>
+{% set is_master = 'master' in roles %}
+{% set is_admin = 'admin' in roles %}
+<div class="bar"><h1>{{ person.name }} <small class="muted">{{ role }}{% if role_words and role_words|lower != role|lower %} · {{ role_words }}{% endif %}{% if person.location %} · {{ person.location }}{% endif %} · {{ month_title }}</small></h1>
   <nav class="tabs" aria-label="Месяц">
     {% if span.prev_key %}<a href="/team/{{ person.id }}?month={{ span.prev_key }}&amp;week={{ week.isoformat() }}&amp;day={{ day.isoformat() }}" title="прошлый месяц">‹</a>{% endif %}<a href="/team/{{ person.id }}?{{ keep }}" class="on">{{ span.first.strftime('%m.%Y') }}</a>{% if span.next_key %}<a href="/team/{{ person.id }}?month={{ span.next_key }}&amp;week={{ week.isoformat() }}&amp;day={{ day.isoformat() }}" title="следующий месяц">›</a>{% endif %}
   </nav>
   <a class="btn ghost" href="/team?month={{ span.key }}">← Команда</a>
 </div>
+{% if owner %}
+<p class="muted">Владелец — не исполнитель: плана и зарплаты у него нет. Ниже — что он сделал сам за {{ month_title }}.</p>
+{% elif not roles %}
+<p class="muted">У роли «{{ role }}» нет показателей мастера или администратора точки: мастер может менять «Сервис», администратор — выдачу, аренды или кассу. Остаются задачи, оклад и цена задач.</p>
+{% endif %}
 <div class="tiles">
   {% for m in metrics %}{% if money_ok or not m.money %}
   <div class="tile {% if m.ahead is false %}warn{% endif %}">
@@ -20,22 +30,33 @@
     {% if m.plan is not none %}<span class="bar-track"><span class="bar-fill {% if m.ahead %}ok{% else %}bad{% endif %}" style="width: {{ [m.percent, 100]|min }}%"></span></span>
     <small class="muted">к сегодня по темпу — {{ m.pace_text }}</small>{% endif %}
   </div>
+  {% endif %}
+  {% if m.key == 'orders_ext' %}
+  <div class="tile {% if on_time and on_time.late %}warn{% endif %}">
+    <b>{% if on_time %}{{ on_time.percent }} %{% else %}—{% endif %}</b>
+    <span>в срок ремонта{% if on_time %} · {{ on_time.done }} из {{ on_time.of }}{% endif %}</span>
+    {% if on_time and on_time.late %}<small class="muted">дольше срока — {{ on_time.late }}</small>{% endif %}
+  </div>
   {% endif %}{% endfor %}
+  {% if owner and not metrics %}<div class="tile"><b>0</b><span>ничего за месяц</span></div>{% endif %}
 </div>
 <div class="cols">
-{% if money_ok %}
+{% if money_ok and not owner %}
 <section class="card">
   <h2>Начислено за {{ month_title }}</h2>
   <dl>
     <dt>Оклад</dt><dd>{{ money(pay.base) }}</dd>
-    <dt>За выдачи</dt><dd>{{ money(pay.issues) }}{% if plan and plan.per_issue %} <small class="muted">({{ facts.issues or 0 }} × {{ money(plan.per_issue) }})</small>{% endif %}</dd>
-    <dt>% от работы нарядов</dt><dd>{{ money(pay.orders) }}{% if plan and plan.order_pct %} <small class="muted">({{ plan.order_pct }} % от {{ money(facts.orders_works or 0) }})</small>{% endif %}</dd>
-    <dt>% от принесённых денег</dt><dd>{{ money(pay.revenue) }}{% if plan and plan.revenue_pct %} <small class="muted">({{ plan.revenue_pct }} % от {{ money(revenue) }})</small>{% endif %}</dd>
+    {% if 'per_issue' in pay.terms %}<dt>За выдачи</dt><dd>{{ money(pay.issues) }}{% if plan and plan.per_issue %} <small class="muted">({{ facts.issues or 0 }} × {{ money(plan.per_issue) }})</small>{% endif %}</dd>{% endif %}
+    {% if 'order_pct' in pay.terms %}<dt>% от суммы работ</dt><dd>{{ money(pay.orders) }}{% if plan and plan.order_pct %} <small class="muted">({{ plan.order_pct }} % от {{ money(facts.orders_works or 0) }})</small>{% endif %}</dd>{% endif %}
+    {% if 'revenue_pct' in pay.terms %}<dt>% от принятых денег</dt><dd>{{ money(pay.revenue) }}{% if plan and plan.revenue_pct %} <small class="muted">({{ plan.revenue_pct }} % от {{ money(facts.payments or 0) }})</small>{% endif %}</dd>{% endif %}
     <dt>За задачи</dt><dd>{{ money(pay.tasks) }}</dd>
     <dt><b>Итого</b></dt><dd><b>{{ money(pay.total) }}</b></dd>
   </dl>
   {% if plan and not plan.own %}<p class="muted">Своих условий на этот месяц нет — действуют условия с {{ plan.month.strftime('%m.%Y') }}.</p>
   {% elif not plan %}<p class="muted">Условия оплаты не заданы.</p>{% endif %}
+  {% if foreign %}<p class="muted" id="foreign-terms">Не начисляется — условие чужой роли:
+    {% for f in foreign %}{{ f.title|lower }} {{ f.text }} ({{ f.role }}){% if not loop.last %}, {% endif %}{% endfor %}.
+    Осталось в строке с прежних правил, когда условия были у всех{% if may_plan %}; обнулить — галочкой в форме плана{% endif %}.</p>{% endif %}
 </section>
 {% endif %}
 {% if may_plan %}
@@ -48,26 +69,25 @@
     <input type="hidden" name="month" value="{{ span.key }}">
     <input type="hidden" name="week" value="{{ week.isoformat() }}">
     <input type="hidden" name="day" value="{{ day.isoformat() }}">
-    <label>План выдач <input name="plan_issues" inputmode="numeric" value="{{ mval('plan_issues') }}"></label>
-    <label>План нарядов <input name="plan_orders" inputmode="numeric" value="{{ mval('plan_orders') }}"></label>
-    <label>План задач <input name="plan_tasks" inputmode="numeric" value="{{ mval('plan_tasks') }}"></label>
-    {% if money_ok %}
-    <label>План денег, ₽ <input name="plan_revenue" inputmode="decimal" value="{{ mval('plan_revenue') }}"></label>
-    <label>Оклад, ₽ <input name="salary_base" inputmode="decimal" value="{{ mval('salary_base') }}"></label>
-    <label>За выдачу, ₽ <input name="per_issue" inputmode="decimal" value="{{ mval('per_issue') }}"></label>
-    <label>% от работы нарядов <input name="order_pct" inputmode="decimal" value="{{ mval('order_pct') }}"></label>
-    <label>% от принесённых денег <input name="revenue_pct" inputmode="decimal" value="{{ mval('revenue_pct') }}"></label>
+    {% for key, title, is_money in fields %}{% if money_ok or not is_money %}
+    <label>План: {{ title|lower }}{% if is_money %}, ₽{% endif %} <input name="{{ key }}" inputmode="{{ 'decimal' if is_money else 'numeric' }}" value="{{ mval(key) }}"></label>
+    {% endif %}{% endfor %}
+    {% if money_ok %}{% for key, title in terms %}
+    <label>{{ title }} <input name="{{ key }}" inputmode="decimal" value="{{ mval(key) }}"></label>
+    {% endfor %}
+    {% if foreign %}<label class="check"><input type="checkbox" name="drop_foreign" value="1"> Обнулить условие чужой роли: {{ foreign|map(attribute='title')|join(', ')|lower }}</label>{% endif %}
     {% endif %}
     <button type="submit">Сохранить на {{ month_title }}</button>
   </form>
   <p class="muted">Пустой план — не планируется. Сохранение пишет только этот месяц: прошлые
     считаются по своим {{ 'условиям' if money_ok else 'планам' }}, следующие — по этим, пока их не поменяют. План недели и
-    дня без своего — доля этого плана по дням.{% if not money_ok %} План денег и условия
+    дня без своего — доля этого плана по дням. Поля — по роли: {% if is_master and is_admin %}мастера и администратора{% elif is_master %}мастеру — ремонт и % от суммы работ{% elif is_admin %}администратору — выдачи, продления, сдачи, клиенты, деньги, ставка за выдачу и % денег{% else %}без роли — задачи и оклад{% endif %}.{% if not money_ok %} План в рублях и условия
     оплаты ставит владелец или сотрудник с «Финансами» — сохранение их не меняет.{% endif %}</p>
 </section>
 {% endif %}
 </div>
 
+{% if not owner %}
 <div class="cols">
 {% for p in periods %}
 {% set week_kind = p.kind == 'week' %}
@@ -98,10 +118,18 @@
     <tr><th>Показатель</th><th class="num">План</th><th class="num">Факт</th><th class="num">Выполнено</th></tr>
     {% for m in p.metrics %}{% if money_ok or not m.money %}
     <tr class="{% if m.ahead is false %}warn-row{% endif %}">
-      <td data-label="Показатель">{{ m.title }}</td>
+      <td data-label="Показатель">{{ m.title }}{% if m.money %}, ₽{% endif %}</td>
       <td class="num" data-label="План">{% if m.plan is not none %}{{ m.plan_text }}{% if m.source == 'month' %}<br><small class="muted">из плана месяца</small>{% endif %}{% else %}<span class="muted">не задан</span>{% endif %}</td>
       <td class="num" data-label="Факт">{{ m.fact_text }}</td>
       <td class="num" data-label="Выполнено">{% if m.percent is not none %}<b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% else %}<span class="muted">—</span>{% endif %}</td>
+    </tr>
+    {% endif %}
+    {% if m.key == 'orders_ext' %}
+    <tr>
+      <td data-label="Показатель">В срок ремонта</td>
+      <td class="num" data-label="План"><span class="muted">доля, без плана</span></td>
+      <td class="num" data-label="Факт">{% if p.on_time %}{{ p.on_time.done }} из {{ p.on_time.of }}{% else %}<span class="muted">нарядов нет</span>{% endif %}</td>
+      <td class="num" data-label="Выполнено">{% if p.on_time %}<b class="{% if p.on_time.late %}bad{% else %}ok{% endif %}">{{ p.on_time.percent }} %</b>{% else %}<span class="muted">—</span>{% endif %}</td>
     </tr>
     {% endif %}{% endfor %}
   </table>
@@ -113,8 +141,8 @@
     <input type="hidden" name="month" value="{{ span.key }}">
     <input type="hidden" name="week" value="{{ week.isoformat() }}">
     <input type="hidden" name="day" value="{{ day.isoformat() }}">
-    {% for key, label, mode in (('plan_issues', 'План выдач', 'numeric'), ('plan_orders', 'План нарядов', 'numeric'), ('plan_tasks', 'План задач', 'numeric'), ('plan_revenue', 'План денег, ₽', 'decimal')) %}{% if money_ok or key != 'plan_revenue' %}
-    <label>{{ label }} <input name="{{ key }}" inputmode="{{ mode }}" value="{% if p.typed is not none %}{{ p.typed[key] }}{% elif p.own and p.own[key] is not none %}{{ p.own[key] }}{% endif %}"{% if key in p.hint %} placeholder="из плана месяца"{% endif %}></label>
+    {% for key, title, is_money in fields %}{% if money_ok or not is_money %}
+    <label>План: {{ title|lower }}{% if is_money %}, ₽{% endif %} <input name="{{ key }}" inputmode="{{ 'decimal' if is_money else 'numeric' }}" value="{% if p.typed is not none %}{{ p.typed[key] }}{% elif p.own and p.own[key] is not none %}{{ p.own[key] }}{% endif %}"{% if key in p.hint %} placeholder="из плана месяца"{% endif %}></label>
     {% endif %}{% endfor %}
     <button type="submit">Сохранить план {{ what }}</button>
   </form>
@@ -130,15 +158,15 @@
   {% if history %}
   <div class="table-wrap">
   <table class="cards">
-    <tr><th>Месяц</th>{% for key in ('issues', 'orders', 'tasks') %}<th class="num">{{ history[0].metrics[key].title }}</th>{% endfor %}
-      {% if money_ok %}<th class="num">Принёс денег</th><th class="num">Начислено</th>{% endif %}</tr>
+    <tr><th>Месяц</th>{% for m in history[0].metrics.values() %}{% if money_ok or not m.money %}<th class="num">{{ m.title }}{% if m.money %}, ₽{% endif %}</th>{% endif %}{% if m.key == 'orders_ext' %}<th class="num">В срок</th>{% endif %}{% endfor %}
+      {% if money_ok %}<th class="num">Начислено</th>{% endif %}</tr>
     {% for h in history %}
     <tr>
       <td data-label="Месяц"><a href="/team/{{ person.id }}?month={{ h.key }}">{{ h.title }}</a>{% if h.current %} <small class="muted">идёт</small>{% endif %}
         {% if not h.has_plan %}<br><small class="muted">без плана</small>{% elif h.inherited %}<br><small class="muted">план прошлого месяца</small>{% endif %}</td>
-      {% for key in ('issues', 'orders', 'tasks', 'revenue') %}{% set m = h.metrics[key] %}{% if money_ok or not m.money %}
+      {% for m in h.metrics.values() %}{% if money_ok or not m.money %}
       <td class="num" data-label="{{ m.title }}">{{ m.fact_text }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan_text }}</small><br><b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% endif %}</td>
-      {% endif %}{% endfor %}
+      {% endif %}{% if m.key == 'orders_ext' %}<td class="num" data-label="В срок">{% if h.on_time %}{{ h.on_time.percent }} %{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}{% endfor %}
       {% if money_ok %}<td class="num" data-label="Начислено">{{ money(h.pay.total) }}</td>{% endif %}
     </tr>
     {% endfor %}
@@ -148,7 +176,15 @@
     сегодняшнему дню. Месяцы до первой работы сотрудника не показаны.</p>
   {% else %}<p class="muted">За последние полгода ни плана, ни сделанного.</p>{% endif %}
 </section>
+{% endif %}
 
+{% set own_orders = detail.orders|selectattr('bike_id')|list %}
+{% set ext_orders = detail.orders|rejectattr('bike_id')|list %}
+{% macro orders_table(rows, empty) %}
+  {% if rows %}<table class="cards"><tr><th>Наряд</th><th>Закрыт</th><th class="num">Срок</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}</tr>
+  {% for o in rows %}<tr class="{% if o.days > o.norm %}warn-row{% endif %}"><td data-label="Наряд"><a href="/orders/{{ o.id }}">{{ o.no }}</a> <small class="muted">{{ ('№ ' ~ o.bike_code) if o.bike_code else (o.object_note or '') }}{% if o.payer == 'client' %} · {{ 'оплачен' if o.paid_at else 'клиентский' }}{% endif %}</small></td><td data-label="Закрыт" class="nowrap">{{ o.closed_at|dmy }}</td><td class="num nowrap" data-label="Срок">{% if o.days > o.norm %}<b class="bad">+{{ o.days - o.norm }} дн.</b>{% else %}<span class="ok">в срок</span>{% endif %}<br><small class="muted">{{ o.days }} из {{ o.norm }} сут.</small></td>{% if money_ok %}<td class="num" data-label="Сумма">{{ money(o.total) }}</td>{% endif %}</tr>{% endfor %}
+  </table>{% else %}<p class="muted">{{ empty }}</p>{% endif %}
+{% endmacro %}
 <div class="cols">
 <section class="card">
   <h2>Задачи <span class="muted">· {{ detail.tasks|length }}</span></h2>
@@ -156,26 +192,48 @@
   {% for t in detail.tasks %}<tr><td data-label="Задача"><a href="/tasks/{{ t.id }}">{{ t.title }}</a></td><td data-label="Сделана" class="nowrap">{{ t.done_at|dmy }}</td>{% if money_ok %}<td class="num" data-label="Оплата за задачу">{{ money(t.pay) if t.pay is not none else '—' }}</td>{% endif %}</tr>{% endfor %}
   </table>{% else %}<p class="muted">Нет.</p>{% endif %}
 </section>
+{% if is_master or (owner and own_orders) %}
 <section class="card">
-  <h2>Наряды <span class="muted">· {{ detail.orders|length }}</span></h2>
-  {% if detail.orders %}<table class="cards"><tr><th>Наряд</th><th>Закрыт</th>{% if money_ok %}<th class="num">Сумма</th>{% endif %}</tr>
-  {% for o in detail.orders %}<tr><td data-label="Наряд"><a href="/orders/{{ o.id }}">{{ o.no }}</a> <small class="muted">{{ ('№ ' ~ o.bike_code) if o.bike_code else (o.object_note or '') }}{% if o.payer == 'client' %} · клиентский{% endif %}</small></td><td data-label="Закрыт" class="nowrap">{{ o.closed_at|dmy }}</td>{% if money_ok %}<td class="num" data-label="Сумма">{{ money(o.total) }}</td>{% endif %}</tr>{% endfor %}
-  </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+  <h2>Ремонт парка <span class="muted">· {{ own_orders|length }}</span></h2>
+  {{ orders_table(own_orders, 'Нарядов по велосипедам парка нет.') }}
 </section>
-</div>
-<div class="cols">
+{% endif %}
+{% if is_master or (owner and ext_orders) %}
+<section class="card">
+  <h2>Сторонний ремонт <span class="muted">· {{ ext_orders|length }}</span></h2>
+  {{ orders_table(ext_orders, 'Нарядов по чужой технике нет.') }}
+</section>
+{% endif %}
+{% if is_admin or (owner and detail.rentals) %}
 <section class="card">
   <h2>Выдачи <span class="muted">· {{ detail.rentals|length }}</span></h2>
   {% if detail.rentals %}<table class="cards"><tr><th>Клиент</th><th>Велосипед</th><th>Когда</th></tr>
   {% for r in detail.rentals %}<tr><td data-label="Клиент"><a href="/rentals/{{ r.id }}">{{ r.full_name }}</a></td><td data-label="Велосипед">{{ r.bike_code or '—' }}</td><td data-label="Когда" class="nowrap">{{ r.created_at|dmy }}</td></tr>{% endfor %}
   </table>{% else %}<p class="muted">Нет.</p>{% endif %}
 </section>
-{% if money_ok %}
+{% endif %}
+{% if is_admin or (owner and detail.returns) %}
 <section class="card">
-  <h2>Принятые платежи <span class="muted">· {{ detail.payments|length }}</span></h2>
-  {% if detail.payments %}<table class="cards"><tr><th>Клиент</th><th>Когда</th><th class="num">Сумма</th></tr>
-  {% for x in detail.payments %}<tr><td data-label="Клиент"><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a></td><td data-label="Когда" class="nowrap">{{ x.created_at|dmy }}</td><td class="num" data-label="Сумма">{{ money(x.amount) }}</td></tr>{% endfor %}
+  <h2>Сдачи <span class="muted">· {{ detail.returns|length }}</span></h2>
+  {% if detail.returns %}<table class="cards"><tr><th>Клиент</th><th>Велосипед</th><th>Когда</th></tr>
+  {% for r in detail.returns %}<tr><td data-label="Клиент"><a href="/rentals/{{ r.id }}">{{ r.full_name }}</a></td><td data-label="Велосипед">{{ r.bike_code or '—' }}{% if r.to_status != 'available' %} <small class="muted">{{ BIKE_STATUSES.get(r.to_status, r.to_status)|lower }}</small>{% endif %}</td><td data-label="Когда" class="nowrap">{{ r.closed_at|dmy }}</td></tr>{% endfor %}
   </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+</section>
+{% endif %}
+{% if money_ok and (is_admin or (owner and detail.payments)) %}
+<section class="card">
+  <h2>Принятые платежи <span class="muted">· {{ detail.payments|length }}{% if extensions %} · продлений {{ extensions }}{% endif %}</span></h2>
+  {% if detail.payments %}<table class="cards"><tr><th>Клиент</th><th>Когда</th><th class="num">Сумма</th></tr>
+  {% for x in detail.payments %}<tr><td data-label="Клиент"><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a>{% if x.extension %} <small class="muted">продление</small>{% endif %}</td><td data-label="Когда" class="nowrap">{{ x.created_at|dmy }}</td><td class="num" data-label="Сумма">{{ money(x.amount) }}</td></tr>{% endfor %}
+  </table>{% else %}<p class="muted">Нет.</p>{% endif %}
+</section>
+{% endif %}
+{% if is_admin or (owner and detail.clients) %}
+<section class="card">
+  <h2>Новые клиенты <span class="muted">· {{ detail.clients|length }}</span></h2>
+  {% if detail.clients %}<table class="cards"><tr><th>Клиент</th><th>Заведён</th></tr>
+  {% for c in detail.clients %}<tr><td data-label="Клиент"><a href="/clients/{{ c.id }}">{{ c.full_name }}</a></td><td data-label="Заведён" class="nowrap">{{ c.created_at|dmy }}</td></tr>{% endfor %}
+  </table>{% else %}<p class="muted">Нет: считаются карточки, заведённые им в панели, — клиенты из бота заводятся сами.</p>{% endif %}
 </section>
 {% endif %}
 </div>

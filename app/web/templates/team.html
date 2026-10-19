@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Команда — {{ app_title }}{% endblock %}
 {% block content %}
-{# «Команда» (app/crm/team.py): сотрудник за месяц, неделю или день - план,
-   факт, темп; за месяц ещё начисленное по его условиям. Факт - из своих
-   таблиц по автору записи. План недели и дня без своего - доля месяца. #}
+{# «Команда» (app/crm/team.py): таблицы по ролям - у мастеров и у
+   администраторов свои показатели; за месяц, неделю или день - план,
+   факт, темп; за месяц ещё начисленное по условиям роли. Роль - по
+   доступу (team.roles_of); владелец не исполнитель - строкой ниже. Факт -
+   из своих таблиц по автору записи. План недели и дня без своего - доля
+   месяца. #}
 {% set head = month_title if kind == 'month' else period.title %}
 <div class="bar"><h1>Команда <small class="muted">{{ head }}</small></h1>
   <nav class="tabs" aria-label="Период">
@@ -20,11 +23,14 @@
   {% if money_ok and kind == 'month' %}<a class="btn ghost" href="/team.xlsx?month={{ span.key }}">Excel</a>{% endif %}
 </div>
 <div class="tiles">
+  <div class="tile"><b>{{ total.orders }}</b><span>нарядов закрыто<br><small class="muted">парк {{ total.orders_own }} · сторонние {{ total.orders_ext }}</small></span></div>
   <div class="tile"><b>{{ total.issues }}</b><span>выдач</span></div>
-  <div class="tile"><b>{{ total.orders }}</b><span>нарядов закрыто</span></div>
+  <div class="tile"><b>{{ total.extensions }}</b><span>продлений</span></div>
+  <div class="tile"><b>{{ total.returns }}</b><span>сдач</span></div>
   <div class="tile"><b>{{ total.tasks }}</b><span>задач сделано</span></div>
   {% if money_ok %}
-  <div class="tile"><b>{{ money(total.revenue) }}</b><span>принесли денег</span></div>
+  <div class="tile"><b>{{ money(total.payments) }}</b><span>принято денег</span></div>
+  <div class="tile"><b>{{ money(total.repair_revenue) }}</b><span>выручка ремонта</span></div>
   {% if kind == 'month' %}<div class="tile"><b>{{ money(total.pay) }}</b><span>начислено зарплаты</span></div>{% endif %}
   {% endif %}
 </div>
@@ -32,37 +38,65 @@
 {% elif kind == 'week' and period.is_current %}<p class="muted">Неделя идёт: день {{ period.passed }} из 7. Темп — сколько плана недели должно быть сделано к сегодняшнему дню.</p>
 {% elif kind == 'day' and period.is_current %}<p class="muted">День идёт: невыполненное к вечеру ещё не отставание — красным станет завтра.</p>
 {% elif period and period.future %}<p class="muted">Период ещё не начался — здесь видно, какой план на него стоит.</p>{% endif %}
-<div class="card">
-<div class="table-wrap">
-<table class="cards">
-  <tr><th>Сотрудник</th><th class="num">Выдачи</th><th class="num">Наряды</th><th class="num">Задачи</th>
-    {% if money_ok %}<th class="num">Принёс денег</th>{% endif %}<th class="num">План</th>
-    {% if money_ok and kind == 'month' %}<th class="num">Начислено</th>{% endif %}</tr>
-  {% for r in rows %}
-  <tr class="{% if r.behind %}warn-row{% endif %}">
-    <td data-label="Сотрудник"><a href="/team/{{ r.id }}?{{ member_q }}"><b>{{ r.name }}</b></a>
-      <br><small class="muted">{{ r.role }}{% if r.location %} · {{ r.location }}{% endif %}{% if not r.active %} · отключён{% endif %}</small></td>
-    {% for key in ('issues', 'orders', 'tasks') %}{% set m = r.metrics[key] %}
-    <td class="num" data-label="{{ m.title }}">{{ m.fact_text }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan_text }}</small>{% endif %}</td>
+
+{% for s in sections %}
+<section class="card team-role" id="role-{{ s.code }}">
+  <h2>{{ s.title }} <span class="muted">· {{ s.rows|length }}</span></h2>
+  {% if s.rows %}
+  <div class="table-wrap">
+  <table class="cards">
+    <tr><th>Сотрудник</th>
+      {% for m in s.metrics %}{% if money_ok or not m.money %}<th class="num">{{ m.title }}{% if m.money %}, ₽{% endif %}</th>{% endif %}{% if m.fact == 'orders_ext' %}<th class="num">В срок</th>{% endif %}{% endfor %}
+      <th class="num">План</th>
+      {% if money_ok and kind == 'month' %}<th class="num">Начислено</th>{% endif %}</tr>
+    {% for r in s.rows %}
+    <tr class="{% if r.behind %}warn-row{% endif %}">
+      <td data-label="Сотрудник"><a href="/team/{{ r.id }}?{{ member_q }}"><b>{{ r.name }}</b></a>
+        <br><small class="muted">{{ r.role }}{% if r.location %} · {{ r.location }}{% endif %}{% if r.both %} · {{ 'ещё и администратор' if s.code == 'master' else 'ещё и мастер' }}{% endif %}{% if not r.active %} · отключён{% endif %}</small></td>
+      {% for c in r.cells %}{% if money_ok or not c.money %}
+      <td class="num" data-label="{{ c.title }}">{{ c.fact_text }}{% if c.plan is not none %}{% if c.money %}<br><small class="muted">из {{ c.plan_text }}</small>{% else %} <small class="muted">/ {{ c.plan_text }}</small>{% endif %}{% endif %}</td>
+      {% endif %}{% if c.key == 'orders_ext' %}<td class="num" data-label="В срок">{% if r.on_time %}<b class="{% if r.on_time.late %}bad{% else %}ok{% endif %}">{{ r.on_time.percent }} %</b><br><small class="muted">{{ r.on_time.done }} из {{ r.on_time.of }}</small>{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}{% endfor %}
+      <td class="num" data-label="План">{% if r.percent is not none %}<b class="{% if r.behind %}bad{% elif r.ahead %}ok{% endif %}">{{ r.percent }} %</b>
+        {% if kind != 'month' %}<br><small class="muted">{% if r.source == 'own' %}свой план {{ 'недели' if kind == 'week' else 'дня' }}{% elif r.source == 'month' %}из плана месяца{% else %}свой + из месяца{% endif %}</small>{% endif %}
+        {% else %}<span class="muted">не задан</span>{% endif %}</td>
+      {% if money_ok and kind == 'month' %}<td class="num" data-label="Начислено">{{ money(r.pay.total) }}{% if r.both %}<br><small class="muted">за обе роли</small>{% elif r.inherited %}<br><small class="muted">условия прошлого месяца</small>{% endif %}{% if r.foreign %}<br><small class="muted" title="условие чужой роли осталось в строке с прежних правил">не начисляется: {{ r.foreign|map(attribute='title')|join(', ')|lower }}</small>{% endif %}</td>{% endif %}
+    </tr>
     {% endfor %}
-    {% if money_ok %}{% set m = r.metrics['revenue'] %}<td class="num" data-label="Принёс денег">{{ m.fact_text }}{% if m.plan is not none %}<br><small class="muted">из {{ m.plan_text }}</small>{% endif %}</td>{% endif %}
-    <td class="num" data-label="План">{% if r.percent is not none %}<b class="{% if r.behind %}bad{% elif r.ahead %}ok{% endif %}">{{ r.percent }} %</b>
-      {% if kind != 'month' %}<br><small class="muted">{% if r.source == 'own' %}свой план {{ 'недели' if kind == 'week' else 'дня' }}{% elif r.source == 'month' %}из плана месяца{% else %}свой + из месяца{% endif %}</small>{% endif %}
-      {% else %}<span class="muted">не задан</span>{% endif %}</td>
-    {% if money_ok and kind == 'month' %}<td class="num" data-label="Начислено">{{ money(r.pay.total) }}{% if r.inherited %}<br><small class="muted">условия прошлого месяца</small>{% endif %}</td>{% endif %}
-  </tr>
-  {% else %}<tr><td colspan="7" class="muted">Сотрудников нет.</td></tr>{% endfor %}
-</table>
-</div>
-</div>
+    {% if s.rows|length > 1 %}
+    <tr class="total"><td><b>Итого</b></td>
+      {% for m in s.metrics %}{% if money_ok or not m.money %}<td class="num" data-label="{{ m.title }}">{{ money(s.total[m.fact]) if m.money else s.total[m.fact] }}</td>{% endif %}{% if m.fact == 'orders_ext' %}<td class="num" data-label="В срок">{% if s.total.on_time %}{{ s.total.on_time.percent }} %{% endif %}</td>{% endif %}{% endfor %}
+      <td class="num"></td>{% if money_ok and kind == 'month' %}<td class="num"></td>{% endif %}</tr>
+    {% endif %}
+  </table>
+  </div>
+  {% elif s.code == 'master' %}
+  <p class="muted">Мастеров нет: мастер — тот, кто может менять «Сервис» (роль «Мастер»). Роль сотруднику задают в {% if can_edit(staff, 'staff') %}<a href="/staff">«Сотрудниках»</a>{% else %}«Сотрудниках»{% endif %}.</p>
+  {% else %}
+  <p class="muted">Администраторов точки нет: администратор — тот, кто может менять выдачу, аренды или кассу (роль «Администратор»). Роль сотруднику задают в {% if can_edit(staff, 'staff') %}<a href="/staff">«Сотрудниках»</a>{% else %}«Сотрудниках»{% endif %}.</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% for o in owners %}
+<p class="muted">Владелец <a href="/team/{{ o.id }}?{{ member_q }}">{{ o.name }}</a> сам: {% for d in o.done %}{{ d.title|lower }} — {{ d.text }}{% if not loop.last %}, {% endif %}{% endfor %}. В план и зарплату это не идёт: владелец не исполнитель.</p>
+{% endfor %}
 {% if kind == 'month' %}
-<p class="muted">Выдачи — аренды, оформленные сотрудником; наряды — закрытые, где он техник;
-  задачи — сделанные им поручения. «Принёс денег» — платежи, которые он принял (банк и
-  автозачисление ничьи), плюс клиентские наряды. План и условия оплаты задаются в карточке
-  сотрудника на месяц: месяц без своих условий живёт по прошлым. Зарплата — расчёт по
-  условиям, в журнал денег клиентов она не идёт.</p>
+<p class="muted">Роль — по доступу сотрудника: может менять «Сервис» — мастер, выдачу, аренды
+  или кассу — администратор точки; оба права — в обеих таблицах.
+  <b>Мастер:</b> ремонт парка — закрытые наряды по велосипеду парка, где он техник;
+  сторонний ремонт — по чужой технике; в срок — доля нарядов, закрытых в срок ремонта;
+  сумма работ — наряды без себестоимости, каждый не меньше нуля: свой ремонт без цены
+  клиенту — ноль, а не минус запчасти, поэтому она бывает больше «Работ» в «Выработке
+  техников», где такой наряд идёт в минус; выручка ремонта — оплаченные клиентом наряды (в
+  журнал денег их оплата не идёт). <b>Администратор:</b> выдачи — аренды, оформленные им;
+  продления — его платежи по аренде, начатой раньше дня платежа и не сданной в этот день
+  (долг, принятый при сдаче, — не продление; наличные и карта за день — одно); сдачи — аренды,
+  закрытые им с возвратом техники; новые клиенты — карточки, заведённые им в панели;
+  «принял денег» — платежи, которые он записал (банк и автозачисление ничьи). Задачи —
+  сделанные поручения, у всех. План и условия оплаты задаются в карточке сотрудника на
+  месяц: месяц без своих условий живёт по прошлым. Зарплата — расчёт по условиям роли,
+  в журнал денег клиентов она не идёт.</p>
 {% else %}
-<p class="muted">Факт — те же выдачи, наряды, задачи и деньги, что в месяце, но за
+<p class="muted">Факт — те же показатели роли, что в месяце, но за
   {{ 'эти семь дней (неделя с понедельника; на стыке месяцев — по датам)' if kind == 'week' else 'этот день' }}.
   План {{ 'недели' if kind == 'week' else 'дня' }} без своего — доля плана месяца по дням:
   каждый день берёт свою часть плана своего месяца. Свой план задаётся в карточке

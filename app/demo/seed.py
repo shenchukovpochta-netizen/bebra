@@ -351,13 +351,17 @@ async def _write(conn: asyncpg.Connection, w: World, sim: core.Sim) -> None:
             [m[0] for m in marks], [m[1] for m in marks])
 
     spec = {m[0]: m for m in core.BATTERY_MODELS}
+    # Карточку, заведённую в панели, заводит оператор точки первой аренды -
+    # «Новые клиенты» администратора в «Команде» (app/crm/team.py) не пусты.
     await _copy(conn, "clients",
                 ["id", "full_name", "phone", "status", "contract_no", "note", "source",
                  "created_at", "updated_at", "ref_code", "invited_by", "invited_at",
-                 "channel", "employer", "experience"],
+                 "channel", "employer", "experience", "created_by"],
                 [(c.id, c.full_name, c.phone, c.status, c.contract_no, c.note, c.source,
                   c.created_at, c.created_at, c.ref_code, c.invited_by, c.invited_at,
-                  c.channel, c.employer, c.experience) for c in w.clients])
+                  c.channel, c.employer, c.experience,
+                  w.operator(c.point).actor if c.source == "manual" and c.point else None)
+                 for c in w.clients])
 
     rows = []
     for r in w.rentals:
