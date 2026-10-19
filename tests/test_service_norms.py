@@ -743,7 +743,7 @@ class TestBatteryPlanInPanel(tw.WebCase):
     def test_new_battery_form_takes_the_model(self):
         page = self.get_ok(f"/batteries/new?model_id={self.model_id}")
         self.assertIn(f'<option value="{self.model_id}" selected>', page)
-        self.assertIn('name="purchase_price" value="16000', page)
+        self.assertRegex(page, r'name="purchase_price"[^>]*value="16000')
         self.assertIn("Новая батарея", self.get_ok("/batteries/new?model_id=abc"))
 
 
