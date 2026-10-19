@@ -1,21 +1,25 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Касса — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Касса</h1>{% include "_cash_tabs.html" %}</div>
 
 {% for o in opened %}{% set current = o.shift %}{% set state = o.state %}
 <section class="card">
-  <h2>Открыта смена {{ current.no }}{% if current.location %} · {{ current.location }}{% endif %}</h2>
+  <h2>Открыта смена {{ current.no }}{% if current.location %} <span class="nowrap">· {{ current.location }}</span>{% endif %}</h2>
+  {# Переход к смене - сразу под заголовком: внести, изъять и закрыть
+     можно только там, а под шестью плитками кнопка уходила за экран. #}
+  <p class="inline-form"><a class="btn" href="/cash/{{ current.id }}">К смене: внести, изъять, закрыть</a>
+    <span class="muted">Открыл {{ current.opened_by or '' }} · {{ current.opened_at|dmy }} · размен {{ money(current.opening) }}</span></p>
   <div class="tiles">
     <div class="tile"><b>{{ money(state.expected) }}</b><span>должно быть в ящике</span></div>
-    <div class="tile"><b>{{ money(state.cash) }}</b><span>принято наличными<br><small class="muted">{{ state.payments }} платежей</small></span></div>
-    <div class="tile"><b>{{ money(state.inflow) }}</b><span>внесено</span></div>
-    <div class="tile"><b>{{ money(state.outflow) }}</b><span>изъято</span></div>
+    <div class="tile"><b>{{ money(state.cash) }}</b><span>принято наличными<br><small class="muted">платежей: {{ state.payments }}</small></span></div>
+    {# Нулевые «внесено» и «изъято» - пустые плитки: в обычный день их нет. #}
+    {% if state.inflow %}<div class="tile"><b>{{ money(state.inflow) }}</b><span>внесено</span></div>{% endif %}
+    {% if state.outflow %}<div class="tile"><b>{{ money(state.outflow) }}</b><span>изъято</span></div>{% endif %}
     <div class="tile"><b>{{ money(state.other) }}</b><span>не в ящике<br><small class="muted">{% for code, sum in state.by_method.items() %}{{ METHODS.get(code, code) }} {{ money(sum) }}{% if not loop.last %} · {% endif %}{% else %}переводом и картой{% endfor %}</small></span></div>
     <div class="tile"><b>{{ money(state.revenue) }}</b><span>выручка за смену<br><small class="muted">наличные и не в ящике вместе</small></span></div>
   </div>
-  <p class="inline-form"><a class="btn" href="/cash/{{ current.id }}">К смене: внести, изъять, закрыть</a>
-    <span class="muted">Открыл {{ current.opened_by or '' }} · {{ current.opened_at|dmy }} · размен {{ money(current.opening) }}</span></p>
 </section>
 {% endfor %}
 {% if can_open and can_edit(staff, 'cash') %}
@@ -43,14 +47,15 @@
   {% for s in rows %}
   <tr class="{% if s.big_diff %}warn-row{% endif %}">
     <td data-label="Смена"><a href="/cash/{{ s.id }}">{{ s.no }}</a>{% if s.status == 'open' %} <span class="tag rented">открыта</span>{% endif %}</td>
-    <td data-label="Точка">{{ s.location or '—' }}</td>
+    <td data-label="Точка">{{ s.location or '' }}</td>
     <td data-label="Открыта">{{ s.opened_at|dmy }} <span class="muted">{{ s.opened_by or '' }}</span></td>
-    <td data-label="Закрыта">{% if s.closed_at %}{{ s.closed_at|dmy }} <span class="muted">{{ s.closed_by or '' }}</span>{% else %}—{% endif %}</td>
-    <td class="num" data-label="Ожидалось">{% if s.expected is not none %}{{ money(s.expected) }}{% else %}—{% endif %}</td>
-    <td class="num" data-label="Насчитали">{% if s.counted is not none %}{{ money(s.counted) }}{% else %}—{% endif %}</td>
-    <td class="num {% if s.big_diff %}bad{% endif %}" data-label="Расхождение">{% if s.diff is not none %}{{ money(s.diff) }}{% else %}—{% endif %}</td>
+    <td data-label="Закрыта">{% if s.closed_at %}{{ s.closed_at|dmy }} <span class="muted">{{ s.closed_by or '' }}</span>{% endif %}</td>
+    <td class="num" data-label="Ожидалось">{% if s.expected is not none %}{{ money(s.expected) }}{% endif %}</td>
+    <td class="num" data-label="Насчитали">{% if s.counted is not none %}{{ money(s.counted) }}{% endif %}</td>
+    <td class="num {% if s.big_diff %}bad{% endif %}" data-label="Расхождение">{% if s.diff is not none %}{{ money(s.diff) }}{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Смен не было.</td></tr>{% endfor %}
+  {% if tools.total %}{{ list.footer(tools, '/cash', 7) }}{% endif %}
 </table>
 <p class="muted">Расхождение записывается как есть и не подгоняется:
   смена, которая всегда сходится, ничего не проверяет. Полтинник в конце

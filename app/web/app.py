@@ -8663,7 +8663,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # смены на той же точке: открывать с нуля, не глядя, нельзя.
         previous = sorted(await crm.last_closed_shifts(),
                           key=lambda x: str(x.get("location") or ""))
-        return render(request, "cash.html", rows=rows, opened=opened,
+        # Постранично: сотня смен карточками на телефоне - десятки экранов.
+        tools = list_tools(request, rows, allowed={})
+        return render(request, "cash.html", rows=tools["rows"], tools=tools,
+                      opened=opened,
                       previous=previous, locations=free,
                       can_open=bool(free) or (not names and "" not in busy))
 
@@ -9301,8 +9304,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # со строкой аренды); готовность предлагать - автосписание плюс
         # карты от банка.
         seen = await crm.cards_seen()
+        # Постранично: двести счетов карточками на телефоне - десятки экранов.
+        tools = list_tools(request, logic.pay_rows(orders), allowed={})
         return render(request, "payments.html",
-                      rows=logic.pay_rows(orders), status=status,
+                      rows=tools["rows"], tools=tools, status=status,
                       settings=settings, acq=acquiring_state(raw_settings),
                       summary=logic.pay_summary(
                           await crm.pay_orders(limit=500)),
