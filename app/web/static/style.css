@@ -1241,9 +1241,23 @@ table.cal-mini td small{display:block;font-size:12px;line-height:1.35}
      выталкивали черту строк за край */
   details.card.fold>table.cards{width:auto}
   /* выбор клиента в строке выписки - во всю ширину ячейки, кнопки
-     строкой под ним */
-  table.cards td .inline-form select{flex:1 1 100%;max-width:100%}
+     строкой под ним; только выписка: «Я оплатил» и роль сотрудника
+     держат поле и кнопку одной строкой */
+  table.cards td .inline-form.bank-pick select{flex:1 1 100%;max-width:100%}
+  /* нулевой день календаря: на компьютере прочерк в своей колонке, в
+     карточке дня - не строка «Приход —». Не opt: тот скрывает ячейку с
+     700 px, когда список ещё таблица, и суммы съезжали под чужую шапку */
+  table.cards td.zero{display:none}
+  /* месяц оценок без единого вопроса - не карточка «0 / 0 / —» */
+  table.cards tr.empty-row{display:none}
+  /* «Зарегистрировались» в 106 px подписи не входит: перенос по слогам */
+  table.cards.ref-agents td[data-label]::before{-webkit-hyphens:auto;hyphens:auto}
 }
+/* Цель якоря («Закрыть аренду ↓», «+ Новый счёт», «+ Плановый платёж») не
+   уходит под липкую шапку: на компьютере это .top (60 px), на телефоне -
+   полоса с бургером (до 77 px). */
+.card[id]{scroll-margin-top:72px}
+@media (max-width:1000px){.card[id]{scroll-margin-top:90px}}
 
 /* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при
    фокусе и назад не возвращают. Масштаб пальцами не запрещаем

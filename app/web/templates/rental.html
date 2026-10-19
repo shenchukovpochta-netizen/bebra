@@ -3,7 +3,9 @@
 {% block content %}
 {% set money_ok = can_view(staff, 'finance') %}
 {% set acting = rental.status == 'active' and can_edit(staff, 'rentals') %}
-<div class="bar"><h1>Аренда #{{ rental.id }} <span class="tag {{ rental.status }}">{{ RENTAL_STATUSES[rental.status] }}</span></h1>
+{% set searching = rental.status == 'active' and in_search(rental) %}
+<div class="bar"><h1>Аренда #{{ rental.id }} <span class="tag {{ rental.status }}">{{ RENTAL_STATUSES[rental.status] }}</span>
+  {%- if searching %} <span class="tag bad">в розыске {{ search_days(rental) }} дн.</span>{% endif %}</h1>
   {# Сдача - частое действие, а форма ниже условий и оплаты: на телефоне
      до неё несколько экранов. #}
   {% if acting %}<a class="btn ghost" href="#close">Закрыть аренду ↓</a>{% endif %}</div>
@@ -57,6 +59,20 @@
   <p class="muted">{% if summary.due %}К оплате сейчас — {{ money(summary.due) }}: {% if summary.overdue %}просрочка{% else %}следующий период{% endif %}.{% else %}Долга нет; платёж вперёд сдвинет «оплачено до».{% endif %} Ссылку на оплату картой выставляют из карточки клиента.</p>
 </section>
 {% endif %}
+{% if acting and searching %}
+{# Розыск не прощает долг и не останавливает начисления: он поднимает
+   флаг, чтобы велосипед не растворился в списке должников. Объявленный -
+   состояние аренды, а не редкая форма: открытой карточкой сразу под
+   оплатой, выше сдачи. #}
+<section class="card" id="search">
+  <h2>Розыск</h2>
+  <form method="post" action="/rentals/{{ rental.id }}/search" class="grid2">
+    <p class="wide">В розыске {{ search_days(rental) }} дн.{% if rental.search_note %} — {{ rental.search_note }}{% endif %} <small class="muted">{{ rental.search_by or '' }}</small></p>
+    <button type="submit" name="action" value="stop">Снять розыск</button>
+    <button type="submit" name="action" value="theft" class="danger">Признать потерянным</button>
+  </form>
+</section>
+{% endif %}
 {% if acting %}
 {# Частые действия - открытыми карточками, редкие формы - свёрнутыми: на
    телефоне пять форм подряд уводили «Закрыть аренду» на седьмой экран. #}
@@ -97,7 +113,11 @@
 
 {% if batteries or free_batteries %}
 <details class="card fold">
-  <summary>Батареи у клиента <small class="muted">· {% for b in batteries %}№ {{ b.code }}{% if not loop.last %}, {% endif %}{% else %}не отмечены{% endfor %}{% if free_batteries %} · заменить{% endif %}</small></summary>
+  {# Непроверенный паспорт - красным и в свёрнутой строке: раньше
+     «сверить» было видно сразу. #}
+  {% set unchecked = batteries|selectattr('checked', 'defined')|rejectattr('checked')|list %}
+  <summary>Батареи у клиента <small class="muted">· {% for b in batteries %}№ {{ b.code }}{% if not loop.last %}, {% endif %}{% else %}не отмечены{% endfor %}{% if free_batteries %} · {% if batteries %}заменить{% else %}выдать{% endif %}{% endif %}</small>
+    {%- if unchecked %} <small class="bad">· сверить</small>{% endif %}</summary>
   {# Батарея ломается чаще велосипеда: замена на точке - обычное дело,
      и аренду она не трогает вовсе. #}
   <p>{% for b in batteries %}<a href="/batteries/{{ b.id }}">№ {{ b.code }}</a>{% if b.model_title %} · {{ b.model_title }}{% endif %} <span class="muted">{{ b.cycles }} циклов</span>{% if b.checked is defined and not b.checked %} · <a href="/batteries/{{ b.id }}#passport" class="bad">сверить</a>{% endif %}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">не отмечены — батареи можно выдать при следующей замене.</span>{% endfor %}</p>
@@ -212,21 +232,14 @@
   </table>
 </section>
 {% endif %}
-{% if acting %}
-{# Розыск не прощает долг и не останавливает начисления: он поднимает
-   флаг, чтобы велосипед не растворился в списке должников. Объявленный -
-   раскрыт: это состояние аренды, а не редкая форма. #}
-<details class="card fold" {% if in_search(rental) %}open{% endif %}>
-  <summary>Розыск <small class="{% if in_search(rental) %}bad{% else %}muted{% endif %}">· {% if in_search(rental) %}в розыске {{ search_days(rental) }} дн.{% else %}не объявлен{% endif %}</small></summary>
+{% if acting and not searching %}
+{# Объявить в розыск - редкая форма: свёрнута в конце. Объявленный розыск -
+   открытой карточкой под оплатой (выше). #}
+<details class="card fold">
+  <summary>Розыск <small class="muted">· не объявлен</small></summary>
   <form method="post" action="/rentals/{{ rental.id }}/search" class="grid2">
-    {% if in_search(rental) %}
-    <p class="wide">В розыске {{ search_days(rental) }} дн.{% if rental.search_note %} — {{ rental.search_note }}{% endif %} <small class="muted">{{ rental.search_by or '' }}</small></p>
-    <button type="submit" name="action" value="stop">Снять розыск</button>
-    <button type="submit" name="action" value="theft" class="danger">Признать потерянным</button>
-    {% else %}
     <label class="wide">Комментарий <input name="note" placeholder="не отвечает с 10.09, адрес не подтверждён"></label>
     <button type="submit" class="ghost" name="action" value="start">Объявить в розыск</button>
-    {% endif %}
   </form>
 </details>
 {% endif %}

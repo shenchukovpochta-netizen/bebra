@@ -20,8 +20,11 @@
   <div class="table-wrap">
   <table class="cards">
     <tr><th>Месяц</th><th class="num">Спросили</th><th class="num">Ответили</th><th class="num">Средняя</th>{% for s in FEEDBACK_SCORES|reverse %}<th class="num opt">{{ s }}★</th>{% endfor %}<th class="num">Низких</th></tr>
+    {# Месяц без вопросов (empty-row) в карточки не идёт: полгода
+       карточек «0 / 0 / —» на телефоне - шум; на компьютере строка
+       остаётся, ряд месяцев без дыр. #}
     {% for r in months + [total] %}
-    <tr {% if loop.last %}class="total"{% endif %}><td class="nowrap" data-label="Месяц">{% if loop.last %}<b>ИТОГО</b>{% else %}{{ r.month.strftime('%m.%Y') }}{% endif %}</td>
+    <tr {% if loop.last %}class="total"{% elif not r.asked %}class="empty-row"{% endif %}><td class="nowrap" data-label="Месяц">{% if loop.last %}<b>ИТОГО</b>{% else %}{{ r.month.strftime('%m.%Y') }}{% endif %}</td>
       <td class="num" data-label="Спросили">{{ r.asked }}</td>
       <td class="num" data-label="Ответили">{{ r.answered }}{% if r.rate is not none %} <span class="muted">· {{ r.rate }} %</span>{% endif %}</td>
       <td class="num" data-label="Средняя"><b>{{ feedback_avg(r.avg) }}</b></td>
@@ -64,7 +67,7 @@
       <td data-label="Комментарий">{% if f.comment %}{{ f.comment }}{% elif f.commented_at %}<span class="muted">стёрт по сроку</span>{% endif %}</td></tr>
     {% else %}<tr><td colspan="6" class="muted">Низких оценок за год нет.</td></tr>{% endfor %}
   </table>
-  {% if low|length > 20 %}<p>{% if all_low %}<a href="/reports/feedback">только последние 20</a>{% else %}<a href="/reports/feedback?low=all">все {{ low|length }} низких оценок →</a>{% endif %}</p>{% endif %}
+  {% if low|length > 20 %}<p>{% if all_low %}<a href="/reports/feedback">только последние 20</a>{% else %}<a href="/reports/feedback?low=all">все низкие оценки: {{ low|length }} →</a>{% endif %}</p>{% endif %}
   <p class="muted">Вопрос «Как вам аренда?» бот задаёт сам после сдачи
     велосипеда, одной кнопкой от 1 до 5. На 3 и ниже просит написать, что пошло
     не так, и сообщает в служебный чат — выключить вопрос и выбрать адресат

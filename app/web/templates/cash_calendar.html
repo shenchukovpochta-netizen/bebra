@@ -33,12 +33,14 @@
   {% for d in cal.days %}{% if d.entries or loop.first %}
   <tr class="{% if cal.opening is not none and d.balance < 0 %}warn-row{% endif %}">
     <td class="nowrap" data-label="День"><b>{{ d.day.strftime('%d.%m') }}</b> <small class="muted">{{ ['пн','вт','ср','чт','пт','сб','вс'][d.day.weekday()] }}</small></td>
-    {# Нули - прочерком на компьютере и не показываются на телефоне (opt):
-       в карточке дня «Приход —» и «Расход —» были шумом. #}
-    <td class="num{% if not d.rent %} opt{% endif %}" data-label="Аренда">{% if d.rent %}{{ money(d.rent) }} <small class="muted">· {{ d.rent_count }}</small>{% else %}—{% endif %}</td>
-    <td class="num{% if not d.plan_in %} opt{% endif %}" data-label="Приход">{{ money(d.plan_in) if d.plan_in else '—' }}</td>
-    <td class="num{% if not d.plan_out %} opt{% endif %}" data-label="Расход">{{ money(d.plan_out) if d.plan_out else '—' }}</td>
-    <td class="num{% if not d.net %} opt{% endif %}" data-label="Итог дня"><b>{{ money(d.net) }}</b></td>
+    {# Нули - прочерком на компьютере и не показываются в карточке дня
+       (zero, только в режиме карточек): «Приход —» и «Расход —» были
+       шумом. Не opt - тот прячет ячейку и у таблицы шириной 641-700 px,
+       и суммы съезжали под чужую шапку. #}
+    <td class="num{% if not d.rent %} zero{% endif %}" data-label="Аренда">{% if d.rent %}{{ money(d.rent) }} <small class="muted">· {{ d.rent_count }}</small>{% else %}—{% endif %}</td>
+    <td class="num{% if not d.plan_in %} zero{% endif %}" data-label="Приход">{{ money(d.plan_in) if d.plan_in else '—' }}</td>
+    <td class="num{% if not d.plan_out %} zero{% endif %}" data-label="Расход">{{ money(d.plan_out) if d.plan_out else '—' }}</td>
+    <td class="num{% if not d.net %} zero{% endif %}" data-label="Итог дня"><b>{{ money(d.net) }}</b></td>
     {% if cal.opening is not none %}<td class="num" data-label="Остаток">{{ money(d.balance) }}</td>{% endif %}
     <td data-label="Что">
       {%- if d.entries %}<small>{% for i in d.entries if i.kind == 'plan' %}<span class="{% if i.direction == 'out' %}bad{% else %}ok{% endif %}">{{ '−' if i.direction == 'out' else '+' }}{{ money(i.amount) }} {{ i.title }}{% if i.overdue %} (просрочен){% endif %}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}

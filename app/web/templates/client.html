@@ -81,8 +81,8 @@
 </div>
 
 {% if money_ok %}
-<section class="card">
-  <h2>Журнал операций</h2>
+<section class="card" id="ledger">
+  <h2>Журнал операций{% if ledger_total > ledger_shown and not all_ledger %} <span class="muted">· последние {{ ledger_shown }} из {{ ledger_total }}</span>{% endif %}</h2>
   <table class="cards">
     <tr><th>Дата</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th class="opt">Кто</th></tr>
     {% for x in ledger %}
@@ -97,6 +97,7 @@
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Записей нет.</td></tr>{% endfor %}
   </table>
+  {% if ledger_total > ledger_shown %}<p>{% if all_ledger %}<a href="/clients/{{ client.id }}#ledger">только последние {{ ledger_shown }}</a>{% else %}<a href="/clients/{{ client.id }}?ledger=all#ledger">весь журнал, записей: {{ ledger_total }} →</a>{% endif %}</p>{% endif %}
 </section>
 {% endif %}
 

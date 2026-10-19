@@ -2607,6 +2607,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Клиент добавлен.")
         return redirect(f"/clients/{client_id}")
 
+    CLIENT_LEDGER_SHOWN = 20
+
     @app.get("/clients/{client_id}")
     async def client_card(request: Request, client_id: int) -> Response:
         client = await crm.client(client_id)
@@ -2618,11 +2620,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         bot_user = dict(bot_user) if bot_user else None
         has_contract = bool(bot_user and bot_user.get("contract_status") == "signed"
                             and bot_user.get("contract_path"))
+        # Журнал - последние CLIENT_LEDGER_SHOWN, весь - по ссылке
+        # (?ledger=all): сотня записей карточками на телефоне уводила
+        # «Историю аренд» за десятки экранов.
+        entries = await crm.ledger_of(client_id, 100000)
+        all_ledger = request.query_params.get("ledger") == "all"
         return render(request, "client.html", client=client, balance=balance,
                       presets=logic.fine_presets(await crm.work_types(active_only=True)),
                       rental=rental, summary=summarize(rental, balance),
                       risk=await risk_of(client_id),
-                      ledger=await crm.ledger_of(client_id, 100),
+                      ledger=entries if all_ledger else entries[:CLIENT_LEDGER_SHOWN],
+                      ledger_total=len(entries), all_ledger=all_ledger,
+                      ledger_shown=CLIENT_LEDGER_SHOWN,
                       rentals=await crm.client_rentals(client_id),
                       claim=await crm.pending_claim_of(client_id),
                       bot_user=bot_user, has_contract=has_contract,
@@ -5900,6 +5909,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "feedback.html", since=since,
                       all_low=request.query_params.get("low") == "all", **data)
 
+    REF_GRANTS_SHOWN = 20
+
     @app.get("/reports/referrals")
     async def referrals_report(request: Request) -> Response:
         if not may_view(request, "finance"):
@@ -5920,7 +5931,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         rows = await crm.referrals(since=start, until=end, limit=5000)
         raw = await crm.settings()
         grants = await crm.bonuses(since=since.value, until=until.value, limit=2000)
+        # Приглашённые - постранично, баллы - последние REF_GRANTS_SHOWN и
+        # ссылка «все»: за длинный период это тысячи карточек на телефоне.
+        # Воронка, агенты и итог баллов - по всему найденному.
+        tools = list_tools(request, rows, allowed={})
+        all_grants = request.query_params.get("grants") == "all"
         return render(request, "referrals.html", rows=rows,
+                      invited=tools["rows"], tools=tools,
+                      grants_shown=REF_GRANTS_SHOWN, all_grants=all_grants,
                       funnel=logic.ref_funnel(rows), agents=logic.ref_agents(rows),
                       settings=logic.bonus_settings(raw),
                       links=logic.review_links(raw),
@@ -8402,19 +8420,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         campaign = await crm.campaign(campaign_id)
         if campaign is None:
             return render(request, "missing.html", status_code=404, what="Рассылка")
-        sends = await crm.campaign_sends(campaign_id, limit=1000)
+        # Все получатели: страницу режет list_tools, а плитки и кнопка
+        # «Отправить N» считают всю аудиторию, а не первую тысячу.
+        sends = await crm.campaign_sends(campaign_id, limit=100000)
+        # Недошедшие - первыми и постранично: тысяча получателей одной
+        # таблицей прятала ошибки где-то в середине. Предпросмотр - по
+        # первому в этом же порядке: «так увидит первый в списке».
+        failed_first = sorted(sends, key=lambda s: s.get("status") != "failed")
         preview = ""
-        if sends:
-            client = await crm.client(sends[0]["client_id"])
+        if failed_first:
+            client = await crm.client(failed_first[0]["client_id"])
             if client is not None:
                 values = logic.template_context(
                     client, await crm.active_rental_of(client["id"]),
                     await crm.client_balance(client["id"]),
                     pay_url=cfg.pay_url)
                 preview = logic.render_template(campaign.get("body") or "", values)
-        # Недошедшие - первыми и постранично: тысяча получателей одной
-        # таблицей прятала ошибки где-то в середине.
-        failed_first = sorted(sends, key=lambda s: s.get("status") != "failed")
         tools = list_tools(request, failed_first, allowed={})
         return render(request, "campaign.html", campaign=campaign, sends=sends,
                       rows=tools["rows"], tools=tools,
@@ -8653,7 +8674,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def cash_page(request: Request) -> Response:
         if not may_view(request, "cash"):
             return denied(request, "cash")
-        rows = logic.shift_rows(await crm.cash_shifts(limit=100))
+        # Все смены: страницу режет list_tools, подвал - сколько их всего.
+        rows = logic.shift_rows(await crm.cash_shifts(limit=100000))
         # Точек две, и смены на них открыты одновременно: показывать одну
         # «текущую» значило спрятать от второй точки и её смену, и форму
         # открытия - наличные второй точки тогда падали в чужую смену.
@@ -8774,15 +8796,24 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         status = request.query_params.get("status") or "new"
         settings = await crm.settings()
         clients = await crm.clients(limit=10000)
-        txns = await crm.bank_txns(status=None if status == "all" else status, limit=200)
-        # Те же деньги, уже зачисленные заявкой или счётом, - в подсказке:
-        # автозачисление такую строку не трогает, решает оператор.
-        rows = logic.bank_rows(txns, clients, settings=settings,
-                               credits=await banking.credited_around(crm, txns))
+        # Вся выписка одной выборкой: страницу режет list_tools, подвал
+        # «Итого» - всё найденное, а не предел выборки; плитки - по тем же
+        # строкам (были по последним пятистам).
+        every = await crm.bank_txns(limit=100000)
+        txns = list(every) if status == "all" else [t for t in every
+                                                     if t.get("status") == status]
         if status == "new":
             # Списания в «не разобрано» не показываем: разбирать в них
             # нечего, они никому не зачисляются и висели бы вечно.
-            rows = [r for r in rows if r["direction"] == "credit"]
+            txns = [t for t in txns if t.get("direction") == "credit"]
+        # Порядок bank_rows (неразобранные первыми, свежие выше; выборка уже
+        # по дате) - до страницы: догадку по клиентам считаем только ей.
+        txns.sort(key=lambda t: t.get("status") != "new")
+        tools = list_tools(request, txns, allowed={})
+        # Те же деньги, уже зачисленные заявкой или счётом, - в подсказке:
+        # автозачисление такую строку не трогает, решает оператор.
+        rows = logic.bank_rows(tools["rows"], clients, settings=settings,
+                               credits=await banking.credited_around(crm, tools["rows"]))
         # В выпадающем списке - те, кто платит: должники и те, у кого идёт
         # аренда. Весь список клиентов в select не помещается и не нужен:
         # платёж от закрывшегося год назад - повод открыть его карточку,
@@ -8793,9 +8824,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                              {"id": rental["client_id"],
                               "full_name": rental.get("full_name"),
                               "phone": rental.get("phone")})
-        return render(request, "bank.html", rows=rows, status=status,
-                      summary=logic.bank_summary(
-                          logic.bank_rows(await crm.bank_txns(limit=500))),
+        return render(request, "bank.html", rows=rows, tools=tools, status=status,
+                      summary=logic.bank_summary(logic.bank_rows(every)),
                       auto=logic.bank_settings(settings)["auto_credit"],
                       clients_for_pick=sorted(
                           picks.values(), key=lambda c: str(c.get("full_name") or "")),
@@ -9294,7 +9324,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_view(request, "finance"):
             return denied(request, "finance")
         status = request.query_params.get("status") or ""
-        orders = await crm.pay_orders(status=status or None, limit=200)
+        # Все счета одной выборкой: страницу режет list_tools, и подвал
+        # «Итого» - всё найденное, а не предел выборки (был 200 при 500
+        # оплаченных на плитке). Плитки - по тем же строкам.
+        every = await crm.pay_orders(limit=100000)
+        orders = [o for o in every if o.get("status") == status] if status else every
         settings = logic.pay_settings(await crm.settings())
         # В выпадающем списке - те, кто платит: должники и действующие
         # аренды. Весь список клиентов сюда не влезает и не нужен.
@@ -9316,8 +9350,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "payments.html",
                       rows=tools["rows"], tools=tools, status=status,
                       settings=settings, acq=acquiring_state(raw_settings),
-                      summary=logic.pay_summary(
-                          await crm.pay_orders(limit=500)),
+                      summary=logic.pay_summary(every),
                       online=await acquiring_live() is not None,
                       clients_for_pick=sorted(
                           picks.values(), key=lambda c: str(c.get("full_name") or "")),
