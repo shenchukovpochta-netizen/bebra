@@ -1164,16 +1164,8 @@ h1.hero-title{font:700 30px/1.1 var(--font-text);letter-spacing:-.03em;margin:0 
   a.arrow{display:inline-flex;align-items:center;justify-content:center;min-width:40px;min-height:40px;
     border-radius:8px;box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--text)}
   a.arrow:hover{text-decoration:none}
-}
-
-/* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при
-   фокусе и назад не возвращают. Масштаб пальцами не запрещаем
-   (maximum-scale в viewport), а лечим причину. Поле кода подписи (28 px)
-   и так крупное. Правило последнее в файле: select и textarea перебивают
-   правила выше порядком, input - весом (.saved-views, .side-search). */
-@media (max-width:1000px){
-  input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=color]):not(.code-input),
-  select,textarea{font-size:16px}
+  /* у месяца сводки ссылка уже .month-nav a - её вес выше a.arrow */
+  .month-nav a.arrow{display:inline-flex;min-width:40px}
 }
 
 /* ── сводка: план-факт, календарь, парк ──
@@ -1214,3 +1206,13 @@ details.more[open]>summary{margin-bottom:10px}
 .cal-start{margin:0 0 12px}
 .cal-start label{display:inline-flex;align-items:center;gap:8px;margin:0}
 table.cal-mini td small{display:block;font-size:12px;line-height:1.35}
+
+/* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при
+   фокусе и назад не возвращают. Масштаб пальцами не запрещаем
+   (maximum-scale в viewport), а лечим причину. Поле кода подписи (28 px)
+   и так крупное. Правило последнее в файле: select и textarea перебивают
+   правила выше порядком, input - весом (.saved-views, .side-search). */
+@media (max-width:1000px){
+  input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=color]):not(.code-input),
+  select,textarea{font-size:16px}
+}
