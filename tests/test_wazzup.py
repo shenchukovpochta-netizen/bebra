@@ -307,6 +307,28 @@ class TestRules(unittest.TestCase):
         got, _ = logic.parse_inbound({"channel": "vk", "ext_id": "42", "text": "x"})
         self.assertEqual(got[0]["channel"], "vk", "n8n может прислать и ВКонтакте")
 
+    def test_instagram_login_from_chat_id(self):
+        """У Instagram логин - номер чата: contact.username обычно пуст, а
+        ссылка на профиль и строка «Логин в Instagram» всё равно есть."""
+        def msg(chat, **contact):
+            return {"messageId": f"m-{chat}", "channelId": CH2, "chatType": "instagram",
+                    "chatId": chat, "type": "text", "text": "Привет", "contact": contact}
+        items, skipped = logic.parse_inbound({"messages": [
+            msg("anna.kzn", name="Anna"), msg("@ildar_k"), msg("1784140592"),
+            msg("bad/login"), msg("chat.id", name="Пётр", username="real.login")]})
+        self.assertEqual(skipped, 0)
+        self.assertEqual([i.get("username") for i in items],
+                         ["anna.kzn", "ildar_k", None, None, "real.login"],
+                         "одни цифры - номер аккаунта, а не логин; логин контакта главнее")
+        thread = {"channel": "ig", "ext_id": items[0]["ext_id"],
+                  "username": items[0]["username"]}
+        self.assertEqual(logic.inbox_links(thread)["ig"], "https://instagram.com/anna.kzn")
+        req = logic.wazzup_crm_request({"createContact": {"contactData": [
+            {"chatType": "instagram", "chatId": "anna.kzn"}]}})
+        self.assertEqual(req["chats"][0]["username"], "anna.kzn")
+        [vk] = logic.parse_inbound({"messages": [{**msg("123"), "chatType": "vk"}]})[0]
+        self.assertNotIn("username", vk, "у ВКонтакте номер чата - не логин")
+
     def test_new_channels_reply_rules(self):
         channels = [{"id": "ig-1", "kind": "ig", "active": True},
                     {"id": "vk-1", "kind": "vk", "active": True}]
@@ -824,8 +846,31 @@ class TestWazzupCrmHook(tiw.InboxCase if HAVE_WEB else unittest.TestCase):
         body = self.contact().json()
         [thread] = tiw.run(self.crm.inbox_threads(limit=10))
         self.assertEqual(thread["client_id"], client_id)
-        self.assertEqual(body["uri"], f"https://crm.mybike.ru/clients/{client_id}")
+        self.assertEqual(body["uri"], f"https://crm.mybike.ru/inbox/{thread['id']}",
+                         "ссылка - на обращение, а не на карточку клиента")
         self.assertEqual(body["name"], "Азиз Каримов", "ФИО карточки наружу не уходит")
+
+    def test_contact_reply_same_for_client_and_stranger(self):
+        """С утёкшим токеном по ответу не понять, чей номер: у клиента и
+        у чужого номера ответ одного вида - ни карточки, ни её номера."""
+        client_id = tiw.run(self.crm.create_client(full_name="Каримов Азиз Рустамович",
+                                                   phone="+79001234567"))
+        bodies = {}
+        for chat_id in ("79001234567", "79007654321"):
+            got = self.hook({"createContact": {"contactData": [
+                {"chatType": "whatsapp", "chatId": chat_id}]}}).json()
+            thread_id = logic.wazzup_ref(got["id"])[1]
+            bodies[chat_id] = (got, thread_id)
+        threads = {t["id"]: t for t in tiw.run(self.crm.inbox_threads(limit=10))}
+        client_body, client_thread = bodies["79001234567"]
+        other_body, other_thread = bodies["79007654321"]
+        self.assertEqual(threads[client_thread]["client_id"], client_id)
+        self.assertIsNone(threads[other_thread]["client_id"])
+        for body, thread_id in ((client_body, client_thread), (other_body, other_thread)):
+            self.assertEqual(set(body), {"id", "name", "contactData", "uri"})
+            self.assertEqual(body["uri"], f"https://crm.mybike.ru/inbox/{thread_id}")
+            self.assertEqual(body["name"], logic.inbox_no(thread_id))
+            self.assertNotIn("/clients/", json.dumps(body))
 
     def test_contact_reply_does_not_reveal_stored_name(self):
         """Чат уже есть с именем из канала: запрос без имени получает номер

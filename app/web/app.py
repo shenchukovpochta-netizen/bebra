@@ -3816,19 +3816,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                      req["kind"])
             return JSONResponse({"ok": True, "skipped": 1})
         if req["kind"] == "contact":
-            client_id = got.get("client_id")
-            # Имя - из запроса, иначе номер обращения: имя, записанное
-            # раньше (из канала или чужого чата), в ответ не уходит - с
-            # утёкшим токеном хук не должен отвечать, как зовут человека
-            # с этим номером.
-            name = req.get("name") or logic.inbox_no(got["thread_id"])
+            # С утёкшим токеном хук не должен отвечать, чей это номер:
+            # ответ одинаков для клиента и для чужого. Имя - из запроса,
+            # иначе номер обращения (имя, записанное раньше, и ФИО карточки
+            # не уходят), ссылка - всегда на обращение, а не на карточку
+            # клиента: её номер в ответе выдал бы, что номер - наш клиент.
+            # Карточку обращение и так показывает.
+            thread_id = int(got["thread_id"])
+            name = req.get("name") or logic.inbox_no(thread_id)
             log.info("хук входящих: Wazzup контакт - обращение %s (%s)",
-                     logic.inbox_no(got["thread_id"]),
+                     logic.inbox_no(thread_id),
                      "новое" if got["created"] else "уже было")
             return JSONResponse(logic.wazzup_contact_reply(
-                req, contact_id=f"thread-{int(got['thread_id'])}", name=name,
-                uri=wazzup_uri(f"/clients/{int(client_id)}" if client_id
-                               else f"/inbox/{int(got['thread_id'])}")))
+                req, contact_id=f"thread-{thread_id}", name=name,
+                uri=wazzup_uri(f"/inbox/{thread_id}")))
         deal = got["deal"]
         log.info("хук входящих: Wazzup сделка %s (%s)", int(deal["id"]),
                  "новая" if got["created"] else "уже была")

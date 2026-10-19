@@ -11564,6 +11564,12 @@ def _inbound_item(channel: str, ext_id: Any, *, msg_id: Any = None, name: Any = 
     if own:
         item["ext_channel"] = own
     login = str(username or "").strip().lstrip("@")
+    if channel == "ig" and not _IG_USERNAME.fullmatch(login):
+        # У Instagram логин - сам номер чата (Wazzup: «аккаунт без @»), а
+        # contact.username обычно пуст. Одни цифры - не логин, а номер
+        # аккаунта: instagram.com/<цифры> вёл бы к постороннему.
+        chat = ext.lstrip("@")
+        login = chat if not chat.isdigit() else ""
     if (channel == "tgp" and _TG_USERNAME.fullmatch(login)) or (
             channel == "ig" and _IG_USERNAME.fullmatch(login)):
         item["username"] = login
