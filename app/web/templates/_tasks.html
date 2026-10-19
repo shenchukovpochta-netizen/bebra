@@ -1,11 +1,11 @@
 {# Задачи дня (app/crm/tasks.py): строка задачи с кнопками и форма новой.
    Один кусок на «Задачи дня» (/my), «Все задачи» (/tasks) и карточку. #}
-{% macro row(t, back, show_who=False) %}
+{% macro row(t, back, show_who=False, show_where=False) %}
 <li class="task-row{% if t.hot %} hot{% endif %}">
   <a href="/tasks/{{ t.id }}"><b>{{ t.title }}</b>
-    <small class="muted">{{ [t.due_text,
+    <small class="muted">{{ [t.due_text or ('без срока' if show_where else ''),
       (t.assignee_name or 'не закреплена') if show_who else '',
-      t.location or '',
+      t.location or ('вся сеть' if show_where else ''),
       money(t.pay) if t.pay is not none else '']|select|join(' · ') }}</small></a>
   <span class="task-acts">
     {% if t.can_take %}<form method="post" action="/tasks/{{ t.id }}/take"><input type="hidden" name="back" value="{{ back }}"><button type="submit" class="ghost">Взять</button></form>{% endif %}

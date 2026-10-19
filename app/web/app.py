@@ -1377,25 +1377,30 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/my")
     async def my_tasks_page(request: Request) -> Response:
-        """Задачи этого сотрудника на сегодня (app/crm/mytasks.py): наряды
-        по технику, аренды, заявки и тревоги - по его точке. Открыта всем:
-        раздела у неё нет, а группа - тому, кто по ней действует
-        (mytasks). Источник читается, только если его группа будет видна.
-        Владельцу - не прозвон и выдачи команды, а поручения по сотрудникам:
+        """«Задачи дня» тремя видами: задачи владельца, задачи админов и
+        мастеров по точкам, общие (незакреплённые). Открыта всем: раздела
+        у неё нет. Сотруднику - его поручения и группы его точки
+        (app/crm/mytasks.py: наряды по технику, аренды, заявки и тревоги по
+        точке, группа - тому, кто по ней действует; источник читается,
+        только если группа будет видна). Владельцу - не прозвон и выдачи
+        команды, а поручения сотрудников по их точкам (tasks.points_board):
         рабочие списки точек живут у тех, кто по ним действует."""
         staff = request.state.staff
         today = date.today()
         owner = logic.is_owner(staff)
         open_tasks = await crm.tasks(status="open")
         people = await team_people()
-        common = {"today": today, "task_lists": tasks.my_lists(staff, open_tasks, today=today),
-                  "people": people, "locations": await crm.locations(active_only=True),
-                  "task_money": tasks.manages(staff)}
+        locations = await crm.locations(active_only=True)
+        lists = tasks.my_lists(staff, open_tasks, today=today)
+        common = {"today": today, "task_lists": lists, "people": people,
+                  "locations": locations, "task_money": tasks.manages(staff)}
         if owner:
-            board = tasks.overview(open_tasks, people, staff=staff, today=today)
-            board["people"] = [p for p in board["people"] if int(p["id"]) != int(staff["id"])]
+            board = tasks.points_board(open_tasks, people, staff=staff, today=today,
+                                       points=[loc["name"] for loc in locations],
+                                       location=request.query_params.get("location") or "")
             return render(request, "my.html", groups=[], point=None, own_month=None,
-                          team_board=board, **common)
+                          board=board, free=board["free"],
+                          back=tasks.back_url("/my", board["place"]), **common)
         settings = await crm.settings()
         expiring: list[dict] = []
         search = None
@@ -1423,7 +1428,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             repair_norm=logic.repair_norm_default(settings),
             booking_url=booking_issue_url)
         return render(request, "my.html", groups=groups, point=point,
-                      own_month=await own_plan(staff, today), team_board=None, **common)
+                      own_month=await own_plan(staff, today), board=None,
+                      free=lists["free"], back="/my", **common)
 
     # ─────────── задачи дня: поручения (app/crm/tasks.py) ───────────
 
@@ -1432,8 +1438,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     def task_back(data: dict[str, str]) -> str:
         """Куда вернуться: только свои страницы, адрес из формы - чужая строка."""
-        back = data.get("back") or ""
-        return back if back in ("/my", "/tasks") else "/my"
+        return tasks.safe_back(data.get("back"))
 
     # ─────────── команда: план, факт, зарплата (app/crm/team.py) ───────────
 
@@ -1701,6 +1706,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         done = [tasks.dress(t, staff=staff, today=today)
                 for t in await crm.tasks(status="done", done_since=start)]
         return render(request, "tasks.html", view=view, done=done, place=place,
+                      back=tasks.back_url("/tasks", place),
                       people=people, locations=await crm.locations(active_only=True),
                       today=today, task_money=tasks.manages(staff),
                       money_ok=tasks.money_ok(staff))

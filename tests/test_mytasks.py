@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal as D
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote_plus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -284,27 +286,161 @@ class TestMyTasksPage(WebCase):
         self.assertNotIn("Клиент Павлюхина", page)
         self.assertEqual(self.client.get("/clients").status_code, 403)
 
-    def test_owner_sees_team_not_call_lists(self):
-        oper = run(self.crm.staff_by_login("oper"))
-        run(self.crm.create_task(title="Обзвонить должников", by="staff:admin",
-                                 assignee_id=oper["id"]))
+    @staticmethod
+    def blocks(page):
+        """Заголовки трёх блоков «Задач дня» по порядку."""
+        return re.findall(r'<div class="my-block-h"><h2>([^<]+?)\s*(?:<|$)', page)
+
+    @staticmethod
+    def heads(part):
+        """Заголовки групп точек в блоке «по точкам»."""
+        return re.findall(r"<h3>([^<]+?) <small", part)
+
+    @staticmethod
+    def block(page, anchor):
+        part = page.split(f'id="{anchor}"')[1]
+        return part.split('class="my-block"')[0]
+
+    def test_owner_sees_three_kinds_not_call_lists(self):
+        crm = self.crm
+        oper = run(crm.staff_by_login("oper"))
+        manager = run(crm.access_profile_by_code("manager"))
+        anna = run(crm.create_staff("anna", logic.hash_password("password-1"), "Анна",
+                                    "manager", manager["id"], location=P2))
+        run(crm.create_staff("floater", logic.hash_password("password-1"),
+                                       "Подменный", "manager", manager["id"]))
+        owner = run(crm.staff_by_login("admin"))
         self.login()
+        empty = self.block(self.get_ok("/my"), "owner")
+        self.assertIn("Своих задач нет", empty)
+        self.assertNotIn("my-group", empty, "пустое - не предупреждение")
+        run(crm.create_task(title="Обзвонить должников", by="staff:admin",
+                            assignee_id=oper["id"]))
+        run(crm.create_task(title="Сверить кассу", by="staff:admin", assignee_id=anna))
+        run(crm.create_task(title="Закупить колодки", by="staff:admin",
+                            assignee_id=owner["id"]))
+        run(crm.create_task(title="Ремонт АКБ", by="staff:admin", location=P1))
+        run(crm.create_task(title="Помыть витрину", by="staff:admin", location=P2))
+        run(crm.create_task(title="Инвентаризация шлемов", by="staff:admin"))
         page = self.get_ok("/my")
+        self.assertIn("· вся сеть</small>", page)
         self.assertNotIn("Клиент Павлюхина", page, "прозвон точек - не владельцу")
         self.assertNotIn("позвонить", page)
         self.assertNotIn("Своя точка не задана", page)
-        board = page.split('class="team-cols"')[1]
-        self.assertIn("Оператор", board)
-        self.assertIn("Механик", board)
-        self.assertIn("Обзвонить должников", board, "поручение - в колонке сотрудника")
+        self.assertEqual(self.blocks(page), ["Задачи владельца",
+                                             "Задачи админов и мастеров по точкам",
+                                             "Общие задачи"], "а, б, в - по порядку")
+        mine = self.block(page, "owner")
+        self.assertIn("Закупить колодки", mine)
+        self.assertIn("my-group warn", mine)
+        self.assertIn("+ Поставить задачу", mine)
+        self.assertNotIn("Обзвонить должников", mine)
+        points = self.block(page, "points")
+        # группа - точка сотрудника, внутри - её люди с поручениями
+        order = [loc["name"] for loc in run(crm.locations(active_only=True))]
+        self.assertEqual(self.heads(points), [*order, "Без точки"], "порядок справочника")
+        p1 = points.split(f"<h3>{P1} ")[1].split("<h3>")[0]
+        p2 = points.split(f"<h3>{P2} ")[1].split("<h3>")[0]
+        for word in ("Оператор", "Механик", "Обзвонить должников", "2 сотрудника · 1 задача"):
+            self.assertIn(word, p1)
+        self.assertIn(f'href="/team/{anna}"', p2, "имя ведёт в «Команду»")
+        self.assertIn("Сверить кассу", p2)
+        self.assertNotIn("Оператор", p2)
+        self.assertIn("Подменный", points.split("<h3>Без точки")[1])
+        self.assertNotIn("Закупить колодки", points, "свои - не в колонках команды")
+        self.assertNotIn(f'href="/team/{owner["id"]}"', points)
+        common = self.block(page, "common")
+        for word in ("Ремонт АКБ", "Помыть витрину", "Инвентаризация шлемов", "вся сеть"):
+            self.assertIn(word, common)
         self.assertIn('href="/my"', self.get_ok("/"), "ссылка на сводке")
-        # тот же список у оператора - на месте
-        self.client.post("/logout")
+        # переключатель точки: её группа и общие, которые она видит
+        page = self.get_ok(f"/my?location={P2}")
+        self.assertIn(f"· {P2}</small>", page, "подзаголовок - выбранная точка")
+        points = self.block(page, "points")
+        self.assertEqual(self.heads(points), [P2])
+        self.assertIn("Анна", points)
+        common = self.block(page, "common")
+        self.assertIn("Помыть витрину", common)
+        self.assertIn("Инвентаризация шлемов", common, "без точки - видит вся сеть")
+        self.assertNotIn("Ремонт АКБ", common)
+        self.assertIn("Закупить колодки", self.block(page, "owner"), "свои - всегда")
+        page_none = self.get_ok("/my?location=none")
+        self.assertIn("· Без точки</small>", page_none)
+        none = self.block(page_none, "points")
+        self.assertIn("Подменный", none)
+        self.assertNotIn("Оператор", none)
+        common = self.block(page_none, "common")
+        for word in ("Ремонт АКБ", "Помыть витрину", "Инвентаризация шлемов"):
+            self.assertIn(word, common, "люди без точки видят все незакреплённые")
+        self.assertIn("Оператор", self.block(self.get_ok("/my?location=Марс"), "points"),
+                      "чужая строка - показывается всё")
+        # кнопка возвращает на ту же точку и в тот же блок, лишнее из
+        # адреса отбрасывается
+        back = "/my?location=" + quote_plus(P2)
+        self.assertIn(f'value="{back}#common"', page)
+        self.assertIn(f'value="{back}#owner"', page)
+        task = next(t for t in crm.tasks_.values() if t["title"] == "Помыть витрину")
+        r = self.client.post(f"/tasks/{task['id']}/take",
+                             data={"back": f"/my?location={P2}&next=https://evil.example"
+                                           "#common"})
+        self.assertEqual(r.headers["location"], back + "#common")
+        self.assertEqual(task["assignee_id"], owner["id"])
+        r = self.client.post(f"/tasks/{task['id']}/done",
+                             data={"back": f"/my?location={P2}#x\"><script>"})
+        self.assertEqual(r.headers["location"], back, "чужой якорь - отбрасывается")
+
+    def test_staff_sees_his_point_and_common(self):
+        crm = self.crm
+        oper = run(crm.staff_by_login("oper"))
+        manager = run(crm.access_profile_by_code("manager"))
+        anna = run(crm.create_staff("anna", logic.hash_password("password-1"), "Анна",
+                                    "manager", manager["id"], location=P2))
+        run(crm.create_task(title="Обзвонить должников", by="staff:admin",
+                            assignee_id=oper["id"]))
+        run(crm.create_task(title="Сверить кассу", by="staff:admin", assignee_id=anna))
+        run(crm.create_task(title="Ремонт АКБ", by="staff:admin", location=P1))
+        run(crm.create_task(title="Помыть витрину", by="staff:admin", location=P2))
+        run(crm.create_task(title="Инвентаризация шлемов", by="staff:admin"))
+        # «только задачи»: оператор Павлюхиной
         self.login("oper", "password-1")
         page = self.get_ok("/my")
-        self.assertIn("Клиент Павлюхина", page)
-        self.assertIn("Обзвонить должников", page)
+        self.assertEqual(self.blocks(page), [f"Задачи точки «{P1}»", "Общие задачи"],
+                         "задач владельца сотруднику нет")
+        point = self.block(page, "point")
+        for word in ("Мои поручения", "Обзвонить должников", "Клиент Павлюхина",
+                     "Касса «Павлюхина» не открыта", "+ Поставить задачу"):
+            self.assertIn(word, point)
+        self.assertNotIn("Сверить кассу", page, "чужие поручения - не ему")
+        self.assertNotIn("Клиент Адоратского", page)
+        common = self.block(page, "common")
+        self.assertIn("Ремонт АКБ", common)
+        self.assertIn("Инвентаризация шлемов", common)
+        self.assertNotIn("Помыть витрину", common, "общая задача чужой точки")
+        self.assertIn("Взять", common)
+        self.assertIn('href="#common">Общие задачи · 2</a>', point, "ссылка вниз, к общим")
         self.assertNotIn('class="team-cols"', page)
+        # механик - свои наряды на своей точке, общие - те же
+        self.client.post("/logout")
+        self.login("mech", "password-1")
+        page = self.get_ok("/my")
+        self.assertEqual(self.blocks(page), [f"Задачи точки «{P1}»", "Общие задачи"])
+        self.assertIn(run(crm.work_order(self.mine))["no"], self.block(page, "point"))
+        self.assertIn("Ремонт АКБ", self.block(page, "common"))
+        # администратор другой точки
+        self.client.post("/logout")
+        self.login("anna", "password-1")
+        page = self.get_ok("/my")
+        self.assertEqual(self.blocks(page), [f"Задачи точки «{P2}»", "Общие задачи"])
+        self.assertIn("Сверить кассу", self.block(page, "point"))
+        common = self.block(page, "common")
+        self.assertIn("Помыть витрину", common)
+        self.assertNotIn("Ремонт АКБ", common)
+        self.assertNotIn('aria-label="Точка"', page, "переключатель - только у владельца")
+        other = self.get_ok("/my?location=" + quote_plus(P1))
+        self.assertNotIn('aria-label="Точка"', other)
+        for anchor in ("point", "common"):
+            self.assertEqual(self.block(other, anchor), self.block(page, anchor),
+                             "фильтр из адреса блоки сотрудника не режет")
 
 
 @unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
