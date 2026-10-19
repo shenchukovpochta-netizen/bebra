@@ -336,6 +336,14 @@ async def _issue_plan(crm: Any, data: dict, *, today: date) -> dict:
         status = logic.BIKE_STATUSES.get(bike.get("status"), bike.get("status"))
         raise FormError(f"⚠️ № {_esc(bike['code'])} сейчас «{_esc(status)}» — "
                         "выдать можно только свободный.")
+    # Со склада не выдают (service.open_rental), а точки выдачи в этой
+    # форме нет - отказ должен быть виден уже в предпросмотре, а не после
+    # кнопки «Провести».
+    if bike.get("location") in logic.warehouse_names(await crm.locations()):
+        raise FormError(f"⚠️ № {_esc(bike['code'])} стоит на складе «{_esc(bike['location'])}» "
+                        "— со склада не выдают. Перевезите его на точку (карточка велосипеда "
+                        "или переброска в отчёте «По точкам») или оформите выдачу в панели: "
+                        "там точка выдачи выбирается.")
     tariffs = await crm.tariffs(active_only=True)
     aliases = logic.model_aliases(await crm.bike_models())
     rows = logic.tariffs_for_model(tariffs, bike.get("model"), aliases=aliases)

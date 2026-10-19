@@ -1302,11 +1302,26 @@ async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
     status = old_status or logic.SWAP_BIKE_STATUS.get(reason, "available")
     if status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус снятого велосипеда.")
+    issue_place = None
+    if not old_id and not rental.get("location"):
+        # Аренда без велосипеда и без точки берёт точку нового: первая
+        # настоящая выдача - эта. Склад точкой аренды не бывает (как в
+        # open_rental): его выручка и чек ушли бы в строку склада. Тогда
+        # точка аренды - «где меняли», и велосипед встаёт на неё.
+        stores = logic.warehouse_names(await crm.locations())
+        if new_bike.get("location") in stores:
+            if not swap_location or swap_location in stores:
+                raise ServiceError(
+                    f"Велосипед {new_bike.get('code')} стоит на складе "
+                    f"«{new_bike['location']}», а у аренды ещё нет точки: со склада не "
+                    "выдают. Укажите в «Где меняли» точку выдачи или сначала "
+                    "перевезите велосипед на точку.")
+            issue_place = swap_location
     ok = await crm.swap_rental_bike(
         rental["id"], old_bike_id=old_id, new_bike_id=new_bike["id"],
         old_status=status, mileage_old=mileage_old, mileage_new=mileage_new,
         reason=logic.SWAP_REASONS[reason], today=date.today(), by=by,
-        swap_location=swap_location or None)
+        swap_location=swap_location or None, issue_location=issue_place)
     if not ok:
         # Отказ базы - либо аренда, либо новый велосипед: он мог уйти из
         # свободных, пока заполняли форму, и тогда его и надо назвать.

@@ -550,10 +550,37 @@ class TestWarehouseLogic(unittest.TestCase):
         self.assertEqual([(m["source"], m["target"], m["count"]) for m in plan["moves"]],
                          [(STORE, PAV, 2)])
         self.assertTrue(all(m["target"] != STORE for m in plan["moves"]))
+        self.assertEqual([g["label"] for g in plan["moves"]],
+                         [f"со склада на {PAV}: 2 × Truck"],
+                         "«с Склад» читается неграмотно")
         # Без пометки склада - обычная точка со своим спросом и запасом.
         plain = logic.transfer_plan(points=[PAV, STORE], bikes=bikes, rentals=[],
                                     history=history, today=today, safety=1)
         self.assertLess(next(r for r in plain["rows"] if r["location"] == STORE)["spare"], 3)
+
+    def test_warehouse_gives_first_when_surplus_is_equal(self):
+        """Лишний есть и на Адоратского, и на складе поровну: везут со
+        склада - точка выдачи держит свободный под курьера без заявки."""
+        today = date(2026, 10, 19)
+        bikes = [{"id": 1, "code": "A-1", "model": "Truck", "status": "available",
+                  "location": ADO},
+                 {"id": 2, "code": "S-1", "model": "Truck", "status": "available",
+                  "location": STORE}]
+        # Спрос Павлюхиной - одна выдача, по завтрашним дням недели.
+        tomorrow = (today + timedelta(days=1)).weekday()
+        history = [{"started_on": today - timedelta(days=d), "location": PAV,
+                    "model": "Truck"} for d in range(1, 57)
+                   if (today - timedelta(days=d)).weekday() == tomorrow]
+        plan = logic.transfer_plan(points=[PAV, ADO, STORE], bikes=bikes, rentals=[],
+                                   history=history, today=today, safety=0,
+                                   stores=[STORE])
+        spare = {r["location"]: r["spare"] for r in plan["rows"]}
+        self.assertEqual((spare[ADO], spare[STORE]), (1, 1), "излишек поровну")
+        self.assertEqual([(m["source"], m["target"], m["count"]) for m in plan["moves"]],
+                         [(STORE, PAV, 1)])
+        self.assertEqual(logic.transfer_from("Центральный", store=True),
+                         "со склада «Центральный»")
+        self.assertEqual(logic.transfer_from(ADO), f"с {ADO}")
 
     def test_waitlist_and_booking_do_not_count_warehouse_bikes(self):
         bike = {"id": 1, "status": "available", "model": "Truck", "location": STORE}
@@ -656,6 +683,41 @@ class TestWarehouseInPanel(PointsCase):
         self.assertEqual(r.status_code, 303)
         self.assertEqual(self.bike(self.store_bike)["location"], PAV,
                          "с него возят переброской")
+
+    def test_point_turned_warehouse_keeps_promo_scope_and_warns(self):
+        """Точку выдачи с акцией «только эта точка» отметили складом: панель
+        предупреждает, что на ней осталось, а форма акции не теряет
+        ограничение - иначе первое сохранение пустило бы скидку по сети."""
+        r = self.client.post("/promos", data={"kind": "season", "title": "Осень",
+                                              "percent": "10", "location": DEK})
+        promo_id = int(r.headers["location"].rsplit("/", 1)[1])
+        self.assertEqual(logic.promo_scope(tw.run(self.crm.promo(promo_id)))["location"],
+                         DEK)
+        self.client.post("/cash", data={"location": DEK, "opening": "0"})
+        self.assertEqual(len(tw.run(self.crm.open_shifts())), 1)
+        r = self.client.post(f"/locations/{self.dek_id}", data={
+            "city": "Казань", "address": "ул. Декабристов, 1", "kind": "warehouse"},
+            follow_redirects=True)
+        self.assertIn('<div class="flash warn">', r.text)
+        self.assertIn("акции только по ней: 1", r.text)
+        self.assertIn("открытая смена кассы: 1", r.text)
+        # Повторное сохранение склада не повторяет предупреждение.
+        r = self.client.post(f"/locations/{self.dek_id}", data={
+            "city": "Казань", "address": "ул. Декабристов, 1", "kind": "warehouse"},
+            follow_redirects=True)
+        self.assertNotIn('<div class="flash warn">', r.text)
+        page = self.get_ok(f"/promos/{promo_id}")
+        self.assertIn(f'<option value="{DEK}" selected>', page)
+        self.assertIn("Декабристов, 1 — склад</option>", page)
+        self.assertIn(f"«{DEK}» теперь склад: с него не выдают", page)
+        r = self.client.post(f"/promos/{promo_id}", data={
+            "kind": "season", "title": "Осень", "percent": "10", "location": DEK})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(logic.promo_scope(tw.run(self.crm.promo(promo_id)))["location"],
+                         DEK, "ограничение не снято молча")
+        # Новой акции склад по-прежнему не предлагается.
+        self.assertNotIn(f'<option value="{DEK}"',
+                         self.get_ok("/promos/new?kind=season"))
 
     def test_locations_page_marks_and_edits_the_kind(self):
         page = self.get_ok("/locations")

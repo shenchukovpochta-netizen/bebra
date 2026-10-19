@@ -7624,14 +7624,37 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if not check.ok:
                 flash(request, check.error, "err")
                 return redirect("/locations")
+        extra = {k: v for k, v in location_extra(data).items() if k in data}
         await crm.update_location(
             location_id, address=(data.get("address") or "").strip() or None,
             note=note.value, city=city.value, sort=sort.value,
             # Только поля, что пришли в форме: форма, открытая до выката
             # нового поля («Как найти»), иначе стёрла бы его значение.
-            **{k: v for k, v in location_extra(data).items() if k in data})
+            **extra)
         flash(request, "Точка сохранена.")
+        if extra.get("kind") == "warehouse" and not logic.is_warehouse(rows[0]):
+            left = await point_leftovers(rows[0]["name"])
+            if left:
+                flash(request, f"«{rows[0]['name']}» теперь склад: клиенту, выдаче и кассе "
+                               "она больше не предлагается. На ней осталось — "
+                               + "; ".join(left) + ". Закройте или перенесите их сами: "
+                               "панель их не трогает.", "warn")
         return redirect("/locations")
+
+    async def point_leftovers(name: str) -> list[str]:
+        """Что держит точку точкой выдачи, когда её отмечают складом:
+        акции с ограничением по ней, открытая смена кассы, заявки и идущие
+        аренды. Только счёт для предупреждения - решает человек: акцию
+        можно перенести на другую точку, смену закрыть, заявку снять."""
+        promos = [p for p in await crm.promos(active_only=True)
+                  if logic.promo_scope(p)["location"] == name]
+        shifts = [x for x in await crm.open_shifts() if x.get("location") == name]
+        bookings = [b for b in await crm.bookings(status="new", limit=10000)
+                    if b.get("location_name") == name]
+        rentals = await crm.rentals(status="active", location=name, limit=10000)
+        counts = (("акции только по ней", promos), ("открытая смена кассы", shifts),
+                  ("заявки на аренду", bookings), ("идущие аренды", rentals))
+        return [f"{what}: {len(rows)}" for what, rows in counts if rows]
 
     @app.post("/locations/{location_id}/rename")
     async def location_rename(request: Request, location_id: int) -> Response:
@@ -8557,9 +8580,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                    for b in await crm.bikes(limit=10000) if b.get("model")}
         if scope["model"]:
             models.add(scope["model"])
-        # Акция ложится на аренду - точки выдачи; склад ей не ограничить.
-        return {"models": sorted(m for m in models if m),
-                "places": await client_location_names(scope["location"])}
+        # Акция ложится на аренду - точки выдачи; новую складом не
+        # ограничить. Но точку уже заведённой акции могли потом отметить
+        # складом: её значение остаётся в списке (форма пометит «склад»),
+        # иначе первое же сохранение молча сняло бы ограничение, и скидка
+        # пошла бы по всей сети.
+        places = await client_location_names(scope["location"])
+        if scope["location"] and scope["location"] not in places:
+            places.append(scope["location"])
+        return {"models": sorted(m for m in models if m), "places": places}
 
     @app.get("/promos")
     async def promos_page(request: Request) -> Response:

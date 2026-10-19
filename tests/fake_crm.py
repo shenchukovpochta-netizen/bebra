@@ -2711,7 +2711,7 @@ class FakeCrm:
 
     async def swap_rental_bike(self, rental_id, *, old_bike_id, new_bike_id,
                                old_status, mileage_old, mileage_new, reason, today, by,
-                               swap_location=None):
+                               swap_location=None, issue_location=None):
         rental = self.rentals_.get(rental_id)
         if rental is None or rental["status"] != "active":
             return False
@@ -2755,6 +2755,10 @@ class FakeCrm:
         # выдача без велосипеда.
         if old_bike_id is not None or rental.get("location") is not None:
             self._place_bike(new_bike_id, rental.get("location"), by, at)
+        elif issue_location is not None:
+            # Аренда без велосипеда и без точки, новый - со склада: он
+            # встаёт на точку первой выдачи, и она - точка аренды.
+            self._place_bike(new_bike_id, issue_location, by, at)
         rental.update(bike_id=new_bike_id, mileage_start=mileage_new or 0,
                       mileage_end=None)
         if old_bike_id is None and rental.get("location") is None:

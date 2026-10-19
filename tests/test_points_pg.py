@@ -372,6 +372,58 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.crm.rental(bare))["location"], "Павлюхина")
         self.assertEqual((await self.crm.bike(spare))["location"], "Павлюхина")
 
+    async def test_swap_into_a_bikeless_rental_never_lands_on_the_warehouse(self):
+        """Ручная аренда без велосипеда точки не имеет до первой замены, и
+        берёт точку нового. Велосипед со склада ей точку не даёт: аренда на
+        складе завела бы его в выручку и чек точек (как в open_rental).
+        Нужна «где меняли» - точка выдачи, и велосипед встаёт на неё. На
+        FakeCrm - так же."""
+        async def story(crm):
+            names = {p["name"] for p in await crm.locations()}
+            for name, kind in (("Павлюхина", "point"), ("Адоратского", "point"),
+                               ("Склад", "warehouse")):
+                if name not in names:
+                    await crm.create_location(name=name, city="Казань", address=None,
+                                              note=None, kind=kind)
+            tariff_id = await crm.create_tariff("Неделя", 7, D(3000), None)
+            cid = await crm.create_client(full_name="Клиент", phone="+79990000071")
+            rid = await service.open_rental(
+                crm, client=await crm.client(cid), bike=None,
+                tariff=await crm.tariff(tariff_id), started_on=date.today(),
+                contract_no=None, by="staff:op", billing="manual")
+            store_bike = await crm.create_bike(code="W-1", model="M", location="Склад")
+            for where in (None, "Склад"):
+                with self.assertRaises(service.ServiceError) as err:
+                    await service.swap_bike(crm, await crm.rental(rid),
+                                            await crm.bike(store_bike), reason="other",
+                                            by="staff:op", swap_location=where)
+                self.assertIn("стоит на складе", str(err.exception))
+            rental, bike = await crm.rental(rid), await crm.bike(store_bike)
+            self.assertEqual((rental["bike_id"], rental["location"], bike["status"],
+                              bike["location"]), (None, None, "available", "Склад"),
+                             "отказ - до единой записи")
+            await service.swap_bike(crm, await crm.rental(rid), await crm.bike(store_bike),
+                                    reason="other", by="staff:op",
+                                    swap_location="Адоратского")
+            rental, bike = await crm.rental(rid), await crm.bike(store_bike)
+            # Велосипед не со склада - по-прежнему точка нового.
+            cid2 = await crm.create_client(full_name="Клиент 2", phone="+79990000072")
+            rid2 = await service.open_rental(
+                crm, client=await crm.client(cid2), bike=None,
+                tariff=await crm.tariff(tariff_id), started_on=date.today(),
+                contract_no=None, by="staff:op", billing="manual")
+            pav_bike = await crm.create_bike(code="P-1", model="M", location="Павлюхина")
+            await service.swap_bike(crm, await crm.rental(rid2), await crm.bike(pav_bike),
+                                    reason="other", by="staff:op",
+                                    swap_location="Адоратского")
+            return (rental["location"], bike["location"], bike["status"],
+                    (await crm.rental(rid2))["location"],
+                    (await crm.bike(pav_bike))["location"])
+
+        expected = ("Адоратского", "Адоратского", "rented", "Павлюхина", "Павлюхина")
+        self.assertEqual(await story(self.crm), expected)
+        self.assertEqual(await story(FakeCrm()), expected)
+
     async def test_swap_does_not_move_past_money_of_a_pointless_rental(self):
         """Аренда на велосипеде «не на точке» (бот, импорт, старая база)
         меняет велосипед на стоящий на Павлюхина. Точку аренде задним
@@ -592,8 +644,10 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_install_gets_the_warehouse_once(self):
         store = next(x for x in await self.crm.locations() if x["kind"] == "warehouse")
-        # Живая установка Май Байк до правки: склада нет, отметки нет.
+        # Живая установка Май Байк до правки: склада нет, отметки нет, парк
+        # стоит на Павлюхиной.
         await self.pool.execute("delete from crm.locations where id = $1", store["id"])
+        await self.crm.create_bike(code="P-1", model="M", location="Павлюхина")
         await self.reapply("locations_warehouse_seeded")
         self.assertEqual(await self.warehouses(), [("Склад", self.STORE_ADDRESS)])
         self.assertEqual((await self.crm.settings()).get("locations_warehouse_seeded"), "1")
@@ -615,12 +669,47 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.reapply()
         self.assertEqual(await self.warehouses(), [])
 
+    async def test_franchise_with_closed_shipped_points_gets_no_warehouse(self):
+        """Франчайзи закрыл поставочные точки мастером запуска: строки
+        «Павлюхина» и «Адоратского» остались, но закрытыми, - это не
+        установка Май Байк, склад сам не появляется, а отметка ставится."""
+        rows = {p["name"]: p for p in await self.crm.locations()}
+        await self.pool.execute("delete from crm.locations where kind = 'warehouse'")
+        for name in ("Павлюхина", "Адоратского"):
+            await self.crm.update_location(rows[name]["id"], active=False)
+        await self.crm.create_location(name="Центр", city="Самара",
+                                       address="г. Самара, ул. Ленина, 1", note=None)
+        # Даже велосипед, оставшийся на закрытой Павлюхиной, складом не зовёт.
+        await self.crm.create_bike(code="C-1", model="M", location="Павлюхина")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [])
+        self.assertEqual((await self.crm.settings()).get("locations_warehouse_seeded"), "1")
+        # Отметка стоит - и после открытия Павлюхиной склад не приходит.
+        await self.crm.update_location(rows["Павлюхина"]["id"], active=True)
+        await self.reapply()
+        self.assertEqual(await self.warehouses(), [])
+
+    async def test_franchise_with_open_shipped_points_gets_no_warehouse(self):
+        """Поставочные точки не закрыты, но парк франчайзи стоит на своих
+        точках, или своя точка в другом городе: склада нет."""
+        await self.pool.execute("delete from crm.locations where kind = 'warehouse'")
+        await self.crm.create_location(name="Центр", city="Самара",
+                                       address="г. Самара, ул. Ленина, 1", note=None)
+        await self.crm.create_bike(code="C-1", model="M", location="Центр")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [], "на Павлюхиной парка нет")
+        # Парк есть и на Павлюхиной, но открыта точка в Самаре.
+        await self.crm.create_bike(code="C-2", model="M", location="Павлюхина")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [], "открытая точка вне Казани")
+
     async def test_foreign_install_gets_no_warehouse(self):
         """У франчайзи свои точки: склад владельца сам не появляется. Имя
         «Склад» у его точки выдачи не склеивается со складом."""
         rows = {p["name"]: p for p in await self.crm.locations()}
         await self.pool.execute("delete from crm.locations where id = $1",
                                 rows["Склад"]["id"])
+        await self.crm.create_bike(code="P-1", model="M", location="Павлюхина")
         self.assertEqual(await self.crm.rename_location(rows["Павлюхина"]["id"], "Центр"),
                          "ok")
         await self.crm.update_location(rows["Павлюхина"]["id"],

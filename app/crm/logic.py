@@ -5655,11 +5655,13 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
     for target in sorted((r for r in out_rows if r["need"]),
                          key=lambda r: (-r["need"], order[r["location"]], r["model"])):
         want = target["need"]
+        # При равном излишке - со склада: он для того и есть, а точка
+        # выдачи, отдав велосипед, теряет того, кто стоит под курьера.
         sources = sorted((r for r in out_rows if r["model"] == target["model"]
                           and r["location"] != target["location"]
                           and left[(r["location"], r["model"])] > 0),
                          key=lambda r: (-left[(r["location"], r["model"])],
-                                        order[r["location"]]))
+                                        not r["store"], order[r["location"]]))
         for source in sources:
             if want <= 0:
                 break
@@ -5672,6 +5674,7 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
             pool = by_key[key]["bikes"][taken[key]:]
             taken[key] += count
             moves.append({"source": source["location"], "target": target["location"],
+                          "store": source["store"],
                           "model": target["model"], "count": count,
                           "bikes": [{**b, "picked": i < count} for i, b in
                                     enumerate(pool[:count + TRANSFER_EXTRA_CHOICES])]})
@@ -5680,15 +5683,29 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for move in moves:
         group = groups.setdefault((move["source"], move["target"]), {
-            "source": move["source"], "target": move["target"], "lines": [], "count": 0})
+            "source": move["source"], "target": move["target"], "lines": [], "count": 0,
+            "store": move["store"]})
         group["lines"].append(move)
         group["count"] += move["count"]
     for group in groups.values():
-        group["label"] = (f"с {group['source']} на {group['target']}: " + ", ".join(
-            f"{m['count']} × {m['model']}" for m in group["lines"]))
+        group["label"] = (f"{transfer_from(group['source'], store=group['store'])} "
+                          f"на {group['target']}: " + ", ".join(
+                              f"{m['count']} × {m['model']}" for m in group["lines"]))
     return {"rows": out_rows, "moves": list(groups.values()), "days": horizon,
             "safety": safety, "weeks": weeks,
             "short": sum(r["need"] - r["covered"] for r in out_rows)}
+
+
+def transfer_from(source: str, *, store: bool = False) -> str:
+    """«Откуда» в подписи перевозки. Точки названы улицами («с
+    Адоратского»), и «с» к ним годится; склад - существительное, и «с
+    Склад» читается неграмотно: «со склада», а склад со своим именем -
+    «со склада «Центральный»»."""
+    if not store:
+        return f"с {source}"
+    if str(source).strip().casefold() == "склад":
+        return "со склада"
+    return f"со склада «{source}»"
 
 
 # ─────────────────── закупки основных средств ───────────────────
