@@ -26,16 +26,19 @@
 </div>
 {# Сводка всех клиентов за всё время: плитки считаются по всей базе, а не
    по найденному, - это ответ «сколько у нас клиентов вообще». Плитка -
-   ссылка на свою группу, слова и порядок - как у вкладок. #}
+   ссылка на свою группу, слова и порядок - как у вкладок. На телефоне
+   плитка, которая повторяет вкладку тем же числом (tab-dup), скрыта:
+   восемь плиток отодвигали список на два экрана. Должники (сумма) и
+   «оплатили» вкладкой не сказаны - они остаются. #}
 <div class="tiles">
-  <a class="tile" href="/clients?group=all"><b>{{ tiles.all }}</b><span>все клиенты<br><small class="muted">база за всё время</small></span></a>
-  <a class="tile good" href="/clients?group=active"><b>{{ tiles.active }}</b><span>арендаторы вело<br><small class="muted">сейчас в аренде</small></span></a>
-  <a class="tile" href="/clients?group=former"><b>{{ tiles.former }}</b><span>сдали вело<br><small class="muted">брали, сейчас без велосипеда</small></span></a>
-  <a class="tile" href="/clients?group=bought"><b>{{ tiles.bought }}</b><span>купили технику<br><small class="muted">выкупили велосипед</small></span></a>
-  <a class="tile" href="/clients?group=repair"><b>{{ tiles.repair }}</b><span>ремонтировались у нас<br><small class="muted">чинили свою технику</small></span></a>
+  <a class="tile tab-dup" href="/clients?group=all"><b>{{ tiles.all }}</b><span>все клиенты<br><small class="muted">база за всё время</small></span></a>
+  <a class="tile tab-dup good" href="/clients?group=active"><b>{{ tiles.active }}</b><span>арендаторы вело<br><small class="muted">сейчас в аренде</small></span></a>
+  <a class="tile tab-dup" href="/clients?group=former"><b>{{ tiles.former }}</b><span>сдали вело<br><small class="muted">брали, сейчас без велосипеда</small></span></a>
+  <a class="tile tab-dup" href="/clients?group=bought"><b>{{ tiles.bought }}</b><span>купили технику<br><small class="muted">выкупили велосипед</small></span></a>
+  <a class="tile tab-dup" href="/clients?group=repair"><b>{{ tiles.repair }}</b><span>ремонтировались у нас<br><small class="muted">чинили свою технику</small></span></a>
   {% if money_ok %}
   <a class="tile {% if tiles.debt %}warn{% endif %}" href="/clients?group=debt"><b>{{ tiles.debt }}</b><span>должники<br><small class="muted">на {{ money(tiles.debt_sum) }}</small></span></a>{% endif %}
-  <a class="tile" href="/clients?group=never"><b>{{ tiles.never }}</b><span>ни разу не брали</span></a>
+  <a class="tile tab-dup" href="/clients?group=never"><b>{{ tiles.never }}</b><span>ни разу не брали</span></a>
   {% if money_ok %}
   <div class="tile"><b>{{ money(tiles.paid) }}</b><span>оплатили за всё время<br><small class="muted">{{ '{:,}'.format(tiles.days)|replace(',', ' ') }} дней с велосипедом</small></span></div>{% endif %}
 </div>

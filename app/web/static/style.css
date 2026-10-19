@@ -1225,6 +1225,36 @@ details.more[open]>summary{margin-bottom:10px}
 .cal-start label{display:inline-flex;align-items:center;gap:8px;margin:0}
 table.cal-mini td small{display:block;font-size:12px;line-height:1.35}
 
+/* ── отчёты, клиенты, входящие на телефоне ──
+   Фильтры списка (аренды, наряды, свои фильтры «Входящих») - под
+   раскрывашкой: три селекта в три строки отодвигали список на полэкрана.
+   Шаблон открывает её, когда фильтр задан. На компьютере место есть:
+   заголовка нет, а содержимое видно и у закрытой (::details-content);
+   браузер без него показывает обычную раскрывашку. */
+details.filters>summary{display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:0 14px;
+  border-radius:var(--r3);box-shadow:inset 0 0 0 1px var(--line-strong);cursor:pointer;list-style:none;
+  font-weight:600;font-size:14px;color:var(--text)}
+details.filters>summary::-webkit-details-marker{display:none}
+details.filters>summary::after{content:"▸";color:var(--muted)}
+details.filters[open]>summary::after{content:"▾"}
+details.filters[open]{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+details.filters>.fields{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+main>details.filters{margin-bottom:12px}
+@supports selector(::details-content){@media (min-width:641px){
+  details.filters>summary{display:none}
+  details.filters::details-content{content-visibility:visible}
+}}
+@media (max-width:640px){
+  /* «Мои фильтры» - уже в заголовке раскрывашки */
+  details.filters>.saved-views>.muted:first-child{display:none}
+  /* Плитка, которая повторяет вкладку с тем же числом (группы клиентов),
+     на телефоне только отодвигает список: вкладки и так над ним. */
+  .tile.tab-dup{display:none}
+}
+/* Карточка, которая на узком экране идёт первой (переписка обращения):
+   в две колонки она справа, а в одну оказывалась под формами. */
+@media (max-width:860px){.cols>.lead{order:-1}}
+
 /* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при
    фокусе и назад не возвращают. Масштаб пальцами не запрещаем
    (maximum-scale в viewport), а лечим причину. Поле кода подписи (28 px)

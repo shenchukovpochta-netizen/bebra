@@ -44,7 +44,9 @@
   {% endif %}
 </section>
 
-<section class="card">
+{# Переписка - ради неё карточку и открывают: в одну колонку (телефон,
+   планшет) она первой, а не под формами состояния и привязки (.lead). #}
+<section class="card lead">
   <h2>Переписка</h2>
   <div class="thread">
     {# От новых к старым: .thread рисует column-reverse, см. style.css. #}
