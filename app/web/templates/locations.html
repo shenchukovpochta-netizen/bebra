@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Точки выдачи — {{ app_title }}{% endblock %}
+{% block title %}Точки и склады — {{ app_title }}{% endblock %}
 {% block content %}
-<div class="bar"><h1>Точки выдачи</h1>
+<div class="bar"><h1>Точки и склады</h1>
   {# Пробелы между ссылками - места переноса: без них на телефоне вкладки
      встают одной строкой шире экрана. #}
   <nav class="tabs"><a href="/company">Реквизиты</a> <a href="/documents">Документы</a> <a href="/locations" class="on">Точки</a> <a href="/models">Каталог</a> <a href="/notices">Уведомления</a> <a href="/intake">Ввод техники</a> <a href="/risk">Риск клиента</a> <a href="/readiness">Готовность</a></nav>
@@ -19,7 +19,7 @@
   <tr><th>Точка</th><th class="num">Парк</th><th class="opt">Адрес и режим</th><th class="opt">Телефон</th><th class="opt">На карте</th><th>Работает</th></tr>
   {% for r in g.rows %}{% set b = bikes.get(r.name) or {} %}
   <tr class="{% if not r.active %}muted{% endif %}">
-    <td><b>{{ r.name }}</b>{% if not r.active %} <span class="tag">закрыта</span>{% endif %}{% if r.public_title %}<br><small class="muted">{{ r.public_title }}</small>{% endif %}
+    <td><b>{{ r.name }}</b>{% if r.kind == 'warehouse' %} <span class="tag" title="клиентам не показывается, выдачи и кассы нет">склад</span>{% endif %}{% if not r.active %} <span class="tag">закрыта</span>{% endif %}{% if r.public_title %}<br><small class="muted">{{ r.public_title }}</small>{% endif %}
       {% if can_view(staff, 'reports') %}<br><small><a href="/reports/points/{{ r.id }}">Аналитика точки</a></small>{% endif %}
       {# План - деньги: виден с финансами, правится на странице точки. #}
       {% if r.plan_rented is not none and can_view(staff, 'finance') %}<br><small class="muted">план месяца: {{ r.plan_rented }} в аренде{% if r.plan_check %} по {{ money(r.plan_check) }}{% endif %}</small>{% endif %}</td>
@@ -43,6 +43,9 @@
         <label>Долгота <input name="lon" value="{{ r.lon or '' }}" placeholder="49.148580"></label>
         <label>Порядок в списках <input name="sort" value="{{ r.sort }}" inputmode="numeric" placeholder="10"></label>
         <label>Описание <input name="note" value="{{ r.note or '' }}"></label>
+        {# Скрытое «point» перед галочкой: без галочки форма всё равно несёт
+           вид, и снятая галочка возвращает складу точку выдачи. #}
+        <label class="check wide"><input type="hidden" name="kind" value="point"><input type="checkbox" name="kind" value="warehouse" {% if r.kind == 'warehouse' %}checked{% endif %}> Склад — клиентам не показывать: нет в боте, выдаче и кассе</label>
         <button type="submit">Сохранить</button>
       </form>
       {# Имя точки лежит текстом в карточках, арендах, нарядах, кассе и
@@ -78,6 +81,12 @@
   и переписывать их ради красоты справочника значит потерять, где они стоят.
   Переименование города переносит точку в другую группу и больше ничего
   не задевает: в карточке парка стоит точка, а не город.</p>
+<p class="muted">Склад — тоже точка: на нём стоят велосипеды и батареи, его
+  считают пересчётом, на него ставят задачи, с него возят переброской, и
+  в отчёте «По точкам» он своей строкой. Но клиенту его не называют: бот,
+  заявка на аренду и лист ожидания его не знают, выдачи и кассы на нём нет,
+  плана аренды тоже. В списках панели точка подписана адресом — «Павлюхина
+  · ул. Павлюхина, 97»; город из адреса в подписи опускается.</p>
 <p class="muted">Часового пояса у города нет намеренно. Вся система живёт
   в Europe/Moscow — сроки аренды, начисления, отчёты, журнал статусов, —
   и второй пояс пришлось бы протащить через каждый из них. Понадобится
@@ -97,6 +106,7 @@
     <label>Широта <input name="lat" placeholder="55.766900"></label>
     <label>Долгота <input name="lon" placeholder="49.148580"></label>
     <label class="wide">Описание <input name="note"></label>
+    <label class="check wide"><input type="hidden" name="kind" value="point"><input type="checkbox" name="kind" value="warehouse"> Склад — клиентам не показывать: нет в боте, выдаче и кассе</label>
     <button type="submit">Добавить</button>
   </form>
 </div>

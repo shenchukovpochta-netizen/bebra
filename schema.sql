@@ -1533,29 +1533,82 @@ alter table crm.locations add column if not exists phone        text;
 alter table crm.locations add column if not exists hours        text;
 alter table crm.locations add column if not exists lat          double precision;
 alter table crm.locations add column if not exists lon          double precision;
+-- Вид точки: пункт выдачи или склад. Склад - тоже точка: на нём стоят
+-- велосипеды и батареи, его считают пересчётом, на него ставят задачи и с
+-- него возят переброской. Но клиенту его не называют (бот, заявка, часы,
+-- лист ожидания), и выдачи и кассы на нём нет. Колонкой, а не отдельной
+-- таблицей: ключ точки - текст name, и склад обязан жить в том же
+-- справочнике, что парк, пересчёт и журнал мест.
+alter table crm.locations add column if not exists kind text not null default 'point'
+  check (kind in ('point', 'warehouse'));
 
 -- Две точки владельца - один раз на установку (settings.locations_seeded)
 -- и сразу с контактами. Сид с coalesce на каждом старте возвращал стёртые
 -- владельцем телефон, часы и координаты, а переименованную «Павлюхина» -
 -- второй, пустой точкой. Живой установке прежняя схема клала точки каждым
 -- стартом: есть в справочнике хоть одна строка - только отметка, иначе
--- рядом с переименованной встал бы фантом.
+-- рядом с переименованной встал бы фантом. Склад владельца (Динмухаметова)
+-- свежая установка получает тем же сидом; живой - разовая вставка ниже.
 do $$
 begin
   if not exists (select 1 from crm.settings where key = 'locations_seeded') then
     if not exists (select 1 from crm.locations) then
       insert into crm.locations (name, city, sort, public_title, address, phone,
-                                 hours, lat, lon) values
+                                 hours, lat, lon, kind) values
         ('Павлюхина', 'Казань', 10, 'Май Байк — сервис и аренда, Павлюхина',
-         'г. Казань, ул. Павлюхина, 97А', '+7 (904) 676-49-26',
-         'пн-вс: 10:00-19:00', 55.766900, 49.148580),
+         'г. Казань, ул. Павлюхина, 97', '+7 (904) 676-49-26',
+         'пн-вс: 10:00-19:00', 55.766900, 49.148580, 'point'),
         ('Адоратского', 'Казань', 20, 'Май Байк — сервис и аренда, Адоратского',
          'г. Казань, ул. Адоратского, 11А', '+7 (904) 676-49-26',
-         'пн-вс: 10:00-19:00', 55.824319, 49.147018)
+         'пн-вс: 10:00-19:00', 55.824319, 49.147018, 'point'),
+        ('Склад', 'Казань', 30, null, 'г. Казань, ул. Динмухаметова, 14А', null,
+         null, null, null, 'warehouse')
       on conflict do nothing;
     end if;
     insert into crm.settings (key, value, updated_by)
     values ('locations_seeded', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
+
+-- Адрес Павлюхиной в первом сиде был с лишней «А»: по словам владельца
+-- точка - «Павлюхина, 97». Один раз (locations_address_v2) и только у
+-- строки с прежним сидовым адресом ровно: свой адрес владельца, введённый
+-- в панели, не трогаем, даже если он тоже с «А».
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'locations_address_v2') then
+    update crm.locations set address = 'г. Казань, ул. Павлюхина, 97'
+     where address = 'г. Казань, ул. Павлюхина, 97А';
+    insert into crm.settings (key, value, updated_by)
+    values ('locations_address_v2', '1', 'schema')
+    on conflict (key) do nothing;
+  end if;
+end $$;
+
+-- Склад владельца на Динмухаметова, 14А - третьей точкой, один раз
+-- (locations_warehouse_seeded) и только в установке Май Байк: в
+-- справочнике есть Павлюхина (по имени или адресу - её могли
+-- переименовать). У франчайзи свои точки, и чужой склад им не нужен.
+-- Склад уже заведён руками (вид «склад» или адрес на Динмухаметова) -
+-- только отметка: второй склад рядом с первым был бы фантомом. Имя
+-- «Склад» занято другой точкой - вставка молча уступает (on conflict):
+-- склеивать чужую точку со складом нельзя, завести его можно в панели.
+-- Регистр - классом символов: ilike в локали C кириллицу не сводит.
+do $$
+begin
+  if not exists (select 1 from crm.settings where key = 'locations_warehouse_seeded') then
+    if exists (select 1 from crm.locations
+                where name = 'Павлюхина' or coalesce(address, '') ~ '[Пп]авлюхина')
+       and not exists (select 1 from crm.locations
+                        where kind = 'warehouse'
+                           or coalesce(address, '') ~ '[Дд]инмухаметова') then
+      insert into crm.locations (name, city, sort, address, kind)
+      values ('Склад', 'Казань', 30, 'г. Казань, ул. Динмухаметова, 14А', 'warehouse')
+      on conflict (name) do nothing;
+    end if;
+    insert into crm.settings (key, value, updated_by)
+    values ('locations_warehouse_seeded', '1', 'schema')
     on conflict (key) do nothing;
   end if;
 end $$;

@@ -2817,9 +2817,11 @@ class FakeCrm:
 
     # ───────────────── справочники и батареи ─────────────────
 
-    async def locations(self, *, active_only=False):
+    async def locations(self, *, active_only=False, clients_only=False):
         rows = [dict(x) for x in self.locations_.values()
-                if not active_only or x["active"]]
+                if not (active_only or clients_only) or x["active"]]
+        if clients_only:
+            rows = [x for x in rows if (x.get("kind") or "point") == "point"]
         return sorted(rows, key=lambda x: (x["sort"], x["name"]))
 
     async def location_names(self):
@@ -2834,7 +2836,7 @@ class FakeCrm:
                                    "sort": 100, "public_title": None, "phone": None,
                                    "hours": None, "lat": None, "lon": None,
                                    "directions": None, "plan_rented": None,
-                                   "plan_check": None,
+                                   "plan_check": None, "kind": "point",
                                    "created_at": self._now(), **extra}
         return loc_id
 

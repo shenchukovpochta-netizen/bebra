@@ -29,7 +29,7 @@
     <label>Срок <input type="date" name="due_on"></label>
     {% if locations|length > 1 %}<label>Точка
       <select name="location"><option value="">{% if staff.location %}моя ({{ staff.location }}){% else %}вся сеть{% endif %}</option>
-        {% for l in locations %}<option value="{{ l.name }}">{{ l.name }}</option>{% endfor %}
+        {% for l in locations %}<option value="{{ l.name }}">{{ l.name|place }}</option>{% endfor %}
       </select></label>{% endif %}
     {% if task_money %}<label>Цена задачи, ₽ <input name="pay" inputmode="decimal" placeholder="в зарплату исполнителю"></label>{% endif %}
     <label class="wide">Подробнее <textarea name="note" rows="2" maxlength="2000"></textarea></label>

@@ -39,7 +39,7 @@
     {% if on_rent %}
     <label>Точка <input value="{{ bike.location or 'не на точке' }}" disabled title="в аренде точку меняют возврат и замена"></label>
     {% else %}
-    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in places %}<option value="{{ loc }}" {% if bike.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in places %}<option value="{{ loc }}" {% if bike.location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}</select></label>
     {% endif %}
   <label class="check"><input type="checkbox" name="spare" value="1" {% if bike.spare %}checked{% endif %}> Подменный: держим под замены, а не под выдачу</label>
     <label>Цена покупки <input name="purchase_price" inputmode="decimal" value="{{ bike.purchase_price or '' }}"></label>

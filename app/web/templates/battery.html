@@ -71,7 +71,7 @@
     <label>Серийный номер <input name="serial_no" value="{{ battery.serial_no or '' }}"></label>
     <label>Напряжение по табличке, В <input name="volts" inputmode="numeric" value="{{ battery.volts or '' }}" placeholder="60"></label>
     <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal" value="{{ battery.amp_hours or '' }}" placeholder="70"></label>
-    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}" {% if battery.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}" {% if battery.location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}</select></label>
     <label>Цена покупки <input name="purchase_price" value="{{ battery.purchase_price if battery.purchase_price is not none else '' }}"></label>
     <label>Куплена <input type="date" name="purchased_on" value="{{ battery.purchased_on|iso if battery.purchased_on else '' }}"></label>
     <label>Срок службы, мес. <input name="service_months" value="{{ battery.service_months }}" size="4"></label>

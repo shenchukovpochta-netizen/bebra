@@ -536,6 +536,108 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ГСК «Сокол»", next(x for x in await self.crm.locations()
                                          if x["id"] == pav["id"])["directions"])
 
+    # ─── склад и адрес Павлюхиной (замечания Эдгара 18.10) ───
+
+    STORE_ADDRESS = "г. Казань, ул. Динмухаметова, 14А"
+
+    async def warehouses(self):
+        return [(p["name"], p["address"]) for p in await self.crm.locations()
+                if p["kind"] == "warehouse"]
+
+    async def reapply(self, *flags):
+        for flag in flags:
+            await self.pool.execute("delete from crm.settings where key = $1", flag)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+
+    async def test_fresh_install_has_the_warehouse_and_the_right_address(self):
+        rows = {p["name"]: p for p in await self.crm.locations()}
+        self.assertEqual(rows["Павлюхина"]["address"], "г. Казань, ул. Павлюхина, 97")
+        self.assertEqual(await self.warehouses(), [("Склад", self.STORE_ADDRESS)])
+        self.assertEqual({rows["Павлюхина"]["kind"], rows["Адоратского"]["kind"]},
+                         {"point"})
+        self.assertEqual([p["name"] for p in await self.crm.locations(clients_only=True)],
+                         ["Павлюхина", "Адоратского"], "клиенту склад не называют")
+        points.reset()
+        try:
+            await points.refresh(self.crm, force=True)
+            self.assertEqual([p["name"] for p in points.snapshot()],
+                             ["Павлюхина", "Адоратского"])
+            self.assertNotIn("Динмухаметова",
+                             faq.answer(faq.BY_CODE["ADDR"], points=points.snapshot()))
+        finally:
+            points.reset()
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.update_location(rows["Склад"]["id"], kind="garage")
+
+    async def test_old_seed_address_is_fixed_once_and_only_exactly(self):
+        pav = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
+
+        async def address():
+            return next(x for x in await self.crm.locations()
+                        if x["id"] == pav["id"])["address"]
+
+        # Живая установка: адрес из первого сида.
+        await self.crm.update_location(pav["id"], address="г. Казань, ул. Павлюхина, 97А")
+        await self.reapply("locations_address_v2")
+        self.assertEqual(await address(), "г. Казань, ул. Павлюхина, 97")
+        # Свой адрес владельца, пусть и с «А», - не сидовый ровно: не трогаем.
+        own = "г. Казань, ул. Павлюхина, 97А, ГСК «Сокол»"
+        await self.crm.update_location(pav["id"], address=own)
+        await self.reapply("locations_address_v2")
+        self.assertEqual(await address(), own)
+        # Отметка стоит - правка не повторяется на каждом деплое.
+        await self.crm.update_location(pav["id"], address="г. Казань, ул. Павлюхина, 97А")
+        await self.reapply()
+        self.assertEqual(await address(), "г. Казань, ул. Павлюхина, 97А")
+
+    async def test_owner_install_gets_the_warehouse_once(self):
+        store = next(x for x in await self.crm.locations() if x["kind"] == "warehouse")
+        # Живая установка Май Байк до правки: склада нет, отметки нет.
+        await self.pool.execute("delete from crm.locations where id = $1", store["id"])
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [("Склад", self.STORE_ADDRESS)])
+        self.assertEqual((await self.crm.settings()).get("locations_warehouse_seeded"), "1")
+        # Идемпотентно: второй прогон и даже снятая отметка второго склада
+        # не ставят; переименованный склад узнаётся по виду.
+        await self.reapply()
+        store = next(x for x in await self.crm.locations() if x["kind"] == "warehouse")
+        self.assertEqual(await self.crm.rename_location(store["id"], "Динмухаметова"), "ok")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(),
+                         [("Динмухаметова", self.STORE_ADDRESS)])
+        # Склад, заведённый руками точкой с этим адресом, - тоже «уже есть».
+        await self.crm.update_location(store["id"], kind="point")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [])
+        # Владелец удалил склад после отметки - он не возвращается.
+        await self.crm.update_location(store["id"], kind="warehouse")
+        await self.pool.execute("delete from crm.locations where id = $1", store["id"])
+        await self.reapply()
+        self.assertEqual(await self.warehouses(), [])
+
+    async def test_foreign_install_gets_no_warehouse(self):
+        """У франчайзи свои точки: склад владельца сам не появляется. Имя
+        «Склад» у его точки выдачи не склеивается со складом."""
+        rows = {p["name"]: p for p in await self.crm.locations()}
+        await self.pool.execute("delete from crm.locations where id = $1",
+                                rows["Склад"]["id"])
+        self.assertEqual(await self.crm.rename_location(rows["Павлюхина"]["id"], "Центр"),
+                         "ok")
+        await self.crm.update_location(rows["Павлюхина"]["id"],
+                                       address="г. Самара, ул. Ленина, 1")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [])
+        self.assertEqual((await self.crm.settings()).get("locations_warehouse_seeded"), "1")
+        # Май Байк, где «Склад» - уже имя точки выдачи: вставка уступает.
+        await self.crm.update_location(rows["Павлюхина"]["id"],
+                                       address="г. Казань, ул. Павлюхина, 97")
+        self.assertEqual(await self.crm.rename_location(rows["Адоратского"]["id"], "Склад"),
+                         "ok")
+        await self.reapply("locations_warehouse_seeded")
+        self.assertEqual(await self.warehouses(), [])
+        self.assertEqual(next(x for x in await self.crm.locations()
+                              if x["name"] == "Склад")["kind"], "point")
+
     # ─── наряд и сотрудник ───
 
     async def test_work_order_and_staff_point(self):
@@ -622,20 +724,20 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Павлюхина 97А", await self.crm.location_names())
 
     async def test_rename_refuses_a_name_that_orphan_rows_use(self):
-        """Велосипед на «Склад» (имени нет в справочнике - строка «нет в
-        справочнике» отчёта). Переименование Павлюхина в «Склад» склеило бы
+        """Велосипед на «Гараж» (имени нет в справочнике - строка «нет в
+        справочнике» отчёта). Переименование Павлюхина в «Гараж» склеило бы
         их навсегда: обратное переименование увело бы оба велосипеда.
         Отказ, и ничего не тронуто - ни у точки, ни у сирот."""
         point = next(x for x in await self.crm.locations() if x["name"] == "Павлюхина")
-        orphan = await self.crm.create_bike(code="O-1", model="M", location="Склад")
+        orphan = await self.crm.create_bike(code="O-1", model="M", location="Гараж")
         own = await self.crm.create_bike(code="P-1", model="M", location="Павлюхина")
-        self.assertEqual(await self.crm.rename_location(point["id"], "Склад"), "orphan")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Гараж"), "orphan")
         self.assertEqual([(await self.crm.bike(b))["location"] for b in (orphan, own)],
-                         ["Склад", "Павлюхина"])
+                         ["Гараж", "Павлюхина"])
         self.assertIn("Павлюхина", await self.crm.location_names())
-        # Имя только в журнале мест (велосипед со «Склада» давно уехал) - то же.
+        # Имя только в журнале мест (велосипед из «Гаража» давно уехал) - то же.
         await self.crm.update_bike(orphan, location="Адоратского", by="x")
-        self.assertEqual(await self.crm.rename_location(point["id"], "Склад"), "orphan")
+        self.assertEqual(await self.crm.rename_location(point["id"], "Гараж"), "orphan")
         # Открытая смена под чужим именем, у самой точки смены нет.
         ado = next(x for x in await self.crm.locations() if x["name"] == "Адоратского")
         await self.crm.create_shift(location="Марс", opening=D(0), note=None, by="x")
@@ -646,8 +748,8 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         fake = FakeCrm()
         f_point = await fake.create_location(name="Павлюхина", city="Казань",
                                              address=None, note=None)
-        await fake.create_bike(code="O-1", model="M", location="Склад")
-        self.assertEqual(await fake.rename_location(f_point, "Склад"), "orphan",
+        await fake.create_bike(code="O-1", model="M", location="Гараж")
+        self.assertEqual(await fake.rename_location(f_point, "Гараж"), "orphan",
                          "заглушка отказывает так же")
 
     async def test_rename_rewrites_saved_filters(self):
@@ -953,8 +1055,11 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
             debt=await self.crm.debt_by_location(),
             cash=await self.crm.cash_by_location(since, until),
             service=await self.crm.service_by_location(since, until))
+        # Склад свежей установки - своей строкой, хоть и пустой: строка
+        # справочника видна всегда, а «Итого» от неё не меняется.
         self.assertEqual([r["title"] for r in report["rows"]],
-                         ["Павлюхина", "Адоратского", "Чистопольская", "без точки"])
+                         ["Павлюхина", "Адоратского", "Склад", "Чистопольская",
+                          "без точки"])
         total, panel = report["total"], logic.fleet_metrics(
             overall, await self.crm.rental_revenue(since, until))
         for key in ("idle_percent", "avg_check", "revenue"):

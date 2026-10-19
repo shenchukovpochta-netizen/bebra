@@ -6,7 +6,9 @@
 коротким сроком жизни: третья точка, заведённая в панели, доезжает до
 ответов бота за несколько минут и без перезапуска.
 
-В снимке только открытые точки и только то, что можно сказать клиенту:
+В снимке только открытые точки выдачи - склад клиенту не называют (ни
+«где вы», ни часы, ни «сдать можно на любой») - и только то, что можно
+сказать клиенту:
 название, адрес, как найти, режим и телефон. Описание и координаты сюда
 не едут - описание пишут для своих, а не для курьера; «как найти» -
 отдельное поле именно для клиента («заезд в ГСК, 9-й бокс»).
@@ -29,6 +31,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .. import i18n
+from . import logic
 
 log = logging.getLogger(__name__)
 
@@ -56,12 +59,14 @@ def snapshot() -> list[dict[str, str]]:
 def set_snapshot(rows: list[dict[str, Any]] | None) -> None:
     """Подменить снимок - для тестов и для первого чтения на старте.
 
-    Закрытая точка отсекается и здесь: снимок могут подать строками всего
-    справочника, а звать клиента на закрытую точку нельзя.
+    Закрытая точка и склад отсекаются и здесь: снимок могут подать
+    строками всего справочника, а звать клиента на закрытую точку или на
+    склад нельзя.
     """
     global _snapshot, _loaded_at
     _snapshot = [{field: str(row.get(field) or "").strip() for field in FIELDS}
-                 for row in rows or () if row.get("active", True)]
+                 for row in rows or ()
+                 if row.get("active", True) and not logic.is_warehouse(row)]
     _loaded_at = time.monotonic()
 
 
@@ -74,11 +79,12 @@ def hours_note(lang: str | None, location: str | None = None, *,
     закрыли) - все открытые: одна - её часы, несколько - списком.
     Точка без режима пропускается: выдумывать ей часы нельзя, время
     назовёт оператор. Справочника нет (пустой снимок, бот без CRM) -
-    прежние зашитые часы, как у ответов app/faq.py.
+    прежние зашитые часы, как у ответов app/faq.py. Склад не называется
+    никогда: с него не выдают и на него не сдают.
     rows - строки справочника, если их уже прочитали; иначе снимок.
     """
     open_rows = [row for row in (snapshot() if rows is None else rows)
-                 if row.get("active", True)]
+                 if row.get("active", True) and not logic.is_warehouse(row)]
     if not open_rows:
         return "\n" + i18n.t(lang, "HOURS_DEFAULT")
     own = [row for row in open_rows if location and row.get("name") == location]
@@ -145,7 +151,7 @@ async def refresh(crm: Any, *, force: bool = False) -> list[dict[str, str]]:
     if not force and is_fresh():
         return snapshot()
     try:
-        set_snapshot(await crm.locations(active_only=True))
+        set_snapshot(await crm.locations(clients_only=True))
     except Exception:                                    # noqa: BLE001
         log.exception("точки выдачи не перечитаны")
     return snapshot()

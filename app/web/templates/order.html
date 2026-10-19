@@ -40,7 +40,7 @@
     <label>Плательщик <select name="payer" {% if payer_locked %}disabled title="смета отправлена или счёт выставлен"{% endif %}>{% for code, label in PAYERS.items() %}<option value="{{ code }}" {% if order.payer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
     <label>Клиент по телефону <input name="client_phone" inputmode="tel" placeholder="{% if order.client_id %}{{ order.client_name }}{% else %}+7 …{% endif %}"></label>
     <label>Смета, ₽ <input name="estimate" inputmode="decimal" value="{{ order.estimate }}"></label>
-    <label>Где чиним <select name="location"><option value="">без точки</option>{% for loc in places %}<option value="{{ loc }}" {% if order.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Где чиним <select name="location"><option value="">без точки</option>{% for loc in places %}<option value="{{ loc }}" {% if order.location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}</select></label>
     <label>Заметка <input name="note" value="{{ order.note or '' }}"></label>
     <button type="submit">Сохранить</button>
   </form>

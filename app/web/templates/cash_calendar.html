@@ -8,7 +8,7 @@
   <form method="get" class="search">
     <select name="days">{% for d in horizons %}<option value="{{ d }}" {% if d == days %}selected{% endif %}>{{ d }} дней</option>{% endfor %}</select>
     {% if locations|length > 1 %}<select name="location"><option value="">все точки</option>
-      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}</select>{% endif %}
+      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name|place }}</option>{% endfor %}</select>{% endif %}
     <input name="start" value="{{ start_raw }}" placeholder="остаток на сегодня, ₽" inputmode="decimal">
     <button type="submit">Показать</button>
   </form>
@@ -55,7 +55,7 @@
     <label>Сумма, ₽ <input name="amount" inputmode="decimal" required></label>
     <label>Вид <select name="direction">{% for code, label in directions.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
     <label>Повтор <select name="repeat_months"><option value="0">разово</option><option value="1">каждый месяц</option><option value="3">раз в квартал</option><option value="12">раз в год</option></select></label>
-    {% if locations|length > 1 %}<label>Точка <select name="location"><option value="">вся сеть</option>{% for l in locations %}<option value="{{ l.name }}">{{ l.name }}</option>{% endfor %}</select></label>{% endif %}
+    {% if locations|length > 1 %}<label>Точка <select name="location"><option value="">вся сеть</option>{% for l in locations %}<option value="{{ l.name }}">{{ l.name|place }}</option>{% endfor %}</select></label>{% endif %}
     <button type="submit">Добавить</button>
   </form>
 </section>

@@ -54,13 +54,17 @@ async def run_once(bot: Any, db: Any, crm: Any, *, now: datetime) -> int:
     if not bookings:
         return 0
     aliases = logic.model_aliases(await crm.bike_models())
-    locations = await crm.locations(active_only=True)
+    # Часы в сообщении - точек выдачи; велосипед на складе не зовёт никого.
+    places = await crm.locations()
+    locations = logic.client_points(places)
+    stores = logic.warehouse_names(places)
     per_bike = logic.notice_param(setting, "per_bike", logic.WAITLIST_PER_BIKE)
     today = moment.date()
     sent = 0
     for bike in freed:
         slots = per_bike - logic.waitlist_taken(bike, bookings)
-        for booking in logic.waitlist_queue(bike, bookings, today=today, aliases=aliases):
+        for booking in logic.waitlist_queue(bike, bookings, today=today, aliases=aliases,
+                                            stores=stores):
             if slots <= 0:
                 break
             client = await crm.client(booking["client_id"])
@@ -94,12 +98,14 @@ async def run_once(bot: Any, db: Any, crm: Any, *, now: datetime) -> int:
 async def free_bike(crm: Any, booking: dict, bike_id: int | None) -> dict | None:
     """Свободный велосипед под заявку: тот, о котором писали, иначе любой
     той же модели на той же точке - клиенту важна модель, а не номер.
-    None - все разобраны."""
+    Склад не в счёт: велосипед там клиенту не выдадут. None - все разобраны."""
     aliases = logic.model_aliases(await crm.bike_models())
+    stores = logic.warehouse_names(await crm.locations())
     bike = await crm.bike(bike_id) if bike_id is not None else None
-    if bike is not None and logic.waitlist_fits(bike, booking, aliases=aliases):
+    if bike is not None and logic.waitlist_fits(bike, booking, aliases=aliases,
+                                                stores=stores):
         return bike
     for row in await crm.bikes(status="available", limit=10000):
-        if logic.waitlist_fits(row, booking, aliases=aliases):
+        if logic.waitlist_fits(row, booking, aliases=aliases, stores=stores):
             return row
     return None

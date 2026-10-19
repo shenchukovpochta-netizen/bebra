@@ -33,7 +33,7 @@
     {% endfor %}
     {% if spec.scope %}
     <label>Только модель <select name="model"><option value="">любая</option>{% for m in models %}<option value="{{ m }}"{% if m == scope.model %} selected{% endif %}>{{ m }}</option>{% endfor %}</select></label>
-    <label>Только точка <select name="location"><option value="">любая</option>{% for p in places %}<option value="{{ p }}"{% if p == scope.location %} selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+    <label>Только точка <select name="location"><option value="">любая</option>{% for p in places %}<option value="{{ p }}"{% if p == scope.location %} selected{% endif %}>{{ p|place }}</option>{% endfor %}</select></label>
     <label class="check"><input type="checkbox" name="new_only" value="1" {% if promo_new_only(promo) %}checked{% endif %}> Только новые аренды — первый период выдачи</label>
     {% endif %}
     <label>Действует с <input type="date" name="starts_on" value="{{ promo.starts_on|iso if promo.starts_on else '' }}"></label>

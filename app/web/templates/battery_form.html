@@ -13,7 +13,7 @@
   <label>Серийный номер <input name="serial_no"></label>
   <label>Напряжение по табличке, В <input name="volts" inputmode="numeric"{% if model and model.voltage %} placeholder="{{ model.voltage }}"{% endif %}></label>
   <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal"{% if model and model.capacity %} placeholder="{{ model.capacity }}"{% endif %}></label>
-  <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+  <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}">{{ loc|place }}</option>{% endfor %}</select></label>
   <label>Цена покупки <input name="purchase_price" value="{{ model.price if model and model.price else '' }}"></label>
   <label>Куплена <input type="date" name="purchased_on"></label>
   <label>Срок службы, мес. <input name="service_months" value="{{ model.service_months if model and model.service_months else 15 }}" size="4"></label>

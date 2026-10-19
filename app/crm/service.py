@@ -120,7 +120,9 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
 
     `location` - точка выдачи; не выбрана - точка заявки `booking` (клиент
     сам назвал, куда придёт), иначе точка велосипеда: её решает база в той
-    же транзакции, где велосипед уходит в аренду.
+    же транзакции, где велосипед уходит в аренду. Склад точкой выдачи не
+    бывает ни выбранным, ни «как у велосипеда»: аренда на складе завела бы
+    его в выручку и чек точек, а клиента - туда, где не выдают.
     """
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
@@ -128,6 +130,14 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
         raise ServiceError(
             f"Велосипед {bike.get('code')} сейчас "
             f"«{logic.BIKE_STATUSES.get(bike.get('status'), bike.get('status'))}».")
+    place = logic.issue_point(location, booking=booking)
+    stores = logic.warehouse_names(await crm.locations())
+    if place in stores:
+        raise ServiceError(f"«{place}» — склад, с него не выдают. Выберите точку выдачи.")
+    if place is None and bike is not None and bike.get("location") in stores:
+        raise ServiceError(
+            f"Велосипед {bike.get('code')} стоит на складе «{bike['location']}»: "
+            "выдают с точки. Выберите точку выдачи или сначала перевезите его.")
     if await crm.active_rental_of(client["id"]) is not None:
         raise ServiceError("У клиента уже идёт аренда - сначала закройте её.")
     base = logic.to_money(tariff["price"])
@@ -140,7 +150,7 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             billing=billing, started_on=started_on, contract_no=contract_no,
             created_by=by, mileage_start=mileage,
             promo_code=logic.clean_promo_code(promo_code) or None,
-            location=logic.issue_point(location, booking=booking))
+            location=place)
     except Exception as exc:                            # noqa: BLE001
         # Уникальные индексы на активную аренду: гонка двух операторов.
         if "unique" in type(exc).__name__.lower():

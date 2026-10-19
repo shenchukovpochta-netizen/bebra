@@ -81,7 +81,7 @@ class PointsCase(tw.WebCase):
         self.seed()
         crm = self.crm
         self.pav_id = tw.run(crm.create_location(name=PAV, city="Казань",
-                                                 address="ул. Павлюхина, 97А",
+                                                 address="ул. Павлюхина, 97",
                                                  note=None, sort=10))
         self.ado_id = tw.run(crm.create_location(name=ADO, city="Казань",
                                                  address="ул. Адоратского, 11А",
@@ -273,7 +273,8 @@ class TestOrderAndStaffPoint(PointsCase):
 
     def test_order_point_defaults_to_the_bike_and_is_chosen_for_foreign(self):
         page = self.get_ok(f"/orders/new?bike={self.bike_id}")
-        self.assertIn(f"как у велосипеда ({PAV})", page)
+        # Подпись точки - с адресом (logic.point_label), значение - имя.
+        self.assertIn(f"как у велосипеда ({PAV} · ул. Павлюхина, 97)", page)
         self.client.post("/orders", data={"bike_id": self.bike_id, "payer": "own"})
         own = max(self.crm.orders_)
         self.assertEqual(self.order(own)["location"], PAV)
@@ -458,6 +459,226 @@ class TestBotPoint(PointsCase):
         self.assertEqual(rental["bike_id"], self.bike2_id)
         self.assertEqual(rental["location"], DEK)
         self.assertEqual(self.bike(self.bike2_id)["location"], DEK)
+
+
+# ───────────────── склад и подпись точки адресом ─────────────────
+
+STORE = "Склад"
+STORE_ROW = {"name": STORE, "city": "Казань", "active": True, "sort": 30,
+             "address": "г. Казань, ул. Динмухаметова, 14А", "kind": "warehouse"}
+POINT_ROWS = [
+    {"name": PAV, "city": "Казань", "active": True, "sort": 10,
+     "address": "г. Казань, ул. Павлюхина, 97", "kind": "point", "hours": "10-19"},
+    {"name": ADO, "city": "Казань", "active": True, "sort": 20,
+     "address": "г. Казань, ул. Адоратского, 11А", "kind": "point", "hours": "10-19"},
+    STORE_ROW,
+]
+
+
+class TestPointLabel(unittest.TestCase):
+    def test_label_is_name_and_address_without_own_city(self):
+        """Эдгар: в списке «Точка» - полные адреса. Город точки в подписи
+        опускается (он у точки отдельным полем), чужой - остаётся."""
+        self.assertEqual(logic.point_label(POINT_ROWS[0]), "Павлюхина · ул. Павлюхина, 97")
+        self.assertEqual(logic.point_label(POINT_ROWS[1]),
+                         "Адоратского · ул. Адоратского, 11А")
+        self.assertEqual(logic.point_label(STORE_ROW), "Склад · ул. Динмухаметова, 14А")
+        self.assertEqual(logic.point_address({"city": "Казань",
+                                              "address": "Казань, ул. Баумана, 1"}),
+                         "ул. Баумана, 1")
+        self.assertEqual(logic.point_address({"city": "Казань",
+                                              "address": "г. Зеленодольск, ул. Ленина, 2"}),
+                         "г. Зеленодольск, ул. Ленина, 2")
+
+    def test_label_without_address_is_the_name(self):
+        self.assertEqual(logic.point_label({"name": DEK, "address": None}), DEK)
+        self.assertEqual(logic.point_label({"name": "ул. Ленина, 1", "city": "Казань",
+                                            "address": "г. Казань, ул. Ленина, 1"}),
+                         "ул. Ленина, 1", "адрес и есть имя - не повторяем")
+        self.assertEqual(logic.point_label(None), "")
+
+    def test_labels_map_marks_the_warehouse(self):
+        labels = logic.point_labels(POINT_ROWS)
+        self.assertEqual(labels[PAV]["label"], "Павлюхина · ул. Павлюхина, 97")
+        self.assertEqual(labels[STORE]["address"], "ул. Динмухаметова, 14А")
+        self.assertTrue(labels[STORE]["warehouse"])
+        self.assertFalse(labels[PAV]["warehouse"])
+
+
+class TestWarehouseLogic(unittest.TestCase):
+    def test_client_points_and_choices_skip_the_warehouse(self):
+        self.assertEqual([p["name"] for p in logic.client_points(POINT_ROWS)], [PAV, ADO])
+        self.assertEqual(logic.warehouse_names(POINT_ROWS), {STORE})
+        self.assertEqual(logic.point_choices(POINT_ROWS), [PAV, ADO, STORE],
+                         "для парка, пересчёта и задач склад - точка")
+        self.assertEqual(logic.point_choices(POINT_ROWS, STORE, DEK, clients=True),
+                         [PAV, ADO, DEK],
+                         "выдаче склад не предлагается и текущим значением")
+        # Склад без вида (строка старой схемы) - точка выдачи.
+        self.assertFalse(logic.is_warehouse({"name": "X"}))
+        self.assertEqual(logic.point_choices([STORE_ROW], clients=True), [],
+                         "справочник есть - константа не подставляется")
+
+    def test_warehouse_has_no_plan(self):
+        rows = [dict(POINT_ROWS[0], plan_rented=10), dict(POINT_ROWS[1], plan_rented=5),
+                dict(STORE_ROW)]
+        total = logic.plan_from_points(rows, check=D(500))
+        self.assertEqual(total["rented"], 15,
+                         "у склада плана нет - сумма точек выдачи и есть сеть")
+        self.assertIsNone(logic.point_plan(dict(STORE_ROW, plan_rented=3), check=D(500)))
+
+    def test_transfer_takes_from_the_warehouse_and_never_brings_to_it(self):
+        today = date(2026, 10, 19)
+        bikes = ([{"id": i, "code": f"S-{i}", "model": "Truck", "status": "available",
+                   "location": STORE} for i in range(1, 4)]
+                 + [{"id": 10, "code": "P-1", "model": "Truck", "status": "rented",
+                     "location": PAV}])
+        # Каждый день недели по выдаче на Павлюхина - спрос 1 в день.
+        history = [{"started_on": today - timedelta(days=d), "location": PAV,
+                    "model": "Truck"} for d in range(1, 57)]
+        # Выдача «на складе» в истории и заявка на него - не спрос склада.
+        history += [{"started_on": today - timedelta(days=d), "location": STORE,
+                     "model": "Truck"} for d in range(1, 57)]
+        plan = logic.transfer_plan(points=[PAV, ADO, STORE], bikes=bikes, rentals=[],
+                                   history=history, today=today, safety=1,
+                                   stores=[STORE],
+                                   bookings=[{"location_name": STORE, "model": "Truck",
+                                              "wanted_on": today + timedelta(days=1)}])
+        store = next(r for r in plan["rows"] if r["location"] == STORE)
+        self.assertEqual((store["need"], store["spare"], store["store"]), (0, 3, True),
+                         "склад отдаёт всё свободное: запас держат под курьера")
+        self.assertEqual([(m["source"], m["target"], m["count"]) for m in plan["moves"]],
+                         [(STORE, PAV, 2)])
+        self.assertTrue(all(m["target"] != STORE for m in plan["moves"]))
+        # Без пометки склада - обычная точка со своим спросом и запасом.
+        plain = logic.transfer_plan(points=[PAV, STORE], bikes=bikes, rentals=[],
+                                    history=history, today=today, safety=1)
+        self.assertLess(next(r for r in plain["rows"] if r["location"] == STORE)["spare"], 3)
+
+    def test_waitlist_and_booking_do_not_count_warehouse_bikes(self):
+        bike = {"id": 1, "status": "available", "model": "Truck", "location": STORE}
+        booking = {"id": 5, "status": "new", "model": "Truck", "location_id": None}
+        self.assertTrue(logic.waitlist_fits(bike, booking))
+        self.assertFalse(logic.waitlist_fits(bike, booking, stores={STORE}),
+                         "звать к велосипеду на складе - звать туда, где не выдают")
+        self.assertEqual(logic.waitlist_queue(bike, [booking], today=date(2026, 10, 19),
+                                              stores={STORE}), [])
+        models = [{"id": 1, "title": "Truck"}]
+        self.assertEqual(logic.booking_models(models, [bike], stores={STORE})[0]["free"], 0)
+        self.assertEqual(logic.booking_models(models, [bike])[0]["free"], 1)
+        rows = [dict(r, id=i) for i, r in enumerate(POINT_ROWS, 1)]
+        self.assertEqual([p["title"] for p in logic.booking_points(rows, models, [bike])],
+                         [PAV, ADO], "склада в заявке нет")
+
+    def test_bot_never_names_the_warehouse(self):
+        from app.crm import points, readiness
+        try:
+            points.set_snapshot(POINT_ROWS)
+            self.assertEqual([p["name"] for p in points.snapshot()], [PAV, ADO])
+        finally:
+            points.reset()
+        note = points.hours_note("ru", rows=[dict(STORE_ROW, hours="круглосуточно"),
+                                             POINT_ROWS[0]])
+        self.assertNotIn("круглосуточно", note, "сдача «на любой точке» - не на склад")
+        self.assertIn("10-19", note)
+        # «Готовность» не просит у склада телефон и режим.
+        rows = [dict(POINT_ROWS[0], phone="+7", address="ул. Павлюхина, 97"),
+                dict(STORE_ROW)]
+        self.assertEqual(readiness.check_points(rows)["state"], readiness.OK)
+        self.assertNotIn(STORE, readiness.check_points(rows)["text"])
+
+
+class TestWarehouseInPanel(PointsCase):
+    """Склад - точка для парка, пересчёта, задач и перевозки, но не для
+    выдачи и кассы. Подпись точки в списках - с адресом."""
+
+    def setUp(self):
+        super().setUp()
+        self.store_id = tw.run(self.crm.create_location(
+            name=STORE, city="Казань", address="г. Казань, ул. Динмухаметова, 14А",
+            note=None, sort=30, kind="warehouse"))
+        self.store_bike = tw.run(self.crm.create_bike(code="S-1", model="Kugoo V3",
+                                                      location=STORE))
+
+    def test_issue_offers_no_warehouse_and_asks_for_a_point(self):
+        base = f"/issue?client={self.client_id}&tariff={self.tariff_id}"
+        page = self.get_ok(base + "&model=Kugoo+V3")
+        self.assertNotIn(f'<option value="{STORE}"', page)
+        self.assertIn(f'<option value="{PAV}" >Павлюхина · ул. Павлюхина, 97</option>',
+                      page, "значение - имя, подпись - с адресом")
+        page = self.get_ok(base + f"&bike={self.store_bike}")
+        self.assertNotIn(f'<option value="{STORE}"', page)
+        self.assertIn('<option value="">не указана</option>', page,
+                      "велосипед со склада: точку выдачи называет оператор")
+        # Без точки и со складом - отказ до денег.
+        self.issue_form(bike_id=self.store_bike, pay_amount="3000")
+        self.assertIsNone(self.rental())
+        self.assertEqual(self.crm.ledger_, [])
+        self.assertIn("стоит на складе", self.get_ok("/"))
+        self.issue_form(bike_id=self.store_bike, location=STORE)
+        self.assertIsNone(self.rental())
+        # С точкой - выдача, велосипед переезжает на точку аренды.
+        self.issue_form(bike_id=self.store_bike, location=ADO)
+        self.assertEqual(self.rental()["location"], ADO)
+        self.assertEqual(self.bike(self.store_bike)["location"], ADO)
+
+    def test_service_refuses_the_warehouse_for_every_path(self):
+        """Быстрая выдача из лички и ручная аренда идут тем же
+        service.open_rental: склад точкой аренды не станет ни выбором, ни
+        «как у велосипеда»."""
+        for location in (None, STORE):
+            with self.assertRaises(service.ServiceError):
+                self.open_rental(location=location, bike_id=self.store_bike)
+        self.assertNotIn(f'<option value="{STORE}"', self.get_ok("/rentals/new"))
+        self.assertNotIn(f'<option value="{STORE}"', self.get_ok("/rentals"))
+
+    def test_cash_and_promo_have_no_warehouse(self):
+        page = self.get_ok("/cash")
+        self.assertIn(f'<option value="{PAV}"', page)
+        self.assertNotIn(f'<option value="{STORE}"', page)
+        self.client.post("/cash", data={"location": STORE, "opening": "0"})
+        self.assertEqual(tw.run(self.crm.open_shifts()), [], "на складе кассы нет")
+        page = self.get_ok(f"/promos/new?kind={logic.IDLE_PROMO_KIND}")
+        self.assertIn(f'<option value="{PAV}"', page)
+        self.assertNotIn(f'<option value="{STORE}"', page, "акция ложится на аренду")
+
+    def test_warehouse_is_a_point_for_the_fleet(self):
+        label = f'<option value="{STORE}">Склад · ул. Динмухаметова, 14А</option>'
+        for path in ("/bikes/new", "/stock-takes", "/assets", "/staff", "/tasks"):
+            self.assertIn(f'value="{STORE}"', self.get_ok(path), path)
+        self.assertIn(label, self.get_ok("/bikes/new"))
+        # Форма «Поставить задачу» - макрос, импортированный без контекста
+        # страницы: подпись с адресом доходит и до него.
+        self.assertIn(">Склад · ул. Динмухаметова, 14А</option>", self.get_ok("/my"))
+        self.assertIn(">Павлюхина · ул. Павлюхина, 97</option>", self.get_ok("/my"))
+        r = self.client.post("/bikes/transfer", data={
+            "source": STORE, "target": PAV, "bike_ids": str(self.store_bike)})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.bike(self.store_bike)["location"], PAV,
+                         "с него возят переброской")
+
+    def test_locations_page_marks_and_edits_the_kind(self):
+        page = self.get_ok("/locations")
+        self.assertIn('title="клиентам не показывается, выдачи и кассы нет">склад</span>',
+                      page)
+        self.client.post(f"/locations/{self.dek_id}", data={
+            "city": "Казань", "address": "ул. Декабристов, 1",
+            "kind": "warehouse"})
+        self.assertEqual(self.place(self.dek_id)["kind"], "warehouse")
+        # Галочку сняли - форма несёт только скрытое «point».
+        self.client.post(f"/locations/{self.dek_id}", data={
+            "city": "Казань", "address": "ул. Декабристов, 1", "kind": "point"})
+        self.assertEqual(self.place(self.dek_id)["kind"], "point")
+        # Форма без поля (открыта до обновления) вид не трогает.
+        self.client.post(f"/locations/{self.store_id}", data={"city": "Казань"})
+        self.assertEqual(self.place(self.store_id)["kind"], "warehouse")
+        self.client.post("/locations", data={"name": "Гараж", "city": "Казань",
+                                             "kind": "warehouse"})
+        self.assertEqual(next(x for x in tw.run(self.crm.locations())
+                              if x["name"] == "Гараж")["kind"], "warehouse")
+
+    def place(self, location_id):
+        return next(x for x in tw.run(self.crm.locations()) if x["id"] == location_id)
 
 
 if __name__ == "__main__":

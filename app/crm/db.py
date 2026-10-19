@@ -44,7 +44,7 @@ BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location
 # План месяца точки - в её строке: переименование его не задевает.
 LOCATION_FIELDS = frozenset({"city", "address", "note", "active", "sort",
                             "public_title", "phone", "hours", "lat", "lon",
-                            "directions", "plan_rented", "plan_check"})
+                            "directions", "plan_rented", "plan_check", "kind"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note",
                                "weight_kg", "speed_kmh", "range_km",
@@ -4049,8 +4049,14 @@ class CrmDB:
 
     # ───────────────── справочники: точки и модели ─────────────────
 
-    async def locations(self, *, active_only: bool = False) -> list[dict]:
-        where = "where active" if active_only else ""
+    async def locations(self, *, active_only: bool = False,
+                        clients_only: bool = False) -> list[dict]:
+        """Справочник точек (sort, name). clients_only - точки, которые
+        видит клиент и с которых выдают: открытые и не склад (бот, заявка,
+        лист ожидания). Склад остаётся в полном списке: парк, пересчёт,
+        задачи и переброска."""
+        where = ("where active and kind = 'point'" if clients_only
+                 else "where active" if active_only else "")
         return _rows(await self.pool.fetch(
             f"select * from crm.locations {where} order by sort, name"))
 

@@ -7,7 +7,7 @@
 {# Фильтр списков по этой точке; «none» - строки без точки. #}
 {% set loc_q = (place.name|urlencode) if place else 'none' %}
 {% set m = row.metrics %}
-<div class="bar"><h1>{% if place %}{{ place.name }}{% else %}Без точки{% endif %} <small class="muted">· {{ span.label }}</small></h1>
+<div class="bar"><h1>{% if place %}{{ place.name|place }}{% if place.kind == 'warehouse' %} <span class="tag">склад</span>{% endif %}{% else %}Без точки{% endif %} <small class="muted">· {{ span.label }}</small></h1>
   {% with active = 'points' %}{% include "_report_tabs.html" %}{% endwith %}
 </div>
 <p><a href="/reports/points{{ q }}">← все точки</a></p>
@@ -69,7 +69,7 @@
 
 {# План месяца точки - деньги, поэтому только с финансами; у «без точки»
    и у закрытой точки плана нет. Месяц - выбранный в отчёте, иначе текущий. #}
-{% if money_ok and place and place.active %}
+{% if money_ok and place and place.active and place.kind != 'warehouse' %}
 <section class="card">
   <h2>План месяца <span class="muted">· {{ plan_span.first.strftime('%m.%Y') }}</span></h2>
   {% if plan %}

@@ -127,7 +127,7 @@
     <label>Снятый после замены <select name="old_status"><option value="">по причине</option>{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}">{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>
     <label>Пробег снятого, км <input name="mileage_old" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% endif %}"></label>
     <label>Пробег нового, км <input name="mileage_new" inputmode="numeric" placeholder="с дисплея"></label>
-    <label>Где меняли <select name="swap_location">{% if not home %}<option value="">не указано</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Где меняли <select name="swap_location">{% if not home %}<option value="">не указано</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}</select></label>
     <button type="submit" class="ghost">Заменить</button>
   </form>
   <p class="muted">Деньги, даты и договор остаются те же. Снятый велосипед по умолчанию уходит туда, куда указывает причина: поломка — в ремонт, ТО — на ТО, — и остаётся на точке, где меняли. Новый встаёт на точку аренды.</p>
@@ -202,7 +202,7 @@
   <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2" enctype="multipart/form-data">
     <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
     <label>Пробег при возврате, км <input name="mileage" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% else %}с дисплея{% endif %}"></label>
-    <label>Точка возврата <select name="return_location">{% if not home %}<option value="">не указана</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Точка возврата <select name="return_location">{% if not home %}<option value="">не указана</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}</select></label>
     <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="maintenance">на ТО</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option><option value="written_off">списан</option></select></label>
     <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
     {% if not demo %}<label class="wide">Фото при сдаче, до {{ RETURN_PHOTOS_MAX }} <input name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>{% endif %}

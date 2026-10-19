@@ -22,7 +22,7 @@
 <section class="card narrow">
   <h2>Открыть смену{% if opened %} на другой точке{% endif %}</h2>
   <form method="post" action="/cash" class="grid2">
-    <label>Точка <select name="location">{% if not opened or not locations %}<option value="">не указана</option>{% endif %}{% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Точка <select name="location">{% if not opened or not locations %}<option value="">не указана</option>{% endif %}{% for loc in locations %}<option value="{{ loc }}">{{ loc|place }}</option>{% endfor %}</select></label>
     <label>Размен в ящике, ₽ <input name="opening" inputmode="decimal" value="0"></label>
     <label class="wide">Заметка <input name="note" placeholder="кто на точке, чем разменялись"></label>
     <button type="submit">Открыть</button>

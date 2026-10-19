@@ -9,7 +9,7 @@
   <form method="get" class="search">
     <select name="location" onchange="this.form.submit()">
       <option value="">все точки</option>
-      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name|place }}</option>{% endfor %}
       <option value="none" {% if place == 'none' %}selected{% endif %}>без точки</option>
     </select>
     <noscript><button type="submit">Показать</button></noscript>

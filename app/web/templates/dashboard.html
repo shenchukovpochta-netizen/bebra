@@ -392,7 +392,7 @@
     <tr><th>Точка</th><th class="num">Парк<br>сейчас</th><th class="num">Простой</th>{% if money_ok %}<th class="num">Чек/день</th><th class="num">Выручка</th>{% endif %}{% if planned %}<th class="num">План</th><th class="num">Выпол&shy;нено</th>{% endif %}</tr>
     {% for r in points.rows + [points.total] %}{% set pm = r.metrics %}
     <tr {% if r.total %}class="total"{% endif %}>
-      <td data-label="Точка">{% if r.total %}<b>Итого</b>{% elif rep_ok and not r.orphan %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}?month={{ span.key }}">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}{% if r.closed %} <span class="tag">закрыта</span>{% endif %}</td>
+      <td data-label="Точка">{% if r.total %}<b>Итого</b>{% elif rep_ok and not r.orphan %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}?month={{ span.key }}">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}{% if r.place and r.place.kind == 'warehouse' %} <span class="tag">склад</span>{% endif %}{% if r.closed %} <span class="tag">закрыта</span>{% endif %}{% if r.place and r.key|place_addr %}<br><small class="muted">{{ r.key|place_addr }}</small>{% endif %}</td>
       <td class="num" data-label="Парк сейчас">{{ r.fleet }}</td>
       <td class="num {% if pm.idle_percent is none %}muted{% elif pm.idle_ok %}ok{% else %}bad{% endif %}" data-label="Простой">{% if pm.idle_percent is none %}—{% else %}{{ pm.idle_percent }} %{% endif %}</td>
       {% if money_ok %}

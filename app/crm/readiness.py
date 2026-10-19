@@ -92,7 +92,10 @@ def check_consent(settings: Mapping[str, Any], consent: str) -> dict[str, Any]:
 
 
 def check_points(locations: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    open_points = [row for row in locations if row.get("active", True)]
+    # Склад клиенту не называют: телефон и режим ему не нужны, и «нет
+    # телефона» у склада держало бы пункт недоделанным навсегда.
+    open_points = [row for row in locations
+                   if row.get("active", True) and not logic.is_warehouse(row)]
     if not open_points:
         return item("points", "Точки выдачи", TODO,
                     "Нет ни одной открытой точки: выдавать неоткуда, а бот не знает, "

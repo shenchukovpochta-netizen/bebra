@@ -20,6 +20,7 @@ import re
 import secrets
 import time
 from collections.abc import Sequence
+from contextvars import ContextVar
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +41,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -626,6 +628,36 @@ def _iso(value: Any) -> str:
     return value.strftime("%Y-%m-%d") if isinstance(value, date) else ""
 
 
+# Подписи точек запроса (logic.point_labels). Кроме контекста страницы -
+# переменной контекста выполнения: макросы, импортированные без контекста
+# ({% import "_tasks.html" as tk %}), переменных страницы не видят, а
+# список точек в форме задачи - именно в таком макросе.
+_PLACE_INFO: ContextVar[dict[str, Any] | None] = ContextVar("place_info", default=None)
+
+
+def _place_info(ctx: Any) -> dict[str, Any]:
+    return ctx.get("place_info") or _PLACE_INFO.get() or {}
+
+
+@pass_context
+def _place(ctx: Any, name: Any) -> str:
+    """Подпись точки для глаз: «Павлюхина · ул. Павлюхина, 97»
+    (logic.point_label). Значение поля и адреса фильтров остаются именем -
+    ключом точки. Справочник собирает страж на запрос (`place_info`);
+    имени в нём нет (закрытая давно, чужая) - само имя."""
+    key = str(name or "").strip()
+    info = _place_info(ctx).get(key)
+    return str(info["label"]) if info else key
+
+
+@pass_context
+def _place_addr(ctx: Any, name: Any) -> str:
+    """Короткий адрес точки (logic.point_address) - строкой под именем в
+    таблицах, где имя - ссылка. Пусто - адреса нет."""
+    info = _place_info(ctx).get(str(name or "").strip())
+    return str(info["address"]) if info else ""
+
+
 def static_stamp(folder: Path) -> str:
     """Отпечаток статики: им помечены ссылки на style.css и fonts.css.
 
@@ -824,6 +856,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     )
     templates.env.filters["dmy"] = _dmy
     templates.env.filters["iso"] = _iso
+    templates.env.filters["place"] = _place
+    templates.env.filters["place_addr"] = _place_addr
 
     # ─────────────────────── обвязка ───────────────────────
 
@@ -834,6 +868,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         staff = getattr(request.state, "staff", None)
         ctx.update(staff=staff, flash=messages,
                    learn=getattr(request.state, "learn", None))
+        # Подписи точек с адресом для фильтров place и place_addr: одна
+        # выборка справочника на запрос (её собрал страж), а не поле в
+        # контексте каждой страницы со списком точек.
+        ctx.setdefault("place_info", getattr(request.state, "place_info", None) or {})
         if staff is not None:
             # Меню и крошки - из одного дерева (app/web/nav.py): права те же,
             # что у стража маршрутов, счётчики собрал страж на входе.
@@ -909,6 +947,22 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     public = PUBLIC + DEMO_PUBLIC if cfg.demo else PUBLIC
     nav_cache = nav.CountsCache()
+    # Подписи точек (имя · адрес) - тем же кэшем на полминуты, что счётчики
+    # меню, и сбрасываются той же записью: точки правят редко, а страница
+    # со списком точек открывается на каждом шаге.
+    places_cache = nav.CountsCache()
+
+    async def place_info() -> dict[str, Any]:
+        cached = places_cache.fresh()
+        if cached is not None:
+            return cached
+        generation = places_cache.generation
+        try:
+            value = logic.point_labels(await crm.locations())
+        except Exception:                                   # noqa: BLE001
+            log.exception("подписи точек не собрались")
+            value = {}
+        return places_cache.put(value, generation=generation)
 
     async def nav_counts() -> dict[str, Any]:
         """Счётчики меню из кэша процесса. Сбой - меню без чисел, но
@@ -965,11 +1019,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if (request.state.staff is not None and request.method == "GET"
                 and nav.is_page(path)):
             request.state.nav_counts = await nav_counts()
+        request.state.place_info = None
+        if request.state.staff is not None and not path.startswith(
+                ("/static", "/healthz", "/manifest")):
+            request.state.place_info = await place_info()
+        # До call_next: задача обработчика копирует контекст при создании.
+        _PLACE_INFO.set(request.state.place_info or {})
         response = await call_next(request)
         if request.method not in ("GET", "HEAD"):
             # Запись могла сдвинуть число в меню: следующая страница
             # посчитает заново, а не покажет старое ещё полминуты.
             nav_cache.drop()
+            places_cache.drop()
         return secured(response)
 
     @app.exception_handler(RequestValidationError)
@@ -1146,18 +1207,31 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             places = []
         return logic.point_choices(places, *current)
 
-    async def filter_points(current: Any = "") -> list[str]:
+    async def client_location_names(*current: Any) -> list[str]:
+        """Точки выдачи - то же, что location_names, но без склада: выдача,
+        ручная аренда, касса, акция. Склад - тоже точка (парк, пересчёт,
+        задачи, перевозка), но клиенту с него не выдают и денег там не
+        принимают; текущее значение «склад» в список тоже не попадает."""
+        try:
+            places = await crm.locations()
+        except Exception:                                # noqa: BLE001
+            places = []
+        return logic.point_choices(places, *current, clients=True)
+
+    async def filter_points(current: Any = "", *, clients: bool = False) -> list[str]:
         """Точки для фильтра списка: действующие, за ними закрытые. Новую
         карточку на закрытую точку не ставят, а найти её аренды, наряды и
         оставшиеся на ней велосипеды надо по-прежнему. «none» - не точка,
-        а «без точки», его шаблон добавляет сам."""
+        а «без точки», его шаблон добавляет сам. clients - список аренд:
+        склада в нём нет, аренды на складе не бывает."""
         try:
             places = await crm.locations()
         except Exception:                                # noqa: BLE001
             places = []
         closed = [p["name"] for p in places if p.get("active") is False]
         return logic.point_choices(places, *closed,
-                                   "" if current == "none" else current)
+                                   "" if current == "none" else current,
+                                   clients=clients)
 
     # ─────────────────────── вход ───────────────────────
 
@@ -1348,7 +1422,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             release()
             flash(request, "Обучение на этом стенде не настроено.", "err")
             return redirect("/login")
-        places = [p["name"] for p in await crm.locations() if p.get("active")]
+        # Учебный админ стоит на точке выдачи: на складе у него не было бы
+        # ни аренд, ни заявок, ни кассы.
+        places = [p["name"] for p in logic.client_points(await crm.locations())]
         password = "".join(secrets.choice(learning.PASSWORD_ALPHABET)
                            for _ in range(learning.PASSWORD_LEN))
         password_hash = await asyncio.to_thread(logic.hash_password, password)
@@ -2215,6 +2291,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if place is None:
             return render(request, "missing.html", status_code=404, what="Точка")
         back = f"/reports/points/{location_id}"
+        if logic.is_warehouse(place):
+            flash(request, "У склада плана аренды нет: с него не выдают.", "err")
+            return redirect(back)
         data = await form(request)
         rented = (count_field(data, "plan_rented", what="Велосипедов в аренде",
                               limit=9999)
@@ -2322,12 +2401,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         """Переброска между точками и скидка на простаивающие - одна выборка
         на сводку, отчёт по точкам и страницу точки: иначе три экрана
         советовали бы разное. Переброска - когда точек больше одной;
-        странице точки она не нужна (with_transfer=False)."""
+        странице точки она не нужна (with_transfer=False). Склад в
+        переброске - источник без спроса; скидку на простой ему не
+        предлагают: с него не выдают, и акция на нём никого не позовёт."""
         today = date.today()
         now = datetime.now(UTC)
         if settings is None:
             settings = await crm.settings()
         names = logic.point_choices(places)
+        stores = logic.warehouse_names(places)
         aliases = logic.model_aliases(await crm.bike_models())
         since = await crm.bike_status_since()
         transfer = None
@@ -2340,7 +2422,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 bookings=(bookings if bookings is not None
                           else await crm.bookings(status="new")),
                 today=today, safety=logic.transfer_settings(settings)["safety"],
-                aliases=aliases,
+                aliases=aliases, stores=stores,
                 idle={int(b["id"]): logic.idle_days(since.get(b["id"]), now=now)
                       for b in fleet})
         idle = logic.idle_promo_settings(settings)
@@ -2350,7 +2432,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 "idle": logic.idle_promo_rows(
                     logic.idle_models(fleet, since=since, now=now, days=idle["days"],
                                       moved=await crm.bike_location_since(),
-                                      points=names, aliases=aliases),
+                                      points=[n for n in names if n not in stores],
+                                      aliases=aliases),
                     await crm.promos(active_only=True), today=today)}
 
     @app.post("/billing/run")
@@ -3307,7 +3390,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Точка выдачи едет через шаги так же: из заявки - та, что назвал
         # клиент, на шаге велосипеда она же фильтрует свободные. Имя из
         # адреса - чужая строка: принимаем только точку справочника.
-        places = await location_names()
+        # Склад - не точка выдачи: ни в фильтре, ни в выборе.
+        places = await client_location_names()
         point = (p.get("location") or "").strip()
         ctx.update(point=point if point in places else "", places=places)
 
@@ -3425,9 +3509,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # пересчёт, - точка из закрытой заявки не должна разойтись с ним.
         booking = (await crm.booking(ctx["booking_id"])
                    if ctx["booking_id"] is not None else None)
-        ctx.update(point=logic.issue_point(ctx["point"], booking=booking, bike=ctx["bike"]),
-                   issue_places=await location_names(
-                       ctx["bike"].get("location"), (booking or {}).get("location_name")))
+        issue_places = await client_location_names(
+            ctx["bike"].get("location"), (booking or {}).get("location_name"))
+        point = logic.issue_point(ctx["point"], booking=booking, bike=ctx["bike"])
+        # Велосипед со склада: точку выдачи называет оператор, «как у
+        # велосипеда» здесь значило бы аренду на складе.
+        ctx.update(point=point if point in issue_places else None,
+                   issue_places=issue_places)
         # Акция видна до денег: оператор называет клиенту сумму со
         # скидкой, а не объясняет баллы после оплаты. Промокод приходит
         # адресом (?promo=) - мастер без скрипта, проверка кода это
@@ -3529,7 +3617,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # велосипеда со «снятой» заявкой.
         if booking is not None and int(booking.get("client_id") or 0) != int(client["id"]):
             booking_id, booking = None, None
-        place = logic.check_location(data.get("location"), await location_names(
+        place = logic.check_location(data.get("location"), await client_location_names(
             bike.get("location"), (booking or {}).get("location_name")))
         for check in (started, pay, contract, mileage, place):
             if not check.ok:
@@ -3816,7 +3904,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 if deals.matches(d, q=q, who=who_f, me=int(staff["id"]), location=place)]
         return render(request, "deals.html", columns=deals.board(rows), q=q, who=who_f,
                       place=place, people=await team_people(),
-                      locations=await crm.locations(active_only=True),
+                      # Сделка - путь клиента: точка выдачи, склада нет.
+                      locations=await crm.locations(clients_only=True),
                       may_move=may_edit(request, "issue"), inbox_ok=inbox_ok,
                       closed_days=deals.CLOSED_DAYS)
 
@@ -3858,7 +3947,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                  if code != deal.get("stage") and deals.can_move(deal, code) is None]
         return render(request, "deal.html", deal=view, log_rows=await crm.deal_log(deal["id"]),
                       people=await team_people(),
-                      locations=await crm.locations(active_only=True),
+                      locations=await crm.locations(clients_only=True),
                       may_move=may_edit(request, "issue"), inbox_ok=inbox_ok,
                       moves=moves, issue_url=issue_url, stages=deals.STAGES)
 
@@ -4442,7 +4531,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         tools = list_tools(request, shown, allowed=rental_sorts(request))
         return render(request, "rentals.html", rows=tools["rows"], tools=tools,
                       status=status, view=view, q=q, location=location,
-                      places=await filter_points(location),
+                      places=await filter_points(location, clients=True),
                       views=await views_of(request, "/rentals"),
                       # Баланс - клиентский, он приходит в каждой строке его
                       # аренд: сумма по строкам посчитала бы долг клиента с
@@ -4500,7 +4589,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         client_id = request.query_params.get("client")
         bike_id = request.query_params.get("bike")
         return render(request, "rental_form.html", clients=free_clients,
-                      places=await location_names(),
+                      places=await client_location_names(),
                       bikes=await crm.bikes(status="available"),
                       tariffs=[t for t in await crm.tariffs(active_only=True)
                                if (t.get("kind") or "bike") == "bike"],
@@ -4562,7 +4651,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         # Пусто - точка велосипеда; без велосипеда аренда остаётся без
         # точки, пока её не назовёт первая замена.
         place = logic.check_location(data.get("location"),
-                                     await location_names((bike or {}).get("location")))
+                                     await client_location_names((bike or {}).get("location")))
         if not place.ok:
             flash(request, place.error, "err")
             return redirect("/rentals/new")
@@ -7453,12 +7542,15 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return value if value is not None and -180 <= value <= 180 else None
 
         # «Как найти» - для клиента: бот называет его под адресом («заезд
-        # в ГСК, 9-й бокс»). Описание (note) остаётся для своих.
+        # в ГСК, 9-й бокс»). Описание (note) остаётся для своих. Вид -
+        # галочка «склад» (скрытое «point» перед ней): склад клиенту не
+        # называют, с него не выдают.
         return {"public_title": (data.get("public_title") or "").strip() or None,
                 "phone": (data.get("phone") or "").strip() or None,
                 "hours": (data.get("hours") or "").strip() or None,
                 "directions": (data.get("directions") or "").strip() or None,
-                "lat": coord("lat"), "lon": coord("lon")}
+                "lat": coord("lat"), "lon": coord("lon"),
+                "kind": "warehouse" if data.get("kind") == "warehouse" else "point"}
 
     async def add_location(request: Request, data: dict) -> str | None:
         """Новая точка справочника из формы: её имя, None - ошибка уже во
@@ -8465,8 +8557,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                    for b in await crm.bikes(limit=10000) if b.get("model")}
         if scope["model"]:
             models.add(scope["model"])
+        # Акция ложится на аренду - точки выдачи; склад ей не ограничить.
         return {"models": sorted(m for m in models if m),
-                "places": await location_names(scope["location"])}
+                "places": await client_location_names(scope["location"])}
 
     @app.get("/promos")
     async def promos_page(request: Request) -> Response:
@@ -8657,7 +8750,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 await crm.cash_moves(shift["id"]),
                 other=await crm.shift_payments(shift["id"], cash=False))})
         busy = {str(o["shift"].get("location") or "") for o in opened}
-        names = await location_names()
+        # Касса - на точке выдачи: на складе денег не принимают.
+        names = await client_location_names()
         free = [loc for loc in names if loc not in busy]
         # Что должно лежать в ящике при открытии - «насчитали» прошлой
         # смены на той же точке: открывать с нуля, не глядя, нельзя.
@@ -8674,7 +8768,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         data = await form(request)
         opening = cost_field(data, "opening")
         note = logic.check_note(data.get("note"))
-        location = logic.check_location(data.get("location"), await location_names())
+        location = logic.check_location(data.get("location"), await client_location_names())
         for check in (opening, note, location):
             if not check.ok:
                 flash(request, check.error, "err")
