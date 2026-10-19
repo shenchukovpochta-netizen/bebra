@@ -42,9 +42,10 @@
     {% else %}<tr><td colspan="{{ 3 + plan.horizons|length }}" class="muted">В ближайшие полгода менять нечего.</td></tr>{% endfor %}
     {% if plan.models and money_ok %}
     {# Итог - только с ценой: «Итого» на две колонки (модель и цена), а
-       пустая ячейка под кнопками - без подписи, на телефоне её нет. #}
+       пустая ячейка под кнопками подписана как вся их колонка: телефон
+       её прячет (td:empty), черта итога на компьютере идёт до края. #}
     <tr class="total"><td colspan="2">Итого</td>
-      {% for h in plan.horizons %}<td class="num" data-label="за {{ h.months }} мес.">{{ h.count }}<br><small>{{ money(h.budget) }}</small></td>{% endfor %}<td colspan="1"></td></tr>
+      {% for h in plan.horizons %}<td class="num" data-label="за {{ h.months }} мес.">{{ h.count }}<br><small>{{ money(h.budget) }}</small></td>{% endfor %}<td data-label="Действие"></td></tr>
     {% endif %}
   </table>
   </div>

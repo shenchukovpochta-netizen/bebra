@@ -66,8 +66,10 @@
     </tr>
     {% else %}<tr><td colspan="5" class="muted">Строк пока нет.</td></tr>{% endfor %}
     {% if items and money_ok %}
-    {# Ячейка под кнопками пуста - подписывать нечего (colspan), на телефоне её нет. #}
-    <tr class="total"><td colspan="2"><b>Итого</b></td><td class="num" data-label="Клиенту"><b>{{ money(totals.total) }}</b></td><td class="num muted" data-label="Себест.">{{ money(totals.cost) }}</td><td colspan="1"></td></tr>
+    {# Ячейка под кнопками пуста и подписана как вся колонка кнопок
+       («Действие»): пустую телефон прячет (td:empty), а черта итога на
+       компьютере идёт до края. #}
+    <tr class="total"><td colspan="2"><b>Итого</b></td><td class="num" data-label="Клиенту"><b>{{ money(totals.total) }}</b></td><td class="num muted" data-label="Себест.">{{ money(totals.cost) }}</td><td data-label="Действие"></td></tr>
     {% endif %}
   </table>
   {% if can and open_now %}

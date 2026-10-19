@@ -20,13 +20,17 @@
 <div class="card">
   <h2>Что заказать</h2>
   <table class="cards">
-    <tr><th>Позиция</th><th class="num">Сколько</th><th>Откуда потребность</th><th class="opt">Наряд</th></tr>
+    <tr><th>Позиция</th><th class="num">Сколько</th><th>Откуда потребность</th><th>Наряд</th></tr>
     {% for n in needs %}
     <tr class="{% if n.covered %}muted{% endif %}">
       <td data-label="Позиция">{% if n.part_id %}<a href="/parts/{{ n.part_id }}">{{ n.title }}</a>{% else %}{{ n.title }} <small class="muted">нет в номенклатуре</small>{% endif %}</td>
-      <td class="num" data-label="Сколько">{% if n.covered %}—{% else %}{{ n.qty }}{% endif %}{% if n.transit %} <small class="muted">· в пути {{ n.transit }}</small>{% endif %}</td>
+      {# Покрытая - только «в пути N»: прочерк в карточке читался бы
+         значением «Сколько: —». #}
+      <td class="num" data-label="Сколько">{%- if n.covered -%}<small class="muted">в пути {{ n.transit }}</small>{%- else -%}{{ n.qty }}{% if n.transit %} <small class="muted">· в пути {{ n.transit }}</small>{% endif %}{%- endif -%}</td>
       <td data-label="Откуда потребность">{{ NEED_SOURCES[n.source] }}{% if n.edge %} <small class="muted">· на пределе</small>{% endif %}{% if n.covered %} <small class="muted">· уже едет, заказывать не надо</small>{% endif %}</td>
-      <td class="opt" data-label="Наряд">{% if n.work_order_no %}<a href="/orders/{{ n.work_order_id }}">{{ n.work_order_no }}</a>{% if n.bike_code %} · № {{ n.bike_code }}{% endif %}{% else %}—{% endif %}</td>
+      {# Наряд и велосипед - в карточке тоже: плитка выше говорит «велосипеды
+         стоят». У потребности от остатков ячейка пуста и скрыта. #}
+      <td data-label="Наряд">{%- if n.work_order_no -%}<a href="/orders/{{ n.work_order_id }}">{{ n.work_order_no }}</a>{% if n.bike_code %} · № {{ n.bike_code }}{% endif %}{%- endif -%}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">Потребностей нет: остатки в норме, наряды запчастей не ждут.</td></tr>{% endfor %}
   </table>

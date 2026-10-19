@@ -56,6 +56,8 @@
 
 <section class="card">
   <h2>Движения <span class="muted">· последние</span></h2>
+  {# В половине .cols колонка «Кто» иначе обрезалась краем карточки. #}
+  <div class="table-wrap">
   <table class="cards">
     <tr><th>Когда</th><th>Что</th><th>Кол-во</th>{% if money_ok %}<th>Себест.</th>{% endif %}<th class="opt">Документ</th><th class="opt">Кто</th></tr>
     {% for m in moves[:moves_shown] %}
@@ -69,6 +71,7 @@
     </tr>
     {% else %}<tr><td colspan="6" class="muted">Движений не было.</td></tr>{% endfor %}
   </table>
+  </div>
   {% if moves|length > moves_shown %}<p><a href="/parts/moves?part={{ part.id }}">Все движения позиции →</a></p>{% endif %}
 </section>
 </div>
