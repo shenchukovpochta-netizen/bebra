@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import time
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -455,16 +456,20 @@ def _file_exists(path: str) -> bool:
 
 
 def _csv(filename: str, header: list[str], rows: list[list[Any]], *,
-         note: str | None = None) -> Response:
+         note: str | None = None, title: Sequence[str] = ()) -> Response:
     """CSV для Excel: BOM, точка с запятой, десятичная запятая.
 
     `note` - строка над шапкой (пометка демо): её видно в любой программе,
-    которой откроют файл."""
+    которой откроют файл. `title` - строки документа под ней (номер, дата,
+    комментарий): в них бывает текст человека, и он идёт той же защитой
+    от формул, что и ячейки."""
     buf = io.StringIO()
     buf.write("\ufeff")
     writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
     if note:
         writer.writerow([note])
+    for line in title:
+        writer.writerow([_cell(line)])
     writer.writerow(header)
     for row in rows:
         writer.writerow([_cell(v) for v in row])
@@ -495,7 +500,7 @@ def _cell(value: Any) -> str:
 
 
 def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
-          note: str | None = None) -> Response:
+          note: str | None = None, title: Sequence[str] = ()) -> Response:
     """Тот же набор строк, но настоящей таблицей Excel.
 
     CSV Excel открывает по-разному в зависимости от настроек локали, и
@@ -509,6 +514,7 @@ def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
 
     `note` (пометка демо) - первой строкой над шапкой, именем листа и в
     свойствах файла: таблицу пересылают без страницы, с которой скачали.
+    `title` - строки документа между ней и шапкой (номер, дата, кто).
     """
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font
@@ -526,6 +532,17 @@ def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
                               end_column=len(header))
         book.properties.title = book.properties.subject = note
         top = 2
+    for line in title:
+        sheet.append([str(line)])
+        cell = sheet.cell(row=top, column=1)
+        # Строка с «=» остаётся строкой: в комментарии - текст человека.
+        cell.data_type = "s"
+        if top == 1 + bool(note):
+            cell.font = Font(bold=True)
+        if len(header) > 1:
+            sheet.merge_cells(start_row=top, start_column=1, end_row=top,
+                              end_column=len(header))
+        top += 1
     sheet.append(list(header))
     for cell in sheet[top]:
         cell.font = Font(bold=True)
@@ -585,7 +602,8 @@ EXPORT_FORMATS = ("xlsx", "csv")
 
 
 def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
-           note: str | None = None, limit: int | None = None) -> Response:
+           note: str | None = None, limit: int | None = None,
+           title: Sequence[str] = ()) -> Response:
     """Одна выгрузка в двух видах. Неизвестное расширение - 404.
 
     Молча отдать csv на запрос `.pdf` значит соврать в имени файла, и
@@ -593,6 +611,7 @@ def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
 
     `note` - пометка над шапкой (демо), `limit` - сколько строк отдать
     (демо); обрезанная выгрузка говорит об этом в той же пометке.
+    `title` - строки документа над шапкой: номер, дата, кто, комментарий.
     """
     if fmt not in EXPORT_FORMATS:
         raise HTTPException(status_code=404)
@@ -600,8 +619,8 @@ def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
         rows = rows[:limit]
         note = f"{note or ''} Показаны первые {limit} строк.".strip()
     if fmt == "xlsx":
-        return _xlsx(f"{stem}.xlsx", header, rows, note=note)
-    return _csv(f"{stem}.csv", header, rows, note=note)
+        return _xlsx(f"{stem}.xlsx", header, rows, note=note, title=title)
+    return _csv(f"{stem}.csv", header, rows, note=note, title=title)
 
 
 def _iso(value: Any) -> str:
@@ -840,7 +859,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return RedirectResponse(url, status_code=303)
 
     async def table(fmt: str, stem: str, header: list[str],
-                    rows: list[list[Any]]) -> Response:
+                    rows: list[list[Any]], *, title: Sequence[str] = ()) -> Response:
         """Выгрузка (_table) в потоке: openpyxl на тысячах строк - секунды
         процессора, и в цикле событий они заморозили бы панель всем
         остальным. В демо файл помечен и строк в нём не больше
@@ -848,7 +867,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return await asyncio.to_thread(
             _table, fmt, stem, header, rows,
             note=DEMO_EXPORT_NOTE if cfg.demo else None,
-            limit=DEMO_EXPORT_ROWS if cfg.demo else None)
+            limit=DEMO_EXPORT_ROWS if cfg.demo else None, title=title)
 
     def who(request: Request) -> str:
         staff = getattr(request.state, "staff", None)
@@ -9998,6 +10017,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return logic.take_may_count(getattr(request.state, "staff", None),
                                     scope=take.get("scope"), location=take.get("location"))
 
+    def may_mark(request: Request, take: dict) -> bool:
+        """Отмечать в ней: ещё и администратору точки в пересчёте всего
+        парка (logic.take_may_mark)."""
+        return logic.take_may_mark(getattr(request.state, "staff", None),
+                                   scope=take.get("scope"), location=take.get("location"))
+
     def may_start_take(request: Request) -> bool:
         return may_edit(request, "bikes") or logic.can_act(
             getattr(request.state, "staff", None), "stock_take")
@@ -10108,18 +10133,37 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 logic.TAKE_STATES.get(item.get("state"), item.get("state")),
                 item.get("note")]
 
+    def take_doc_lines(take: dict, items: list[dict]) -> list[str]:
+        """Шапка выгрузки ведомости: файл пересылают без страницы, и без
+        номера, даты и точки строки ничего не значат."""
+        counts = logic.take_counts(items)
+        started = _cell(take.get("started_at"))
+        when = (f"Начат {started}, закрыт {_cell(take.get('closed_at'))}"
+                if take.get("closed_at") else f"Начат {started}, идёт")
+        tally = (f"Ожидалось {counts['total']}, на месте {counts['found']}, "
+                 f"не нашли {counts['missing']}, лишних {counts['extra']}")
+        if counts["expected"]:
+            tally += f", не отмечено {counts['expected']}"
+        lines = [f"{take.get('no')} · {logic.take_title(take)}",
+                 f"{when} · провёл {take.get('created_by') or '—'}", tally]
+        if take.get("note"):
+            lines.append(f"Комментарий: {take['note']}")
+        return lines
+
     # Раньше /stock-takes/{take_id}: иначе «7.xlsx» уходил бы туда и
     # падал на разборе номера.
     @app.get("/stock-takes/{take_id}.{ext}")
     async def stock_take_export(request: Request, take_id: int, ext: str) -> Response:
-        """Ведомость файлом: документ с датой, точкой и тем, кто считал."""
+        """Ведомость файлом: шапка документа (номер, что и где считали,
+        когда, кто, итог, комментарий) и строки, как на экране."""
         take = await crm.stock_take(take_id)
         if take is None:
             return render(request, "missing.html", status_code=404, what="Пересчёт")
-        rows = [take_item_cells(i) for i in await crm.take_items(take_id)]
+        items = await crm.take_items(take_id)
         return await table(ext, f"stock-take-{take_id}",
                            ["№", "Наименование", "Статус", "Точка", "Отметка",
-                            "Комментарий"], rows)
+                            "Комментарий"], [take_item_cells(i) for i in items],
+                           title=take_doc_lines(take, items))
 
     @app.get("/stock-takes/{take_id}")
     async def stock_take_page(request: Request, take_id: int) -> Response:
@@ -10130,20 +10174,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         counts = logic.take_counts(items)
         show = take_show(request)
         shown = [i for i in items if i.get("state") == show] if show else items
+        is_open = logic.take_is_open(take)
         return render(request, "stock_take.html", take=take, items=shown,
                       counts=counts, progress=logic.take_progress(counts),
                       by_kind=logic.take_counts_by_kind(items), show=show,
-                      editable=logic.take_is_open(take) and may_count(request, take))
+                      editable=is_open and may_mark(request, take),
+                      closable=is_open and may_count(request, take),
+                      may_lose=may_edit(request, "bikes"))
 
-    async def take_for_edit(request: Request,
-                            take_id: int) -> tuple[dict | None, Response | None]:
+    async def take_for_edit(request: Request, take_id: int, *,
+                            lead: bool = False) -> tuple[dict | None, Response | None]:
         """Ведомость, которую этот сотрудник может править сейчас, или ответ:
-        нет такой - 404, не его - отказ, закрыта - назад с объяснением."""
+        нет такой - 404, не его - отказ, закрыта - назад с объяснением.
+        `lead` - действие того, кто ведёт пересчёт («всё на месте», общий
+        комментарий), а не отметка."""
         take = await crm.stock_take(take_id)
         if take is None:
             return None, render(request, "missing.html", status_code=404,
                                 what="Пересчёт")
-        if not may_count(request, take):
+        if not (may_count if lead else may_mark)(request, take):
             return None, take_denied(request)
         if not logic.take_is_open(take):
             flash(request, "Пересчёт закрыт.", "err")
@@ -10170,7 +10219,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def stock_take_note(request: Request, take_id: int) -> Response:
         """Общий комментарий ведомости: что считали, где, кто помогал,
         почему расхождение. Пустой стирает."""
-        take, refusal = await take_for_edit(request, take_id)
+        take, refusal = await take_for_edit(request, take_id, lead=True)
         if refusal is not None:
             return refusal
         data = await form(request)
@@ -10234,7 +10283,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/stock-takes/{take_id}/mark-all")
     async def stock_take_mark_all(request: Request, take_id: int) -> Response:
-        take, refusal = await take_for_edit(request, take_id)
+        take, refusal = await take_for_edit(request, take_id, lead=True)
         if refusal is not None:
             return refusal
         data = await form(request)
@@ -10253,9 +10302,13 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return take_denied(request)
         data = await form(request)
         try:
+            # «Утерян» выводит технику из операционного парка - это правка
+            # парка, а не пересчёт: администратору точки (действие
+            # stock_take) галочка не дана, и присланная руками не действует.
+            # Найденный потерянный возвращается по правилу и у него.
             result = await service.finish_stock_take(
                 crm, take, by=who(request),
-                lose_missing=bool(data.get("lose_missing")),
+                lose_missing=bool(data.get("lose_missing")) and may_edit(request, "bikes"),
                 return_found=bool(data.get("return_found")))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
@@ -10265,6 +10318,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             parts.append(f"не нашли {result['missing']}")
         if result["lost"]:
             parts.append(f"переведено в «Утерян»: {result['lost']}")
+        if result["kept"]:
+            parts.append(f"не переведено в «Утерян»: {result['kept']} — их отметили "
+                         f"в {', '.join(result['kept_in'])}")
         if result["returned"]:
             parts.append(f"вернулось в парк: {result['returned']}")
         flash(request, "Пересчёт закрыт: " + ", ".join(parts) + ".")

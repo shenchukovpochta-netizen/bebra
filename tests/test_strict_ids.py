@@ -223,7 +223,8 @@ class TestStrictIdsInThePanel(tw.WebCase):
         длиннее bigint - 500 в базе. Всё это адрес без записи - 404 страницей."""
         huge = "9" * 19
         for path in ("/clients/%C2%B2", f"/clients/{quote('٢')}", "/clients/abc",
-                     f"/clients/{huge}", f"/trackers/{huge}", f"/rentals/{huge}/battery"):
+                     f"/clients/{huge}", f"/trackers/{huge}", f"/rentals/{huge}/battery",
+                     f"/stock-takes/{huge}.csv", f"/stock-takes/{huge}.xlsx"):
             r = (self.client.post(path, data={}) if path.endswith("/battery")
                  else self.client.get(path))
             self.assertEqual(r.status_code, 404, path)
@@ -231,6 +232,9 @@ class TestStrictIdsInThePanel(tw.WebCase):
         self.assertTrue(logic.path_ids_ok(f"/clients/{'9' * 18}"), "bigint - ещё номер")
         self.assertFalse(logic.path_ids_ok(f"/clients/{huge}/edit"))
         self.assertTrue(logic.path_ids_ok("/sign/Ab-9/doc/0"))
+        # Выгрузка одной записи - номер с расширением: «N.csv» - тот же номер.
+        self.assertFalse(logic.path_ids_ok(f"/stock-takes/{huge}.csv"))
+        self.assertTrue(logic.path_ids_ok(f"/stock-takes/{'9' * 18}.xlsx"))
         # Всё, что pydantic читает в int, а не только голые цифры.
         for spelling in (f"+{huge}", f"-{huge}", f" {huge}", f"{huge}\t", f"{huge}.0",
                          f" {huge}", "1_000_000_000_000_000_000", f"0-{huge}"):

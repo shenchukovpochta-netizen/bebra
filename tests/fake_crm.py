@@ -1830,12 +1830,16 @@ class FakeCrm:
             return None
         missing = {"bikes": [], "batteries": []}
         for item in self.take_items_:
-            if item["take_id"] == take_id and item["state"] == "expected":
+            if item["take_id"] != take_id:
+                continue
+            if item["state"] == "expected":
                 item["state"] = "missing"
-                if item["bike_id"] is not None:
-                    missing["bikes"].append(int(item["bike_id"]))
-                if item.get("battery_id") is not None:
-                    missing["batteries"].append(int(item["battery_id"]))
+            if item["state"] != "missing":
+                continue
+            if item["bike_id"] is not None:
+                missing["bikes"].append(int(item["bike_id"]))
+            if item.get("battery_id") is not None:
+                missing["batteries"].append(int(item["battery_id"]))
         counts = crm_logic.take_counts(
             [i for i in self.take_items_ if i["take_id"] == take_id])
         self.takes_[take_id].update({
@@ -1843,6 +1847,27 @@ class FakeCrm:
             "found": counts["found"], "missing": counts["missing"],
             "extra": counts["extra"]})
         return {**missing, "counts": counts}
+
+    async def take_seen_elsewhere(self, take_id):
+        take = self.takes_.get(take_id)
+        if take is None:
+            return []
+        out = []
+        for other in sorted(self.takes_.values(), key=lambda t: t["id"]):
+            if other["id"] == take_id or not (
+                    other["status"] == "open"
+                    or (other.get("closed_at") is not None
+                        and other["closed_at"] >= take["started_at"])):
+                continue
+            for item in sorted(self.take_items_, key=lambda i: i["id"]):
+                if (item["take_id"] == other["id"] and item["state"] in ("found", "extra")
+                        and (item["bike_id"] is not None
+                             or item.get("battery_id") is not None)):
+                    out.append({"bike_id": item["bike_id"],
+                                "battery_id": item.get("battery_id"),
+                                "state": item["state"], "take_id": other["id"],
+                                "no": other["no"], "location": other["location"]})
+        return out
 
     # ─────────────────────── отчёты сервиса ───────────────────────
 

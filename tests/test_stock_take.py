@@ -402,6 +402,50 @@ class TestTakeCodes(unittest.TestCase):
                          ["XYZ-1", "XYZ-2", "МБ-001"])
         self.assertEqual(logic.take_codes(" , ;\n", known), [])
 
+    def test_a_known_number_is_not_glued_to_the_next(self):
+        """Склейка брала самый длинный узнанный отрезок, и нули снимались
+        после неё: «МБ-001 2» при АКБ «2» отмечал МБ-012, «1 2» - АКБ «12».
+        Отметка не той единицы прячет недостачу - а её пересчёт и ищет."""
+        index = logic.TakeIndex([
+            {"kind": "bike", "id": 1, "code": "МБ-001"},
+            {"kind": "bike", "id": 12, "code": "МБ-012"},
+            {"kind": "battery", "id": 21, "code": "1"},
+            {"kind": "battery", "id": 22, "code": "2"},
+            {"kind": "battery", "id": 23, "code": "12"},
+            {"kind": "battery", "id": 24, "code": "АКБ-1070"}])
+        known = lambda text: bool(index.find(text))  # noqa: E731
+        for raw, codes in (("МБ-001 2", ["МБ-001", "2"]), ("1 2", ["1", "2"]),
+                           ("МБ 001 2", ["МБ 001", "2"]), ("МБ 001", ["МБ 001"]),
+                           ("МБ 12", ["МБ 12"]),
+                           # Неизвестное слово не съедает номер за ним.
+                           ("Truck МБ-001", ["Truck", "МБ-001"]),
+                           # Цифры после букв - хвост того же номера, а не
+                           # чужая батарея с теми же цифрами.
+                           ("МБ 1070", ["МБ 1070"])):
+            self.assertEqual(logic.take_codes(raw, known), codes, raw)
+        # Номер мотора с пробелами по-прежнему один номер.
+        motor = logic.TakeIndex(self.UNITS)
+        self.assertEqual(logic.take_codes("60В240W 2305 123456",
+                                          lambda t: bool(motor.find(t))),
+                         ["60В240W 2305 123456"])
+
+    def test_digits_alone(self):
+        """«144» вместо «МБ-144»: находится, если номер с этими цифрами в
+        парке один, а при двух - просьба уточнить, а не лишняя строка."""
+        index = logic.TakeIndex([{"kind": "bike", "id": 144, "code": "МБ-144"},
+                                 {"kind": "bike", "id": 9, "code": "МБ-009",
+                                  "motor_no": "60V240W2305000013"}])
+        self.assertEqual([h["id"] for h in index.find("144")], [144])
+        self.assertEqual([h["id"] for h in index.find("0009")], [9])
+        # Хвост мотора от шести знаков - раньше цифр номера.
+        self.assertEqual([h["id"] for h in index.find("000013")], [9])
+        self.assertEqual(index.find("145"), [])
+        both = logic.TakeIndex([{"kind": "bike", "id": 144, "code": "МБ-144"},
+                                {"kind": "battery", "id": 7, "code": "АКБ-0144"}])
+        self.assertEqual(sorted(h["kind"] for h in both.find("144")),
+                         ["battery", "bike"], "велосипеду тут первенства нет")
+        self.assertEqual([h["kind"] for h in both.find("мб-144")], ["bike"])
+
     def test_item_title_is_kind_and_model(self):
         self.assertEqual(logic.take_item_title({"bike_id": 1, "bike_model": "Truck +"}),
                          "Велосипед · Truck +")
@@ -430,6 +474,12 @@ class TestTakeCodes(unittest.TestCase):
         self.assertTrue(logic.take_may_count(admin, **here))
         self.assertFalse(logic.take_may_count(admin, **there))
         self.assertFalse(logic.take_may_count(admin, **park))
+        # Отмечать в пересчёте всего парка админ точки может, вести - нет.
+        self.assertTrue(logic.take_may_mark(admin, **park))
+        self.assertTrue(logic.take_may_mark(admin, **here))
+        self.assertFalse(logic.take_may_mark(admin, **there))
+        for take in (here, there, park):
+            self.assertFalse(logic.take_may_mark(viewer, **take))
 
     def test_points_count_at_once_but_not_twice(self):
         open_takes = [{"no": "ПРТ-1", "scope": "location", "location": "Павлюхина"}]
@@ -622,6 +672,109 @@ class TestTakeInput(tw.WebCase):
         self.assertEqual(self.client.get(f"/stock-takes/{take_id}.pdf").status_code, 404)
         self.assertEqual(self.client.get("/stock-takes/999.csv").status_code, 404)
 
+    def test_digits_alone_are_a_number(self):
+        """«2» вместо «МБ-002»: подсказка обещает свободный ввод, а номер
+        писался лишним «нет в парке»."""
+        take_id = self.start()
+        r = self.scan(take_id, "2")
+        self.assertIn("МБ-002 на месте", self.get_ok(r.headers["location"]))
+        self.scan(take_id, "17")
+        self.assertEqual(self.state(take_id, battery_id=self.cell), "found")
+        tw.run(self.crm.create_battery(code="АКБ-0001", status="available",
+                                       location="Павлюхина"))
+        r = self.scan(take_id, "1")
+        self.assertIn("подходит несколько - АКБ-0001, МБ-001",
+                      self.get_ok(r.headers["location"]))
+        self.assertEqual(self.state(take_id, self.b1), "expected")
+        self.assertEqual(self.extras(take_id), [])
+
+    def test_digits_yield_to_a_number_typed_in_full(self):
+        """АКБ с номером «2» на корпусе: в ведомости на велосипеды «2» - эта
+        батарея, а не догадка по цифрам МБ-002. Иначе МБ-002 отметился бы на
+        месте, и его недостачу пересчёт не показал бы."""
+        tw.run(self.crm.create_battery(code="2", status="available",
+                                       location="Павлюхина"))
+        take_id = self.start(what="bikes")
+        r = self.scan(take_id, "2")
+        self.assertIn("2 - аккумулятор, а считаем", self.get_ok(r.headers["location"]))
+        self.assertEqual(self.state(take_id, self.b2), "expected")
+        self.assertEqual(self.extras(take_id), [])
+        # Без такой батареи цифры по-прежнему находят велосипед.
+        self.scan(take_id, "1")
+        self.assertEqual(self.state(take_id, self.b1), "found")
+
+    def test_take_export_has_a_document_head(self):
+        """Файл пересылают без страницы: номер, что и где, когда, кто, итог
+        и комментарий - над строками."""
+        take_id = self.start(note="Считали вдвоём")
+        self.scan(take_id, "мб-1")
+        lines = self.client.get(f"/stock-takes/{take_id}.csv").content.decode(
+            "utf-8-sig").splitlines()
+        self.assertEqual(lines[0], "ПРТ-000001 · Всё · Точка Павлюхина")
+        self.assertRegex(lines[1], r"^Начат \d\d\.\d\d\.\d{4} \d\d:\d\d, идёт · "
+                                   r"провёл staff:admin$")
+        self.assertEqual(lines[2], "Ожидалось 3, на месте 1, не нашли 0, лишних 0, "
+                                   "не отмечено 2")
+        self.assertEqual(lines[3], "Комментарий: Считали вдвоём")
+        self.assertTrue(lines[4].startswith("№;Наименование;Статус"), lines[4])
+        self.client.post(f"/stock-takes/{take_id}/close")
+        lines = self.client.get(f"/stock-takes/{take_id}.csv").content.decode(
+            "utf-8-sig").splitlines()
+        self.assertIn(", закрыт ", lines[1])
+        self.assertEqual(lines[2], "Ожидалось 3, на месте 1, не нашли 2, лишних 0")
+        import io
+
+        from openpyxl import load_workbook
+        sheet = load_workbook(io.BytesIO(
+            self.client.get(f"/stock-takes/{take_id}.xlsx").content)).active
+        self.assertEqual(sheet["A1"].value, "ПРТ-000001 · Всё · Точка Павлюхина")
+        self.assertEqual(sheet["A4"].value, "Комментарий: Считали вдвоём")
+        self.assertEqual([c.value for c in sheet[5]][:3], ["№", "Наименование", "Статус"])
+
+    def test_row_marked_missing_by_hand_is_lost_by_the_checkbox(self):
+        """Строка «не нашли», поставленная руками, - тоже недостача: галочка
+        «в Утерян» брала только неотмеченные."""
+        take_id = self.start(what="bikes")
+        item = tw.run(self.crm.take_item_of_bike(take_id, self.b2))
+        self.client.post(f"/stock-takes/{take_id}/items/{item['id']}",
+                         data={"state": "missing"})
+        self.scan(take_id, "мб-1")
+        self.client.post(f"/stock-takes/{take_id}/close", data={"lose_missing": "1"})
+        self.assertEqual(tw.run(self.crm.bike(self.b2))["status"], "lost")
+        self.assertEqual(tw.run(self.crm.bike(self.b1))["status"], "available")
+
+    def test_unit_seen_at_another_point_is_not_lost(self):
+        """Точки считают одновременно: МБ-003 числится на Адоратского, а
+        стоит на Павлюхина. Галочка «в Утерян» на Адоратского его не
+        теряет - в какой бы очерёдности ни закрывали."""
+        for here_first in (False, True):
+            with self.subTest(here_first=here_first):
+                tw.run(self.crm.update_bike(self.b3, status="available", by="t"))
+                here = self.start()
+                there = self.start(location="Адоратского")
+                self.scan(here, "мб-3")
+                if here_first:
+                    self.client.post(f"/stock-takes/{here}/close")
+                r = self.client.post(f"/stock-takes/{there}/close",
+                                     data={"lose_missing": "1"})
+                no = tw.run(self.crm.stock_take(here))["no"]
+                self.assertIn(f"не переведено в «Утерян»: 1 — их отметили в {no}",
+                              self.get_ok(r.headers["location"]))
+                self.assertEqual(tw.run(self.crm.bike(self.b3))["status"], "available")
+                if not here_first:
+                    self.client.post(f"/stock-takes/{here}/close")
+
+    def test_an_older_count_elsewhere_does_not_save_from_lost(self):
+        """Видели на другой точке до начала этого пересчёта - это старое
+        знание, а недостача - новое."""
+        here = self.start()
+        self.scan(here, "мб-3")
+        self.client.post(f"/stock-takes/{here}/close")
+        there = self.start(location="Адоратского")
+        r = self.client.post(f"/stock-takes/{there}/close", data={"lose_missing": "1"})
+        self.assertNotIn("не переведено", self.get_ok(r.headers["location"]))
+        self.assertEqual(tw.run(self.crm.bike(self.b3))["status"], "lost")
+
     def test_two_points_count_at_once(self):
         here = self.start()
         there = self.start(location="Адоратского")
@@ -691,6 +844,62 @@ class TestTakeRights(tw.WebCase):
                                  data={"code": "B-2", "state": "found"})
             self.assertEqual(r.status_code, 403, path)
         self.assertEqual(tw.run(self.crm.stock_take(take_id))["status"], "open")
+
+    def test_admin_cannot_lose_the_park_by_closing(self):
+        """Статус «Утерян» выводит технику из операционного парка: это
+        правка парка, а не пересчёт. Галочки у администратора точки нет, и
+        присланная руками не действует; найденный потерянный возвращается."""
+        lost = tw.run(self.crm.create_bike(code="B-9", model="M", status="lost",
+                                           location="Адоратского"))
+        owner_take = self.client.post("/stock-takes", data={
+            "scope": "location", "what": "all", "location": "Адоратского", "note": ""})
+        owner_take = int(owner_take.headers["location"].rsplit("/", 1)[1])
+        self.assertIn('name="lose_missing"', self.client.get(
+            f"/stock-takes/{owner_take}").text)
+        self.as_admin()
+        r = self.client.post("/stock-takes", data={"scope": "location", "what": "all",
+                                                   "location": "Павлюхина", "note": ""})
+        take_id = int(r.headers["location"].rsplit("/", 1)[1])
+        page = " ".join(self.get_ok(f"/stock-takes/{take_id}").split())
+        self.assertNotIn('name="lose_missing"', page)
+        self.assertIn("в «Утерян» их переводит тот, кто ведёт парк", page)
+        tw.run(self.crm.create_bike(code="B-3", model="M", location="Павлюхина"))
+        self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "b-9"})
+        r = self.client.post(f"/stock-takes/{take_id}/close",
+                             data={"lose_missing": "1", "return_found": "1"})
+        self.assertNotIn("переведено в «Утерян»", self.get_ok(r.headers["location"]))
+        self.assertEqual(tw.run(self.crm.bike_by_code("B-1"))["status"], "available")
+        self.assertEqual(tw.run(self.crm.bike(lost))["status"], "available",
+                         "найденный потерянный вернулся и у неё")
+
+    def test_admin_marks_in_a_park_take(self):
+        """Пересчёт всего парка идёт по точкам: администратор отмечает то,
+        что видит у себя, а «всё на месте», общий комментарий и закрытие -
+        у того, кто ведёт пересчёт."""
+        r = self.client.post("/stock-takes", data={"scope": "all", "what": "all",
+                                                   "location": "", "note": "Сеть"})
+        take_id = int(r.headers["location"].rsplit("/", 1)[1])
+        self.as_admin()
+        page = " ".join(self.get_ok(f"/stock-takes/{take_id}").split())
+        self.assertIn("Отметить по номеру", page)
+        self.assertIn("Закрывает пересчёт всего парка тот, кто его ведёт", page)
+        for absent in ("Закрыть пересчёт", "Всё на месте",
+                       f'action="/stock-takes/{take_id}/note"'):
+            self.assertNotIn(absent, page)
+        self.assertIn("Сеть", page)
+        r = self.client.post(f"/stock-takes/{take_id}/scan", data={"code": "b-1"})
+        self.assertIn("B-1 на месте", self.get_ok(r.headers["location"]))
+        item = tw.run(self.crm.take_item_of_bike(
+            take_id, tw.run(self.crm.bike_by_code("B-2"))["id"]))
+        r = self.client.post(f"/stock-takes/{take_id}/items/{item['id']}/note",
+                             data={"note": "у курьера во дворе"})
+        self.assertEqual(r.status_code, 303)
+        for path in ("note", "mark-all", "close"):
+            r = self.client.post(f"/stock-takes/{take_id}/{path}",
+                                 data={"note": "моё", "state": "found"})
+            self.assertEqual(r.status_code, 403, path)
+        take = tw.run(self.crm.stock_take(take_id))
+        self.assertEqual((take["status"], take["note"]), ("open", "Сеть"))
 
     def test_admin_without_point_counts_anywhere(self):
         staff = tw.run(self.crm.staff_by_login("anna"))

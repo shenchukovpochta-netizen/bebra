@@ -36,9 +36,10 @@
     <button type="submit">Отметить</button>
   </form>
   <p class="muted">Номер можно набрать как удобно: регистр, раскладка, дефис и
-    нули впереди не важны — «мб-1», «MB 001» и «МБ-001» один номер. Подходит
-    и номер мотора, рамы или аккумулятора. Несколько номеров — через пробел,
-    запятую или с новой строки.</p>
+    нули впереди не важны — «мб-1», «MB 001» и «МБ-001» один номер. Можно и
+    одни цифры — «144», если номер с ними в парке один. Подходит и номер
+    мотора, рамы или аккумулятора. Несколько номеров — через пробел, запятую
+    или с новой строки.</p>
   <details class="take-list">
     <summary>Ввести списком</summary>
     <form method="post" action="/stock-takes/{{ take.id }}/scan">
@@ -48,6 +49,7 @@
       <button type="submit">Отметить все</button>
     </form>
   </details>
+  {% if closable %}
   <div class="take-tools">
     <form method="post" action="/stock-takes/{{ take.id }}/mark-all">
       <input type="hidden" name="show" value="{{ show }}">
@@ -58,13 +60,19 @@
       <input type="hidden" name="state" value="expected"><button type="submit" class="ghost small">Снять отметки</button>
     </form>
   </div>
+  {% else %}
+  {# Пересчёт всего парка: администратор точки отмечает то, что видит у
+     себя, а «всё на месте» и закрытие - у того, кто ведёт пересчёт. #}
+  <p class="muted">Отмечайте технику, которую видите на своей точке. Закрывает
+    пересчёт всего парка тот, кто его ведёт.</p>
+  {% endif %}
 </div>
 {% endif %}
 
-{% if editable or take.note %}
+{% if closable or take.note %}
 <div class="card" id="take-note">
   <h2>Комментарий к пересчёту</h2>
-  {% if editable %}
+  {% if closable %}
   {# Что считали, где, кто помогал, почему расхождение - то, что через
      месяц не вспомнить. Правится, пока ведомость идёт; пустой стирает. #}
   <form method="post" action="/stock-takes/{{ take.id }}/note">
@@ -100,7 +108,10 @@
     <td data-label="Статус">{% if i.bike_status %}{{ BIKE_STATUSES[i.bike_status] }}
       {% elif i.battery_status %}{{ BATTERY_STATUSES[i.battery_status] }}
       {% else %}нет в парке{% endif %}</td>
-    <td class="opt" data-label="Точка">{{ i.bike_location or i.battery_location or '—' }}</td>
+    {% set where = i.bike_location or i.battery_location %}
+    {# На телефоне точка уводится, но не у лишней с чужой точки: откуда
+       она, там и есть находка. #}
+    <td{% if not (i.state == 'extra' and where and where != take.location) %} class="opt"{% endif %} data-label="Точка">{{ where or '—' }}</td>
     <td data-label="Отметка"><span class="tag take-{{ i.state }}">{{ TAKE_STATES[i.state] }}</span></td>
     <td data-label="Комментарий"{% if not editable and not i.note %} class="opt"{% endif %}>
       {% if editable %}
@@ -137,15 +148,23 @@
 </table>
 </div>
 
-{% if editable %}
+{% if closable %}
 <div class="card">
   <h2>Закрыть пересчёт</h2>
   <p>Неотмеченные строки станут недостачей: сейчас их {{ counts.left }}.</p>
   <form method="post" action="/stock-takes/{{ take.id }}/close">
     {# Статус «Утерян» снимает велосипед с операционного парка, и обратно
-       его никто не вернёт. Поэтому недостача переводится в потери руками. #}
+       его никто не вернёт. Поэтому недостача переводится в потери руками -
+       и только тем, кто может менять парк. #}
+    {% if may_lose %}
     <label class="check"><input type="checkbox" name="lose_missing" value="1">
       Перевести ненайденные в «Утерян»</label>
+    <p class="muted">Что в эти дни отметил пересчёт другой точки, в «Утерян» не
+      уйдёт: его видели.</p>
+    {% else %}
+    <p class="muted">Ненайденные останутся недостачей: в «Утерян» их переводит
+      тот, кто ведёт парк.</p>
+    {% endif %}
     <label class="check"><input type="checkbox" name="return_found" value="1" checked>
       Вернуть найденные потерянные в «Свободен»</label>
     <button type="submit">Закрыть пересчёт</button>

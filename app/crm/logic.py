@@ -599,6 +599,8 @@ def parse_id(raw: Any) -> int | None:
 
 
 _PATH_NUMBER = re.compile(r"[\s0-9+\-_.]+")
+# Расширение файла в конце сегмента: «.csv», «.xlsx».
+_PATH_EXT = re.compile(r"\.[A-Za-z]+$")
 
 
 def path_ids_ok(path: str) -> bool:
@@ -609,11 +611,16 @@ def path_ids_ok(path: str) -> bool:
     Смотрим на состав сегмента, а не на написание: pydantic читает в int
     и «+N», «-N», « N», «N.0», «1_000», и даже «0-9» (это -9). Все его
     написания - из ASCII-цифр, пробелов, знаков, «_» и «.»; больше 18
-    значащих цифр в таком сегменте - число за пределом, какое бы ни было."""
+    значащих цифр в таком сегменте - число за пределом, какое бы ни было.
+
+    Выгрузка одной записи («/stock-takes/{id}.{ext}») несёт номер с
+    расширением: сегмент «N.csv» смотрим и без «.csv», иначе двадцать
+    цифр перед ним снова доходили до базы."""
     for part in str(path or "").split("/"):
-        if (_PATH_NUMBER.fullmatch(part)
-                and len(re.sub(r"[^0-9]", "", part).lstrip("0")) > 18):
-            return False
+        for piece in {part, _PATH_EXT.sub("", part)}:
+            if (_PATH_NUMBER.fullmatch(piece)
+                    and len(re.sub(r"[^0-9]", "", piece).lstrip("0")) > 18):
+                return False
     return True
 
 
@@ -3268,6 +3275,9 @@ TAKE_SCAN_CHARS = 5000
 TAKE_TAIL_MIN = 6
 # Номер с пробелами внутри («МБ 001») - не больше стольких кусков.
 TAKE_SPAN_MAX = 3
+# Номер парка вида «буквы + цифры» (ключ take_code_key): по цифрам его
+# находит ввод одних цифр («144» - МБ-144).
+_TAKE_NUMBER = re.compile(r"[^0-9]+([0-9]+)")
 # Кириллица -> латиница для сравнения номеров. Двойник - в свой
 # латинский вид (В -> B, Н -> H, Р -> P, С -> C, У -> Y, Х -> X): с
 # телефона на латинской раскладке «МВ» набирают «MB». Буква без двойника -
@@ -3308,7 +3318,8 @@ class TakeIndex:
     Порядок - от точного к широкому, и широкий не спорит с точным:
     номер как напечатан; тот же номер без регистра, раскладки, дефисов и
     ведущих нулей (`take_code_key`); номер мотора, рамы или АКБ целиком
-    (`vin_key`, как у рабочей группы); его хвост от TAKE_TAIL_MIN знаков.
+    (`vin_key`, как у рабочей группы); его хвост от TAKE_TAIL_MIN знаков;
+    одни цифры номера парка без букв («144» - МБ-144).
     Строится один раз на ввод: строк в парке сотни, номеров в поле - до
     TAKE_SCAN_LIMIT.
     """
@@ -3318,6 +3329,7 @@ class TakeIndex:
         self.keys: dict[str, list[dict]] = {}
         self.vins: dict[str, list[dict]] = {}
         self.tails: list[tuple[str, dict]] = []
+        self.numbers: dict[str, list[dict]] = {}
         for unit in units:
             code = " ".join(str(unit.get("code") or "").split()).upper()
             if code:
@@ -3325,26 +3337,43 @@ class TakeIndex:
             key = take_code_key(code)
             if key:
                 self.keys.setdefault(key, []).append(unit)
+            number = _TAKE_NUMBER.fullmatch(key)
+            if number:
+                self.numbers.setdefault(number.group(1), []).append(unit)
             for field in ("motor_no", "frame_no", "serial_no"):
                 vin = vin_key(unit.get(field))
                 if len(vin) >= VIN_MIN:
                     self.vins.setdefault(vin, []).append(unit)
                     self.tails.append((vin, unit))
 
-    def find(self, raw: Any) -> list[dict]:
+    def find(self, raw: Any, *, digits: bool = True) -> list[dict]:
         """Единицы под номером: пусто - нет такой, больше одной - номер
-        надо уточнить."""
+        надо уточнить. `digits=False` - без догадки по одним цифрам:
+        ведомость сперва ищет номер, набранный полностью, по всему парку
+        (service.take_add_found)."""
         text = " ".join(str(raw or "").split()).upper()
         if not text:
             return []
-        for hits in (self.exact.get(text), self.keys.get(take_code_key(text))):
+        key = take_code_key(text)
+        for hits in (self.exact.get(text), self.keys.get(key)):
             if hits:
                 return _take_unique(hits)
         vin = vin_key(text)
         if len(vin) >= VIN_MIN and self.vins.get(vin):
             return _take_unique(self.vins[vin])
         if len(vin) >= TAKE_TAIL_MIN:
-            return _take_unique(u for v, u in self.tails if v.endswith(vin))
+            hits = _take_unique(u for v, u in self.tails if v.endswith(vin))
+            if hits:
+                return hits
+        if digits and key.isdigit():
+            # Одни цифры: «144» - это МБ-144, если номер с этими цифрами в
+            # парке один. Есть и МБ-144, и АКБ-0144 - уточнить, а не угадать:
+            # велосипеду тут не первенство, как у общего номера, - человек
+            # не набрал ни буквы.
+            seen: dict[tuple[str, Any], dict] = {}
+            for unit in self.numbers.get(key, ()):
+                seen.setdefault((str(unit.get("kind")), unit.get("id")), unit)
+            return list(seen.values())
         return []
 
 
@@ -3353,28 +3382,35 @@ def take_codes(raw: Any, known: Callable[[str], bool]) -> list[str]:
     запятой, перевод строки или пробел.
 
     Пробел бывает и внутри номера («МБ 001»), поэтому куски между
-    запятыми разбираются жадно: самый длинный отрезок, который `known`
-    узнаёт, - один номер. Неузнанный кусок из одних букв - начало номера
-    («МБ 1070»), он клеится к следующему; прочие неузнанные - по одному.
+    запятыми разбираются так: самый короткий отрезок, который `known`
+    узнаёт, - один номер. Короткий, а не длинный: номер, узнанный сам,
+    к следующему не клеится - «МБ-001 2» это МБ-001 и АКБ «2», а не
+    МБ-012 (нули снимаются после склейки), и отметка не той единицы
+    спрятала бы недостачу. Неузнанный кусок из одних букв - начало номера
+    («МБ 1070»), он клеится к следующему, если тот не номер с буквами,
+    узнанный сам («Truck МБ-001» - это МБ-001). Одни цифры после букв -
+    хвост того же номера, даже если цифрами узнаются: «МБ 1070» при
+    АКБ-1070 и без МБ-1070 - лишний номер, а не чужая батарея. Прочие
+    неузнанные - по одному.
     """
+    def whole(token: str) -> bool:
+        return bool(re.search(r"[^\W\d_]", token)) and known(token)
+
     out: list[str] = []
     for chunk in re.split(r"[,;\n\r\t]+", str(raw or "")):
         tokens = chunk.split()
         i = 0
         while i < len(tokens):
-            for j in range(min(len(tokens), i + TAKE_SPAN_MAX), i, -1):
-                text = " ".join(tokens[i:j])
-                if known(text):
-                    out.append(text)
-                    i = j
-                    break
-            else:
+            last = min(len(tokens), i + TAKE_SPAN_MAX)
+            j = next((j for j in range(i + 1, last + 1)
+                      if known(" ".join(tokens[i:j]))), None)
+            if j is None:
                 j = i + 1
-                while (j < len(tokens) and j - i < TAKE_SPAN_MAX
-                       and not re.search(r"\d", tokens[j - 1])):
+                while (j < last and not re.search(r"\d", tokens[j - 1])
+                       and not whole(tokens[j])):
                     j += 1
-                out.append(" ".join(tokens[i:j]))
-                i = j
+            out.append(" ".join(tokens[i:j]))
+            i = j
     return out
 
 
@@ -3442,6 +3478,20 @@ def take_may_count(staff: dict | None, *, scope: Any, location: Any) -> bool:
         return False
     own = (staff or {}).get("location") or None
     return own is None or (scope == "location" and (location or None) == own)
+
+
+def take_may_mark(staff: dict | None, *, scope: Any, location: Any) -> bool:
+    """Может ли сотрудник отмечать в ведомости: номера, строки, их
+    комментарии.
+
+    Шире, чем вести её (`take_may_count`): пересчёт всего парка идёт по
+    точкам, и администратор с точкой отмечает то, что видит у себя.
+    Закрывает его, ставит «всё на месте» и пишет общий комментарий тот,
+    кто может вести весь парк: закрытие меняет статусы.
+    """
+    if take_may_count(staff, scope=scope, location=location):
+        return True
+    return str(scope or "") == "all" and can_act(staff, "stock_take")
 
 
 def take_conflict(open_takes: Iterable[dict], *, scope: str,

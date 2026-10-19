@@ -715,14 +715,21 @@ async def take_add_found(crm: Any, take: dict, code: str, *,
     if indexes is None:
         indexes = _take_indexes(await crm.take_units(), take)
     own, every = indexes
-    hits = own.find(code)
+    hits = own.find(code, digits=False)
+    other = [] if hits else every.find(code, digits=False)
+    if not hits and not other:
+        # Одни цифры («2» - МБ-002) - последним шагом и после всего парка:
+        # АКБ с номером «2» на корпусе главнее догадки по цифрам. В ведомости
+        # на велосипеды «2» - это та батарея («считаем велосипеды»), а не
+        # МБ-002 на месте: чужая отметка спрятала бы его недостачу.
+        hits = own.find(code)
+        other = [] if hits else every.find(code)
     if len(hits) > 1:
         names = ", ".join(sorted(str(h.get("code")) for h in hits)[:5])
         return _take_result("ambiguous", f"{code}: подходит несколько - {names}. "
                                          "Введите номер полностью.")
     if hits:
         return await _take_mark(crm, take, hits[0])
-    other = every.find(code)
     if other:
         unit = other[0]
         word = "аккумулятор" if unit.get("kind") == "battery" else "велосипед"
@@ -846,6 +853,11 @@ async def finish_stock_take(crm: Any, take: dict, *, by: str,
     глазами легко, а статус «Утерян» потом никто не снимет. Поэтому
     недостачу в потери переводят отдельной галочкой, а вот найденный
     потерянный возвращается в парк сразу - он физически стоит на точке.
+
+    Галочка не теряет то, что в те же дни видели на другой точке: точки
+    считают одновременно, и велосипед, числящийся на Б, а стоящий на А, в
+    ведомости А лишний, а в ведомости Б не найден. Без этой проверки исход
+    зависел бы от того, кто закрыл раньше. Такие единицы - `kept`.
     """
     if not logic.take_is_open(take):
         raise ServiceError("Пересчёт уже закрыт.")
@@ -856,20 +868,34 @@ async def finish_stock_take(crm: Any, take: dict, *, by: str,
         raise ServiceError("Пересчёт уже закрыт.")
     counts = closed["counts"]
     lost, returned = 0, 0
+    kept: list[str] = []
     if lose_missing:
+        seen: dict[tuple[str, int], str] = {}
+        for row in await crm.take_seen_elsewhere(take["id"]):
+            for kind in ("bike", "battery"):
+                if row.get(f"{kind}_id") is not None:
+                    seen.setdefault((kind, int(row[f"{kind}_id"])), str(row["no"]))
         for bike_id in closed["bikes"]:
             bike = await crm.bike(bike_id)
             # В аренде велосипед потеряться не может: он у клиента, и это
             # разговор с клиентом, а не отметка в ведомости.
-            if bike and bike.get("status") in logic.TAKE_EXPECTED_STATUSES:
-                await crm.update_bike(bike_id, status="lost", by=by)
-                lost += 1
+            if not bike or bike.get("status") not in logic.TAKE_EXPECTED_STATUSES:
+                continue
+            if ("bike", bike_id) in seen:
+                kept.append(seen[("bike", bike_id)])
+                continue
+            await crm.update_bike(bike_id, status="lost", by=by)
+            lost += 1
         for battery_id in closed["batteries"]:
             battery = await crm.battery(battery_id)
-            if battery and battery.get("status") in \
+            if not battery or battery.get("status") not in \
                     logic.TAKE_EXPECTED_BATTERY_STATUSES:
-                await crm.update_battery(battery_id, status="lost", by=by)
-                lost += 1
+                continue
+            if ("battery", battery_id) in seen:
+                kept.append(seen[("battery", battery_id)])
+                continue
+            await crm.update_battery(battery_id, status="lost", by=by)
+            lost += 1
     if return_found:
         # Найденный возвращается туда, где его нашли: ведомость по точке -
         # на её точку, тем же обновлением, что и статус (оба журнала пишут
@@ -893,7 +919,8 @@ async def finish_stock_take(crm: Any, take: dict, *, by: str,
                     await crm.update_battery(int(battery["id"]), status="available",
                                              by=by, **place)
                     returned += 1
-    return {**counts, "lost": lost, "returned": returned}
+    return {**counts, "lost": lost, "returned": returned, "kept": len(kept),
+            "kept_in": sorted(set(kept))}
 
 
 async def ref_code_of(crm: Any, client: dict) -> str:

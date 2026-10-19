@@ -189,10 +189,17 @@ class TestStockTakeOnPostgres(unittest.IsolatedAsyncioTestCase):
         await self.post(f"/stock-takes/{take_id}/note",
                         note="Считали вдвоём, МБ-200 нашли в подсобке")
 
-        # Выгрузки: ведомость и список.
+        # Выгрузки: ведомость (с шапкой документа) и список.
         r = await self.client.get(f"/stock-takes/{take_id}.csv")
         self.assertEqual(r.status_code, 200)
+        head = r.content.decode("utf-8-sig").splitlines()
+        self.assertEqual(head[0], "ПРТ-000001 · Всё · Весь парк")
+        self.assertIn("провёл staff:admin", head[1])
+        self.assertEqual(head[3], "Комментарий: Считали вдвоём, МБ-200 нашли в подсобке")
         self.assertIn("ZZ-404;—;нет в парке;;Лишний;наклейка чужая", r.text)
+        # Номер за пределом bigint в выгрузке - 404, а не 500 из базы.
+        r = await self.client.get(f"/stock-takes/{'9' * 20}.csv")
+        self.assertEqual(r.status_code, 404)
         self.assertEqual((await self.client.get(f"/stock-takes/{take_id}.xlsx")).status_code,
                          200)
 
@@ -260,6 +267,35 @@ class TestStockTakeOnPostgres(unittest.IsolatedAsyncioTestCase):
         text = await self.scan(here, "мб-2")
         self.assertIn("МБ-002 не ждали здесь: статус «Свободен», точка Адоратского", text)
 
+    async def test_seen_at_another_point_is_not_lost(self):
+        """Две точки считают разом. МБ-002 числится на Адоратского, а стоит
+        на Павлюхина: в ведомости Павлюхина он лишний, на Адоратского не
+        найден. Галочка «в Утерян» на Адоратского его не теряет - в какой бы
+        очерёдности ни закрывали; а пересчёт, закрытый до начала нового,
+        уже не спасает."""
+        here = await self.start(scope="location", location="Павлюхина", what="bikes")
+        there = await self.start(scope="location", location="Адоратского", what="bikes")
+        self.assertIn("МБ-002 не ждали здесь", await self.scan(here, "мб-2"))
+        await self.post(f"/stock-takes/{here}/close")
+        # «Не нашли» руками - тоже недостача.
+        item = await self.crm.take_item_of_bike(
+            there, (await self.crm.bike_by_code("МБ-006"))["id"])
+        await self.post(f"/stock-takes/{there}/items/{item['id']}", state="missing")
+        text = await self.get_ok(await self.post(f"/stock-takes/{there}/close",
+                                                 lose_missing="1"))
+        self.assertIn("не переведено в «Утерян»: 1 — их отметили в ПРТ-000001", text)
+        self.assertEqual((await self.crm.bike_by_code("МБ-002"))["status"], "available")
+        for code in ("МБ-004", "МБ-006"):
+            self.assertEqual((await self.crm.bike_by_code(code))["status"], "lost", code)
+        # Новый пересчёт Адоратского: Павлюхина закрыт до его начала.
+        await self.pool.execute("update crm.bikes set status = 'available' "
+                                "where status = 'lost' and code <> 'МБ-200'")
+        again = await self.start(scope="location", location="Адоратского", what="bikes")
+        text = await self.get_ok(await self.post(f"/stock-takes/{again}/close",
+                                                 lose_missing="1"))
+        self.assertNotIn("не переведено", text)
+        self.assertEqual((await self.crm.bike_by_code("МБ-002"))["status"], "lost")
+
     async def test_point_admin_counts_her_point(self):
         profile = await self.crm.access_profile_by_code("manager")
         self.assertTrue(logic.normalize_perms(profile["perms"])["actions"]["stock_take"])
@@ -275,7 +311,16 @@ class TestStockTakeOnPostgres(unittest.IsolatedAsyncioTestCase):
             take_id = await self.start(anna, scope="location", location="Павлюхина")
             await self.post(f"/stock-takes/{take_id}/scan", anna, code="мб-1")
             self.assertEqual((await self.states(take_id))["МБ-001"], "found")
-            await self.post(f"/stock-takes/{take_id}/close", anna)
+            # Галочка «в Утерян» - правка парка: присланная ею руками не
+            # действует, недостача так и остаётся недостачей.
+            lost_before = await self.pool.fetchval(
+                "select count(*) from crm.bikes where status = 'lost'")
+            await self.post(f"/stock-takes/{take_id}/close", anna, lose_missing="1")
+            self.assertEqual(await self.pool.fetchval(
+                "select count(*) from crm.bikes where status = 'lost'"), lost_before)
+            self.assertEqual((await self.crm.bike_by_code("МБ-003"))["status"],
+                             "available")
+            self.assertGreater((await self.crm.stock_take(take_id))["missing"], 0)
             # Карточку велосипеда ей по-прежнему не править.
             bike = await self.crm.bike_by_code("МБ-001")
             r = await anna.post(f"/bikes/{bike['id']}/status", data={"status": "repair"})
@@ -295,9 +340,18 @@ class TestStockTakeOnPostgres(unittest.IsolatedAsyncioTestCase):
                 crm, scope="location", location="Север", note="н", what="all", by="t")
             busy = await crm.create_stock_take(scope="all", location=None, note=None,
                                                bike_ids=[], created_by="t")
+            south = await service.start_stock_take(
+                crm, scope="location", location="Юг", note=None, what="bikes", by="t")
             take = await crm.stock_take(take_id)
             got = [(await service.take_scan(crm, take, raw))["message"]
                    for raw in ("т-1", "T 01", "т-3", "НЕТ-1", "нет 1", "б-7, т 2")]
+            # Т-03 юга стоит на севере: юг его не нашёл, но в «Утерян» не отдаёт.
+            seen = sorted((r["state"], r["no"], r["location"], r["battery_id"] is None)
+                          for r in await crm.take_seen_elsewhere(south))
+            south_result = await service.finish_stock_take(
+                crm, await crm.stock_take(south), by="t", lose_missing=True)
+            south_result = {k: south_result[k] for k in ("missing", "lost", "kept",
+                                                         "kept_in")}
             extra = next(i for i in await crm.take_items(take_id) if i["code"] == "НЕТ-1")
             marked = await crm.set_take_item(take_id, extra["id"], state="found")
             noted = await crm.set_stock_take_note(take_id, "итог")
@@ -308,7 +362,8 @@ class TestStockTakeOnPostgres(unittest.IsolatedAsyncioTestCase):
             done = await crm.stock_take(take_id)
             return (busy, got, marked, noted, late, items,
                     {k: result[k] for k in ("total", "found", "missing", "extra")},
-                    (done["status"], done["note"], done["expected"], done["extra"]))
+                    (done["status"], done["note"], done["expected"], done["extra"]),
+                    seen, south_result)
 
         # В базе уже лежит парк из asyncSetUp - на других точках и с другими
         # номерами: история его не задевает.
@@ -317,6 +372,8 @@ class TestStockTakeOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(real, fake)
         self.assertIsNone(real[0], "весь парк рядом с точкой не открыть")
         self.assertEqual(real[1][1], "Т-01 уже отмечен.")
+        self.assertEqual(real[-1], {"missing": 1, "lost": 0, "kept": 1,
+                                    "kept_in": ["ПРТ-000001"]})
 
     async def test_action_is_granted_once(self):
         """Старой установке действие выдаётся ролям администратора один раз:
