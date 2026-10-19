@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Приглашения — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Приглашения</h1>
@@ -26,18 +27,20 @@
 
 <div class="card">
   <h2>Агенты</h2>
-  <table>
-    <tr><th>Клиент</th><th>Код</th><th>Перешли</th><th>Зарегистрировались</th><th class="opt">Взяли велосипед</th><th>Заплатили</th><th>Начислено</th><th class="opt">Последний друг</th></tr>
+  {# «Зарегистри&shy;ровались» - одно слово с плиткой воронки; подпись
+     карточки переносится по слогам (ref-agents), а не где придётся. #}
+  <table class="cards ref-agents">
+    <tr><th>Клиент</th><th>Код</th><th>Перешли</th><th>Зарегистри&shy;ровались</th><th class="opt">Взяли велосипед</th><th>Заплатили</th><th>Начислено</th><th class="opt">Последний друг</th></tr>
     {% for a in agents %}
     <tr>
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ a.agent_id }}">{{ a.agent_name }}</a>{% else %}{{ a.agent_name }}{% endif %}</td>
-      <td><code>{{ a.ref_code or '—' }}</code></td>
-      <td class="num">{{ a.click }}</td>
-      <td class="num">{{ a.signed }}</td>
-      <td class="num opt">{{ a.rented }}</td>
-      <td class="num {% if a.paid %}ok{% endif %}">{{ a.paid }}</td>
-      <td class="num">{{ money(a.bonus) }}</td>
-      <td class="opt">{{ a.last_friend or '—' }}{% if a.last_at %} <small class="muted">{{ a.last_at|dmy }}</small>{% endif %}</td>
+      <td data-label="Клиент">{% if can_view(staff, 'clients') %}<a href="/clients/{{ a.agent_id }}">{{ a.agent_name }}</a>{% else %}{{ a.agent_name }}{% endif %}</td>
+      <td data-label="Код">{% if a.ref_code %}<code>{{ a.ref_code }}</code>{% endif %}</td>
+      <td class="num" data-label="Перешли">{{ a.click }}</td>
+      <td class="num" data-label="Зарегистрировались">{{ a.signed }}</td>
+      <td class="num opt" data-label="Взяли велосипед">{{ a.rented }}</td>
+      <td class="num {% if a.paid %}ok{% endif %}" data-label="Заплатили">{{ a.paid }}</td>
+      <td class="num" data-label="Начислено">{{ money(a.bonus) }}</td>
+      <td class="opt" data-label="Последний друг">{{ a.last_friend or '—' }}{% if a.last_at %} <small class="muted">{{ a.last_at|dmy }}</small>{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="8" class="muted">За период никого не приглашали.</td></tr>{% endfor %}
   </table>
@@ -50,17 +53,18 @@
 
 <div class="card">
   <h2>Приглашённые</h2>
-  <table>
+  <table class="cards">
     <tr><th>Когда</th><th>Агент</th><th>Друг</th><th>Шаг</th><th class="opt">Бонус</th></tr>
-    {% for r in rows %}
+    {% for r in invited %}
     <tr>
-      <td>{{ r.created_at|dmy }}</td>
-      <td>{{ r.agent_name }}</td>
-      <td>{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.friend_name }}</a>{% else %}{{ r.friend_name or 'ещё не зарегистрировался' }}{% endif %}</td>
-      <td><span class="tag ref-{{ r.status }}">{{ REF_STATUSES[r.status] }}</span></td>
-      <td class="num opt">{% if r.status == 'paid' %}{{ money(r.bonus) }}{% endif %}</td>
+      <td data-label="Когда">{{ r.created_at|dmy }}</td>
+      <td data-label="Агент">{{ r.agent_name }}</td>
+      <td data-label="Друг">{% if r.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.friend_name }}</a>{% else %}{{ r.friend_name or 'ещё не зарегистрировался' }}{% endif %}</td>
+      <td data-label="Шаг"><span class="tag ref-{{ r.status }}">{{ REF_STATUSES[r.status] }}</span></td>
+      <td class="num opt" data-label="Бонус">{% if r.status == 'paid' %}{{ money(r.bonus) }}{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="5" class="muted">Переходов не было.</td></tr>{% endfor %}
+    {% if tools.total %}{{ list.footer(tools, '/reports/referrals', 5) }}{% endif %}
   </table>
 </div>
 
@@ -96,25 +100,28 @@
     обязанности нам отвечать.</p>
 </div>
 
-<div class="card">
+<div class="card" id="grants">
   <h2>Роздано баллами
     <span class="muted">· {{ money(totals.total) }}</span>
     {% if totals.share %}<span class="muted">· {{ totals.share }} % от оплат периода</span>{% endif %}
+    {% if bonuses|length > grants_shown and not all_grants %}<span class="muted">· последние {{ grants_shown }} из {{ bonuses|length }}</span>{% endif %}
   </h2>
   <p class="muted">Баллы — не деньги, а наша скидка: в журнале они лежат
     отдельным видом и в средний чек не идут. Доля нужна, чтобы увидеть,
     не превратилась ли программа в раздачу.</p>
-  <table>
+  <table class="cards">
     <tr><th>Когда</th><th>Клиент</th><th>За что</th><th class="num">Сумма</th></tr>
-    {% for b in bonuses %}
+    {% for b in (bonuses if all_grants else bonuses[:grants_shown]) %}
     <tr>
-      <td class="nowrap muted">{{ b.created_at|dmy }}</td>
-      <td><a href="/clients/{{ b.client_id }}">{{ b.full_name or '—' }}</a></td>
-      <td>{{ BONUS_KINDS.get(b.kind, b.kind) }}{% if b.note %}<br><small class="muted">{{ b.note }}</small>{% endif %}</td>
-      <td class="num">{{ money(b.amount) }}</td>
+      <td class="nowrap muted" data-label="Когда">{{ b.created_at|dmy }}</td>
+      <td data-label="Клиент"><a href="/clients/{{ b.client_id }}">{{ b.full_name or '—' }}</a></td>
+      <td data-label="За что">{{ BONUS_KINDS.get(b.kind, b.kind) }}{% if b.note %}<br><small class="muted">{{ b.note }}</small>{% endif %}</td>
+      <td class="num" data-label="Сумма">{{ money(b.amount) }}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">За период баллов не начисляли.</td></tr>{% endfor %}
   </table>
+  {% if bonuses|length > grants_shown %}{% set period = 'since=' ~ since|iso ~ '&until=' ~ until|iso %}
+  <p>{% if all_grants %}<a href="/reports/referrals?{{ period }}#grants">только последние {{ grants_shown }}</a>{% else %}<a href="/reports/referrals?{{ period }}&grants=all#grants">все начисления баллов: {{ bonuses|length }} →</a>{% endif %}</p>{% endif %}
 </div>
 {% endif %}
 {% endblock %}

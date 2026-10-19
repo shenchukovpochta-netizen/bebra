@@ -62,15 +62,15 @@
 
 <section class="card">
   <h2>Журнал</h2>
-  <table>
+  <table class="cards">
     <tr><th>Когда</th><th>Что</th><th>Адрес</th><th class="opt">Устройство</th><th>Заметка</th></tr>
     {% for e in events %}
     <tr>
-      <td>{{ e.at|dmy }}</td>
-      <td>{{ SIGN_EVENTS.get(e.kind, e.kind) }}</td>
-      <td class="muted">{{ e.ip or '—' }}</td>
-      <td class="opt muted">{{ (e.user_agent or '')[:60] }}</td>
-      <td class="muted">{{ e.note or '' }}</td>
+      <td data-label="Когда">{{ e.at|dmy }}</td>
+      <td data-label="Что">{{ SIGN_EVENTS.get(e.kind, e.kind) }}</td>
+      <td class="muted" data-label="Адрес">{{ e.ip or '' }}</td>
+      <td class="opt muted" data-label="Устройство">{{ (e.user_agent or '')[:60] }}</td>
+      <td class="muted" data-label="Заметка">{{ e.note or '' }}</td>
     </tr>
     {% endfor %}
   </table>

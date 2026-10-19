@@ -81,49 +81,52 @@
 </div>
 
 {% if money_ok %}
-<section class="card">
-  <h2>Журнал операций</h2>
-  <table>
-    <tr><th>Дата</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th>Кто</th></tr>
+<section class="card" id="ledger">
+  <h2>Журнал операций{% if ledger_total > ledger_shown and not all_ledger %} <span class="muted">· последние {{ ledger_shown }} из {{ ledger_total }}</span>{% endif %}</h2>
+  <table class="cards">
+    <tr><th>Дата</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Способ</th><th>Заметка</th><th class="opt">Кто</th></tr>
     {% for x in ledger %}
     <tr>
-      <td>{{ x.created_at|dmy }}</td>
-      <td>{{ KINDS.get(x.kind, x.kind) }}</td>
-      <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}">{{ money_signed(x.amount) }}</td>
-      <td>{{ period_label(x.period_from, x.period_to) }}</td>
-      <td>{{ METHODS.get(x.method, x.method or '') }}</td>
-      <td>{{ x.note or '' }}</td>
-      <td class="muted">{{ x.created_by or '' }}</td>
+      <td data-label="Дата">{{ x.created_at|dmy }}</td>
+      <td data-label="Вид">{{ KINDS.get(x.kind, x.kind) }}</td>
+      <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}" data-label="Сумма">{{ money_signed(x.amount) }}</td>
+      <td data-label="Период">{{ period_label(x.period_from, x.period_to) }}</td>
+      <td data-label="Способ">{{ METHODS.get(x.method, x.method or '') }}</td>
+      <td data-label="Заметка">{{ x.note or '' }}</td>
+      <td class="opt muted" data-label="Кто">{{ x.created_by or '' }}</td>
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Записей нет.</td></tr>{% endfor %}
   </table>
+  {% if ledger_total > ledger_shown %}<p>{% if all_ledger %}<a href="/clients/{{ client.id }}#ledger">только последние {{ ledger_shown }}</a>{% else %}<a href="/clients/{{ client.id }}?ledger=all#ledger">весь журнал, записей: {{ ledger_total }} →</a>{% endif %}</p>{% endif %}
 </section>
 {% endif %}
 
 <div class="cols">
 <section class="card">
   <h2>История аренд</h2>
-  <table>
-    {# Срок одной колонкой: «С» и «По» вдвоём не помещались в половину
-       страницы, и статус уезжал за прокрутку таблицы. #}
+  {# Срок одной колонкой: «С» и «По» вдвоём не помещались в половину
+     страницы, и статус уезжал за прокрутку таблицы. #}
+  <table class="cards">
     <tr><th>#</th><th>Велосипед</th><th>Тариф</th><th>Срок</th><th>Статус</th></tr>
     {% for r in rentals %}
-    <tr><td><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td><td>{{ r.bike_code or '—' }} {{ r.bike_model or '' }}</td>
-      <td>{{ r.tariff_name }}</td>
-      <td>{% if r.closed_on %}<span class="nowrap">{{ r.started_on.strftime('%d.%m') if r.started_on and r.started_on.year == r.closed_on.year else r.started_on|dmy }} –</span> <span class="nowrap">{{ r.closed_on|dmy }}</span>{% else %}<span class="nowrap">с {{ r.started_on|dmy }}</span>{% endif %}</td>
-      <td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
+    <tr><td data-label="#"><a href="/rentals/{{ r.id }}">{{ r.id }}</a></td><td data-label="Велосипед">{{ [r.bike_code, r.bike_model]|select|join(' ') }}</td>
+      <td data-label="Тариф">{{ r.tariff_name }}</td>
+      <td data-label="Срок">{% if r.closed_on %}<span class="nowrap">{{ r.started_on.strftime('%d.%m') if r.started_on and r.started_on.year == r.closed_on.year else r.started_on|dmy }} –</span> <span class="nowrap">{{ r.closed_on|dmy }}</span>{% else %}<span class="nowrap">с {{ r.started_on|dmy }}</span>{% endif %}</td>
+      <td data-label="Статус">{{ RENTAL_STATUSES[r.status] }}</td></tr>
     {% else %}<tr><td colspan="5" class="muted">Аренд не было.</td></tr>{% endfor %}
   </table>
   {% if feedback %}
   {# Оценка после сдачи: «тройка» от постоянного клиента - повод
      позвонить до того, как он уйдёт к конкуренту. #}
   <h3>Оценки аренд</h3>
-  <table>
+  {# Карточками, как история над ней: карточка-список раздета до строк, и
+     таблица на фоне страницы уводила комментарий за край. #}
+  <table class="cards">
     <tr><th>Аренда</th><th>Оценка</th><th>Комментарий</th></tr>
     {% for f in feedback %}
-    <tr><td class="nowrap"><a href="/rentals/{{ f.rental_id }}">#{{ f.rental_id }}</a> <span class="muted">{{ f.answered_at|dmy }}</span></td>
-      <td class="nowrap"><span class="stars">{{ feedback_stars(f.score) }}</span> {{ f.score }}</td>
-      <td>{{ f.comment or '' }}</td></tr>
+    <tr><td class="nowrap" data-label="Аренда"><a href="/rentals/{{ f.rental_id }}">#{{ f.rental_id }}</a> <span class="muted">{{ f.answered_at|dmy }}</span></td>
+      <td class="nowrap" data-label="Оценка"><span class="stars">{{ feedback_stars(f.score) }}</span> {{ f.score }}</td>
+      <td data-label="Комментарий">{{ f.comment or '' }}</td></tr>
     {% endfor %}
   </table>
   {% endif %}

@@ -500,7 +500,9 @@ class TestAccessInPanel(tw.WebCase):
         self.assertIn("777", page)
         self.assertIn("4 321", page)
         self.narrow("olga", {"clients": "edit"})
-        page = self.get_ok(f"/clients/{self.client_id}")
+        # Метка версии статики (?v=…) - отпечаток style.css: «777» в ней -
+        # совпадение, а не сумма баллов.
+        page = re.sub(r"\?v=[0-9a-f]+", "", self.get_ok(f"/clients/{self.client_id}"))
         self.assertIn("Баллы", page, "повод баллов виден и без денег")
         self.assertIn("Счета", page)
         self.assertNotIn("777", page)

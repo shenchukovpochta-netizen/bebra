@@ -2,7 +2,13 @@
 {% block title %}Аренда #{{ rental.id }} — {{ app_title }}{% endblock %}
 {% block content %}
 {% set money_ok = can_view(staff, 'finance') %}
-<div class="bar"><h1>Аренда #{{ rental.id }} <span class="tag {{ rental.status }}">{{ RENTAL_STATUSES[rental.status] }}</span></h1></div>
+{% set acting = rental.status == 'active' and can_edit(staff, 'rentals') %}
+{% set searching = rental.status == 'active' and in_search(rental) %}
+<div class="bar"><h1>Аренда #{{ rental.id }} <span class="tag {{ rental.status }}">{{ RENTAL_STATUSES[rental.status] }}</span>
+  {%- if searching %} <span class="tag bad">в розыске {{ search_days(rental) }} дн.</span>{% endif %}</h1>
+  {# Сдача - частое действие, а форма ниже условий и оплаты: на телефоне
+     до неё несколько экранов. #}
+  {% if acting %}<a class="btn ghost" href="#close">Закрыть аренду ↓</a>{% endif %}</div>
 <div class="cols">
 <section class="card">
   <h2>Условия</h2>
@@ -53,9 +59,144 @@
   <p class="muted">{% if summary.due %}К оплате сейчас — {{ money(summary.due) }}: {% if summary.overdue %}просрочка{% else %}следующий период{% endif %}.{% else %}Долга нет; платёж вперёд сдвинет «оплачено до».{% endif %} Ссылку на оплату картой выставляют из карточки клиента.</p>
 </section>
 {% endif %}
-{% if rental.status == 'active' and can_edit(staff, 'rentals') and can_act(staff, 'money_edit') %}
+{% if acting and searching %}
+{# Розыск не прощает долг и не останавливает начисления: он поднимает
+   флаг, чтобы велосипед не растворился в списке должников. Объявленный -
+   состояние аренды, а не редкая форма: открытой карточкой сразу под
+   оплатой, выше сдачи. #}
+<section class="card" id="search">
+  <h2>Розыск</h2>
+  <form method="post" action="/rentals/{{ rental.id }}/search" class="grid2">
+    <p class="wide">В розыске {{ search_days(rental) }} дн.{% if rental.search_note %} — {{ rental.search_note }}{% endif %} <small class="muted">{{ rental.search_by or '' }}</small></p>
+    <button type="submit" name="action" value="stop">Снять розыск</button>
+    <button type="submit" name="action" value="theft" class="danger">Признать потерянным</button>
+  </form>
+</section>
+{% endif %}
+{% if acting %}
+{# Частые действия - открытыми карточками, редкие формы - свёрнутыми: на
+   телефоне пять форм подряд уводили «Закрыть аренду» на седьмой экран. #}
+<section class="card" id="close">
+  <h2>Закрыть аренду</h2>
+  <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2" enctype="multipart/form-data">
+    <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
+    <label>Пробег при возврате, км <input name="mileage" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% else %}с дисплея{% endif %}"></label>
+    <label>Точка возврата <select name="return_location">{% if not home %}<option value="">не указана</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="maintenance">на ТО</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option><option value="written_off">списан</option></select></label>
+    <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
+    {% if not demo %}<label class="wide">Фото при сдаче, до {{ RETURN_PHOTOS_MAX }} <input name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>{% endif %}
+    <button type="submit" class="danger">Закрыть</button>
+  </form>
+  <p class="muted">Фото при сдаче — jpg, png или webp до 8 МБ: спор «царапина была до меня» решается снимком, а не памятью. Их можно прислать и ответом на карточку сдачи в служебном чате — пока аренда идёт и в первый час после подписи акта.{% if demo %} В демо снимки не хранятся.{% endif %}</p>
+  <p class="muted">Велосипед встанет на точку возврата: сданный на другой точке дальше простаивает там, а не там, где его выдали. Пробег необязателен: без него у аренды не будет «накатал». Начисления останавливаются, неиспользованный остаток периода не возвращается автоматически — при необходимости добавьте корректировку в карточке клиента.</p>
+</section>
+
+{# Розыск не зависит от свободных велосипедов: при простое меньше
+   10 % менять не на что, а искать должника всё равно надо. #}
+{% if swap_bikes %}
 <section class="card">
-  <h2>Изменить срок</h2>
+  <h2>Заменить велосипед</h2>
+  {# Замена не трогает деньги, даты и договор: меняется только то, что
+     у клиента на руках. Подменные предлагаются первыми. #}
+  <form method="post" action="/rentals/{{ rental.id }}/swap" class="grid2">
+    <label class="wide">Новый велосипед <select name="bike_id">{% for b in swap_bikes %}<option value="{{ b.id }}">№ {{ b.code }} {{ b.model }}{% if b.spare %} · подменный{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Причина <select name="reason">{% for code, label in SWAP_REASONS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
+    <label>Снятый после замены <select name="old_status"><option value="">по причине</option>{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}">{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>
+    <label>Пробег снятого, км <input name="mileage_old" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% endif %}"></label>
+    <label>Пробег нового, км <input name="mileage_new" inputmode="numeric" placeholder="с дисплея"></label>
+    <label>Где меняли <select name="swap_location">{% if not home %}<option value="">не указано</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+    <button type="submit" class="ghost">Заменить</button>
+  </form>
+  <p class="muted">Деньги, даты и договор остаются те же. Снятый велосипед по умолчанию уходит туда, куда указывает причина: поломка — в ремонт, ТО — на ТО, — и остаётся на точке, где меняли. Новый встаёт на точку аренды.</p>
+</section>
+{% endif %}
+
+{% if batteries or free_batteries %}
+<details class="card fold">
+  {# Непроверенный паспорт - красным и в свёрнутой строке: раньше
+     «сверить» было видно сразу. #}
+  {% set unchecked = batteries|selectattr('checked', 'defined')|rejectattr('checked')|list %}
+  <summary>Батареи у клиента <small class="muted">· {% for b in batteries %}№ {{ b.code }}{% if not loop.last %}, {% endif %}{% else %}не отмечены{% endfor %}{% if free_batteries %} · {% if batteries %}заменить{% else %}выдать{% endif %}{% endif %}</small>
+    {%- if unchecked %} <small class="bad">· сверить</small>{% endif %}</summary>
+  {# Батарея ломается чаще велосипеда: замена на точке - обычное дело,
+     и аренду она не трогает вовсе. #}
+  <p>{% for b in batteries %}<a href="/batteries/{{ b.id }}">№ {{ b.code }}</a>{% if b.model_title %} · {{ b.model_title }}{% endif %} <span class="muted">{{ b.cycles }} циклов</span>{% if b.checked is defined and not b.checked %} · <a href="/batteries/{{ b.id }}#passport" class="bad">сверить</a>{% endif %}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">не отмечены — батареи можно выдать при следующей замене.</span>{% endfor %}</p>
+  {% if free_batteries %}
+  <form method="post" action="/rentals/{{ rental.id }}/battery" class="grid2">
+    <label>Снять <select name="old_id"><option value="">ничего не снимать</option>{% for b in batteries %}<option value="{{ b.id }}">№ {{ b.code }}</option>{% endfor %}</select></label>
+    <label>Выдать <select name="battery_id">{% for b in free_batteries %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Снятая уходит <select name="old_status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'repair' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select></label>
+    <button type="submit" class="ghost">{% if batteries %}Заменить батарею{% else %}Выдать батарею{% endif %}</button>
+  </form>
+  {% endif %}
+</details>
+{% endif %}
+
+{# Просьба из кабинета - не позиция: денег не взято, батарею выдают
+   здесь же, формой ниже. Добавленная позиция снимает отметку
+   (crm.add_rental_extra), и снятие позиции старую просьбу не вернёт. #}
+{% set live_extras = extras|rejectattr('removed_at')|list %}
+{% set battery_asked = rental.battery_asked_at and not live_extras %}
+<details class="card fold" {% if battery_asked %}open{% endif %}>
+  <summary>Позиции аренды <small class="muted">· {% if live_extras %}доп. аккумуляторов: {{ live_extras|length }}{% else %}доп. аккумуляторы{% endif %}</small></summary>
+  {% if battery_asked %}
+  <p class="flash">🔋 Клиент попросил второй аккумулятор в кабинете {{ rental.battery_asked_at|dmy }} — выдайте на точке и добавьте позицию.</p>
+  {% endif %}
+  {# Цена периода у аренды одна; позиции - её расшифровка. Складывать
+     цену в двух местах нельзя: однажды сложат по-разному. #}
+  {# Цены - только с «Финансами», как тариф и баланс выше. #}
+  <table class="cards">
+    <tr><th>Что</th>{% if money_ok %}<th class="num">За период</th>{% endif %}<th>Взята</th><th></th></tr>
+    {# Первая строка - сам велосипед (e пустое), дальше позиции: одна
+       разметка строки на всех, и подпись каждой ячейки - одна. #}
+    {% for e in [none] + extras|list %}
+    <tr class="{% if e and e.removed_at %}muted{% endif %}">
+      <td data-label="Что">{% if e %}{{ e.title }}{% if e.battery_code %} · <a href="/batteries/{{ e.battery_id }}">№ {{ e.battery_code }}</a>{% endif %}{% else %}{{ rental.tariff_name }} <span class="muted">· велосипед</span>{% endif %}</td>
+      {% if money_ok %}<td class="num" data-label="За период">{% if not e %}{{ money(rental.base_price or rental.price) }}{% elif e.removed_at %}<s>{{ money(e.price) }}</s>{% else %}{{ money(e.price) }}{% endif %}</td>{% endif %}
+      <td class="muted" data-label="Взята">{% if e %}{{ e.added_at|dmy }}{% if e.removed_at %} — снята {{ e.removed_at|dmy }}{% endif %}{% else %}{{ rental.started_on|dmy }}{% endif %}</td>
+      <td class="actions" data-label="Действие">
+        {%- if e and not e.removed_at %}
+        <form method="post" action="/rentals/{{ rental.id }}/extras/{{ e.id }}" class="inline-form">
+          <select name="status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'available' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select>
+          <button type="submit" class="ghost danger">Снять</button>
+        </form>
+        {%- endif -%}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if money_ok %}<tr class="total"><td data-label="Что"><b>Итого за период</b></td><td class="num" data-label="За период"><b>{{ money(rental.price) }}</b></td><td colspan="2" class="muted">{% if extras_total %}велосипед + {{ money(extras_total) }} позициями{% endif %}</td></tr>{% endif %}
+  </table>
+  {% set can_add = free_batteries|selectattr('priced')|list %}
+  {% if can_add %}
+  <form method="post" action="/rentals/{{ rental.id }}/extras" class="grid2">
+    <label>Доп. аккумулятор <select name="battery_id">
+      {% for b in can_add %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if money_ok %} · +{{ money(b.extra_price) }}{% endif %}</option>{% endfor %}
+    </select></label>
+    <button type="submit" class="ghost">Выдать за деньги</button>
+  </form>
+  <p class="muted">Не больше {{ max_extra }} доп. аккумуляторов на аренду.
+    Новая цена действует со следующего начисления: текущий период уже
+    начислен, и менять клиенту сумму задним числом нельзя.</p>
+  {% else %}
+  <p class="muted">Свободных аккумуляторов с ценой на {{ rental.period_days }} дн.
+    нет — заведите её в <a href="/tariffs">тарифах</a>.</p>
+  {% endif %}
+</details>
+
+{% if money_ok %}
+<details class="card fold">
+  <summary>Сменить тариф <small class="muted">· сейчас {{ rental.tariff_name }}</small></summary>
+  <form method="post" action="/rentals/{{ rental.id }}/tariff" class="grid2">
+    <label>Тариф <select name="tariff_id">{% for t in tariffs %}<option value="{{ t.id }}" {% if t.id == rental.tariff_id %}selected{% endif %}>{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}</select></label>
+    {% if can_act(staff, 'money_edit') %}<label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% endif %}
+    <button type="submit" class="ghost">Применить со следующего периода</button>
+  </form>
+</details>
+{% endif %}
+{% endif %}
+{% if acting and can_act(staff, 'money_edit') %}
+<details class="card fold">
+  <summary>Изменить срок <small class="muted">· начало и следующее начисление{% if term_changes %}, правок: {{ term_changes|length }}{% endif %}</small></summary>
   {# Начало и следующее начисление. Вперёд - дни без списания (перенос,
      компенсация за ремонт); назад - не раньше уже начисленного. #}
   <form method="post" action="/rentals/{{ rental.id }}/term" class="grid2">
@@ -76,7 +217,7 @@
     {% endfor %}
   </table>
   {% endif %}
-</section>
+</details>
 {% elif term_changes %}
 <section class="card">
   <h2>Правки срока</h2>
@@ -91,141 +232,31 @@
   </table>
 </section>
 {% endif %}
-{% if rental.status == 'active' and can_edit(staff, 'rentals') %}
-<section class="card">
-  {% if money_ok %}
-  <h2>Сменить тариф</h2>
-  <form method="post" action="/rentals/{{ rental.id }}/tariff" class="grid2">
-    <label>Тариф <select name="tariff_id">{% for t in tariffs %}<option value="{{ t.id }}" {% if t.id == rental.tariff_id %}selected{% endif %}>{{ t.name }} — {{ money(t.price) }} / {{ t.period_days }} дн.</option>{% endfor %}</select></label>
-    {% if can_act(staff, 'money_edit') %}<label>Начисление <select name="billing">{% for code, label in BILLING.items() %}<option value="{{ code }}" {% if rental.billing == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% endif %}
-    <button type="submit" class="ghost">Применить со следующего периода</button>
-  </form>
-  {% endif %}
-  <h2>Розыск</h2>
-  {# Розыск не прощает долг и не останавливает начисления: он поднимает
-     флаг, чтобы велосипед не растворился в списке должников. #}
+{% if acting and not searching %}
+{# Объявить в розыск - редкая форма: свёрнута в конце. Объявленный розыск -
+   открытой карточкой под оплатой (выше). #}
+<details class="card fold">
+  <summary>Розыск <small class="muted">· не объявлен</small></summary>
   <form method="post" action="/rentals/{{ rental.id }}/search" class="grid2">
-    {% if in_search(rental) %}
-    <p class="wide">В розыске {{ search_days(rental) }} дн.{% if rental.search_note %} — {{ rental.search_note }}{% endif %} <small class="muted">{{ rental.search_by or '' }}</small></p>
-    <button type="submit" name="action" value="stop">Снять розыск</button>
-    <button type="submit" name="action" value="theft" class="danger">Признать потерянным</button>
-    {% else %}
     <label class="wide">Комментарий <input name="note" placeholder="не отвечает с 10.09, адрес не подтверждён"></label>
     <button type="submit" class="ghost" name="action" value="start">Объявить в розыск</button>
-    {% endif %}
   </form>
-
-  {# Розыск не зависит от свободных велосипедов: при простое меньше
-     10 % менять не на что, а искать должника всё равно надо. #}
-  {% if swap_bikes %}
-  <h2>Заменить велосипед</h2>
-  {# Замена не трогает деньги, даты и договор: меняется только то, что
-     у клиента на руках. Подменные предлагаются первыми. #}
-  <form method="post" action="/rentals/{{ rental.id }}/swap" class="grid2">
-    <label class="wide">Новый велосипед <select name="bike_id">{% for b in swap_bikes %}<option value="{{ b.id }}">№ {{ b.code }} {{ b.model }}{% if b.spare %} · подменный{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
-    <label>Причина <select name="reason">{% for code, label in SWAP_REASONS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
-    <label>Снятый после замены <select name="old_status"><option value="">по причине</option>{% for code in BIKE_MANUAL_STATUSES %}<option value="{{ code }}">{{ BIKE_STATUSES[code] }}</option>{% endfor %}</select></label>
-    <label>Пробег снятого, км <input name="mileage_old" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% endif %}"></label>
-    <label>Пробег нового, км <input name="mileage_new" inputmode="numeric" placeholder="с дисплея"></label>
-    <label>Где меняли <select name="swap_location">{% if not home %}<option value="">не указано</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
-    <button type="submit" class="ghost">Заменить</button>
-  </form>
-  <p class="muted">Деньги, даты и договор остаются те же. Снятый велосипед по умолчанию уходит туда, куда указывает причина: поломка — в ремонт, ТО — на ТО, — и остаётся на точке, где меняли. Новый встаёт на точку аренды.</p>
-  {% endif %}
-
-  {% if batteries or free_batteries %}
-  <h2>Батареи у клиента</h2>
-  {# Батарея ломается чаще велосипеда: замена на точке - обычное дело,
-     и аренду она не трогает вовсе. #}
-  <p class="wide">{% for b in batteries %}<a href="/batteries/{{ b.id }}">№ {{ b.code }}</a>{% if b.model_title %} · {{ b.model_title }}{% endif %} <span class="muted">{{ b.cycles }} циклов</span>{% if b.checked is defined and not b.checked %} · <a href="/batteries/{{ b.id }}#passport" class="bad">сверить</a>{% endif %}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">не отмечены — батареи можно выдать при следующей замене.</span>{% endfor %}</p>
-  {% if free_batteries %}
-  <form method="post" action="/rentals/{{ rental.id }}/battery" class="grid2">
-    <label>Снять <select name="old_id"><option value="">ничего не снимать</option>{% for b in batteries %}<option value="{{ b.id }}">№ {{ b.code }}</option>{% endfor %}</select></label>
-    <label>Выдать <select name="battery_id">{% for b in free_batteries %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if b.location %} · {{ b.location }}{% endif %}</option>{% endfor %}</select></label>
-    <label>Снятая уходит <select name="old_status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'repair' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select></label>
-    <button type="submit" class="ghost">{% if batteries %}Заменить батарею{% else %}Выдать батарею{% endif %}</button>
-  </form>
-  {% endif %}
-  {% endif %}
-
-  <h2>Позиции аренды <span class="muted">· доп. аккумуляторы</span></h2>
-  {# Просьба из кабинета - не позиция: денег не взято, батарею выдают
-     здесь же, формой ниже. Добавленная позиция снимает отметку
-     (crm.add_rental_extra), и снятие позиции старую просьбу не вернёт. #}
-  {% if rental.battery_asked_at and rental.status == 'active' and not (extras|rejectattr('removed_at')|list) %}
-  <p class="flash">🔋 Клиент попросил второй аккумулятор в кабинете {{ rental.battery_asked_at|dmy }} — выдайте на точке и добавьте позицию.</p>
-  {% endif %}
-  {# Цена периода у аренды одна; позиции - её расшифровка. Складывать
-     цену в двух местах нельзя: однажды сложат по-разному. #}
-  {# Цены - только с «Финансами», как тариф и баланс выше. #}
-  <table>
-    <tr><th>Что</th>{% if money_ok %}<th class="num">За период</th>{% endif %}<th>Взята</th><th></th></tr>
-    <tr><td>{{ rental.tariff_name }} <span class="muted">· велосипед</span></td>
-      {% if money_ok %}<td class="num">{{ money(rental.base_price or rental.price) }}</td>{% endif %}
-      <td class="muted">{{ rental.started_on|dmy }}</td><td></td></tr>
-    {% for e in extras %}
-    <tr class="{% if e.removed_at %}muted{% endif %}">
-      <td>{{ e.title }}{% if e.battery_code %} · <a href="/batteries/{{ e.battery_id }}">№ {{ e.battery_code }}</a>{% endif %}</td>
-      {% if money_ok %}<td class="num">{% if e.removed_at %}<s>{{ money(e.price) }}</s>{% else %}{{ money(e.price) }}{% endif %}</td>{% endif %}
-      <td class="muted">{{ e.added_at|dmy }}{% if e.removed_at %} — снята {{ e.removed_at|dmy }}{% endif %}</td>
-      <td class="actions">
-        {% if not e.removed_at and rental.status == 'active' and can_edit(staff, 'rentals') %}
-        <form method="post" action="/rentals/{{ rental.id }}/extras/{{ e.id }}" class="inline-form">
-          <select name="status">{% for code in BATTERY_MANUAL_STATUSES %}<option value="{{ code }}" {% if code == 'available' %}selected{% endif %}>{{ BATTERY_STATUSES[code] }}</option>{% endfor %}</select>
-          <button type="submit" class="ghost danger">Снять</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-    {% if money_ok %}<tr><td><b>Итого за период</b></td><td class="num"><b>{{ money(rental.price) }}</b></td><td colspan="2" class="muted">{% if extras_total %}велосипед + {{ money(extras_total) }} позициями{% endif %}</td></tr>{% endif %}
-  </table>
-  {% if rental.status == 'active' and can_edit(staff, 'rentals') %}
-  {% set can_add = free_batteries|selectattr('priced')|list %}
-  {% if can_add %}
-  <form method="post" action="/rentals/{{ rental.id }}/extras" class="grid2">
-    <label>Доп. аккумулятор <select name="battery_id">
-      {% for b in can_add %}<option value="{{ b.id }}">№ {{ b.code }}{% if b.model_title %} · {{ b.model_title }}{% endif %}{% if money_ok %} · +{{ money(b.extra_price) }}{% endif %}</option>{% endfor %}
-    </select></label>
-    <button type="submit" class="ghost">Выдать за деньги</button>
-  </form>
-  <p class="muted">Не больше {{ max_extra }} доп. аккумуляторов на аренду.
-    Новая цена действует со следующего начисления: текущий период уже
-    начислен, и менять клиенту сумму задним числом нельзя.</p>
-  {% else %}
-  <p class="muted">Свободных аккумуляторов с ценой на {{ rental.period_days }} дн.
-    нет — заведите её в <a href="/tariffs">тарифах</a>.</p>
-  {% endif %}
-  {% endif %}
-
-  <h2>Закрыть аренду</h2>
-  <form method="post" action="/rentals/{{ rental.id }}/close" class="grid2" enctype="multipart/form-data">
-    <label>Дата возврата <input name="closed_on" type="date" value="{{ today()|iso }}"></label>
-    <label>Пробег при возврате, км <input name="mileage" inputmode="numeric" placeholder="{% if bike %}сейчас {{ bike.mileage_km or 0 }}{% else %}с дисплея{% endif %}"></label>
-    <label>Точка возврата <select name="return_location">{% if not home %}<option value="">не указана</option>{% endif %}{% for loc in places %}<option value="{{ loc }}" {% if loc == home %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
-    <label>Велосипед после возврата <select name="bike_status"><option value="available">свободен</option><option value="repair">в ремонт</option><option value="maintenance">на ТО</option><option value="lost">утерян</option><option value="sold">продан (выкуп)</option><option value="written_off">списан</option></select></label>
-    <label class="wide">Заметка <input name="note" placeholder="состояние, повреждения"></label>
-    {% if not demo %}<label class="wide">Фото при сдаче, до {{ RETURN_PHOTOS_MAX }} <input name="photos" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>{% endif %}
-    <button type="submit" class="danger">Закрыть</button>
-  </form>
-  <p class="muted">Фото при сдаче — jpg, png или webp до 8 МБ: спор «царапина была до меня» решается снимком, а не памятью. Их можно прислать и ответом на карточку сдачи в служебном чате — пока аренда идёт и в первый час после подписи акта.{% if demo %} В демо снимки не хранятся.{% endif %}</p>
-  <p class="muted">Велосипед встанет на точку возврата: сданный на другой точке дальше простаивает там, а не там, где его выдали. Пробег необязателен: без него у аренды не будет «накатал». Начисления останавливаются, неиспользованный остаток периода не возвращается автоматически — при необходимости добавьте корректировку в карточке клиента.</p>
-</section>
+</details>
 {% endif %}
 </div>
 {% if moves|length > 1 or (moves and not moves[0].open) %}
 <section class="card">
   <h2>Что было у клиента</h2>
-  <table>
+  <table class="cards">
     <tr><th>Велосипед</th><th>Выдан</th><th>Снят</th><th>Суток</th><th>Накатал</th><th>Почему</th></tr>
     {% for m in moves %}
     <tr>
-      <td><a href="/bikes/{{ m.bike_id }}">№ {{ m.bike_code }}</a> {{ m.bike_model }}{% if m.open %} <span class="tag rented">сейчас у клиента</span>{% endif %}</td>
-      <td>{{ m.issued_on|dmy }}</td>
-      <td>{% if m.returned_on %}{{ m.returned_on|dmy }}{% else %}—{% endif %}</td>
-      <td class="num">{{ m.days }}</td>
-      <td class="num">{% if m.ridden is not none %}{{ m.ridden }} км{% else %}—{% endif %}</td>
-      <td>{{ m.reason or '' }}</td>
+      <td data-label="Велосипед"><a href="/bikes/{{ m.bike_id }}">№ {{ m.bike_code }}</a> {{ m.bike_model }}{% if m.open %} <span class="tag rented">сейчас у клиента</span>{% endif %}</td>
+      <td data-label="Выдан">{{ m.issued_on|dmy }}</td>
+      <td data-label="Снят">{% if m.returned_on %}{{ m.returned_on|dmy }}{% endif %}</td>
+      <td class="num" data-label="Суток">{{ m.days }}</td>
+      <td class="num" data-label="Накатал">{% if m.ridden is not none %}{{ m.ridden }} км{% endif %}</td>
+      <td data-label="Почему">{{ m.reason or '' }}</td>
     </tr>
     {% endfor %}
   </table>
@@ -258,13 +289,13 @@
 {% if ops %}
 <section class="card">
   <h2>Сверка отчётов</h2>
-  <table>
+  <table class="cards">
     <tr><th>Когда</th><th>Что</th><th></th><th>Суть</th><th class="opt">Кто написал</th></tr>
     {% for r in ops %}
-    <tr class="{% if not r.ok %}warn-row{% endif %}"><td>{{ r.created_at|dmy }}</td>
-      <td>{{ OPS_KINDS.get(r.kind, r.kind) }}</td><td>{% if r.ok %}👍{% else %}👎{% endif %}</td>
-      <td>{{ ops_report_summary(r) }}{% if r.note %}<br><span class="muted">{{ r.note }}</span>{% endif %}</td>
-      <td class="opt muted">{{ r.author or '' }}</td></tr>
+    <tr class="{% if not r.ok %}warn-row{% endif %}"><td data-label="Когда">{{ r.created_at|dmy }}</td>
+      <td data-label="Что">{{ OPS_KINDS.get(r.kind, r.kind) }}</td><td data-label="Сверка">{% if r.ok %}👍{% else %}👎{% endif %}</td>
+      <td data-label="Суть">{{ ops_report_summary(r) }}{% if r.note %}<br><span class="muted">{{ r.note }}</span>{% endif %}</td>
+      <td class="opt muted" data-label="Кто написал">{{ r.author or '' }}</td></tr>
     {% endfor %}
   </table>
 </section>
@@ -272,12 +303,12 @@
 {% if money_ok %}
 <section class="card">
   <h2>Начисления по аренде</h2>
-  <table>
+  <table class="cards">
     <tr><th>Дата</th><th>Вид</th><th>Сумма</th><th>Период</th><th>Заметка</th></tr>
     {% for x in ledger %}
-    <tr><td>{{ x.created_at|dmy }}</td><td>{{ KINDS.get(x.kind, x.kind) }}</td>
-      <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}">{{ money_signed(x.amount) }}</td>
-      <td>{{ period_label(x.period_from, x.period_to) }}</td><td>{{ x.note or '' }}</td></tr>
+    <tr><td data-label="Дата">{{ x.created_at|dmy }}</td><td data-label="Вид">{{ KINDS.get(x.kind, x.kind) }}</td>
+      <td class="num {% if x.amount < 0 %}bad{% else %}ok{% endif %}" data-label="Сумма">{{ money_signed(x.amount) }}</td>
+      <td data-label="Период">{{ period_label(x.period_from, x.period_to) }}</td><td data-label="Заметка">{{ x.note or '' }}</td></tr>
     {% else %}<tr><td colspan="5" class="muted">Начислений нет.</td></tr>{% endfor %}
   </table>
 </section>

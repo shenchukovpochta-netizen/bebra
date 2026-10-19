@@ -219,7 +219,9 @@ class TestRentersWithoutCardPage(tw.WebCase):
             tw.run(self.crm.save_card_token(client_id=cid, token=f"tk{cid}", mask="4477"))
         page = self.get_ok("/payments")
         self.assertIn("· 0 из 2 арендаторов", page)
-        self.assertNotIn('<table class="cards">', page)
+        # Список счетов на той же странице тоже карточки: пропасть должна
+        # шапка списка «без карты», а не любая таблица-карточки.
+        self.assertNotIn("<th>Предлагали</th>", page)
 
 
 if __name__ == "__main__":                              # pragma: no cover

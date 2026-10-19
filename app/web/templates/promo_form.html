@@ -86,14 +86,14 @@
   <pre class="preview">{{ mailing_body }}</pre>
   {% endif %}
   <h3>Кому начислено</h3>
-  <table>
+  <table class="cards">
     <tr><th>Когда</th><th>Клиент</th><th class="opt">Период</th><th class="num">Сумма</th></tr>
     {% for b in grants %}
     <tr>
-      <td class="nowrap muted">{{ b.created_at|dmy }}</td>
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}</td>
-      <td class="opt muted">{% if b.rental_id %}<a href="/rentals/{{ b.rental_id }}">аренда #{{ b.rental_id }}</a>{% endif %}{% if b.period_from %} · с {{ b.period_from|dmy }}{% endif %}</td>
-      <td class="num">{{ money(b.amount) }}</td>
+      <td class="nowrap muted" data-label="Когда">{{ b.created_at|dmy }}</td>
+      <td data-label="Клиент">{% if can_view(staff, 'clients') %}<a href="/clients/{{ b.client_id }}">{{ b.full_name }}</a>{% else %}{{ b.full_name }}{% endif %}</td>
+      <td class="opt muted" data-label="Период">{% if b.rental_id %}<a href="/rentals/{{ b.rental_id }}">аренда #{{ b.rental_id }}</a>{% endif %}{% if b.period_from %} · с {{ b.period_from|dmy }}{% endif %}</td>
+      <td class="num" data-label="Сумма">{{ money(b.amount) }}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">Пока никому.</td></tr>{% endfor %}
   </table>
