@@ -33,16 +33,16 @@
   Версия системы: {% if snap.version %}<code>{{ snap.version }}</code>{% if snap.version == version %} — как у нас{% else %} — не как у нас (<code>{{ version }}</code>){% endif %}{% else %}не сообщена{% endif %}.
   Точки ({{ snap.points|length }}): {% for p in snap.points %}{{ p.name }}{% if p.city %} ({{ p.city }}){% endif %}{% if not loop.last %}, {% endif %}{% else %}не заведены{% endfor %}.</p>
 <div class="table-wrap">
-<table>
+<table class="cards">
   <tr><th>Месяц</th><th class="num">Простой</th><th class="num">Чек/день</th><th class="num">Выручка</th>
       <th class="num opt">Дней в аренде</th><th class="num opt">Дней парка</th></tr>
   {% for m in snap.months %}
-  <tr><td>{{ m.month.strftime('%m.%Y') }}{% if m.partial %} <small class="muted">идёт</small>{% endif %}</td>
-    <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
-    <td class="num {% if m.avg_check is none %}muted{% elif m.avg_check >= CHECK_TARGET %}ok{% else %}bad{% endif %}">{{ money(m.avg_check) }}</td>
-    <td class="num">{{ money(m.revenue) }}</td>
-    <td class="num opt">{{ m.rented_days|round(1) }}</td>
-    <td class="num opt">{{ m.operational_days|round(1) }}</td></tr>
+  <tr><td data-label="Месяц">{{ m.month.strftime('%m.%Y') }}{% if m.partial %} <small class="muted">идёт</small>{% endif %}</td>
+    <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_percent < IDLE_TARGET_PERCENT %}ok{% else %}bad{% endif %}" data-label="Простой">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
+    <td class="num {% if m.avg_check is none %}muted{% elif m.avg_check >= CHECK_TARGET %}ok{% else %}bad{% endif %}" data-label="Чек/день">{{ money(m.avg_check) }}</td>
+    <td class="num" data-label="Выручка">{{ money(m.revenue) }}</td>
+    <td class="num opt" data-label="Дней в аренде">{{ m.rented_days|round(1) }}</td>
+    <td class="num opt" data-label="Дней парка">{{ m.operational_days|round(1) }}</td></tr>
   {% endfor %}
 </table>
 </div>
@@ -55,15 +55,15 @@
 <div class="card">
 <h2>Роялти по месяцам</h2>
 <div class="table-wrap">
-<table>
+<table class="cards">
   <tr><th>Месяц</th><th class="num">Выручка</th><th class="num">%</th><th class="num">Фикс</th><th class="num">Роялти</th><th></th></tr>
   {% for b in history %}{% for r in b.rows %}
-  <tr><td>{{ b.month.strftime('%m.%Y') }}</td>
-    <td class="num">{{ money(r.revenue) }}</td>
-    <td class="num">{% if r.percent is none %}—{% else %}{{ '%g'|format(r.percent|float)|replace('.', ',') }} %{% endif %}</td>
-    <td class="num">{{ money(r.fixed) }}</td>
-    <td class="num"><b>{{ money(r.royalty) }}</b></td>
-    <td class="muted">{{ r.mark }}</td></tr>
+  <tr><td data-label="Месяц">{{ b.month.strftime('%m.%Y') }}</td>
+    <td class="num" data-label="Выручка">{{ money(r.revenue) }}</td>
+    <td class="num" data-label="%">{% if r.percent is none %}—{% else %}{{ '%g'|format(r.percent|float)|replace('.', ',') }} %{% endif %}</td>
+    <td class="num" data-label="Фикс">{{ money(r.fixed) }}</td>
+    <td class="num" data-label="Роялти"><b>{{ money(r.royalty) }}</b></td>
+    <td class="muted" data-label="Отметка">{{ r.mark or '' }}</td></tr>
   {% endfor %}{% endfor %}
 </table>
 </div>

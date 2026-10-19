@@ -7,21 +7,27 @@
   <a class="btn ghost" href="/reports/channels.csv">CSV</a>
 </div>
 <div class="card">
-<table>
-  <tr><th>Месяц</th>{% for code in columns %}<th>{{ channel_label(code) }}</th>{% endfor %}<th>Всего</th></tr>
+{# Колонки - каналы, по которым кто-то пришёл, поэтому подпись ячейки -
+   тоже имя канала. Ноль - пустая ячейка: на телефоне карточка месяца -
+   только каналы, откуда пришли, а не столбик нулей. #}
+<div class="table-wrap">
+<table class="cards">
+  <tr><th>Месяц</th>{% for code in columns %}<th class="num">{{ channel_label(code) }}</th>{% endfor %}<th class="num">Всего</th></tr>
   {% for r in rows %}
   <tr>
-    <td>{{ r.month.strftime('%m.%Y') }}</td>
-    {% for code in columns %}<td class="num {% if not r.cells[code] %}muted{% endif %}">{{ r.cells[code] }}</td>{% endfor %}
-    <td class="num">{{ r.total }}</td>
+    <td data-label="Месяц">{{ r.month.strftime('%m.%Y') }}</td>
+    {% for code in columns %}<td class="num" data-label="{{ channel_label(code) }}">{{ r.cells[code] or '' }}</td>{% endfor %}
+    <td class="num {% if not r.total %}muted{% endif %}" data-label="Всего">{{ r.total }}</td>
   </tr>
   {% endfor %}
   <tr class="total">
-    <td><b>ИТОГО</b></td>
-    {% for code in columns %}<td class="num">{{ totals.get(code, 0) }}</td>{% endfor %}
-    <td class="num">{{ total }}</td>
+    <td data-label="Месяц"><b>ИТОГО</b></td>
+    {% for code in columns %}<td class="num" data-label="{{ channel_label(code) }}">{{ totals.get(code, 0) }}</td>{% endfor %}
+    <td class="num" data-label="Всего">{{ total }}</td>
   </tr>
 </table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
 {% if not columns %}<p class="muted">За год новых клиентов не было.</p>{% endif %}
 <p class="muted">Считаются карточки по дате появления. «Не спросили» — канал
   не заполнен: это честный пробел, а не «другое». Спрашивайте при выдаче и
