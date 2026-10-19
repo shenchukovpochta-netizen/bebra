@@ -75,38 +75,44 @@
 <div class="cols">
 <section class="card">
   <h2>Тревоги</h2>
-  <table>
+  {% if alerts %}
+  <table class="cards">
     <tr><th>Когда</th><th>Что</th><th>Подробности</th><th>Снял</th></tr>
     {% for a in alerts %}
     <tr>
-      <td>{{ a.created_at|dmy }}</td>
-      <td>{{ TRACKER_ALERTS.get(a.kind, a.kind) }}</td>
-      <td>{{ a.note or '' }}</td>
-      <td class="muted">{% if a.handled_at %}{{ a.handled_by or '' }} · {{ a.handled_at|dmy }}{% else %}<span class="tag bad">открыта</span>{% endif %}</td>
+      <td data-label="Когда">{{ a.created_at|dmy }}</td>
+      <td data-label="Что">{{ TRACKER_ALERTS.get(a.kind, a.kind) }}</td>
+      <td data-label="Подробности">{{ a.note or '' }}</td>
+      <td class="muted" data-label="Снял">{% if a.handled_at %}{{ a.handled_by or '' }} · {{ a.handled_at|dmy }}{% else %}<span class="tag bad">открыта</span>{% endif %}</td>
     </tr>
-    {% else %}<tr><td colspan="4" class="muted">Тревог не было.</td></tr>{% endfor %}
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Тревог не было.</p>{% endif %}
 </section>
 
 <section class="card">
   <h2>Команды StarLine</h2>
-  <table>
+  {% if commands %}
+  <table class="cards">
     <tr><th>Когда</th><th>Команда</th><th>Кто</th><th>Ответ</th></tr>
     {% for c in commands %}
     <tr>
-      <td>{{ c.requested_at|dmy }}</td>
-      <td>{{ c.title }}</td>
-      <td class="muted">{{ c.requested_by or '—' }}</td>
-      <td>{% if c.state == 'pending' %}<span class="tag rented">в очереди</span>{% if c.stale %} <small class="bad">опрос не забирает — работает ли бот и настроен ли StarLine?</small>{% endif %}
+      <td data-label="Когда">{{ c.requested_at|dmy }}</td>
+      <td data-label="Команда">{{ c.title }}</td>
+      <td class="muted" data-label="Кто">{{ c.requested_by or '' }}</td>
+      <td data-label="Ответ">{% if c.state == 'pending' %}<span class="tag rented">в очереди</span>{% if c.stale %} <small class="bad">опрос не забирает — работает ли бот и настроен ли StarLine?</small>{% endif %}
         {% elif c.state == 'done' %}<span class="tag available">выполнена</span> <small class="muted">{{ c.sent_at|dmy }}</small>
         {% else %}<span class="tag bad">отказ</span> <small class="muted">{{ c.result or '' }}</small>{% endif %}</td>
     </tr>
-    {% else %}<tr><td colspan="4" class="muted">Команд не было.</td></tr>{% endfor %}
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Команд не было.</p>{% endif %}
 </section>
 
 <section class="card">
   <h2>Последние точки</h2>
+  {% if track %}
+  {# Три колонки помещаются и на телефоне: таблицей, не карточками. #}
   <table>
     <tr><th>Когда</th><th>Координаты</th><th>Скорость</th></tr>
     {% for p in track[:30] %}
@@ -115,8 +121,9 @@
       <td><a href="{{ map_url(p.lat, p.lon) }}" target="_blank" rel="noopener">{{ '%.5f'|format(p.lat) }}, {{ '%.5f'|format(p.lon) }}</a></td>
       <td class="num">{% if p.speed %}{{ p.speed|int }} км/ч{% else %}—{% endif %}</td>
     </tr>
-    {% else %}<tr><td colspan="3" class="muted">Точек нет: устройство ещё не выходило на связь.</td></tr>{% endfor %}
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Точек нет: устройство ещё не выходило на связь.</p>{% endif %}
   <p class="muted">Журнал хранится около месяца: точка на каждый опрос — это
     десятки тысяч строк, а нужен он на пару недель назад.</p>
 </section>

@@ -18,11 +18,18 @@
 <p class="flash">Велосипед в ремонте, но наряда нет — работой никто не занят.
   {% if can_edit(staff, 'service') %}<a href="/orders/new?bike={{ bike.id }}">Открыть наряд</a>{% endif %}</p>
 {% endif %}
+{# У кого он сейчас и во что обходится простой - над карточкой: на
+   телефоне до них иначе листать через всю форму паспорта. #}
+{% if bike.rental_id %}<p>Сейчас у {% if can_view(staff, 'clients') %}<a href="/clients/{{ bike.client_id }}">{{ bike.full_name }}</a>{% else %}{{ bike.full_name }}{% endif %} — {% if can_view(staff, 'rentals') %}<a href="/rentals/{{ bike.rental_id }}">аренда #{{ bike.rental_id }}</a>{% else %}аренда #{{ bike.rental_id }}{% endif %}.</p>{% endif %}
+{% if idle_days and can_view(staff, 'finance') %}
+<p class="flash {% if idle_lost %}err{% endif %}">Простаивает {{ idle_days }} сут. —
+  это <b>−{{ money(idle_lost) }}</b> по цели {{ money(CHECK_TARGET) }} в день.
+  Пока он стоит, каждые сутки стоят ещё {{ money(CHECK_TARGET) }}.</p>
+{% endif %}
 <div class="cols">
 <section class="card">
   <h2>Карточка</h2>
-  {% if bike.rental_id %}<p>Сейчас у {% if can_view(staff, 'clients') %}<a href="/clients/{{ bike.client_id }}">{{ bike.full_name }}</a>{% else %}{{ bike.full_name }}{% endif %} — {% if can_view(staff, 'rentals') %}<a href="/rentals/{{ bike.rental_id }}">аренда #{{ bike.rental_id }}</a>{% else %}аренда #{{ bike.rental_id }}{% endif %}.</p>{% endif %}
-  <fieldset {% if not can_edit(staff, 'bikes') %}disabled{% endif %} class="plain">
+  {% if can_edit(staff, 'bikes') %}
   <form method="post" action="/bikes/{{ bike.id }}/edit" class="grid2">
     <label>Инвентарный номер <input name="code" value="{{ bike.code }}" required></label>
     <label>Модель <input name="model" value="{{ bike.model }}" required></label>
@@ -51,14 +58,30 @@
     <label class="wide">Заметка <input name="note" value="{{ bike.note or '' }}"></label>
     <button type="submit">Сохранить</button>
   </form>
-  </fieldset>
-  {% if on_rent %}<p class="muted">Велосипед в аренде и числится на её точке{% if bike.location %} — {{ bike.location }}{% endif %}. Точку меняют возврат («точка возврата») и замена («где меняли»), а не карточка.</p>{% endif %}
-  {% if not can_edit(staff, 'bikes') %}<p class="muted">Парк вам открыт только на просмотр: карточка, ремонт и смена статуса — за механиком.</p>{% endif %}
-  {% if idle_days and can_view(staff, 'finance') %}
-  <p class="flash {% if idle_lost %}err{% endif %}">Простаивает {{ idle_days }} сут. —
-    это <b>−{{ money(idle_lost) }}</b> по цели {{ money(CHECK_TARGET) }} в день.
-    Пока он стоит, каждые сутки стоят ещё {{ money(CHECK_TARGET) }}.</p>
+  {% else %}
+  {# Без права правки - паспорт текстом: погашенная форма на телефоне -
+     полтора экрана серых полей, в которых значение не прочесть. #}
+  <dl>
+    <dt>Инвентарный номер</dt><dd>{{ bike.code }}</dd>
+    <dt>Модель</dt><dd>{{ bike.model }}</dd>
+    <dt>Номер рамы</dt><dd>{{ bike.frame_no or '—' }}</dd>
+    <dt>VIN мотора (номер колеса)</dt><dd>{{ bike.motor_no or '—' }}</dd>
+    <dt>Госномер</dt><dd>{{ bike.plate_no or '—' }}{% if bike.plate_ok %} · установлен{% elif bike.plate_no %} · не установлен{% endif %}</dd>
+    <dt>Трекер</dt><dd>{{ 'установлен' if bike.tracker_ok else 'не установлен' }}</dd>
+    <dt>АКБ, шт.</dt><dd>{{ bike.battery_count }}</dd>
+    <dt>Пробег</dt><dd>{{ '{:,}'.format(bike.mileage_km or 0).replace(',', '\u00a0') }} км</dd>
+    <dt>Точка</dt><dd>{{ bike.location or 'не на точке' }}{% if bike.spare %} · подменный: держим под замены{% endif %}</dd>
+    <dt>Цена покупки</dt><dd>{{ money(bike.purchase_price) if bike.purchase_price else '—' }}</dd>
+    <dt>Дата покупки</dt><dd>{{ bike.purchased_on|dmy }}</dd>
+    <dt>Срок службы</dt><dd>{{ bike.service_months or 24 }} мес.</dd>
+    <dt>Остаточная стоимость</dt><dd>{{ money(bike.residual_price) if bike.residual_price else '—' }}</dd>
+    <dt>Цена одной АКБ</dt><dd>{{ money(bike.battery_price) if bike.battery_price else '—' }}</dd>
+    <dt>Срок службы АКБ</dt><dd>{{ bike.battery_service_months or 15 }} мес.</dd>
+    <dt>Заметка</dt><dd>{{ bike.note or '—' }}</dd>
+  </dl>
+  <p class="muted">Парк вам открыт только на просмотр: карточка, ремонт и смена статуса — за механиком.</p>
   {% endif %}
+  {% if on_rent %}<p class="muted">Велосипед в аренде и числится на её точке{% if bike.location %} — {{ bike.location }}{% endif %}. Точку меняют возврат («точка возврата») и замена («где меняли»), а не карточка.</p>{% endif %}
   <p class="muted">Пробег растёт сам: его вписывают при выдаче и при возврате аренды, назад не крутится. Амортизация: {% if amortization is not none %}<b>{{ money(amortization) }}</b> в месяц (рама за вычетом остаточной стоимости + АКБ по своему сроку){% else %}укажите цену покупки, чтобы считать{% endif %}.</p>
 </section>
 {% if can_view(staff, 'trackers') %}
@@ -89,7 +112,9 @@
 {% endwith %}
 
 {% if can_edit(staff, 'bikes') %}
-<section class="card">
+{# Статус и ремонт - то, ради чего карточку открывают с телефона: при
+   одной колонке они встают первыми (.bike-ops, order:-1). #}
+<section class="card bike-ops">
   <h2>Статус</h2>
   {% if bike.rental_id %}
     <p class="muted">Пока идёт аренда, статус «в аренде» снимается только закрытием аренды.</p>
@@ -128,51 +153,59 @@
 <div class="cols">
 <section class="card">
   <h2>Журнал</h2>
-  <table>
+  {% if log %}
+  <table class="cards">
     <tr><th>Дата</th><th>Вид</th><th>Запись</th><th>Стоимость</th><th>Кто</th></tr>
     {% for x in log %}
-    <tr><td>{{ x.created_at|dmy }}</td><td>{{ {'status': 'статус', 'repair': 'ремонт', 'note': 'заметка'}.get(x.kind, x.kind) }}</td>
-      <td>{{ x.note or '' }}</td><td class="num">{{ money(x.cost) if x.cost else '' }}</td><td class="muted">{{ x.created_by or '' }}</td></tr>
-    {% else %}<tr><td colspan="5" class="muted">Записей нет.</td></tr>{% endfor %}
+    <tr><td data-label="Дата">{{ x.created_at|dmy }}</td><td data-label="Вид">{{ {'status': 'статус', 'repair': 'ремонт', 'note': 'заметка'}.get(x.kind, x.kind) }}</td>
+      <td data-label="Запись">{{ x.note or '' }}</td><td class="num" data-label="Стоимость">{{ money(x.cost) if x.cost else '' }}</td><td class="muted" data-label="Кто">{{ x.created_by or '' }}</td></tr>
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Записей нет.</p>{% endif %}
 </section>
 {% if can_view(staff, 'service') %}
 <section class="card">
   <h2>Наряды <a class="muted" href="/orders?bike={{ bike.id }}">все →</a></h2>
-  <table>
+  {% if orders %}
+  <table class="cards">
     <tr><th>№</th><th>Открыт</th><th>Статус</th><th>Плательщик</th><th>Суток</th>{% if can_view(staff, 'finance') %}<th class="num">Сумма</th>{% endif %}</tr>
     {% for o in orders %}
-    <tr><td><a href="/orders/{{ o.id }}">{{ o.no }}</a></td><td>{{ o.opened_at|dmy }}</td>
-      <td><span class="tag order-{{ o.status }}">{{ ORDER_STATUSES[o.status] }}</span></td>
-      <td>{{ PAYERS[o.payer] }}</td><td class="num">{{ o.days }}</td>
-      {% if can_view(staff, 'finance') %}<td class="num">{{ money(o.total if o.status == 'done' else o.estimate) }}</td>{% endif %}</tr>
-    {% else %}<tr><td colspan="6" class="muted">Нарядов по велосипеду не было.</td></tr>{% endfor %}
+    <tr><td data-label="№"><a href="/orders/{{ o.id }}">{{ o.no }}</a></td><td data-label="Открыт">{{ o.opened_at|dmy }}</td>
+      <td data-label="Статус"><span class="tag order-{{ o.status }}">{{ ORDER_STATUSES[o.status] }}</span></td>
+      <td data-label="Плательщик">{{ PAYERS[o.payer] }}</td><td class="num" data-label="Суток">{{ o.days }}</td>
+      {% if can_view(staff, 'finance') %}<td class="num" data-label="Сумма">{{ money(o.total if o.status == 'done' else o.estimate) }}</td>{% endif %}</tr>
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Нарядов по велосипеду не было.</p>{% endif %}
   <p class="muted">Открытые и закрытые вместе: по ним видно, что у велосипеда ломается раз за разом. Записи «ремонт» в журнале ниже — итог закрытых нарядов и ремонты без наряда.</p>
 </section>
 {% endif %}
 <section class="card">
   <h2>История статусов</h2>
-  <table>
+  {% if status_log %}
+  <table class="cards">
     <tr><th>Когда</th><th>Стало</th><th>Было</th><th class="num opt">Пробег</th><th>Кто</th></tr>
     {% for x in status_log %}
-    <tr><td>{{ x.changed_at|dmy }}</td><td><span class="tag {{ x.to_status }}">{{ BIKE_STATUSES.get(x.to_status, x.to_status) }}</span></td>
-      <td class="muted">{{ BIKE_STATUSES.get(x.from_status, x.from_status) if x.from_status else '—' }}</td>
-      <td class="num muted opt">{% if x.mileage_km is none %}—{% else %}{{ x.mileage_km }} км{% endif %}</td>
-      <td class="muted">{{ x.changed_by or '' }}</td></tr>
-    {% else %}<tr><td colspan="4" class="muted">Записей нет.</td></tr>{% endfor %}
+    <tr><td data-label="Когда">{{ x.changed_at|dmy }}</td><td data-label="Стало"><span class="tag {{ x.to_status }}">{{ BIKE_STATUSES.get(x.to_status, x.to_status) }}</span></td>
+      <td class="muted" data-label="Было">{{ BIKE_STATUSES.get(x.from_status, x.from_status) if x.from_status else '' }}</td>
+      <td class="num muted opt" data-label="Пробег">{% if x.mileage_km is none %}—{% else %}{{ x.mileage_km }} км{% endif %}</td>
+      <td class="muted" data-label="Кто">{{ x.changed_by or '' }}</td></tr>
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Записей нет.</p>{% endif %}
   <p class="muted">Пишется базой при каждой смене статуса; по этому журналу
     считается простой. Пробег записывается тем же триггером — по нему видно,
     сколько велосипед накатал между ремонтами, а не только за аренду.</p>
   <h2>Аренды</h2>
-  <table>
+  {% if rentals %}
+  <table class="cards">
     <tr><th>#</th><th>Клиент</th><th>С</th><th>По</th><th>Статус</th></tr>
     {% for r in rentals %}
-    <tr><td>{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ r.id }}">{{ r.id }}</a>{% else %}{{ r.id }}{% endif %}</td><td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
-      <td>{{ r.started_on|dmy }}</td><td>{{ r.closed_on|dmy if r.closed_on else '' }}</td><td>{{ RENTAL_STATUSES[r.status] }}</td></tr>
-    {% else %}<tr><td colspan="5" class="muted">Ещё не выдавался.</td></tr>{% endfor %}
+    <tr><td data-label="#">{% if can_view(staff, 'rentals') %}<a href="/rentals/{{ r.id }}">{{ r.id }}</a>{% else %}{{ r.id }}{% endif %}</td><td data-label="Клиент">{% if can_view(staff, 'clients') %}<a href="/clients/{{ r.client_id }}">{{ r.full_name }}</a>{% else %}{{ r.full_name }}{% endif %}</td>
+      <td data-label="С">{{ r.started_on|dmy }}</td><td data-label="По">{{ r.closed_on|dmy if r.closed_on else '' }}</td><td data-label="Статус">{{ RENTAL_STATUSES[r.status] }}</td></tr>
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Ещё не выдавался.</p>{% endif %}
   {% if return_photos %}
   {# Фото при сдаче - по аренде: какой он пришёл от какого клиента. #}
   <h2>Фото при сдаче <span class="muted">· последние {{ return_photos|length }}</span></h2>

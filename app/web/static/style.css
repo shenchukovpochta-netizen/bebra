@@ -1225,6 +1225,25 @@ details.more[open]>summary{margin-bottom:10px}
 .cal-start label{display:inline-flex;align-items:center;gap:8px;margin:0}
 table.cal-mini td small{display:block;font-size:12px;line-height:1.35}
 
+/* ── парк, трекеры, настройки ──
+   Строка правки (.edit-row, «▸ Изменить» под строкой каталога) - часть
+   своей строки, а не новая запись: без черты между ними. */
+tr:has(+tr.edit-row)>td{border-bottom:0}
+tr.edit-row>td{padding-top:0}
+tr.edit-row details.more{margin:0}
+/* Карточка велосипеда в одну колонку: статус и ремонт - первыми, ради
+   них её и открывают с телефона, паспорт - ниже. */
+@media (max-width:860px){.cols>.bike-ops{order:-1}}
+@media (max-width:640px){
+  /* тот же набор, что у правила черты выше, - вес равный, побеждает порядок */
+  .card:has(>form,>details,>dl,>fieldset,>.grid2,>.tiles,>.bars) table.cards tr.edit-row{border-top:0;padding-top:0}
+  /* галочка в ячейке-карточке («Вкл» уведомлений) - вровень со своей
+     подписью; цель касания - вся высота label.check */
+  table.cards td>label.check{margin:0;align-items:flex-start}
+  /* плитка, которая повторяет число вкладки под ней («Требуют внимания») */
+  .tiles>.tile.tab-dup{display:none}
+}
+
 /* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при
    фокусе и назад не возвращают. Масштаб пальцами не запрещаем
    (maximum-scale в viewport), а лечим причину. Поле кода подписи (28 px)

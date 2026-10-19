@@ -50,15 +50,17 @@
 
 <section class="card">
   <h2>Журнал статусов</h2>
-  <table>
+  {% if log %}
+  <table class="cards">
     <tr><th>Когда</th><th>Было</th><th>Стало</th><th>Кто</th></tr>
     {% for x in log %}
-    <tr><td>{{ x.changed_at|dmy }}</td>
-      <td class="muted">{{ BATTERY_STATUSES.get(x.from_status, x.from_status or '—') }}</td>
-      <td>{{ BATTERY_STATUSES.get(x.to_status, x.to_status) }}</td>
-      <td class="muted">{{ x.changed_by or '' }}</td></tr>
-    {% else %}<tr><td colspan="4" class="muted">Записей нет.</td></tr>{% endfor %}
+    <tr><td data-label="Когда">{{ x.changed_at|dmy }}</td>
+      <td class="muted" data-label="Было">{{ BATTERY_STATUSES.get(x.from_status, x.from_status) if x.from_status else '' }}</td>
+      <td data-label="Стало">{{ BATTERY_STATUSES.get(x.to_status, x.to_status) }}</td>
+      <td class="muted" data-label="Кто">{{ x.changed_by or '' }}</td></tr>
+    {% endfor %}
   </table>
+  {% else %}<p class="muted">Записей нет.</p>{% endif %}
 </section>
 </div>
 
@@ -69,13 +71,15 @@
     <label>Номер на корпусе <input name="code" value="{{ battery.code }}" required></label>
     <label>Модель <select name="model_id"><option value="">не указана</option>{% for m in models %}<option value="{{ m.id }}" {% if battery.model_id == m.id %}selected{% endif %}>{{ m.title }}</option>{% endfor %}</select></label>
     <label>Серийный номер <input name="serial_no" value="{{ battery.serial_no or '' }}"></label>
-    <label>Напряжение по табличке, В <input name="volts" inputmode="numeric" value="{{ battery.volts or '' }}" placeholder="60"></label>
-    <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal" value="{{ battery.amp_hours or '' }}" placeholder="70"></label>
+    {# Подсказка в пустом поле - паспорт модели, а не выдуманное число:
+       его принимали за уже переписанную табличку. #}
+    <label>Напряжение по табличке, В <input name="volts" inputmode="numeric" value="{{ battery.volts or '' }}"{% if battery.voltage %} placeholder="{{ battery.voltage }}"{% endif %}></label>
+    <label>Ёмкость по табличке, А·ч <input name="amp_hours" inputmode="decimal" value="{{ battery.amp_hours or '' }}"{% if battery.capacity %} placeholder="{{ battery.capacity }}"{% endif %}></label>
     <label>Точка <select name="location"><option value="">не на точке</option>{% for loc in locations %}<option value="{{ loc }}" {% if battery.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
-    <label>Цена покупки <input name="purchase_price" value="{{ battery.purchase_price if battery.purchase_price is not none else '' }}"></label>
+    <label>Цена покупки <input name="purchase_price" inputmode="decimal" value="{{ battery.purchase_price if battery.purchase_price is not none else '' }}"></label>
     <label>Куплена <input type="date" name="purchased_on" value="{{ battery.purchased_on|iso if battery.purchased_on else '' }}"></label>
-    <label>Срок службы, мес. <input name="service_months" value="{{ battery.service_months }}" size="4"></label>
-    <label>Циклов заряда <input name="cycles" value="{{ battery.cycles }}" size="5"></label>
+    <label>Срок службы, мес. <input name="service_months" inputmode="numeric" value="{{ battery.service_months }}" size="4"></label>
+    <label>Циклов заряда <input name="cycles" inputmode="numeric" value="{{ battery.cycles }}" size="5"></label>
     <label class="wide">Заметка <textarea name="note" rows="2">{{ battery.note or '' }}</textarea></label>
     <button type="submit">Сохранить</button>
   </form>

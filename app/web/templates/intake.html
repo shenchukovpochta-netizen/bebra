@@ -53,13 +53,13 @@
 
 <section class="card">
   <h2>На сборке <span class="muted">· {{ rows|length }}</span></h2>
-  <table>
+  <table class="cards">
     <tr><th>Номер</th><th>Модель</th><th>Сверка</th></tr>
     {% for b in rows %}
     <tr>
-      <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
-      <td>{{ b.model }}</td>
-      <td>{% if b.state.done %}<span class="tag ok">готов к выпуску</span>
+      <td data-label="Номер"><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
+      <td data-label="Модель">{{ b.model }}</td>
+      <td data-label="Сверка">{% if b.state.done %}<span class="tag ok">готов к выпуску</span>
         {% else %}<span class="muted">{{ b.state.left|join(', ') }}</span>{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="3" class="muted">Ничего не собирается —
@@ -72,13 +72,13 @@
 
 <section class="card">
   <h2>Аккумуляторы на сборке <span class="muted">· {{ cells|length }}</span></h2>
-  <table>
+  <table class="cards">
     <tr><th>Номер</th><th>Модель</th><th>Сверка</th></tr>
     {% for b in cells %}
     <tr>
-      <td><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
-      <td>{{ b.model_title or '—' }}</td>
-      <td>{% if b.state.done %}<span class="tag ok">готов к выпуску</span>
+      <td data-label="Номер"><a href="/batteries/{{ b.id }}">{{ b.code }}</a></td>
+      <td data-label="Модель">{{ b.model_title or '' }}</td>
+      <td data-label="Сверка">{% if b.state.done %}<span class="tag ok">готов к выпуску</span>
         {% else %}<span class="muted">{{ b.state.left|join(', ') }}</span>{% endif %}</td>
     </tr>
     {% else %}<tr><td colspan="3" class="muted">Ничего не собирается —
