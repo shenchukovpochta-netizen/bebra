@@ -188,9 +188,10 @@ class Config:
     avito_client_id: str = ""
     avito_client_secret: str = ""
     avito_poll_seconds: int = 60
-    # WhatsApp через Wazzup (secrets/wazzup_api_key): ответы из «Входящих» и
-    # подписка хука панели. Токен хука нужен, чтобы подписать адрес
-    # https://<CRM_DOMAIN>/hook/inbox/<токен>. Пусто - выключено.
+    # Wazzup (secrets/wazzup_api_key): WhatsApp, Instagram, ВКонтакте,
+    # Telegram-аккаунт, Viber и Авито - ответы из «Входящих» и подписка хука
+    # панели на сообщения и заявки из окна чата. Токен хука нужен, чтобы
+    # подписать адрес https://<CRM_DOMAIN>/hook/inbox/<токен>. Пусто - выключено.
     wazzup_api_key: str = ""
     inbox_hook_token: str = ""
     # Рабочая группа точек (бывший сценарий n8n): бот сверяет формы в

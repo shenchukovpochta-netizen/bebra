@@ -481,7 +481,7 @@ async def wazzup_once(crm: Any, wazzup: Any, cfg: Any, *,
     if state["ok"] and url is None:
         state["hook"], state["hook_error"] = None, (
             "нет домена панели (CRM_DOMAIN) или токена хука "
-            "(secrets/inbox_hook_token): входящие WhatsApp не придут")
+            "(secrets/inbox_hook_token)")
     elif state["ok"] and url is not None:
         mark = logic.wazzup_fingerprint(url)
         hooked = logic._moment(prev.get("hooked_at"))

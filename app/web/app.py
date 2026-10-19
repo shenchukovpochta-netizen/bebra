@@ -3816,10 +3816,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                      req["kind"])
             return JSONResponse({"ok": True, "skipped": 1})
         if req["kind"] == "contact":
-            thread = await crm.inbox_thread(int(got["thread_id"]))
             client_id = got.get("client_id")
-            name = (req.get("name") or (thread or {}).get("name")
-                    or logic.inbox_no(got["thread_id"]))
+            # Имя - из запроса, иначе номер обращения: имя, записанное
+            # раньше (из канала или чужого чата), в ответ не уходит - с
+            # утёкшим токеном хук не должен отвечать, как зовут человека
+            # с этим номером.
+            name = req.get("name") or logic.inbox_no(got["thread_id"])
             log.info("хук входящих: Wazzup контакт - обращение %s (%s)",
                      logic.inbox_no(got["thread_id"]),
                      "новое" if got["created"] else "уже было")

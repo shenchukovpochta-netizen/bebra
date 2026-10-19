@@ -827,6 +827,20 @@ class TestWazzupCrmHook(tiw.InboxCase if HAVE_WEB else unittest.TestCase):
         self.assertEqual(body["uri"], f"https://crm.mybike.ru/clients/{client_id}")
         self.assertEqual(body["name"], "Азиз Каримов", "ФИО карточки наружу не уходит")
 
+    def test_contact_reply_does_not_reveal_stored_name(self):
+        """Чат уже есть с именем из канала: запрос без имени получает номер
+        обращения, а не записанное имя - хук не справочник «чей номер»."""
+        self.client.post(f"/hook/inbox/{tiw.HOOK}", json={"messages": [{
+            "messageId": "m-0", "channelId": CH2, "chatType": "whatsapp",
+            "chatId": "79001234567", "type": "text", "text": "Добрый день",
+            "contact": {"name": "Азиз Каримов"}}]})
+        [thread] = tiw.run(self.crm.inbox_threads(limit=10))
+        body = self.hook({"createContact": {"contactData": [
+            {"chatType": "whatsapp", "chatId": "79001234567"}]}}).json()
+        self.assertEqual((body["id"], body["name"]),
+                         (f"thread-{thread['id']}", logic.inbox_no(thread["id"])))
+        self.assertNotIn("responsibleUserId", body, "не пришёл - не выдумываем")
+
     def test_contact_without_domain_has_no_uri(self):
         self.build(inbox_key=tiw.KEY, inbox_hook_token=tiw.HOOK, crm_domain="")
         self.assertNotIn("uri", self.contact().json())

@@ -11996,7 +11996,8 @@ def wazzup_state(settings: Mapping[str, Any], *,
 
     ok - API ответил и ключ принят, live - и это было недавно; hook - адрес
     хука подписан (в настройке лежит отпечаток адреса, не сам адрес: в нём
-    токен). channels - номера WhatsApp из кабинета Wazzup.
+    токен). channels - каналы из кабинета Wazzup: вид канала «Входящих»,
+    номер (где он телефон), в сети ли.
     """
     data = _json_dict(settings.get("inbox_wazzup_state"))
     at = _moment(data.get("at"))
