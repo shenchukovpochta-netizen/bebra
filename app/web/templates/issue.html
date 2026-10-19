@@ -39,7 +39,7 @@
       <td class="nowrap" data-label="Когда">{{ b.wanted_on|dmy }}</td>
       <td data-label="Клиент">{{ b.full_name }}<br><small class="muted">{{ b.phone }}</small></td>
       <td data-label="Что просит">{{ booking_line(b) }}</td>
-      <td class="actions"><a class="btn" href="{{ b.issue_url }}">Выдать</a></td>
+      <td class="actions" data-label="Действие"><a class="btn" href="{{ b.issue_url }}">Выдать</a></td>
     </tr>
     {% endfor %}
   </table>

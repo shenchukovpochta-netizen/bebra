@@ -55,11 +55,50 @@ except ImportError:                                    # pragma: no cover
 D = Decimal
 # Шаблон - сколько в нём таблиц-карточек. «По точкам» - три: сами точки,
 # прогноз переброски и три числа по месяцам.
-CARD_TABLES = {"rentals.html": 1, "bikes.html": 1, "clients.html": 1, "orders.html": 1,
-               "points.html": 3, "cash.html": 1, "finance.html": 1, "inbox.html": 1,
-               "batteries.html": 1, "parts.html": 1, "payments.html": 1,
-               "tariff_report.html": 1, "buy.html": 1, "franchisees.html": 1,
-               "franchise_royalty.html": 1, "feedback.html": 1, "bookings.html": 1}
+CARD_TABLES = {"_passport.html": 1, "alerts.html": 1, "assets.html": 2, "bank.html": 1,
+               "batteries.html": 1, "battery.html": 1, "battery_plan.html": 2,
+               "bike.html": 4, "bikes.html": 1, "bookings.html": 1, "buy.html": 1,
+               "campaign.html": 1, "cash.html": 1, "cash_calendar.html": 2,
+               "cash_shift.html": 3, "channels.html": 1, "claims.html": 1,
+               "client.html": 3, "clients.html": 1, "company.html": 1,
+               "dashboard.html": 3, "deal.html": 1, "documents.html": 1,
+               "feedback.html": 3, "finance.html": 1, "franchise_royalty.html": 1,
+               "franchisee.html": 2, "franchisees.html": 1, "inbox.html": 1,
+               "incoming.html": 1, "intake.html": 2, "integrity.html": 1,
+               "issue.html": 1, "mailing.html": 2, "map.html": 2,
+               "model_parts.html": 1, "models.html": 2, "my.html": 1,
+               "notices.html": 2, "ops.html": 1, "order.html": 1, "orders.html": 1,
+               "part.html": 1, "part_docs.html": 2, "part_moves.html": 1,
+               "part_orders.html": 3, "parts.html": 1, "payback.html": 1,
+               "payments.html": 2, "point.html": 4, "points.html": 3,
+               "profiles.html": 1, "promo_form.html": 1, "promos.html": 2,
+               "readiness.html": 1, "referrals.html": 3, "rental.html": 6,
+               "rentals.html": 1, "report_months.html": 2, "reports.html": 1,
+               "search.html": 2, "service.html": 1, "setup.html": 3, "signing.html": 1,
+               "signings.html": 1, "spend.html": 1, "staff.html": 1,
+               "stock_take.html": 1, "stock_takes.html": 1, "suppliers.html": 1,
+               "tariff_report.html": 1, "tariffs.html": 1, "tasks.html": 1,
+               "techs.html": 1,
+               "tracker.html": 2, "trackers.html": 2, "work_types.html": 1}
+# Таблицы, которые остаются таблицами и на телефоне - с причиной. Всё
+# остальное - карточки: голая таблица на 390 px листается вбок, а это
+# главный способ сломать телефон, не заметив на компьютере.
+PLAIN_TABLES = {
+    "_server.html": "две колонки «что - состояние» помещаются",
+    "client.html": "счета, бонусы и подписания - три-четыре узкие колонки",
+    "dashboard.html": "сводка: статьи, календарь и модели - узкие таблицы compact",
+    "locations.html": "строка точки с формой правки; карточками - вместе с правкой точек",
+    "me.html": "две колонки «раздел - доступ»",
+    "models.html": "матрица совместимости - строки и столбцы из каталога",
+    "order.html": "счета наряда - три узкие колонки",
+    "profile.html": "матрица прав роли - короткие подписи уровней (Нет / Вид / Правка)",
+    "reports.html": "свёрнутые блоки «Главного» - не шире четырёх колонок",
+    "risk.html": "две колонки «что в истории - баллы»",
+    "signing.html": "протокол подписания: отпечатки документов",
+    "tracker.html": "точки трека - три узкие колонки",
+    "work_types.html": "сроки ремонта - две колонки «узел - срок»",
+}
+
 # Класс cards - среди прочих тоже: «editable cards», «ready cards»,
 # «cards staff-table».
 TABLE = re.compile(r'<table class="(?:[\w-]+ )*cards(?: [\w-]+)*">(.*?)</table>', re.S)
@@ -91,6 +130,19 @@ class TestCardTemplates(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(len(self.tables(name)), count)
 
+    def test_plain_tables_are_listed(self):
+        """Каждая таблица шаблонов - карточки или стоит в PLAIN_TABLES с
+        причиной: новая голая таблица на телефоне листалась бы вбок."""
+        cards = re.compile(r'class="(?:[\w-]+ )*cards(?: [\w-]+)*"')
+        for path in sorted(TEMPLATES.glob("*.html")):
+            text = path.read_text(encoding="utf-8")
+            plain_tags = [t for t in re.findall(r"<table\b[^>]*>", text) if not cards.search(t)]
+            with self.subTest(path.name):
+                if plain_tags:
+                    self.assertIn(path.name, PLAIN_TABLES, plain_tags)
+                elif path.name in PLAIN_TABLES:
+                    self.fail("в шаблоне больше нет голых таблиц - уберите его из PLAIN_TABLES")
+
     def test_every_cell_has_a_label(self):
         """Ячейка без подписи на телефоне - число без смысла. Без подписи
         только ячейки на всю ширину (colspan): «Пусто.» и итоговые строки."""
@@ -98,7 +150,8 @@ class TestCardTemplates(unittest.TestCase):
             for body in self.tables(name):
                 for cell in CELL.findall(body):
                     with self.subTest(name, cell=cell):
-                        self.assertRegex(cell, r'data-label="[^"]+"|colspan=')
+                        # data-nolabel - ячейка-заголовок карточки («Главное» отчётов).
+                        self.assertRegex(cell, r'data-label="[^"]+"|colspan=|data-nolabel')
 
     def test_labels_follow_the_header(self):
         """Подпись - имя своей колонки и в том же порядке: переставленная
@@ -110,16 +163,23 @@ class TestCardTemplates(unittest.TestCase):
                     continue           # матрица по месяцам: подпись - точка и число
                 head_row = re.search(r"<tr>(.*?)</tr>", body, re.S).group(1)
                 head = [plain(a or b) for a, b in HEAD.findall(head_row)]
-                labels = LABEL.findall(body[len(head_row):])
+                # Подпись каждой ячейки по порядку; ячейка-заголовок
+                # (data-nolabel) держит своё место пустой строкой.
+                labels = [(LABEL.search(c).group(1) if LABEL.search(c) else "")
+                          for c in CELL.findall(body[len(head_row):])
+                          if LABEL.search(c) or "data-nolabel" in c]
                 with self.subTest(name):
                     # Шапка найдена (таблицы в три-четыре колонки - тоже списки).
                     self.assertGreaterEqual(len(head), 2)
                     self.assertGreaterEqual(len(labels), len(head))
                     for column, label in zip(head, labels, strict=False):
-                        if column:
+                        if column and label:
                             self.assertEqual(label, column)
                     named = {c for c in head if c}
-                    extra = [x for x in labels[len(head):] if x not in named]
+                    # Колонка без шапки (кнопки) подписана своим словом - и в
+                    # итоговой строке тоже.
+                    own = {lab for col, lab in zip(head, labels, strict=False) if not col}
+                    extra = [x for x in labels[len(head):] if x and x not in named | own]
                     self.assertEqual(extra, [], "подпись итоговой строки - из шапки")
 
     def test_month_matrix_names_the_point(self):

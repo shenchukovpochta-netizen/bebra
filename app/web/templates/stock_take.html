@@ -124,7 +124,7 @@
       {% else %}{{ i.note or '' }}{% endif %}
     </td>
     {% if editable %}
-    <td class="actions">
+    <td class="actions" data-label="Действие">
       {% if i.state == 'extra' %}
       <form method="post" action="/stock-takes/{{ take.id }}/items/{{ i.id }}/delete">
         <input type="hidden" name="show" value="{{ show }}">

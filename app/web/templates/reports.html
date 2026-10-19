@@ -19,9 +19,9 @@
   <div class="table-wrap"><table class="headline cards">
     <tr><th>Показатель</th><th class="num">Сейчас</th><th class="num">Прошлый · {{ sm.prev.label }}</th><th class="num">Цель</th></tr>
     {% for r in sm.headline %}
-    <tr><td>{{ r.title }}{% if r.code == 'integrity' and r.ok is false %} <a class="muted" href="/reports/integrity">разобрать →</a>{% endif %}</td>
+    <tr><td data-nolabel>{{ r.title }}{% if r.code == 'integrity' and r.ok is false %} <a class="muted" href="/reports/integrity">разобрать →</a>{% endif %}</td>
       <td class="num {% if r.ok is true %}ok{% elif r.ok is false %}bad{% endif %}" data-label="Сейчас"><b>{{ r.now }}</b>{% if r.up is not none %} <span class="{{ 'ok' if r.better else 'bad' }}" title="{{ 'лучше' if r.better else 'хуже' }}, чем в прошлом периоде">{{ '▲' if r.up else '▼' }}</span>{% endif %}</td>
-      <td class="num muted" data-label="Прошлый">{{ r.prev }}</td>
+      <td class="num muted" data-label="Прошлый · {{ sm.prev.label }}">{{ r.prev }}</td>
       <td class="num muted" data-label="Цель">{{ r.goal }}</td></tr>
     {% endfor %}
   </table></div>

@@ -26,7 +26,7 @@
       </form>
       {% endif %}
     </td>
-    <td class="actions">{% if can_edit(staff, 'claims') %}<form method="post" action="/claims/{{ c.id }}/reject"><button type="submit" class="ghost danger">Отклонить</button></form>{% endif %}</td>
+    <td class="actions" data-label="Действие">{% if can_edit(staff, 'claims') %}<form method="post" action="/claims/{{ c.id }}/reject"><button type="submit" class="ghost danger">Отклонить</button></form>{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="8" class="muted">Открытых заявок нет.</td></tr>{% endfor %}
 </table>

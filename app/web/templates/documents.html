@@ -24,7 +24,7 @@
         {% elif r.mine %}<span class="tag ok">ваш</span>
         {% else %}<span class="tag">наш</span>{% endif %}
       </td>
-      <td class="stack">
+      <td class="stack" data-label="Действие">
         {% if not r.code_only %}
         {% if ours.get(r.kind) %}<a class="btn ghost" href="/documents/ours/{{ r.kind }}">Скачать наш</a>{% endif %}
         {% if r.active %}
