@@ -94,7 +94,10 @@
 <div class="page">
 <header class="top">
   {# Крошки: где я и куда назад - из того же дерева меню. #}
-  {% if crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep" aria-hidden="true">›</span>{% endif %}{% endfor %}</nav>{% else %}<span class="top-fill"></span>{% endif %}
+  {# Последняя крошка на своей же странице - текст, а не ссылка на себя:
+     из карточки велосипеда «Велосипеды» ведёт к списку, а на самом
+     списке нажимать её незачем. #}
+  {% if crumbs and crumbs|length > 1 %}<nav class="crumbs" aria-label="Вы здесь">{% for c in crumbs %}{% if c.href and not (loop.last and c.href == request.url.path) %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span{% if loop.last %} aria-current="page"{% endif %}>{{ c.label }}</span>{% endif %}{% if not loop.last %}<span class="sep" aria-hidden="true">›</span>{% endif %}{% endfor %}</nav>{% else %}<span class="top-fill"></span>{% endif %}
   {% if can_view(staff, 'bikes') %}
   <form class="top-search" method="get" action="/bikes" role="search">
     {{ ico('search') }}<input name="q" placeholder="Велосипед: номер, VIN рамы или мотора" aria-label="Найти велосипед по номеру" autocomplete="off"><kbd title="Нажмите «/», чтобы искать">/</kbd>
@@ -120,11 +123,12 @@
 </div>
 {# Телефон: главные разделы внизу под большим пальцем, остальное - «Меню»
    (та же галочка, что у кнопки в шапке). Первые четыре из списка, какие
-   открыты правами этого человека. #}
+   открыты правами этого человека. Подпись - короткое имя пункта, если
+   оно есть: «Рабочий стол» в 70 пикселях обрезался до «Рабочий ст…». #}
 {% set tabs = [] %}
 {% for href in ('/my', '/', '/incoming', '/clients', '/issue', '/service', '/bikes') %}{% for it in flat if it.href == href %}{% if tabs|length < 4 %}{% set _ = tabs.append(it) %}{% endif %}{% endfor %}{% endfor %}
 <nav class="tabbar" aria-label="Главные разделы">
-  {% for it in tabs %}<a class="tab {% if it.on %}on{% endif %}" href="{{ it.href }}">{{ ico(it.icon) }}<span>{{ it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>{% endfor %}
+  {% for it in tabs %}<a class="tab {% if it.on %}on{% endif %}" href="{{ it.href }}" title="{{ it.label }}">{{ ico(it.icon) }}<span>{{ it.short or it.label }}</span>{% if it.badge %}<em class="badge">{{ it.badge }}</em>{% endif %}</a>{% endfor %}
   <label for="navtoggle" class="tab">{{ ico('dots') }}<span>Меню</span></label>
 </nav>
 {% endif %}
@@ -184,6 +188,28 @@
     var top = on.getBoundingClientRect().top - side.getBoundingClientRect().top;
     if (top > side.clientHeight - 80) side.scrollTop = top - side.clientHeight / 2;
   }
+  // Лента вкладок или шагов шире экрана: открытая - в середину ленты, а
+  // не за краем; край, за которым ещё пункты, тает (more / more-back в
+  // style.css). scrollLeft, а не scrollIntoView: страница не дёргается
+  // по вертикали.
+  var strips = document.querySelectorAll('nav.tabs, .steps');
+  function edges(n) {
+    var wide = n.scrollWidth > n.clientWidth + 1;
+    n.classList.toggle('more', wide && n.scrollLeft + n.clientWidth < n.scrollWidth - 4);
+    n.classList.toggle('more-back', wide && n.scrollLeft > 4);
+  }
+  strips.forEach(function (n) {
+    var a = n.querySelector('a.on, .now');
+    if (a && n.scrollWidth > n.clientWidth + 1) {
+      n.scrollLeft += a.getBoundingClientRect().left - n.getBoundingClientRect().left
+                      - (n.clientWidth - a.offsetWidth) / 2;
+    }
+    edges(n);
+    n.addEventListener('scroll', function () { edges(n); }, {passive: true});
+  });
+  function allEdges() { strips.forEach(edges); }
+  window.addEventListener('resize', allEdges);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(allEdges);
 })();
 </script>
 {% endif %}

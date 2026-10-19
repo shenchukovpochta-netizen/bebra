@@ -101,8 +101,20 @@ class TestTree(unittest.TestCase):
         self.assertNotIn("Склад", only_reports)
         self.assertEqual(nav.menu({"perms": {}}, "/"),
                          [{"title": "Главное", "items": [
-                             {"label": "Задачи дня", "href": "/my", "icon": "square-check",
+                             {"label": "Задачи дня", "short": None, "href": "/my",
+                              "icon": "square-check",
                               "on": False, "open": False, "children": [], "badge": 0}]}])
+
+    def test_short_label_for_the_phone_bar(self):
+        """В нижней панели телефона подпись - короткое имя пункта:
+        «Рабочий стол» в её ячейке обрезался до «Рабочий ст…»."""
+        service = next(it for g in nav.menu(TECH, "/service") for it in g["items"]
+                       if it["label"] == "Сервис")
+        desk = next(c for c in service["children"] if c["href"] == "/service")
+        self.assertEqual((desk["label"], desk["short"]), ("Рабочий стол", "Сервис"))
+        for item in nav.all_items():
+            if item.short:
+                self.assertLessEqual(len(item.short), 10, item.label)
 
     def test_owner_does_not_see_the_counter_work(self):
         """Владельцу выдача в меню лишняя - её делают на точке. Права это
@@ -231,6 +243,23 @@ class TestMenuInPanel(tw.WebCase):
         self.assertIn('<nav class="crumbs" aria-label="Вы здесь"><span>Склад</span>', page)
         self.assertIn("<small>Владелец</small>", page)
         self.assertIn('action="/bikes" role="search"', page, "поиск велосипеда в меню")
+        # Последняя крошка на своей странице - текст, а не ссылка на себя;
+        # из карточки она ведёт назад к списку.
+        self.assertIn('<span aria-current="page">Приходы</span></nav>', page)
+        self.assertNotIn('<a href="/parts/receipts">Приходы</a>', page)
+        part = tw.run(self.crm.create_part(title="Колодки", node=None, unit="шт", cost=0,
+                                           price=0, min_stock=0, model=None, note=None))
+        self.assertIn('<a href="/parts">Остатки</a></nav>', self.get_ok(f"/parts/{part}"))
+
+    def test_phone_bar_uses_the_short_label(self):
+        tw.run(self.crm.create_staff(
+            "tech", logic.hash_password("password-1"), "tech", "manager",
+            tw.run(self.crm.access_profile_by_code("tech"))["id"]))
+        self.client.post("/logout")
+        self.login("tech", "password-1")
+        page = self.get_ok("/service")
+        self.assertRegex(page, r'<a class="tab on" href="/service" title="Рабочий стол">'
+                               r'<svg[^>]*>.*?</svg><span>Сервис</span>')
 
     def as_manager(self):
         manager = tw.run(self.crm.access_profile_by_code("manager"))

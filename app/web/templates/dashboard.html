@@ -25,7 +25,7 @@
 {% endif %}
 {# Месяц сводки - один на план-факт и точки: стрелки листают оба блока,
    прошлый месяц - целиком, вперёд - некуда, назад - до начала истории. #}
-{% macro month_nav(anchor) %}<span class="muted month-nav">{% if span.prev_key %}<a href="/?month={{ span.prev_key }}#{{ anchor }}" title="прошлый месяц" aria-label="прошлый месяц">‹</a>{% endif %} {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a href="/?month={{ span.next_key }}#{{ anchor }}" title="следующий месяц" aria-label="следующий месяц">›</a>{% endif %}</span>{% if coverage.partial %} <span class="tag" title="в счёте {{ coverage.days }} дн. из {{ coverage.of }}">неполный · {% if coverage.from %}с {{ coverage.from.strftime('%d.%m') }}{% else %}{{ coverage.days }} дн.{% endif %}</span>{% endif %}{% endmacro %}
+{% macro month_nav(anchor) %}<span class="muted month-nav">{% if span.prev_key %}<a class="arrow" href="/?month={{ span.prev_key }}#{{ anchor }}" title="прошлый месяц" aria-label="прошлый месяц">‹</a>{% endif %} {{ span.first.strftime('%m.%Y') }} {% if span.next_key %}<a class="arrow" href="/?month={{ span.next_key }}#{{ anchor }}" title="следующий месяц" aria-label="следующий месяц">›</a>{% endif %}</span>{% if coverage.partial %} <span class="tag" title="в счёте {{ coverage.days }} дн. из {{ coverage.of }}">неполный · {% if coverage.from %}с {{ coverage.from.strftime('%d.%m') }}{% else %}{{ coverage.days }} дн.{% endif %}</span>{% endif %}{% endmacro %}
 {% set mq = '' if span.is_current else '?month=' ~ span.key %}
 
 {# Шапка - приветствие и «Критично» тремя группами: клиенты, задачи,
@@ -133,16 +133,22 @@
        aria-label="Деньги по дням месяца, план {{ money(chart.plan_per_day) }} в день">
     {% for d in shown %}
     <div class="bar-col" title="{{ d.day|dmy }}: пришло {{ money(d.paid) }}{% if d.debt %}, долг {{ money(d.debt) }}{% endif %}">
-      <div class="bar-val {% if d.future %}future{% elif d.over %}over-ok{% endif %}"
-           style="height:{{ d.height }}%"></div>
-      {% if chart_view != 'cumulative' and d.debt %}
-      <div class="bar-dot" style="bottom:{{ d.debt_height }}%" aria-hidden="true"></div>
-      {% endif %}
+      {# Столбик и точка долга - в области над подписью дня: от всей
+         колонки точка нуля ложилась на число дня. #}
+      <div class="bar-area">
+        <div class="bar-val {% if d.future %}future{% elif d.over %}over-ok{% endif %}"
+             style="height:{{ d.height }}%"></div>
+        {% if chart_view != 'cumulative' and d.debt %}
+        <div class="bar-dot" style="bottom:{{ d.debt_height }}%" aria-hidden="true"></div>
+        {% endif %}
+      </div>
       <div class="bar-day muted">{{ d.day.day }}</div>
     </div>
     {% endfor %}
     {% if chart_view != 'cumulative' and chart.plan_per_day %}
-    <div class="bar-norm" style="bottom:{{ chart.plan_height }}%" aria-hidden="true">
+    {# Линия плана - в той же системе, что столбики: доля области
+       столбика (--p), а не всей высоты графика; правило - в style.css. #}
+    <div class="bar-norm" style="--p:{{ chart.plan_height }}" aria-hidden="true">
       <span>план {{ money(chart.plan_per_day) }}/день</span></div>
     {% endif %}
   </div>

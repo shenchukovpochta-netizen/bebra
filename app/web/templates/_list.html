@@ -21,8 +21,9 @@
     <b>Итого {{ tools.total }}</b>{% if tools.shown != tools.total %} · показано {{ tools.shown }}{% endif %}
     {% if extra %}· {{ extra }}{% endif %}
     <span class="spacer"></span>
-    строк:
-    {% for size in LIST_SIZES %}<a href="?{{ tools.q_rows }}{% if tools.q_rows %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}
+    {# Одним куском: на телефоне «300» уезжала на свою строку одна. #}
+    <span class="nowrap">строк:
+    {% for size in LIST_SIZES %}<a href="?{{ tools.q_rows }}{% if tools.q_rows %}&{% endif %}rows={{ size }}" {% if tools.size == size %}class="on"{% endif %}>{{ size }}</a>{% if not loop.last %}·{% endif %}{% endfor %}</span>
     {% if tools.pages > 1 %}
     <span class="spacer"></span>
     {% if tools.page > 1 %}<a href="?{{ tools.query }}{% if tools.query %}&{% endif %}page={{ tools.page - 1 }}">←</a>{% endif %}
@@ -39,10 +40,15 @@
 <div class="saved-views">
   <span class="muted">Мои фильтры:</span>
   {% for v in saved %}
-  <a class="btn ghost" href="{{ section }}{% if v.query %}?{{ v.query }}{% endif %}">★ {{ v.name }}</a>
-  <form method="post" action="/views/{{ v.id }}/delete" class="inline-form">
-    <button type="submit" class="ghost danger" title="убрать фильтр">×</button>
-  </form>
+  {# Фильтр и его крестик - одной парой: порознь перенос строки ставил
+     крестик перед чужим фильтром, а удаление - одним нажатием. #}
+  <span class="view">
+    <a class="btn ghost" href="{{ section }}{% if v.query %}?{{ v.query }}{% endif %}">★ {{ v.name }}</a>
+    <form method="post" action="/views/{{ v.id }}/delete" class="inline-form">
+      <button type="submit" class="ghost danger" title="убрать фильтр «{{ v.name }}»"
+              aria-label="убрать фильтр «{{ v.name }}»">×</button>
+    </form>
+  </span>
   {% else %}<span class="muted">пока нет</span>{% endfor %}
   {% if tools.query %}
   <form method="post" action="/views" class="inline-form">

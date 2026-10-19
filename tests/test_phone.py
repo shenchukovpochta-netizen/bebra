@@ -60,7 +60,9 @@ CARD_TABLES = {"rentals.html": 1, "bikes.html": 1, "clients.html": 1, "orders.ht
                "batteries.html": 1, "parts.html": 1, "payments.html": 1,
                "tariff_report.html": 1, "buy.html": 1, "franchisees.html": 1,
                "franchise_royalty.html": 1, "feedback.html": 1, "bookings.html": 1}
-TABLE = re.compile(r'<table class="cards">(.*?)</table>', re.S)
+# Класс cards - среди прочих тоже: «editable cards», «ready cards»,
+# «cards staff-table».
+TABLE = re.compile(r'<table class="(?:[\w-]+ )*cards(?: [\w-]+)*">(.*?)</table>', re.S)
 HEAD = re.compile(r"""\{\{\s*list\.th\('([^']*)'|<th\b[^>]*>(.*?)</th>""", re.S)
 LABEL = re.compile(r'data-label="([^"]*)"')
 # Открывающий тег ячейки: «>» внутри {% if a > b %} тег не закрывает.
@@ -110,7 +112,8 @@ class TestCardTemplates(unittest.TestCase):
                 head = [plain(a or b) for a, b in HEAD.findall(head_row)]
                 labels = LABEL.findall(body[len(head_row):])
                 with self.subTest(name):
-                    self.assertGreaterEqual(len(head), 5)
+                    # Шапка найдена (таблицы в три-четыре колонки - тоже списки).
+                    self.assertGreaterEqual(len(head), 2)
                     self.assertGreaterEqual(len(labels), len(head))
                     for column, label in zip(head, labels, strict=False):
                         if column:
@@ -151,12 +154,14 @@ class TestCardStyles(unittest.TestCase):
 
     def test_cards_only_on_phones(self):
         """Карточки - только в телефонном @media: на компьютере список
-        остаётся таблицей, и ни одна его строка не меняет вид."""
+        остаётся таблицей, и ни одна его строка не меняет вид. Ровно этот
+        запрос: в «(hover:none),(max-width:640px)» карточками стал бы и
+        планшет с компьютерной шириной экрана."""
         found = [head for head, body in self.blocks()
                  if "table.cards" in head or "table.cards" in body]
         self.assertTrue(found)
         for head in found:
-            self.assertRegex(head, r"@media \(max-width:640px\)", head)
+            self.assertEqual(head, "@media (max-width:640px)", head)
 
     def test_label_comes_from_the_cell(self):
         self.assertIn("content:attr(data-label)", self.css)
@@ -176,6 +181,25 @@ class TestCardStyles(unittest.TestCase):
     def test_no_scroll_hint_over_cards(self):
         """«Прокрутите вбок» под карточками - неправда."""
         self.assertIn(".table-wrap:has(>table.cards)~.scroll-hint{display:none}", self.css)
+
+    def test_fields_do_not_zoom_the_page(self):
+        """Поле мельче 16 px iOS и Mini App увеличивают при фокусе. Правило -
+        последнее в файле: select и textarea иначе перебили бы правила
+        ниже него; поле кода подписи (28 px) не уменьшается."""
+        head, body = self.blocks()[-1]
+        self.assertEqual(head, "@media (max-width:1000px)")
+        self.assertIn(":not(.code-input)", body)
+        self.assertIn("select,textarea{font-size:16px}", body)
+        self.assertNotIn("maximum-scale", (TEMPLATES / "base.html").read_text(encoding="utf-8"))
+
+    def test_card_with_forms_keeps_its_frame(self):
+        """Карточку-список раздевают до строк на фоне страницы, а карточку,
+        где кроме списка есть формы, - нет: формы легли бы на фон."""
+        phone = "".join(body for head, body in self.blocks()
+                        if head == "@media (max-width:640px)")
+        self.assertIn(".card:is(:has(>table.cards),:has(>.table-wrap>table.cards))"
+                      ":not(:has(>form,", phone)
+        self.assertNotIn(".card:has(>table.cards),.card:has(>.table-wrap>table.cards){", phone)
 
 
 class CardParser(HTMLParser):
