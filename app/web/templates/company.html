@@ -32,14 +32,14 @@
 
 <div class="card">
   <h2>Шаблоны документов</h2>
-  <table>
+  <table class="cards">
     <tr><th>Документ</th><th>Состояние</th><th class="opt">Файл</th><th class="opt">Подстановки</th></tr>
     {% for t in templates %}
     <tr>
-      <td>{{ t.title }}</td>
-      <td>{% if t.ok %}<span class="tag ok">читается</span>{% else %}<span class="tag bad">{{ t.error }}</span>{% endif %}</td>
-      <td class="opt muted">{{ t.path }}{% if t.size %} · {{ (t.size / 1024)|round|int }} КБ{% endif %}</td>
-      <td class="opt muted">{% if t.fields %}{{ t.fields|length }}: {{ t.fields[:6]|join(', ') }}{% if t.fields|length > 6 %}…{% endif %}{% else %}—{% endif %}</td>
+      <td data-label="Документ">{{ t.title }}</td>
+      <td data-label="Состояние">{% if t.ok %}<span class="tag ok">читается</span>{% else %}<span class="tag bad">{{ t.error }}</span>{% endif %}</td>
+      <td class="opt muted" data-label="Файл">{{ t.path }}{% if t.size %} · {{ (t.size / 1024)|round|int }} КБ{% endif %}</td>
+      <td class="opt muted" data-label="Подстановки">{% if t.fields %}{{ t.fields|length }}: {{ t.fields[:6]|join(', ') }}{% if t.fields|length > 6 %}…{% endif %}{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}
   </table>

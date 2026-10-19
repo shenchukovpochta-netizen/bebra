@@ -8,9 +8,12 @@
   <a class="btn ghost" href="/alerts.csv?view={{ view }}&level={{ level }}&kind={{ kind }}&q={{ q|urlencode }}">CSV</a>
 </div>
 
+{# «Требуют внимания» - то же число, что на вкладке под плитками: на
+   телефоне плитка-повтор уходит (.tile.tab-dup), а последняя («за
+   сутки») встаёт на весь ряд - пятая плитка без пары. #}
 <div class="tiles">
   <div class="tile {% if summary.urgent %}warn{% endif %}"><b>{{ summary.urgent }}</b><span>срочных<br><small class="muted">едет не туда или сработала метка</small></span></div>
-  <div class="tile"><b>{{ summary.needs }}</b><span>требуют внимания</span></div>
+  <div class="tile tab-dup"><b>{{ summary.needs }}</b><span>требуют внимания</span></div>
   <div class="tile"><b>{{ summary.working }}</b><span>в работе</span></div>
   <div class="tile"><b>{{ summary.snoozed }}</b><span>отложено</span></div>
   <div class="tile"><b>{{ summary.normal }}</b><span>это норма<br><small class="muted">снимутся сами, когда причина исчезнет</small></span></div>
@@ -62,8 +65,8 @@
           {% if a.taken_by %}<br><small class="muted">{{ a.taken_by }}</small>{% endif %}
         {% endif %}
       </td>
-      <td class="actions nowrap">
-        {% if a.open and can_edit(staff, 'trackers') %}
+      <td class="actions nowrap" data-label="Действие">
+        {%- if a.open and can_edit(staff, 'trackers') %}
         <form method="post" action="/alerts/{{ a.id }}" class="inline-form">
           <input type="hidden" name="next" value="/alerts?view={{ view }}">
           {% if a.state != 'working' %}<button type="submit" name="action" value="take" class="ghost">взять</button>{% endif %}
@@ -82,7 +85,7 @@
           <button type="submit" class="ghost danger">🔒 блокировать мотор</button>
         </form>
         {% elif a.tracker_blocked %}<span class="tag bad">мотор заблокирован</span>{% endif %}
-        {% endif %}
+        {%- endif -%}
       </td>
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Ничего не требует внимания.</td></tr>{% endfor %}

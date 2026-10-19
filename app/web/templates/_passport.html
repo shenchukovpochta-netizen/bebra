@@ -15,12 +15,15 @@
     <tr>
       <td data-label="Поле">{{ r.title }}</td>
       <td data-label="Что в нём">{% if r.filled %}{{ r.value }}{% else %}<span class="muted">не заполнено</span>{% endif %}</td>
-      <td data-label="Сверено">{% if r.ok %}<span class="tag ok">✓ {{ r.at[:10] }}</span>
+      {# Пустая ячейка на телефоне прячется (td:empty), поэтому пробелы
+         вокруг условий срезаны: «Сверено —» и подпись над пустыми
+         кнопками - шум. #}
+      <td data-label="Сверено">{%- if r.ok %}<span class="tag ok">✓ {{ r.at[:10] }}</span>
         {% if r.photo %}<br><a href="{{ base }}/photo/{{ r.field }}" target="_blank" rel="noopener">снимок</a>{% endif %}
-        {% elif r.at %}<span class="tag bad">нужен снимок</span>
-        {% else %}<span class="muted">—</span>{% endif %}</td>
-      <td class="actions nowrap">
-        {% if can_edit(staff, section) %}
+        {%- elif r.at %}<span class="tag bad">нужен снимок</span>
+        {%- endif -%}</td>
+      <td class="actions nowrap" data-label="Действие">
+        {%- if can_edit(staff, section) %}
         {% if r.ok %}
         <form method="post" action="{{ base }}/check" class="inline-form">
           <input type="hidden" name="field" value="{{ r.field }}">
@@ -34,7 +37,7 @@
           <button type="submit" name="action" value="check" class="ghost">Сверено</button>
         </form>
         {% endif %}
-        {% endif %}
+        {%- endif -%}
       </td>
     </tr>
     {% endfor %}

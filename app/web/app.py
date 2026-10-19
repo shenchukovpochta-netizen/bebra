@@ -2773,7 +2773,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       model=filters["model"] or "", places=await filter_points(location),
                       rows=tools["rows"], tools=tools,
                       views=await views_of(request, "/bikes"),
-                      counts=await crm.bike_counts())
+                      # Числа в выборе статуса - по выбранной точке, как и
+                      # сам список: иначе «свободен (40)» при шести в списке.
+                      counts=await crm.bike_counts(location=location or None))
 
     @app.get("/bikes.{ext}")
     async def bikes_csv(request: Request, ext: str) -> Response:
@@ -9505,7 +9507,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         settings = await crm.settings()
         rows = logic.tracker_rows(await crm.trackers(), settings=settings)
         q = request.query_params.get("q") or ""
-        found = logic.rows_search(rows, q, TRACKER_SEARCH)
+        # Снятые с наблюдения - в конце, как в «Устройствах»: их молчание
+        # никого не ждёт.
+        found = logic.tracker_filter(logic.rows_search(rows, q, TRACKER_SEARCH), "")
         tools = list_tools(request, found, allowed=TRACKER_SORTS)
         # Точки на карте - по найденному: поиск и есть «выделить найденное».
         points = logic.map_points(tools["all_rows"])
@@ -9641,12 +9645,25 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not may_view(request, "trackers"):
             return denied(request, "trackers")
         rows = await tracker_rows_now()
+        # Поиск, состояние и страницы: 130 устройств одним списком на
+        # телефоне - два десятка экранов. Плитки - по всем, а не по найденному.
+        q = request.query_params.get("q") or ""
+        state = request.query_params.get("state") or ""
+        state = state if state in logic.TRACKER_FILTERS else ""
+        found = logic.tracker_filter(logic.rows_search(rows, q, TRACKER_SEARCH), state)
+        for row in found:                 # сортировка - по тому имени, что в строке
+            row["name"] = row.get("alias") or row.get("device_id")
+        tools = list_tools(request, found, allowed=TRACKER_LIST_SORTS)
         # Списка парка здесь нет: привязка живёт на карточке трекера. Список
         # в каждой строке - 130 трекеров на 190 велосипедов - это 2 МБ и
         # треть секунды на страницу.
-        return render(request, "trackers.html", rows=rows,
+        return render(request, "trackers.html", rows=tools["rows"], tools=tools,
+                      q=q, state=state, states=logic.TRACKER_FILTERS,
                       summary=logic.tracker_summary(rows),
                       alerts=await crm.tracker_alerts(open_only=True, limit=50))
+
+    TRACKER_LIST_SORTS = {"device": "name", "bike": "bike_code",
+                          "power": "voltage", "silent": "silent_hours"}
 
     @app.post("/trackers")
     async def tracker_create(request: Request) -> Response:

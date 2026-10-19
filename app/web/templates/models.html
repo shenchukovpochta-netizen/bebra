@@ -8,20 +8,26 @@
 <div class="cols">
 <section class="card">
   <h2>Велосипеды</h2>
-  <table>
+  <table class="cards">
     <tr><th>Название</th><th class="opt">Характеристики</th><th>Слотов</th><th>В парке</th><th>Цены</th></tr>
     {% for m in bike_models %}
     <tr class="{% if not m.active %}muted{% endif %}">
-      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}
+      <td data-label="Название">{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}
         {% if m.factory_title %}<br><small class="muted">заводское: {{ m.factory_title }}</small>{% endif %}</td>
-      <td class="opt muted">{% if m.speed_kmh %}{{ m.speed_kmh }} км/ч{% endif %}{% if m.range_km %} · {{ m.range_km }} км{% endif %}{% if m.motor_watt %} · {{ m.motor_watt }} Вт{% endif %}{% if m.weight_kg %} · {{ m.weight_kg|int }} кг{% endif %}{% if m.max_load_kg %} · до {{ m.max_load_kg }} кг{% endif %}</td>
-      <td class="num">{{ m.battery_slots }}</td>
-      <td class="num">{{ m.bikes }}</td>
-      <td>{% for t in prices.get(m.title, []) %}{{ t.name }} {{ money(t.price) }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">нет своих цен</span>{% endfor %}</td>
+      <td class="opt muted" data-label="Характеристики">{% if m.speed_kmh %}{{ m.speed_kmh }} км/ч{% endif %}{% if m.range_km %} · {{ m.range_km }} км{% endif %}{% if m.motor_watt %} · {{ m.motor_watt }} Вт{% endif %}{% if m.weight_kg %} · {{ m.weight_kg|int }} кг{% endif %}{% if m.max_load_kg %} · до {{ m.max_load_kg }} кг{% endif %}</td>
+      <td class="num" data-label="Слотов">{{ m.battery_slots }}</td>
+      <td class="num" data-label="В парке">{{ m.bikes }}</td>
+      {# Сумма и так одним куском (money - с неразрывными пробелами), а
+         nowrap на всю «Две недели 6 000 ₽» выталкивал колонку за край
+         карточки на компьютере: каталог там - половина ширины. #}
+      <td data-label="Цены">{% for t in prices.get(m.title, []) %}{{ t.name }} {{ money(t.price) }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">нет своих цен</span>{% endfor %}</td>
     </tr>
     {% if can_edit(staff, 'settings') %}
-    <tr class="{% if not m.active %}muted{% endif %}">
+    {# Форма правки - под раскрытием: двенадцать полей на каждую модель
+       делали из каталога десять экранов телефона. #}
+    <tr class="edit-row {% if not m.active %}muted{% endif %}">
       <td colspan="5">
+        <details class="more"><summary>Изменить</summary>
         <form method="post" action="/models/bikes/{{ m.id }}" class="grid2">
           <label>Название для клиента <input name="title" value="{{ m.title }}" required></label>
           <label>Бренд <input name="brand" value="{{ m.brand or '' }}"></label>
@@ -42,6 +48,7 @@
           {% if not m.bikes %}<button type="submit" name="action" value="delete" class="ghost danger"
             onclick="return confirm('Удалить модель «{{ m.title }}» из каталога?')">Удалить</button>{% endif %}
         </form>
+        </details>
       </td>
     </tr>
     {% endif %}
@@ -53,7 +60,8 @@
     иначе цена и совместимость к ним не привяжутся.</p>
   {% endif %}
   {% if can_edit(staff, 'settings') %}
-  <h3>Добавить модель</h3>
+  {# Модель заводят раз в сезон: четырнадцать полей - под раскрытием. #}
+  <details class="more"><summary>Добавить модель</summary>
   <form method="post" action="/models/bikes" class="grid2">
     <label>Название для клиента <input name="title" required></label>
     <label>Бренд <input name="brand"></label>
@@ -71,27 +79,29 @@
     <label class="wide">Описание для клиента <input name="description"></label>
     <button type="submit">Добавить</button>
   </form>
+  </details>
   {% endif %}
 </section>
 
 <section class="card">
   <h2>Батареи</h2>
-  <table>
+  <table class="cards">
     <tr><th>Название</th><th>В</th><th>А·ч</th>{% if can_view(staff, 'finance') %}<th>Цена</th>{% endif %}<th>Заведено</th><th></th></tr>
     {% for m in battery_models %}
     <tr class="{% if not m.active %}muted{% endif %}">
-      <td>{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}{% if not m.active %} <small class="muted">архив</small>{% endif %}</td>
-      <td class="num">{{ m.voltage or '—' }}</td>
-      <td class="num">{{ m.capacity or '—' }}</td>
-      {% if can_view(staff, 'finance') %}<td class="num">{{ money(m.price) }}</td>{% endif %}
-      <td class="num">{{ m.batteries }}</td>
-      <td class="actions nowrap">{% if can_edit(staff, 'settings') %}<form method="post" action="/models/batteries/{{ m.id }}" class="inline-form"><button type="submit" name="action" value="toggle" class="ghost">{{ 'В архив' if m.active else 'Вернуть' }}</button></form>{% endif %}</td>
+      <td data-label="Название">{{ m.title }}{% if m.brand %} <small class="muted">{{ m.brand }}</small>{% endif %}{% if not m.active %} <small class="muted">архив</small>{% endif %}</td>
+      <td class="num" data-label="В">{{ m.voltage or '' }}</td>
+      <td class="num" data-label="А·ч">{{ m.capacity or '' }}</td>
+      {% if can_view(staff, 'finance') %}<td class="num" data-label="Цена">{{ money(m.price) }}</td>{% endif %}
+      <td class="num" data-label="Заведено">{{ m.batteries }}</td>
+      <td class="actions nowrap" data-label="Действие">{% if can_edit(staff, 'settings') %}<form method="post" action="/models/batteries/{{ m.id }}" class="inline-form"><button type="submit" name="action" value="toggle" class="ghost">{{ 'В архив' if m.active else 'Вернуть' }}</button></form>{% endif %}</td>
     </tr>
     {% if can_edit(staff, 'settings') %}
-    <tr class="{% if not m.active %}muted{% endif %}">
+    <tr class="edit-row {% if not m.active %}muted{% endif %}">
       <td colspan="6">
         {# Цена и срок службы - источник амортизации батарей этой модели:
            правятся здесь, а не в каждой батарее. #}
+        <details class="more"><summary>Изменить</summary>
         <form method="post" action="/models/batteries/{{ m.id }}" class="grid2">
           <label>Название <input name="title" value="{{ m.title }}" required></label>
           <label>Бренд <input name="brand" value="{{ m.brand or '' }}"></label>
@@ -102,6 +112,7 @@
           <label>Ресурс, циклов <input name="max_cycles" value="{{ m.max_cycles or '' }}" size="6" placeholder="общий"></label>
           <button type="submit" class="ghost">Сохранить</button>
         </form>
+        </details>
       </td>
     </tr>
     {% endif %}
@@ -110,6 +121,7 @@
   <p class="muted">Архивная модель не предлагается при заведении батарей, но
     заведённые остаются с ней: история парка не переписывается.</p>
   {% if can_edit(staff, 'settings') %}
+  <details class="more"><summary>Добавить модель АКБ</summary>
   <form method="post" action="/models/batteries" class="grid2">
     <label>Название <input name="title" required></label>
     <label>Бренд <input name="brand"></label>
@@ -120,6 +132,7 @@
     <label>Ресурс, циклов <input name="max_cycles" size="6" placeholder="общий"></label>
     <button type="submit">Добавить</button>
   </form>
+  </details>
   {% endif %}
   <p class="muted">Ресурс в циклах — для плана замены АКБ: пусто — общий из
     «Батареи → План замены». Срок службы и цена здесь же: по сроку считается
@@ -156,6 +169,9 @@
     </tr>
     {% endfor %}
   </table>
+  {# Матрица остаётся таблицей: клетка - пара «велосипед и батарея», и
+     карточкой её не прочесть. На телефоне - прокрутка вбок. #}
+  <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
   <p class="muted">Пустая клетка и есть «не подходит»: хранить отдельно «нет»
     значило бы отличать «проверили и не подходит» от «ещё не проверяли», а на
     двух точках это различие никому не нужно. «Основная» — та, что ставят по

@@ -101,6 +101,7 @@ class TestCrmSql(unittest.TestCase):
             self.db.bike_by_frame("f"), self.db.bike_by_code("c"),
             self.db.create_bike(code="c", model="m", frame_no=None),
             self.db.update_bike(1, status="repair", note="x"), self.db.bike_counts(),
+            self.db.bike_counts(location="Павлюхина"), self.db.bike_counts(location="none"),
             self.db.update_bike(1, status="repair", not_status=("rented", "new"), by="me"),
             self.db.update_bike(1, location="Павлюхина", from_location="Адоратского",
                                 not_status=("rented",)),

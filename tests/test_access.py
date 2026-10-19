@@ -317,7 +317,12 @@ class TestAccessInPanel(tw.WebCase):
         self.as_("ivan")
         page = self.get_ok(f"/bikes/{self.bike_id}")
         self.assertIn("Kugoo V3", page)
-        self.assertIn('<fieldset disabled class="plain">', page)
+        # Паспорт - текстом, а не погашенной формой: на телефоне серые поля
+        # не прочесть. Формы сохранения на странице нет вовсе.
+        self.assertNotIn("<fieldset disabled", page)
+        self.assertNotIn(f'action="/bikes/{self.bike_id}/edit"', page)
+        self.assertIn("<dt>Инвентарный номер</dt><dd>B-1</dd>", page)
+        self.assertIn("только на просмотр", page)
         self.assertNotIn("Записать ремонт", page)
         self.assertNotIn("+ Велосипед", self.get_ok("/bikes"))
         r = self.client.post(f"/bikes/{self.bike_id}/repair",

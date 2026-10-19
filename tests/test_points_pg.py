@@ -962,6 +962,15 @@ class TestPointsOnPostgres(unittest.IsolatedAsyncioTestCase):
         counts = await self.crm.bike_counts()
         self.assertEqual(total["fleet"],
                          sum(counts.get(s, 0) for s in logic.OPERATIONAL_STATUSES))
+        # Счётчики по точке (выбор статуса в «Парке» при фильтре точки) -
+        # в сумме весь парк, «не на точке» - отдельная строка.
+        by_point = [await self.crm.bike_counts(location=name)
+                    for name in ("Павлюхина", "Адоратского", "Чистопольская", "none")]
+        for status, n in counts.items():
+            self.assertEqual(sum(c.get(status, 0) for c in by_point), n, status)
+        self.assertEqual(sum((await self.crm.bike_counts(location="none")).values()),
+                         sum(1 for b in await self.crm.bikes(limit=1000)
+                             if b["location"] is None))
         self.assertEqual(total["active"], (await self.crm.counts())["rentals"])
         self.assertEqual(total["debt"], -sum(d["balance"] for d in await self.crm.debtors()))
 

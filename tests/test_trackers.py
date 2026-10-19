@@ -331,6 +331,34 @@ class TestTrackerLogic(unittest.TestCase):
         self.assertEqual(rows[0]["bike_code"], "B-103", "едущие - первыми")
         self.assertIn("yandex.ru/maps", rows[0]["map"])
 
+    def test_filter_by_state_keeps_the_alarm_order(self):
+        """Фильтр списка устройств - то же слово, что тег в строке; снятые
+        с наблюдения - в конце, иначе их молчание занимало первую страницу."""
+        rows = logic.tracker_rows(
+            [tracker(),
+             tracker(id=2, device_id="1002", bike_code="B-102", active=False,
+                     last_seen=NOW - timedelta(hours=20)),
+             tracker(id=3, device_id="1003", bike_code="B-103",
+                     last_seen=NOW - timedelta(hours=20)),
+             tracker(id=4, device_id="1004", bike_id=None, bike_code=None, speed=D(24))],
+            now=NOW)
+        codes = [r["device_id"] for r in logic.tracker_filter(rows, "")]
+        self.assertEqual(codes[-1], "1002", "снятый - последним")
+        self.assertEqual(codes[0], "1004", "едущий - первым, как в tracker_rows")
+        self.assertEqual([r["device_id"] for r in logic.tracker_filter(rows, "offline")],
+                         ["1003", "1002"])
+        self.assertEqual([r["device_id"] for r in logic.tracker_filter(rows, "moving")],
+                         ["1004"])
+        self.assertEqual([r["device_id"] for r in logic.tracker_filter(rows, "free")],
+                         ["1004"])
+        self.assertEqual([r["device_id"] for r in logic.tracker_filter(rows, "off")],
+                         ["1002"])
+        self.assertEqual([r["device_id"] for r in logic.tracker_filter(rows, "parked")],
+                         ["1001"])
+        self.assertEqual(len(logic.tracker_filter(rows, "чушь")), 4)
+        self.assertEqual(set(logic.TRACKER_FILTERS), {"alarm", "moving", "offline",
+                                                     "parked", "free", "off"})
+
     def test_thresholds_come_from_settings(self):
         row = logic.tracker_rows([tracker(speed=D(7))], now=NOW,
                                  settings={"tracker_moving_speed": "10"})[0]
@@ -620,8 +648,10 @@ class TestTrackerPanel(tw.WebCase):
         bound = tw.run(self.crm.create_tracker(device_id="1002", alias="На B-1"))
         tw.run(self.crm.update_tracker(bound, bike_id=self.bike_id))
         page = self.get_ok("/trackers")
-        self.assertNotIn("<option", page.split('name="device_id"')[0],
+        # Выпадающий список на странице один - фильтр по состоянию, не парк.
+        self.assertNotIn('name="bike_id"', page,
                          "в строках списка нет выпадающего списка велосипедов")
+        self.assertNotIn("F-0", page)
         self.assertIn(f'href="/trackers/{self.tracker_id}#bind">привязать</a>', page)
         self.assertIn(f'href="/bikes/{self.bike_id}">№ B-1</a>', page)
         card = self.get_ok(f"/trackers/{self.tracker_id}")
@@ -659,6 +689,15 @@ class TestTrackerPanel(tw.WebCase):
         r = self.client.post(f"/trackers/alerts/{alert_id}", data={"next": "/map"})
         self.assertEqual(r.headers["location"], "/map")
         self.assertEqual(tw.run(self.crm.tracker_alerts()), [])
+
+    def test_open_alerts_stand_above_the_devices(self):
+        """«Снять» - главное действие страницы: под первой страницей
+        устройств (полсотни карточек на телефоне) до него не долистать."""
+        tw.run(self.crm.raise_alert(tracker_id=self.tracker_id, kind="offline",
+                                    note="молчит", bike_id=None, lat=None, lon=None))
+        page = self.get_ok("/trackers")
+        self.assertIn("Открытые тревоги", page)
+        self.assertLess(page.index("Открытые тревоги"), page.index('class="search"'))
 
     def test_card_keeps_its_open_alert_behind_the_fleets_history(self):
         """Карточка брала полсотни тревог всего парка и отбирала свои: давняя
@@ -699,6 +738,28 @@ class TestTrackerPanel(tw.WebCase):
         self.client.post(f"/trackers/{self.tracker_id}/toggle")
         self.assertFalse(tw.run(self.crm.tracker(self.tracker_id))["active"])
         self.assertIn("снят", self.get_ok("/trackers"))
+
+    def test_list_searches_filters_and_pages(self):
+        """130 устройств - не одним списком: поиск, состояние и страницы,
+        а плитки - по всем устройствам, не по найденному."""
+        for i in range(60):
+            tw.run(self.crm.create_tracker(device_id=f"9{i:03d}", alias=f"Метка {i}"))
+        bound = tw.run(self.crm.create_tracker(device_id="1002", alias="На B-1",
+                                               last_seen=datetime.now(UTC), speed=D(0)))
+        tw.run(self.crm.update_tracker(bound, bike_id=self.bike_id))
+        page = self.get_ok("/trackers")
+        self.assertIn("Итого 62", page)
+        self.assertIn("стр. 1 из 2", page)
+        self.assertIn("<b>62</b><span>устройств</span>", page)
+        found = self.get_ok("/trackers?q=B-1")
+        self.assertIn("Итого 1", found)
+        self.assertIn("На B-1", found)
+        self.assertIn("<b>62</b><span>устройств</span>", found, "плитки - по всем")
+        free = self.get_ok("/trackers?state=free")
+        self.assertIn("Итого 61", free)
+        self.assertNotIn("На B-1", free)
+        self.assertIn('<option value="free" selected>', free)
+        self.assertIn("Итого 62", self.get_ok("/trackers?state=чушь"))
 
     def test_missing_tracker_is_a_404(self):
         self.assertEqual(self.client.get("/trackers/999").status_code, 404)
