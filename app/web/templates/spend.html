@@ -21,20 +21,20 @@
 </div>
 
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>Позиция</th><th class="opt">Узел</th><th>Ушло</th><th>Нарядов</th>{% if money_ok %}<th>Себестоимость</th>{% endif %}</tr>
   {% for r in rows %}
   <tr>
-    <td><a href="/parts/{{ r.id }}">{{ r.title }}</a></td>
-    <td class="opt muted">{{ r.node_title }}</td>
-    <td class="num">{{ r.qty }} {{ r.unit }}</td>
-    <td class="num">{{ r.orders or '—' }}</td>
-    {% if money_ok %}<td class="num">{{ money(r.cost) }}</td>{% endif %}
+    <td data-label="Позиция"><a href="/parts/{{ r.id }}">{{ r.title }}</a></td>
+    <td class="opt muted" data-label="Узел">{{ r.node_title or '' }}</td>
+    <td class="num" data-label="Ушло">{{ r.qty }} {{ r.unit }}</td>
+    <td class="num" data-label="Нарядов">{{ r.orders or '' }}</td>
+    {% if money_ok %}<td class="num" data-label="Себестоимость">{{ money(r.cost) }}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="5" class="muted">За период со склада ничего не уходило.</td></tr>{% endfor %}
   {% if rows %}
-  <tr><td><b>ИТОГО</b></td><td class="opt"></td><td class="num"><b>{{ total.qty }}</b></td>
-      <td></td>{% if money_ok %}<td class="num"><b>{{ money(total.cost) }}</b></td>{% endif %}</tr>
+  <tr class="total"><td data-label="Позиция"><b>ИТОГО</b></td><td class="opt" data-label="Узел"></td><td class="num" data-label="Ушло"><b>{{ total.qty }}</b></td>
+      <td data-label="Нарядов"></td>{% if money_ok %}<td class="num" data-label="Себестоимость"><b>{{ money(total.cost) }}</b></td>{% endif %}</tr>
   {% endif %}
 </table>
 <p class="muted">Расход — это всё, что уменьшило остаток: ушло в наряд,

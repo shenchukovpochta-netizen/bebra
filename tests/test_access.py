@@ -331,6 +331,24 @@ class TestAccessInPanel(tw.WebCase):
         self.assertIn("только на просмотр", page)
         self.assertNotIn("Новый тариф", page)
 
+    def test_view_only_price_lists_are_text(self):
+        """Без права правки тарифы и прайс сервиса - текстом, а не
+        запертыми полями: на телефоне поле в шесть знаков обрезало цену,
+        а серые кнопки читались как сломанная форма."""
+        self.add("ivan", "manager")
+        self.as_("ivan")
+        page = self.get_ok("/tariffs")
+        self.assertIn("3 000 ₽", page, "цена недели - числом")
+        self.assertNotIn('form="tariff', page)
+        self.assertNotIn("<fieldset disabled", page)
+        self.assertNotIn(">Сохранить<", page)
+        page = self.get_ok("/work-types")
+        self.assertIn("только на просмотр", page)
+        self.assertNotIn('form="work', page)
+        self.assertNotIn('name="norm_', page, "сроки ремонта - тоже текстом")
+        self.assertNotIn("Сохранить сроки", page)
+        self.assertIn("Сроки ремонта", page)
+
     def test_reports_keep_repairs_but_hide_money(self):
         self.add("petr", "tech")
         self.as_("petr")

@@ -25,32 +25,32 @@
 
 <div class="card">
 <div class="table-wrap">
-<table>
+<table class="cards">
   <tr><th>Техник</th><th>Нарядов</th><th class="opt">Из них клиентских</th>
       <th class="opt">Средн. суток</th>{% if money_ok %}<th>Работы</th><th class="opt">Запчасти</th>
       <th>Сумма</th><th class="opt">Средний наряд</th>{% endif %}</tr>
   {% for r in rows %}
   <tr>
-    <td>{{ r.tech }}</td>
-    <td class="num">{{ r.orders }}</td>
-    <td class="num opt">{{ r.client_orders or '—' }}</td>
-    <td class="num opt">{{ r.avg_days }}</td>
+    <td data-label="Техник">{{ r.tech }}</td>
+    <td class="num" data-label="Нарядов">{{ r.orders }}</td>
+    <td class="num opt" data-label="Из них клиентских">{{ r.client_orders or '—' }}</td>
+    <td class="num opt" data-label="Средн. суток">{{ r.avg_days }}</td>
     {% if money_ok %}
-    <td class="num">{{ money(r.works) }}</td>
-    <td class="num opt muted">{{ money(r.cost) }}</td>
-    <td class="num"><b>{{ money(r.total) }}</b></td>
-    <td class="num opt muted">{{ money(r.avg_total) }}</td>
+    <td class="num" data-label="Работы">{{ money(r.works) }}</td>
+    <td class="num opt muted" data-label="Запчасти">{{ money(r.cost) }}</td>
+    <td class="num" data-label="Сумма"><b>{{ money(r.total) }}</b></td>
+    <td class="num opt muted" data-label="Средний наряд">{{ money(r.avg_total) }}</td>
     {% endif %}
   </tr>
   {% else %}<tr><td colspan="{{ 8 if money_ok else 4 }}" class="muted">За период нет закрытых нарядов.</td></tr>{% endfor %}
   {% if rows %}
-  <tr><td><b>ИТОГО</b></td><td class="num"><b>{{ total.orders }}</b></td>
-      <td class="num opt">{{ total.client_orders }}</td><td class="opt"></td>
+  <tr class="total"><td data-label="Техник"><b>ИТОГО</b></td><td class="num" data-label="Нарядов"><b>{{ total.orders }}</b></td>
+      <td class="num opt" data-label="Из них клиентских">{{ total.client_orders }}</td><td class="opt" data-label="Средн. суток"></td>
       {% if money_ok %}
-      <td class="num"><b>{{ money(total.works) }}</b></td>
-      <td class="num opt muted">{{ money(total.cost) }}</td>
-      <td class="num"><b>{{ money(total.total) }}</b></td>
-      <td class="num opt muted">{{ money(total.avg_total) }}</td>
+      <td class="num" data-label="Работы"><b>{{ money(total.works) }}</b></td>
+      <td class="num opt muted" data-label="Запчасти">{{ money(total.cost) }}</td>
+      <td class="num" data-label="Сумма"><b>{{ money(total.total) }}</b></td>
+      <td class="num opt muted" data-label="Средний наряд">{{ money(total.avg_total) }}</td>
       {% endif %}</tr>
   {% endif %}
 </table>

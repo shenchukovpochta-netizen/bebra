@@ -331,6 +331,33 @@ class TestStockInPanel(tw.WebCase):
         self.assertIn("Приход", self.get_ok("/parts/moves"))
         self.assertEqual(self.client.get("/parts/999").status_code, 404)
 
+    def test_card_shows_the_last_moves_and_links_to_all(self):
+        """На карточке позиции - последние движения: сотня строк уводила
+        пересчёт на телефоне далеко вниз. Все - «Движения склада» этой
+        позиции, постранично."""
+        other = tw.run(self.crm.create_part(
+            title="Трос тормозной", node=None, unit="шт", cost=D(50), price=D(100),
+            min_stock=0, model=None, note=None))
+        tw.run(self.crm.add_part_move(part_id=other, kind="count", qty=1, cost=D(50),
+                                      note="чужая позиция"))
+        page = self.get_ok(f"/parts/{self.part_id}")
+        self.assertNotIn(f"/parts/moves?part={self.part_id}", page, "движений мало - ссылки нет")
+        for n in range(21):
+            tw.run(self.crm.add_part_move(part_id=self.part_id, kind="count", qty=1,
+                                          cost=D(100), note=f"пересчёт {n}"))
+        page = self.get_ok(f"/parts/{self.part_id}")
+        self.assertIn(f'href="/parts/moves?part={self.part_id}"', page)
+        self.assertIn("пересчёт 20", page, "последнее - на карточке")
+        self.assertNotIn("пересчёт 0<", page, "двадцать первое с конца - только в списке")
+        moves = self.get_ok(f"/parts/moves?part={self.part_id}")
+        self.assertIn("Итого 21", moves)
+        self.assertNotIn("чужая позиция", moves)
+        self.assertIn("все позиции", moves)
+        self.assertIn("чужая позиция", self.get_ok("/parts/moves"))
+        page = self.get_ok(f"/parts/moves?part={self.part_id}&rows=50&page=1&sort=qty&dir=desc")
+        self.assertIn("Итого 21", page)
+        self.assertEqual(self.client.get("/parts/moves?part=abc").status_code, 200)
+
     def test_cost_cannot_be_set_by_hand(self):
         self.receive(qty="10", price="300")
         self.client.post(f"/parts/{self.part_id}/edit", data={

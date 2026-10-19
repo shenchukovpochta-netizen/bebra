@@ -5,17 +5,19 @@
   {% with active = 'suppliers' %}{% include "_parts_tabs.html" %}{% endwith %}
 </div>
 <div class="card">
-<table>
+<table class="cards">
   <tr><th>Название</th><th>Телефон</th><th>Приходов</th>{% if can_view(staff, 'finance') %}<th>Закуплено</th>{% endif %}<th class="opt">Последний</th><th class="opt">Заметка</th><th></th></tr>
   {% for s in rows %}
   <tr class="{% if not s.active %}muted{% endif %}">
-    <td>{{ s.name }}</td>
-    <td>{{ s.phone or '—' }}</td>
-    <td class="num">{{ s.receipts }}</td>
-    {% if can_view(staff, 'finance') %}<td class="num">{{ money(s.spent) }}</td>{% endif %}
-    <td class="opt">{% if s.last_at %}{{ s.last_at|dmy }}{% else %}—{% endif %}</td>
-    <td class="opt">{{ s.note or '' }}</td>
-    <td>{% if can_edit(staff, 'inventory') %}<form method="post" action="/suppliers/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'В архив' if s.active else 'Вернуть' }}</button></form>{% endif %}</td>
+    <td data-label="Название">{{ s.name }}</td>
+    {# Номер одним куском: «+7 900» и «123-45-67» на разных строках не
+       набрать. Обёрткой, а не классом ячейки: в карточке ячейка переносится. #}
+    <td data-label="Телефон">{%- if s.phone -%}<span class="nowrap">{{ s.phone }}</span>{%- endif -%}</td>
+    <td class="num" data-label="Приходов">{{ s.receipts }}</td>
+    {% if can_view(staff, 'finance') %}<td class="num" data-label="Закуплено">{{ money(s.spent) }}</td>{% endif %}
+    <td class="opt" data-label="Последний">{% if s.last_at %}{{ s.last_at|dmy }}{% else %}—{% endif %}</td>
+    <td class="opt" data-label="Заметка">{{ s.note or '' }}</td>
+    <td data-label="Действие">{%- if can_edit(staff, 'inventory') -%}<form method="post" action="/suppliers/{{ s.id }}/toggle"><button type="submit" class="ghost">{{ 'В архив' if s.active else 'Вернуть' }}</button></form>{%- endif -%}</td>
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Поставщиков нет.</td></tr>{% endfor %}
 </table>

@@ -3,46 +3,62 @@
 {% block content %}
 <div class="bar"><h1>Тарифы</h1></div>
 {% set can = can_edit(staff, 'tariffs') %}
+{# Пояснение - до таблиц: внизу его не видно, и непонятно, почему цену
+   нельзя поправить. #}
+{% if not can %}<p class="muted">Тарифы вам открыты только на просмотр.</p>{% endif %}
 
 {% for g in groups %}
 <section class="card">
   <h2>{{ g.title }} <span class="muted">· {{ g.rows|length }}</span></h2>
-  <fieldset {% if not can %}disabled{% endif %} class="plain">
   {# Формы стоят отдельно от таблицы, а поля ссылаются на них атрибутом
      form: <form> внутри <tr> браузер выносит наружу, и строки таблицы
-     разъезжаются пустотами. #}
+     разъезжаются пустотами. Без права правки - текстом: запертые поля и
+     серые кнопки на телефоне читались как сломанная форма, а цена в
+     поле обрезалась. #}
   <div class="table-wrap">
-  <table class="editable">
-    <tr><th>Модель</th><th>Название</th><th>Период</th><th>Цена</th><th class="num">В день</th><th class="opt">Заметка</th><th></th></tr>
+  <table class="editable cards">
+    <tr><th>Модель</th><th{% if not can %} class="opt"{% endif %}>Название</th><th>Период</th><th{% if not can %} class="num"{% endif %}>Цена</th><th class="num">В день</th><th class="opt">Заметка</th>{% if can %}<th></th>{% endif %}</tr>
     {% for t in g.rows %}
     <tr class="{% if not t.active %}muted{% endif %}">
-      <td>
+      {% if can %}
+      <td data-label="Модель">
         <select name="model" form="tariff{{ t.id }}" title="{{ t.model or 'любая модель' }}">
           <option value="">любая модель</option>
           {% for m in g.models %}<option value="{{ m.title }}" {% if t.model == m.title %}selected{% endif %}>{{ m.title }}</option>{% endfor %}
           {% if t.model and t.model not in g.models|map(attribute='title')|list %}<option value="{{ t.model }}" selected>{{ t.model }} · нет в каталоге</option>{% endif %}
         </select>
       </td>
-      <td class="grow"><input name="name" value="{{ t.name }}" form="tariff{{ t.id }}"></td>
-      <td class="nowrap"><input name="period_days" value="{{ t.period_days }}" form="tariff{{ t.id }}" size="3" class="mini"> дн.</td>
-      <td class="nowrap"><input name="price" value="{{ t.price }}" form="tariff{{ t.id }}" size="7" class="mini"> ₽</td>
-      <td class="num muted">{{ money(per_day(t.price, t.period_days)) }}</td>
-      <td class="opt grow"><input name="note" value="{{ t.note or '' }}" form="tariff{{ t.id }}"></td>
-      <td class="actions nowrap">
+      <td class="grow" data-label="Название"><input name="name" value="{{ t.name }}" form="tariff{{ t.id }}"></td>
+      <td class="nowrap" data-label="Период"><input name="period_days" value="{{ t.period_days }}" form="tariff{{ t.id }}" size="3" class="mini"> дн.</td>
+      <td class="nowrap" data-label="Цена"><input name="price" value="{{ t.price }}" form="tariff{{ t.id }}" size="7" class="mini"> ₽</td>
+      <td class="num muted" data-label="В день">{{ money(per_day(t.price, t.period_days)) }}</td>
+      <td class="opt grow" data-label="Заметка"><input name="note" value="{{ t.note or '' }}" form="tariff{{ t.id }}"></td>
+      <td class="actions nowrap" data-label="Действие">
         <button type="submit" class="ghost" form="tariff{{ t.id }}">Сохранить</button>
         <button type="submit" name="action" value="toggle" class="ghost" form="tariff{{ t.id }}">{{ 'Выключить' if t.active else 'Включить' }}</button>
       </td>
+      {% else %}
+      {# Название при просмотре - справочное: срок и так в «Периоде», а
+         карточка тарифа на телефоне - модель, срок и цена. #}
+      <td data-label="Модель">{{ t.model or 'любая модель' }}{% if not t.active %} <small class="muted">· выключен</small>{% endif %}</td>
+      <td class="opt" data-label="Название">{{ t.name }}</td>
+      <td class="nowrap" data-label="Период">{{ t.period_days }} дн.</td>
+      <td class="num" data-label="Цена">{{ money(t.price) }}</td>
+      <td class="num muted" data-label="В день">{{ money(per_day(t.price, t.period_days)) }}</td>
+      <td class="opt" data-label="Заметка">{{ t.note or '' }}</td>
+      {% endif %}
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Тарифов пока нет.</td></tr>{% endfor %}
   </table>
   </div>
+  {% if can %}
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
   {% for t in g.rows %}
   <form id="tariff{{ t.id }}" method="post" action="/tariffs/{{ t.id }}">
     <input type="hidden" name="kind" value="{{ g.kind }}">
   </form>
   {% endfor %}
-  </fieldset>
+  {% endif %}
 
   <p class="muted">{{ g.hint }}</p>
   {% if g.unpriced %}
@@ -68,7 +84,6 @@
 </section>
 {% endfor %}
 
-{% if not can %}<p class="muted">Тарифы вам открыты только на просмотр.</p>{% endif %}
 <p class="muted">Одна цена на связку «вид + модель + срок»: второй такой же
   тариф система не примет. Выключенный тариф не предлагается при
   оформлении, но остаётся в истории. Идущие аренды хранят свою копию цены

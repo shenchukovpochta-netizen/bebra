@@ -7,6 +7,8 @@
 <div class="bar">
   <h1>Наряд {{ order.no }} <span class="tag order-{{ order.status }}">{{ ORDER_STATUSES[order.status] }}</span></h1>
   <a class="btn ghost" href="/orders">Все наряды</a>
+  {# Закрытие - последней карточкой: на телефоне до него пять экранов форм. #}
+  {% if can and open_now %}<a class="btn ghost" href="#close">Закрыть наряд ↓</a>{% endif %}
 </div>
 
 <div class="cols">
@@ -26,7 +28,7 @@
     {% if money_ok %}<dt>Смета</dt><dd>{{ money(order.estimate) }}{% if order.status == 'done' %} · итог <b>{{ money(order.total) }}</b>{% endif %}</dd>{% endif %}
   </dl>
   {% if can and open_now %}
-  <h2>Изменить</h2>
+  <h3>Изменить</h3>
   <form method="post" action="/orders/{{ order.id }}/edit" class="grid2">
     {# На согласовании статус руками не меняют: список его не содержит, и
        выпадающий «Новый» молча сбросил бы ожидание ответа клиента. #}
@@ -50,22 +52,28 @@
 <section class="card">
   <h2>Работы и запчасти</h2>
   <table class="cards">
-    <tr><th>Работа</th><th>Узел</th><th class="num">Кол-во</th>{% if money_ok %}<th class="num">Клиенту</th><th class="num">Себест.</th>{% endif %}<th></th></tr>
+    {# Узел - строкой под работой, а не своей колонкой: в половине экрана
+       кнопка «Убрать» иначе уезжала за край карточки. #}
+    <tr><th>Работа</th><th class="num">Кол-во</th>{% if money_ok %}<th class="num">Клиенту</th><th class="num">Себест.</th>{% endif %}<th></th></tr>
     {% for i in items %}
     <tr>
-      <td data-label="Работа">{{ i.title }}</td>
-      <td class="muted" data-label="Узел">{{ REPAIR_NODES.get(i.node, '—') }}</td>
+      <td data-label="Работа">{{ i.title }}{% if i.node in REPAIR_NODES %}<br><small class="muted">{{ REPAIR_NODES[i.node] }}</small>{% endif %}</td>
       <td class="num" data-label="Кол-во">{{ i.qty }}</td>
       {% if money_ok %}<td class="num" data-label="Клиенту">{{ money(i.price * i.qty) }}</td><td class="num muted" data-label="Себест.">{{ money((i.parts_cost + i.labor_cost) * i.qty) }}</td>{% endif %}
-      <td class="actions">{% if can and open_now %}<form method="post" action="/orders/{{ order.id }}/items/{{ i.id }}/delete"><button type="submit" class="icon" title="Убрать строку" aria-label="Убрать строку">×</button></form>{% endif %}</td>
+      {# Словом, а не «×»: крестик в 22 пикселя у края карточки на телефоне
+         не попадал под палец. #}
+      <td class="actions" data-label="Действие">{%- if can and open_now -%}<form method="post" action="/orders/{{ order.id }}/items/{{ i.id }}/delete"><button type="submit" class="ghost small" title="Убрать строку «{{ i.title }}»">Убрать</button></form>{%- endif -%}</td>
     </tr>
-    {% else %}<tr><td colspan="6" class="muted">Строк пока нет.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="5" class="muted">Строк пока нет.</td></tr>{% endfor %}
     {% if items and money_ok %}
-    <tr class="total"><td colspan="3"><b>Итого</b></td><td class="num" data-label="Клиенту"><b>{{ money(totals.total) }}</b></td><td class="num muted" data-label="Себест.">{{ money(totals.cost) }}</td><td></td></tr>
+    {# Ячейка под кнопками пуста и подписана как вся колонка кнопок
+       («Действие»): пустую телефон прячет (td:empty), а черта итога на
+       компьютере идёт до края. #}
+    <tr class="total"><td colspan="2"><b>Итого</b></td><td class="num" data-label="Клиенту"><b>{{ money(totals.total) }}</b></td><td class="num muted" data-label="Себест.">{{ money(totals.cost) }}</td><td data-label="Действие"></td></tr>
     {% endif %}
   </table>
   {% if can and open_now %}
-  <h2>Добавить строку</h2>
+  <h3>Добавить строку</h3>
   {% if may_stock and parts %}
   {# Со склада: себестоимость берётся оттуда, а остаток уменьшается тем же
      действием - иначе запчасть «уходит» в ремонт только на словах. #}
@@ -162,7 +170,7 @@
 {% endif %}
 
 {% if can and open_now %}
-<section class="card narrow">
+<section class="card narrow" id="close">
   <h2>Закрыть наряд</h2>
   <form method="post" action="/orders/{{ order.id }}/close" class="grid2">
     {# У чужой техники возвращать в парк нечего: велосипеда в нём нет. #}
