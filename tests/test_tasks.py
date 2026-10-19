@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.crm import logic, tasks
 
 try:
+    from app.crm import notify
     from tests.test_web import HAVE_WEB, WebCase, run
 except ImportError:                                    # pragma: no cover
     HAVE_WEB = False
@@ -51,10 +52,112 @@ class TestTaskRules(unittest.TestCase):
         self.assertEqual((fields["assignee_id"], fields["pay"]), (None, D("1500.50")))
         self.assertEqual(tasks.parse_form({"title": " "}, staff=OWNER, today=TODAY)[1],
                          "Напишите, что сделать.")
-        self.assertIn("прошёл", tasks.parse_form({"title": "x", "due_on": "2026-09-01"},
+        self.assertIn("прошла", tasks.parse_form({"title": "x", "due_on": "2026-09-01"},
                                                  staff=OWNER, today=TODAY)[1])
-        self.assertIn("число", tasks.parse_form({"title": "x", "pay": "много"},
-                                                staff=OWNER, today=TODAY)[1])
+        self.assertIn("Оплата исполнителю - число",
+                      tasks.parse_form({"title": "x", "pay": "много"}, staff=OWNER,
+                                       today=TODAY)[1])
+        for bad in ("NaN", "-1", "1e9"):
+            self.assertIn("от нуля", tasks.parse_form({"title": "x", "pay": bad},
+                                                      staff=OWNER, today=TODAY)[1], bad)
+
+    def test_two_dates(self):
+        """«Дата постановки» (пусто - сегодня, можно в будущем) и «Дата
+        выполнения» (необязательна, не раньше постановки); в правке
+        неизменённая прошедшая дата проходит."""
+        fields, _ = tasks.parse_form({"title": "x"}, staff=ADMIN, today=TODAY)
+        self.assertEqual((fields["start_on"], fields["due_on"]), (TODAY, None))
+        fields, _ = tasks.parse_form({"title": "x", "start_on": "2026-10-09",
+                                      "due_on": "2026-10-12"}, staff=ADMIN, today=TODAY)
+        self.assertEqual((fields["start_on"], fields["due_on"]),
+                         (date(2026, 10, 9), date(2026, 10, 12)))
+        self.assertEqual(tasks.parse_form({"title": "x", "start_on": "2026-10-09",
+                                           "due_on": "2026-10-08"}, staff=ADMIN,
+                                          today=TODAY)[1],
+                         "Дата выполнения раньше даты постановки.")
+        self.assertIn("постановки уже прошла",
+                      tasks.parse_form({"title": "x", "start_on": "2026-10-01"}, staff=ADMIN,
+                                       today=TODAY)[1])
+        self.assertEqual(tasks.parse_form({"title": "x", "start_on": "завтра"}, staff=ADMIN,
+                                          today=TODAY)[1], "Дата постановки - дата.")
+        old = {"start_on": date(2026, 9, 20), "due_on": date(2026, 9, 25)}
+        fields, problem = tasks.parse_form({"title": "переименовали", "start_on": "2026-09-20",
+                                            "due_on": "2026-09-25"}, staff=ADMIN,
+                                           today=TODAY, task=old)
+        self.assertIsNone(problem, "просроченную можно переименовать")
+        self.assertIn("уже прошла", tasks.parse_form(
+            {"title": "x", "start_on": "2026-09-20", "due_on": "2026-09-26"}, staff=ADMIN,
+            today=TODAY, task=old)[1], "новую прошедшую дату - нет")
+
+    def test_planned_tasks(self):
+        """Дата постановки впереди: в «Задачах дня» задачи нет ни у
+        исполнителя, ни в общих; автор видит её в своих запланированных,
+        доска - в «Запланированных»."""
+        later = TODAY + timedelta(days=3)
+        rows = [{"id": 1, "status": "open", "title": "сегодня", "assignee_id": 3,
+                 "start_on": TODAY, "created_by_id": 2},
+                {"id": 2, "status": "open", "title": "потом", "assignee_id": 3,
+                 "start_on": later, "due_on": later, "created_by_id": 2},
+                {"id": 3, "status": "open", "title": "потом всем", "assignee_id": None,
+                 "location": "Павлюхина", "start_on": TODAY + timedelta(days=1),
+                 "created_by_id": 2}]
+        master = tasks.my_lists(MASTER, rows, today=TODAY)
+        self.assertEqual([t["id"] for t in master["mine"]], [1])
+        self.assertEqual((master["free"], master["planned"]), ([], []))
+        author = tasks.my_lists(ADMIN, rows, today=TODAY)
+        self.assertEqual([t["id"] for t in author["planned"]], [3, 2], "по дате постановки")
+        self.assertEqual(author["planned"][0]["start_text"], "с завтра")
+        self.assertEqual(author["planned"][1]["start_text"], f"с {later:%d.%m}")
+        people = [{"id": 3, "name": "Марат", "location": "Павлюхина"}]
+        view = tasks.overview(rows, people, staff=OWNER, today=TODAY)
+        self.assertEqual(([t["id"] for t in view["planned"]], view["open"]), ([3, 2], 1))
+        self.assertEqual([t["id"] for t in view["people"][0]["tasks"]], [1])
+        board = tasks.points_board(rows, people, staff=OWNER, today=TODAY)
+        self.assertEqual(board["free"], [], "в «Задачах дня» владельца - тоже нет")
+        self.assertEqual(sum(len(p["tasks"]) for g in board["points"] for p in g["people"]), 1)
+        # в день постановки - обычная задача
+        on_day = tasks.my_lists(MASTER, rows, today=later)
+        self.assertEqual([t["id"] for t in on_day["mine"]], [2, 1], "сегодняшняя горит первой")
+        self.assertEqual(tasks.due_label(rows[1], today=later + timedelta(days=2)),
+                         ("просрочена на 2 дн.", True), "просрочка - по дате выполнения")
+
+    def test_assignees(self):
+        """«Кому»: все действующие, кроме себя, без фильтра по точке и роли;
+        подпись - имя, роль, точка; истёкший доступ - не в списке, а
+        исполнитель правимой задачи остаётся."""
+        people = [{"id": 1, "name": "Владелец", "profile_name": "Владелец"},
+                  {"id": 3, "name": "Булат", "profile_name": "Мастер", "location": "Павлюхина"},
+                  {"id": 4, "name": "Анна", "profile_name": "Администратор: только задачи",
+                   "location": "Адоратского"},
+                  {"id": 5, "name": "Склад", "profile_name": "Мастер"},
+                  {"id": 6, "name": "Ушёл", "profile_name": "Мастер",
+                   "expires_at": datetime(2020, 1, 1, tzinfo=UTC)}]
+        got = tasks.assignees(people, staff=OWNER)
+        self.assertEqual([o["label"] for o in got],
+                         ["Склад · Мастер", "Анна · Администратор: только задачи · Адоратского",
+                          "Булат · Мастер · Павлюхина"])
+        self.assertNotIn(1, [o["id"] for o in got], "себе - «мне»")
+        self.assertEqual([o["id"] for o in tasks.assignees(people, staff=MASTER)], [1, 5, 4],
+                         "мастер ставит и владельцу, и другой точке")
+        kept = tasks.assignees(people, staff=OWNER,
+                               task={"assignee_id": 6, "assignee_name": "Ушёл"})
+        self.assertEqual(kept[-1], {"id": 6, "where": "", "label": "Ушёл · нет доступа"})
+
+    def test_board_counts_with_work(self):
+        people = [{"id": 2, "name": "Админ", "location": "Адоратского"}]
+        rows = [{"id": 1, "status": "open", "title": "a", "assignee_id": 2,
+                 "start_on": TODAY, "due_on": TODAY}]
+        work = {"Адоратского": [{"code": "overdue", "count": 4, "hot": 4},
+                                {"code": "soon", "count": 3, "hot": 0}],
+                None: [{"code": "claims", "count": 1, "hot": 0}]}
+        board = tasks.points_board(rows, people, staff=OWNER, today=TODAY,
+                                   points=["Павлюхина", "Адоратского"], work=work)
+        by = {g["key"]: g for g in board["points"]}
+        self.assertEqual(by["Адоратского"]["counts"],
+                         "1 сотрудник · 7 рабочих задач · 1 поручение · горит 5")
+        self.assertEqual(by["Павлюхина"]["counts"], "0 сотрудников · задач нет")
+        self.assertEqual([g["code"] for g in board["work_free"]], ["claims"])
+        self.assertEqual(tasks.counts_text(0, 0, 2, work=1), "2 сотрудника · 1 рабочая задача")
 
     def test_rights(self):
         task = {"status": "open", "assignee_id": 3, "created_by_id": 1}
@@ -243,6 +346,112 @@ class TestTaskPages(WebCase):
                          ("Позвонить поставщику", None, D("350.00")))
         self.assertIn("Позвонить поставщику", self.get_ok(f"/tasks/{task['id']}"))
         self.assertEqual(self.client.get("/tasks/999999").status_code, 404)
+
+    def test_anyone_assigns_anyone(self):
+        """Ставит задачу любой: администратор «только задачи» - мастеру
+        другой точки и владельцу; оплату за задачу - только руководитель.
+        В «Кому» - все действующие с ролью и точкой; ссылка завести
+        человека - тому, кто ведёт «Сотрудников»."""
+        bulat = self.add_staff("bulat", "tasks_tech", location="Павлюхина", tg_id=7002)
+        self.add_staff("dina", "tasks_operator", location="Адоратского")
+        owner = run(self.crm.staff_by_login("admin"))
+        self.as_("dina")
+        my = self.get_ok("/my")
+        self.assertIn("+ Поставить задачу", my)
+        self.assertIn(f'<option value="{bulat}">Bulat · Мастер: только задачи · Павлюхина'
+                      "</option>", my)
+        self.assertIn(f'<option value="{owner["id"]}">', my, "и владельцу")
+        self.assertNotIn("Заведите его", my, "заводить людей - не её право")
+        self.assertNotIn("Оплата исполнителю", my)
+        self.client.post("/tasks", data={"title": "Подкачать колёса", "assignee": str(bulat),
+                                         "pay": "900", "back": "/my"})
+        task = next(t for t in self.crm.tasks_.values() if t["title"] == "Подкачать колёса")
+        self.assertEqual((task["assignee_id"], task["pay"]), (bulat, None))
+        self.assertTrue(any("Подкачать колёса" in text for chat, text in self.bot.sent
+                            if chat == 7002), "мастер узнаёт сразу")
+        self.client.post("/tasks", data={"title": "Проверить кассу", "assignee": str(owner["id"])})
+        self.assertTrue(any(t["title"] == "Проверить кассу" and t["assignee_id"] == owner["id"]
+                            for t in self.crm.tasks_.values()))
+        self.as_("bulat")
+        self.assertIn("Подкачать колёса", self.get_ok("/my"))
+        self.client.post("/logout")
+        self.login()
+        page = self.get_ok("/my")
+        self.assertIn("Нет нужного человека? Заведите его в", page)
+        self.assertIn("Оплата исполнителю за задачу, ₽", page)
+        self.assertIn("сверх оклада", page)
+        self.assertIn("Дата постановки", page)
+        self.assertIn("Дата выполнения", page)
+
+    def test_planned_task_waits_for_its_day(self):
+        """Дата постановки впереди: исполнитель не видит задачу и не получает
+        сообщения до её дня; доска - в «Запланированных», автор - у себя.
+        В день постановки бот говорит утром, один раз."""
+        marat = self.add_staff("marat", "tech", location="Павлюхина", tg_id=7001)
+        self.login()
+        today = date.today()
+        later = today + timedelta(days=2)
+        r = self.client.post("/tasks", data={
+            "title": "Инвентаризация склада", "assignee": str(marat), "back": "/my",
+            "start_on": later.isoformat(), "due_on": (later + timedelta(days=1)).isoformat()})
+        self.assertEqual(r.status_code, 303)
+        task = next(iter(self.crm.tasks_.values()))
+        self.assertEqual((task["start_on"], task["notified_at"]), (later, None))
+        self.assertFalse([1 for chat, _ in self.bot.sent if chat == 7001],
+                         "сообщение - в день постановки, а не сейчас")
+        board = self.get_ok("/tasks")
+        planned = board.split('id="planned"')[1].split("</section>")[0]
+        self.assertIn("Инвентаризация склада", planned)
+        self.assertIn(f"с {later:%d.%m}", planned)
+        self.assertNotIn("Инвентаризация склада", board.split('id="planned"')[0])
+        mine = self.get_ok("/my")
+        self.assertIn("Запланировано мной", mine)
+        self.assertNotIn("Инвентаризация склада",
+                         mine.split('id="points"')[1].split('id="planned"')[0])
+        card = self.get_ok(f"/tasks/{task['id']}")
+        self.assertIn("Дата постановки", card)
+        self.assertIn(f"{later:%d.%m.%Y}", card)
+        self.as_("marat")
+        self.assertNotIn("Инвентаризация склада", self.get_ok("/my"))
+        # бот: накануне и ночью молчит, утром дня постановки - один раз
+        evening = datetime.combine(later, time(23, 0))
+        self.assertEqual(run(notify.announce_tasks(self.bot, self.crm, now=evening)), 0)
+        before = datetime.combine(later - timedelta(days=1), time(10, 0))
+        self.assertEqual(run(notify.announce_tasks(self.bot, self.crm, now=before)), 0)
+        morning = datetime.combine(later, time(9, 15))
+        self.assertEqual(run(notify.announce_tasks(self.bot, self.crm, now=morning)), 1)
+        said = [text for chat, text in self.bot.sent if chat == 7001]
+        self.assertTrue(said and "Инвентаризация склада" in said[-1])
+        self.assertIn("Дата выполнения", said[-1])
+        self.assertIn("От: Владелец", said[-1], "от кого - имя автора")
+        self.assertEqual(run(notify.announce_tasks(self.bot, self.crm, now=morning)), 0,
+                         "второй раз не говорит")
+
+    def test_edit_moves_planned_to_today(self):
+        """Запланированную перенесли на сегодня - исполнитель узнаёт сразу;
+        новому исполнителю запланированной - в день постановки."""
+        marat = self.add_staff("marat", "tech", location="Павлюхина", tg_id=7001)
+        anna = self.add_staff("anna", "manager", location="Адоратского", tg_id=7003)
+        self.login()
+        today = date.today()
+        later = today + timedelta(days=3)
+        self.client.post("/tasks", data={"title": "Покрасить стойку", "assignee": str(marat),
+                                         "start_on": later.isoformat()})
+        task = next(iter(self.crm.tasks_.values()))
+        self.client.post(f"/tasks/{task['id']}", data={
+            "title": "Покрасить стойку", "assignee": str(anna), "start_on": later.isoformat()})
+        self.assertEqual((task["assignee_id"], task["notified_at"]), (anna, None))
+        self.assertFalse([1 for chat, _ in self.bot.sent if chat in (7001, 7003)])
+        self.client.post(f"/tasks/{task['id']}", data={
+            "title": "Покрасить стойку", "assignee": str(anna), "start_on": today.isoformat()})
+        self.assertIsNotNone(task["notified_at"])
+        self.assertTrue(any("Покрасить стойку" in text for chat, text in self.bot.sent
+                            if chat == 7003))
+        r = self.client.post(f"/tasks/{task['id']}", data={
+            "title": "Покрасить стойку", "assignee": str(anna), "start_on": today.isoformat(),
+            "due_on": (today - timedelta(days=5)).isoformat()})
+        self.assertEqual(r.status_code, 303)
+        self.assertIsNone(task["due_on"], "прошедшая дата выполнения не принимается")
 
 
 if __name__ == "__main__":

@@ -152,8 +152,8 @@
 <div class="cols">
 <section class="card">
   <h2>Задачи <span class="muted">· {{ detail.tasks|length }}</span></h2>
-  {% if detail.tasks %}<table class="cards"><tr><th>Задача</th><th>Сделана</th>{% if money_ok %}<th class="num">Цена</th>{% endif %}</tr>
-  {% for t in detail.tasks %}<tr><td data-label="Задача"><a href="/tasks/{{ t.id }}">{{ t.title }}</a></td><td data-label="Сделана" class="nowrap">{{ t.done_at|dmy }}</td>{% if money_ok %}<td class="num" data-label="Цена">{{ money(t.pay) if t.pay is not none else '—' }}</td>{% endif %}</tr>{% endfor %}
+  {% if detail.tasks %}<table class="cards"><tr><th>Задача</th><th>Сделана</th>{% if money_ok %}<th class="num">Оплата за задачу</th>{% endif %}</tr>
+  {% for t in detail.tasks %}<tr><td data-label="Задача"><a href="/tasks/{{ t.id }}">{{ t.title }}</a></td><td data-label="Сделана" class="nowrap">{{ t.done_at|dmy }}</td>{% if money_ok %}<td class="num" data-label="Оплата за задачу">{{ money(t.pay) if t.pay is not none else '—' }}</td>{% endif %}</tr>{% endfor %}
   </table>{% else %}<p class="muted">Нет.</p>{% endif %}
 </section>
 <section class="card">

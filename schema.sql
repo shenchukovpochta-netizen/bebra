@@ -3074,6 +3074,32 @@ create table if not exists crm.tasks (
 create index if not exists tasks_open_idx on crm.tasks (due_on, id) where status = 'open';
 create index if not exists tasks_done_idx on crm.tasks (done_by, done_at) where status = 'done';
 
+-- Две даты задачи словами владельца: «Дата постановки» (start_on) - с
+-- этого дня она в «Задачах дня» исполнителя, до него - только в
+-- «Запланированных» доски и у автора; «Дата выполнения» - due_on, по ней
+-- «просрочена». Прежним задачам постановка - день создания: так их и
+-- видели. Порядок дат проверяет форма, а не check: старая строка со
+-- сроком накануне создания падала бы на любом UPDATE, даже на «Сделано».
+-- notified_at - когда исполнителю сказали о задаче (или говорить было
+-- некому): null - ждёт дня постановки, тогда бот пишет ему утром
+-- (app/crm/notify.py, announce_tasks). Умолчание now() - «сказано»: новая
+-- колонка не будит исполнителей всех прежних задач, а отложить сообщение
+-- панель просит явно.
+alter table crm.tasks add column if not exists start_on date;
+alter table crm.tasks add column if not exists notified_at timestamptz default now();
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'crm' and table_name = 'tasks'
+                and column_name = 'start_on' and is_nullable = 'YES') then
+    update crm.tasks set start_on = created_at::date where start_on is null;
+    alter table crm.tasks alter column start_on set default current_date;
+    alter table crm.tasks alter column start_on set not null;
+  end if;
+end $$;
+create index if not exists tasks_announce_idx on crm.tasks (start_on)
+  where status = 'open' and notified_at is null;
+
 -- Команда (app/crm/team.py): план месяца и условия оплаты сотрудника.
 -- Строка - на месяц (первое число): правка не переписывает прошлые
 -- месяцы, а месяц без своей строки живёт по последней прежней - условия

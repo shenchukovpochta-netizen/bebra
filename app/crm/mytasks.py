@@ -20,6 +20,12 @@
 Рубли - только с правом на финансы, как на сводке. Источники те же, что
 у сводки и разделов (logic.expiring, search_rows, order_stuck): список
 не вправе показывать не то, что покажет раздел.
+
+Владельцу те же группы - по каждой точке (`by_point`): что видит
+администратор и мастер этой точки, но строго её записи, а записи без
+точки (и точки вне справочника) и «Я оплатил» - одной группой «общие».
+Наряды у него - не «мои», а «дольше срока» по всем техникам точки и «без
+техника». Источники читаются один раз на страницу и режутся здесь.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from datetime import date
 from typing import Any
+from urllib.parse import urlencode
 
 from . import logic
 
@@ -48,12 +55,15 @@ def _mine(point: str | None, where: Any) -> bool:
 
 
 def _group(code: str, title: str, level: str, section: str, url: str,
-           items: list[dict]) -> dict[str, Any] | None:
+           items: list[dict], limit: int = GROUP_LIMIT) -> dict[str, Any] | None:
+    """Группа задач; `hot` - горящих строк во всей группе, а не в
+    показанных: из них счётчик точки у владельца."""
     if not items:
         return None
     return {"code": code, "title": title, "level": level, "section": section,
-            "url": url, "count": len(items), "rows": items[:GROUP_LIMIT],
-            "more": max(0, len(items) - GROUP_LIMIT)}
+            "url": url, "count": len(items), "rows": items[:limit],
+            "more": max(0, len(items) - limit),
+            "hot": sum(1 for i in items if i.get("hot"))}
 
 
 def _rental_item(r: Mapping[str, Any], *, money_ok: bool, point: str | None) -> dict:
@@ -89,7 +99,10 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
              shift_open: bool | None = None,
              today: date | None = None,
              repair_norm: int = logic.ORDER_STUCK_DAYS,
-             booking_url: Callable[[Mapping[str, Any]], str] | None = None
+             booking_url: Callable[[Mapping[str, Any]], str] | None = None,
+             match: Callable[[Any], bool] | None = None,
+             overseer: bool = False,
+             limit: int = GROUP_LIMIT
              ) -> list[dict[str, Any]]:
     """Группы задач сотрудника, горящее сверху. Пустые не возвращаются.
 
@@ -98,12 +111,17 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
     заявки, `alerts` - открытые тревоги (с bike_location), `claims` -
     заявки на зачисление, `shift_open` - открыта ли касса его точки
     (None - не проверяли). `booking_url` - адрес выдачи по заявке.
+    `match` - чья запись по её точке (по умолчанию - своя точка и записи
+    без точки), `overseer` - взгляд владельца на точку (`by_point`):
+    наряды дольше срока у всех техников вместо «моих», `limit` - строк в
+    группе.
     """
     today = today or date.today()
     point = staff.get("location") or None
     me = staff.get("id")
     money_ok = logic.can_view(staff, "finance")
     can = logic.can_edit
+    mine_at = match or (lambda where: _mine(point, where))
     groups: list[dict[str, Any] | None] = []
 
     if logic.can_view(staff, "service"):
@@ -118,28 +136,41 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
                     f"{logic.order_days(o, today=today)} сут. в работе"]
             if stuck:
                 bits.append("дольше срока")
+            if overseer and o.get("tech_id"):
+                bits.append(str(o.get("tech_name") or o.get("tech_login") or "техник"))
             if o.get("complaint"):
                 bits.append(str(o["complaint"]))
             return {"title": f"{o.get('no') or ''} · {what}", "sub": " · ".join(bits),
                     "url": f"/orders/{o['id']}", "hot": stuck}
 
-        mine = sorted((o for o in open_orders if me is not None and o.get("tech_id") == me),
-                      key=lambda o: (not logic.order_stuck(o, today=today,
-                                                           default=repair_norm),
-                                     o.get("opened_at") or today, o["id"]))
-        groups.append(_group("orders_mine", "Мои наряды", "hot" if any(
-            logic.order_stuck(o, today=today, default=repair_norm) for o in mine) else "warn",
-            "service", "/orders", [order_item(o) for o in mine]))
+        if overseer:
+            late = sorted((o for o in open_orders if o.get("tech_id")
+                           and mine_at(o.get("location"))
+                           and logic.order_stuck(o, today=today, default=repair_norm)),
+                          key=lambda o: (o.get("opened_at") or today, o["id"]))
+            groups.append(_group("orders_late", "Наряды дольше срока ремонта", "hot",
+                                 "service", "/orders?overdue=1",
+                                 [order_item(o) for o in late], limit))
+        else:
+            mine = sorted((o for o in open_orders
+                           if me is not None and o.get("tech_id") == me),
+                          key=lambda o: (not logic.order_stuck(o, today=today,
+                                                               default=repair_norm),
+                                         o.get("opened_at") or today, o["id"]))
+            groups.append(_group("orders_mine", "Мои наряды", "hot" if any(
+                logic.order_stuck(o, today=today, default=repair_norm) for o in mine)
+                else "warn", "service", "/orders", [order_item(o) for o in mine], limit))
         free = [o for o in open_orders if not o.get("tech_id")
-                and _mine(point, o.get("location"))] if can(staff, "service") else []
+                and mine_at(o.get("location"))] if can(staff, "service") else []
         free.sort(key=lambda o: (o.get("opened_at") or today, o["id"]))
-        groups.append(_group("orders_free", "Наряды без техника — можно взять", "info",
-                             "service", "/service", [order_item(o) for o in free]))
+        groups.append(_group("orders_free", "Наряды без техника" if overseer
+                             else "Наряды без техника — можно взять", "info",
+                             "service", "/service", [order_item(o) for o in free], limit))
 
     if can(staff, "issue"):
         due = []
         for b in bookings:
-            if b.get("status", "new") != "new" or not _mine(point, b.get("location_name")):
+            if b.get("status", "new") != "new" or not mine_at(b.get("location_name")):
                 continue
             wanted = b.get("wanted_on")
             if wanted is None or wanted <= today or logic.waitlist_coming_today(b, today=today):
@@ -150,20 +181,23 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
                   "url": booking_url(b) if booking_url else "/bookings",
                   "phone": b.get("phone"), "hot": True} for b in due]
         groups.append(_group("bookings", "Выдать сегодня по заявкам", "hot", "issue",
-                             "/bookings", items))
+                             "/bookings", items, limit))
 
     if can(staff, "rentals"):
-        rows = [r for r in expiring if _mine(point, r.get("location"))]
+        # «без точки» в строке - тому, кто видит свою точку и чужие записи
+        # без неё; владельцу по точкам такие записи идут общими.
+        mark = None if overseer else point
+        rows = [r for r in expiring if mine_at(r.get("location"))]
         overdue = [r for r in rows if (r.get("summary") or {}).get("days_left") is not None
                    and r["summary"]["days_left"] <= 0]
         soon = [r for r in rows if r not in overdue]
         groups.append(_group(
             "overdue", "Просрочка и платёж сегодня — позвонить", "hot", "rentals",
             logic.EXPIRING_URL,
-            [_rental_item(r, money_ok=money_ok, point=point) for r in overdue]))
+            [_rental_item(r, money_ok=money_ok, point=mark) for r in overdue], limit))
         search = search or {}
         wanted = [r for r in (*search.get("searching", ()), *search.get("candidates", ()))
-                  if _mine(point, r.get("location"))]
+                  if mine_at(r.get("location"))]
         groups.append(_group(
             "search", "Розыск — решить", "hot", "rentals", "/rentals/search",
             [{"title": r.get("full_name") or "—",
@@ -173,15 +207,15 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
                    "в розыске" if r.get("search_at") else
                    f"просрочка {r.get('overdue_days')} дн. — кандидат")) if x),
               "url": f"/rentals/{r['id']}", "phone": r.get("phone"), "hot": True}
-             for r in wanted]))
+             for r in wanted], limit))
         groups.append(_group(
             "soon", "Истекает на днях — напомнить", "warn", "rentals",
             logic.EXPIRING_URL,
-            [_rental_item(r, money_ok=money_ok, point=point) for r in soon]))
+            [_rental_item(r, money_ok=money_ok, point=mark) for r in soon], limit))
 
     if logic.can_view(staff, "trackers"):
         fresh = [a for a in alerts if a.get("state", "new") == "new"
-                 and _mine(point, a.get("bike_location"))]
+                 and mine_at(a.get("bike_location"))]
         items = [{"title": " ".join(x for x in (
                       f"№ {a['bike_code']}" if a.get("bike_code") else a.get("alias"),
                       "—", logic.TRACKER_ALERTS.get(a.get("kind") or "", a.get("kind")))
@@ -192,14 +226,14 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
                   "url": f"/trackers/{a['tracker_id']}", "hot": a.get("level") == "urgent"}
                  for a in fresh]
         groups.append(_group("alerts", "Тревоги трекеров", "hot" if any(
-            i["hot"] for i in items) else "warn", "trackers", "/alerts", items))
+            i["hot"] for i in items) else "warn", "trackers", "/alerts", items, limit))
 
     if can(staff, "claims"):
         groups.append(_group(
             "claims", "Заявки на зачисление — сверить с банком", "warn", "claims",
             "/claims", [{"title": c.get("full_name") or "—",
                          "sub": "клиент нажал «Я оплатил»", "url": "/claims",
-                         "hot": False} for c in claims]))
+                         "hot": False} for c in claims], limit))
 
     if point is not None and shift_open is False and logic.can_edit(staff, "cash"):
         groups.append(_group("cash", f"Касса «{point}» не открыта", "warn", "cash",
@@ -211,3 +245,52 @@ def my_tasks(staff: Mapping[str, Any], *, expiring: Iterable[Mapping[str, Any]] 
     out = [g for g in groups if g]
     out.sort(key=lambda g: order.get(g["level"], len(order)))
     return out
+
+
+def by_point(staff: Mapping[str, Any], points: Iterable[str], *,
+             expiring: Iterable[Mapping[str, Any]] = (),
+             search: Mapping[str, Any] | None = None,
+             orders: Iterable[Mapping[str, Any]] = (),
+             bookings: Iterable[Mapping[str, Any]] = (),
+             alerts: Iterable[Mapping[str, Any]] = (),
+             claims: Iterable[Mapping[str, Any]] = (),
+             today: date | None = None,
+             repair_norm: int = logic.ORDER_STUCK_DAYS,
+             booking_url: Callable[[Mapping[str, Any]], str] | None = None,
+             limit: int = GROUP_LIMIT) -> dict[str | None, list[dict[str, Any]]]:
+    """Рабочие группы владельца по точкам: {точка: группы, None: общие}.
+
+    У каждой точки - то, что видит её администратор и мастер (те же
+    правила `my_tasks` и права смотрящего), но только записи этой точки:
+    запись без точки у сотрудника видна всем, а у владельца она одна - в
+    общих (None), вместе с записями точек вне справочника (закрытая,
+    чужое имя) и «Я оплатил»: у заявки на зачисление точки нет. Касса
+    точки владельцу не задача: «смена не открыта» - дело администратора,
+    а у склада кассы нет вовсе. Источники - один раз на страницу: здесь
+    они только режутся.
+    """
+    names = [p for p in dict.fromkeys(points) if p]
+    known = set(names)
+    common: dict[str, Any] = {
+        "expiring": list(expiring), "search": search or {}, "orders": list(orders),
+        "bookings": list(bookings), "alerts": list(alerts), "today": today,
+        "repair_norm": repair_norm, "booking_url": booking_url, "overseer": True,
+        "limit": limit}
+    out: dict[str | None, list[dict[str, Any]]] = {}
+    for name in names:
+        groups = my_tasks({**staff, "location": name},
+                          match=lambda where, n=name: where == n, **common)
+        for g in groups:
+            g["url"] = _at_point(g["url"], name)
+        out[name] = groups
+    out[None] = my_tasks({**staff, "location": None}, claims=list(claims),
+                         match=lambda where: not where or where not in known, **common)
+    return out
+
+
+def _at_point(url: str, point: str) -> str:
+    """«Весь список» группы точки - с фильтром точки, где раздел его знает
+    (аренды и наряды); остальные списки - целиком."""
+    if not url.startswith(("/rentals?", "/orders")):
+        return url
+    return f"{url}{'&' if '?' in url else '?'}{urlencode({'location': point})}"

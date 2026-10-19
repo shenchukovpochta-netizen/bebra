@@ -1,12 +1,15 @@
-{# Задачи дня (app/crm/tasks.py): строка задачи с кнопками и форма новой.
-   Один кусок на «Задачи дня» (/my), «Все задачи» (/tasks) и карточку. #}
+{# Задачи дня (app/crm/tasks.py): строка задачи с кнопками, форма новой и
+   рабочая группа (app/crm/mytasks.py). Один кусок на «Задачи дня» (/my),
+   «Все задачи» (/tasks) и карточку. Оплата исполнителю - только тому, у
+   кого она не скрыта (tasks.dress). #}
 {% macro row(t, back, show_who=False, show_where=False) %}
 <li class="task-row{% if t.hot %} hot{% endif %}">
   <a href="/tasks/{{ t.id }}"><b>{{ t.title }}</b>
-    <small class="muted">{{ [t.due_text or ('без срока' if show_where else ''),
+    <small class="muted">{{ [t.start_text,
+      t.due_text or ('без даты выполнения' if show_where else ''),
       (t.assignee_name or 'не закреплена') if show_who else '',
       t.location or ('вся сеть' if show_where else ''),
-      money(t.pay) if t.pay is not none else '']|select|join(' · ') }}</small></a>
+      ('оплата ' ~ money(t.pay)) if t.pay is not none else '']|select|join(' · ') }}</small></a>
   <span class="task-acts">
     {% if t.can_take %}<form method="post" action="/tasks/{{ t.id }}/take"><input type="hidden" name="back" value="{{ back }}"><button type="submit" class="ghost">Взять</button></form>{% endif %}
     {% if t.can_finish %}<form method="post" action="/tasks/{{ t.id }}/done"><input type="hidden" name="back" value="{{ back }}"><button type="submit">Сделано</button></form>{% endif %}
@@ -14,7 +17,38 @@
 </li>
 {% endmacro %}
 
-{% macro add_form(people, locations, staff, task_money, back, open=False) %}
+{# Рабочая группа: наряды, прозвон, выдачи, тревоги - строка ведёт в
+   карточку записи, у клиента телефон ссылкой. #}
+{% macro work_group(g) %}
+<section class="card my-group {{ g.level }}">
+  <h2>{{ g.title }} <span class="muted">· {{ g.count }}</span></h2>
+  <ul class="my-items">
+    {% for i in g.rows %}
+    <li class="{% if i.hot %}hot{% endif %}">
+      <a href="{{ i.url }}"><b>{{ i.title }}</b>{% if i.sub %}<small class="muted">{{ i.sub }}</small>{% endif %}</a>
+      {% if i.phone %}<a class="tel" href="tel:{{ i.phone }}">{{ i.phone }}</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if g.more %}<p class="muted">и ещё {{ g.more }} — <a href="{{ g.url }}">весь список</a></p>{% endif %}
+</section>
+{% endmacro %}
+
+{# Задачи, поставленные заранее: до даты постановки их нет в «Задачах
+   дня», автор видит их здесь. #}
+{% macro planned(items, back) %}
+{% if items %}
+<details class="card my-group task-later" id="planned">
+  <summary><b>Запланировано мной</b> <span class="muted">· {{ items|length }} · появятся в «Задачах дня» в дату постановки</span></summary>
+  <ul class="my-items">{% for t in items %}{{ row(t, back ~ '#planned', show_who=True) }}{% endfor %}</ul>
+</details>
+{% endif %}
+{% endmacro %}
+
+{# Поставить задачу может любой сотрудник любому: себе, другому или
+   незакреплённой. «Кому» - все действующие, кроме себя (tasks.assignees:
+   имя, роль, точка). Оплату за задачу - только тот, кто ведёт команду. #}
+{% macro add_form(assignees, locations, staff, task_money, back, day, open=False) %}
 <details class="card task-add"{% if open %} open{% endif %}>
   <summary><b>+ Поставить задачу</b></summary>
   <form method="post" action="/tasks" class="grid2">
@@ -24,14 +58,19 @@
       <select name="assignee">
         <option value="me">мне</option>
         <option value="none">не закреплять — возьмёт свободный</option>
-        {% for s in people if s.id != staff.id %}<option value="{{ s.id }}">{{ s.name }}{% if s.location %} · {{ s.location }}{% endif %}</option>{% endfor %}
-      </select></label>
-    <label>Срок <input type="date" name="due_on"></label>
+        {% for s in assignees %}<option value="{{ s.id }}">{{ s.label }}</option>{% endfor %}
+      </select>
+      {% if can_edit(staff, 'staff') %}<small class="muted">Нет нужного человека? Заведите его в <a href="/staff">«Сотрудниках»</a>.</small>{% endif %}</label>
     {% if locations|length > 1 %}<label>Точка
       <select name="location"><option value="">{% if staff.location %}моя ({{ staff.location }}){% else %}вся сеть{% endif %}</option>
         {% for l in locations %}<option value="{{ l.name }}">{{ l.name }}</option>{% endfor %}
       </select></label>{% endif %}
-    {% if task_money %}<label>Цена задачи, ₽ <input name="pay" inputmode="decimal" placeholder="в зарплату исполнителю"></label>{% endif %}
+    <label>Дата постановки <input type="date" name="start_on" value="{{ day.isoformat() }}" min="{{ day.isoformat() }}" required>
+      <small class="muted">С этого дня задача в «Задачах дня» исполнителя; позже сегодняшней — запланирована.</small></label>
+    <label>Дата выполнения <input type="date" name="due_on" min="{{ day.isoformat() }}">
+      <small class="muted">До какого дня сделать: после неё задача горит «просрочена». Пусто — без даты.</small></label>
+    {% if task_money %}<label class="wide">Оплата исполнителю за задачу, ₽ <input name="pay" inputmode="decimal" placeholder="пусто — без доплаты">
+      <small class="muted">Сколько исполнитель получит за эту задачу сверх оклада. Сумма попадёт в расчёт зарплаты в «Команде», когда задачу отметят сделанной. Пусто — без доплаты.</small></label>{% endif %}
     <label class="wide">Подробнее <textarea name="note" rows="2" maxlength="2000"></textarea></label>
     <button type="submit">Поставить</button>
   </form>
