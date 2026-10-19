@@ -54,6 +54,9 @@
   </dl>
   {% if plan and not plan.own %}<p class="muted">Своих условий на этот месяц нет — действуют условия с {{ plan.month.strftime('%m.%Y') }}.</p>
   {% elif not plan %}<p class="muted">Условия оплаты не заданы.</p>{% endif %}
+  {% if foreign %}<p class="muted" id="foreign-terms">Не начисляется — условие чужой роли:
+    {% for f in foreign %}{{ f.title|lower }} {{ f.text }} ({{ f.role }}){% if not loop.last %}, {% endif %}{% endfor %}.
+    Осталось в строке с прежних правил, когда условия были у всех{% if may_plan %}; обнулить — галочкой в форме плана{% endif %}.</p>{% endif %}
 </section>
 {% endif %}
 {% if may_plan %}
@@ -71,7 +74,9 @@
     {% endif %}{% endfor %}
     {% if money_ok %}{% for key, title in terms %}
     <label>{{ title }} <input name="{{ key }}" inputmode="decimal" value="{{ mval(key) }}"></label>
-    {% endfor %}{% endif %}
+    {% endfor %}
+    {% if foreign %}<label class="check"><input type="checkbox" name="drop_foreign" value="1"> Обнулить условие чужой роли: {{ foreign|map(attribute='title')|join(', ')|lower }}</label>{% endif %}
+    {% endif %}
     <button type="submit">Сохранить на {{ month_title }}</button>
   </form>
   <p class="muted">Пустой план — не планируется. Сохранение пишет только этот месяц: прошлые
@@ -217,7 +222,7 @@
 {% endif %}
 {% if money_ok and (is_admin or (owner and detail.payments)) %}
 <section class="card">
-  <h2>Принятые платежи <span class="muted">· {{ detail.payments|length }}{% if detail.payments|selectattr('extension')|list %}, из них продлений {{ detail.payments|selectattr('extension')|list|length }}{% endif %}</span></h2>
+  <h2>Принятые платежи <span class="muted">· {{ detail.payments|length }}{% if extensions %} · продлений {{ extensions }}{% endif %}</span></h2>
   {% if detail.payments %}<table class="cards"><tr><th>Клиент</th><th>Когда</th><th class="num">Сумма</th></tr>
   {% for x in detail.payments %}<tr><td data-label="Клиент"><a href="/clients/{{ x.client_id }}">{{ x.full_name }}</a>{% if x.extension %} <small class="muted">продление</small>{% endif %}</td><td data-label="Когда" class="nowrap">{{ x.created_at|dmy }}</td><td class="num" data-label="Сумма">{{ money(x.amount) }}</td></tr>{% endfor %}
   </table>{% else %}<p class="muted">Нет.</p>{% endif %}

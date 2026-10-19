@@ -1570,10 +1570,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             member_q = urlencode({"month": f"{start:%Y-%m}",
                                   "week": team.monday(start).isoformat(),
                                   **({"day": start.isoformat()} if kind == "day" else {})})
+        money_ok = team_money(request)
         return render(request, "team.html", sections=team.sections(rows),
-                      owners=team.owners(rows), total=team.totals(rows), span=span,
-                      kind=kind, period=period, periods=team.PERIODS, member_q=member_q,
-                      month_title=team.month_name(first), money_ok=team_money(request))
+                      owners=team.owners(rows, money_ok=money_ok), total=team.totals(rows),
+                      span=span, kind=kind, period=period, periods=team.PERIODS,
+                      member_q=member_q, month_title=team.month_name(first),
+                      money_ok=money_ok)
 
     @app.get("/team.{ext}")
     async def team_export(request: Request, ext: str) -> Response:
@@ -1663,11 +1665,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                                       norm_days=norm)).get(sid) or {}))
         this_week = team.monday(today)
         week_options = sorted({this_week + timedelta(weeks=n) for n in range(-8, 9)} | {week})
+        money_ok = team_money(request)
         metrics = team.progress(plan, facts, days=span["days"], passed=span["passed"],
                                 roles=None if owner else roles)
         if owner:
-            # Владелец сам что-то сделал - только это: плана у него нет.
-            metrics = [m for m in metrics if m["fact"]]
+            # Владелец сам что-то сделал - только это: плана у него нет;
+            # рубли - с правом на деньги, иначе пустые плитки.
+            metrics = [m for m in metrics if m["fact"] and (money_ok or not m["money"])]
+        detail = await crm.team_detail(person, since, until, norm_days=norm)
         return render(request, "team_member.html", person=person, span=span, plan=plan,
                       month_title=team.month_name(first),
                       facts=facts, role=logic.role_title(person), owner=owner,
@@ -1676,6 +1681,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       fields=[(m.plan, m.title, m.money) for m in team.metrics_for(roles)],
                       terms=[(t, team.TERM_TITLES[t]) for t in team.terms_for(roles)],
                       metrics=metrics, pay=team.salary(plan, facts, roles),
+                      foreign=[] if owner else team.foreign_terms(plan, roles),
                       periods=periods,
                       history=team.history(history, today=today, roles=roles),
                       week=week, day=day,
@@ -1684,8 +1690,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                     for w in week_options],
                       month_problem=problem if failed == "month" else None,
                       month_typed=typed if failed == "month" else None,
-                      detail=await crm.team_detail(person, since, until, norm_days=norm),
-                      money_ok=team_money(request),
+                      detail=detail, extensions=team.extension_count(detail["payments"]),
+                      money_ok=money_ok,
                       may_plan=may_edit(request, "staff") and not owner,
                       status_code=status_code)
 
@@ -1700,7 +1706,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     async def team_plan_save(request: Request, staff_id: str) -> Response:
         """План месяца с условиями оплаты, или план недели или дня (period),
         по показателям роли сотрудника. Числа, которых форма не несёт (чужая
-        роль, рубли без «Финансов»), - прежние из базы (team.keep_saved)."""
+        роль, рубли без «Финансов»), - прежние из базы (team.keep_saved);
+        галочка `drop_foreign` (только с деньгами) обнуляет условия чужой роли."""
         if not may_edit(request, "staff"):
             return denied(request, "staff")
         person = await by_id(crm.staff_by_id, staff_id)
@@ -1730,6 +1737,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         saved = ((await crm.staff_plans(first)).get(sid) if kind == "month"
                  else (await crm.staff_period_plans(kind, start)).get(sid))
         fields = team.keep_saved(kind, fields, saved)
+        if kind == "month" and money_ok and data.get("drop_foreign"):
+            # условия чужой роли (остались с прежних правил) - ноль
+            fields = team.drop_foreign(fields, team.roles_of(person))
         if kind == "month":
             await crm.set_staff_plan(sid, first, by=who(request), **fields)
             flash(request, (f"План и условия на {team.month_name(first)} сохранены."

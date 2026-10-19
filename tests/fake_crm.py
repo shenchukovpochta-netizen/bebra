@@ -2112,7 +2112,7 @@ class FakeCrm:
         own = [r for r in self.rentals_.values() if r["client_id"] == entry["client_id"]]
         covering = [r for r in own
                     if r["started_on"] <= day
-                    and (r.get("closed_on") is None or r["closed_on"] >= day)]
+                    and (r.get("closed_on") is None or r["closed_on"] > day)]
         if covering:
             return max(covering, key=lambda r: r["id"])
         if own:
@@ -5059,14 +5059,15 @@ class FakeCrm:
 
     def _team_extension(self, x):
         """Аренда, которую продлил платёж (как _EXTENSION_SQL в базе): своя
-        аренда записи или аренда клиента, шедшая в день платежа и начатая
-        раньше него. None - платёж выдачи или долга, не продление."""
+        аренда записи или аренда клиента, начатая раньше дня платежа и
+        идущая после него. None - платёж выдачи, долга после сдачи или в
+        день сдачи - не продление."""
         day = crm_logic.local_date(x["created_at"])
         hits = [r for r in self.rentals_.values()
                 if r["client_id"] == x["client_id"]
                 and (x.get("rental_id") is None or r["id"] == x.get("rental_id"))
                 and r["started_on"] < day
-                and (r.get("closed_on") is None or r["closed_on"] >= day)]
+                and (r.get("closed_on") is None or r["closed_on"] > day)]
         return max((r["id"] for r in hits), default=None)
 
     def _team_returns(self, actor, inside):
@@ -5147,7 +5148,8 @@ class FakeCrm:
                     "to_status": log["to_status"]}
                    for r, log in self._team_returns(actor, inside)]
         payments = [{**x, "full_name": self.clients_[x["client_id"]]["full_name"],
-                     "extension": self._team_extension(x) is not None}
+                     "extension_rental": (got := self._team_extension(x)),
+                     "extension": got is not None}
                     for x in self.ledger_ if x["kind"] == "payment"
                     and x.get("created_by") == actor and inside(x["created_at"])]
         clients = [{"id": c["id"], "full_name": c["full_name"], "created_at": c["created_at"],

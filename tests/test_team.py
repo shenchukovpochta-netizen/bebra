@@ -115,6 +115,43 @@ class TestTeamRules(unittest.TestCase):
         self.assertEqual(both["total"], D("27300.00"))
         self.assertEqual(team.salary(None, {})["total"], D("0.00"))
 
+    def test_foreign_terms(self):
+        """Условие чужой роли, оставшееся в строке месяца с прежних правил
+        (тогда условия были у всех), - не молча: строкой, и галочка его
+        обнуляет; ноль - не условие, у владельца плана нет."""
+        plan = {"salary_base": D("30000"), "per_issue": D("0"), "order_pct": D("30"),
+                "revenue_pct": D("10.00")}
+        got = team.foreign_terms(plan, ("master",))
+        self.assertEqual([(f["key"], f["text"], f["role"]) for f in got],
+                         [("revenue_pct", "10 %", "администратор")])
+        self.assertEqual([f["key"] for f in team.foreign_terms(plan, ("admin",))],
+                         ["order_pct"])
+        self.assertEqual(team.foreign_terms({"per_issue": D("300")}, ())[0]["text"],
+                         logic.money(D("300")))
+        self.assertEqual(team.foreign_terms(plan, ("master", "admin")), [])
+        self.assertEqual(team.foreign_terms(None, ("master",)), [])
+        dropped = team.drop_foreign(plan, ("master",))
+        self.assertEqual((dropped["revenue_pct"], dropped["per_issue"], dropped["order_pct"],
+                          dropped["salary_base"]),
+                         (D("0.00"), D("0.00"), D("30"), D("30000")))
+        got = {r["name"]: r for r in team.rows(
+            [{"id": 1, "name": "Булат", **perms("tech")},
+             {"id": 2, "name": "Владелец", **perms("owner")}],
+            {}, {1: plan, 2: plan}, days=31, passed=1)}
+        self.assertEqual([f["key"] for f in got["Булат"]["foreign"]], ["revenue_pct"])
+        self.assertEqual(got["Владелец"]["foreign"], [], "у владельца условий нет")
+
+    def test_extension_count(self):
+        """Продления в списке платежей - пары «аренда, местный день», как у
+        db.team_facts: наличные и карта за одно продление - одно."""
+        at = datetime(2026, 10, 15, 9, tzinfo=UTC)
+        pays = [{"extension_rental": 7, "created_at": at},
+                {"extension_rental": 7, "created_at": at + timedelta(hours=2)},
+                {"extension_rental": 7, "created_at": at + timedelta(days=1)},
+                {"extension_rental": 8, "created_at": at},
+                {"extension_rental": None, "created_at": at}]
+        self.assertEqual(team.extension_count(pays), 3)
+
     def test_on_time(self):
         self.assertIsNone(team.on_time({"orders": 0}), "нарядов нет - не «0 %»")
         got = team.on_time({"orders": 3, "orders_on_time": 2})
@@ -179,6 +216,12 @@ class TestTeamRules(unittest.TestCase):
         owners = team.owners(team_rows)
         self.assertEqual([o["name"] for o in owners], ["Владелец"])
         self.assertEqual([d["title"] for d in owners[0]["done"]], ["Выдачи", "Принял денег"])
+        self.assertEqual([d["title"] for d in team.owners(team_rows, money_ok=False)[0]["done"]],
+                         ["Выдачи"], "рубли - с правом на деньги")
+        only_money = team.rows([{"id": 4, "name": "Владелец", **perms("owner")}],
+                               {4: {"payments": D("500")}}, {}, days=30, passed=15)
+        self.assertEqual(team.owners(only_money, money_ok=False), [],
+                         "без права на деньги и без штук - строки нет, а не «сам: .»")
         total = team.totals(team_rows)
         self.assertEqual((total["issues"], total["orders"], total["payments"]),
                          (4, 5, D("9000.00")), "Вера считается один раз, владелец - нет")
@@ -518,6 +561,25 @@ class TestTeamPages(WebCase):
         self.assertNotIn("За выдачи", card, "начисление - условия его роли")
         # 30000 + 30 % от 3000
         self.assertIn("30 900 ₽", card)
+        self.assertNotIn("условие чужой роли", card)
+        # % денег с прежних правил (тогда условия были у всех): мастеру не
+        # начисляется - и это видно строкой, а не молчаливой разницей
+        run(self.crm.set_staff_plan(bulat, first, by="t", revenue_pct=D("10")))
+        card = self.get_ok(f"/team/{bulat}")
+        self.assertIn("Не начисляется — условие чужой роли", card)
+        self.assertIn("% от принятых денег 10 % (администратор)", card)
+        self.assertIn("30 900 ₽", card, "начислено - без него")
+        self.assertIn('name="drop_foreign"', card)
+        self.assertIn("не начисляется: % от принятых денег", self.get_ok("/team"))
+        r = self.client.post(f"/team/{bulat}/plan", data={
+            "month": f"{first:%Y-%m}", "plan_orders_own": "20", "plan_orders_ext": "4",
+            "salary_base": "30000", "order_pct": "30", "drop_foreign": "1"})
+        self.assertEqual(r.status_code, 303)
+        plan = run(self.crm.staff_plans(first))[bulat]
+        self.assertEqual((plan["revenue_pct"], plan["per_issue"], plan["order_pct"],
+                          plan["plan_issues"]), (D("0.00"), D("0.00"), D("30.00"), 5),
+                         "галочка обнуляет только условия чужой роли")
+        self.assertNotIn("условие чужой роли", self.get_ok(f"/team/{bulat}"))
         self.client.post("/logout")
         self.login("bulat", "password-3")
         my = self.get_ok("/my")
@@ -525,9 +587,12 @@ class TestTeamPages(WebCase):
         self.assertIn("в срок ремонта", my)
 
     def test_admin_extensions_returns_clients(self):
-        """Администратор: продление - платёж по идущей аренде, начатой
-        раньше; два платежа за день - одно продление; сдача - закрытие с
-        возвратом техники; новые клиенты - заведённые им карточки."""
+        """Администратор: продление - платёж по аренде, начатой раньше и не
+        сданной в этот день; два платежа за день - одно продление (и в
+        плитке, и в заголовке списка); долг, принятый при сдаче, - не
+        продление; сдал старую и взял новую в тот же день - платёж выдачи;
+        сдача - закрытие с возвратом техники; новые клиенты - заведённые им
+        карточки."""
         anna = self.make_anna()
         start = date.today() - timedelta(days=3)
         rid = run(service.open_rental(
@@ -539,34 +604,52 @@ class TestTeamPages(WebCase):
                                     rental_id=rid, created_by="staff:anna"))
         run(self.crm.create_client(full_name="Петров Пётр", phone="+79990000001",
                                    created_by="staff:anna"))
-        run(service.close_rental(self.crm, run(self.crm.rental(rid)),
-                                 closed_on=date.today(), note=None, by="staff:anna"))
         now = datetime.now(UTC)
-        facts = run(self.crm.team_facts(now - timedelta(hours=1),
-                                        now + timedelta(minutes=1)))[anna]
-        self.assertEqual((facts["issues"], facts["extensions"], facts["returns"],
-                          facts["new_clients"], facts["payments"]),
-                         (1, 1, 1, 1, D(3000)))
-        # платёж в день начала аренды - выдача, не продление
+
+        def facts():
+            return run(self.crm.team_facts(now - timedelta(hours=1),
+                                           datetime.now(UTC) + timedelta(minutes=1)))[anna]
+        got = facts()
+        self.assertEqual((got["issues"], got["extensions"], got["returns"],
+                          got["new_clients"], got["payments"]),
+                         (1, 1, 0, 1, D(3000)))
+        # сдача с долгом: велосипед вернули, долг принят на точке тем же днём
         other = run(self.crm.create_client(full_name="Сидоров", phone="+79990000002"))
         bike2 = run(self.crm.create_bike(code="B-2", model="Kugoo V3"))
-        rid2 = run(service.open_rental(
+        old = run(service.open_rental(
             self.crm, client=run(self.crm.client(other)), bike=run(self.crm.bike(bike2)),
+            tariff=run(self.crm.tariff(self.tariff_id)),
+            started_on=date.today() - timedelta(days=10), contract_no=None,
+            by="staff:admin"))
+        run(service.close_rental(self.crm, run(self.crm.rental(old)),
+                                 closed_on=date.today(), note=None, by="staff:anna"))
+        run(self.crm.add_ledger(client_id=other, kind="payment", amount=D(500),
+                                rental_id=old, created_by="staff:anna"))
+        got = facts()
+        self.assertEqual((got["returns"], got["extensions"]), (1, 1),
+                         "долг при сдаче - не продление")
+        # тот же клиент тем же днём берёт новую: платёж без аренды - за выдачу
+        bike3 = run(self.crm.create_bike(code="B-3", model="Kugoo V3"))
+        rid2 = run(service.open_rental(
+            self.crm, client=run(self.crm.client(other)), bike=run(self.crm.bike(bike3)),
             tariff=run(self.crm.tariff(self.tariff_id)), started_on=date.today(),
             contract_no=None, by="staff:anna"))
         run(self.crm.add_ledger(client_id=other, kind="payment", amount=D(3000),
-                                rental_id=rid2, created_by="staff:anna"))
+                                created_by="staff:anna"))
         # потеря - не сдача
         run(service.declare_theft(self.crm, run(self.crm.rental(rid2)), note=None,
                                   by="staff:anna"))
-        facts = run(self.crm.team_facts(now - timedelta(hours=1),
-                                        datetime.now(UTC) + timedelta(minutes=1)))[anna]
-        self.assertEqual((facts["extensions"], facts["returns"]), (1, 1))
+        got = facts()
+        self.assertEqual((got["issues"], got["extensions"], got["returns"],
+                          got["payments"]), (2, 1, 1, D(6500)))
         self.login()
         card = self.get_ok(f"/team/{anna}")
         self.assertIn("Сдачи", card)
         self.assertIn("Петров Пётр", card)
-        self.assertIn("из них продлений 2", card, "оба платежа помечены продлением")
+        self.assertIn("Принятые платежи <span class=\"muted\">· 4 · продлений 1</span>", card,
+                      "наличные и карта за день - одно продление, как в плитке")
+        self.assertEqual(card.count('<small class="muted">продление</small>'), 2,
+                         "оба платежа продления помечены")
 
     def test_owner_not_in_tables(self):
         """Владелец не исполнитель: ни в таблице ролей, ни плана; сделанное

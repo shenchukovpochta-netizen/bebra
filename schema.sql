@@ -3160,6 +3160,14 @@ alter table crm.staff_period_plans add column if not exists plan_clients integer
 -- (settings.team_roles_v1) переезжает в «Ремонт парка»: сторонний ремонт
 -- отдельно не планировался, а основная работа мастера - свой парк.
 -- Колонка остаётся с данными, но панель её больше не пишет и не читает.
+-- План денег мастера тем же разом переезжает в «Выручку ремонта»: по
+-- прежним правилам «принёс денег» - платежи плюс клиентские наряды, и у
+-- мастера, который денег не принимает, это и были деньги ремонта; теперь
+-- plan_revenue - принятые деньги администратора. Мастер - по доступу, как
+-- team.roles_of: меняет «Сервис» и не меняет ни выдачу, ни аренды, ни
+-- кассу (у кого оба права, план денег остаётся админским). Условия
+-- оплаты не трогаются: % денег мастеру не начисляется, карточка говорит
+-- об этом строкой (team.foreign_terms) и даёт обнулить.
 do $$
 begin
   if not exists (select 1 from crm.settings where key = 'team_roles_v1') then
@@ -3167,6 +3175,24 @@ begin
      where plan_orders is not null and plan_orders_own is null;
     update crm.staff_period_plans set plan_orders_own = plan_orders
      where plan_orders is not null and plan_orders_own is null;
+    update crm.staff_plans sp
+       set plan_repair_revenue = sp.plan_revenue, plan_revenue = null
+      from crm.staff s join crm.access_profiles p on p.id = s.profile_id
+     where s.id = sp.staff_id and sp.plan_revenue is not null
+       and sp.plan_repair_revenue is null and p.code is distinct from 'owner'
+       and p.perms -> 'sections' ->> 'service' = 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'issue', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'rentals', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'cash', '') <> 'edit';
+    update crm.staff_period_plans sp
+       set plan_repair_revenue = sp.plan_revenue, plan_revenue = null
+      from crm.staff s join crm.access_profiles p on p.id = s.profile_id
+     where s.id = sp.staff_id and sp.plan_revenue is not null
+       and sp.plan_repair_revenue is null and p.code is distinct from 'owner'
+       and p.perms -> 'sections' ->> 'service' = 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'issue', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'rentals', '') <> 'edit'
+       and coalesce(p.perms -> 'sections' ->> 'cash', '') <> 'edit';
     insert into crm.settings (key, value, updated_by)
     values ('team_roles_v1', '1', 'schema')
     on conflict (key) do nothing;

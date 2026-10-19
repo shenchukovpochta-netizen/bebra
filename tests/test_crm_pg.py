@@ -23,7 +23,7 @@ try:
     import asyncpg
     import pgserver
 
-    from app.crm import logic, service
+    from app.crm import logic, service, team
     from app.crm.db import CrmDB
     from app.db import Database, _init_connection
     from app.services.crypto import generate_key
@@ -688,12 +688,14 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
 
     async def test_team_roles_on_postgres(self):
         """Команда по ролям на настоящей базе. Администратор: продление -
-        платёж по идущей аренде, начатой раньше (два за день - одно), сдача -
-        закрытие с возвратом техники по журналу статусов того же момента,
-        потеря - не сдача, новые клиенты - по автору карточки. Мастер: наряд
-        по велосипеду парка и сторонний порознь, в срок - по сроку узла или
-        общему, выручка - оплаченные клиентом. Прежний plan_orders один раз
-        переезжает в «Ремонт парка»."""
+        платёж по аренде, начатой раньше и не сданной в этот день (два за
+        день - одно; долг при сдаче и платёж сдавшего старую и взявшего
+        новую тем же днём - нет), сдача - закрытие с возвратом техники по
+        журналу статусов того же момента, потеря - не сдача, новые клиенты -
+        по автору карточки. Мастер: наряд по велосипеду парка и сторонний
+        порознь, в срок - по сроку узла или общему, выручка - оплаченные
+        клиентом. Прежний plan_orders один раз переезжает в «Ремонт парка»,
+        план денег мастера - в «Выручку ремонта»."""
         await self.seed()
         tech = await self.crm.access_profile_by_code("tech")
         manager = await self.crm.access_profile_by_code("manager")
@@ -709,16 +711,26 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                                   created_by="staff:anna", method="card")
         new = await self.crm.create_client(full_name="Петров", phone="+79990000001",
                                            created_by="staff:anna")
-        await service.close_rental(self.crm, await self.crm.rental(rid),
+        # сдача с долгом: вернул велосипед и тем же днём отдал долг - не продление
+        bike3 = await self.crm.create_bike(code="B-3", model="Kugoo V3", frame_no="FR3")
+        old = await service.open_rental(
+            self.crm, client=await self.crm.client(new), bike=await self.crm.bike(bike3),
+            tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() - timedelta(days=10), contract_no=None,
+            by="staff:admin")
+        await service.close_rental(self.crm, await self.crm.rental(old),
                                    closed_on=date.today(), note=None, by="staff:anna")
-        # выдача сегодня, платёж в день начала - не продление; потеря - не сдача
+        await self.crm.add_ledger(client_id=new, kind="payment", amount=D("500"),
+                                  rental_id=old, created_by="staff:anna")
+        # тем же днём новая аренда: платёж без аренды - выдача, как у
+        # _ledger_rentals, а не продление сданной; потеря - не сдача
         bike2 = await self.crm.create_bike(code="B-2", model="Kugoo V3", frame_no="FR2")
         rid2 = await service.open_rental(
             self.crm, client=await self.crm.client(new), bike=await self.crm.bike(bike2),
             tariff=await self.crm.tariff(self.tariff_id), started_on=date.today(),
             contract_no=None, by="staff:anna")
         await self.crm.add_ledger(client_id=new, kind="payment", amount=D("3000"),
-                                  rental_id=rid2, created_by="staff:anna")
+                                  created_by="staff:anna")
         await service.declare_theft(self.crm, await self.crm.rental(rid2), note=None,
                                     by="staff:anna")
         # мастер: колодки (срок узла 1 сут.) два дня - просрочен; чужой
@@ -753,16 +765,18 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         facts = await self.crm.team_facts(since, until)
         a, b = facts[anna], facts[bulat]
         self.assertEqual((a["issues"], a["extensions"], a["returns"], a["new_clients"],
-                          a["payments"]), (2, 1, 1, 1, D("6000.00")))
+                          a["payments"]), (2, 1, 1, 1, D("6500.00")))
         self.assertEqual((b["orders"], b["orders_own"], b["orders_ext"], b["orders_on_time"],
                           b["orders_works"], b["repair_revenue"]),
                          (3, 1, 2, 2, D("3000.00"), D("3500.00")))
         self.assertEqual((await self.crm.team_facts(since, until, norm_days=0))[bulat]
                          ["orders_on_time"], 1, "общий срок 0 - сутки уже просрочка")
         detail = await self.crm.team_detail(await self.crm.staff_by_id(anna), since, until)
-        self.assertEqual([r["id"] for r in detail["returns"]], [rid])
+        self.assertEqual([r["id"] for r in detail["returns"]], [old])
         self.assertEqual(sorted(x["extension"] for x in detail["payments"]),
-                         [False, True, True])
+                         [False, False, True, True])
+        self.assertEqual({x["extension_rental"] for x in detail["payments"]}, {None, rid})
+        self.assertEqual(team.extension_count(detail["payments"]), a["extensions"])
         self.assertEqual([c["id"] for c in detail["clients"]], [new])
         orders = {o["id"]: o for o in (await self.crm.team_detail(
             await self.crm.staff_by_id(bulat), since, until))["orders"]}
@@ -779,12 +793,23 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          (4, 1, None))
         with self.assertRaises(asyncpg.CheckViolationError):
             await self.crm.set_staff_plan(bulat, first, by="t", plan_works=D("-1"))
-        await self.pool.execute("update crm.staff_plans set plan_orders = 12 "
-                                "where staff_id = $1", bulat)
+        await self.pool.execute("update crm.staff_plans set plan_orders = 12, "
+                                "plan_revenue = 50000 where staff_id = $1", bulat)
+        await self.crm.set_staff_plan(anna, first, by="t", plan_revenue=D("70000"))
+        await self.crm.set_staff_period_plan(bulat, "day", date.today(), by="t",
+                                             plan_revenue=D("2000"))
         await self.pool.execute("delete from crm.settings where key = 'team_roles_v1'")
         await Database(self.pool).apply_schema(SCHEMA, force=True)
-        plan = (await self.crm.staff_plans(first))[bulat]
+        plans = await self.crm.staff_plans(first)
+        plan = plans[bulat]
         self.assertEqual((plan["plan_orders_own"], plan["plan_orders_ext"]), (12, 3))
+        self.assertEqual((plan["plan_repair_revenue"], plan["plan_revenue"]),
+                         (D("50000.00"), None), "деньги мастера по прежним правилам - ремонт")
+        self.assertEqual((plans[anna]["plan_revenue"], plans[anna]["plan_repair_revenue"]),
+                         (D("70000.00"), None), "у администратора - принятые деньги")
+        day = (await self.crm.staff_period_plans("day", date.today()))[bulat]
+        self.assertEqual((day["plan_repair_revenue"], day["plan_revenue"]),
+                         (D("2000.00"), None))
         await self.pool.execute("update crm.staff_plans set plan_orders_own = null")
         await Database(self.pool).apply_schema(SCHEMA, force=True)
         self.assertIsNone((await self.crm.staff_plans(first))[bulat]["plan_orders_own"],

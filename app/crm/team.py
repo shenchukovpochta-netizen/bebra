@@ -26,9 +26,10 @@
 
 администратор
 - выдачи - аренды, заведённые им (`rentals.created_by`);
-- продления - принятые им платежи по идущей аренде, начатой раньше дня
-  платежа (платёж выдачи - не продление); два платежа одной аренды за
-  день - одно продление;
+- продления - принятые им платежи по аренде, начатой раньше дня платежа
+  и не сданной в этот день (платёж выдачи - не продление, долг, принятый
+  при сдаче, - тоже); два платежа одной аренды за день - одно продление
+  (`extension_count`);
 - сдачи - аренды, которые он закрыл с возвратом техники (журнал статусов
   в момент закрытия: из «в аренде» в свободный, ремонт, ТО, бронь;
   потеря, выкуп и списание - не сдача);
@@ -40,7 +41,9 @@
 
 Зарплата = оклад + цена сделанных задач + условия роли: мастеру % от
 суммы работ, администратору ставка × выдачи и % от принятых денег.
-Условие чужой роли не начисляется и в форме не показывается. Условия и
+Условие чужой роли не начисляется и в форме не показывается; осталось в
+строке (по прежним правилам у всех были все условия) - карточка говорит
+об этом строкой (`foreign_terms`), и его можно обнулить галочкой. Условия и
 план - строка на месяц (`crm.staff_plans`): месяц без строки живёт по
 последней прежней. Это расчёт, а не запись: в журнал денег клиентов
 зарплата не идёт.
@@ -168,6 +171,32 @@ def metrics_for(roles: Sequence[str] | None = None) -> tuple[Metric, ...]:
 def terms_for(roles: Sequence[str]) -> tuple[str, ...]:
     """Условия оплаты роли: оклад - всем, остальное - своей роли."""
     return tuple(t for t in TERMS if TERM_ROLE[t] is None or TERM_ROLE[t] in roles)
+
+
+def foreign_terms(plan: Mapping[str, Any] | None,
+                  roles: Sequence[str]) -> list[dict[str, Any]]:
+    """Ненулевые условия чужой роли в строке месяца: по прежним правилам
+    условия были у всех (мастеру - % от принесённых денег, где считались и
+    оплаченные наряды), теперь они не начисляются и в форме их нет. Чтобы
+    начисленное не уменьшалось молча, карточка показывает их строкой."""
+    allowed = terms_for(roles)
+    out = []
+    for key in TERMS:
+        value = _dec((plan or {}).get(key))
+        if key in allowed or not value:
+            continue
+        text = (f"{number(format(value.normalize(), 'f'))} %" if key.endswith("_pct")
+                else logic.money(value))
+        out.append({"key": key, "title": TERM_TITLES[key].split(",")[0],
+                    "role": ROLE_ONE[str(TERM_ROLE[key])], "text": text})
+    return out
+
+
+def extension_count(payments: Iterable[Mapping[str, Any]]) -> int:
+    """Продления в списке платежей (db.team_detail): пары «аренда, день», как
+    у db.team_facts, - наличные и карта за одно продление не два продления."""
+    return len({(p["extension_rental"], logic.local_date(p["created_at"]))
+                for p in payments if p.get("extension_rental") is not None})
 
 
 def month_name(first: date) -> str:
@@ -389,6 +418,7 @@ def rows(people: Iterable[Mapping[str, Any]], facts: Mapping[int, Mapping[str, A
             "facts": f, "metrics": {m["key"]: m for m in metrics},
             **_score(metrics), "on_time": on_time(f),
             "plan": plan, "pay": salary(plan, f, roles),
+            "foreign": [] if logic.is_owner(p) else foreign_terms(plan, roles),
             "inherited": bool(plan) and plan.get("own") is False})
     out.sort(key=lambda r: (-(r["percent"] or -1), str(r["name"])))
     return out
@@ -428,10 +458,12 @@ def sections(team_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def owners(team_rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def owners(team_rows: Iterable[Mapping[str, Any]], *,
+           money_ok: bool = True) -> list[dict[str, Any]]:
     """Владелец сам что-то сделал (выдал, принял деньги, закрыл наряд) -
     строкой под таблицами: в план и зарплату это не идёт, но и не
-    пропадает из виду. Без факта - не показывается."""
+    пропадает из виду. Без факта - не показывается; рубли - только с
+    правом на деньги (`money_ok`), и только рубли без него - строки нет."""
     out = []
     for r in team_rows:
         if not r["owner"] or not busy(r["facts"]):
@@ -439,11 +471,12 @@ def owners(team_rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
         done = []
         for m in METRICS:
             value = r["facts"].get(m.fact)
-            if value:
+            if value and (money_ok or not m.money):
                 done.append({"title": m.title, "money": m.money,
                              "text": number(logic.to_money(_dec(value)) if m.money
                                             else int(value), m.money)})
-        out.append({"id": r["id"], "name": r["name"], "done": done})
+        if done:
+            out.append({"id": r["id"], "name": r["name"], "done": done})
     return out
 
 
@@ -583,6 +616,13 @@ def keep_saved(kind: str, fields: Mapping[str, Any],
             got = (saved or {}).get(key)
             out[key] = ZERO if got is None and key in TERMS else got
     return out
+
+
+def drop_foreign(fields: Mapping[str, Any], roles: Sequence[str]) -> dict[str, Any]:
+    """Галочка «обнулить условие чужой роли» в форме месяца: условия, которых
+    роль не получает, - ноль в этой строке (и в месяцах, живущих по ней)."""
+    allowed = terms_for(roles)
+    return {**fields, **{key: ZERO for key in TERMS if key not in allowed}}
 
 
 def parse_plan(data: Mapping[str, str], keys: tuple[str, ...] = PLAN_FIELDS

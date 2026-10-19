@@ -6945,15 +6945,18 @@ class CrmDB:
     # rentals.closed_at (одна транзакция db.close_rental), и автором
     # (crm.actor) - того, кто закрыл. Потеря, выкуп и списание - не сдача.
     _RETURNED_SQL = "(" + ", ".join(f"'{s}'" for s in logic.FEEDBACK_RETURNED) + ")"
-    # Продление - платёж по идущей аренде, начатой раньше дня платежа:
-    # своя аренда записи, иначе любая аренда клиента, шедшая в тот день
-    # (как первые два шага _ledger_rentals). Платёж выдачи - в день начала.
+    # Продление - платёж по аренде, которая идёт и после дня платежа и
+    # начата раньше него: своя аренда записи, иначе аренда клиента, шедшая
+    # в тот день (как первые два шага _ledger_rentals). Платёж выдачи - в
+    # день начала; платёж в день сдачи (долг на точке при возврате) -
+    # расчёт, а не продление, и сдавший старую и взявший новую в тот же
+    # день платит за выдачу, как и у _ledger_rentals.
     _EXTENSION_SQL = """
         select r.id from crm.rentals r
          where r.client_id = l.client_id
            and (l.rental_id is null or r.id = l.rental_id)
            and r.started_on < l.created_at::date
-           and (r.closed_on is null or r.closed_on >= l.created_at::date)
+           and (r.closed_on is null or r.closed_on > l.created_at::date)
          order by r.id desc limit 1"""
     # Срок наряда - как logic.order_norm: самый долгий срок узлов строк;
     # строка без своего срока (или без узла) меряется общим ($N), наряд без
@@ -6975,9 +6978,10 @@ class CrmDB:
         """Сделанное каждым сотрудником за окно (app/crm/team.py).
 
         Администратор: выдачи, платежи, новые клиенты - по автору записи
-        (staff:<логин>); продления - его платежи по идущей аренде, начатой
-        раньше дня платежа (две записи одной аренды за день - одно
-        продление); сдачи - закрытые им аренды с возвратом техники.
+        (staff:<логин>); продления - его платежи по аренде, начатой раньше
+        дня платежа и не сданной в этот день (две записи одной аренды за
+        день - одно продление; долг при сдаче - не продление); сдачи -
+        закрытые им аренды с возвратом техники.
         Мастер: закрытые наряды, где он техник, - по велосипеду парка и по
         чужой технике, в срок ли (`norm_days` - общий срок ремонта), сумма
         работ (наряд без себестоимости, не меньше нуля); выручка ремонта -
@@ -7062,7 +7066,9 @@ class CrmDB:
                           limit: int = 300, *, norm_days: int = logic.ORDER_STUCK_DAYS
                           ) -> dict[str, list[dict]]:
         """Что именно сделал сотрудник за окно - для его карточки: выдачи,
-        сдачи, принятые платежи (продление помечено `extension`), новые
+        сдачи, принятые платежи (продление помечено `extension`, его аренда -
+        `extension_rental`: продлений столько, сколько пар «аренда, день» -
+        team.extension_count), новые
         клиенты, закрытые наряды (по велосипеду парка и сторонние - по
         bike_id; срок `norm` и сутки `days` - как у team_facts), задачи."""
         actor = f"staff:{staff['login']}"
@@ -7091,6 +7097,7 @@ class CrmDB:
         payments = await self.pool.fetch(
             f"""
             select l.id, l.created_at, l.amount, l.method, l.client_id, c.full_name,
+                   ({self._EXTENSION_SQL}) as extension_rental,
                    exists ({self._EXTENSION_SQL}) as extension
               from crm.ledger l join crm.clients c on c.id = l.client_id
              where l.kind = 'payment' and l.created_by = $1 and l.created_at >= $2
