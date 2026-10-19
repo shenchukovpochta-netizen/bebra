@@ -1,26 +1,51 @@
-"""Команда: план месяца сотрудника, его факт и расчёт зарплаты.
+"""Команда: план сотрудника по его роли, факт и расчёт зарплаты.
 
-Владельцу - кнопка «Команда» (/team): кто сколько выдал, принял денег,
-закрыл нарядов и задач за месяц против своего плана, и сколько ему
-начислено по его условиям. У сотрудника - карточка (/team/<id>) с тем же
-по дням месяца и списками сделанного; себя он видит в «Задачах дня».
+Владельцу - кнопка «Команда» (/team): таблицы по ролям («Мастера»,
+«Администраторы»), у каждой свои показатели за месяц, неделю или день
+против плана, и сколько начислено по условиям. У сотрудника - карточка
+(/team/<id>) с тем же по показателям его роли и списками сделанного;
+себя он видит в «Задачах дня».
+
+Роль - по доступу (`roles_of`), а не по колонке staff.role: мастер меняет
+«Сервис» (наряды), администратор точки - выдачу, аренды или кассу; оба
+права - оба набора. Владелец исполнителем не считается: плана и зарплаты
+у него нет, на странице - строкой «сам сделал» под таблицами.
 
 Факт не хранится, он считается из своих таблиц (db.team_facts):
 
+мастер
+- ремонт парка - закрытые наряды, где он техник, по велосипеду парка;
+- сторонний ремонт - закрытые наряды по чужой технике (без велосипеда);
+- в срок - доля закрытых нарядов, уложившихся в срок ремонта
+  (logic.order_norm: самый долгий срок строк, общий - у строк без своего);
+- сумма работ - наряд без себестоимости (запчасти и работа), как в
+  «Выработке техников», но не меньше нуля: свой ремонт без цены клиенту
+  - ноль, а не минус себестоимость (иначе % от работ отнимал бы оклад);
+- выручка ремонта - оплаченные клиентом наряды (paid_at): сторонний
+  ремонт и ремонт арендатору за его счёт. В журнале этих денег нет;
+
+администратор
 - выдачи - аренды, заведённые им (`rentals.created_by`);
+- продления - принятые им платежи по идущей аренде, начатой раньше дня
+  платежа (платёж выдачи - не продление); два платежа одной аренды за
+  день - одно продление;
+- сдачи - аренды, которые он закрыл с возвратом техники (журнал статусов
+  в момент закрытия: из «в аренде» в свободный, ремонт, ТО, бронь;
+  потеря, выкуп и списание - не сдача);
 - принял денег - платежи журнала, которые он записал (`ledger`, вид
   `payment`): банк и автозачисление не его заслуга;
-- наряды - закрытые, где он техник; работа - сумма наряда без запчастей;
-- задачи - сделанные им поручения (`tasks.done_by`) и их цена;
-- «принёс денег» - принятые платежи плюс клиентские наряды: оплата
-  чужого ремонта в журнал не идёт, но это тоже деньги компании.
+- новые клиенты - карточки, заведённые им в панели (`clients.created_by`);
 
-Зарплата = оклад + ставка × выдачи + % от работы нарядов + % от
-принесённых денег + цена сделанных задач. Условия и план - строка на
-месяц (`crm.staff_plans`): месяц без строки живёт по последней прежней.
-Это расчёт, а не запись: в журнал денег клиентов зарплата не идёт.
+у всех - задачи: сделанные им поручения (`tasks.done_by`) и их цена.
 
-План на неделю (с понедельника) и на день - те же четыре числа без
+Зарплата = оклад + цена сделанных задач + условия роли: мастеру % от
+суммы работ, администратору ставка × выдачи и % от принятых денег.
+Условие чужой роли не начисляется и в форме не показывается. Условия и
+план - строка на месяц (`crm.staff_plans`): месяц без строки живёт по
+последней прежней. Это расчёт, а не запись: в журнал денег клиентов
+зарплата не идёт.
+
+План на неделю (с понедельника) и на день - те же числа плана без
 условий (`crm.staff_period_plans`). Своего нет - доля плана месяца по
 дням (`month_share`): каждый день берёт 1/N плана своего месяца, поэтому
 неделя на стыке месяцев складывается из двух планов. Своё число главнее
@@ -29,33 +54,67 @@
 Факт недели и дня - тот же db.team_facts по датам окна.
 
 Рубли плана и условия оплаты - владельцу или с «Финансами»: без этого
-права форма их не показывает, а сохранение берёт прежние из базы.
+права форма их не показывает, а сохранение берёт прежние из базы. Числа
+чужой роли форма тоже не несёт и сохранение их не трогает (`keep_saved`).
 """
 
 from __future__ import annotations
 
 from calendar import monthrange
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import logic
 
-# Что планируется: ключ плана, ключ факта, подпись, деньги ли.
-METRICS: tuple[tuple[str, str, str, bool], ...] = (
-    ("plan_issues", "issues", "Выдачи", False),
-    ("plan_orders", "orders", "Наряды", False),
-    ("plan_tasks", "tasks", "Задачи", False),
-    ("plan_revenue", "revenue", "Принёс денег", True),
+
+class Metric(NamedTuple):
+    """Показатель «Команды»: колонка плана (staff_plans, staff_period_plans),
+    ключ факта (db.team_facts), подпись, деньги ли, роль (None - у всех)."""
+    plan: str
+    fact: str
+    title: str
+    money: bool
+    role: str | None
+
+
+# Роли «Команды» по порядку таблиц. Роль - по доступу (roles_of).
+ROLES: tuple[tuple[str, str], ...] = (("master", "Мастера"), ("admin", "Администраторы"))
+ROLE_ONE = {"master": "мастер", "admin": "администратор"}
+# Администратор точки - тот, кто меняет выдачу, аренды или кассу.
+ADMIN_SECTIONS = ("issue", "rentals", "cash")
+
+METRICS: tuple[Metric, ...] = (
+    Metric("plan_orders_own", "orders_own", "Ремонт парка", False, "master"),
+    Metric("plan_orders_ext", "orders_ext", "Сторонний ремонт", False, "master"),
+    Metric("plan_works", "orders_works", "Сумма работ", True, "master"),
+    Metric("plan_repair_revenue", "repair_revenue", "Выручка ремонта", True, "master"),
+    Metric("plan_issues", "issues", "Выдачи", False, "admin"),
+    Metric("plan_extensions", "extensions", "Продления", False, "admin"),
+    Metric("plan_returns", "returns", "Сдачи", False, "admin"),
+    Metric("plan_clients", "new_clients", "Новые клиенты", False, "admin"),
+    Metric("plan_revenue", "payments", "Принял денег", True, "admin"),
+    Metric("plan_tasks", "tasks", "Задачи", False, None),
 )
+BY_FACT = {m.fact: m for m in METRICS}
+# Условия оплаты и чья это роль: оклад - всем, ставка за выдачу и % денег -
+# администратору, % от суммы работ - мастеру.
 TERMS = ("salary_base", "per_issue", "order_pct", "revenue_pct")
-PERIOD_FIELDS = tuple(m[0] for m in METRICS)
+TERM_ROLE: dict[str, str | None] = {"salary_base": None, "per_issue": "admin",
+                                    "order_pct": "master", "revenue_pct": "admin"}
+TERM_TITLES = {"salary_base": "Оклад, ₽", "per_issue": "За выдачу, ₽",
+               "order_pct": "% от суммы работ", "revenue_pct": "% от принятых денег"}
+PERIOD_FIELDS = tuple(m.plan for m in METRICS)
 PLAN_FIELDS = PERIOD_FIELDS + TERMS
-COUNT_FIELDS = tuple(m[0] for m in METRICS if not m[3])
+COUNT_FIELDS = tuple(m.plan for m in METRICS if not m.money)
 # Рубли плана и условия оплаты: без права на деньги их нет ни в форме,
-# ни в сохранении (form_keys, keep_money).
-MONEY_FIELDS = tuple(m[0] for m in METRICS if m[3]) + TERMS
+# ни в сохранении (form_keys, keep_saved).
+MONEY_FIELDS = tuple(m.plan for m in METRICS if m.money) + TERMS
+# Что считается «сотрудник работал в периоде» (отключённый с фактом
+# остаётся в таблице, месяц аналитики не пропускается).
+BUSY_FACTS = ("orders", "issues", "extensions", "returns", "payments", "new_clients",
+              "repair_revenue", "tasks")
 ZERO = Decimal("0.00")
 
 # Период «Команды»: месяц (с условиями оплаты), неделя и день (только план).
@@ -73,6 +132,42 @@ MONTHS_GEN = ("января", "февраля", "марта", "апреля", "�
               "сентября", "октября", "ноября", "декабря")
 WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота",
             "воскресенье")
+
+
+def roles_of(staff: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Роли сотрудника в «Команде» по его доступу: мастер - меняет
+    «Сервис», администратор - выдачу, аренды или кассу; оба права - обе
+    роли. Владелец - пусто: он не исполнитель, плана и зарплаты у него нет.
+    Профиль «только смотрит» - тоже пусто: показателей роли у него нет,
+    остаются задачи."""
+    if logic.is_owner(staff):
+        return ()
+    got = dict(staff or {})
+    out = []
+    if logic.can_edit(got, "service"):
+        out.append("master")
+    if any(logic.can_edit(got, code) for code in ADMIN_SECTIONS):
+        out.append("admin")
+    return tuple(out)
+
+
+def role_words(roles: Sequence[str]) -> str:
+    """«мастер и администратор» - подпись роли в «Команде»."""
+    return " и ".join(ROLE_ONE[r] for r in roles)
+
+
+def metrics_for(roles: Sequence[str] | None = None) -> tuple[Metric, ...]:
+    """Показатели ролей по порядку ROLES, задачи - последними (они у всех).
+    None - все показатели (выгрузка, план периода)."""
+    if roles is None:
+        return METRICS
+    own = [m for code, _t in ROLES if code in roles for m in METRICS if m.role == code]
+    return tuple(own + [m for m in METRICS if m.role is None])
+
+
+def terms_for(roles: Sequence[str]) -> tuple[str, ...]:
+    """Условия оплаты роли: оклад - всем, остальное - своей роли."""
+    return tuple(t for t in TERMS if TERM_ROLE[t] is None or TERM_ROLE[t] in roles)
 
 
 def month_name(first: date) -> str:
@@ -157,22 +252,38 @@ def _dec(value: Any) -> Decimal:
         return Decimal(0)
 
 
-def revenue(facts: Mapping[str, Any]) -> Decimal:
-    return logic.to_money(_dec(facts.get("payments")) + _dec(facts.get("client_orders_total")))
+def busy(facts: Mapping[str, Any]) -> bool:
+    return any(facts.get(k) for k in BUSY_FACTS)
 
 
-def salary(terms: Mapping[str, Any] | None, facts: Mapping[str, Any]) -> dict[str, Any]:
-    """Начислено по условиям месяца: разбивка и итог, в рублях с копейками."""
+def salary(terms: Mapping[str, Any] | None, facts: Mapping[str, Any],
+           roles: Sequence[str] = ("master", "admin")) -> dict[str, Any]:
+    """Начислено по условиям месяца: разбивка и итог, в рублях с копейками.
+    Условие чужой роли не начисляется: мастеру % денег, которых он не
+    принимает, не положен, даже если остался в строке с прошлых правил."""
     terms = terms or {}
-    base = logic.to_money(_dec(terms.get("salary_base")))
-    issues = logic.to_money(_dec(terms.get("per_issue")) * int(facts.get("issues") or 0))
-    orders = logic.to_money(_dec(facts.get("orders_works")) * _dec(terms.get("order_pct"))
-                            / 100)
-    money = logic.to_money(revenue(facts) * _dec(terms.get("revenue_pct")) / 100)
+    allowed = terms_for(roles)
+
+    def term(key: str) -> Decimal:
+        return _dec(terms.get(key)) if key in allowed else Decimal(0)
+    base = logic.to_money(term("salary_base"))
+    issues = logic.to_money(term("per_issue") * int(facts.get("issues") or 0))
+    orders = logic.to_money(_dec(facts.get("orders_works")) * term("order_pct") / 100)
+    money = logic.to_money(_dec(facts.get("payments")) * term("revenue_pct") / 100)
     tasks = logic.to_money(_dec(facts.get("tasks_pay")))
     total = base + issues + orders + money + tasks
     return {"base": base, "issues": issues, "orders": orders, "revenue": money,
-            "tasks": tasks, "total": logic.to_money(total)}
+            "tasks": tasks, "total": logic.to_money(total), "terms": allowed}
+
+
+def on_time(facts: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Доля нарядов, закрытых в срок ремонта. Нарядов нет - None (не «0 %»)."""
+    total = int(facts.get("orders") or 0)
+    if not total:
+        return None
+    done = int(facts.get("orders_on_time") or 0)
+    return {"done": done, "of": total, "late": total - done,
+            "percent": int((Decimal(done * 100) / total).quantize(Decimal(1), ROUND_HALF_UP))}
 
 
 def _count(value: Decimal, whole: bool) -> int | Decimal:
@@ -192,9 +303,11 @@ def number(value: Any, is_money: bool = False) -> str:
 
 
 def progress(plan: Mapping[str, Any] | None, facts: Mapping[str, Any], *,
-             days: int, passed: int, open_day: bool = False) -> list[dict[str, Any]]:
-    """Факт против плана по каждой метрике: процент и отставание от ровного
-    темпа. Метрика без плана - просто число.
+             days: int, passed: int, open_day: bool = False,
+             roles: Sequence[str] | None = None) -> list[dict[str, Any]]:
+    """Факт против плана по каждому показателю ролей (`roles`; None - все):
+    процент и отставание от ровного темпа. Показатель без плана - просто
+    число.
 
     Период ещё не начался (passed = 0) - отставания нет. `open_day` - идущий
     день: несделанное к вечеру - ещё не отставание, сделанное - «в темпе»."""
@@ -203,12 +316,13 @@ def progress(plan: Mapping[str, Any] | None, facts: Mapping[str, Any], *,
     days = max(int(days), 1)
     passed = min(max(int(passed), 0), days)
     out = []
-    for plan_key, fact_key, title, is_money in METRICS:
-        fact = revenue(facts) if fact_key == "revenue" else _dec(facts.get(fact_key))
-        target = plan.get(plan_key)
-        shown = fact if is_money else int(fact)
-        row: dict[str, Any] = {"key": fact_key, "title": title, "money": is_money,
-                               "fact": shown, "fact_text": number(shown, is_money),
+    for m in metrics_for(roles):
+        fact = logic.to_money(_dec(facts.get(m.fact))) if m.money else _dec(facts.get(m.fact))
+        target = plan.get(m.plan)
+        shown = fact if m.money else int(fact)
+        row: dict[str, Any] = {"key": m.fact, "title": m.title, "money": m.money,
+                               "role": m.role, "fact": shown,
+                               "fact_text": number(shown, m.money),
                                "plan": None, "plan_text": None, "percent": None,
                                "pace": None, "pace_text": None, "ahead": None,
                                "source": None}
@@ -220,12 +334,12 @@ def progress(plan: Mapping[str, Any] | None, facts: Mapping[str, Any], *,
                 ahead = None
             else:
                 ahead = fact >= pace
-            goal_shown = logic.to_money(goal) if is_money else _count(goal, whole)
-            pace_shown = logic.to_money(pace) if is_money else _count(pace, whole)
-            row.update(plan=goal_shown, plan_text=number(goal_shown, is_money),
+            goal_shown = logic.to_money(goal) if m.money else _count(goal, whole)
+            pace_shown = logic.to_money(pace) if m.money else _count(pace, whole)
+            row.update(plan=goal_shown, plan_text=number(goal_shown, m.money),
                        percent=int((fact * 100 / goal).quantize(Decimal(1), ROUND_HALF_UP)),
-                       pace=pace_shown, pace_text=number(pace_shown, is_money),
-                       ahead=ahead, source=sources.get(plan_key))
+                       pace=pace_shown, pace_text=number(pace_shown, m.money),
+                       ahead=ahead, source=sources.get(m.plan))
         out.append(row)
     return out
 
@@ -238,35 +352,98 @@ def plan_source(metrics: Iterable[Mapping[str, Any]]) -> str | None:
     return got.pop() if len(got) == 1 else "mixed"
 
 
-def rows(people: Iterable[Mapping[str, Any]], facts: Mapping[int, Mapping[str, Any]],
-         plans: Mapping[int, Mapping[str, Any]], *, days: int,
-         passed: int, open_day: bool = False) -> list[dict[str, Any]]:
-    """Строки «Команды»: действующие сотрудники и отключённые с фактом
-    в этом периоде (зарплату за отработанное считать всё равно надо)."""
-    out = []
-    for p in people:
-        sid = int(p["id"])
-        f = facts.get(sid) or {}
-        busy = any(f.get(k) for k in ("issues", "payments", "orders", "tasks"))
-        if not p.get("active", True) and not busy:
-            continue
-        plan = plans.get(sid)
-        metrics = progress(plan, f, days=days, passed=passed, open_day=open_day)
-        planned = [m for m in metrics if m["percent"] is not None]
-        out.append({
-            "id": sid, "name": p.get("name") or p.get("login"), "role": logic.role_title(p),
-            "location": p.get("location"), "active": p.get("active", True),
-            "facts": f, "metrics": {m["key"]: m for m in metrics},
-            "percent": (round(sum(m["percent"] for m in planned) / len(planned))
+def _score(metrics: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Сводка строки по запланированным показателям: средний процент,
+    отстаёт ли что-то, в темпе ли всё, откуда план."""
+    planned = [m for m in metrics if m["percent"] is not None]
+    return {"percent": (round(sum(m["percent"] for m in planned) / len(planned))
                         if planned else None),
             "behind": any(m["ahead"] is False for m in planned),
             # Зелёный - только когда в темпе всё запланированное: один
             # сделанный показатель при нуле денег - не «всё в порядке».
             "ahead": bool(planned) and all(m["ahead"] is True for m in planned),
-            "plan": plan, "pay": salary(plan, f), "revenue": revenue(f),
-            "source": plan_source(planned),
+            "source": plan_source(planned)}
+
+
+def rows(people: Iterable[Mapping[str, Any]], facts: Mapping[int, Mapping[str, Any]],
+         plans: Mapping[int, Mapping[str, Any]], *, days: int,
+         passed: int, open_day: bool = False) -> list[dict[str, Any]]:
+    """Строки «Команды»: действующие сотрудники и отключённые с фактом
+    в этом периоде (зарплату за отработанное считать всё равно надо).
+    Показатели - своей роли (roles_of); владелец помечен `owner`: в
+    таблицы ролей он не входит."""
+    out = []
+    for p in people:
+        sid = int(p["id"])
+        f = facts.get(sid) or {}
+        if not p.get("active", True) and not busy(f):
+            continue
+        roles = roles_of(p)
+        plan = plans.get(sid)
+        metrics = progress(plan, f, days=days, passed=passed, open_day=open_day,
+                           roles=roles)
+        out.append({
+            "id": sid, "name": p.get("name") or p.get("login"), "role": logic.role_title(p),
+            "roles": roles, "owner": logic.is_owner(p),
+            "location": p.get("location"), "active": p.get("active", True),
+            "facts": f, "metrics": {m["key"]: m for m in metrics},
+            **_score(metrics), "on_time": on_time(f),
+            "plan": plan, "pay": salary(plan, f, roles),
             "inherited": bool(plan) and plan.get("own") is False})
     out.sort(key=lambda r: (-(r["percent"] or -1), str(r["name"])))
+    return out
+
+
+def sections(team_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Таблицы «Команды» по ролям: у мастеров - свои колонки, у
+    администраторов - свои; сотрудник с обеими ролями - в обеих, процент
+    плана в каждой - по показателям этой роли. Без роли (профиль «только
+    смотрит») - «Остальные» с задачами, только если такие есть. Владелец -
+    ни в одной: он не исполнитель (owners)."""
+    out = []
+    for code, title in (*ROLES, ("other", "Остальные")):
+        keys = metrics_for(() if code == "other" else (code,))
+        members = []
+        for r in team_rows:
+            if r["owner"] or (code == "other" and r["roles"]) or (
+                    code != "other" and code not in r["roles"]):
+                continue
+            cells = [r["metrics"][m.fact] for m in keys]
+            members.append({**r, "cells": cells, **_score(cells),
+                            "both": len(r["roles"]) > 1})
+        if code == "other" and not members:
+            continue
+        members.sort(key=lambda r: (-(r["percent"] or -1), str(r["name"])))
+        total = {m.fact: (logic.to_money(sum((_dec(r["facts"].get(m.fact)) for r in members),
+                                             Decimal(0)))
+                          if m.money else sum(int(r["facts"].get(m.fact) or 0)
+                                              for r in members))
+                 for m in keys}
+        total["on_time"] = on_time({
+            "orders": sum(int(r["facts"].get("orders") or 0) for r in members),
+            "orders_on_time": sum(int(r["facts"].get("orders_on_time") or 0)
+                                  for r in members)})
+        out.append({"code": code, "title": title, "metrics": keys, "rows": members,
+                    "total": total})
+    return out
+
+
+def owners(team_rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Владелец сам что-то сделал (выдал, принял деньги, закрыл наряд) -
+    строкой под таблицами: в план и зарплату это не идёт, но и не
+    пропадает из виду. Без факта - не показывается."""
+    out = []
+    for r in team_rows:
+        if not r["owner"] or not busy(r["facts"]):
+            continue
+        done = []
+        for m in METRICS:
+            value = r["facts"].get(m.fact)
+            if value:
+                done.append({"title": m.title, "money": m.money,
+                             "text": number(logic.to_money(_dec(value)) if m.money
+                                            else int(value), m.money)})
+        out.append({"id": r["id"], "name": r["name"], "done": done})
     return out
 
 
@@ -277,21 +454,21 @@ def month_share(month_plans: Mapping[date, Mapping[str, Any] | None], start: dat
     месяцев - по датам, а не по месяцу начала. Показатель, не планируемый
     ни в одном из месяцев, - None. Деньги - до рубля, штуки - до десятых."""
     out: dict[str, Any] = {}
-    for key, _fact, _title, is_money in METRICS:
+    for m in METRICS:
         total, seen = Decimal(0), False
         for i in range(days):
             day = start + timedelta(days=i)
-            value = (month_plans.get(day.replace(day=1)) or {}).get(key)
+            value = (month_plans.get(day.replace(day=1)) or {}).get(m.plan)
             if value is None:
                 continue
             seen = True
             total += _dec(value) / monthrange(day.year, day.month)[1]
         if not seen:
-            out[key] = None
-        elif is_money:
-            out[key] = logic.to_money(total.quantize(Decimal(1), ROUND_HALF_UP))
+            out[m.plan] = None
+        elif m.money:
+            out[m.plan] = logic.to_money(total.quantize(Decimal(1), ROUND_HALF_UP))
         else:
-            out[key] = total.quantize(Decimal("0.1"), ROUND_HALF_UP)
+            out[m.plan] = total.quantize(Decimal("0.1"), ROUND_HALF_UP)
     return out
 
 
@@ -343,50 +520,66 @@ def history_months(first: date, count: int = HISTORY_MONTHS) -> list[date]:
 
 
 def history(months: Iterable[tuple[date, Mapping[str, Any] | None, Mapping[str, Any]]],
-            *, today: date) -> list[dict[str, Any]]:
-    """Аналитика сотрудника помесячно: план, факт и % по каждому показателю
-    и начисленное. Месяцы до первого с планом или фактом не показываются
-    (сотрудника тогда не было); новые сверху."""
+            *, today: date, roles: Sequence[str] = ("master", "admin")
+            ) -> list[dict[str, Any]]:
+    """Аналитика сотрудника помесячно по показателям его роли: план, факт и
+    % по каждому и начисленное. Месяцы до первого с планом или фактом не
+    показываются (сотрудника тогда не было); новые сверху."""
     out: list[dict[str, Any]] = []
     for first, plan, facts in sorted(months, key=lambda m: m[0]):
-        busy = (any(facts.get(k) for k in ("issues", "payments", "orders", "tasks"))
-                or any((plan or {}).get(k) for k in PLAN_FIELDS))
-        if not out and not busy:
+        busy_month = busy(facts) or any((plan or {}).get(k) for k in PLAN_FIELDS)
+        if not out and not busy_month:
             continue
         span = logic.month_bounds(first, today=today)
-        metrics = progress(plan, facts, days=span["days"], passed=span["passed"])
+        metrics = progress(plan, facts, days=span["days"], passed=span["passed"],
+                           roles=roles)
         out.append({"first": first, "key": span["key"], "title": month_name(first),
                     "current": span["is_current"], "metrics": {m["key"]: m for m in metrics},
-                    "pay": salary(plan, facts), "has_plan": bool(plan),
+                    "on_time": on_time(facts), "pay": salary(plan, facts, roles),
+                    "has_plan": bool(plan),
                     "inherited": bool(plan) and plan.get("own") is False})
     return out[::-1]
 
 
 def totals(team: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    team = list(team)
-    return {"issues": sum(int(r["facts"].get("issues") or 0) for r in team),
-            "orders": sum(int(r["facts"].get("orders") or 0) for r in team),
-            "tasks": sum(int(r["facts"].get("tasks") or 0) for r in team),
-            "revenue": logic.to_money(sum((r["revenue"] for r in team), ZERO)),
+    """Плитки над таблицами: по команде без владельца - каждый сотрудник
+    один раз, даже если он в двух таблицах ролей."""
+    team = [r for r in team if not r.get("owner")]
+
+    def count(key: str) -> int:
+        return sum(int(r["facts"].get(key) or 0) for r in team)
+
+    def cash(key: str) -> Decimal:
+        return logic.to_money(sum((_dec(r["facts"].get(key)) for r in team), Decimal(0)))
+    return {"orders": count("orders"), "orders_own": count("orders_own"),
+            "orders_ext": count("orders_ext"), "issues": count("issues"),
+            "extensions": count("extensions"), "returns": count("returns"),
+            "tasks": count("tasks"), "payments": cash("payments"),
+            "repair_revenue": cash("repair_revenue"),
             "pay": logic.to_money(sum((r["pay"]["total"] for r in team), ZERO))}
 
 
-def form_keys(kind: str, money_ok: bool) -> tuple[str, ...]:
-    """Поля формы плана: месяц - план и условия, неделя и день - план.
-    Без права на деньги - только штуки."""
-    keys = PLAN_FIELDS if kind == "month" else PERIOD_FIELDS
+def form_keys(kind: str, money_ok: bool,
+              roles: Sequence[str] = ("master", "admin")) -> tuple[str, ...]:
+    """Поля формы плана: показатели роли, у месяца - и условия роли; неделя
+    и день - только план. Без права на деньги - только штуки."""
+    keys = tuple(m.plan for m in metrics_for(roles))
+    if kind == "month":
+        keys += terms_for(roles)
     return keys if money_ok else tuple(k for k in keys if k not in MONEY_FIELDS)
 
 
-def keep_money(kind: str, fields: Mapping[str, Any],
+def keep_saved(kind: str, fields: Mapping[str, Any],
                saved: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Форма без права на деньги рублей не несёт, а запись пишет строку
-    целиком: деньги плана и условия - прежние из базы (`saved` - действующая
-    строка: своя или унаследованная у месяца, своя у недели и дня), иначе
-    сохранение штук молча стёрло бы денежный план и оклад."""
+    """Форма несёт не все числа: без права на деньги - без рублей, у
+    мастера - без чисел администратора и наоборот. Запись же пишет строку
+    целиком, поэтому недостающее - прежнее из базы (`saved` - действующая
+    строка: своя или унаследованная у месяца, своя у недели и дня). Иначе
+    сохранение штук молча стёрло бы денежный план и оклад, а сохранение
+    плана мастера - план того же человека как администратора."""
     out = dict(fields)
     for key in PLAN_FIELDS if kind == "month" else PERIOD_FIELDS:
-        if key in MONEY_FIELDS:
+        if key not in out:
             got = (saved or {}).get(key)
             out[key] = ZERO if got is None and key in TERMS else got
     return out
@@ -395,12 +588,12 @@ def keep_money(kind: str, fields: Mapping[str, Any],
 def parse_plan(data: Mapping[str, str], keys: tuple[str, ...] = PLAN_FIELDS
                ) -> tuple[dict[str, Any] | None, str | None]:
     """План и условия из формы. Пустой план месяца - «не планируется»,
-    недели и дня (keys=PERIOD_FIELDS) - «как в плане месяца»; пустое
+    недели и дня (keys без условий) - «как в плане месяца»; пустое
     условие - ноль. Штуки - целыми: «1,3» не усекается до 1 молча."""
     what = "плана и условий" if set(keys) & set(TERMS) else "плана"
     out: dict[str, Any] = {}
     for key in keys:
-        raw = (data.get(key) or "").replace(" ", "").replace(" ", "").replace(",", ".")
+        raw = (data.get(key) or "").replace(" ", "").replace(" ", "").replace(",", ".")
         if not raw:
             out[key] = None if key.startswith("plan_") else ZERO
             continue
@@ -416,7 +609,7 @@ def parse_plan(data: Mapping[str, str], keys: tuple[str, ...] = PLAN_FIELDS
             return None, "Слишком большое число."
         if key in COUNT_FIELDS:
             if value != value.to_integral_value():
-                return None, "Выдачи, наряды и задачи - целым числом."
+                return None, "Штуки плана - целым числом."
             out[key] = int(value)
         else:
             out[key] = value.quantize(Decimal("0.01"))

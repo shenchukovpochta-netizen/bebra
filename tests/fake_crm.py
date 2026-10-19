@@ -1087,12 +1087,13 @@ class FakeCrm:
         r = self.rentals_.get(rental_id)
         if r is None or r["status"] != "active":
             return False
-        r.update(status="closed", closed_on=closed_on, close_note=note,
-                 closed_at=self._now())
+        # Один момент на закрытие и журнал статусов: в базе это одно now()
+        # транзакции, и «сдачи» команды (team_facts) сверяют их на равенство.
+        at = self._now()
+        r.update(status="closed", closed_on=closed_on, close_note=note, closed_at=at)
         if mileage_end is not None:
             r["mileage_end"] = int(mileage_end)
         if r["bike_id"] is not None and self.bikes_[r["bike_id"]]["status"] == "rented":
-            at = self._now()
             bike = self.bikes_[r["bike_id"]]
             if bike_status != "rented":
                 self._log_status(r["bike_id"], "rented", bike_status, closed_by, at)
@@ -5009,6 +5010,11 @@ class FakeCrm:
         return self.cash_plan_.pop(plan_id, None) is not None
 
     # ─── команда: план и факт сотрудника ───
+    _PERIOD_PLAN_COLS = ("plan_orders_own", "plan_orders_ext", "plan_works",
+                         "plan_repair_revenue", "plan_issues", "plan_extensions",
+                         "plan_returns", "plan_clients", "plan_revenue", "plan_tasks")
+    _PLAN_TERMS = ("salary_base", "per_issue", "order_pct", "revenue_pct")
+
     async def staff_plans(self, month):
         out = {}
         for (sid, m), row in sorted(self.staff_plans_.items(), key=lambda kv: kv[0][1]):
@@ -5017,15 +5023,14 @@ class FakeCrm:
         return out
 
     async def set_staff_plan(self, staff_id, month, *, by, **fields):
-        unknown = set(fields) - {"plan_issues", "plan_orders", "plan_tasks", "plan_revenue",
-                                 "salary_base", "per_issue", "order_pct", "revenue_pct"}
+        unknown = set(fields) - set(self._PERIOD_PLAN_COLS) - set(self._PLAN_TERMS)
         if unknown:
             raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
         assert month.day == 1
         row = self.staff_plans_.setdefault((staff_id, month), {
-            "staff_id": staff_id, "month": month, "plan_issues": None, "plan_orders": None,
-            "plan_tasks": None, "plan_revenue": None, "salary_base": Decimal(0),
-            "per_issue": Decimal(0), "order_pct": Decimal(0), "revenue_pct": Decimal(0)})
+            "staff_id": staff_id, "month": month, "plan_orders": None,
+            **dict.fromkeys(self._PERIOD_PLAN_COLS),
+            **{t: Decimal(0) for t in self._PLAN_TERMS}})
         row.update(fields, updated_by=by, updated_at=self._now())
 
     async def staff_period_plans(self, kind, starts):
@@ -5035,7 +5040,7 @@ class FakeCrm:
                 if k == kind and d == starts}
 
     async def set_staff_period_plan(self, staff_id, kind, starts, *, by, **fields):
-        cols = ("plan_issues", "plan_orders", "plan_tasks", "plan_revenue")
+        cols = self._PERIOD_PLAN_COLS
         if kind not in ("week", "day"):
             raise ValueError(f"неизвестный период: {kind}")
         unknown = set(fields) - set(cols)
@@ -5049,10 +5054,41 @@ class FakeCrm:
             self.staff_period_plans_.pop(key, None)
             return
         self.staff_period_plans_[key] = {"staff_id": staff_id, "kind": kind, "starts": starts,
-                                         **values, "updated_by": by,
+                                         "plan_orders": None, **values, "updated_by": by,
                                          "updated_at": self._now()}
 
-    async def team_facts(self, since, until):
+    def _team_extension(self, x):
+        """Аренда, которую продлил платёж (как _EXTENSION_SQL в базе): своя
+        аренда записи или аренда клиента, шедшая в день платежа и начатая
+        раньше него. None - платёж выдачи или долга, не продление."""
+        day = crm_logic.local_date(x["created_at"])
+        hits = [r for r in self.rentals_.values()
+                if r["client_id"] == x["client_id"]
+                and (x.get("rental_id") is None or r["id"] == x.get("rental_id"))
+                and r["started_on"] < day
+                and (r.get("closed_on") is None or r["closed_on"] >= day)]
+        return max((r["id"] for r in hits), default=None)
+
+    def _team_returns(self, actor, inside):
+        """Сдачи: закрытые аренды, чей велосипед в момент закрытия ушёл из
+        «в аренде» в возвращённый статус, автор перехода - actor."""
+        out = []
+        for r in self.rentals_.values():
+            if not inside(r.get("closed_at")) or r.get("bike_id") is None:
+                continue
+            log = next((x for x in self.status_log_
+                        if x["bike_id"] == r["bike_id"] and x["changed_at"] == r["closed_at"]
+                        and x["from_status"] == "rented"
+                        and x["to_status"] in crm_logic.FEEDBACK_RETURNED
+                        and x.get("changed_by") == actor), None)
+            if log is not None:
+                out.append((r, log))
+        return out
+
+    def _team_norm(self, o, norm_days):
+        return crm_logic.order_norm(self._order_row(o), norm_days)
+
+    async def team_facts(self, since, until, *, norm_days=crm_logic.ORDER_STUCK_DAYS):
         def inside(moment):
             return moment is not None and since <= moment < until
         out = {}
@@ -5060,8 +5096,12 @@ class FakeCrm:
             actor = f"staff:{person['login']}"
             pays = [x for x in self.ledger_ if x["kind"] == "payment"
                     and x.get("created_by") == actor and inside(x["created_at"])]
+            extensions = {(rid, crm_logic.local_date(x["created_at"])) for x in pays
+                          if (rid := self._team_extension(x)) is not None}
             orders = [o for o in self.orders_.values() if o.get("tech_id") == sid
                       and o.get("status") == "done" and inside(o.get("closed_at"))]
+            paid = [o for o in self.orders_.values() if o.get("tech_id") == sid
+                    and o.get("payer") == "client" and inside(o.get("paid_at"))]
             done = [t for t in self.tasks_.values() if t.get("done_by") == sid
                     and t["status"] == "done" and inside(t.get("done_at"))]
             out[sid] = {
@@ -5069,17 +5109,28 @@ class FakeCrm:
                 "issues": sum(1 for r in self.rentals_.values()
                               if r.get("created_by") == actor and inside(r.get("created_at"))),
                 "payments": sum((x["amount"] for x in pays), Decimal(0)),
-                "payments_n": len(pays), "orders": len(orders),
+                "payments_n": len(pays), "extensions": len(extensions),
+                "returns": len(self._team_returns(actor, inside)),
+                "new_clients": sum(1 for c in self.clients_.values()
+                                   if c.get("created_by") == actor
+                                   and inside(c.get("created_at"))),
+                "orders": len(orders),
+                "orders_own": sum(1 for o in orders if o.get("bike_id") is not None),
+                "orders_ext": sum(1 for o in orders if o.get("bike_id") is None),
+                "orders_on_time": sum(1 for o in orders
+                                      if crm_logic.order_days(dict(o))
+                                      <= self._team_norm(o, norm_days)),
                 "orders_total": sum((Decimal(o.get("total") or 0) for o in orders), Decimal(0)),
-                "orders_works": sum((Decimal(o.get("total") or 0) - Decimal(o.get("cost") or 0)
+                "orders_works": sum((max(Decimal(o.get("total") or 0)
+                                         - Decimal(o.get("cost") or 0), Decimal(0))
                                      for o in orders), Decimal(0)),
-                "client_orders_total": sum((Decimal(o.get("total") or 0) for o in orders
-                                            if o.get("payer") == "client"), Decimal(0)),
+                "repair_revenue": sum((Decimal(o.get("total") or 0) for o in paid), Decimal(0)),
                 "tasks": len(done),
                 "tasks_pay": sum((Decimal(t.get("pay") or 0) for t in done), Decimal(0))}
         return out
 
-    async def team_detail(self, staff, since, until, limit=300):
+    async def team_detail(self, staff, since, until, limit=300, *,
+                          norm_days=crm_logic.ORDER_STUCK_DAYS):
         def inside(moment):
             return moment is not None and since <= moment < until
         actor = f"staff:{staff['login']}"
@@ -5090,15 +5141,28 @@ class FakeCrm:
                     "bike_code": (self.bikes_.get(r.get("bike_id")) or {}).get("code")}
                    for r in self.rentals_.values()
                    if r.get("created_by") == actor and inside(r.get("created_at"))]
-        payments = [{**x, "full_name": self.clients_[x["client_id"]]["full_name"]}
+        returns = [{"id": r["id"], "closed_at": r["closed_at"], "closed_on": r["closed_on"],
+                    "full_name": self.clients_[r["client_id"]]["full_name"],
+                    "bike_code": (self.bikes_.get(r.get("bike_id")) or {}).get("code"),
+                    "to_status": log["to_status"]}
+                   for r, log in self._team_returns(actor, inside)]
+        payments = [{**x, "full_name": self.clients_[x["client_id"]]["full_name"],
+                     "extension": self._team_extension(x) is not None}
                     for x in self.ledger_ if x["kind"] == "payment"
                     and x.get("created_by") == actor and inside(x["created_at"])]
-        orders = [{**o, "bike_code": (self.bikes_.get(o.get("bike_id")) or {}).get("code")}
+        clients = [{"id": c["id"], "full_name": c["full_name"], "created_at": c["created_at"],
+                    "source": c.get("source")}
+                   for c in self.clients_.values()
+                   if c.get("created_by") == actor and inside(c.get("created_at"))]
+        orders = [{**o, "bike_code": (self.bikes_.get(o.get("bike_id")) or {}).get("code"),
+                   "days": crm_logic.order_days(dict(o)),
+                   "norm": self._team_norm(o, norm_days)}
                   for o in self.orders_.values() if o.get("tech_id") == sid
                   and o.get("status") == "done" and inside(o.get("closed_at"))]
         tasks = [dict(t) for t in self.tasks_.values() if t.get("done_by") == sid
                  and t["status"] == "done" and inside(t.get("done_at"))]
-        return {"rentals": rentals[:limit], "payments": payments[:limit],
+        return {"rentals": rentals[:limit], "returns": returns[:limit],
+                "payments": payments[:limit], "clients": clients[:limit],
                 "orders": orders[:limit], "tasks": tasks[:limit]}
 
     # ─── сделки: воронка «Входящих» ───

@@ -686,6 +686,110 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
             await fake.set_staff_period_plan(sid, "week", date(2026, 9, 30), by="t",
                                              plan_issues=1)
 
+    async def test_team_roles_on_postgres(self):
+        """Команда по ролям на настоящей базе. Администратор: продление -
+        платёж по идущей аренде, начатой раньше (два за день - одно), сдача -
+        закрытие с возвратом техники по журналу статусов того же момента,
+        потеря - не сдача, новые клиенты - по автору карточки. Мастер: наряд
+        по велосипеду парка и сторонний порознь, в срок - по сроку узла или
+        общему, выручка - оплаченные клиентом. Прежний plan_orders один раз
+        переезжает в «Ремонт парка»."""
+        await self.seed()
+        tech = await self.crm.access_profile_by_code("tech")
+        manager = await self.crm.access_profile_by_code("manager")
+        anna = await self.crm.create_staff("anna", "hash", "Анна", "manager", manager["id"])
+        bulat = await self.crm.create_staff("bulat", "hash", "Булат", "manager", tech["id"])
+        rid = await service.open_rental(
+            self.crm, client=await self.crm.client(self.client_id),
+            bike=await self.crm.bike(self.bike_id), tariff=await self.crm.tariff(self.tariff_id),
+            started_on=date.today() - timedelta(days=3), contract_no=None, by="staff:anna")
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("1000"),
+                                  rental_id=rid, created_by="staff:anna", method="cash")
+        await self.crm.add_ledger(client_id=self.client_id, kind="payment", amount=D("2000"),
+                                  created_by="staff:anna", method="card")
+        new = await self.crm.create_client(full_name="Петров", phone="+79990000001",
+                                           created_by="staff:anna")
+        await service.close_rental(self.crm, await self.crm.rental(rid),
+                                   closed_on=date.today(), note=None, by="staff:anna")
+        # выдача сегодня, платёж в день начала - не продление; потеря - не сдача
+        bike2 = await self.crm.create_bike(code="B-2", model="Kugoo V3", frame_no="FR2")
+        rid2 = await service.open_rental(
+            self.crm, client=await self.crm.client(new), bike=await self.crm.bike(bike2),
+            tariff=await self.crm.tariff(self.tariff_id), started_on=date.today(),
+            contract_no=None, by="staff:anna")
+        await self.crm.add_ledger(client_id=new, kind="payment", amount=D("3000"),
+                                  rental_id=rid2, created_by="staff:anna")
+        await service.declare_theft(self.crm, await self.crm.rental(rid2), note=None,
+                                    by="staff:anna")
+        # мастер: колодки (срок узла 1 сут.) два дня - просрочен; чужой
+        # самокат без строк (общий срок 3) - сутки, в срок, оплачен
+        await self.crm.set_node_norm("brake_pads", 1)
+        client = await self.crm.client(self.client_id)
+        own = await service.open_order(self.crm, bike=await self.crm.bike(self.bike_id),
+                                       payer="own", client=None, complaint="колодки",
+                                       object_note=None, tech_id=bulat, estimate=D(0),
+                                       by="t")
+        await self.crm.add_order_item(own, title="Колодки", node="brake_pads",
+                                      work_type_id=None, qty=1, price=D("800"),
+                                      parts_cost=D("300"), labor_cost=D("0"))
+        ext = await service.open_order(self.crm, bike=None, payer="client", client=client,
+                                       complaint="мотор", object_note="Самокат Kugoo",
+                                       tech_id=bulat, estimate=D(0), by="t")
+        now = datetime.now(UTC)
+        # наряд в минус (своя цена ниже себестоимости) - ноль в сумме работ
+        cheap = await self.crm.create_work_order(
+            bike_id=None, payer="own", client_id=None, complaint="камера",
+            object_note="Подменный самокат", tech_id=bulat, estimate=D(0), created_by="t")
+        for oid, days, total, cost, paid in ((own, 2, D("800"), D("300"), None),
+                                             (ext, 1, D("3500"), D("1000"), now),
+                                             (cheap, 0, D("0"), D("700"), None)):
+            await self.pool.execute(
+                "update crm.work_orders set opened_at = now() - make_interval(days => $2) "
+                "where id = $1", oid, days)
+            await self.crm.update_work_order(oid, status="done", closed_at=now, total=total,
+                                             cost=cost, paid_at=paid)
+        since = now - timedelta(hours=1)
+        until = datetime.now(UTC) + timedelta(minutes=1)
+        facts = await self.crm.team_facts(since, until)
+        a, b = facts[anna], facts[bulat]
+        self.assertEqual((a["issues"], a["extensions"], a["returns"], a["new_clients"],
+                          a["payments"]), (2, 1, 1, 1, D("6000.00")))
+        self.assertEqual((b["orders"], b["orders_own"], b["orders_ext"], b["orders_on_time"],
+                          b["orders_works"], b["repair_revenue"]),
+                         (3, 1, 2, 2, D("3000.00"), D("3500.00")))
+        self.assertEqual((await self.crm.team_facts(since, until, norm_days=0))[bulat]
+                         ["orders_on_time"], 1, "общий срок 0 - сутки уже просрочка")
+        detail = await self.crm.team_detail(await self.crm.staff_by_id(anna), since, until)
+        self.assertEqual([r["id"] for r in detail["returns"]], [rid])
+        self.assertEqual(sorted(x["extension"] for x in detail["payments"]),
+                         [False, True, True])
+        self.assertEqual([c["id"] for c in detail["clients"]], [new])
+        orders = {o["id"]: o for o in (await self.crm.team_detail(
+            await self.crm.staff_by_id(bulat), since, until))["orders"]}
+        self.assertEqual((orders[own]["days"], orders[own]["norm"]), (2, 1))
+        self.assertEqual((orders[ext]["days"], orders[ext]["norm"]), (1, 3))
+        # план по ролям и разовый переезд plan_orders -> plan_orders_own
+        first = date.today().replace(day=1)
+        await self.crm.set_staff_plan(bulat, first, by="t", plan_orders_ext=3,
+                                      plan_works=D("40000"))
+        await self.crm.set_staff_period_plan(anna, "day", date.today(), by="t",
+                                             plan_extensions=4, plan_clients=1)
+        day = (await self.crm.staff_period_plans("day", date.today()))[anna]
+        self.assertEqual((day["plan_extensions"], day["plan_clients"], day["plan_issues"]),
+                         (4, 1, None))
+        with self.assertRaises(asyncpg.CheckViolationError):
+            await self.crm.set_staff_plan(bulat, first, by="t", plan_works=D("-1"))
+        await self.pool.execute("update crm.staff_plans set plan_orders = 12 "
+                                "where staff_id = $1", bulat)
+        await self.pool.execute("delete from crm.settings where key = 'team_roles_v1'")
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        plan = (await self.crm.staff_plans(first))[bulat]
+        self.assertEqual((plan["plan_orders_own"], plan["plan_orders_ext"]), (12, 3))
+        await self.pool.execute("update crm.staff_plans set plan_orders_own = null")
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        self.assertIsNone((await self.crm.staff_plans(first))[bulat]["plan_orders_own"],
+                          "переезд - один раз: снятый руками план не возвращается")
+
     async def test_income_and_cash_plan_on_postgres(self):
         """Доход по статьям: оплаченные клиентские наряды по точке, чужая
         техника отдельно от своей; плановые платежи календаря."""

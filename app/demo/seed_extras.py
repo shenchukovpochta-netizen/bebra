@@ -2217,31 +2217,45 @@ async def _team(conn: asyncpg.Connection, c: _Ctx) -> None:
             "done" if done_at else "open", owner.id,
             c.now - timedelta(days=1, hours=3), done_at)
     first = today.replace(day=1)
-    plans = (("operator", 40, None, 10, D("150000"), D("25000"), D("300"), D(0), D(1)),
-             ("operator2", 30, None, 10, D("110000"), D("25000"), D("300"), D(0), D(1)),
-             ("operator3", 25, None, 8, D("90000"), D("22000"), D("300"), D(0), D(1)),
-             ("mechanic", None, 25, 10, None, D("30000"), D(0), D("30"), D(0)),
-             ("mechanic2", None, 20, 8, None, D("28000"), D(0), D("30"), D(0)))
-    await conn.executemany(
-        """
-        insert into crm.staff_plans (staff_id, month, plan_issues, plan_orders, plan_tasks,
-                                     plan_revenue, salary_base, per_issue, order_pct,
-                                     revenue_pct, updated_by)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'staff:demo')
-        on conflict (staff_id, month) do nothing
-        """, [(s[login].id, first, *rest) for login, *rest in plans if login in s])
+    # План по ролям (team.METRICS): администратору - выдачи, продления,
+    # сдачи, новые клиенты, принятые деньги; мастеру - ремонт парка и
+    # сторонний, сумма работ и выручка ремонта; задачи - всем.
+    admin_cols = ("plan_issues", "plan_extensions", "plan_returns", "plan_clients",
+                  "plan_revenue", "plan_tasks", "salary_base", "per_issue", "revenue_pct")
+    master_cols = ("plan_orders_own", "plan_orders_ext", "plan_works", "plan_repair_revenue",
+                   "plan_tasks", "salary_base", "order_pct")
+    plans = ((admin_cols, "operator", (80, 120, 75, 18, D("650000"), 3, D("25000"),
+                                       D("300"), D(1))),
+             (admin_cols, "operator2", (90, 90, 90, 35, D("600000"), 3, D("25000"),
+                                        D("300"), D(1))),
+             (admin_cols, "operator3", (40, 60, 30, 12, D("300000"), 2, D("22000"),
+                                        D("300"), D(1))),
+             (master_cols, "mechanic", (55, 4, D("12000"), D("5000"), 2, D("30000"),
+                                        D("30"))),
+             (master_cols, "mechanic2", (30, 3, D("10000"), D("2000"), 2, D("28000"),
+                                         D("30"))))
+    for cols, login, values in plans:
+        if login not in s:
+            continue
+        await conn.execute(
+            f"""
+            insert into crm.staff_plans (staff_id, month, updated_by, {", ".join(cols)})
+            values ($1, $2, 'staff:demo', {", ".join(f"${i + 3}" for i in range(len(cols)))})
+            on conflict (staff_id, month) do nothing
+            """, s[login].id, first, *values)
     # Свой план недели и дня: у администратора - на эту неделю, у второго
     # и у мастера - на сегодня; остальные живут долей плана месяца.
     monday = today - timedelta(days=today.weekday())
-    period = (("operator", "week", monday, 12, None, 3, D("40000")),
-              ("operator2", "day", today, 3, None, None, None),
-              ("mechanic", "day", today, None, 2, 1, None))
+    period = (("operator", "week", monday, 18, 28, None, None, 1, D("150000")),
+              ("operator2", "day", today, 3, None, None, None, None, None),
+              ("mechanic", "day", today, None, None, 2, 1, 1, None))
     await conn.executemany(
         """
         insert into crm.staff_period_plans (staff_id, kind, starts, plan_issues,
-                                            plan_orders, plan_tasks, plan_revenue,
+                                            plan_extensions, plan_orders_own,
+                                            plan_orders_ext, plan_tasks, plan_revenue,
                                             updated_by)
-        values ($1, $2, $3, $4, $5, $6, $7, 'staff:demo')
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'staff:demo')
         on conflict (staff_id, kind, starts) do nothing
         """, [(s[login].id, *rest) for login, *rest in period if login in s])
 

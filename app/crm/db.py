@@ -91,13 +91,19 @@ DEAL_FIELDS = frozenset({
 # Задача дня: что правится в карточке. Статус - своими методами (взять,
 # сделано, отменить): у каждого перехода своё условие в самом UPDATE.
 TASK_FIELDS = frozenset({"title", "note", "assignee_id", "location", "due_on", "pay"})
-# План месяца и условия оплаты сотрудника (app/crm/team.py).
-STAFF_PLAN_FIELDS = frozenset({
-    "plan_issues", "plan_orders", "plan_tasks", "plan_revenue",
+# План недели и дня сотрудника по показателям ролей (app/crm/team.py,
+# METRICS): мастер - ремонт парка, сторонний ремонт, работы, выручка
+# ремонта; администратор - выдачи, продления, сдачи, клиенты, деньги;
+# задачи - у всех. Прежний plan_orders («все наряды») не пишется.
+STAFF_PERIOD_PLAN_FIELDS = (
+    "plan_orders_own", "plan_orders_ext", "plan_works", "plan_repair_revenue",
+    "plan_issues", "plan_extensions", "plan_returns", "plan_clients", "plan_revenue",
+    "plan_tasks",
+)
+# План месяца - те же числа и условия оплаты.
+STAFF_PLAN_FIELDS = frozenset(STAFF_PERIOD_PLAN_FIELDS) | {
     "salary_base", "per_issue", "order_pct", "revenue_pct",
-})
-# План недели и дня - те же числа, что у месяца, без условий оплаты.
-STAFF_PERIOD_PLAN_FIELDS = ("plan_issues", "plan_orders", "plan_tasks", "plan_revenue")
+}
 STAFF_PERIOD_KINDS = ("week", "day")
 ORDER_FIELDS = frozenset({
     "status", "tech_id", "complaint", "object_note", "estimate", "note",
@@ -6911,8 +6917,8 @@ class CrmDB:
 
     async def set_staff_period_plan(self, staff_id: int, kind: str, starts: date, *,
                                     by: str, **fields: Any) -> None:
-        """План недели или дня - все четыре числа разом: пропущенное - пусто
-        («как в плане месяца»). Без единого числа строка удаляется."""
+        """План недели или дня - все числа разом: пропущенное - пусто («как
+        в плане месяца»). Без единого числа строка удаляется."""
         if kind not in STAFF_PERIOD_KINDS:
             raise ValueError(f"неизвестный период: {kind}")
         unknown = set(fields) - set(STAFF_PERIOD_PLAN_FIELDS)
@@ -6924,38 +6930,107 @@ class CrmDB:
                 "delete from crm.staff_period_plans where staff_id = $1 and kind = $2 "
                 "and starts = $3", staff_id, kind, starts)
             return
+        names = ", ".join(STAFF_PERIOD_PLAN_FIELDS)
+        marks = ", ".join(f"${i + 5}" for i in range(len(STAFF_PERIOD_PLAN_FIELDS)))
+        sets = ", ".join(f"{c} = excluded.{c}" for c in STAFF_PERIOD_PLAN_FIELDS)
         await self.pool.execute(
-            "insert into crm.staff_period_plans (staff_id, kind, starts, updated_by, "
-            "plan_issues, plan_orders, plan_tasks, plan_revenue) "
-            "values ($1, $2, $3, $4, $5, $6, $7, $8) "
-            "on conflict (staff_id, kind, starts) do update set "
-            "plan_issues = excluded.plan_issues, plan_orders = excluded.plan_orders, "
-            "plan_tasks = excluded.plan_tasks, plan_revenue = excluded.plan_revenue, "
-            "updated_by = excluded.updated_by, updated_at = now()",
+            f"insert into crm.staff_period_plans (staff_id, kind, starts, updated_by, "
+            f"{names}) values ($1, $2, $3, $4, {marks}) "
+            f"on conflict (staff_id, kind, starts) do update set {sets}, "
+            f"updated_by = excluded.updated_by, updated_at = now()",
             staff_id, kind, starts, by, *values)
 
-    async def team_facts(self, since: datetime, until: datetime) -> dict[int, dict]:
-        """Сделанное каждым сотрудником за окно: выдачи и принятые платежи -
-        по автору записи (staff:<логин>), наряды - по технику, задачи - по
-        тому, кто сделал. Банк и автозачисление ничьи. Окно любое - месяц,
-        неделя (и через границу месяца), день: считается по моментам."""
+    # Сдача - аренда, закрытая с возвратом техники: триггер журнала статусов
+    # пишет переход «в аренде» -> куда вернули тем же now(), что и
+    # rentals.closed_at (одна транзакция db.close_rental), и автором
+    # (crm.actor) - того, кто закрыл. Потеря, выкуп и списание - не сдача.
+    _RETURNED_SQL = "(" + ", ".join(f"'{s}'" for s in logic.FEEDBACK_RETURNED) + ")"
+    # Продление - платёж по идущей аренде, начатой раньше дня платежа:
+    # своя аренда записи, иначе любая аренда клиента, шедшая в тот день
+    # (как первые два шага _ledger_rentals). Платёж выдачи - в день начала.
+    _EXTENSION_SQL = """
+        select r.id from crm.rentals r
+         where r.client_id = l.client_id
+           and (l.rental_id is null or r.id = l.rental_id)
+           and r.started_on < l.created_at::date
+           and (r.closed_on is null or r.closed_on >= l.created_at::date)
+         order by r.id desc limit 1"""
+    # Срок наряда - как logic.order_norm: самый долгий срок узлов строк;
+    # строка без своего срока (или без узла) меряется общим ($N), наряд без
+    # строк - тоже общим. Сутки - по местным датам, как logic.order_days.
+    _ORDER_NORM_JOIN = """
+        left join lateral (
+          select max(n.norm_days) as norm, bool_or(n.norm_days is null) as general
+            from crm.work_order_items wi
+            left join crm.repair_nodes n on n.code = wi.node
+           where wi.order_id = o.id) nn on true"""
+
+    @staticmethod
+    def _order_norm_sql(mark: str) -> str:
+        return (f"case when nn.norm is null then {mark}::int "
+                f"when nn.general then greatest(nn.norm, {mark}::int) else nn.norm end")
+
+    async def team_facts(self, since: datetime, until: datetime, *,
+                         norm_days: int = logic.ORDER_STUCK_DAYS) -> dict[int, dict]:
+        """Сделанное каждым сотрудником за окно (app/crm/team.py).
+
+        Администратор: выдачи, платежи, новые клиенты - по автору записи
+        (staff:<логин>); продления - его платежи по идущей аренде, начатой
+        раньше дня платежа (две записи одной аренды за день - одно
+        продление); сдачи - закрытые им аренды с возвратом техники.
+        Мастер: закрытые наряды, где он техник, - по велосипеду парка и по
+        чужой технике, в срок ли (`norm_days` - общий срок ремонта), сумма
+        работ (наряд без себестоимости, не меньше нуля); выручка ремонта -
+        оплаченные клиентом наряды по моменту оплаты (в журнале их нет).
+        Задачи - по тому, кто сделал.
+        Банк и автозачисление ничьи. Окно любое - месяц, неделя (и через
+        границу месяца), день: считается по моментам."""
         rows = await self.pool.fetch(
-            """
+            f"""
             with i as (select created_by, count(*) as n from crm.rentals
                         where created_at >= $1 and created_at < $2 group by 1),
                  p as (select created_by, sum(amount) as amount, count(*) as n
                          from crm.ledger
                         where kind = 'payment' and created_at >= $1 and created_at < $2
                         group by 1),
-                 o as (select tech_id, count(*) as n, coalesce(sum(total), 0) as total,
-                              coalesce(sum(coalesce(total, 0) - coalesce(cost, 0)), 0)
-                                as works,
-                              coalesce(sum(total) filter (where payer = 'client'), 0)
-                                as client_total
-                         from crm.work_orders
-                        where status = 'done' and closed_at >= $1 and closed_at < $2
-                          and tech_id is not null
+                 x as (select l.created_by,
+                              count(distinct (g.id, l.created_at::date)) as n
+                         from crm.ledger l
+                         join lateral ({self._EXTENSION_SQL}) g on true
+                        where l.kind = 'payment' and l.created_at >= $1
+                          and l.created_at < $2 and l.created_by like 'staff:%'
                         group by 1),
+                 rt as (select g.changed_by, count(distinct r.id) as n
+                          from crm.rentals r
+                          join crm.bike_status_log g
+                            on g.bike_id = r.bike_id and g.changed_at = r.closed_at
+                           and g.from_status = 'rented'
+                           and g.to_status in {self._RETURNED_SQL}
+                         where r.closed_at >= $1 and r.closed_at < $2
+                         group by 1),
+                 c as (select created_by, count(*) as n from crm.clients
+                        where created_at >= $1 and created_at < $2 group by 1),
+                 o as (select o.tech_id, count(*) as n,
+                              count(*) filter (where o.bike_id is not null) as own,
+                              count(*) filter (where o.bike_id is null) as ext,
+                              count(*) filter (
+                                where o.closed_at::date - o.opened_at::date
+                                      <= {self._order_norm_sql("$3")}) as on_time,
+                              coalesce(sum(o.total), 0) as total,
+                              -- сумма работ: наряд без себестоимости; свой ремонт
+                              -- без цены клиенту - ноль, а не минус себестоимость
+                              coalesce(sum(greatest(coalesce(o.total, 0)
+                                                    - coalesce(o.cost, 0), 0)), 0) as works
+                         from crm.work_orders o
+                         {self._ORDER_NORM_JOIN}
+                        where o.status = 'done' and o.closed_at >= $1 and o.closed_at < $2
+                          and o.tech_id is not null
+                        group by 1),
+                 rv as (select tech_id, coalesce(sum(total), 0) as amount
+                          from crm.work_orders
+                         where payer = 'client' and paid_at >= $1 and paid_at < $2
+                           and tech_id is not null
+                         group by 1),
                  t as (select done_by, count(*) as n, coalesce(sum(pay), 0) as pay
                          from crm.tasks
                         where status = 'done' and done_at >= $1 and done_at < $2
@@ -6963,21 +7038,33 @@ class CrmDB:
                         group by 1)
             select s.id as staff_id, coalesce(i.n, 0) as issues,
                    coalesce(p.amount, 0) as payments, coalesce(p.n, 0) as payments_n,
-                   coalesce(o.n, 0) as orders, coalesce(o.total, 0) as orders_total,
+                   coalesce(x.n, 0) as extensions, coalesce(rt.n, 0) as returns,
+                   coalesce(c.n, 0) as new_clients,
+                   coalesce(o.n, 0) as orders, coalesce(o.own, 0) as orders_own,
+                   coalesce(o.ext, 0) as orders_ext, coalesce(o.on_time, 0) as orders_on_time,
+                   coalesce(o.total, 0) as orders_total,
                    coalesce(o.works, 0) as orders_works,
-                   coalesce(o.client_total, 0) as client_orders_total,
+                   coalesce(rv.amount, 0) as repair_revenue,
                    coalesce(t.n, 0) as tasks, coalesce(t.pay, 0) as tasks_pay
               from crm.staff s
               left join i on i.created_by = 'staff:' || s.login
               left join p on p.created_by = 'staff:' || s.login
+              left join x on x.created_by = 'staff:' || s.login
+              left join rt on rt.changed_by = 'staff:' || s.login
+              left join c on c.created_by = 'staff:' || s.login
               left join o on o.tech_id = s.id
+              left join rv on rv.tech_id = s.id
               left join t on t.done_by = s.id
-            """, since, until)
+            """, since, until, int(norm_days))
         return {int(r["staff_id"]): dict(r) for r in rows}
 
     async def team_detail(self, staff: dict, since: datetime, until: datetime,
-                          limit: int = 300) -> dict[str, list[dict]]:
-        """Что именно сделал сотрудник за окно - для его карточки."""
+                          limit: int = 300, *, norm_days: int = logic.ORDER_STUCK_DAYS
+                          ) -> dict[str, list[dict]]:
+        """Что именно сделал сотрудник за окно - для его карточки: выдачи,
+        сдачи, принятые платежи (продление помечено `extension`), новые
+        клиенты, закрытые наряды (по велосипеду парка и сторонние - по
+        bike_id; срок `norm` и сутки `days` - как у team_facts), задачи."""
         actor = f"staff:{staff['login']}"
         rentals = await self.pool.fetch(
             "select r.id, r.created_at, r.tariff_name, c.full_name, b.code as bike_code "
@@ -6985,24 +7072,52 @@ class CrmDB:
             "left join crm.bikes b on b.id = r.bike_id "
             "where r.created_by = $1 and r.created_at >= $2 and r.created_at < $3 "
             "order by r.created_at desc limit $4", actor, since, until, limit)
+        returns = await self.pool.fetch(
+            f"""
+            select r.id, r.closed_at, r.closed_on, c.full_name, b.code as bike_code,
+                   g.to_status
+              from crm.rentals r
+              join lateral (
+                select x.to_status from crm.bike_status_log x
+                 where x.bike_id = r.bike_id and x.changed_at = r.closed_at
+                   and x.from_status = 'rented' and x.to_status in {self._RETURNED_SQL}
+                   and x.changed_by = $1
+                 order by x.id limit 1) g on true
+              join crm.clients c on c.id = r.client_id
+              left join crm.bikes b on b.id = r.bike_id
+             where r.closed_at >= $2 and r.closed_at < $3
+             order by r.closed_at desc limit $4
+            """, actor, since, until, limit)
         payments = await self.pool.fetch(
-            "select l.id, l.created_at, l.amount, l.method, l.client_id, c.full_name "
-            "from crm.ledger l join crm.clients c on c.id = l.client_id "
-            "where l.kind = 'payment' and l.created_by = $1 and l.created_at >= $2 "
-            "and l.created_at < $3 order by l.created_at desc limit $4",
-            actor, since, until, limit)
+            f"""
+            select l.id, l.created_at, l.amount, l.method, l.client_id, c.full_name,
+                   exists ({self._EXTENSION_SQL}) as extension
+              from crm.ledger l join crm.clients c on c.id = l.client_id
+             where l.kind = 'payment' and l.created_by = $1 and l.created_at >= $2
+               and l.created_at < $3 order by l.created_at desc limit $4
+            """, actor, since, until, limit)
+        clients = await self.pool.fetch(
+            "select id, full_name, created_at, source from crm.clients "
+            "where created_by = $1 and created_at >= $2 and created_at < $3 "
+            "order by created_at desc limit $4", actor, since, until, limit)
         orders = await self.pool.fetch(
-            "select o.id, o.no, o.closed_at, o.total, o.cost, o.payer, o.object_note, "
-            "b.code as bike_code from crm.work_orders o "
-            "left join crm.bikes b on b.id = o.bike_id "
-            "where o.tech_id = $1 and o.status = 'done' and o.closed_at >= $2 "
-            "and o.closed_at < $3 order by o.closed_at desc limit $4",
-            int(staff["id"]), since, until, limit)
+            f"""
+            select o.id, o.no, o.opened_at, o.closed_at, o.total, o.cost, o.payer,
+                   o.paid_at, o.object_note, o.bike_id, b.code as bike_code,
+                   o.closed_at::date - o.opened_at::date as days,
+                   {self._order_norm_sql("$5")} as norm
+              from crm.work_orders o
+              left join crm.bikes b on b.id = o.bike_id
+              {self._ORDER_NORM_JOIN}
+             where o.tech_id = $1 and o.status = 'done' and o.closed_at >= $2
+               and o.closed_at < $3 order by o.closed_at desc limit $4
+            """, int(staff["id"]), since, until, limit, int(norm_days))
         tasks = await self.pool.fetch(
             "select id, title, done_at, pay, location from crm.tasks "
             "where done_by = $1 and status = 'done' and done_at >= $2 and done_at < $3 "
             "order by done_at desc limit $4", int(staff["id"]), since, until, limit)
-        return {"rentals": _rows(rentals), "payments": _rows(payments),
+        return {"rentals": _rows(rentals), "returns": _rows(returns),
+                "payments": _rows(payments), "clients": _rows(clients),
                 "orders": _rows(orders), "tasks": _rows(tasks)}
 
     # ─────────────── доход по статьям и платёжный календарь (app/crm/cashflow.py) ───────────────
