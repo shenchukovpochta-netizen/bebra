@@ -390,6 +390,23 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
         return sorted({r.path for r in self.app.routes
                        if "GET" in (getattr(r, "methods", None) or ())})
 
+    async def exports(self) -> list[str]:
+        """Все выгрузки в обоих видах. Выгрузка одной записи
+        («/stock-takes/{take_id}.{ext}») - на первой записи того же вида
+        из DETAILS: номер в адрес сам не подставится."""
+        out: list[str] = []
+        for route in self.routes():
+            if not route.endswith(".{ext}"):
+                continue
+            stem = route[:-len(".{ext}")]
+            if "{" in stem:
+                template = re.sub(r"\{[^}]+\}", "{}", stem)
+                sql = next((q for _, t, q in DETAILS if t == template), None)
+                self.assertIsNotNone(sql, f"{route}: нет записи в DETAILS")
+                stem = template.format(await self.pool.fetchval(sql))
+            out += [f"{stem}.{ext}" for ext in ("xlsx", "csv")]
+        return out
+
     async def details(self) -> list[str]:
         pages: list[str] = []
         empty: list[str] = []
@@ -499,8 +516,7 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
         routes = self.routes()
         static = [r for r in routes if "{" not in r and r != "/login"
                   and not r.startswith(OWN_CHECK)]
-        exports = [r.replace("{ext}", ext) for r in routes if r.endswith(".{ext}")
-                   for ext in ("xlsx", "csv")]
+        exports = await self.exports()
         files = await self.file_pages()
         start = [*static, *exports, *await self.details(), *await self.variants(),
                  *files]
@@ -581,8 +597,7 @@ class TestDemoCrawl(unittest.IsolatedAsyncioTestCase):
         """Каждая выгрузка демо помечена: имя файла с demo- и строка
         «Демо-версия» над шапкой - и в xlsx, и в csv."""
         from openpyxl import load_workbook
-        exports = [r.replace("{ext}", ext) for r in self.routes() if r.endswith(".{ext}")
-                   for ext in ("xlsx", "csv")]
+        exports = await self.exports()
         self.assertGreater(len(exports), 20)
         async with self.client() as client:
             await self.login(client, "demo")

@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import time
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -454,16 +455,20 @@ def _file_exists(path: str) -> bool:
 
 
 def _csv(filename: str, header: list[str], rows: list[list[Any]], *,
-         note: str | None = None) -> Response:
+         note: str | None = None, title: Sequence[str] = ()) -> Response:
     """CSV для Excel: BOM, точка с запятой, десятичная запятая.
 
     `note` - строка над шапкой (пометка демо): её видно в любой программе,
-    которой откроют файл."""
+    которой откроют файл. `title` - строки документа под ней (номер, дата,
+    комментарий): в них бывает текст человека, и он идёт той же защитой
+    от формул, что и ячейки."""
     buf = io.StringIO()
     buf.write("\ufeff")
     writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
     if note:
         writer.writerow([note])
+    for line in title:
+        writer.writerow([_cell(line)])
     writer.writerow(header)
     for row in rows:
         writer.writerow([_cell(v) for v in row])
@@ -494,7 +499,7 @@ def _cell(value: Any) -> str:
 
 
 def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
-          note: str | None = None) -> Response:
+          note: str | None = None, title: Sequence[str] = ()) -> Response:
     """Тот же набор строк, но настоящей таблицей Excel.
 
     CSV Excel открывает по-разному в зависимости от настроек локали, и
@@ -508,6 +513,7 @@ def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
 
     `note` (пометка демо) - первой строкой над шапкой, именем листа и в
     свойствах файла: таблицу пересылают без страницы, с которой скачали.
+    `title` - строки документа между ней и шапкой (номер, дата, кто).
     """
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font
@@ -525,6 +531,17 @@ def _xlsx(filename: str, header: list[str], rows: list[list[Any]], *,
                               end_column=len(header))
         book.properties.title = book.properties.subject = note
         top = 2
+    for line in title:
+        sheet.append([str(line)])
+        cell = sheet.cell(row=top, column=1)
+        # Строка с «=» остаётся строкой: в комментарии - текст человека.
+        cell.data_type = "s"
+        if top == 1 + bool(note):
+            cell.font = Font(bold=True)
+        if len(header) > 1:
+            sheet.merge_cells(start_row=top, start_column=1, end_row=top,
+                              end_column=len(header))
+        top += 1
     sheet.append(list(header))
     for cell in sheet[top]:
         cell.font = Font(bold=True)
@@ -584,7 +601,8 @@ EXPORT_FORMATS = ("xlsx", "csv")
 
 
 def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
-           note: str | None = None, limit: int | None = None) -> Response:
+           note: str | None = None, limit: int | None = None,
+           title: Sequence[str] = ()) -> Response:
     """Одна выгрузка в двух видах. Неизвестное расширение - 404.
 
     Молча отдать csv на запрос `.pdf` значит соврать в имени файла, и
@@ -592,6 +610,7 @@ def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
 
     `note` - пометка над шапкой (демо), `limit` - сколько строк отдать
     (демо); обрезанная выгрузка говорит об этом в той же пометке.
+    `title` - строки документа над шапкой: номер, дата, кто, комментарий.
     """
     if fmt not in EXPORT_FORMATS:
         raise HTTPException(status_code=404)
@@ -599,8 +618,8 @@ def _table(fmt: str, stem: str, header: list[str], rows: list[list[Any]], *,
         rows = rows[:limit]
         note = f"{note or ''} Показаны первые {limit} строк.".strip()
     if fmt == "xlsx":
-        return _xlsx(f"{stem}.xlsx", header, rows, note=note)
-    return _csv(f"{stem}.csv", header, rows, note=note)
+        return _xlsx(f"{stem}.xlsx", header, rows, note=note, title=title)
+    return _csv(f"{stem}.csv", header, rows, note=note, title=title)
 
 
 def _iso(value: Any) -> str:
@@ -758,6 +777,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         PRICE_SHEETS=logic.PRICE_SHEETS, TRACKER_COMMANDS=logic.TRACKER_COMMANDS,
         BLOCKABLE_ALERTS=logic.BLOCKABLE_ALERTS,
         TAKE_SCOPES=logic.TAKE_SCOPES, TAKE_STATES=logic.TAKE_STATES,
+        TAKE_SHOW=logic.TAKE_SHOW, TAKE_STATUSES=logic.TAKE_STATUSES,
         REF_STATUSES=logic.REF_STATUSES, staff_tg_label=logic.staff_tg_label,
         BONUS_KINDS=logic.BONUS_KINDS, REVIEW_SITES=logic.REVIEW_SITES,
         feedback_stars=logic.feedback_stars, feedback_avg=logic.feedback_avg,
@@ -786,7 +806,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         PART_ORDER_STATUSES=logic.PART_ORDER_STATUSES,
         NEED_SOURCES=logic.NEED_SOURCES, PART_UNITS=logic.PART_UNITS,
         INTEGRITY_KINDS=logic.INTEGRITY_KINDS, DEBT_NOISE=logic.DEBT_NOISE,
-        take_title=logic.take_title,
+        take_title=logic.take_title, take_item_title=logic.take_item_title,
         SECTIONS=logic.SECTIONS, ACTIONS=logic.ACTIONS, LEVELS=logic.LEVELS,
         LEVEL_ORDER=logic.LEVEL_ORDER, can_view=logic.can_view, can_edit=logic.can_edit,
         can_act=logic.can_act, visible_sections=logic.visible_sections,
@@ -838,7 +858,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return RedirectResponse(url, status_code=303)
 
     async def table(fmt: str, stem: str, header: list[str],
-                    rows: list[list[Any]]) -> Response:
+                    rows: list[list[Any]], *, title: Sequence[str] = ()) -> Response:
         """Выгрузка (_table) в потоке: openpyxl на тысячах строк - секунды
         процессора, и в цикле событий они заморозили бы панель всем
         остальным. В демо файл помечен и строк в нём не больше
@@ -846,7 +866,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return await asyncio.to_thread(
             _table, fmt, stem, header, rows,
             note=DEMO_EXPORT_NOTE if cfg.demo else None,
-            limit=DEMO_EXPORT_ROWS if cfg.demo else None)
+            limit=DEMO_EXPORT_ROWS if cfg.demo else None, title=title)
 
     def who(request: Request) -> str:
         staff = getattr(request.state, "staff", None)
@@ -935,7 +955,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         code = logic.section_for(path) if path not in ALWAYS_OPEN else None
         if code and request.state.staff is not None:
             allowed = (may_view(request, code) if request.method in ("GET", "HEAD")
-                       else may_edit(request, code))
+                       else logic.can_write(request.state.staff, path, code))
             if not allowed:
                 return secured(denied(request, code))
         # Номер длиннее bigint: записи с ним нет, а база ответила бы 500.
@@ -10223,7 +10243,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     TAKE_SORTS = {"no": "no", "started": "started_at", "what": "title",
                   "expected": "expected", "found": "found", "missing": "missing",
-                  "extra": "extra", "who": "created_by"}
+                  "extra": "extra", "who": "created_by", "status": "status"}
 
     async def take_rows(request: Request) -> tuple[list[dict], str]:
         q = request.query_params.get("q") or ""
@@ -10233,30 +10253,82 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return logic.rows_search(rows, q, ("no", "title", "note", "created_by",
                                            "location")), q
 
+    def may_count(request: Request, take: dict) -> bool:
+        """Вести эту ведомость: парк менять - любую, действие «Пересчёт
+        техники» - своей точки (logic.take_may_count)."""
+        return logic.take_may_count(getattr(request.state, "staff", None),
+                                    scope=take.get("scope"), location=take.get("location"))
+
+    def may_mark(request: Request, take: dict) -> bool:
+        """Отмечать в ней: ещё и администратору точки в пересчёте всего
+        парка (logic.take_may_mark)."""
+        return logic.take_may_mark(getattr(request.state, "staff", None),
+                                   scope=take.get("scope"), location=take.get("location"))
+
+    def may_start_take(request: Request) -> bool:
+        return may_edit(request, "bikes") or logic.can_act(
+            getattr(request.state, "staff", None), "stock_take")
+
+    def own_take_point(request: Request) -> str | None:
+        """Точка, которой ограничен сотрудник без права менять парк: ему -
+        пересчёт только её. None - любая точка и весь парк."""
+        staff = getattr(request.state, "staff", None) or {}
+        if may_edit(request, "bikes"):
+            return None
+        return staff.get("location") or None
+
+    def take_denied(request: Request) -> Response:
+        """Отказ словами того права, которого не хватило: с действием
+        «Пересчёт техники» - это чужая точка, без него - парк."""
+        if logic.can_act(getattr(request.state, "staff", None), "stock_take"):
+            return denied(request, "stock_take")
+        return denied(request, "bikes")
+
+    def take_show(request: Request) -> str:
+        show = request.query_params.get("show") or ""
+        return show if show in logic.TAKE_SHOW else ""
+
+    def take_back(take_id: int, show: Any = "", anchor: str = "") -> RedirectResponse:
+        """Назад на ведомость с тем же фильтром строк: человек с телефоном
+        смотрит «Не отмечены», и каждая отметка не должна сбрасывать вид."""
+        show = str(show or "")
+        query = f"?show={show}" if show in logic.TAKE_SHOW and show else ""
+        return redirect(f"/stock-takes/{take_id}{query}{anchor}")
+
     @app.get("/stock-takes")
     async def stock_takes_page(request: Request) -> Response:
         rows, q = await take_rows(request)
         tools = list_tools(request, rows, allowed=TAKE_SORTS)
+        current = await crm.open_stock_takes()
+        own = own_take_point(request)
+        # Новый пересчёт начать есть где: весь парк, пока ничего не идёт;
+        # точку, пока не идёт её пересчёт или пересчёт всего парка.
+        places = await filter_points()
+        free = [p for p in places
+                if logic.take_conflict(current, scope="location", location=p) is None]
+        if own:
+            free = [p for p in free if p == own]
         return render(request, "stock_takes.html", rows=tools["rows"], tools=tools,
-                      q=q, current=await crm.open_stock_take(),
-                      places=await filter_points())
+                      q=q, current=current, places=free, own_point=own,
+                      may_start=may_start_take(request),
+                      all_free=not current and own is None)
 
     @app.get("/stock-takes.{ext}")
     async def stock_takes_csv(request: Request, ext: str) -> Response:
         rows, _ = await take_rows(request)
         return await table(ext, "stock-takes",
-                      ["№", "Дата", "Что считали", "Состояние", "Ожидалось",
-                       "Найдено", "Не нашли", "Лишние", "Кто провёл", "Комментарий"],
+                      ["№", "Дата", "Наименование", "Статус", "Ожидалось",
+                       "Нашли", "Не нашли", "Лишние", "Кто провёл", "Комментарий"],
                       [[r["no"], r.get("started_at"), r["title"],
-                        logic.TAKE_STATES.get(r.get("status"), r.get("status")),
+                        logic.TAKE_STATUSES.get(r.get("status"), r.get("status")),
                         r.get("expected"), r.get("found"), r.get("missing"),
                         r.get("extra"), r.get("created_by"), r.get("note")]
                        for r in rows])
 
     @app.post("/stock-takes")
     async def stock_take_start(request: Request) -> Response:
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
+        if not may_start_take(request):
+            return take_denied(request)
         data = await form(request)
         scope = logic.check_scope(data.get("scope") or "all")
         note = logic.check_note(data.get("note"))
@@ -10276,6 +10348,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if not what.ok:
             flash(request, what.error, "err")
             return redirect("/stock-takes")
+        if not logic.take_may_count(getattr(request.state, "staff", None),
+                                    scope=scope.value, location=location):
+            flash(request, f"Пересчёт - только своей точки: {own_take_point(request)}.",
+                  "err")
+            return redirect("/stock-takes")
         try:
             take_id = await service.start_stock_take(
                 crm, scope=scope.value, location=location, note=note.value,
@@ -10286,6 +10363,50 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         flash(request, "Пересчёт начат: отмечайте технику, которую видите.")
         return redirect(f"/stock-takes/{take_id}")
 
+    def take_item_cells(item: dict) -> list[Any]:
+        """Строка ведомости в выгрузке - те же колонки, что на экране."""
+        status = (logic.BIKE_STATUSES.get(item.get("bike_status"))
+                  if item.get("bike_status") else
+                  logic.BATTERY_STATUSES.get(item.get("battery_status"))
+                  if item.get("battery_status") else "нет в парке")
+        return [item.get("bike_code") or item.get("battery_code") or item.get("code"),
+                logic.take_item_title(item), status,
+                item.get("bike_location") or item.get("battery_location"),
+                logic.TAKE_STATES.get(item.get("state"), item.get("state")),
+                item.get("note")]
+
+    def take_doc_lines(take: dict, items: list[dict]) -> list[str]:
+        """Шапка выгрузки ведомости: файл пересылают без страницы, и без
+        номера, даты и точки строки ничего не значат."""
+        counts = logic.take_counts(items)
+        started = _cell(take.get("started_at"))
+        when = (f"Начат {started}, закрыт {_cell(take.get('closed_at'))}"
+                if take.get("closed_at") else f"Начат {started}, идёт")
+        tally = (f"Ожидалось {counts['total']}, на месте {counts['found']}, "
+                 f"не нашли {counts['missing']}, лишних {counts['extra']}")
+        if counts["expected"]:
+            tally += f", не отмечено {counts['expected']}"
+        lines = [f"{take.get('no')} · {logic.take_title(take)}",
+                 f"{when} · провёл {take.get('created_by') or '—'}", tally]
+        if take.get("note"):
+            lines.append(f"Комментарий: {take['note']}")
+        return lines
+
+    # Раньше /stock-takes/{take_id}: иначе «7.xlsx» уходил бы туда и
+    # падал на разборе номера.
+    @app.get("/stock-takes/{take_id}.{ext}")
+    async def stock_take_export(request: Request, take_id: int, ext: str) -> Response:
+        """Ведомость файлом: шапка документа (номер, что и где считали,
+        когда, кто, итог, комментарий) и строки, как на экране."""
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return render(request, "missing.html", status_code=404, what="Пересчёт")
+        items = await crm.take_items(take_id)
+        return await table(ext, f"stock-take-{take_id}",
+                           ["№", "Наименование", "Статус", "Точка", "Отметка",
+                            "Комментарий"], [take_item_cells(i) for i in items],
+                           title=take_doc_lines(take, items))
+
     @app.get("/stock-takes/{take_id}")
     async def stock_take_page(request: Request, take_id: int) -> Response:
         take = await crm.stock_take(take_id)
@@ -10293,120 +10414,143 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return render(request, "missing.html", status_code=404, what="Пересчёт")
         items = await crm.take_items(take_id)
         counts = logic.take_counts(items)
-        return render(request, "stock_take.html", take=take, items=items,
+        show = take_show(request)
+        shown = [i for i in items if i.get("state") == show] if show else items
+        is_open = logic.take_is_open(take)
+        return render(request, "stock_take.html", take=take, items=shown,
                       counts=counts, progress=logic.take_progress(counts),
-                      by_kind=logic.take_counts_by_kind(items))
+                      by_kind=logic.take_counts_by_kind(items), show=show,
+                      editable=is_open and may_mark(request, take),
+                      closable=is_open and may_count(request, take),
+                      may_lose=may_edit(request, "bikes"))
+
+    async def take_for_edit(request: Request, take_id: int, *,
+                            lead: bool = False) -> tuple[dict | None, Response | None]:
+        """Ведомость, которую этот сотрудник может править сейчас, или ответ:
+        нет такой - 404, не его - отказ, закрыта - назад с объяснением.
+        `lead` - действие того, кто ведёт пересчёт («всё на месте», общий
+        комментарий), а не отметка."""
+        take = await crm.stock_take(take_id)
+        if take is None:
+            return None, render(request, "missing.html", status_code=404,
+                                what="Пересчёт")
+        if not (may_count if lead else may_mark)(request, take):
+            return None, take_denied(request)
+        if not logic.take_is_open(take):
+            flash(request, "Пересчёт закрыт.", "err")
+            return None, redirect(f"/stock-takes/{take_id}")
+        return take, None
 
     @app.post("/stock-takes/{take_id}/scan")
     async def stock_take_scan(request: Request, take_id: int) -> Response:
-        """Отметка по номеру на раме: один ввод - одна единица техники."""
-        take = await crm.stock_take(take_id)
-        if take is None:
-            return render(request, "missing.html", status_code=404, what="Пересчёт")
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
-        if not logic.take_is_open(take):
-            flash(request, "Пересчёт закрыт.", "err")
-            return redirect(f"/stock-takes/{take_id}")
+        """Отметка по номеру: один номер или несколько через пробел,
+        запятую или с новой строки - как читают со сканера и с листа."""
+        take, refusal = await take_for_edit(request, take_id)
+        if refusal is not None:
+            return refusal
         data = await form(request)
-        code = logic.check_code(data.get("code"))
-        if not code.ok:
-            flash(request, code.error, "err")
-            return redirect(f"/stock-takes/{take_id}")
-        result = await service.take_add_found(crm, take, code.value)
-        flash(request, result["message"], "ok" if result["state"] == "found" else "err")
-        return redirect(f"/stock-takes/{take_id}")
+        try:
+            result = await service.take_scan(crm, take, data.get("code"))
+        except service.ServiceError as exc:
+            flash(request, str(exc), "err")
+            return take_back(take_id, data.get("show"))
+        flash(request, result["message"], "ok" if result["ok"] else "err")
+        return take_back(take_id, data.get("show"))
+
+    @app.post("/stock-takes/{take_id}/note")
+    async def stock_take_note(request: Request, take_id: int) -> Response:
+        """Общий комментарий ведомости: что считали, где, кто помогал,
+        почему расхождение. Пустой стирает."""
+        take, refusal = await take_for_edit(request, take_id, lead=True)
+        if refusal is not None:
+            return refusal
+        data = await form(request)
+        note = logic.check_note(data.get("note"))
+        if not note.ok:
+            flash(request, note.error, "err")
+        elif not await crm.set_stock_take_note(take_id, note.value):
+            flash(request, "Пересчёт закрыт.", "err")
+        else:
+            flash(request, "Комментарий сохранён." if note.value
+                  else "Комментарий стёрт.")
+        return take_back(take_id, data.get("show"), "#take-note")
 
     @app.post("/stock-takes/{take_id}/items/{item_id}")
     async def stock_take_item(request: Request, take_id: int, item_id: int) -> Response:
-        take = await crm.stock_take(take_id)
-        if take is None:
-            return render(request, "missing.html", status_code=404, what="Пересчёт")
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
-        if not logic.take_is_open(take):
-            flash(request, "Пересчёт закрыт.", "err")
-            return redirect(f"/stock-takes/{take_id}")
+        take, refusal = await take_for_edit(request, take_id)
+        if refusal is not None:
+            return refusal
         data = await form(request)
         state = logic.check_choice(data.get("state"), ("found", "expected", "missing"),
                                    what="Отметка")
         if not state.ok:
             flash(request, state.error, "err")
-            return redirect(f"/stock-takes/{take_id}")
+            return take_back(take_id, data.get("show"))
+        # Лишнюю строку отметкой не превратить в ожидаемую - её только
+        # убирают (db.set_take_item).
         if not await crm.set_take_item(take_id, item_id, state=state.value):
-            flash(request, "Строки уже нет.", "err")
-        return redirect(f"/stock-takes/{take_id}")
+            flash(request, "Строки уже нет или она лишняя.", "err")
+        return take_back(take_id, data.get("show"), f"#item-{item_id}")
 
     @app.post("/stock-takes/{take_id}/items/{item_id}/note")
     async def stock_take_item_note(request: Request, take_id: int,
                                    item_id: int) -> Response:
         """Комментарий строки, пока пересчёт идёт: «на ремонте у Марата»,
         «номер стёрт». Закрытая ведомость - документ, её не правят."""
-        take = await crm.stock_take(take_id)
-        if take is None:
-            return render(request, "missing.html", status_code=404, what="Пересчёт")
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
-        if not logic.take_is_open(take):
-            flash(request, "Пересчёт закрыт.", "err")
-            return redirect(f"/stock-takes/{take_id}")
-        note = logic.check_note((await form(request)).get("note"))
+        take, refusal = await take_for_edit(request, take_id)
+        if refusal is not None:
+            return refusal
+        data = await form(request)
+        note = logic.check_note(data.get("note"))
         if not note.ok:
             flash(request, note.error, "err")
         elif not await crm.set_take_item_note(take_id, item_id, note.value):
             flash(request, "Строки уже нет.", "err")
-        return redirect(f"/stock-takes/{take_id}#item-{item_id}")
+        return take_back(take_id, data.get("show"), f"#item-{item_id}")
 
     @app.post("/stock-takes/{take_id}/items/{item_id}/delete")
     async def stock_take_item_delete(request: Request, take_id: int,
                                      item_id: int) -> Response:
-        take = await crm.stock_take(take_id)
-        if take is None:
-            return render(request, "missing.html", status_code=404, what="Пересчёт")
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
-        if not logic.take_is_open(take):
-            flash(request, "Пересчёт закрыт.", "err")
-            return redirect(f"/stock-takes/{take_id}")
-        item = await crm.take_item(take_id, item_id)
+        take, refusal = await take_for_edit(request, take_id)
+        if refusal is not None:
+            return refusal
+        data = await form(request)
         # Убрать можно только лишнюю строку: снести ожидаемую - это стереть
         # недостачу, ради которой пересчёт и делают.
-        if item is None or item["state"] != "extra":
+        if not await crm.delete_take_item(take_id, item_id):
             flash(request, "Убрать можно только лишнюю строку.", "err")
-            return redirect(f"/stock-takes/{take_id}")
-        await crm.delete_take_item(take_id, item_id)
-        flash(request, "Лишняя строка убрана.")
-        return redirect(f"/stock-takes/{take_id}")
+        else:
+            flash(request, "Лишняя строка убрана.")
+        return take_back(take_id, data.get("show"))
 
     @app.post("/stock-takes/{take_id}/mark-all")
     async def stock_take_mark_all(request: Request, take_id: int) -> Response:
-        take = await crm.stock_take(take_id)
-        if take is None:
-            return render(request, "missing.html", status_code=404, what="Пересчёт")
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
-        if not logic.take_is_open(take):
-            flash(request, "Пересчёт закрыт.", "err")
-            return redirect(f"/stock-takes/{take_id}")
+        take, refusal = await take_for_edit(request, take_id, lead=True)
+        if refusal is not None:
+            return refusal
         data = await form(request)
         state = "expected" if (data.get("state") or "") == "expected" else "found"
         hit = await crm.mark_take_all(take_id, state=state)
         flash(request, f"Отмечено строк: {hit}." if state == "found"
               else f"Снято отметок: {hit}.")
-        return redirect(f"/stock-takes/{take_id}")
+        return take_back(take_id, data.get("show"))
 
     @app.post("/stock-takes/{take_id}/close")
     async def stock_take_close(request: Request, take_id: int) -> Response:
         take = await crm.stock_take(take_id)
         if take is None:
             return render(request, "missing.html", status_code=404, what="Пересчёт")
-        if not may_edit(request, "bikes"):
-            return denied(request, "bikes")
+        if not may_count(request, take):
+            return take_denied(request)
         data = await form(request)
         try:
+            # «Утерян» выводит технику из операционного парка - это правка
+            # парка, а не пересчёт: администратору точки (действие
+            # stock_take) галочка не дана, и присланная руками не действует.
+            # Найденный потерянный возвращается по правилу и у него.
             result = await service.finish_stock_take(
                 crm, take, by=who(request),
-                lose_missing=bool(data.get("lose_missing")),
+                lose_missing=bool(data.get("lose_missing")) and may_edit(request, "bikes"),
                 return_found=bool(data.get("return_found")))
         except service.ServiceError as exc:
             flash(request, str(exc), "err")
@@ -10416,6 +10560,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             parts.append(f"не нашли {result['missing']}")
         if result["lost"]:
             parts.append(f"переведено в «Утерян»: {result['lost']}")
+        if result["kept"]:
+            parts.append(f"не переведено в «Утерян»: {result['kept']} — их отметили "
+                         f"в {', '.join(result['kept_in'])}")
         if result["returned"]:
             parts.append(f"вернулось в парк: {result['returned']}")
         flash(request, "Пересчёт закрыт: " + ", ".join(parts) + ".")

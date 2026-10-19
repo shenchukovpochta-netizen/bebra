@@ -599,6 +599,8 @@ def parse_id(raw: Any) -> int | None:
 
 
 _PATH_NUMBER = re.compile(r"[\s0-9+\-_.]+")
+# Расширение файла в конце сегмента: «.csv», «.xlsx».
+_PATH_EXT = re.compile(r"\.[A-Za-z]+$")
 
 
 def path_ids_ok(path: str) -> bool:
@@ -609,11 +611,16 @@ def path_ids_ok(path: str) -> bool:
     Смотрим на состав сегмента, а не на написание: pydantic читает в int
     и «+N», «-N», « N», «N.0», «1_000», и даже «0-9» (это -9). Все его
     написания - из ASCII-цифр, пробелов, знаков, «_» и «.»; больше 18
-    значащих цифр в таком сегменте - число за пределом, какое бы ни было."""
+    значащих цифр в таком сегменте - число за пределом, какое бы ни было.
+
+    Выгрузка одной записи («/stock-takes/{id}.{ext}») несёт номер с
+    расширением: сегмент «N.csv» смотрим и без «.csv», иначе двадцать
+    цифр перед ним снова доходили до базы."""
     for part in str(path or "").split("/"):
-        if (_PATH_NUMBER.fullmatch(part)
-                and len(re.sub(r"[^0-9]", "", part).lstrip("0")) > 18):
-            return False
+        for piece in {part, _PATH_EXT.sub("", part)}:
+            if (_PATH_NUMBER.fullmatch(piece)
+                    and len(re.sub(r"[^0-9]", "", piece).lstrip("0")) > 18):
+                return False
     return True
 
 
@@ -2603,6 +2610,9 @@ SECTIONS: dict[str, str] = {
 ACTIONS: dict[str, str] = {
     "money_edit": "Записи в журнал руками: платёж, штраф, возврат, корректировка",
     "client_docs": "Паспортные документы клиента: скачивание подписанного договора",
+    # Пересчёт ведёт тот, кто стоит на точке, а менять парк (карточки,
+    # статусы) администратору не дают. Своя точка - staff.location.
+    "stock_take": "Пересчёт техники своей точки: начать, отмечать, закрыть",
 }
 
 LEVELS: dict[str, str] = {"": "нет доступа", "view": "смотреть", "edit": "смотреть и менять"}
@@ -2676,6 +2686,23 @@ SECTION_PATHS: tuple[tuple[str, str], ...] = (
     # Правило оценки риска и залог по уровням - решение владельца.
     ("/risk", "settings"),
 )
+
+
+# Записи, которые открывает действие, а не правка всего раздела: префикс
+# пути -> действие. Страж раздела пропускает их тому, кто раздел видит и
+# имеет действие; чья это точка, проверяет уже обработчик
+# (logic.take_may_count). Администратор точки считает парк, но карточки
+# и статусы велосипедов ему по-прежнему не править.
+ACTION_WRITES: tuple[tuple[str, str], ...] = (("/stock-takes", "stock_take"),)
+
+
+def can_write(staff: dict | None, path: str, code: str) -> bool:
+    """Пускает ли страж раздела запись (POST) по этому адресу."""
+    if can_edit(staff, code):
+        return True
+    return can_view(staff, code) and any(
+        (path == prefix or path.startswith(prefix + "/")) and can_act(staff, action)
+        for prefix, action in ACTION_WRITES)
 
 
 def section_for(path: str) -> str | None:
@@ -2759,7 +2786,7 @@ BUILT_IN_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
                    "reports": "view", "inventory": "view", "batteries": "view",
                    "trackers": "view", "cash": "edit", "mailing": "view",
                    "promos": "view"},
-      "actions": {}}, False),
+      "actions": {"stock_take": True}}, False),
     ("tech", "Мастер",
      {"sections": {"dashboard": "view", "bikes": "edit", "service": "edit",
                    "rentals": "view", "reports": "view", "inventory": "edit",
@@ -2776,7 +2803,7 @@ TASK_PROFILES: tuple[tuple[str, str, dict[str, Any], bool], ...] = (
      {"sections": {"issue": "edit", "clients": "edit", "rentals": "edit", "cash": "edit",
                    "claims": "edit", "bikes": "view", "batteries": "view",
                    "trackers": "view"},
-      "actions": {}}, False),
+      "actions": {"stock_take": True}}, False),
     ("tasks_tech", "Мастер: только задачи",
      {"sections": {"service": "edit", "bikes": "edit", "batteries": "edit",
                    "inventory": "edit", "trackers": "view"},
@@ -3291,6 +3318,257 @@ def take_title(take: dict) -> str:
     where = (f"Точка {take.get('location') or '—'}"
              if str(take.get("scope") or "") == "location" else TAKE_SCOPES["all"])
     return f"{what} · {where}" if what else where
+
+
+# Состояние самой ведомости - не путать с отметкой строки (TAKE_STATES).
+TAKE_STATUSES: dict[str, str] = {"open": "Идёт", "done": "Закрыт"}
+# Вид единицы в колонке «Наименование»: вид словом, модель - за ним.
+TAKE_KINDS: dict[str, str] = {"bike": "Велосипед", "battery": "АКБ"}
+# Фильтр строк ведомости на её странице: в ведомости на 600 строк с
+# телефона ищут «что ещё не отметил», а не листают всё.
+TAKE_SHOW: dict[str, str] = {"": "Все", "expected": "Не отмечены", "found": "На месте",
+                             "missing": "Не нашли", "extra": "Лишние"}
+# Номеров в одном поле: лист пересчёта списком - да, простыня - нет.
+TAKE_SCAN_LIMIT = 100
+TAKE_SCAN_CHARS = 5000
+# Хвост номера мотора, рамы или АКБ, по которому ещё ищем: короче
+# совпадёт с половиной парка. Шесть знаков - это и номер парка у импорта
+# таблицы (последние цифры мотора).
+TAKE_TAIL_MIN = 6
+# Номер с пробелами внутри («МБ 001») - не больше стольких кусков.
+TAKE_SPAN_MAX = 3
+# Номер парка вида «буквы + цифры» (ключ take_code_key): по цифрам его
+# находит ввод одних цифр («144» - МБ-144).
+_TAKE_NUMBER = re.compile(r"[^0-9]+([0-9]+)")
+# Кириллица -> латиница для сравнения номеров. Двойник - в свой
+# латинский вид (В -> B, Н -> H, Р -> P, С -> C, У -> Y, Х -> X): с
+# телефона на латинской раскладке «МВ» набирают «MB». Буква без двойника -
+# по звуку (Б -> B: «МБ-001» латиницей - «MB-001»). Ж, Ш, Я и прочие
+# латиницей одной буквой не пишутся и остаются собой.
+_TAKE_LATIN = str.maketrans("АБВГДЕЁЗИЙКЛМНОПРСТУФХ", "ABBGDEEZIIKLMHOPPCTYFX")
+
+
+def take_code_key(raw: Any) -> str:
+    """Номер с рамы или корпуса для сравнения: «мб-1», «МБ 001»,
+    «MB-001» и «mb001» - один номер «MB1».
+
+    Регистр, раскладка, пробелы, дефисы и ведущие нули в числах не
+    важны: человек с телефоном набирает номер так, как удобно, а сканер -
+    так, как напечатано. Нули снимаются после склейки: «1-01» - это 101,
+    а не 11.
+    """
+    text = str(raw or "").upper().translate(_TAKE_LATIN)
+    text = re.sub(r"[^0-9A-ZА-Я]", "", text)
+    return re.sub(r"(?<![0-9])0+(?=[0-9])", "", text)
+
+
+def _take_unique(units: Iterable[dict]) -> list[dict]:
+    """Без повторов, а из разных видов - велосипед: номер, общий у
+    велосипеда и батареи, отмечал велосипед и раньше - иначе он не
+    отмечался бы вводом вовсе."""
+    seen: dict[tuple[str, Any], dict] = {}
+    for unit in units:
+        seen.setdefault((str(unit.get("kind")), unit.get("id")), unit)
+    rows = list(seen.values())
+    bikes = [u for u in rows if u.get("kind") == "bike"]
+    return bikes if bikes and len(bikes) < len(rows) else rows
+
+
+class TakeIndex:
+    """Номера парка для ведомости: по ним разбирается ввод человека.
+
+    Порядок - от точного к широкому, и широкий не спорит с точным:
+    номер как напечатан; тот же номер без регистра, раскладки, дефисов и
+    ведущих нулей (`take_code_key`); номер мотора, рамы или АКБ целиком
+    (`vin_key`, как у рабочей группы); его хвост от TAKE_TAIL_MIN знаков;
+    одни цифры номера парка без букв («144» - МБ-144).
+    Строится один раз на ввод: строк в парке сотни, номеров в поле - до
+    TAKE_SCAN_LIMIT.
+    """
+
+    def __init__(self, units: Iterable[dict]) -> None:
+        self.exact: dict[str, list[dict]] = {}
+        self.keys: dict[str, list[dict]] = {}
+        self.vins: dict[str, list[dict]] = {}
+        self.tails: list[tuple[str, dict]] = []
+        self.numbers: dict[str, list[dict]] = {}
+        for unit in units:
+            code = " ".join(str(unit.get("code") or "").split()).upper()
+            if code:
+                self.exact.setdefault(code, []).append(unit)
+            key = take_code_key(code)
+            if key:
+                self.keys.setdefault(key, []).append(unit)
+            number = _TAKE_NUMBER.fullmatch(key)
+            if number:
+                self.numbers.setdefault(number.group(1), []).append(unit)
+            for field in ("motor_no", "frame_no", "serial_no"):
+                vin = vin_key(unit.get(field))
+                if len(vin) >= VIN_MIN:
+                    self.vins.setdefault(vin, []).append(unit)
+                    self.tails.append((vin, unit))
+
+    def find(self, raw: Any, *, digits: bool = True) -> list[dict]:
+        """Единицы под номером: пусто - нет такой, больше одной - номер
+        надо уточнить. `digits=False` - без догадки по одним цифрам:
+        ведомость сперва ищет номер, набранный полностью, по всему парку
+        (service.take_add_found)."""
+        text = " ".join(str(raw or "").split()).upper()
+        if not text:
+            return []
+        key = take_code_key(text)
+        for hits in (self.exact.get(text), self.keys.get(key)):
+            if hits:
+                return _take_unique(hits)
+        vin = vin_key(text)
+        if len(vin) >= VIN_MIN and self.vins.get(vin):
+            return _take_unique(self.vins[vin])
+        if len(vin) >= TAKE_TAIL_MIN:
+            hits = _take_unique(u for v, u in self.tails if v.endswith(vin))
+            if hits:
+                return hits
+        if digits and key.isdigit():
+            # Одни цифры: «144» - это МБ-144, если номер с этими цифрами в
+            # парке один. Есть и МБ-144, и АКБ-0144 - уточнить, а не угадать:
+            # велосипеду тут не первенство, как у общего номера, - человек
+            # не набрал ни буквы.
+            seen: dict[tuple[str, Any], dict] = {}
+            for unit in self.numbers.get(key, ()):
+                seen.setdefault((str(unit.get("kind")), unit.get("id")), unit)
+            return list(seen.values())
+        return []
+
+
+def take_codes(raw: Any, known: Callable[[str], bool]) -> list[str]:
+    """Номера из поля ввода: один, несколько через запятую, точку с
+    запятой, перевод строки или пробел.
+
+    Пробел бывает и внутри номера («МБ 001»), поэтому куски между
+    запятыми разбираются так: самый короткий отрезок, который `known`
+    узнаёт, - один номер. Короткий, а не длинный: номер, узнанный сам,
+    к следующему не клеится - «МБ-001 2» это МБ-001 и АКБ «2», а не
+    МБ-012 (нули снимаются после склейки), и отметка не той единицы
+    спрятала бы недостачу. Неузнанный кусок из одних букв - начало номера
+    («МБ 1070»), он клеится к следующему, если тот не номер с буквами,
+    узнанный сам («Truck МБ-001» - это МБ-001). Одни цифры после букв -
+    хвост того же номера, даже если цифрами узнаются: «МБ 1070» при
+    АКБ-1070 и без МБ-1070 - лишний номер, а не чужая батарея. Прочие
+    неузнанные - по одному.
+    """
+    def whole(token: str) -> bool:
+        return bool(re.search(r"[^\W\d_]", token)) and known(token)
+
+    out: list[str] = []
+    for chunk in re.split(r"[,;\n\r\t]+", str(raw or "")):
+        tokens = chunk.split()
+        i = 0
+        while i < len(tokens):
+            last = min(len(tokens), i + TAKE_SPAN_MAX)
+            j = next((j for j in range(i + 1, last + 1)
+                      if known(" ".join(tokens[i:j]))), None)
+            if j is None:
+                j = i + 1
+                while (j < last and not re.search(r"\d", tokens[j - 1])
+                       and not whole(tokens[j])):
+                    j += 1
+            out.append(" ".join(tokens[i:j]))
+            i = j
+    return out
+
+
+def take_scan_summary(results: Sequence[Mapping[str, Any]]) -> str:
+    """Одна фраза на ввод нескольких номеров: сколько на месте, что
+    лишнее и что не записано - с номерами, чтобы было что перепроверить."""
+    def codes(rows: list[Mapping[str, Any]]) -> str:
+        names = [str(r.get("code") or "") for r in rows]
+        more = len(names) - 10
+        return ", ".join(names[:10]) + (f" и ещё {more}" if more > 0 else "")
+
+    fresh = [r for r in results if r.get("state") == "found" and not r.get("again")]
+    again = [r for r in results if r.get("state") == "found" and r.get("again")]
+    extra = [r for r in results if r.get("state") == "extra"]
+    other = [r for r in results if r.get("state") not in ("found", "extra")]
+    parts = [f"Номеров: {len(results)}"]
+    if fresh:
+        parts.append(f"на месте: {len(fresh)}")
+    if again:
+        parts.append(f"уже отмечены: {len(again)}")
+    if extra:
+        parts.append(f"лишние: {len(extra)} ({codes(extra)})")
+    if other:
+        parts.append(f"не записаны: {len(other)} ({codes(other)})")
+    text = "; ".join(parts) + "."
+    # Почему не записан - словами самого исхода: «подходит несколько»,
+    # «это аккумулятор». Первые три, дальше человек и так поймёт.
+    for r in other[:3]:
+        text += " " + str(r.get("message") or "")
+    return text
+
+
+def take_item_title(item: Mapping[str, Any]) -> str:
+    """Колонка «Наименование»: что это за единица - вид и модель.
+
+    «Велосипед · Truck +», «АКБ Kugoo 60V 21Ah»: у батареи вид уже стоит
+    в названии модели, и «АКБ · АКБ …» было бы повтором. Лишний номер,
+    которого в парке нет, - прочерк.
+    """
+    if item.get("bike_id"):
+        kind, model = TAKE_KINDS["bike"], item.get("bike_model")
+    elif item.get("battery_id"):
+        kind, model = TAKE_KINDS["battery"], item.get("battery_model")
+    else:
+        return "—"
+    model = " ".join(str(model or "").split())
+    if not model:
+        return kind
+    if model.casefold().startswith(kind.casefold()):
+        return model
+    return f"{kind} · {model}"
+
+
+def take_may_count(staff: dict | None, *, scope: Any, location: Any) -> bool:
+    """Может ли сотрудник вести ведомость: начать, отмечать, закрыть.
+
+    С правом менять парк - любую. С действием «Пересчёт техники»
+    (администратор точки, которому парк только смотреть) - ведомость своей
+    точки (`staff.location`); сотрудник без точки работает на всех, как в
+    «Задачах дня», - тогда любую.
+    """
+    if can_edit(staff, "bikes"):
+        return True
+    if not can_act(staff, "stock_take"):
+        return False
+    own = (staff or {}).get("location") or None
+    return own is None or (scope == "location" and (location or None) == own)
+
+
+def take_may_mark(staff: dict | None, *, scope: Any, location: Any) -> bool:
+    """Может ли сотрудник отмечать в ведомости: номера, строки, их
+    комментарии.
+
+    Шире, чем вести её (`take_may_count`): пересчёт всего парка идёт по
+    точкам, и администратор с точкой отмечает то, что видит у себя.
+    Закрывает его, ставит «всё на месте» и пишет общий комментарий тот,
+    кто может вести весь парк: закрытие меняет статусы.
+    """
+    if take_may_count(staff, scope=scope, location=location):
+        return True
+    return str(scope or "") == "all" and can_act(staff, "stock_take")
+
+
+def take_conflict(open_takes: Iterable[dict], *, scope: str,
+                  location: str | None) -> dict | None:
+    """Идущая ведомость, которая мешает начать новую, или None.
+
+    Две точки считают одновременно: техника разных точек не пересекается.
+    А вот два пересчёта одной точки или весь парк рядом с любым другим
+    делят технику пополам, и в каждом половина «не найдена».
+    """
+    for take in open_takes:
+        if (scope != "location" or take.get("scope") != "location"
+                or (take.get("location") or "") == (location or "")):
+            return take
+    return None
 
 
 # ─────────────────────── отчёты сервиса ───────────────────────

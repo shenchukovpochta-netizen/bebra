@@ -1011,7 +1011,7 @@ async def _stock_take(conn: asyncpg.Connection, w: World, rng: random.Random,
     if rented:
         other = rng.choice(rented)
         items.append((other["id"], other["code"], "extra",
-                      "Числится: " + logic.BIKE_STATUSES["rented"], t))
+                      "Статус при отметке: " + logic.BIKE_STATUSES["rented"], t))
     items.append((None, "МБ-1070", "extra", "Нет такого в парке", t + MINUTE * 4))
     counts = logic.take_counts([{"state": x[2]} for x in items])
     await conn.execute(

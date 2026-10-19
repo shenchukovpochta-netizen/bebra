@@ -5,7 +5,7 @@
 <div class="bar"><h1>Пересчёт техники</h1>
   <nav class="tabs"><a href="/bikes">Парк</a><a href="/stock-takes" class="on">Пересчёт</a></nav>
   <form method="get" class="search">
-    <input name="q" value="{{ q }}" placeholder="номер, точка, кто провёл, комментарий">
+    <input name="q" value="{{ q }}" placeholder="номер документа или комментарий">
     <button type="submit">Найти</button>
   </form>
   <a class="btn ghost" href="/stock-takes.xlsx?q={{ q|urlencode }}">Excel</a>
@@ -14,11 +14,18 @@
 
 {% if current %}
 <div class="card">
-  <p>Идёт пересчёт <a href="/stock-takes/{{ current.id }}">{{ current.no }}</a> —
-     {{ take_title(current) }}, начат {{ current.started_at|dmy }}.
-     Пока он не закрыт, новый не начать.</p>
+  {% for t in current %}
+  <p>Идёт пересчёт <a href="/stock-takes/{{ t.id }}">{{ t.no }}</a> —
+     {{ take_title(t) }}, начат {{ t.started_at|dmy }}.{% if t.note %} <span class="muted">{{ t.note }}</span>{% endif %}</p>
+  {% endfor %}
+  {% if may_start and not all_free and not places %}
+  <p class="muted">Новый пересчёт начнётся, когда идущий закроют: одну технику
+    два пересчёта разом делят пополам.</p>
+  {% endif %}
 </div>
-{% elif can_edit(staff, 'bikes') %}
+{% endif %}
+
+{% if may_start and (all_free or places) %}
 <div class="card">
   <h2>Новый пересчёт</h2>
   {# Ведомость снимает парк на момент открытия: ждём то, что должно
@@ -27,13 +34,20 @@
     <label>Что считаем
       <select name="what">{% for code, label in TAKE_WHAT.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
     </label>
+    {% if own_point %}
+    {# Администратор точки считает свою точку: выбирать нечего. #}
+    <input type="hidden" name="scope" value="location">
+    <input type="hidden" name="location" value="{{ own_point }}">
+    <label>Где считаем<input type="text" value="Точка {{ own_point }}" disabled></label>
+    {% else %}
     <label>Где считаем
-      <select name="scope">{% for code, label in TAKE_SCOPES.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select>
+      <select name="scope">{% for code, label in TAKE_SCOPES.items() %}{% if code != 'all' or all_free %}<option value="{{ code }}">{{ label }}</option>{% endif %}{% endfor %}</select>
     </label>
     <label>Точка
       <select name="location"><option value="">—</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select>
     </label>
-    <label class="wide">Комментарий<input type="text" name="note" placeholder="Плановый пересчёт парка"></label>
+    {% endif %}
+    <label class="wide">Комментарий<input type="text" name="note" maxlength="2000" placeholder="Что считаем, кто помогает"></label>
     <button type="submit">Начать пересчёт</button>
   </form>
   <p class="muted">Считается техника, которую ждут на точке: свободная,
@@ -42,38 +56,41 @@
     ещё не в обороте.</p>
   <p class="muted">Отдельной ведомости на батареи нет намеренно: человек
     с телефоном обходит точку один раз и вводит номера подряд, а какой
-    из них чей — разбирается система.</p>
+    из них чей — разбирается система. Точки считают одновременно, каждая
+    свою; пересчёт всего парка — один на всех.</p>
 </div>
 {% endif %}
 
 <div class="card">
 <div class="table-wrap">
-<table>
+<table class="cards">
   <tr>
     {{ list.th('№', 'no', tools) }}
     {{ list.th('Дата', 'started', tools) }}
-    {{ list.th('Что считали', 'what', tools) }}
+    {{ list.th('Наименование', 'what', tools) }}
+    {{ list.th('Статус', 'status', tools) }}
     {{ list.th('Ожидалось', 'expected', tools, 'num') }}
     {{ list.th('Нашли', 'found', tools, 'num') }}
     {{ list.th('Не нашли', 'missing', tools, 'num') }}
     {{ list.th('Лишние', 'extra', tools, 'num') }}
-    {{ list.th('Кто провёл', 'who', tools) }}
+    {{ list.th('Кто провёл', 'who', tools, 'opt') }}
     <th>Комментарий</th>
   </tr>
   {% for r in rows %}
   <tr>
-    <td><a href="/stock-takes/{{ r.id }}">{{ r.no }}</a></td>
-    <td>{{ r.started_at|dmy }}</td>
-    <td>{{ take_title(r) }}{% if r.status == 'open' %} <span class="tag">идёт</span>{% endif %}</td>
-    <td class="num">{{ r.expected }}</td>
-    <td class="num">{{ r.found }}</td>
-    <td class="num {% if r.missing %}bad{% endif %}">{{ r.missing }}</td>
-    <td class="num">{{ r.extra }}</td>
-    <td>{{ r.created_by or '—' }}</td>
-    <td>{{ r.note or '' }}</td>
+    <td data-label="№"><a href="/stock-takes/{{ r.id }}">{{ r.no }}</a></td>
+    <td data-label="Дата">{{ r.started_at|dmy }}</td>
+    <td data-label="Наименование">{{ take_title(r) }}</td>
+    <td data-label="Статус">{% if r.status == 'open' %}<span class="tag">{{ TAKE_STATUSES[r.status] }}</span>{% else %}{{ TAKE_STATUSES.get(r.status, r.status) }}{% endif %}</td>
+    <td class="num" data-label="Ожидалось">{{ r.expected }}</td>
+    <td class="num" data-label="Нашли">{{ r.found }}</td>
+    <td class="num {% if r.missing %}bad{% endif %}" data-label="Не нашли">{{ r.missing }}</td>
+    <td class="num" data-label="Лишние">{{ r.extra }}</td>
+    <td class="opt" data-label="Кто провёл">{{ r.created_by or '—' }}</td>
+    <td data-label="Комментарий">{{ r.note or '' }}</td>
   </tr>
-  {% else %}<tr><td colspan="9" class="muted">Пересчётов ещё не было.</td></tr>{% endfor %}
-  {{ list.footer(tools, '/stock-takes', 9) }}
+  {% else %}<tr><td colspan="10" class="muted">{% if q %}Ничего не нашлось.{% else %}Пересчётов ещё не было.{% endif %}</td></tr>{% endfor %}
+  {{ list.footer(tools, '/stock-takes', 10) }}
 </table>
 </div>
 </div>

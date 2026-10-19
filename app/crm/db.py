@@ -2271,22 +2271,34 @@ class CrmDB:
             "select * from crm.stock_takes where id = $1", take_id))
 
     async def open_stock_take(self) -> dict | None:
-        """Текущая ведомость. Она одна: индекс не даёт открыть вторую."""
+        """Последняя открытая ведомость (их бывает несколько - по точкам)."""
         return _row(await self.pool.fetchrow(
             "select * from crm.stock_takes where status = 'open' "
             "order by id desc limit 1"))
 
+    async def open_stock_takes(self) -> list[dict]:
+        """Идущие ведомости: одна на точку, весь парк - одна на всех."""
+        return _rows(await self.pool.fetch(
+            "select * from crm.stock_takes where status = 'open' order by id"))
+
     async def create_stock_take(self, *, scope: str, location: str | None,
                                 note: str | None, bike_ids: list[int],
                                 created_by: str, what: str = "bikes",
-                                battery_ids: list[int] | None = None) -> int:
+                                battery_ids: list[int] | None = None) -> int | None:
         """Открыть ведомость и сразу записать в неё снимок ожидаемого парка.
 
         Номер и строки - одной транзакцией: ведомость без строк оператор
         примет за «всё сошлось», а это просто недописанный документ.
+        None - мешает идущая ведомость (logic.take_conflict): проверка под
+        тем же замком таблицы, что и номер, иначе два нажатия «Начать»
+        на разных точках прошли бы мимо друг друга.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("lock table crm.stock_takes in share row exclusive mode")
+            busy = _rows(await conn.fetch(
+                "select * from crm.stock_takes where status = 'open'"))
+            if logic.take_conflict(busy, scope=scope, location=location) is not None:
+                return None
             next_no = int(await conn.fetchval(
                 "select coalesce(max(substring(no from '[0-9]+$')::bigint), 0) + 1 "
                 "from crm.stock_takes") or 1)
@@ -2317,6 +2329,30 @@ class CrmDB:
         await self.pool.execute(
             f"update crm.stock_takes set {sets} where id = $1", take_id, *values)
 
+    async def set_stock_take_note(self, take_id: int, note: str | None) -> bool:
+        """Общий комментарий ведомости: что считали, кто помогал, почему
+        расхождение. Правится, пока ведомость идёт: закрытая - документ."""
+        row = await self.pool.fetchrow(
+            "update crm.stock_takes set note = $2 where id = $1 and status = 'open' "
+            "returning id", take_id, note)
+        return row is not None
+
+    async def take_units(self) -> list[dict]:
+        """Номера парка для разбора ввода в ведомости (logic.TakeIndex):
+        велосипеды и батареи одним списком - номер, мотор, рама, номер
+        АКБ - и то, что сказать в ответ: модель, статус, точка."""
+        return _rows(await self.pool.fetch(
+            """
+            select 'bike' as kind, id, code, model, status, location,
+                   motor_no, frame_no, null::text as serial_no
+              from crm.bikes
+            union all
+            select 'battery', a.id, a.code, m.title, a.status, a.location,
+                   null, null, a.serial_no
+              from crm.batteries a
+              left join crm.battery_models m on m.id = a.model_id
+            """))
+
     _TAKE_ITEM_SELECT = """
         select i.*, b.code as bike_code, b.model as bike_model,
                b.status as bike_status, b.location as bike_location,
@@ -2327,6 +2363,12 @@ class CrmDB:
         left join crm.batteries a on a.id = i.battery_id
         left join crm.battery_models m on m.id = a.model_id
     """
+    # Строки правятся только у идущей ведомости. Замок FOR SHARE на её
+    # строке: закрытие берёт FOR UPDATE, и отметка, начатая до закрытия,
+    # либо успевает в ведомость до подсчёта, либо видит её закрытой - а
+    # не дописывает строку в уже посчитанный документ.
+    _TAKE_OPEN = ("(select id from crm.stock_takes where id = $1 and status = 'open' "
+                  "for share)")
 
     async def take_items(self, take_id: int) -> list[dict]:
         return _rows(await self.pool.fetch(
@@ -2351,10 +2393,13 @@ class CrmDB:
 
     async def set_take_item(self, take_id: int, item_id: int, *, state: str,
                             note: str | None = None) -> bool:
+        """Отметка строки. Лишняя остаётся лишней: «на месте» или «не
+        отмечен» у неё превратили бы номер, которого не ждали, в
+        ожидаемый и надули бы «ожидалось»."""
         row = await self.pool.fetchrow(
             "update crm.stock_take_items set state = $3, note = coalesce($4, note) "
-            "where take_id = $1 and id = $2 returning id",
-            take_id, item_id, state, note)
+            f"where take_id in {self._TAKE_OPEN} and id = $2 and state <> 'extra' "
+            "returning id", take_id, item_id, state, note)
         return row is not None
 
     async def set_take_item_note(self, take_id: int, item_id: int,
@@ -2364,7 +2409,7 @@ class CrmDB:
         комментарий не трогает."""
         row = await self.pool.fetchrow(
             "update crm.stock_take_items set note = $3 "
-            "where take_id = $1 and id = $2 returning id",
+            f"where take_id in {self._TAKE_OPEN} and id = $2 returning id",
             take_id, item_id, note)
         return row is not None
 
@@ -2373,50 +2418,86 @@ class CrmDB:
         source = "found" if state == "expected" else "expected"
         return int(await self.pool.fetchval(
             "with upd as (update crm.stock_take_items set state = $2 "
-            "where take_id = $1 and state = $3 returning 1) "
+            f"where take_id in {self._TAKE_OPEN} and state = $3 returning 1) "
             "select count(*) from upd", take_id, state, source) or 0)
 
     async def add_take_item(self, take_id: int, *, bike_id: int | None, code: str | None,
                             state: str = "extra", note: str | None = None,
-                            battery_id: int | None = None) -> int:
-        return int(await self.pool.fetchval(
+                            battery_id: int | None = None) -> int | None:
+        """Строка ведомости; None - ведомость уже закрыта."""
+        item_id = await self.pool.fetchval(
             "insert into crm.stock_take_items (take_id, bike_id, battery_id, code, "
-            "state, note) values ($1, $2, $6, $3, $4, $5) returning id",
-            take_id, bike_id, code, state, note, battery_id))
+            f"state, note) select $1::bigint, $2::bigint, $6::bigint, $3::text, $4::text, "
+            f"$5::text where $1 in {self._TAKE_OPEN} "
+            "returning id", take_id, bike_id, code, state, note, battery_id)
+        return int(item_id) if item_id is not None else None
 
     async def delete_take_item(self, take_id: int, item_id: int) -> bool:
+        """Убрать можно только лишнюю строку идущей ведомости: снести
+        ожидаемую - это стереть недостачу, ради которой пересчёт и делают."""
         row = await self.pool.fetchrow(
-            "delete from crm.stock_take_items where take_id = $1 and id = $2 "
-            "returning id", take_id, item_id)
+            f"delete from crm.stock_take_items where take_id in {self._TAKE_OPEN} "
+            "and id = $2 and state = 'extra' returning id", take_id, item_id)
         return row is not None
 
-    async def close_stock_take(self, take_id: int, *, counts: dict[str, int],
-                               closed_at: datetime) -> dict[str, list[int]]:
+    async def close_stock_take(self, take_id: int, *,
+                               closed_at: datetime) -> dict[str, Any] | None:
         """Закрыть ведомость: неотмеченное становится недостачей.
 
-        Возвращает id ненайденных - велосипедов и батарей отдельно:
-        что с ними делать, решает не база.
+        Возвращает id ненайденных - велосипедов и батарей отдельно, и
+        неотмеченных, и отмеченных «не нашли» руками: что с ними делать,
+        решает не база, - и счётчики, посчитанные в той же транзакции, под
+        замком строки ведомости. None - уже закрыта: два нажатия «Закрыть»
+        не пишут итог дважды.
         """
         async with self.pool.acquire() as conn, conn.transaction():
-            rows = await conn.fetch(
+            if await conn.fetchval(
+                    "select id from crm.stock_takes where id = $1 and status = 'open' "
+                    "for update", take_id) is None:
+                return None
+            await conn.execute(
                 "update crm.stock_take_items set state = 'missing' "
-                "where take_id = $1 and state = 'expected' "
-                "returning bike_id, battery_id", take_id)
+                "where take_id = $1 and state = 'expected'", take_id)
+            items = _rows(await conn.fetch(
+                "select state, bike_id, battery_id from crm.stock_take_items "
+                "where take_id = $1", take_id))
+            counts = logic.take_counts(items)
+            rows = [i for i in items if i["state"] == "missing"]
             await conn.execute(
                 """
                 update crm.stock_takes
                 set status = 'done', closed_at = $2, expected = $3, found = $4,
                     missing = $5, extra = $6
                 where id = $1
-                """, take_id, closed_at, int(counts.get("total") or 0),
-                int(counts.get("found") or 0), int(counts.get("missing") or 0),
-                int(counts.get("extra") or 0))
+                """, take_id, closed_at, counts["total"], counts["found"],
+                counts["missing"], counts["extra"])
             return {
                 "bikes": [int(r["bike_id"]) for r in rows
                           if r["bike_id"] is not None],
                 "batteries": [int(r["battery_id"]) for r in rows
                               if r["battery_id"] is not None],
+                "counts": counts,
             }
+
+    async def take_seen_elsewhere(self, take_id: int) -> list[dict]:
+        """Что отметили - на месте или лишним - другие ведомости, шедшие
+        вместе с этой (идут сейчас или закрыты после её начала), с их
+        номером и точкой. Точки считают одновременно: велосипед, который
+        числится на Б, а стоит на А, в ведомости Б не найден, но его видели,
+        и в «Утерян» его не переводят (service.finish_stock_take).
+        """
+        return _rows(await self.pool.fetch(
+            """
+            select x.bike_id, x.battery_id, x.state, o.id as take_id, o.no,
+                   o.location
+            from crm.stock_takes t
+            join crm.stock_takes o
+              on o.id <> t.id and (o.status = 'open' or o.closed_at >= t.started_at)
+            join crm.stock_take_items x
+              on x.take_id = o.id and x.state in ('found', 'extra')
+            where t.id = $1 and (x.bike_id is not null or x.battery_id is not null)
+            order by o.id, x.id
+            """, take_id))
 
     # ─────────────────────── отчёты сервиса ───────────────────────
 

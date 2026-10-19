@@ -87,7 +87,8 @@ class TestStockTakesList(tw.WebCase):
         self.assertEqual(self.client.get("/stock-takes?sort=expected&dir=desc").status_code, 200)
         csv = self.client.get("/stock-takes.csv?q=кражи")
         self.assertEqual(csv.status_code, 200)
-        self.assertIn("Что считали", csv.text)
+        # Подписи - словами экрана: «Наименование», «Статус».
+        self.assertIn("№;Дата;Наименование;Статус;", csv.text)
         self.assertIn("После кражи", csv.text)
         self.assertNotIn("Летний обход", csv.text)
         self.assertEqual(self.client.get("/stock-takes.xlsx").status_code, 200)
