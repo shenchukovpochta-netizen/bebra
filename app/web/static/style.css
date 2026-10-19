@@ -508,6 +508,10 @@ td.stack .btn,td.stack button{margin:2px 4px 2px 0}
   /* Строка поиска - во всю ширину: в ширину по умолчанию подсказка
      «клиент, телефон, № велосипеда…» обрезалась на середине. */
   .search input[name=q]{flex:1 1 100%}
+  /* Список точек с адресом («Павлюхина · ул. Павлюхина, 97») шире
+     экрана 360 px: select растягивается по самой длинной строке и
+     раздвигал страницу, а за ней - нижнюю панель («Меню» за краем). */
+  .search,.search input,.search select{max-width:100%;min-width:0}
   /* Выгрузка на телефоне - Excel: CSV рядом с ним ломал шапку на две
      строки кнопок, а открыть CSV на телефоне всё равно нечем. */
   .bar a.btn[href*=".csv"]{display:none}
@@ -541,6 +545,9 @@ label{display:block;margin:0 0 12px;font-size:12.5px;font-weight:600;color:var(-
    внутренняя рамка, фокус - оранжевой рамкой. */
 input,select,textarea{display:block;width:100%;margin-top:6px;min-height:40px;padding:8px 12px;border:0;border-radius:var(--r3);
   background:var(--card2);box-shadow:inset 0 0 0 1px var(--line);color:var(--text);font:500 14px/1.4 var(--font-text)}
+/* Выпадающий список не шире своего места: подпись варианта бывает
+   длиннее поля (точка с адресом), а select растёт по самой длинной. */
+select{max-width:100%}
 textarea{min-height:72px}
 input::placeholder,textarea::placeholder{color:var(--muted)}
 input:focus,select:focus,textarea:focus{outline:0;box-shadow:inset 0 0 0 1.5px var(--accent)}
