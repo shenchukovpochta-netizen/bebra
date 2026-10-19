@@ -613,6 +613,22 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                          "один раз")
         self.assertTrue(await self.crm.update_task(later, start_on=today, notified_at=None))
         self.assertEqual([t["id"] for t in await self.crm.announce_due_tasks(today)], [later])
+        # панель отмечает «сказано» условием в UPDATE: бот успел - второго нет
+        self.assertFalse(await self.crm.mark_task_told(later))
+        self.assertTrue(await self.crm.update_task(later, notified_at=None))
+        self.assertTrue(await self.crm.mark_task_told(later))
+        # отключённому и с истёкшим доступом - отметка без сообщения
+        gone = await self.crm.create_task(title="Сдать ключи", by="t", assignee_id=marat,
+                                          start_on=today + timedelta(days=1),
+                                          announce_later=True)
+        late = await self.crm.create_task(title="Сверить кассу", by="t", assignee_id=anna,
+                                          start_on=today + timedelta(days=1),
+                                          announce_later=True)
+        await self.crm.set_staff_active(marat, False)
+        await self.crm.set_staff_expires(anna, datetime.now(UTC) - timedelta(minutes=1))
+        self.assertEqual(await self.crm.announce_due_tasks(today + timedelta(days=1)), [])
+        self.assertIsNotNone((await self.crm.task(gone))["notified_at"], "не висит в очереди")
+        self.assertIsNotNone((await self.crm.task(late))["notified_at"])
 
     async def test_task_dates_on_old_install(self):
         """Установка до двух дат: прежним задачам постановка - день

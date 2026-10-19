@@ -6849,22 +6849,38 @@ class CrmDB:
     async def announce_due_tasks(self, today: date, *, limit: int = 200) -> list[dict]:
         """Задачи, чей день постановки настал, а исполнителю ещё не сказали.
         Отметка ставится здесь же, до отправки: перезапуск бота второго
-        сообщения не даст, а недошедшее видно в «Задачах дня»."""
+        сообщения не даст, а недошедшее видно в «Задачах дня». Отключённому
+        и с истёкшим доступом - отметка без сообщения: бывшему сотруднику
+        задачи не пишем, а строка не висит в очереди до его возвращения."""
         rows = await self.pool.fetch(
             """
-            update crm.tasks set notified_at = now()
-             where id in (select id from crm.tasks
-                           where status = 'open' and notified_at is null
-                             and assignee_id is not null and start_on <= $1
-                           order by start_on, id limit $2
-                           for update skip locked)
-            returning id
+            update crm.tasks t set notified_at = now()
+              from crm.staff a
+             where a.id = t.assignee_id
+               and t.id in (select id from crm.tasks
+                             where status = 'open' and notified_at is null
+                               and assignee_id is not null and start_on <= $1
+                             order by start_on, id limit $2
+                             for update skip locked)
+            returning t.id, a.active and (a.expires_at is null or a.expires_at > now())
+                      as reachable
             """, today, limit)
-        if not rows:
+        ids = [r["id"] for r in rows if r["reachable"]]
+        if not ids:
             return []
         return _rows(await self.pool.fetch(
             f"{self._TASK_SELECT} where t.id = any($1::bigint[]) order by t.start_on, t.id",
-            [r["id"] for r in rows]))
+            ids))
+
+    async def mark_task_told(self, task_id: int) -> bool:
+        """«Исполнителю сказано» - условием в самом UPDATE: бот мог сказать
+        минутой раньше (`announce_due_tasks`), тогда False и второго
+        сообщения панель не шлёт."""
+        row = await self.pool.fetchrow(
+            "update crm.tasks set notified_at = now() "
+            "where id = $1 and status = 'open' and notified_at is null returning id",
+            task_id)
+        return row is not None
 
     async def update_task(self, task_id: int, **fields: Any) -> bool:
         if not fields:

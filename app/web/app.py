@@ -1739,8 +1739,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         assignee = None
         if fields.get("assignee_id") is not None:
             assignee = await crm.staff_by_id(fields["assignee_id"])
-            if assignee is None or not assignee.get("active"):
-                flash(request, "Такого сотрудника нет или он отключён.", "err")
+            if (assignee is None or not assignee.get("active")
+                    or logic.staff_expired(assignee)):
+                flash(request, "Такого сотрудника нет или у него закрыт доступ.", "err")
                 return redirect(back)
         if fields.get("location") is None and assignee is None:
             # Незакреплённая без точки висела бы у всей сети: точка автора.
@@ -1843,18 +1844,26 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if assignee is None:
                 flash(request, "Такого сотрудника нет.", "err")
                 return redirect(f"/tasks/{task['id']}")
-        tell = assignee is not None and int(assignee["id"]) != int(staff["id"])
+        # Другой человек - ему говорят; себе и незакреплённой - некому.
+        # Отключённому и с истёкшим доступом - молча: он бывший.
+        other = assignee is not None and int(assignee["id"]) != int(staff["id"])
+        reachable = bool(other and assignee and assignee.get("active")
+                         and not logic.staff_expired(assignee))
         later = fields["start_on"] > today
-        send = False
+        send = claim = False
         if fields["assignee_id"] != task.get("assignee_id"):
-            # Сменили исполнителя: новому - сейчас, в день постановки или
-            # никогда (себе и незакреплённой говорить некому).
-            send = tell and not later
-            fields["notified_at"] = None if tell and later else datetime.now().astimezone()
-        elif task.get("notified_at") is None and tell and not later:
-            send = True                    # ждала дня постановки, а его перенесли
-            fields["notified_at"] = datetime.now().astimezone()
+            # Сменили исполнителя: новому - сейчас, в день постановки
+            # (решит бот, сверив доступ в тот день) или никогда.
+            send = reachable and not later
+            fields["notified_at"] = None if other and later else datetime.now().astimezone()
+        elif task.get("notified_at") is None and assignee is not None:
+            # Ждала дня постановки: перенесли на сегодня - сказать сейчас;
+            # правит сам исполнитель - отметить без сообщения. Отметка -
+            # условием в UPDATE (`mark_task_told`): бот мог успеть первым.
+            claim = not later or not other
         await crm.update_task(int(task["id"]), **fields)
+        if claim:
+            send = await crm.mark_task_told(int(task["id"])) and reachable
         if send:
             await notify.task_assigned(bot, await crm.task(int(task["id"])) or {}, assignee,
                                        author=task_author(staff))

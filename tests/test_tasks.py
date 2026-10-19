@@ -453,6 +453,86 @@ class TestTaskPages(WebCase):
         self.assertEqual(r.status_code, 303)
         self.assertIsNone(task["due_on"], "прошедшая дата выполнения не принимается")
 
+    def test_former_staff_not_told(self):
+        """Исполнителя отключили или его доступ истёк до дня постановки:
+        ни бот утром, ни правка с переносом на сегодня ему не пишут -
+        задача отмечена сказанной и в очереди не висит."""
+        marat = self.add_staff("marat", "tech", location="Павлюхина", tg_id=7001)
+        anna = self.add_staff("anna", "manager", location="Адоратского", tg_id=7003)
+        self.login()
+        today = date.today()
+        later = today + timedelta(days=2)
+        for title, who in (("Сдать ключи", marat), ("Сверить кассу", anna),
+                           ("Вернуть пропуск", marat)):
+            self.client.post("/tasks", data={"title": title, "assignee": str(who),
+                                             "start_on": later.isoformat()})
+        keys, cash, badge = (next(t for t in self.crm.tasks_.values() if t["title"] == name)
+                             for name in ("Сдать ключи", "Сверить кассу", "Вернуть пропуск"))
+        run(self.crm.set_staff_active(marat, False))
+        run(self.crm.set_staff_expires(anna, datetime.now(UTC) - timedelta(minutes=1)))
+        # правка: исполнитель прежний («нет доступа»), постановку - на сегодня
+        self.client.post(f"/tasks/{badge['id']}", data={
+            "title": "Вернуть пропуск", "assignee": str(marat), "start_on": today.isoformat()})
+        self.assertEqual((badge["start_on"], badge["assignee_id"]), (today, marat))
+        self.assertIsNotNone(badge["notified_at"])
+        morning = datetime.combine(later, time(9, 15))
+        self.assertEqual(run(notify.announce_tasks(self.bot, self.crm, now=morning)), 0)
+        self.assertIsNotNone(keys["notified_at"], "отметка без сообщения")
+        self.assertIsNotNone(cash["notified_at"])
+        self.assertFalse([1 for chat, _ in self.bot.sent if chat in (7001, 7003)],
+                         "бывшим сотрудникам задачи не пишем")
+        # постановщик не может выбрать истёкшего и отключённого
+        self.client.post("/tasks", data={"title": "Пересчёт", "assignee": str(anna)})
+        self.assertFalse([1 for t in self.crm.tasks_.values() if t["title"] == "Пересчёт"])
+
+    def test_edit_by_assignee_and_race(self):
+        """Запланированную переносит на сегодня сам исполнитель - ему не
+        пишут ни панель, ни бот; бот успел сказать раньше, чем панель
+        сохранила перенос, - второго сообщения нет (отметка условием в
+        UPDATE)."""
+        self.add_staff("marat", "tasks_tech", location="Павлюхина", tg_id=7001)
+        anna = self.add_staff("anna", "manager", location="Адоратского", tg_id=7003)
+        owner = run(self.crm.staff_by_login("admin"))
+        run(self.crm.link_staff_tg(owner["id"], 7000, "admin"))
+        today = date.today()
+        later = today + timedelta(days=3)
+        self.as_("marat")
+        self.client.post("/tasks", data={"title": "Заказать цепи",
+                                         "assignee": str(owner["id"]),
+                                         "start_on": later.isoformat()})
+        self.client.post("/tasks", data={"title": "Обзвонить должников",
+                                         "assignee": str(anna),
+                                         "start_on": later.isoformat()})
+        chains, calls = (next(t for t in self.crm.tasks_.values() if t["title"] == name)
+                         for name in ("Заказать цепи", "Обзвонить должников"))
+        self.assertIsNone(chains["notified_at"])
+        self.client.post("/logout")
+        self.login()
+        self.client.post(f"/tasks/{chains['id']}", data={
+            "title": "Заказать цепи", "assignee": "me", "start_on": today.isoformat()})
+        self.assertEqual(chains["start_on"], today)
+        self.assertIsNotNone(chains["notified_at"], "правил сам - уже знает")
+        noon = datetime.combine(today, time(12, 0))
+        self.assertEqual(run(notify.announce_tasks(self.bot, self.crm, now=noon)), 0)
+        self.assertFalse([1 for chat, _ in self.bot.sent if chat == 7000])
+        # гонка: бот сказал Анне, пока владелец сохранял перенос на сегодня
+        update_task = self.crm.update_task
+
+        async def bot_first(task_id, **fields):
+            self.crm.tasks_[task_id]["notified_at"] = datetime.now(UTC)
+            return await update_task(task_id, **fields)
+
+        self.crm.update_task = bot_first
+        try:
+            self.client.post(f"/tasks/{calls['id']}", data={
+                "title": "Обзвонить должников", "assignee": str(anna),
+                "start_on": today.isoformat()})
+        finally:
+            self.crm.update_task = update_task
+        self.assertEqual(calls["start_on"], today)
+        self.assertFalse([1 for chat, _ in self.bot.sent if chat == 7003],
+                         "бот уже сказал - панель не повторяет")
+
 
 if __name__ == "__main__":
     unittest.main()

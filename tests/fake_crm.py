@@ -4937,9 +4937,20 @@ class FakeCrm:
                       if t["status"] == "open" and t.get("notified_at") is None
                       and t["assignee_id"] is not None and t["start_on"] <= today),
                      key=lambda t: (t["start_on"], t["id"]))[:limit]
+        told = []
         for t in due:
             t["notified_at"] = self._now()
-        return [self._task_row(t) for t in due]
+            who = self.staff.get(t["assignee_id"]) or {}
+            if who.get("active") and not crm_logic.staff_expired(who):
+                told.append(self._task_row(t))
+        return told
+
+    async def mark_task_told(self, task_id):
+        t = self.tasks_.get(task_id)
+        if t is None or t["status"] != "open" or t.get("notified_at") is not None:
+            return False
+        t["notified_at"] = self._now()
+        return True
 
     async def update_task(self, task_id, **fields):
         t = self.tasks_.get(task_id)
