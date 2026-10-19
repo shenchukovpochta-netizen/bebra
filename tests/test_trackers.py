@@ -690,6 +690,15 @@ class TestTrackerPanel(tw.WebCase):
         self.assertEqual(r.headers["location"], "/map")
         self.assertEqual(tw.run(self.crm.tracker_alerts()), [])
 
+    def test_open_alerts_stand_above_the_devices(self):
+        """«Снять» - главное действие страницы: под первой страницей
+        устройств (полсотни карточек на телефоне) до него не долистать."""
+        tw.run(self.crm.raise_alert(tracker_id=self.tracker_id, kind="offline",
+                                    note="молчит", bike_id=None, lat=None, lon=None))
+        page = self.get_ok("/trackers")
+        self.assertIn("Открытые тревоги", page)
+        self.assertLess(page.index("Открытые тревоги"), page.index('class="search"'))
+
     def test_card_keeps_its_open_alert_behind_the_fleets_history(self):
         """Карточка брала полсотни тревог всего парка и отбирала свои: давняя
         открытая тревога этого трекера пропадала за чужой историей."""

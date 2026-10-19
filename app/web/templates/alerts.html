@@ -9,7 +9,8 @@
 </div>
 
 {# «Требуют внимания» - то же число, что на вкладке под плитками: на
-   телефоне плитка-повтор уходит (.tile.tab-dup), список ближе. #}
+   телефоне плитка-повтор уходит (.tile.tab-dup), а последняя («за
+   сутки») встаёт на весь ряд - пятая плитка без пары. #}
 <div class="tiles">
   <div class="tile {% if summary.urgent %}warn{% endif %}"><b>{{ summary.urgent }}</b><span>срочных<br><small class="muted">едет не туда или сработала метка</small></span></div>
   <div class="tile tab-dup"><b>{{ summary.needs }}</b><span>требуют внимания</span></div>

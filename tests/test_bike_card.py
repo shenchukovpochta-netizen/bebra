@@ -77,6 +77,14 @@ class TestBikeCard(tw.WebCase):
         self.crm.bikes_[old]["status"] = "new"
         self.assertIsNone(_run(self.crm.delete_bike(old)))
 
+    def test_status_goes_first_on_the_phone_but_not_while_assembling(self):
+        """«Статус / Ремонт» поднимается над карточкой (.bike-ops) - кроме
+        велосипеда на сборке: там главное - сверка и ввод в паспорте."""
+        self.assertIn('class="card bike-ops"', self.get_ok(f"/bikes/{self.bike_id}"))
+        fresh = _run(self.crm.create_bike(code="B-79", model="Kugoo V3"))
+        self.crm.bikes_[fresh]["status"] = "new"
+        self.assertNotIn("bike-ops", self.get_ok(f"/bikes/{fresh}"))
+
     def test_tracker_block_follows_the_binding_not_the_checkbox(self):
         page = self.get_ok(f"/bikes/{self.bike_id}")
         self.assertIn("Привязанного трекера нет", page)

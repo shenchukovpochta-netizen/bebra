@@ -1242,6 +1242,9 @@ tr.edit-row details.more{margin:0}
   table.cards td>label.check{margin:0;align-items:flex-start}
   /* плитка, которая повторяет число вкладки под ней («Требуют внимания») */
   .tiles>.tile.tab-dup{display:none}
+  /* без неё видимых нечётно (всего чётно, одна скрыта) - последняя на
+     весь ряд, а не одна с пустой половиной */
+  .tiles:has(>.tile.tab-dup):has(>.tile:nth-child(even):last-child)>.tile:last-child:not(.tab-dup){grid-column:1/-1}
 }
 
 /* Поле мельче 16 px: iOS и Mini App в Telegram увеличивают страницу при

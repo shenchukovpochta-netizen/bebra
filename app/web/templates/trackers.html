@@ -11,6 +11,27 @@
   <div class="tile {% if summary.alarm %}warn{% endif %}"><b>{{ summary.alarm }}</b><span>с тревогой</span></div>
 </div>
 
+{# Открытые тревоги - над списком устройств, как на карте: с кнопкой
+   «Снять» это главное действие страницы, а под пятьюдесятью карточками
+   устройств на телефоне до него не долистать. #}
+{% if alerts %}
+<section class="card">
+  <h2>Открытые тревоги</h2>
+  <table class="cards">
+    <tr><th>Когда</th><th>Что</th><th>Велосипед</th><th>Подробности</th><th></th></tr>
+    {% for a in alerts %}
+    <tr>
+      <td class="nowrap" data-label="Когда">{{ a.created_at|dmy }}</td>
+      <td data-label="Что"><span class="tag bad">{{ TRACKER_ALERTS.get(a.kind, a.kind) }}</span></td>
+      <td data-label="Велосипед">{% if a.bike_id %}<a href="/bikes/{{ a.bike_id }}">№ {{ a.bike_code }}</a>{% else %}<span class="muted">{{ a.alias or a.device_id }}</span>{% endif %}</td>
+      <td data-label="Подробности">{{ a.note or '' }}{% if a.lat %} · <a href="{{ map_url(a.lat, a.lon) }}" target="_blank" rel="noopener">на карте</a>{% endif %}</td>
+      <td class="actions" data-label="Действие">{% if can_edit(staff, 'trackers') %}<form method="post" action="/trackers/alerts/{{ a.id }}"><input type="hidden" name="next" value="/trackers"><button type="submit" class="ghost">Снять</button></form>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
 <div class="card">
 {# Поиск и состояние: 130 устройств одним списком - два десятка экранов
    телефона. Тревожные первыми, снятые с наблюдения - в конце. #}
@@ -55,24 +76,6 @@
   привязать его к велосипеду нужно руками, на карточке трекера: до этого
   координаты принадлежат неизвестно чему. Один трекер на один велосипед.</p>
 </div>
-
-{% if alerts %}
-<section class="card">
-  <h2>Открытые тревоги</h2>
-  <table class="cards">
-    <tr><th>Когда</th><th>Что</th><th>Велосипед</th><th>Подробности</th><th></th></tr>
-    {% for a in alerts %}
-    <tr>
-      <td class="nowrap" data-label="Когда">{{ a.created_at|dmy }}</td>
-      <td data-label="Что"><span class="tag bad">{{ TRACKER_ALERTS.get(a.kind, a.kind) }}</span></td>
-      <td data-label="Велосипед">{% if a.bike_id %}<a href="/bikes/{{ a.bike_id }}">№ {{ a.bike_code }}</a>{% else %}<span class="muted">{{ a.alias or a.device_id }}</span>{% endif %}</td>
-      <td data-label="Подробности">{{ a.note or '' }}{% if a.lat %} · <a href="{{ map_url(a.lat, a.lon) }}" target="_blank" rel="noopener">на карте</a>{% endif %}</td>
-      <td class="actions" data-label="Действие">{% if can_edit(staff, 'trackers') %}<form method="post" action="/trackers/alerts/{{ a.id }}"><input type="hidden" name="next" value="/trackers"><button type="submit" class="ghost">Снять</button></form>{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </table>
-</section>
-{% endif %}
 
 {% if can_edit(staff, 'trackers') %}
 <div class="card narrow">
