@@ -201,7 +201,7 @@ class TestBoardPages(WebCase):
         self.assertEqual(deal["responsible_id"], 1, "ответственный - кто завёл")
         card = self.get_ok(f"/deals/{deal_id}")
         self.assertIn("Kugoo на месяц", card)
-        self.assertIn("/issue?phone=%2B79991112233", card, "выдача прямо из сделки")
+        self.assertNotIn("/issue?", card, "владелец сам не выдаёт")
         # перетаскивание: ранний этап - да, «В аренде» - только выдачей
         ok = self.client.post(f"/deals/{deal_id}/stage", data={"stage": "touch"},
                               headers={"Accept": "application/json"})
@@ -223,6 +223,10 @@ class TestBoardPages(WebCase):
         self.rent(self.client_id, self.bike_id)
         self.get_ok("/incoming")
         self.assertEqual(known["stage"], "rented")
+        # администратор точки выдаёт прямо из ранней сделки
+        self.as_("oper", "manager")
+        self.assertIn("/issue?phone=%2B79991112233", self.get_ok(f"/deals/{deal_id}"),
+                      "выдача прямо из сделки")
 
     def test_booking_deal_and_rights(self):
         run(self.crm.create_booking(client_id=self.client_id, model="Kugoo V3",

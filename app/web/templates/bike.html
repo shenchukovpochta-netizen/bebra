@@ -3,7 +3,7 @@
 {% block content %}
 <div class="bar">
   <h1>{{ bike.code }} · {{ bike.model }}{% if catalogue and (catalogue.brand or catalogue.title != bike.model) %} <small class="muted">{{ catalogue.brand or '' }}{% if catalogue.title != bike.model %} {{ catalogue.title }}{% endif %}</small>{% endif %} <span class="tag {{ bike.status }}">{{ BIKE_STATUSES.get(bike.status, bike.status) }}</span></h1>
-  {% if bike.status == 'available' and can_edit(staff, 'issue') %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
+  {% if bike.status == 'available' and offers_issue(staff) %}<a class="btn" href="/issue?bike={{ bike.id }}">⚡ Выдать в аренду</a>{% endif %}
   {% if can_edit(staff, 'service') %}
     {% if order %}<a class="btn ghost" href="/orders/{{ order.id }}">Наряд {{ order.no }}</a>
     {% else %}<a class="btn ghost" href="/orders/new?bike={{ bike.id }}">+ Наряд</a>{% endif %}

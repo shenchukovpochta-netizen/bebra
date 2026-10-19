@@ -1,7 +1,8 @@
 {% extends "base.html" %}
+{% block title %}Повторная выдача — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="card narrow">
-<h1>Оформить аренду</h1>
+<h1>Повторная выдача</h1>
 <form method="post" action="/rentals">
   <label>Клиент <select name="client_id" required>
     <option value="">— выберите —</option>

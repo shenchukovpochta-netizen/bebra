@@ -62,8 +62,9 @@ NAV: tuple[Group, ...] = (
         Item("Выдача", "/issue", "circle-plus", section="issue", not_owner=True, children=(
             Item("Быстрая выдача", "/issue", "circle-plus", section="issue",
                  not_owner=True),
-            # Старая форма аренды (Аренды -> «Форма»): клиенту, который уже
-            # был, и редкие случаи - аренда без велосипеда, ручное начисление.
+            # Форма аренды (раньше - «Форма» в шапке «Аренд»): клиенту, который
+            # уже был, и редкие случаи - аренда без велосипеда, ручное
+            # начисление. В «Арендах» кнопок выдачи нет: выдача - этот пункт.
             Item("Повторная выдача", "/rentals/new", "key", section="rentals",
                  not_owner=True, edit=True),
         )),
@@ -76,7 +77,8 @@ NAV: tuple[Group, ...] = (
         Item("Клиенты", "/clients", "users", section="clients",
              match=("/clients", "/signings")),
         Item("Аренды", "/rentals", "key", section="rentals"),
-        Item("Сверка с отчётами", "/ops", "message", section="rentals"),
+        # Журнал рабочей группы точек в Telegram: формы точек, сверенные с базой.
+        Item("Сверка отчётов", "/ops", "message", section="rentals"),
         Item("Рассылки", "/mailing", "send", section="mailing"),
         Item("Акции", "/promos", "tag", section="promos"),
     )),
@@ -148,6 +150,14 @@ def visible(item: Item, staff: Mapping[str, Any] | None) -> bool:
         return False
     if item.children:
         return any(visible(child, staff) for child in item.children)
+    return allowed(item, staff)
+
+
+def allowed(item: Item, staff: Mapping[str, Any] | None) -> bool:
+    """Пункт открыт правами - без `not_owner`: тот лишь прячет его из меню
+    владельца, а права оставляет."""
+    if item.children:
+        return any(allowed(child, staff) for child in item.children)
     if item.section and not logic.can_view(staff, item.section):
         return False
     if item.edit and item.section and not logic.can_edit(staff, item.section):
@@ -165,13 +175,16 @@ def _hits(prefix: str, path: str) -> bool:
 
 def active_item(path: str, staff: Mapping[str, Any] | None = None) -> Item | None:
     """Пункт, который горит на этом адресе: самый длинный подходящий адрес
-    среди видимых листьев. Родитель с подпунктами сам не горит - горит
-    его подпункт, а родитель раскрыт."""
+    среди листьев, открытых правами. Родитель с подпунктами сам не горит -
+    горит его подпункт, а родитель раскрыт. Скрытый от владельца пункт
+    (`not_owner`) - всё равно страница этого адреса: на /rentals/new по
+    прямому адресу крошки - «Выдача › Повторная выдача», как заголовок, а
+    в меню не горит ничего, а не соседние «Аренды»."""
     best: tuple[int, Item] | None = None
     for group in NAV:
         for item in group.items:
             for leaf in (item.children or (item,)):
-                if staff is not None and not visible(leaf, staff):
+                if staff is not None and not allowed(leaf, staff):
                     continue
                 for prefix in leaf.prefixes:
                     if _hits(prefix, path) and (best is None or len(prefix) > best[0]):
