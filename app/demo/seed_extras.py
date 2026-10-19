@@ -2203,19 +2203,32 @@ async def _team(conn: asyncpg.Connection, c: _Ctx) -> None:
         ("Перебрать мотор-колесо подменного велосипеда", s["mechanic"], core.P1, today,
          D("300"), c.now - timedelta(hours=2)),
     )
+    created = c.now - timedelta(days=1, hours=3)
     for title, who, point, due, pay, done_at in tasks:
         await conn.execute(
             """
             insert into crm.tasks (title, assignee_id, location, due_on, pay, status,
                                    created_by, created_by_id, created_at, taken_at,
-                                   done_at, done_by)
+                                   done_at, done_by, start_on)
             values ($1, $2::bigint, $3, $4, $5, $6, 'staff:demo', $7, $8::timestamptz,
                     case when $2::bigint is not null then $8::timestamptz end,
                     $9::timestamptz,
-                    case when $9::timestamptz is not null then $2::bigint end)
+                    case when $9::timestamptz is not null then $2::bigint end,
+                    least($10::date, coalesce($4::date, $10::date)))
             """, title, who.id if who else None, point, due, pay,
-            "done" if done_at else "open", owner.id,
-            c.now - timedelta(days=1, hours=3), done_at)
+            "done" if done_at else "open", owner.id, created, done_at,
+            _msk(created).date())
+    # Заранее поставленная: дата постановки впереди - в «Задачах дня» её
+    # нет, она в «Запланированных» доски (app/crm/tasks.py). Бот демо не
+    # подключается никогда, отметка «сказано» - чтобы не ждать его.
+    await conn.execute(
+        """
+        insert into crm.tasks (title, assignee_id, location, start_on, due_on, pay,
+                               created_by, created_by_id, taken_at)
+        values ('Инвентаризация склада запчастей', $1::bigint, $2, $3, $4, $5,
+                'staff:demo', $6, now())
+        """, s["mechanic"].id, core.P1, today + timedelta(days=3),
+        today + timedelta(days=4), D("500"), owner.id)
     first = today.replace(day=1)
     plans = (("operator", 40, None, 10, D("150000"), D("25000"), D("300"), D(0), D(1)),
              ("operator2", 30, None, 10, D("110000"), D("25000"), D("300"), D(0), D(1)),

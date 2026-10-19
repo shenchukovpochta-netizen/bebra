@@ -594,6 +594,59 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.crm.cancel_task(mine))
         with self.assertRaises(asyncpg.CheckViolationError):
             await self.crm.create_task(title="", by="t")
+        # две даты: постановка по умолчанию - сегодня (местные сутки базы),
+        # сообщение исполнителю - сказано; заранее поставленная ждёт дня
+        today = date.today()
+        self.assertEqual((await self.crm.task(free))["start_on"], today)
+        self.assertIsNotNone((await self.crm.task(free))["notified_at"])
+        later = await self.crm.create_task(title="Инвентаризация", by="staff:anna",
+                                           by_id=anna, assignee_id=marat,
+                                           start_on=today + timedelta(days=2),
+                                           due_on=today + timedelta(days=3),
+                                           announce_later=True)
+        self.assertIsNone((await self.crm.task(later))["notified_at"])
+        self.assertEqual(await self.crm.announce_due_tasks(today), [], "не раньше дня")
+        told = await self.crm.announce_due_tasks(today + timedelta(days=2))
+        self.assertEqual([(t["id"], t["created_by_name"]) for t in told], [(later, "Анна")])
+        self.assertIn("assignee_tg_id", told[0])
+        self.assertEqual(await self.crm.announce_due_tasks(today + timedelta(days=2)), [],
+                         "один раз")
+        self.assertTrue(await self.crm.update_task(later, start_on=today, notified_at=None))
+        self.assertEqual([t["id"] for t in await self.crm.announce_due_tasks(today)], [later])
+        # панель отмечает «сказано» условием в UPDATE: бот успел - второго нет
+        self.assertFalse(await self.crm.mark_task_told(later))
+        self.assertTrue(await self.crm.update_task(later, notified_at=None))
+        self.assertTrue(await self.crm.mark_task_told(later))
+        # отключённому и с истёкшим доступом - отметка без сообщения
+        gone = await self.crm.create_task(title="Сдать ключи", by="t", assignee_id=marat,
+                                          start_on=today + timedelta(days=1),
+                                          announce_later=True)
+        late = await self.crm.create_task(title="Сверить кассу", by="t", assignee_id=anna,
+                                          start_on=today + timedelta(days=1),
+                                          announce_later=True)
+        await self.crm.set_staff_active(marat, False)
+        await self.crm.set_staff_expires(anna, datetime.now(UTC) - timedelta(minutes=1))
+        self.assertEqual(await self.crm.announce_due_tasks(today + timedelta(days=1)), [])
+        self.assertIsNotNone((await self.crm.task(gone))["notified_at"], "не висит в очереди")
+        self.assertIsNotNone((await self.crm.task(late))["notified_at"])
+
+    async def test_task_dates_on_old_install(self):
+        """Установка до двух дат: прежним задачам постановка - день
+        создания, и новая колонка не будит их исполнителей сообщениями."""
+        marat = await self.crm.create_staff("marat", "hash", "Марат", "manager", None)
+        old = await self.crm.create_task(title="Старая", by="t", assignee_id=marat)
+        await self.pool.execute(
+            "alter table crm.tasks drop column start_on, drop column notified_at")
+        await self.pool.execute(
+            "update crm.tasks set created_at = now() - interval '5 days' where id = $1", old)
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        row = await self.crm.task(old)
+        self.assertEqual(row["start_on"], date.today() - timedelta(days=5))
+        self.assertIsNotNone(row["notified_at"])
+        self.assertEqual(await self.crm.announce_due_tasks(date.today()), [])
+        await Database(self.pool).apply_schema(SCHEMA, force=True)
+        self.assertEqual((await self.crm.task(old))["start_on"],
+                         date.today() - timedelta(days=5), "повтор схемы не трогает")
 
     async def test_team_on_postgres(self):
         """Команда на настоящей базе: факт по автору записи, условия месяца

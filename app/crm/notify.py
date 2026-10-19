@@ -9,13 +9,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from .. import i18n, texts
 from .. import keyboards as kb
 from .. import logic as bot_logic
-from . import company, logic, points
+from . import company, logic, points, tasks
 
 log = logging.getLogger(__name__)
 
@@ -174,15 +174,39 @@ async def order_assigned(bot: Any, order: dict, tech: dict) -> bool:
 
 async def task_assigned(bot: Any, task: dict, staff: dict, *, author: str) -> bool:
     """Сотруднику: ему поручили задачу дня. Как наряд технику - сообщением,
-    чтобы не ждать, пока он откроет панель."""
+    чтобы не ждать, пока он откроет панель. Задачу с датой постановки
+    впереди панель не шлёт сразу - её скажет бот утром того дня
+    (`announce_tasks`)."""
     if not staff.get("tg_id") or bot is None:
         return False
     due = task.get("due_on")
     text = texts.STAFF_TASK_ASSIGNED.format(
         title=bot_logic.esc(task.get("title") or ""),
-        due=f"Срок: {due:%d.%m.%Y}\n" if due else "",
+        due=f"Дата выполнения: {due:%d.%m.%Y}\n" if due else "",
         author=bot_logic.esc(author or "—"))
     return await _send(bot, staff["tg_id"], text)
+
+
+async def announce_tasks(bot: Any, crm: Any, *, now: datetime) -> int:
+    """Круг бота: исполнителям - задачи, чей день постановки настал.
+
+    Поставленную на сегодня панель отправляет сразу; поставленную на
+    будущий день она откладывает (`notified_at` пуст), и о ней здесь
+    говорится утром того дня - тем же кругом напоминаний, что лист
+    ожидания. Только днём (`tasks.ANNOUNCE_HOURS`): ночью ждёт утра.
+    Отметка - до отправки (`announce_due_tasks`): недошедшее сообщение не
+    повторяется, задача и так в «Задачах дня»; отключённому и с истёкшим
+    доступом база отмечает без сообщения и сюда их не отдаёт. Возвращает
+    число доставленных."""
+    if bot is None or not tasks.ANNOUNCE_HOURS[0] <= now.hour < tasks.ANNOUNCE_HOURS[1]:
+        return 0
+    sent = 0
+    for task in await crm.announce_due_tasks(now.date()):
+        who = {"tg_id": task.get("assignee_tg_id")}
+        author = task.get("created_by_name") or str(task.get("created_by") or "")
+        if await task_assigned(bot, task, who, author=author.removeprefix("staff:")):
+            sent += 1
+    return sent
 
 
 async def repair_ready(bot: Any, client: dict, order: dict, total: Any) -> bool:

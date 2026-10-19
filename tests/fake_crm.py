@@ -4964,8 +4964,10 @@ class FakeCrm:
     def _task_row(self, t):
         who = self.staff.get(t.get("assignee_id")) or {}
         done = self.staff.get(t.get("done_by")) or {}
+        author = self.staff.get(t.get("created_by_id")) or {}
         return {**t, "assignee_name": who.get("name"), "assignee_login": who.get("login"),
-                "assignee_tg_id": who.get("tg_id"), "done_by_name": done.get("name")}
+                "assignee_tg_id": who.get("tg_id"), "done_by_name": done.get("name"),
+                "created_by_name": author.get("name")}
 
     async def tasks(self, *, status=None, assignee_id=None, done_since=None,
                     done_until=None, limit=2000):
@@ -4988,23 +4990,47 @@ class FakeCrm:
         return self._task_row(t) if t else None
 
     async def create_task(self, *, title, by, by_id=None, note=None, assignee_id=None,
-                          location=None, due_on=None, pay=None):
+                          location=None, due_on=None, pay=None, start_on=None,
+                          announce_later=False):
         assert 1 <= len(title) <= 300
         tid = self._id()
         now = self._now()
         self.tasks_[tid] = {
             "id": tid, "title": title, "note": note, "assignee_id": assignee_id,
             "location": location, "due_on": due_on, "pay": pay, "status": "open",
+            "start_on": start_on or date.today(),
+            "notified_at": None if announce_later else now,
             "created_by": by, "created_by_id": by_id, "created_at": now,
             "taken_at": now if assignee_id is not None else None, "done_at": None,
             "done_by": None, "updated_at": now}
         return tid
 
+    async def announce_due_tasks(self, today, *, limit=200):
+        due = sorted((t for t in self.tasks_.values()
+                      if t["status"] == "open" and t.get("notified_at") is None
+                      and t["assignee_id"] is not None and t["start_on"] <= today),
+                     key=lambda t: (t["start_on"], t["id"]))[:limit]
+        told = []
+        for t in due:
+            t["notified_at"] = self._now()
+            who = self.staff.get(t["assignee_id"]) or {}
+            if who.get("active") and not crm_logic.staff_expired(who):
+                told.append(self._task_row(t))
+        return told
+
+    async def mark_task_told(self, task_id):
+        t = self.tasks_.get(task_id)
+        if t is None or t["status"] != "open" or t.get("notified_at") is not None:
+            return False
+        t["notified_at"] = self._now()
+        return True
+
     async def update_task(self, task_id, **fields):
         t = self.tasks_.get(task_id)
         if t is None or not fields:
             return False
-        unknown = set(fields) - {"title", "note", "assignee_id", "location", "due_on", "pay"}
+        unknown = set(fields) - {"title", "note", "assignee_id", "location", "start_on",
+                                 "due_on", "pay", "notified_at"}
         if unknown:
             raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
         t.update(fields, updated_at=self._now())

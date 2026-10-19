@@ -1093,6 +1093,12 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .task-acts button{min-height:30px;padding:4px 12px;font-size:12.5px}
 .task-add summary{cursor:pointer}
 .task-add form{margin-top:12px}
+/* Поля формы задачи - по верху: у полей подсказки разной длины, и по
+   низу (как у .grid2) поля одной строки разъезжались бы. */
+.task-add .grid2{align-items:start}
+.task-add label small,.task-edit label small{display:block;margin-top:5px;font-weight:500;line-height:1.4}
+.task-later summary{cursor:pointer}
+.task-later .my-items{margin-top:10px}
 .team-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
 .team-cols>.card{margin-bottom:0}
 .team-cols{margin-bottom:20px}
@@ -1107,6 +1113,10 @@ table.staff-table td .inline-form:first-child{margin-top:0}
 .my-block>p.muted{margin:0 0 14px}
 .point-tasks h3{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;margin:18px 0 10px;font-size:15px}
 .point-tasks h3 small{font-weight:500;font-size:12.5px}
+/* Владельцу у точки сперва её рабочие задачи, под ними - её люди. */
+.point-work{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:16px;margin-bottom:16px}
+.point-work>.card{margin-bottom:0}
+.point-tasks .point-calm{margin:0 0 12px}
 
 /* Команда (team_member.html): прогресс плана полосой в плитке. */
 .bar-track{display:block;height:4px;border-radius:4px;background:var(--card2);margin:8px 0 2px;overflow:hidden}

@@ -1402,9 +1402,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         у неё нет. Сотруднику - его поручения и группы его точки
         (app/crm/mytasks.py: наряды по технику, аренды, заявки и тревоги по
         точке, группа - тому, кто по ней действует; источник читается,
-        только если группа будет видна). Владельцу - не прозвон и выдачи
-        команды, а поручения сотрудников по их точкам (tasks.points_board):
-        рабочие списки точек живут у тех, кто по ним действует."""
+        только если группа будет видна). Владельцу - по каждой точке её
+        рабочие группы (то же, что видит её администратор и мастер, -
+        mytasks.by_point) и её люди с поручениями (tasks.points_board);
+        рабочее без точки - в общих. Источники читаются один раз на
+        страницу, а режутся по точкам в памяти."""
         staff = request.state.staff
         today = date.today()
         owner = logic.is_owner(staff)
@@ -1413,14 +1415,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         locations = await crm.locations(active_only=True)
         lists = tasks.my_lists(staff, open_tasks, today=today)
         common = {"today": today, "task_lists": lists, "people": people,
+                  "assignees": tasks.assignees(people, staff=staff),
                   "locations": locations, "task_money": tasks.manages(staff)}
-        if owner:
-            board = tasks.points_board(open_tasks, people, staff=staff, today=today,
-                                       points=[loc["name"] for loc in locations],
-                                       location=request.query_params.get("location") or "")
-            return render(request, "my.html", groups=[], point=None, own_month=None,
-                          board=board, free=board["free"],
-                          back=tasks.back_url("/my", board["place"]), **common)
         settings = await crm.settings()
         expiring: list[dict] = []
         search = None
@@ -1431,25 +1427,34 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                                       before_days=cfg.remind_before_days)
             search = logic.search_rows(rentals, settings=logic.search_settings(settings),
                                        today=today)
+        sources: dict[str, Any] = {
+            "expiring": expiring, "search": search,
+            "orders": (await crm.work_orders(open_only=True, limit=500)
+                       if may_view(request, "service") else ()),
+            "bookings": (await crm.bookings(status="new")
+                         if may_edit(request, "issue") else ()),
+            "alerts": (await crm.tracker_alerts(open_only=True, limit=500)
+                       if may_view(request, "trackers") else ()),
+            "claims": await crm.pending_claims() if may_edit(request, "claims") else (),
+            "today": today, "repair_norm": logic.repair_norm_default(settings),
+            "booking_url": booking_issue_url}
+        if owner:
+            names = [loc["name"] for loc in locations]
+            work = mytasks.by_point(staff, names, limit=tasks.BOARD_GROUP_LIMIT, **sources)
+            board = tasks.points_board(open_tasks, people, staff=staff, today=today,
+                                       points=names, work=work,
+                                       location=request.query_params.get("location") or "")
+            return render(request, "my.html", groups=[], point=None, own_month=None,
+                          board=board, free=board["free"], common_work=board["work_free"],
+                          back=tasks.back_url("/my", board["place"]), **common)
         point = staff.get("location") or None
         shift_open = None
         if point and may_edit(request, "cash"):
             shift_open = await crm.open_shift_at(point) is not None
-        groups = mytasks.my_tasks(
-            staff, expiring=expiring, search=search,
-            orders=(await crm.work_orders(open_only=True, limit=500)
-                    if may_view(request, "service") else ()),
-            bookings=(await crm.bookings(status="new")
-                      if may_edit(request, "issue") else ()),
-            alerts=(await crm.tracker_alerts(open_only=True, limit=500)
-                    if may_view(request, "trackers") else ()),
-            claims=await crm.pending_claims() if may_edit(request, "claims") else (),
-            shift_open=shift_open, today=today,
-            repair_norm=logic.repair_norm_default(settings),
-            booking_url=booking_issue_url)
+        groups = mytasks.my_tasks(staff, shift_open=shift_open, **sources)
         return render(request, "my.html", groups=groups, point=point,
                       own_month=await own_plan(staff, today), board=None,
-                      free=lists["free"], back="/my", **common)
+                      free=lists["free"], common_work=[], back="/my", **common)
 
     # ─────────── задачи дня: поручения (app/crm/tasks.py) ───────────
 
@@ -1714,8 +1719,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
     @app.get("/tasks")
     async def tasks_page(request: Request) -> Response:
         """Все задачи команды: незакреплённые и по каждому сотруднику, с
-        фильтром по точке; ниже - сделанное сегодня. Открыта всем: это
-        доска команды, а не раздел; цены задач - тому, кто ведёт команду."""
+        фильтром по точке; запланированные (дата постановки впереди) -
+        отдельным списком; ниже - сделанное сегодня. Открыта всем: это
+        доска команды, а не раздел; оплата за задачи - тому, кто ведёт
+        команду."""
         staff = request.state.staff
         today = date.today()
         place = request.query_params.get("location") or ""
@@ -1727,15 +1734,23 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 for t in await crm.tasks(status="done", done_since=start)]
         return render(request, "tasks.html", view=view, done=done, place=place,
                       back=tasks.back_url("/tasks", place),
-                      people=people, locations=await crm.locations(active_only=True),
+                      assignees=tasks.assignees(people, staff=staff),
+                      locations=await crm.locations(active_only=True),
                       today=today, task_money=tasks.manages(staff),
                       money_ok=tasks.money_ok(staff))
 
+    def task_author(staff: dict) -> str:
+        return staff.get("name") or staff.get("login") or ""
+
     @app.post("/tasks")
     async def task_add(request: Request) -> Response:
+        """Новая задача - от любого сотрудника любому. Исполнитель с
+        Telegram узнаёт сообщением: поставленную на сегодня - сразу,
+        запланированную - утром дня постановки (бот, notify.announce_tasks)."""
         staff = request.state.staff
         data = await form(request)
-        fields, problem = tasks.parse_form(data, staff=staff, today=date.today())
+        today = date.today()
+        fields, problem = tasks.parse_form(data, staff=staff, today=today)
         back = task_back(data)
         if problem:
             flash(request, problem, "err")
@@ -1744,18 +1759,27 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         assignee = None
         if fields.get("assignee_id") is not None:
             assignee = await crm.staff_by_id(fields["assignee_id"])
-            if assignee is None or not assignee.get("active"):
-                flash(request, "Такого сотрудника нет или он отключён.", "err")
+            if (assignee is None or not assignee.get("active")
+                    or logic.staff_expired(assignee)):
+                flash(request, "Такого сотрудника нет или у него закрыт доступ.", "err")
                 return redirect(back)
         if fields.get("location") is None and assignee is None:
             # Незакреплённая без точки висела бы у всей сети: точка автора.
             fields["location"] = staff.get("location") or None
-        task_id = await crm.create_task(by=who(request), by_id=int(staff["id"]), **fields)
-        if assignee is not None and int(assignee["id"]) != int(staff["id"]):
+        tell = assignee is not None and int(assignee["id"]) != int(staff["id"])
+        later = fields["start_on"] > today
+        task_id = await crm.create_task(by=who(request), by_id=int(staff["id"]),
+                                        announce_later=tell and later, **fields)
+        if tell and not later:
             await notify.task_assigned(bot, await crm.task(task_id) or {}, assignee,
-                                       author=staff.get("name") or staff.get("login") or "")
-        flash(request, "Задача поставлена." if assignee is not None
-              else "Задача поставлена незакреплённой: её возьмёт тот, кто свободен.")
+                                       author=task_author(staff))
+        if later:
+            flash(request, f"Задача запланирована на {fields['start_on']:%d.%m}: в «Задачах "
+                           "дня» она появится в этот день, а пока — во «Всех задачах», "
+                           "в «Запланированных».")
+        else:
+            flash(request, "Задача поставлена." if assignee is not None
+                  else "Задача поставлена незакреплённой: её возьмёт тот, кто свободен.")
         return redirect(back)
 
     async def task_action(request: Request, task_id: str, action: str) -> Response:
@@ -1807,15 +1831,19 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         if task is None:
             return render(request, "missing.html", status_code=404, what="Задача")
         staff = request.state.staff
+        today = date.today()
         return render(request, "task.html",
-                      task=tasks.dress(task, staff=staff, today=date.today()),
-                      people=await team_people(),
+                      task=tasks.dress(task, staff=staff, today=today), today=today,
+                      assignees=tasks.assignees(await team_people(), staff=staff, task=task),
                       locations=await crm.locations(active_only=True),
                       task_money=tasks.manages(staff), money_ok=tasks.money_ok(staff),
                       statuses=tasks.STATUSES)
 
     @app.post("/tasks/{task_id}")
     async def task_save(request: Request, task_id: str) -> Response:
+        """Правка задачи. Новый исполнитель узнаёт сообщением - сразу или,
+        если дата постановки впереди, утром того дня; сообщение, ждавшее
+        дня постановки, уходит сразу, если её перенесли на сегодня."""
         task = await by_id(crm.task, task_id)
         if task is None:
             return render(request, "missing.html", status_code=404, what="Задача")
@@ -1824,7 +1852,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             flash(request, "Править задачу может автор или руководитель.", "err")
             return redirect(f"/tasks/{task['id']}")
         data = await form(request)
-        fields, problem = tasks.parse_form(data, staff=staff, today=date.today())
+        today = date.today()
+        fields, problem = tasks.parse_form(data, staff=staff, today=today, task=task)
         if problem:
             flash(request, problem, "err")
             return redirect(f"/tasks/{task['id']}")
@@ -1835,11 +1864,29 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             if assignee is None:
                 flash(request, "Такого сотрудника нет.", "err")
                 return redirect(f"/tasks/{task['id']}")
+        # Другой человек - ему говорят; себе и незакреплённой - некому.
+        # Отключённому и с истёкшим доступом - молча: он бывший.
+        other = assignee is not None and int(assignee["id"]) != int(staff["id"])
+        reachable = bool(other and assignee and assignee.get("active")
+                         and not logic.staff_expired(assignee))
+        later = fields["start_on"] > today
+        send = claim = False
+        if fields["assignee_id"] != task.get("assignee_id"):
+            # Сменили исполнителя: новому - сейчас, в день постановки
+            # (решит бот, сверив доступ в тот день) или никогда.
+            send = reachable and not later
+            fields["notified_at"] = None if other and later else datetime.now().astimezone()
+        elif task.get("notified_at") is None and assignee is not None:
+            # Ждала дня постановки: перенесли на сегодня - сказать сейчас;
+            # правит сам исполнитель - отметить без сообщения. Отметка -
+            # условием в UPDATE (`mark_task_told`): бот мог успеть первым.
+            claim = not later or not other
         await crm.update_task(int(task["id"]), **fields)
-        if (assignee is not None and fields["assignee_id"] != task.get("assignee_id")
-                and int(assignee["id"]) != int(staff["id"])):
+        if claim:
+            send = await crm.mark_task_told(int(task["id"])) and reachable
+        if send:
             await notify.task_assigned(bot, await crm.task(int(task["id"])) or {}, assignee,
-                                       author=staff.get("name") or staff.get("login") or "")
+                                       author=task_author(staff))
         flash(request, "Задача сохранена.")
         return redirect(f"/tasks/{task['id']}")
 

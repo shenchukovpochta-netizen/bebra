@@ -354,7 +354,7 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                 # Проход CRM зовётся каждый круг, а что именно делать -
                 # решает он сам по расписанию уведомлений. Начисления и
                 # чистки внутри всё так же раз в сутки.
-                from .crm import billing, waitlist
+                from .crm import billing, notify, waitlist
                 local = datetime.now()
                 try:
                     await billing.run_daily(bot, db, crm, cfg, today=local.date(),
@@ -372,6 +372,17 @@ async def reminders_loop(bot: Any, db: Database, cfg: Config,
                     raise
                 except Exception:                       # noqa: BLE001
                     log.exception("лист ожидания не сверен")
+                # Задачи дня, поставленные на сегодня заранее: исполнителю -
+                # утром дня постановки (поставленные на сегодня панель шлёт
+                # сразу). Свой try, как у листа ожидания.
+                try:
+                    told = await notify.announce_tasks(bot, crm, now=local)
+                    if told:
+                        log.info("задачи дня: исполнителям сказано %s", told)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:                       # noqa: BLE001
+                    log.exception("задачи дня исполнителям не разосланы")
         except asyncio.CancelledError:
             raise
         except Exception:                               # noqa: BLE001

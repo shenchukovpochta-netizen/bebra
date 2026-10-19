@@ -163,6 +163,52 @@ class TestMyTasks(unittest.TestCase):
         self.assertEqual(group["url"], logic.EXPIRING_URL,
                          "весь список - аренды по «оплачено до», а не сводка")
 
+    def test_owner_by_point(self):
+        """Владельцу - рабочие группы каждой точки, строго её записи; без
+        точки, чужая точка и «Я оплатил» - в общих (None). Наряды - дольше
+        срока у любого техника и без техника, а не «мои»."""
+        owner = {"id": 1, "login": "admin", "role": "admin", "profile_code": "owner",
+                 "perms": perms("owner")}
+        work = mytasks.by_point(
+            owner, [P1, P2, P1],
+            expiring=[rental(1, "Иванов", P1, -2), rental(2, "Петров", P2, 1),
+                      rental(3, "Безточкин", None, -1), rental(4, "Закрытая", "Старая", -3)],
+            orders=[order(1, tech=7, days=20), order(2, tech=7, days=1), order(3, location=P2),
+                    order(4, tech=8, days=20, location=None)],
+            bookings=[{"id": 1, "client_id": 1, "full_name": "Заявкин", "status": "new",
+                       "wanted_on": TODAY, "location_name": P2}],
+            alerts=[{"id": 1, "tracker_id": 11, "bike_code": "B-1", "kind": "moving",
+                     "level": "urgent", "state": "new", "bike_location": P1}],
+            claims=[{"id": 1, "full_name": "Платил"}],
+            search={"candidates": [{"id": 5, "full_name": "Кандидат", "location": P2,
+                                    "overdue_days": 9}]},
+            today=TODAY, limit=10)
+        self.assertEqual(list(work), [P1, P2, None], "точка - один раз, общие - последними")
+        p1 = {g["code"]: g for g in work[P1]}
+        p2 = {g["code"]: g for g in work[P2]}
+        rest = {g["code"]: g for g in work[None]}
+        self.assertEqual(set(p1), {"overdue", "orders_late", "alerts"})
+        self.assertEqual([i["title"] for i in p1["overdue"]["rows"]], ["Иванов"],
+                         "запись без точки - не у каждой точки, а в общих")
+        self.assertNotIn("без точки", p1["overdue"]["rows"][0]["sub"])
+        self.assertEqual([i["url"] for i in p1["orders_late"]["rows"]], ["/orders/1"],
+                         "дольше срока - да, свой срок - нет")
+        self.assertEqual(p1["orders_late"]["title"], "Наряды дольше срока ремонта")
+        self.assertEqual(p1["orders_late"]["hot"], 1)
+        self.assertEqual(set(p2), {"soon", "orders_free", "bookings", "search"})
+        self.assertEqual(p2["orders_free"]["title"], "Наряды без техника")
+        self.assertEqual(p2["soon"]["url"], logic.EXPIRING_URL + "&location=" + quote_plus(P2),
+                         "весь список - аренды этой точки")
+        self.assertEqual(p2["orders_free"]["url"], "/service", "без фильтра - как есть")
+        self.assertEqual(set(rest), {"overdue", "orders_late", "claims"})
+        self.assertEqual([i["title"] for i in rest["overdue"]["rows"]],
+                         ["Безточкин", "Закрытая"], "точка вне справочника - в общих")
+        self.assertNotIn("orders_mine", {g["code"] for gs in work.values() for g in gs})
+        cut = mytasks.by_point(owner, [P1], expiring=[rental(i, f"К{i}", P1, 1)
+                                                      for i in range(1, 15)],
+                               today=TODAY, limit=10)[P1][0]
+        self.assertEqual((len(cut["rows"]), cut["more"], cut["count"]), (10, 4, 14))
+
 
 class TestProfilesAndTerms(unittest.TestCase):
     def test_task_profiles_hide_the_whole_network(self):
@@ -301,7 +347,11 @@ class TestMyTasksPage(WebCase):
         part = page.split(f'id="{anchor}"')[1]
         return part.split('class="my-block"')[0]
 
-    def test_owner_sees_three_kinds_not_call_lists(self):
+    def test_owner_sees_three_kinds_and_work_of_each_point(self):
+        """Владельцу - три блока; у точки её рабочие задачи (те же, что видит
+        её администратор и мастер) и её люди с поручениями, рабочее без
+        точки - в общих (замечание совладельца 18.10: на сводке горит, а
+        в «Задачах дня» пусто)."""
         crm = self.crm
         oper = run(crm.staff_by_login("oper"))
         manager = run(crm.access_profile_by_code("manager"))
@@ -322,10 +372,16 @@ class TestMyTasksPage(WebCase):
         run(crm.create_task(title="Ремонт АКБ", by="staff:admin", location=P1))
         run(crm.create_task(title="Помыть витрину", by="staff:admin", location=P2))
         run(crm.create_task(title="Инвентаризация шлемов", by="staff:admin"))
+        # аренда без точки и «Я оплатил» - рабочее без точки
+        bike = run(crm.create_bike(code="B-9", model="Kugoo V3"))
+        lone = run(crm.create_client(full_name="Клиент без точки", phone="+79990000009"))
+        run(crm.create_rental(client_id=lone, bike_id=bike, tariff_id=None,
+                              tariff_name="Неделя", period_days=7, price=D(3000),
+                              billing="auto", started_on=date.today() - timedelta(days=9),
+                              contract_no=None, created_by="t", location=None))
+        run(crm.update_rental(max(crm.rentals_), billed_until=date.today() - timedelta(days=2)))
         page = self.get_ok("/my")
         self.assertIn("· вся сеть</small>", page)
-        self.assertNotIn("Клиент Павлюхина", page, "прозвон точек - не владельцу")
-        self.assertNotIn("позвонить", page)
         self.assertNotIn("Своя точка не задана", page)
         self.assertEqual(self.blocks(page), ["Задачи владельца",
                                              "Задачи админов и мастеров по точкам",
@@ -341,17 +397,30 @@ class TestMyTasksPage(WebCase):
         self.assertEqual(self.heads(points), [*order, "Без точки"], "порядок справочника")
         p1 = points.split(f"<h3>{P1} ")[1].split("<h3>")[0]
         p2 = points.split(f"<h3>{P2} ")[1].split("<h3>")[0]
-        for word in ("Оператор", "Механик", "Обзвонить должников", "2 сотрудника · 1 задача"):
+        for word in ("Оператор", "Механик", "Обзвонить должников",
+                     "2 сотрудника · 1 рабочая задача · 1 поручение · горит 1",
+                     "Просрочка и платёж сегодня — позвонить", "Клиент Павлюхина"):
             self.assertIn(word, p1)
+        self.assertNotIn("Клиент Адоратского", p1, "чужая точка")
+        self.assertNotIn("Клиент без точки", p1, "без точки - в общих, не у каждой")
+        self.assertNotIn(run(crm.work_order(self.mine))["no"], p1,
+                         "наряд с мастером в срок - не задача владельца")
         self.assertIn(f'href="/team/{anna}"', p2, "имя ведёт в «Команду»")
         self.assertIn("Сверить кассу", p2)
         self.assertNotIn("Оператор", p2)
+        self.assertIn("Клиент Адоратского", p2)
+        self.assertIn("Наряды без техника", p2)
+        self.assertIn(run(crm.work_order(self.other))["no"], p2)
+        self.assertIn("1 сотрудник · 2 рабочие задачи · 1 поручение · горит 1", p2)
+        self.assertNotIn("Рабочих задач", points.split("<h3>Без точки")[1])
         self.assertIn("Подменный", points.split("<h3>Без точки")[1])
         self.assertNotIn("Закупить колодки", points, "свои - не в колонках команды")
         self.assertNotIn(f'href="/team/{owner["id"]}"', points)
         common = self.block(page, "common")
-        for word in ("Ремонт АКБ", "Помыть витрину", "Инвентаризация шлемов", "вся сеть"):
+        for word in ("Ремонт АКБ", "Помыть витрину", "Инвентаризация шлемов", "вся сеть",
+                     "Клиент без точки", "рабочие задачи без точки"):
             self.assertIn(word, common)
+        self.assertNotIn("Клиент Павлюхина", common)
         self.assertIn('href="/my"', self.get_ok("/"), "ссылка на сводке")
         # переключатель точки: её группа и общие, которые она видит
         page = self.get_ok(f"/my?location={P2}")
@@ -363,6 +432,9 @@ class TestMyTasksPage(WebCase):
         self.assertIn("Помыть витрину", common)
         self.assertIn("Инвентаризация шлемов", common, "без точки - видит вся сеть")
         self.assertNotIn("Ремонт АКБ", common)
+        self.assertIn("Клиент без точки", common, "рабочее без точки - при любой точке")
+        self.assertIn("Клиент Адоратского", points)
+        self.assertNotIn("Клиент Павлюхина", page)
         self.assertIn("Закупить колодки", self.block(page, "owner"), "свои - всегда")
         page_none = self.get_ok("/my?location=none")
         self.assertIn("· Без точки</small>", page_none)
