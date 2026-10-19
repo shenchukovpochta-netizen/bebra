@@ -54,7 +54,7 @@
       <td data-label="Сотрудник"><a href="/team/{{ r.id }}?{{ member_q }}"><b>{{ r.name }}</b></a>
         <br><small class="muted">{{ r.role }}{% if r.location %} · {{ r.location }}{% endif %}{% if r.both %} · {{ 'ещё и администратор' if s.code == 'master' else 'ещё и мастер' }}{% endif %}{% if not r.active %} · отключён{% endif %}</small></td>
       {% for c in r.cells %}{% if money_ok or not c.money %}
-      <td class="num" data-label="{{ c.title }}">{{ c.fact_text }}{% if c.plan is not none %}{% if c.money %}<br><small class="muted">из {{ c.plan_text }}</small>{% else %} <small class="muted">/ {{ c.plan_text }}</small>{% endif %}{% endif %}</td>
+      <td class="num" data-label="{{ c.title }}{% if c.money %}, ₽{% endif %}">{{ c.fact_text }}{% if c.plan is not none %}{% if c.money %}<br><small class="muted">из {{ c.plan_text }}</small>{% else %} <small class="muted">/ {{ c.plan_text }}</small>{% endif %}{% endif %}</td>
       {% endif %}{% if c.key == 'orders_ext' %}<td class="num" data-label="В срок">{% if r.on_time %}<b class="{% if r.on_time.late %}bad{% else %}ok{% endif %}">{{ r.on_time.percent }} %</b><br><small class="muted">{{ r.on_time.done }} из {{ r.on_time.of }}</small>{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}{% endfor %}
       <td class="num" data-label="План">{% if r.percent is not none %}<b class="{% if r.behind %}bad{% elif r.ahead %}ok{% endif %}">{{ r.percent }} %</b>
         {% if kind != 'month' %}<br><small class="muted">{% if r.source == 'own' %}свой план {{ 'недели' if kind == 'week' else 'дня' }}{% elif r.source == 'month' %}из плана месяца{% else %}свой + из месяца{% endif %}</small>{% endif %}
@@ -63,9 +63,9 @@
     </tr>
     {% endfor %}
     {% if s.rows|length > 1 %}
-    <tr class="total"><td><b>Итого</b></td>
-      {% for m in s.metrics %}{% if money_ok or not m.money %}<td class="num" data-label="{{ m.title }}">{{ money(s.total[m.fact]) if m.money else s.total[m.fact] }}</td>{% endif %}{% if m.fact == 'orders_ext' %}<td class="num" data-label="В срок">{% if s.total.on_time %}{{ s.total.on_time.percent }} %{% endif %}</td>{% endif %}{% endfor %}
-      <td class="num"></td>{% if money_ok and kind == 'month' %}<td class="num"></td>{% endif %}</tr>
+    <tr class="total"><td data-label="Сотрудник"><b>Итого</b></td>
+      {% for m in s.metrics %}{% if money_ok or not m.money %}<td class="num" data-label="{{ m.title }}{% if m.money %}, ₽{% endif %}">{{ money(s.total[m.fact]) if m.money else s.total[m.fact] }}</td>{% endif %}{% if m.fact == 'orders_ext' %}<td class="num" data-label="В срок">{% if s.total.on_time %}{{ s.total.on_time.percent }} %{% endif %}</td>{% endif %}{% endfor %}
+      <td class="num" data-label="План"></td>{% if money_ok and kind == 'month' %}<td class="num" data-label="Начислено"></td>{% endif %}</tr>
     {% endif %}
   </table>
   </div>

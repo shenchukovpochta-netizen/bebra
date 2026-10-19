@@ -165,7 +165,7 @@
       <td data-label="Месяц"><a href="/team/{{ person.id }}?month={{ h.key }}">{{ h.title }}</a>{% if h.current %} <small class="muted">идёт</small>{% endif %}
         {% if not h.has_plan %}<br><small class="muted">без плана</small>{% elif h.inherited %}<br><small class="muted">план прошлого месяца</small>{% endif %}</td>
       {% for m in h.metrics.values() %}{% if money_ok or not m.money %}
-      <td class="num" data-label="{{ m.title }}">{{ m.fact_text }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan_text }}</small><br><b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% endif %}</td>
+      <td class="num" data-label="{{ m.title }}{% if m.money %}, ₽{% endif %}">{{ m.fact_text }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan_text }}</small><br><b class="{% if m.ahead is false %}bad{% elif m.ahead %}ok{% endif %}">{{ m.percent }} %</b>{% endif %}</td>
       {% endif %}{% if m.key == 'orders_ext' %}<td class="num" data-label="В срок">{% if h.on_time %}{{ h.on_time.percent }} %{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}{% endfor %}
       {% if money_ok %}<td class="num" data-label="Начислено">{{ money(h.pay.total) }}</td>{% endif %}
     </tr>

@@ -78,7 +78,7 @@ CARD_TABLES = {"_passport.html": 1, "alerts.html": 1, "assets.html": 2, "bank.ht
                "signings.html": 1, "spend.html": 1, "staff.html": 1,
                "stock_take.html": 1, "stock_takes.html": 1, "suppliers.html": 1,
                "tariff_report.html": 1, "tariffs.html": 1, "tasks.html": 1,
-               "techs.html": 1,
+               "team.html": 1, "team_member.html": 8, "techs.html": 1,
                "tracker.html": 2, "trackers.html": 2, "work_types.html": 1}
 # Таблицы, которые остаются таблицами и на телефоне - с причиной. Всё
 # остальное - карточки: голая таблица на 390 px листается вбок, а это
@@ -173,13 +173,15 @@ class TestCardTemplates(unittest.TestCase):
                     self.assertGreaterEqual(len(head), 2)
                     self.assertGreaterEqual(len(labels), len(head))
                     for column, label in zip(head, labels, strict=False):
-                        if column and label:
+                        # Колонка из цикла ({{ m.title }}) сверяется отданной
+                        # страницей (test_rows_carry_one_label_per_column).
+                        if column and label and "{{" not in column:
                             self.assertEqual(label, column)
                     named = {c for c in head if c}
                     # Колонка без шапки (кнопки) подписана своим словом - и в
                     # итоговой строке тоже.
                     own = {lab for col, lab in zip(head, labels, strict=False) if not col}
-                    extra = [x for x in labels[len(head):] if x and x not in named | own]
+                    extra = [x for x in labels[len(head):] if x and plain(x) not in named | own]
                     self.assertEqual(extra, [], "подпись итоговой строки - из шапки")
 
     def test_month_matrix_names_the_point(self):
