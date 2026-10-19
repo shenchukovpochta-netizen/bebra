@@ -10,7 +10,7 @@
     </select></label>
     <label>Плательщик <select name="payer">{% for code, label in PAYERS.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}</select></label>
     <label class="wide">Что за объект <input name="object_note" placeholder="если техника не наша: самокат Kugoo, АКБ 60 Ач"></label>
-    <label>Где чиним <select name="location"><option value="">как у велосипеда{% if bike and bike.location %} ({{ bike.location }}){% endif %}</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Где чиним <select name="location"><option value="">как у велосипеда{% if bike and bike.location %} ({{ bike.location|place }}){% endif %}</option>{% for loc in places %}<option value="{{ loc }}">{{ loc|place }}</option>{% endfor %}</select></label>
     <label>Техник <select name="tech_id"><option value="">не назначен</option>{% for t in techs %}<option value="{{ t.id }}">{{ t.name or t.login }}</option>{% endfor %}</select></label>
     <label>Смета, ₽ <input name="estimate" inputmode="decimal" placeholder="0"></label>
     <label class="wide">Жалоба <input name="complaint" placeholder="с чем обратились: не едет, не заряжается"></label>

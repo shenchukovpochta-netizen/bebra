@@ -176,7 +176,7 @@ class TestPointHelpers(unittest.TestCase):
     def test_map_places_only_open_points_with_coordinates(self):
         places = logic.map_places([
             {"name": PAV, "active": True, "lat": 55.77, "lon": 49.14,
-             "public_title": "Май Байк, Павлюхина", "address": "ул. Павлюхина, 97А"},
+             "public_title": "Май Байк, Павлюхина", "address": "ул. Павлюхина, 97"},
             {"name": ADO, "active": True, "lat": None, "lon": None},
             {"name": DEK, "active": False, "lat": 55.8, "lon": 49.1},
             {"name": "Ноль", "active": True, "lat": 0, "lon": 0}])
@@ -211,7 +211,7 @@ class PointsWebCase(tw.WebCase):
         self.login()
         crm = self.crm
         self.pav = tw.run(crm.create_location(
-            name=PAV, city="Казань", address="ул. Павлюхина, 97А", note=None, sort=10,
+            name=PAV, city="Казань", address="ул. Павлюхина, 97", note=None, sort=10,
             phone="+7 (904) 676-49-26", hours="пн-вс: 10:00-19:00",
             lat=55.7669, lon=49.1486))
         self.ado = tw.run(crm.create_location(name=ADO, city="Казань",
@@ -331,7 +331,7 @@ class TestPointsReport(PointsWebCase):
         tw.run(self.crm.add_ledger(client_id=self.c1, kind="charge", amount=D(-20000),
                                    rental_id=self.r1))
         page = self.get_ok(f"/reports/points/{self.pav}")
-        self.assertIn("ул. Павлюхина, 97А", page)
+        self.assertIn("ул. Павлюхина, 97", page)
         self.assertIn("пн-вс: 10:00-19:00", page)
         self.assertIn("Деньги по дням", page)
         self.assertIn("Три числа по месяцам", page)
@@ -481,7 +481,7 @@ class TestLocationsPage(PointsWebCase):
         списке точек и на странице точки, пустое поле - стёрто."""
         way = "Заезд в ГСК «Сокол», 9-й бокс"
         self.client.post(f"/locations/{self.pav}", data={
-            "city": "Казань", "address": "ул. Павлюхина, 97А", "directions": way,
+            "city": "Казань", "address": "ул. Павлюхина, 97", "directions": way,
             "sort": "10"})
         place = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)
         self.assertEqual(place["directions"], way)
@@ -489,7 +489,7 @@ class TestLocationsPage(PointsWebCase):
         self.assertIn(html.escape(way, quote=False),
                       self.get_ok(f"/reports/points/{self.pav}"))
         self.client.post(f"/locations/{self.pav}", data={
-            "city": "Казань", "address": "ул. Павлюхина, 97А", "directions": "",
+            "city": "Казань", "address": "ул. Павлюхина, 97", "directions": "",
             "sort": "10"})
         place = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)
         self.assertIsNone(place["directions"])
@@ -505,10 +505,10 @@ class TestLocationsPage(PointsWebCase):
         way = "Заезд в ГСК «Сокол», 9-й бокс"
         tw.run(self.crm.update_location(self.pav, directions=way))
         self.client.post(f"/locations/{self.pav}", data={
-            "city": "Казань", "address": "ул. Павлюхина, 97А", "sort": "10"})
+            "city": "Казань", "address": "ул. Павлюхина, 97", "sort": "10"})
         place = next(p for p in tw.run(self.crm.locations()) if p["id"] == self.pav)
         self.assertEqual(place["directions"], way)
-        self.assertEqual(place["address"], "ул. Павлюхина, 97А")
+        self.assertEqual(place["address"], "ул. Павлюхина, 97")
 
     def test_rename_keeps_saved_filters(self):
         """Фильтр «?location=Декабристов» после переименования показывает те

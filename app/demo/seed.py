@@ -219,6 +219,11 @@ async def _reference(conn: asyncpg.Connection, w: World) -> None:
     for name, rented in POINT_PLANS.items():
         await conn.execute("update crm.locations set plan_rented = $2 where name = $1",
                            name, rented)
+    # Склад владельца, который кладёт сид схемы, демо убирает: симуляция
+    # живёт точками выдачи, а пустая строка «Склад» в каждом отчёте стенда
+    # была бы шумом, а не примером. Завести склад на стенде - галочка в
+    # «Точках», как у франчайзи.
+    await conn.execute("delete from crm.locations where kind = 'warehouse'")
     for row in await conn.fetch("select * from crm.locations order by sort, name"):
         opened = p3_open if row["name"] == core.P3 else start.date()
         w.points[row["name"]] = Point(

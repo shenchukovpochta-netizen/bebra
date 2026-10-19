@@ -30,7 +30,7 @@ except ImportError:                                    # pragma: no cover
 
 # Третья точка заведена владельцем в панели - её адреса нет нигде в коде.
 THREE = (
-    ("Павлюхина", "г. Казань, ул. Павлюхина, 97А", "пн-вс: 10:00-19:00"),
+    ("Павлюхина", "г. Казань, ул. Павлюхина, 97", "пн-вс: 10:00-19:00"),
     ("Адоратского", "г. Казань, ул. Адоратского, 11А", "пн-вс: 10:00-19:00"),
     ("Восстания", "г. Казань, ул. Восстания, 100", "пн-пт: 09:00-21:00"),
 )
@@ -140,7 +140,7 @@ class TestPointsInTelegram(unittest.IsolatedAsyncioTestCase):
         self.approved_user()
         text = await self.ask_address()
         self.assertIn("11А", text)
-        self.assertIn("97А", text)
+        self.assertIn("Павлюхина, 97 ", text)
         self.assertNotIn(ADDRESSES[2], text)
         self.assertEqual(points.snapshot(), [])
 

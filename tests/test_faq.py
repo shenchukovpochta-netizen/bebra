@@ -342,7 +342,9 @@ class TestI18n(unittest.TestCase):
         for code in i18n.LANGS:
             text = faq.answer(faq.BY_CODE["ADDR"], now=DAY, lang=code)
             self.assertIn("11А", text, code)
-            self.assertIn("97А", text, code)
+            # Павлюхина - 97 без «А» (так у владельца), в каждом переводе.
+            self.assertRegex(text, r"Павлюхин[^\n]*?\b97\b", code)
+            self.assertNotIn("97А", text, code)
 
     def test_no_html_markup_hazards_in_translations(self):
         for code in self.FOREIGN:
@@ -377,7 +379,7 @@ class TestI18n(unittest.TestCase):
 # у второй не заполнены режим и телефон, у третьей нет названия для курьеров.
 THREE_POINTS = (
     {"name": "Павлюхина", "public_title": "Май Байк — Павлюхина",
-     "address": "г. Казань, ул. Павлюхина, 97А", "hours": "пн-вс: 10:00-19:00",
+     "address": "г. Казань, ул. Павлюхина, 97", "hours": "пн-вс: 10:00-19:00",
      "phone": "+7 (904) 676-49-26"},
     {"name": "Адоратского", "public_title": "Май Байк — Адоратского",
      "address": "г. Казань, ул. Адоратского, 11А", "hours": None, "phone": ""},
@@ -470,7 +472,7 @@ class TestPointsFromDirectory(unittest.TestCase):
                         base, f"{lang}/{intent.code}: {empty!r}")
         text = self.ask("ADDR", pts=None)
         self.assertIn("11А", text)
-        self.assertIn("97А", text)
+        self.assertIn("Павлюхина, 97 ", text)
 
     def test_empty_fields_are_skipped(self):
         text = self.ask("HOURS")
@@ -485,7 +487,7 @@ class TestPointsFromDirectory(unittest.TestCase):
         часов - вопрос, с которым клиент вернётся."""
         text = self.ask("LEAD")
         lines = [line for line in text.split("\n") if line.startswith("📍")]
-        self.assertEqual(lines, ["📍 г. Казань, ул. Павлюхина, 97А · 🕙 пн-вс: 10:00-19:00",
+        self.assertEqual(lines, ["📍 г. Казань, ул. Павлюхина, 97 · 🕙 пн-вс: 10:00-19:00",
                                  "📍 г. Казань, ул. Адоратского, 11А",
                                  "📍 г. Казань, ул. Восстания, 100 · 🕙 пн-пт: 09:00-21:00"])
 
@@ -509,7 +511,7 @@ class TestPointsFromDirectory(unittest.TestCase):
                 self.assertIn("🧭 " + way, text, f"{lang}/{code}")
                 self.assertEqual(text.count("🧭"), 1, f"{lang}/{code}")
         full = self.ask("ADDR", pts=pts)
-        self.assertIn("г. Казань, ул. Павлюхина, 97А\n🧭 " + way, full)
+        self.assertIn("г. Казань, ул. Павлюхина, 97\n🧭 " + way, full)
 
     def test_values_from_the_panel_are_escaped(self):
         """«&» или «<» в адресе - сообщение, которое Telegram не разберёт."""
@@ -574,15 +576,16 @@ class TestPointsFromDirectory(unittest.TestCase):
 
 
 class _Directory:
-    """Справочник точек как его видит бот: только чтение открытых."""
+    """Справочник точек как его видит бот: только чтение точек выдачи."""
 
     def __init__(self, rows):
         self.rows, self.calls = list(rows), []
 
-    async def locations(self, *, active_only=False):
-        self.calls.append(active_only)
+    async def locations(self, *, active_only=False, clients_only=False):
+        self.calls.append(active_only or clients_only)
         return [dict(r) for r in self.rows
-                if not active_only or r.get("active", True)]
+                if not (active_only or clients_only) or r.get("active", True)
+                if not clients_only or (r.get("kind") or "point") == "point"]
 
 
 class TestPointsSnapshot(unittest.TestCase):
@@ -649,7 +652,7 @@ class TestPointsSnapshot(unittest.TestCase):
         points.set_snapshot(THREE_POINTS)
 
         class Broken:
-            async def locations(self, *, active_only=False):
+            async def locations(self, *, active_only=False, clients_only=False):
                 raise RuntimeError("база недоступна")
 
         with self.assertLogs("app.crm.points", "ERROR"):

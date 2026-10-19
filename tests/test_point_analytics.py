@@ -231,7 +231,7 @@ class TestPointsRows(unittest.TestCase):
 DIRECTORY = [
     {"name": PAV, "city": "Казань", "active": True,
      "public_title": "Май Байк — сервис и аренда, Павлюхина",
-     "address": "г. Казань, ул. Павлюхина, 97А"},
+     "address": "г. Казань, ул. Павлюхина, 97"},
     {"name": ADO, "city": "Казань", "active": True,
      "public_title": "Май Байк — сервис и аренда, Адоратского",
      "address": "г. Казань, ул. Адоратского, 11А"},

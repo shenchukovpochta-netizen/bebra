@@ -42,7 +42,7 @@
       <small class="muted">До какого дня сделать; пусто — без даты.</small></label>
     <label>Точка
       <select name="location"><option value="">без точки</option>
-        {% for l in locations %}<option value="{{ l.name }}" {% if task.location == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+        {% for l in locations %}<option value="{{ l.name }}" {% if task.location == l.name %}selected{% endif %}>{{ l.name|place }}</option>{% endfor %}
       </select></label>
     {% if task_money %}<label>Оплата исполнителю за задачу, ₽ <input name="pay" inputmode="decimal" value="{{ task.pay if task.pay is not none else '' }}" placeholder="пусто — без доплаты">
       <small class="muted">Сколько исполнитель получит за эту задачу сверх оклада. Сумма попадёт в расчёт зарплаты в «Команде», когда задачу отметят сделанной. Пусто — без доплаты.</small></label>{% endif %}

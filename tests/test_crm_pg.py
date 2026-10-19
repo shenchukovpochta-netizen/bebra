@@ -450,7 +450,8 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         стёртые владельцем телефон и часы."""
         self.assertEqual((await self.crm.settings()).get("locations_seeded"), "1")
         points = {p["name"]: p for p in await self.crm.locations()}
-        self.assertEqual(set(points), {"Павлюхина", "Адоратского"})
+        self.assertEqual(set(points), {"Павлюхина", "Адоратского", "Склад"})
+        self.assertEqual(points["Склад"]["kind"], "warehouse")
         self.assertEqual(points["Павлюхина"]["phone"], "+7 (904) 676-49-26")
         self.assertAlmostEqual(points["Адоратского"]["lon"], 49.147018, places=5)
         self.assertEqual(await self.crm.rename_location(points["Павлюхина"]["id"],
@@ -464,7 +465,8 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
                           for p in rows)
 
         after = await self.crm.locations()
-        self.assertEqual([p["name"] for p in after], ["Павлюхина 97А", "Адоратского"],
+        self.assertEqual([p["name"] for p in after],
+                         ["Павлюхина 97А", "Адоратского", "Склад"],
                          "фантома «Павлюхина» нет")
         adoratsky = next(p for p in after if p["name"] == "Адоратского")
         self.assertEqual((adoratsky["phone"], adoratsky["hours"], adoratsky["lat"],
@@ -1450,8 +1452,8 @@ class TestCrmOnPostgres(unittest.IsolatedAsyncioTestCase):
         """Батареи на живой базе: триггер журнала, выдача и возврат, каталог."""
         await self.seed()
         seeded = await self.crm.location_names()
-        self.assertEqual(seeded, ["Павлюхина", "Адоратского"],
-                         "точки приезжают со схемой - парк заведён с ними")
+        self.assertEqual(seeded, ["Павлюхина", "Адоратского", "Склад"],
+                         "точки и склад приезжают со схемой - парк заведён с ними")
 
         model_id = await self.crm.create_battery_model(
             title="48V 20Ah", brand="Sanyo", voltage=48, capacity=D("20"),

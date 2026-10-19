@@ -44,7 +44,7 @@ BATTERY_FIELDS = frozenset({"code", "model_id", "serial_no", "status", "location
 # План месяца точки - в её строке: переименование его не задевает.
 LOCATION_FIELDS = frozenset({"city", "address", "note", "active", "sort",
                             "public_title", "phone", "hours", "lat", "lon",
-                            "directions", "plan_rented", "plan_check"})
+                            "directions", "plan_rented", "plan_check", "kind"})
 BIKE_MODEL_FIELDS = frozenset({"title", "brand", "factory_title",
                                "battery_slots", "active", "note",
                                "weight_kg", "speed_kmh", "range_km",
@@ -3918,7 +3918,8 @@ class CrmDB:
                                new_bike_id: int, old_status: str,
                                mileage_old: int | None, mileage_new: int | None,
                                reason: str, today: date, by: str,
-                               swap_location: str | None = None) -> bool:
+                               swap_location: str | None = None,
+                               issue_location: str | None = None) -> bool:
         """Замена велосипеда внутри аренды - одной транзакцией.
 
         Снять старый, выдать новый и переписать аренду по отдельности
@@ -3931,9 +3932,12 @@ class CrmDB:
         (велосипед был «не на точке»): иначе его дни в аренде ушли бы на
         его прежнюю точку, а деньги аренды остались «без точки». Только у
         аренды, выданной вовсе без велосипеда, точкой становится точка
-        нового - первая настоящая выдача случилась здесь. Аренде с
-        велосипедом без точки точку задним числом не дописываем: её
-        прошлые платежи переехали бы на чужую точку в закрытых месяцах.
+        нового - первая настоящая выдача случилась здесь; `issue_location`
+        - точка такой первой выдачи, когда нового берут со склада (с него
+        не выдают): велосипед встаёт на неё, и она становится точкой
+        аренды. Аренде с велосипедом без точки точку задним числом не
+        дописываем: её прошлые платежи переехали бы на чужую точку в
+        закрытых месяцах.
         """
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute("select set_config('crm.actor', $1, true)", by or "")
@@ -3948,14 +3952,16 @@ class CrmDB:
             # первым: ушедший тем временем в ремонт, потерю или к другому
             # клиенту даёт False до единой записи.
             # $4 - у аренды был велосипед: новый встаёт ровно на её точку,
-            # «не на точке» включительно. Без велосипеда - на свою.
+            # «не на точке» включительно. Без велосипеда - на свою, а со
+            # склада - на точку первой выдачи ($5).
             taken = await conn.fetchrow(
                 "update crm.bikes set status = 'rented', "
-                "location = case when $4 then $3 else coalesce($3, location) end, "
+                "location = case when $4 then $3 else coalesce($3, $5, location) end, "
                 "mileage_km = greatest(mileage_km, coalesce($2, mileage_km)), "
                 "updated_at = now() where id = $1 and status = 'available' "
                 "returning location",
-                new_bike_id, mileage_new, rental["location"], old_bike_id is not None)
+                new_bike_id, mileage_new, rental["location"], old_bike_id is not None,
+                issue_location)
             if taken is None:
                 return False
             place = taken["location"]
@@ -4071,8 +4077,14 @@ class CrmDB:
 
     # ───────────────── справочники: точки и модели ─────────────────
 
-    async def locations(self, *, active_only: bool = False) -> list[dict]:
-        where = "where active" if active_only else ""
+    async def locations(self, *, active_only: bool = False,
+                        clients_only: bool = False) -> list[dict]:
+        """Справочник точек (sort, name). clients_only - точки, которые
+        видит клиент и с которых выдают: открытые и не склад (бот, заявка,
+        лист ожидания). Склад остаётся в полном списке: парк, пересчёт,
+        задачи и переброска."""
+        where = ("where active and kind = 'point'" if clients_only
+                 else "where active" if active_only else "")
         return _rows(await self.pool.fetch(
             f"select * from crm.locations {where} order by sort, name"))
 

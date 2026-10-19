@@ -10,7 +10,7 @@
       <option value="repair,maintenance" {% if status == 'repair,maintenance' %}selected{% endif %}>ремонт и ТО ({{ counts.get('repair', 0) + counts.get('maintenance', 0) }})</option>
     </select>
     <select name="location"><option value="">любая точка</option>
-      {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+      {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}
       <option value="none" {% if location == 'none' %}selected{% endif %}>не на точке</option>
     </select>
     {# Модель - точным совпадением (ссылки «По моделям» со сводки): поиск

@@ -120,7 +120,9 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
 
     `location` - точка выдачи; не выбрана - точка заявки `booking` (клиент
     сам назвал, куда придёт), иначе точка велосипеда: её решает база в той
-    же транзакции, где велосипед уходит в аренду.
+    же транзакции, где велосипед уходит в аренду. Склад точкой выдачи не
+    бывает ни выбранным, ни «как у велосипеда»: аренда на складе завела бы
+    его в выручку и чек точек, а клиента - туда, где не выдают.
     """
     if client.get("status") != "active":
         raise ServiceError("Клиент заблокирован или в чёрном списке.")
@@ -128,6 +130,14 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
         raise ServiceError(
             f"Велосипед {bike.get('code')} сейчас "
             f"«{logic.BIKE_STATUSES.get(bike.get('status'), bike.get('status'))}».")
+    place = logic.issue_point(location, booking=booking)
+    stores = logic.warehouse_names(await crm.locations())
+    if place in stores:
+        raise ServiceError(f"«{place}» — склад, с него не выдают. Выберите точку выдачи.")
+    if place is None and bike is not None and bike.get("location") in stores:
+        raise ServiceError(
+            f"Велосипед {bike.get('code')} стоит на складе «{bike['location']}»: "
+            "выдают с точки. Выберите точку выдачи или сначала перевезите его.")
     if await crm.active_rental_of(client["id"]) is not None:
         raise ServiceError("У клиента уже идёт аренда - сначала закройте её.")
     base = logic.to_money(tariff["price"])
@@ -140,7 +150,7 @@ async def open_rental(crm: Any, *, client: dict, bike: dict | None, tariff: dict
             billing=billing, started_on=started_on, contract_no=contract_no,
             created_by=by, mileage_start=mileage,
             promo_code=logic.clean_promo_code(promo_code) or None,
-            location=logic.issue_point(location, booking=booking))
+            location=place)
     except Exception as exc:                            # noqa: BLE001
         # Уникальные индексы на активную аренду: гонка двух операторов.
         if "unique" in type(exc).__name__.lower():
@@ -1292,11 +1302,26 @@ async def swap_bike(crm: Any, rental: dict, new_bike: dict, *, reason: str,
     status = old_status or logic.SWAP_BIKE_STATUS.get(reason, "available")
     if status not in logic.BIKE_MANUAL_STATUSES:
         raise ServiceError("Недопустимый статус снятого велосипеда.")
+    issue_place = None
+    if not old_id and not rental.get("location"):
+        # Аренда без велосипеда и без точки берёт точку нового: первая
+        # настоящая выдача - эта. Склад точкой аренды не бывает (как в
+        # open_rental): его выручка и чек ушли бы в строку склада. Тогда
+        # точка аренды - «где меняли», и велосипед встаёт на неё.
+        stores = logic.warehouse_names(await crm.locations())
+        if new_bike.get("location") in stores:
+            if not swap_location or swap_location in stores:
+                raise ServiceError(
+                    f"Велосипед {new_bike.get('code')} стоит на складе "
+                    f"«{new_bike['location']}», а у аренды ещё нет точки: со склада не "
+                    "выдают. Укажите в «Где меняли» точку выдачи или сначала "
+                    "перевезите велосипед на точку.")
+            issue_place = swap_location
     ok = await crm.swap_rental_bike(
         rental["id"], old_bike_id=old_id, new_bike_id=new_bike["id"],
         old_status=status, mileage_old=mileage_old, mileage_new=mileage_new,
         reason=logic.SWAP_REASONS[reason], today=date.today(), by=by,
-        swap_location=swap_location or None)
+        swap_location=swap_location or None, issue_location=issue_place)
     if not ok:
         # Отказ базы - либо аренда, либо новый велосипед: он мог уйти из
         # свободных, пока заполняли форму, и тогда его и надо назвать.

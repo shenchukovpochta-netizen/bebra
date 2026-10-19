@@ -16,7 +16,7 @@
     </select>
     {% if locations|length > 1 %}<select name="location">
       <option value="">все точки</option>
-      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+      {% for l in locations %}<option value="{{ l.name }}" {% if place == l.name %}selected{% endif %}>{{ l.name|place }}</option>{% endfor %}
       <option value="none" {% if place == 'none' %}selected{% endif %}>без точки</option>
     </select>{% endif %}
     <button type="submit">Найти</button>
@@ -40,7 +40,7 @@
         </select>
         {% if locations|length > 1 %}<select name="location">
           <option value="">без точки</option>
-          {% for l in locations %}<option value="{{ l.name }}" {% if staff.location == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+          {% for l in locations %}<option value="{{ l.name }}" {% if staff.location == l.name %}selected{% endif %}>{{ l.name|place }}</option>{% endfor %}
         </select>{% endif %}
         <button type="submit">Добавить</button>
       </form>

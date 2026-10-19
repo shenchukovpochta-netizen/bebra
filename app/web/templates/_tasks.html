@@ -63,7 +63,7 @@
       {% if can_edit(staff, 'staff') %}<small class="muted">Нет нужного человека? Заведите его в <a href="/staff">«Сотрудниках»</a>.</small>{% endif %}</label>
     {% if locations|length > 1 %}<label>Точка
       <select name="location"><option value="">{% if staff.location %}моя ({{ staff.location }}){% else %}вся сеть{% endif %}</option>
-        {% for l in locations %}<option value="{{ l.name }}">{{ l.name }}</option>{% endfor %}
+        {% for l in locations %}<option value="{{ l.name }}">{{ l.name|place }}</option>{% endfor %}
       </select></label>{% endif %}
     <label>Дата постановки <input type="date" name="start_on" value="{{ day.isoformat() }}" min="{{ day.isoformat() }}" required>
       <small class="muted">С этого дня задача в «Задачах дня» исполнителя; позже сегодняшней — запланирована.</small></label>

@@ -717,14 +717,15 @@ async def _book_tariffs(crm: Any, model: dict) -> list[dict]:
 
 
 async def _book_point(crm: Any, loc_id: int) -> tuple[list[dict], dict | None] | None:
-    """Открытые точки и точка заявки по номеру из кнопки. None - устарела.
+    """Открытые точки выдачи (склад клиенту не предлагается) и точка заявки
+    по номеру из кнопки. None - устарела.
 
     0 - точку не выбирали: справочник был пуст, точка одна или кнопка
     старого порядка. Годится, пока открытых точек не больше одной (точка
     тогда - она сама); при нескольких выбор за клиентом, а не за нами.
     Точку, закрытую с тех пор, тоже не подставляем: звать туда нельзя.
     """
-    locations = await crm.locations(active_only=True)
+    locations = await crm.locations(clients_only=True)
     if not loc_id:
         if len(locations) > 1:
             return None
@@ -760,7 +761,9 @@ async def _send_book_models(bot: Bot, crm: Any, user: dict, lang: str,
     models = crm_logic.booking_models(
         await crm.bike_models(active_only=True), await crm.bikes(limit=10000),
         aliases=crm_logic.model_aliases(await crm.bike_models()),
-        location=location["name"] if at_point and location else None)
+        location=location["name"] if at_point and location else None,
+        # Склад - не точка выдачи: его велосипеды «свободно» не обещают.
+        stores=crm_logic.warehouse_names(await crm.locations()))
     if not models:
         await _send_no_models(bot, user, lang)
         return
@@ -792,7 +795,7 @@ async def cb_book(callback: CallbackQuery, bot: Bot, user: dict,
                 line=logic.esc(crm_logic.booking_line(booking))),
             reply_markup=kb.cab_booking(lang))
         return
-    locations = await crm.locations(active_only=True)
+    locations = await crm.locations(clients_only=True)
     if len(locations) < 2:
         await _send_book_models(bot, crm, user, lang, locations[0] if locations else None)
         return
@@ -970,7 +973,7 @@ async def cb_waitlist(callback: CallbackQuery, bot: Bot, cfg: Config, user: dict
         return
     first = await crm.mark_coming(booking["id"])
     await callback.answer()
-    locations = await crm.locations(active_only=True)
+    locations = await crm.locations(clients_only=True)
     await bot.send_message(
         user["tg_id"],
         i18n.t(lang, "CAB_WAITLIST_COMING").format(

@@ -355,6 +355,25 @@ class TestIssue(QuickCase):
         preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
         self.assertIn("чёрном списке", preview.text)
 
+    async def test_warehouse_bike_is_refused_in_the_preview(self):
+        """Со склада не выдают, а точки выдачи в форме лички нет: отказ -
+        уже в предпросмотре, а не после кнопки, и словами, что делать."""
+        await self.crm.create_location(name="Склад", city="Казань", address=None,
+                                       note=None, kind="warehouse")
+        await self.crm.update_bike(self.bike_id, location="Склад")
+        preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
+        self.assertFalse(preview.ok)
+        self.assertIn("стоит на складе «Склад»", preview.text)
+        self.assertIn("оформите выдачу в панели", preview.text)
+        with self.assertRaises(quickforms.FormError):
+            await quickforms.apply_issue(self.crm, self.admin, issue_now(), today=NOW)
+        self.assertIsNone(await self.crm.active_rental_of(self.client_id))
+        self.assertEqual(await self.crm.ledger_of(self.client_id), [])
+        # Перевезли на точку - выдача проходит.
+        await self.crm.update_bike(self.bike_id, location="Павлюхина")
+        preview = await quickforms.preview_issue(self.crm, self.admin, issue_now(), today=NOW)
+        self.assertTrue(preview.ok, preview.text)
+
     async def test_busy_bike_and_running_rental(self):
         await quickforms.apply_issue(self.crm, self.admin, issue_now(), today=NOW)
         with self.assertRaises(quickforms.FormError) as err:

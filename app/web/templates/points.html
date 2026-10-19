@@ -34,7 +34,7 @@
     <th class="num">Нарядов</th>{% if money_ok %}<th class="num">Сервис</th>{% endif %}</tr>
   {% for r in report.rows + [report.total] %}{% set m = r.metrics %}
   <tr {% if r.total %}class="total"{% endif %}>
-    <td data-label="Точка">{% if r.total %}Итого{% elif r.orphan %}{{ r.title }} <span class="tag" title="имени нет в справочнике: запись старше справочника">нет в справочнике</span>{% else %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}{{ q }}">{{ r.title }}</a>{% if r.closed %} <span class="tag">закрыта</span>{% endif %}{% endif %}</td>
+    <td data-label="Точка">{% if r.total %}Итого{% elif r.orphan %}{{ r.title }} <span class="tag" title="имени нет в справочнике: запись старше справочника">нет в справочнике</span>{% else %}<a href="/reports/points/{{ r.id if r.key is not none else 'none' }}{{ q }}">{{ r.title }}</a>{% if r.place and r.place.kind == 'warehouse' %} <span class="tag">склад</span>{% endif %}{% if r.closed %} <span class="tag">закрыта</span>{% endif %}{% if r.place and r.key|place_addr %}<br><small class="muted addr">{{ r.key|place_addr }}</small>{% endif %}{% endif %}</td>
     <td class="num" data-label="Парк сейчас">{{ r.fleet }}</td>
     <td class="num {% if m.idle_percent is none %}muted{% elif m.idle_ok %}ok{% else %}bad{% endif %}" data-label="Простой">{% if m.idle_percent is none %}—{% else %}{{ m.idle_percent }} %{% endif %}</td>
     {% if money_ok %}
@@ -136,7 +136,8 @@
     недель в среднем плюс открытые заявки на день; будет — свободные сейчас (без ремонта,
     брони и подменных) и аренды, у которых к этому дню кончается «оплачено до», если
     клиент не сказал «продлю». Точка отдаёт только свободные сверх своего прогноза и
-    запаса {{ transfer.safety }}, недостача закрывается от самого большого излишка.</p>
+    запаса {{ transfer.safety }}, недостача закрывается от самого большого излишка.
+    Склад — только источник: спроса у него нет, и он отдаёт всё свободное.</p>
   {% if transfer.rows %}
   <details class="more">
     <summary>Прогноз по точкам и моделям</summary>
@@ -145,7 +146,7 @@
       <tr><th>Точка</th><th>Модель</th><th class="num">Свободно</th>{% for day in transfer.days %}<th class="num">К {{ day|dmy }}: спрос / будет</th>{% endfor %}<th>Итог</th></tr>
       {% for r in transfer.rows %}
       <tr>
-        <td data-label="Точка">{{ r.location }}</td>
+        <td data-label="Точка">{{ r.location }}{% if r.store %} <span class="tag">склад</span>{% endif %}</td>
         <td data-label="Модель">{{ r.model }}</td>
         <td class="num" data-label="Свободно">{{ r.free }}</td>
         {% for st in r.steps %}{% set day = st.on %}<td class="num" data-label="К {{ day|dmy }}: спрос / будет">{{ st.want }} / {{ st.have }}{% if st.booked %} <small class="muted">· заявок {{ st.booked }}</small>{% endif %}</td>{% endfor %}

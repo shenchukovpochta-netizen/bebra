@@ -5131,10 +5131,11 @@ def point_plan(place: Mapping[str, Any] | None, *, check: Any) -> dict[str, Any]
     Лежит в строке справочника (locations.plan_rented, plan_check), а не в
     настройках под именем точки: переименование - каскад по тексту имени,
     и ключ «план Павлюхиной» осиротел бы. Нет plan_rented или точка
-    закрыта - плана нет. Чек не задан - общий чек плана: точку планируют
-    числом велосипедов, а цена у сети одна.
+    закрыта - плана нет; у склада плана аренды не бывает вовсе: с него не
+    выдают. Чек не задан - общий чек плана: точку планируют числом
+    велосипедов, а цена у сети одна.
     """
-    if not place or place.get("active", True) is False:
+    if not place or place.get("active", True) is False or is_warehouse(place):
         return None
     try:
         rented = int(str(place.get("plan_rented")))
@@ -5153,11 +5154,13 @@ def plan_from_points(places: Iterable[Mapping[str, Any]] | None, *,
     """Сумма планов открытых точек - только когда план есть у каждой.
 
     Одна открытая точка без плана - None: сумма без неё занизила бы план
-    сети, и «план выполнен» было бы неправдой. Закрытые не в счёт.
+    сети, и «план выполнен» было бы неправдой. Закрытые не в счёт, склад
+    тоже: аренды с него нет, и без него сумма точек выдачи и есть сеть.
     """
     plans = []
     for place in places or ():
-        if not place.get("name") or place.get("active", True) is False:
+        if (not place.get("name") or place.get("active", True) is False
+                or is_warehouse(place)):
             continue
         plan = point_plan(place, check=check)
         if plan is None:
@@ -5539,7 +5542,8 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
                   safety: int = TRANSFER_SAFETY, weeks: int = TRANSFER_WEEKS,
                   days: int = TRANSFER_DAYS,
                   aliases: Mapping[str, str] | None = None,
-                  idle: Mapping[int, int | None] | None = None) -> dict[str, Any]:
+                  idle: Mapping[int, int | None] | None = None,
+                  stores: Iterable[str] = ()) -> dict[str, Any]:
     """Прогноз по точкам и моделям на `days` дней вперёд и перевозки.
 
     По каждой точке и модели, к концу завтра и к концу послезавтра:
@@ -5557,8 +5561,14 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
     жадно: самой большой нехватке - от самого большого излишка той же
     модели. `idle` - дни простоя по велосипеду: к перевозке предлагаются
     дольше всех стоящие, их и надо везти.
+
+    `stores` - склады среди `points`: спроса у склада нет (с него не
+    выдают, заявку на него не подать), поэтому он только источник и
+    отдаёт все свободные - запас на точке держат под курьера без заявки,
+    а на склад курьер не придёт.
     """
     names = [str(p).strip() for p in points if str(p or "").strip()]
+    stores = {str(p).strip() for p in stores} & set(names)
     order = {name: i for i, name in enumerate(names)}
     days = max(int(days), 1)
     safety = max(int(safety), 0)
@@ -5596,7 +5606,7 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
                 cell(place, model)["back"][int(after)] += 1
     for (place, model, weekday), value in weekday_demand(
             history, today=today, weeks=weeks, aliases=aliases).items():
-        if place not in order:
+        if place not in order or place in stores:
             continue
         for i, on in enumerate(horizon):
             if on.weekday() == weekday:
@@ -5608,13 +5618,14 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
         model = catalogue_model(booking.get("model"), aliases)
         wanted = booking.get("wanted_on") or today
         i = max((wanted - today).days, 1) - 1
-        if place in order and model and i < days:
+        if place in order and place not in stores and model and i < days:
             cell(place, model)["booked"][i] += 1
 
     out_rows: list[dict[str, Any]] = []
     for (place, model), row in cells.items():
         demand = Decimal(0)
         need, room = 0, row["free"]
+        keep = 0 if place in stores else safety
         steps = []
         for i, on in enumerate(horizon):
             demand += row["avg"][i] + row["booked"][i]
@@ -5624,7 +5635,7 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
                                                               rounding=ROUND_HALF_UP),
                           "want": want, "have": have, "booked": row["booked"][i]})
             need = max(need, want - have)
-            room = min(room, have - want - safety)
+            room = min(room, have - want - keep)
         if not (row["free"] or any(row["back"]) or demand):
             continue
         # Дольше всех стоящие - первыми: перевезти их и есть снижение
@@ -5633,7 +5644,8 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
         out_rows.append({"location": place, "model": model, "free": row["free"],
                          "back": sum(row["back"]), "steps": steps,
                          "need": max(need, 0), "spare": max(room, 0),
-                         "bikes": row["bikes"], "covered": 0})
+                         "bikes": row["bikes"], "covered": 0,
+                         "store": place in stores})
     out_rows.sort(key=lambda r: (order[r["location"]], r["model"]))
 
     left = {(r["location"], r["model"]): r["spare"] for r in out_rows}
@@ -5643,11 +5655,13 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
     for target in sorted((r for r in out_rows if r["need"]),
                          key=lambda r: (-r["need"], order[r["location"]], r["model"])):
         want = target["need"]
+        # При равном излишке - со склада: он для того и есть, а точка
+        # выдачи, отдав велосипед, теряет того, кто стоит под курьера.
         sources = sorted((r for r in out_rows if r["model"] == target["model"]
                           and r["location"] != target["location"]
                           and left[(r["location"], r["model"])] > 0),
                          key=lambda r: (-left[(r["location"], r["model"])],
-                                        order[r["location"]]))
+                                        not r["store"], order[r["location"]]))
         for source in sources:
             if want <= 0:
                 break
@@ -5660,6 +5674,7 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
             pool = by_key[key]["bikes"][taken[key]:]
             taken[key] += count
             moves.append({"source": source["location"], "target": target["location"],
+                          "store": source["store"],
                           "model": target["model"], "count": count,
                           "bikes": [{**b, "picked": i < count} for i, b in
                                     enumerate(pool[:count + TRANSFER_EXTRA_CHOICES])]})
@@ -5668,15 +5683,29 @@ def transfer_plan(*, points: Sequence[str], bikes: Iterable[Mapping[str, Any]],
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for move in moves:
         group = groups.setdefault((move["source"], move["target"]), {
-            "source": move["source"], "target": move["target"], "lines": [], "count": 0})
+            "source": move["source"], "target": move["target"], "lines": [], "count": 0,
+            "store": move["store"]})
         group["lines"].append(move)
         group["count"] += move["count"]
     for group in groups.values():
-        group["label"] = (f"с {group['source']} на {group['target']}: " + ", ".join(
-            f"{m['count']} × {m['model']}" for m in group["lines"]))
+        group["label"] = (f"{transfer_from(group['source'], store=group['store'])} "
+                          f"на {group['target']}: " + ", ".join(
+                              f"{m['count']} × {m['model']}" for m in group["lines"]))
     return {"rows": out_rows, "moves": list(groups.values()), "days": horizon,
             "safety": safety, "weeks": weeks,
             "short": sum(r["need"] - r["covered"] for r in out_rows)}
+
+
+def transfer_from(source: str, *, store: bool = False) -> str:
+    """«Откуда» в подписи перевозки. Точки названы улицами («с
+    Адоратского»), и «с» к ним годится; склад - существительное, и «с
+    Склад» читается неграмотно: «со склада», а склад со своим именем -
+    «со склада «Центральный»»."""
+    if not store:
+        return f"с {source}"
+    if str(source).strip().casefold() == "склад":
+        return "со склада"
+    return f"со склада «{source}»"
 
 
 # ─────────────────── закупки основных средств ───────────────────
@@ -5844,7 +5873,8 @@ def check_location(raw: Any, names: Iterable[str] | None = None) -> Check:
     return Check(True, value)
 
 
-def point_choices(places: Iterable[Mapping[str, Any]], *current: Any) -> list[str]:
+def point_choices(places: Iterable[Mapping[str, Any]], *current: Any,
+                  clients: bool = False) -> list[str]:
     """Точки для выпадающего списка и проверки формы - одни на всю панель.
 
     Действующие точки справочника в его порядке (sort, name), плюс текущие
@@ -5852,15 +5882,88 @@ def point_choices(places: Iterable[Mapping[str, Any]], *current: Any) -> list[st
     остаётся в карточке, а список без неё молча стёр бы её при первом же
     сохранении. Справочник пуст - константа LOCATIONS: пустая база не
     должна ломать формы.
+
+    clients - только точки выдачи (выдача, касса, акция, заявка): склад
+    не предлагается и текущим значением - велосипед со склада выдают на
+    точке, а не «как у велосипеда».
     """
     rows = [p for p in places if p.get("name")]
-    names = ([p["name"] for p in rows if p.get("active", True) is not False]
+    hidden = warehouse_names(rows) if clients else set()
+    names = ([p["name"] for p in rows
+              if p.get("active", True) is not False and p["name"] not in hidden]
              if rows else list(LOCATIONS))
     for value in current:
         value = str(value or "").strip()
-        if value and value not in names:
+        if value and value not in names and value not in hidden:
             names.append(value)
     return names
+
+
+# Вид точки справочника (crm.locations.kind). Склад - тоже точка: на нём
+# стоят велосипеды и батареи, его считают пересчётом, на него ставят
+# задачи, с него возят переброской, и в «По точкам» он своей строкой. Но
+# клиенту его не называют и с него не выдают: бот, заявка, лист ожидания,
+# выдача и касса берут только точки выдачи (client_points).
+LOCATION_KINDS = {"point": "Точка выдачи", "warehouse": "Склад"}
+
+
+def is_warehouse(place: Mapping[str, Any] | None) -> bool:
+    return bool(place) and str((place or {}).get("kind") or "point") == "warehouse"
+
+
+def warehouse_names(places: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Имена складов справочника - открытых и закрытых: закрытый склад
+    точкой выдачи от этого не становится."""
+    return {str(p["name"]) for p in places if p.get("name") and is_warehouse(p)}
+
+
+def client_points(places: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Точки, куда зовут клиента и откуда выдают: открытые и не склад.
+    Порядок - справочника."""
+    return [dict(p) for p in places
+            if p.get("name") and p.get("active", True) is not False
+            and not is_warehouse(p)]
+
+
+def point_address(place: Mapping[str, Any] | None) -> str:
+    """Адрес точки без своего города: «г. Казань, ул. Павлюхина, 97» ->
+    «ул. Павлюхина, 97». Город у точки отдельным полем (группа
+    справочника), и в выпадающем списке он только удлинял бы строку.
+    Чужой город в адресе остаётся: «г. Зеленодольск, …» у казанской точки
+    - это уже сведения, а не повтор."""
+    if not place:
+        return ""
+    parts = [p.strip() for p in str(place.get("address") or "").split(",")]
+    parts = [p for p in parts if p]
+    city = str(place.get("city") or "").strip()
+    if parts and city and re.fullmatch(rf"(г\.?\s*|город\s+)?{re.escape(city)}",
+                                       parts[0], re.IGNORECASE):
+        parts = parts[1:]
+    return ", ".join(parts)
+
+
+def point_label(place: Mapping[str, Any] | None) -> str:
+    """Подпись точки в списках и заголовках: «Павлюхина · ул. Павлюхина, 97».
+
+    Имя - ключ точки (оно в value поля и в карточках), адрес - для глаз:
+    сотрудник выбирает точку по улице, а не по внутреннему имени. Нет
+    адреса или он и есть имя - одно имя."""
+    if not place:
+        return ""
+    name = str(place.get("name") or "").strip()
+    address = point_address(place)
+    if not address or address.casefold() == name.casefold():
+        return name
+    return f"{name} · {address}" if name else address
+
+
+def point_labels(places: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Имя точки -> подпись, короткий адрес и «склад» - для фильтров
+    шаблонов `place` и `place_addr`: одна выборка справочника на страницу,
+    а не поле в каждом контексте."""
+    return {str(p["name"]): {"label": point_label(p), "address": point_address(p),
+                             "warehouse": is_warehouse(p)}
+            for p in places if p.get("name")}
 
 
 def bike_on_rent(bike: Mapping[str, Any]) -> bool:
@@ -9664,7 +9767,7 @@ def _place_words(raw: Any) -> list[str]:
 
 def match_location(text: Any, locations: Iterable[Mapping[str, Any]]) -> str | None:
     """Точка справочника по свободному тексту - строке «адрес» формы сдачи:
-    «Адоратского 15», «ул. Павлюхина, 97А».
+    «Адоратского 15», «ул. Павлюхина, 97».
 
     Сравниваются имя, вывеска (public_title) и адрес: без регистра, ё=е,
     без знаков препинания, без слов вроде «ул.» и без названия города -
@@ -10811,7 +10914,8 @@ BOOKING_DAYS_AHEAD = 3
 
 def booking_models(models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[str, Any]],
                    *, aliases: Mapping[str, str] | None = None,
-                   location: str | None = None) -> list[dict[str, Any]]:
+                   location: str | None = None,
+                   stores: Iterable[str] = ()) -> list[dict[str, Any]]:
     """Модели каталога для выбора в кабинете, со счётом свободных сейчас.
 
     Модель без свободных остаётся в списке: заявка на неё - это лист
@@ -10819,12 +10923,16 @@ def booking_models(models: Iterable[Mapping[str, Any]], bikes: Iterable[Mapping[
     location - выбранная точка (имя из справочника): считаются свободные
     только на ней, иначе «свободно 2» звало бы на точку, где их нет. Без
     неё - весь парк: так при одной точке, где место могли и не вести.
+    Склады (`stores`) не в счёт никогда: с них клиенту не выдают.
     """
+    stores = set(stores)
     free: dict[str, int] = {}
     for bike in bikes:
         if bike.get("status") != "available":
             continue
         if location is not None and bike.get("location") != location:
+            continue
+        if bike.get("location") and bike["location"] in stores:
             continue
         title = catalogue_model(bike.get("model"), aliases)
         free[title] = free.get(title, 0) + 1
@@ -10846,13 +10954,13 @@ def booking_points(locations: Iterable[Mapping[str, Any]],
     Счёт - сумма того, что на точке покажет шаг моделей: велосипед модели
     не из каталога выбрать нельзя, и обещать его незачем. Порядок - как
     в справочнике, а не по запасу: точку выбирают по месту, и список не
-    должен переставляться от выдачи к выдаче.
+    должен переставляться от выдачи к выдаче. Склада в списке нет.
     """
     models, bikes = list(models), list(bikes)
     return [{"id": int(loc["id"]), "title": str(loc.get("public_title") or loc["name"]),
              "free": sum(m["free"] for m in booking_models(
                  models, bikes, aliases=aliases, location=str(loc["name"])))}
-            for loc in locations if loc.get("active", True)]
+            for loc in client_points(locations)]
 
 
 def booking_when(raw: Any, *, today: date) -> date | None:
@@ -10926,11 +11034,16 @@ def waitlist_hours_ok(setting: Mapping[str, Any] | None, now: datetime) -> bool:
 
 
 def waitlist_fits(bike: Mapping[str, Any], booking: Mapping[str, Any], *,
-                  aliases: Mapping[str, str] | None = None) -> bool:
+                  aliases: Mapping[str, str] | None = None,
+                  stores: Iterable[str] = ()) -> bool:
     """Велосипед годится заявке: свободен, та же модель (заводское имя
     парка сводится к названию каталога) и та же точка. Заявка без точки
-    (точка была одна) ждёт на любой, без модели - любую."""
+    (точка была одна) ждёт на любой, без модели - любую. Велосипед на
+    складе (`stores`) не годится никакой: с него не выдают, и звать
+    клиента «освободился» к нему - звать туда, куда его не пустят."""
     if bike.get("status", "available") != "available":
+        return False
+    if bike.get("location") and str(bike["location"]) in set(stores):
         return False
     want = str(booking.get("model") or "").strip()
     if want and (catalogue_model(bike.get("model"), aliases)
@@ -10958,7 +11071,8 @@ def waitlist_taken(bike: Mapping[str, Any], bookings: Iterable[Mapping[str, Any]
 
 
 def waitlist_queue(bike: Mapping[str, Any], bookings: Iterable[Mapping[str, Any]], *,
-                   today: date, aliases: Mapping[str, str] | None = None) -> list[dict]:
+                   today: date, aliases: Mapping[str, str] | None = None,
+                   stores: Iterable[str] = ()) -> list[dict]:
     """Кого звать к освободившемуся велосипеду - по очереди подачи.
 
     Заявка, поданная уже после освобождения, не ждала: клиент при подаче
@@ -10977,7 +11091,7 @@ def waitlist_queue(bike: Mapping[str, Any], bookings: Iterable[Mapping[str, Any]
             and not _called_to(bike, b)
             and (freed is None or not isinstance(b.get("created_at"), datetime)
                  or b["created_at"] < freed)
-            and waitlist_fits(bike, b, aliases=aliases)]
+            and waitlist_fits(bike, b, aliases=aliases, stores=stores)]
     rows.sort(key=lambda b: int(b.get("id") or 0))
     return rows
 

@@ -50,8 +50,8 @@
       </select></label>
     <label>Точка
       <select name="location"><option value="">без точки</option>
-        {% for l in locations %}<option value="{{ l.name }}" {% if deal.location == l.name %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
-        {% if deal.location and deal.location not in locations|map(attribute='name')|list %}<option value="{{ deal.location }}" selected>{{ deal.location }}</option>{% endif %}
+        {% for l in locations %}<option value="{{ l.name }}" {% if deal.location == l.name %}selected{% endif %}>{{ l.name|place }}</option>{% endfor %}
+        {% if deal.location and deal.location not in locations|map(attribute='name')|list %}<option value="{{ deal.location }}" selected>{{ deal.location|place }}</option>{% endif %}
       </select></label>
     <label>Заметка <textarea name="note" rows="3" maxlength="2000">{{ deal.note or '' }}</textarea></label>
     <button type="submit">Сохранить</button>

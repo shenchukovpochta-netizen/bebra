@@ -415,6 +415,10 @@ table.editable td.grow input{width:100%;min-width:80px}
 }
 @media (max-width:700px){.scroll-hint{display:block}}
 td.nowrap,th.nowrap,span.nowrap{white-space:nowrap}
+/* Адрес точки под именем в «По точкам»: в узкой колонке он ломался на
+   три строки и удваивал высоту строки. На телефоне - карточка, там
+   перенос уместен. */
+@media (min-width:641px){td small.addr{white-space:nowrap}}
 td.actions{white-space:nowrap;text-align:right}
 td.actions button{padding:5px 10px;font-size:13px}
 input.mini{text-align:right;font-variant-numeric:tabular-nums}
@@ -649,6 +653,7 @@ nav.tabs:is(.incoming-tabs,:not(.seg):has(>a:nth-child(5)))>a.on::after{content:
 .flash{padding:14px 18px;border-radius:14px;margin-bottom:18px;background:var(--okbg);color:var(--text);
   box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ok) 40%,transparent)}
 .flash.err{background:var(--badbg);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--bad) 45%,transparent)}
+.flash.warn{background:var(--warnbg);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--warn) 45%,transparent)}
 /* Пары «подпись - значение» - строками с линией, как карточка клиента образца. */
 dl{display:grid;grid-template-columns:max-content 1fr;gap:0 20px;margin:0}
 dt,dd{padding:8px 0;border-bottom:1px solid var(--line)}

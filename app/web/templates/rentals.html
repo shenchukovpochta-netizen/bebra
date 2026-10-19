@@ -22,7 +22,7 @@
       <summary>Точка</summary>
       <div class="fields">
         <select name="location" aria-label="Точка выдачи"><option value="">любая точка</option>
-          {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+          {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}
           <option value="none" {% if location == 'none' %}selected{% endif %}>{{ NO_POINT_TITLE }}</option>
         </select>
       </div>

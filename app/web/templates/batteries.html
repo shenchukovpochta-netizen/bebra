@@ -8,7 +8,7 @@
       {% for code, label in BATTERY_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }} ({{ summary.get(code, 0) }})</option>{% endfor %}
     </select>
     <select name="location"><option value="">любая точка</option>
-      {% for loc in locations %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+      {% for loc in locations %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}
       <option value="none" {% if location == 'none' %}selected{% endif %}>не на точке</option>
     </select>
     <button type="submit">Найти</button>

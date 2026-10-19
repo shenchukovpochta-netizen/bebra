@@ -44,7 +44,7 @@
       <select name="scope">{% for code, label in TAKE_SCOPES.items() %}{% if code != 'all' or all_free %}<option value="{{ code }}">{{ label }}</option>{% endif %}{% endfor %}</select>
     </label>
     <label>Точка
-      <select name="location"><option value="">—</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select>
+      <select name="location"><option value="">—</option>{% for loc in places %}<option value="{{ loc }}">{{ loc|place }}</option>{% endfor %}</select>
     </label>
     {% endif %}
     <label class="wide">Комментарий<input type="text" name="note" maxlength="2000" placeholder="Что считаем, кто помогает"></label>

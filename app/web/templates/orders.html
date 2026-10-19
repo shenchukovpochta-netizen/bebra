@@ -14,7 +14,7 @@
         <select name="status" aria-label="Статус"><option value="">все статусы</option>{% for code, label in ORDER_STATUSES.items() %}<option value="{{ code }}" {% if status == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
         <select name="payer" aria-label="Плательщик"><option value="">любой плательщик</option>{% for code, label in PAYERS.items() %}<option value="{{ code }}" {% if payer == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
         <select name="location" aria-label="Точка ремонта"><option value="">любая точка</option>
-          {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+          {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}
           <option value="none" {% if location == 'none' %}selected{% endif %}>{{ NO_POINT_TITLE }}</option>
         </select>
         <button type="submit">Показать</button>

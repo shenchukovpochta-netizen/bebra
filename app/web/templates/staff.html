@@ -38,7 +38,7 @@
         {% if can_manage %}
         <form method="post" action="/staff/{{ s.id }}/location" class="inline-form">
           {# Закрытая точка остаётся в строке: список без неё сбросил бы её при первом сохранении. #}
-          <select name="location" aria-label="Своя точка"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location }}</option>{% endif %}</select>
+          <select name="location" aria-label="Своя точка"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if s.location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}{% if s.location and s.location not in places %}<option value="{{ s.location }}" selected>{{ s.location|place }}</option>{% endif %}</select>
           <button type="submit" class="ghost small">Задать</button>
         </form>
         {% else %}{{ s.location or '—' }}{% endif %}
@@ -110,7 +110,7 @@
       {% endfor %}
     </fieldset>
     <div class="grid2">
-      <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if add_form.location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}</select></label>
+      <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}" {% if add_form.location == loc %}selected{% endif %}>{{ loc|place }}</option>{% endfor %}</select></label>
       <label>Срок доступа <select name="term"><option value="">бессрочно</option>{% for code, (label, _) in STAFF_TERMS.items() %}<option value="{{ code }}" {% if add_form.term == code %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
       <label>Логин <input name="login" autocomplete="off" value="{{ add_form.login }}" placeholder="пусто — соберём из ФИО"></label>
       <label>Пароль <input name="password" type="password" autocomplete="new-password" placeholder="пусто — придумает панель"></label>

@@ -62,7 +62,7 @@
     <tr><th>Точка</th><th>Адрес</th><th>Режим</th><th>Телефон</th><th></th></tr>
     {% for p in points %}
     <tr>
-      <td data-label="Точка"><b>{{ p.name }}</b>{% if p.city %}<br><small class="muted">{{ p.city }}</small>{% endif %}</td>
+      <td data-label="Точка"><b>{{ p.name }}</b>{% if p.kind == 'warehouse' %} <span class="tag">склад</span>{% endif %}{% if p.city %}<br><small class="muted">{{ p.city }}</small>{% endif %}</td>
       <td data-label="Адрес">{{ p.address or '—' }}</td>
       <td data-label="Режим">{{ p.hours or '—' }}</td>
       <td data-label="Телефон">{{ p.phone or '—' }}</td>
@@ -71,10 +71,11 @@
     {% endfor %}
   </table>
   {% endif %}
-  <p class="muted">Свежая база приезжает с двумя точками поставки (Казань):
-    закройте их здесь или переименуйте и поправьте в <a href="/locations">«Точках»</a>
-    — там же координаты, порядок и описание. Закрытая точка остаётся в
-    карточках, выдачи с неё нет.{% if closed %} Закрыты: {{ closed|join(', ') }}.{% endif %}</p>
+  <p class="muted">Свежая база приезжает с двумя точками поставки и складом
+    (Казань): закройте их здесь или переименуйте и поправьте в <a href="/locations">«Точках»</a>
+    — там же координаты, порядок, описание и галочка «склад». Закрытая точка
+    остаётся в карточках, выдачи с неё нет. Склад клиенту не называется, и
+    телефон с режимом ему не нужны.{% if closed %} Закрыты: {{ closed|join(', ') }}.{% endif %}</p>
   {% if writable %}
   <h3>Добавить точку</h3>
   <form method="post" action="/setup/points" class="grid2">
@@ -132,7 +133,7 @@
     <input type="hidden" name="once" value="{{ once() }}">
     <label>ФИО <input name="name" required autocomplete="off" placeholder="Кузнецов Тимур"></label>
     <label>Логин <input name="login" autocomplete="off" placeholder="пусто — соберём из ФИО"></label>
-    <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}</select></label>
+    <label>Своя точка <select name="location"><option value="">не задана</option>{% for loc in places %}<option value="{{ loc }}">{{ loc|place }}</option>{% endfor %}</select></label>
     <button type="submit">Завести: {{ r.title|lower }}</button>
   </form>
   {% endif %}

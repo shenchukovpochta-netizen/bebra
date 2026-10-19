@@ -283,6 +283,7 @@ MAX-бот исключение: у него своя база `mybike_max` (и�
 |---|---|
 | текст, который видит клиент | `app/texts.py`, переводы `app/i18n/*.py` |
 | адреса, режим и телефоны точек | справочник в панели (Настройки → «Точки»); бот читает его снимком `app/crm/points.py`, зашитый текст в `app/faq.py` - запасной; часы в заявке, закрытии, напоминании и шаге «Когда приедете?» - `{hours}` из `points.hours_note` |
+| склад: где он точка, а где нет | `locations.kind` (`point` / `warehouse`); `logic.is_warehouse`, `warehouse_names`, `client_points` и `point_choices(..., clients=True)`; клиентские списки - `db.locations(clients_only=True)` (бот, заявка, лист ожидания), `client_location_names` в `app/web/app.py` (выдача, ручная аренда, касса, акция); отказ выдачи со склада - `service.open_rental`; склад-источник переброски - `transfer_plan(stores=...)` |
 | ответ на частый вопрос | `app/faq.py`, переводы `app/faq_i18n.py` |
 | число по точке, отчёт «По точкам» | `days_by_status_location`, `points_rows` в `app/crm/logic.py`; `*_by_location` и общее правило денег `_ledger_rentals` в `app/crm/db.py`; `points_report` в `app/web/app.py` |
 | переброска между точками | чистая `transfer_plan` (спрос `weekday_demand` + заявки, предложение по `freeing_soon`, жадные перевозки, запас `transfer_settings`) в `app/crm/logic.py`; выдачи по дням `CrmDB.issues_by_day`; одна выборка на сводку, отчёт и точку - `point_advice` в `app/web/app.py`; перевозка - `service.transfer_bikes` через `update_bike(keep_rented_location=True, from_location=...)`, маршрут `/bikes/transfer`, запас - `/locations/transfer` |
@@ -1126,7 +1127,12 @@ Jinja2, 113 файлов в `app/web/templates/`, без сборки и без 
 шаблон, действие это POST формы и редирект. Справочники и помощники прокидываются один раз в
 `templates.env.globals` при создании приложения (`BIKE_STATUSES`, `ORDER_STATUSES`,
 `can_view`, `money`, `home_for` и ещё около сотни), поэтому в контекст маршрута их класть не
-нужно. Свои фильтры два: `|dmy` и `|iso`.
+нужно. Свои фильтры: `|dmy`, `|iso` и подписи точки `|place` («Павлюхина · ул.
+Павлюхина, 97», `logic.point_label`) и `|place_addr` (короткий адрес). Подписи - из одной
+выборки справочника на запрос: её собирает страж `auth` (кэш на полминуты, сброс любой
+записью) и кладёт в `request.state.place_info` и в переменную контекста `_PLACE_INFO` -
+вторую видят и макросы, импортированные без контекста. Значение `<option>` остаётся
+именем точки: подпись - только для глаз.
 
 Боковое меню - дерево `NAV` в `app/web/nav.py` (группы, пункты, подпункты, значок, раздел
 прав, адреса, ключ счётчика); `base.html` его только рисует. Пункт показывается по
