@@ -726,18 +726,19 @@ class FakeCrm:
         orders = [o for o in self.orders_.values()
                   if o.get("client_id") == client_id and o.get("payer") == "client"]
         external = [o for o in orders if o.get("bike_id") is None]
-        bought = False
-        for x in mine:
+        bought = None
+        for x in sorted(mine, key=lambda y: y["id"]):
             bike = self.bikes_.get(x.get("bike_id"))
             if x["status"] != "closed" or not bike or bike["status"] != "sold":
                 continue
             if x["id"] == max(y["id"] for y in self.rentals_.values()
                               if y.get("bike_id") == bike["id"]):
-                bought = True
+                bought = bike["model"]
         notes = sorted({o.get("object_note") for o in external if o.get("object_note")})
         return {"last_model": last_bike["model"] if last_bike else None,
                 "repairs_count": len(orders), "external_repairs": len(external),
-                "repair_objects": " | ".join(notes) or None, "bought": bought}
+                "repair_objects": " | ".join(notes) or None,
+                "bought": bought is not None, "bought_model": bought}
 
     async def client(self, client_id):
         c = self.clients_.get(client_id)

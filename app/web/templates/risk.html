@@ -7,11 +7,18 @@
     <a href="/risk" class="on">Риск клиента</a><a href="/readiness">Готовность</a></nav>
 </div>
 
+{% if not enabled %}<p class="flash">Оценка риска выключена: в списке клиентов, карточке клиента, на выдаче и в быстрой форме бота её нет. Правило, пороги и залог ниже сохраняются — включите галочкой, если понадобится.</p>{% endif %}
 <div class="cols">
 <section class="card">
-  <h2>Залог по уровню</h2>
+  <h2>Показ и залог по уровню</h2>
   <fieldset {% if not can_edit(staff, 'settings') %}disabled{% endif %} class="plain">
   <form method="post" action="/risk">
+    <label class="check"><input type="checkbox" name="enabled" value="1"
+      {% if enabled %}checked{% endif %}> Показывать оценку риска клиента</label>
+    <p class="muted">Включено: уровень и причины видны в карточке клиента,
+      на шагах выдачи и в предпросмотре выдачи в боте, в списке клиентов
+      есть фильтр по риску, а в выгрузке — колонка. Выключено — блока
+      риска нигде нет; считать по правилу ниже система не перестаёт.</p>
     <div class="grid2">
       {% for code, label in RISK_LEVELS.items() %}
       <label>{{ 'Нет истории' if code == 'none' else 'Риск ' ~ label }}, ₽
@@ -31,7 +38,7 @@
   <dl>
     {% for code, label in RISK_LEVELS.items() %}
     <dt>{{ 'Нет истории' if code == 'none' else 'Риск ' ~ label }}</dt>
-    <dd>{% if counts[code] and can_view(staff, 'clients') %}<a href="/clients?risk={{ code }}">{{ counts[code] }}</a>{% else %}{{ counts[code] }}{% endif %}</dd>
+    <dd>{% if enabled and counts[code] and can_view(staff, 'clients') %}<a href="/clients?risk={{ code }}">{{ counts[code] }}</a>{% else %}{{ counts[code] }}{% endif %}</dd>
     {% endfor %}
   </dl>
   <p class="muted">Оценка — подсказка оператору, а не решение: выдачу она

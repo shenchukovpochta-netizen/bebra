@@ -745,7 +745,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         ridden=logic.ridden, ridden_per_day=logic.ridden_per_day,
         INTENTS=logic.INTENTS,
         CLIENT_STATUSES=logic.CLIENT_STATUSES, RENTAL_STATUSES=logic.RENTAL_STATUSES,
-        CLIENT_GROUPS=logic.CLIENT_GROUPS,
+        CLIENT_GROUPS=logic.CLIENT_GROUPS, CLIENT_SOURCES=logic.CLIENT_SOURCES,
         RISK_LEVELS=logic.RISK_LEVELS,
         BILLING=logic.BILLING, role_title=logic.role_title,
         greeting=lambda: logic.greeting(datetime.now().hour),
@@ -2347,6 +2347,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────────── клиенты ───────────────────────
 
+    async def risk_shown() -> bool:
+        """Оценка риска видна, только если владелец включил её на странице
+        «Риск клиента» (по умолчанию выключена)."""
+        return logic.risk_enabled(await crm.settings())
+
+    async def risk_of(client_id: int) -> dict | None:
+        """Оценка клиента для карточки и выдачи; выключена - None, и блока
+        риска на странице нет вовсе."""
+        if not await risk_shown():
+            return None
+        return await service.client_risk(crm, client_id, today=date.today())
+
     async def clients_by_risk(rows: list[dict], risk: str) -> list[dict]:
         """Фильтр списка по уровню риска: оценка считается только когда
         фильтр выбран - на каждом открытии списка она не нужна."""
@@ -2365,12 +2377,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     async def clients_found(request: Request) -> dict:
         """Клиенты за всё время: плитки по всей базе и строки выбранной
-        группы с поиском и риском - одно на страницу и её выгрузку."""
+        группы с поиском, видом техники и риском - одно на страницу и её
+        выгрузку (выгрузка - вся найденная выборка, не страница)."""
         p = request.query_params
         q = p.get("q") or ""
         status = p.get("status") or ""
+        # Риск выключен (по умолчанию) - фильтра нет: ?risk=high из старой
+        # закладки показывает всех, а не прячет клиентов по скрытой оценке.
+        risk_on = await risk_shown()
         risk = p.get("risk") or ""
-        risk = risk if risk in logic.RISK_LEVELS else ""
+        risk = risk if risk_on and risk in logic.RISK_LEVELS else ""
         # Должники - это деньги: без «Финансов» группы нет (как и сортировки
         # по балансу), и ?group=debt - это просто все.
         groups = client_groups(request)
@@ -2384,15 +2400,20 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         kind = p.get("kind") if p.get("kind") in logic.TECH_KIND_TITLES else ""
         models = logic.top_values((r.get("last_model") for r in everyone), limit=10)
         model = p.get("model") if p.get("model") in models else ""
-        if kind:
-            found = [r for r in found if kind in logic.client_kinds(r)]
         if model:
             found = [r for r in found if r.get("last_model") == model]
         # С фильтром риска - по всей группе: иначе первые по алфавиту молча
         # прятали бы рискованных с фамилией на «Я».
         found = await clients_by_risk(found, risk)
-        return {"q": q, "status": status, "risk": risk, "group": group,
-                "kind": kind, "model": model, "models": models,
+        # Счётчики видов - внутри группы, поиска, модели и риска, но до
+        # самого вида: переключатель показывает, сколько будет по каждому.
+        kind_counts = logic.client_kind_counts(found)
+        kind_total = len(found)
+        if kind:
+            found = [r for r in found if kind in logic.client_kinds(r)]
+        return {"q": q, "status": status, "risk": risk, "risk_on": risk_on,
+                "group": group, "kind": kind, "model": model, "models": models,
+                "kind_counts": kind_counts, "kind_total": kind_total,
                 "tiles": logic.client_tiles(everyone), "found": found}
 
     def client_groups(request: Request) -> dict[str, str]:
@@ -2402,10 +2423,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.get("/clients")
     async def clients(request: Request) -> Response:
-        """Сводка всех клиентов за всё время и действующих: плитки по группам
-        (действующие, бывшие, ни разу не брали, должники), вкладка группы и
-        по каждому - сколько аренд, дней с велосипедом, когда был, сколько
-        заплатил. Рубли - только с правом на «Финансы»."""
+        """Сводка всех клиентов за всё время: плитки и вкладки по группам
+        (logic.CLIENT_GROUPS - словами владельца), переключатель видов
+        техники и по каждому - вид техники, сколько аренд, дней с
+        велосипедом, когда был, сколько заплатил. Рубли - только с правом
+        на «Финансы»."""
         data = await clients_found(request)
         allowed = (CLIENT_SORTS if may_view(request, "finance") else
                    {k: v for k, v in CLIENT_SORTS.items() if k not in CLIENT_MONEY_SORTS})
@@ -2416,11 +2438,14 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                       "tariff_name": r["tariff_name"], "bike_model": r.get("bike_model"),
                       "bike_code": r.get("bike_code")} if r.get("rental_id") else None
             r["summary"] = summarize(rental, r.get("balance", 0))
+            r["kinds"] = logic.client_kind_titles(r)
         return render(request, "clients.html", rows=tools["rows"], tools=tools,
                       q=data["q"], status=data["status"], risk=data["risk"],
+                      risk_on=data["risk_on"],
                       group=data["group"], tiles=data["tiles"],
                       kind=data["kind"], model=data["model"], models=data["models"],
-                      kinds=logic.TECH_KIND_TITLES,
+                      kinds=logic.TECH_KIND_TITLES, kind_order=logic.TECH_KIND_ORDER,
+                      kind_counts=data["kind_counts"], kind_total=data["kind_total"],
                       groups=client_groups(request),
                       views=await views_of(request, "/clients"))
 
@@ -2432,33 +2457,48 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             return denied(request, "finance")
         data = await clients_found(request)
         found = data["found"]
-        # Выгружают то, что видят: та же группа, поиск и фильтр риска, что
-        # у страницы, и уровень колонкой - оценка всё равно посчитана.
-        if not data["risk"]:
+        # Выгружают то, что видят: та же группа, поиск, вид техники и фильтр
+        # риска, что у страницы, - вся выборка, а не страница списка. Группа
+        # «Все клиенты» - это база всех клиентов одним файлом. Уровень риска
+        # колонкой - только когда оценка включена.
+        if data["risk_on"] and not data["risk"]:
             risks = await service.client_risks(crm, [c["id"] for c in found],
                                                today=date.today())
             found = [{**c, "risk": risks.get(c["id"])} for c in found]
+        groups = client_groups(request)
         rows = []
         for c in found:
             rental = ({"status": "active", "billed_until": c["billed_until"],
                        "price": c["price"], "period_days": c["period_days"]}
                       if c.get("rental_id") else None)
             s = summarize(rental, c.get("balance", 0))
-            rows.append([c["full_name"], c["phone"], logic.CLIENT_STATUSES.get(c["status"]),
-                         ("@" + c["username"]) if c.get("username") else
-                         ("есть" if c.get("tg_id") else ""),
-                         logic.to_money(c.get("balance", 0)), c.get("bike_code"),
-                         c.get("tariff_name"), s.get("covered_until"),
-                         c.get("rentals_count") or 0, c.get("rented_days") or 0,
-                         c.get("first_on"), c.get("last_on"),
-                         logic.to_money(c.get("paid_total") or 0),
-                         c.get("contract_no"), c.get("created_at"),
-                         (c.get("risk") or {}).get("label")])
-        return await table(ext, "clients",
-                    ["ФИО", "Телефон", "Статус", "Telegram", "Баланс", "Велосипед",
-                     "Тариф", "Оплачено до", "Аренд", "Дней с велосипедом",
-                     "Первая аренда", "Последний день", "Оплатил за всё время",
-                     "Договор", "Добавлен", "Риск"], rows)
+            balance = logic.to_money(c.get("balance", 0))
+            row = [c["full_name"], c["phone"],
+                   ", ".join(logic.client_group_titles(c, groups)),
+                   ", ".join(logic.client_kind_titles(c)),
+                   c.get("last_model"), c.get("bought_model"), c.get("repair_objects"),
+                   c.get("first_on"), c.get("last_on"),
+                   c.get("rentals_count") or 0, c.get("rented_days") or 0,
+                   logic.to_money(c.get("paid_total") or 0),
+                   max(-balance, Decimal(0)), balance,
+                   logic.CLIENT_CHANNELS.get(c.get("channel") or "", ""),
+                   logic.CLIENT_SOURCES.get(c.get("source") or "", ""),
+                   logic.CLIENT_STATUSES.get(c["status"]),
+                   ("@" + c["username"]) if c.get("username") else
+                   ("есть" if c.get("tg_id") else ""),
+                   c.get("bike_code"), c.get("tariff_name"), s.get("covered_until"),
+                   c.get("contract_no"), c.get("created_at")]
+            if data["risk_on"]:
+                row.append((c.get("risk") or {}).get("label"))
+            rows.append(row)
+        head = ["ФИО", "Телефон", "Группы", "Вид техники", "Модель (последняя аренда)",
+                "Купил", "Что чинил у нас", "Первая аренда", "Последний день аренды",
+                "Аренд", "Дней с велосипедом", "Оплатил за всё время", "Долг",
+                "Баланс", "Откуда узнал", "Как заведён", "Статус", "Telegram",
+                "Велосипед сейчас", "Тариф", "Оплачено до", "Договор", "Добавлен"]
+        if data["risk_on"]:
+            head.append("Риск")
+        return await table(ext, "clients", head, rows)
 
     @app.get("/clients/new")
     async def client_new(request: Request) -> Response:
@@ -2555,7 +2595,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return render(request, "client.html", client=client, balance=balance,
                       presets=logic.fine_presets(await crm.work_types(active_only=True)),
                       rental=rental, summary=summarize(rental, balance),
-                      risk=await service.client_risk(crm, client_id, today=date.today()),
+                      risk=await risk_of(client_id),
                       ledger=await crm.ledger_of(client_id, 100),
                       rentals=await crm.client_rentals(client_id),
                       claim=await crm.pending_claim_of(client_id),
@@ -3253,7 +3293,8 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                    bot_username=await bot_username(),
                    # Риск - на всех шагах до подтверждения: оператор видит
                    # причины и залог, решает он сам, выдачу оценка не запирает.
-                   risk=await service.client_risk(crm, client["id"], today=date.today()))
+                   # Выключен владельцем (по умолчанию) - блока нет.
+                   risk=await risk_of(client["id"]))
         if active is not None or client.get("status") != "active":
             # Дальше идти некуда: сначала закрыть аренду или снять блокировку.
             return render(request, "issue.html", **ctx)
@@ -9030,8 +9071,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         counts = dict.fromkeys(logic.RISK_LEVELS, 0)
         for got in (await service.client_risks(crm, None, today=date.today())).values():
             counts[got["level"]] += 1
-        deposits = logic.risk_settings(await crm.settings())
+        settings = await crm.settings()
+        deposits = logic.risk_settings(settings)
         return render(request, "risk.html", rules=logic.risk_rules(), counts=counts,
+                      enabled=logic.risk_enabled(settings),
                       deposits={k: plain_amount(v) for k, v in deposits.items()},
                       medium=logic.RISK_MEDIUM, high=logic.RISK_HIGH)
 
@@ -9047,9 +9090,16 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                 flash(request, f"Залог «{logic.RISK_LEVELS[level]}»: {got.error}", "err")
                 return redirect("/risk")
             values[key] = got.value
+        # Галочка «показывать» - в той же форме: без неё выключено, как и
+        # по умолчанию. Пороги и залог сохраняются и при выключенной.
+        enabled = bool(data.get("enabled"))
+        await crm.set_setting(logic.RISK_ENABLED_KEY, "1" if enabled else "0",
+                              by=who(request))
         for key, value in values.items():
             await crm.set_setting(key, plain_amount(value), by=who(request))
-        flash(request, "Залог по уровням риска сохранён.")
+        flash(request, "Оценка риска включена, залог сохранён." if enabled else
+                       "Оценка риска выключена: в клиентах и на выдаче её нет. "
+                       "Залог сохранён.")
         return redirect("/risk")
 
     # ─────────────────────── уведомления ───────────────────────

@@ -948,10 +948,12 @@ class TestExtras(WebCase):
         r = self.client.get("/clients.csv?q=Иван")
         self.assertEqual(r.status_code, 200)
         text = r.content.decode("utf-8")
-        self.assertIn("ФИО;Телефон;Статус", text)
+        self.assertIn("ФИО;Телефон;Группы;Вид техники", text)
         # телефон начинается с «+» - отдаётся как формула-строка, чтобы Excel
         # не превратил его в число и не вычислял ничего из имён
-        self.assertIn('Иванов Иван;"=""+79990000000""";Активен;есть;3000,00', text)
+        self.assertIn('Иванов Иван;"=""+79990000000""";Ни разу не брали;', text)
+        # оплатил, долг, баланс; откуда узнал, как заведён, статус, Telegram
+        self.assertIn(";3000,00;0,00;3000,00;;в панели;Активен;есть;", text)
         self.assertNotIn("Иванов", self.client.get("/clients.csv?q=Сидор").text)
         # экспорт закрыт без входа
         self.client.post("/logout")

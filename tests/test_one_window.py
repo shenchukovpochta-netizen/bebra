@@ -101,8 +101,63 @@ class TestClientGroups(unittest.TestCase):
                          "«АКБ от самоката» - это АКБ")
         self.assertEqual(logic.client_kinds(bought), {"bike"}, "арендатор - велосипед")
         self.assertEqual(logic.tech_kinds("трицикл | что-то своё"), {"tricycle", "other"})
+        # вид словами главнее марки: Kugoo делает и самокаты, и велосипеды
+        self.assertEqual(logic.tech_kinds("Электровелосипед Kugoo V3 Pro, свой у курьера"),
+                         {"bike"})
+        self.assertEqual(logic.tech_kinds("Электросамокат Kugoo G2 Pro"), {"scooter"})
+        self.assertEqual(logic.tech_kinds("Kugoo M4 | Ninebot Max"), {"scooter"},
+                         "одна марка - самокат")
         self.assertEqual(logic.top_values(["A", "B", "A", None, "C", "B", "A"], limit=2),
                          ["A", "B"])
+
+    def test_groups_in_owners_words_and_order(self):
+        # Слова и порядок - из записи владельца; коды прежние: на них
+        # стоят сохранённые фильтры и закладки (?group=active).
+        self.assertEqual(list(logic.CLIENT_GROUPS.items()), [
+            ("all", "Все клиенты"), ("active", "Арендаторы вело"),
+            ("former", "Сдали вело"), ("bought", "Купили технику"),
+            ("repair", "Ремонтировались у нас"), ("debt", "Должники"),
+            ("never", "Ни разу не брали")])
+
+    def test_kind_in_every_group(self):
+        """Вид техники понятен в любой группе: арендатор, сдавший и
+        купивший - велосипед нашего парка, ремонтировавшийся - что приносил."""
+        renter = {"rental_id": 10, "rentals_count": 1}
+        former = {"rental_id": None, "rentals_count": 2}
+        buyer = {"rental_id": None, "rentals_count": 1, "bought": True,
+                 "bought_model": "Kugoo V3"}
+        fixer = {"rentals_count": 0, "external_repairs": 1,
+                 "repair_objects": "Трицикл грузовой"}
+        silent = {"rentals_count": 0, "external_repairs": 1, "repair_objects": None}
+        both = {"rental_id": 11, "rentals_count": 1, "external_repairs": 1,
+                "repair_objects": "АКБ 48В"}
+        nobody = {"rentals_count": 0}
+        for row, group in ((renter, "active"), (former, "former"), (buyer, "bought"),
+                           (fixer, "repair"), (silent, "repair")):
+            self.assertTrue(logic.client_in_group(row, group), group)
+        self.assertEqual(logic.client_kind_titles(renter), ["Велосипед"])
+        self.assertEqual(logic.client_kind_titles(former), ["Велосипед"])
+        self.assertEqual(logic.client_kind_titles(buyer), ["Велосипед"])
+        self.assertEqual(logic.client_kind_titles(fixer), ["Трицикл"])
+        self.assertEqual(logic.client_kind_titles(silent), ["Другое"],
+                         "наряд без слов в объекте - «другое», а не «ничего»")
+        self.assertEqual(logic.client_kind_titles(both), ["Велосипед", "АКБ"],
+                         "наш парк первым")
+        self.assertEqual(logic.client_kind_titles(nobody), [])
+        counts = logic.client_kind_counts([renter, former, buyer, fixer, silent, both,
+                                           nobody])
+        self.assertEqual(list(counts), ["bike", "scooter", "tricycle", "battery", "other"])
+        self.assertEqual(counts, {"bike": 4, "scooter": 0, "tricycle": 1, "battery": 1,
+                                  "other": 1})
+
+    def test_group_titles_for_export(self):
+        row = {"rental_id": None, "rentals_count": 1, "bought": True,
+               "balance": D(-100)}
+        self.assertEqual(logic.client_group_titles(row, logic.CLIENT_GROUPS),
+                         ["Сдали вело", "Купили технику", "Должники"])
+        no_money = {k: v for k, v in logic.CLIENT_GROUPS.items() if k != "debt"}
+        self.assertEqual(logic.client_group_titles(row, no_money),
+                         ["Сдали вело", "Купили технику"])
 
     def test_tiles(self):
         tiles = logic.client_tiles(self.ROWS)
@@ -286,10 +341,21 @@ class TestOneWindowPages(WebCase):
     def test_clients_summary(self):
         self.login()
         page = self.get_ok("/clients")
-        self.assertIn("клиентов за всё время", page)
-        found = dict(re.findall(r'group=(\w+)" (?:class="on")?\s*>[^<]*· (\d+)<', page))
-        self.assertEqual(found, {"all": "3", "active": "1", "former": "1", "never": "1",
-                                 "debt": "1", "bought": "0", "repair": "0"})
+        self.assertIn("база за всё время", page)
+        found = re.findall(r'group=(\w+)" (?:class="on")?\s*>([^<]*) · (\d+)<', page)
+        self.assertEqual(found, [("all", "Все клиенты", "3"),
+                                 ("active", "Арендаторы вело", "1"),
+                                 ("former", "Сдали вело", "1"),
+                                 ("bought", "Купили технику", "0"),
+                                 ("repair", "Ремонтировались у нас", "0"),
+                                 ("debt", "Должники", "1"),
+                                 ("never", "Ни разу не брали", "1")],
+                         "вкладки - словами владельца и в его порядке")
+        tiles = page.split('class="tiles"')[1].split("</div>")[0]
+        order = [tiles.index(w) for w in ("все клиенты", "арендаторы вело", "сдали вело",
+                                          "купили технику", "ремонтировались у нас",
+                                          "должники", "ни разу не брали")]
+        self.assertEqual(order, sorted(order), "плитки - те же слова в том же порядке")
         active = self.get_ok("/clients?group=active")
         self.assertIn("Иванов Иван", active)
         self.assertNotIn("Бывший Клиент", active)
@@ -300,6 +366,104 @@ class TestOneWindowPages(WebCase):
         self.assertIn("Новенький", csv)
         self.assertNotIn("Бывший Клиент", csv)
         self.assertIn("Оплатил за всё время", csv)
+
+    def fixer(self):
+        """Клиент, чинивший у нас свой самокат: наряд на чужую технику."""
+        from app.crm import service
+        fixer = run(self.crm.create_client(full_name="Самокатчик", phone="+79990000005"))
+        run(service.open_order(self.crm, bike=None, payer="client",
+                               client=run(self.crm.client(fixer)), complaint="мотор",
+                               object_note="Самокат Kugoo M4", tech_id=None, estimate=D(0),
+                               by="t"))
+        return fixer
+
+    def test_kinds_switch_and_column(self):
+        self.fixer()
+        self.login()
+        page = self.get_ok("/clients")
+        kinds = page.split('class="tabs seg tech-kinds"')[1].split("</nav>")[0]
+        self.assertEqual(re.findall(r">([^<]+) · (\d+)</a>", kinds),
+                         [("Вся техника", "4"), ("Велосипед", "2"), ("Самокат", "1")],
+                         "виды со счётчиками, пустые не показываются")
+        self.assertIn("<th>Вид техники</th>", page)
+        self.assertIn('data-label="Вид техники">Самокат', page)
+        self.assertIn('data-label="Вид техники">Велосипед', page)
+        repair = self.get_ok("/clients?group=repair")
+        kinds = repair.split('class="tabs seg tech-kinds"')[1].split("</nav>")[0]
+        self.assertEqual(re.findall(r">([^<]+) · (\d+)</a>", kinds),
+                         [("Вся техника", "1"), ("Самокат", "1")],
+                         "счётчики - внутри группы")
+        self.assertIn("group=repair&kind=scooter", kinds)
+        scooters = self.get_ok("/clients?group=all&kind=scooter")
+        self.assertIn("Самокатчик", scooters)
+        self.assertNotIn("Бывший Клиент", scooters)
+        # вкладка группы помнит выбранный вид
+        self.assertIn("&kind=scooter&group=repair", scooters)
+
+    def test_renter_who_bought_keeps_current_model(self):
+        """Выкупил велосипед раньше и снова в аренде на другом: под видом -
+        модель, на которой ездит сейчас, и «купил …» своей строкой."""
+        buyer = run(self.crm.create_client(full_name="Выкупивший", phone="+79990000007"))
+        sold = run(self.crm.create_bike(code="B-3", model="Monster"))
+        run(self.crm.create_rental(client_id=buyer, bike_id=sold,
+                                   tariff_id=self.tariff_id, tariff_name="Неделя",
+                                   period_days=7, price=D(3000), billing="auto",
+                                   started_on=date.today() - timedelta(days=60),
+                                   contract_no=None, created_by="t"))
+        run(self.crm.close_rental(max(self.crm.rentals_),
+                                  closed_on=date.today() - timedelta(days=40), note=None))
+        self.crm.bikes_[sold]["status"] = "sold"
+        now = run(self.crm.create_bike(code="B-4", model="Kugoo V3"))
+        run(self.crm.create_rental(client_id=buyer, bike_id=now,
+                                   tariff_id=self.tariff_id, tariff_name="Неделя",
+                                   period_days=7, price=D(3000), billing="auto",
+                                   started_on=date.today() - timedelta(days=2),
+                                   contract_no=None, created_by="t"))
+        self.login()
+        page = self.get_ok("/clients?group=active")
+        row = next(r for r in page.split("<tr>") if "Выкупивший" in r)
+        cell = row.split('data-label="Вид техники">')[1].split("</td>")[0]
+        self.assertIn('<small class="muted">Kugoo V3</small>', cell, "модель идущей аренды")
+        self.assertIn('<small class="muted">купил Monster</small>', cell)
+        former = self.get_ok("/clients?group=former")
+        row = next(r for r in former.split("<tr>") if "Бывший Клиент" in r)
+        self.assertIn("брал ", row.split('data-label="Вид техники">')[1].split("</td>")[0])
+        # как заведена карточка - те же слова, что в выгрузке (logic.CLIENT_SOURCES)
+        self.assertIn("<dt>Заведён</dt><dd>в панели · ", self.get_ok(f"/clients/{self.other}"))
+
+    def test_export_is_the_whole_base(self):
+        """«Все клиенты» в Excel/CSV - вся база, а не страница списка, с
+        группами, видом техники, моделью, долгом и каналом."""
+        self.fixer()
+        run(self.crm.update_client(self.other, channel="avito"))
+        for i in range(55):
+            run(self.crm.create_client(full_name=f"Клиент {i:02}", phone=f"+7990100{i:04}"))
+        self.login()
+        page = self.get_ok("/clients")
+        self.assertIn("/clients.xlsx?", page)
+        self.assertEqual(page.count('data-label="Клиент"'), 50, "на странице - 50")
+        lines = self.client.get("/clients.csv?group=all").content.decode(
+            "utf-8-sig").splitlines()
+        self.assertEqual(len(lines), 1 + 3 + 1 + 55, "в файле - все")
+        head = lines[0].split(";")
+        for col in ("ФИО", "Телефон", "Группы", "Вид техники", "Модель (последняя аренда)",
+                    "Первая аренда", "Последний день аренды", "Оплатил за всё время",
+                    "Долг", "Откуда узнал", "Как заведён"):
+            self.assertIn(col, head)
+        self.assertNotIn("Риск", head, "оценка риска выключена - колонки нет")
+        rows = {line.split(";")[0]: dict(zip(head, line.split(";"), strict=True))
+                for line in lines[1:]}
+        former = rows["Бывший Клиент"]
+        self.assertEqual((former["Группы"], former["Вид техники"], former["Долг"],
+                          former["Откуда узнал"], former["Как заведён"]),
+                         ("Сдали вело, Должники", "Велосипед", "3000,00", "Авито",
+                          "в панели"))
+        self.assertEqual(former["Модель (последняя аренда)"], "Kugoo V3")
+        fixer = rows["Самокатчик"]
+        self.assertEqual((fixer["Группы"], fixer["Вид техники"], fixer["Что чинил у нас"]),
+                         ("Ремонтировались у нас, Ни разу не брали", "Самокат",
+                          "Самокат Kugoo M4"))
+        self.assertEqual(rows["Иванов Иван"]["Группы"], "Арендаторы вело")
 
     def test_clients_summary_hides_money(self):
         self.as_profile("oper", "manager")

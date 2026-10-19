@@ -606,6 +606,9 @@ class TestRiskWeb(tw.WebCase if HAVE_WEB else unittest.TestCase):
         super().setUp()
         self.login()
         self.seed()
+        # Показ оценки - настройка владельца, по умолчанию выключен; здесь
+        # проверяется сама оценка, поэтому она включена.
+        self.crm.settings_[logic.RISK_ENABLED_KEY] = "1"
 
     def lose_a_bike(self, client_id):
         """В истории клиента - велосипед, признанный потерянным."""
@@ -637,7 +640,7 @@ class TestRiskWeb(tw.WebCase if HAVE_WEB else unittest.TestCase):
         self.assertNotIn("рекомендуемый залог", page, "залог не задан - не подсказываем")
 
     def test_deposit_is_suggested_from_settings(self):
-        r = self.client.post("/risk", data={"risk_deposit_none": "2000",
+        r = self.client.post("/risk", data={"enabled": "1", "risk_deposit_none": "2000",
                                             "risk_deposit_high": "5 000"})
         self.assertEqual(r.status_code, 303)
         self.assertEqual(self.crm.settings_["risk_deposit_none"], "2000")
@@ -721,6 +724,72 @@ class TestRiskWeb(tw.WebCase if HAVE_WEB else unittest.TestCase):
         page = self.get_ok("/risk")
         self.assertIn('href="/clients?risk=high"', page)
         self.assertIn("Риск клиента", self.get_ok("/intake"), "вкладка настроек")
+
+
+@unittest.skipUnless(HAVE_WEB, "fastapi не установлен")
+class TestRiskHiddenByDefault(TestRiskWeb):
+    """Владелец: «убрать блок рисков». Оценка остаётся (правило, данные,
+    страница настроек), но по умолчанию её нигде не видно."""
+
+    def setUp(self):
+        super().setUp()
+        del self.crm.settings_[logic.RISK_ENABLED_KEY]
+        self.crm.settings_["risk_deposit_high"] = "5000"
+        self.lose_a_bike(self.client_id)          # высокий риск - было бы что показать
+
+    # Унаследованные проверки самой оценки здесь не к месту.
+    test_new_client_is_no_history_at_every_step = None
+    test_deposit_is_suggested_from_settings = None
+    test_bad_deposit_is_refused_whole = None
+    test_high_risk_does_not_block_issuing = None
+    test_blacklist_keeps_its_own_rule = None
+    test_client_card_shows_reasons_and_hides_rubles_without_finance = None
+    test_clients_filter_and_export = None
+    test_risk_page_counts_clients_by_level = None
+
+    def assert_no_risk(self, page, where):
+        for mark in ("risk-high", "<dt>Риск</dt>", "рекомендуемый залог",
+                     "не вернул велосипед", 'name="risk"'):
+            self.assertNotIn(mark, page, f"{where}: {mark}")
+
+    def test_hidden_everywhere(self):
+        self.assertFalse(logic.risk_enabled(self.crm.settings_))
+        self.assert_no_risk(self.get_ok(f"/clients/{self.client_id}"), "карточка")
+        self.assert_no_risk(self.get_ok(f"/issue?client={self.client_id}"), "выдача, шаг 2")
+        self.assert_no_risk(self.get_ok(self.step4()), "выдача, сводка")
+        page = self.get_ok("/clients")
+        self.assert_no_risk(page, "список")
+        self.assertNotIn("любой риск", page)
+        other = tw.run(self.crm.create_client(full_name="Петров Пётр",
+                                              phone="+79990000002"))
+        self.assertIn(f"/clients/{other}", self.get_ok("/clients?risk=high"),
+                      "старая закладка с риском - без фильтра")
+        head = self.client.get("/clients.csv").text.splitlines()[0]
+        self.assertNotIn("Риск", head)
+        self.assertNotIn("risk=", page.split('href="/clients.csv?')[1].split('"')[0])
+
+    def test_settings_page_stays_and_turns_it_on(self):
+        page = self.get_ok("/risk")
+        self.assertIn("Оценка риска выключена", page)
+        self.assertIn('name="enabled"', page)
+        self.assertIsNone(re.search(r'name="enabled"[^>]*checked', page), "галочка снята")
+        self.assertNotIn('href="/clients?risk=', page, "фильтра в списке нет - ссылки тоже")
+        self.assertIn("Как считается", page, "правило на месте")
+        self.assertIn("Риск клиента", self.get_ok("/intake"), "вкладка настроек на месте")
+        r = self.client.post("/risk", data={"enabled": "1", "risk_deposit_high": "5000"})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.crm.settings_[logic.RISK_ENABLED_KEY], "1")
+        self.assertRegex(self.get_ok("/risk"), r'name="enabled"[^>]*checked')
+        card = self.get_ok(f"/clients/{self.client_id}")
+        self.assertIn("<dt>Риск</dt>", card)
+        self.assertIn("рекомендуемый залог <b>5 000 ₽</b>", card)
+        self.assertIn('href="/clients?risk=high"', self.get_ok("/risk"))
+        self.assertIn("Риск", self.client.get("/clients.csv").text.splitlines()[0])
+        self.client.post("/risk", data={"risk_deposit_high": "5000"})
+        self.assertEqual(self.crm.settings_[logic.RISK_ENABLED_KEY], "0")
+        self.assertEqual(self.crm.settings_["risk_deposit_high"], "5000",
+                         "залог сохраняется и при выключенной оценке")
+        self.assert_no_risk(self.get_ok(f"/clients/{self.client_id}"), "снова выключено")
 
 
 if __name__ == "__main__":

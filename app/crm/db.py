@@ -871,12 +871,7 @@ class CrmDB:
                    coalesce(wo.repairs, 0) as repairs_count,
                    coalesce(wo.external, 0) as external_repairs,
                    wo.objects as repair_objects,
-                   exists (select 1 from crm.rentals rb
-                             join crm.bikes bb on bb.id = rb.bike_id
-                            where rb.client_id = c.id and rb.status = 'closed'
-                              and bb.status = 'sold'
-                              and rb.id = (select max(x.id) from crm.rentals x
-                                            where x.bike_id = bb.id)) as bought
+                   bo.model is not null as bought, bo.model as bought_model
             from crm.clients c
             left join (select client_id, sum(amount) as balance,
                               sum(amount) filter (where kind = 'payment') as paid
@@ -898,6 +893,15 @@ class CrmDB:
                                  join crm.bikes bl on bl.id = rl.bike_id
                                 where rl.client_id = c.id
                                 order by rl.id desc limit 1) lm on true
+            -- Купил технику: последняя аренда проданного велосипеда - его.
+            -- Модель - что купил (у купивших двух - последний).
+            left join lateral (select bb.model from crm.rentals rb
+                                 join crm.bikes bb on bb.id = rb.bike_id
+                                where rb.client_id = c.id and rb.status = 'closed'
+                                  and bb.status = 'sold'
+                                  and rb.id = (select max(x.id) from crm.rentals x
+                                                where x.bike_id = bb.id)
+                                order by rb.id desc limit 1) bo on true
             left join (select client_id, count(*) as repairs,
                               count(*) filter (where bike_id is null) as external,
                               string_agg(distinct object_note, ' | ')
