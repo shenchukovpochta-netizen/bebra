@@ -11,13 +11,16 @@
   <a class="btn ghost" href="/work-types.xlsx?q={{ q|urlencode }}">Excel</a>
   <a class="btn ghost" href="/work-types.csv?q={{ q|urlencode }}">CSV</a>
 </div>
+{# Пояснение - до прайса: внизу, под сотней строк, его не видно. #}
+{% if not can_manage %}<p class="muted">Виды работ вам открыты только на просмотр.</p>{% endif %}
 <section class="card">
   {# Два листа прайса в одной строке: арендатору и стороннему заказчику.
      Пустая пара «работа + запчасть» значит «в этом прайсе такой работы
      нет» - наряд тогда не подставит ноль, а попросит цену руками. #}
-  <fieldset {% if not can_manage %}disabled{% endif %} class="plain">
+  {# Без права правки - текстом: запертые поля по шесть знаков обрезали
+     цену, а серые кнопки на телефоне читались как сломанная форма. #}
   <div class="table-wrap">
-  <table class="editable">
+  <table class="editable cards">
     <tr>
       {{ list.th('Наименование', 'title', tools) }}
       {{ list.th('Категория', 'category', tools, 'opt') }}
@@ -25,32 +28,43 @@
       {{ list.th('Арендатору: работа + запчасть', 'price', tools) }}
       {{ list.th('Стороннему: работа + запчасть', 'price_ext', tools) }}
       {{ list.th('Использований', 'used', tools, 'num opt') }}
-      <th></th>
+      {% if can_manage %}<th></th>{% endif %}
     </tr>
     {% for t in rows %}
     <tr class="{% if not t.active %}muted{% endif %}">
-      <td class="grow"><input name="title" value="{{ t.title }}" form="work{{ t.id }}"></td>
-      <td class="opt"><select name="category" form="work{{ t.id }}" class="mini">{% for c in WORK_CATEGORIES %}<option value="{{ c }}" {% if t.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+      {% if can_manage %}
+      <td class="grow" data-label="Наименование"><input name="title" value="{{ t.title }}" form="work{{ t.id }}"></td>
+      <td class="opt" data-label="Категория"><select name="category" form="work{{ t.id }}" class="mini">{% for c in WORK_CATEGORIES %}<option value="{{ c }}" {% if t.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
         <select name="node" form="work{{ t.id }}" class="mini" title="узел для отчёта «что ломается»"><option value="">— узел —</option>{% for code, title in REPAIR_NODES.items() %}<option value="{{ code }}" {% if t.node == code %}selected{% endif %}>{{ title }}</option>{% endfor %}</select></td>
-      <td class="nowrap opt"><input name="minutes" value="{{ t.minutes }}" size="3" class="mini" form="work{{ t.id }}"> мин</td>
-      <td class="nowrap"><input name="price" value="{{ '' if t.price is none else t.price }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—"> + <input name="parts_price" value="{{ '' if t.price is none else t.parts_price }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—">
+      <td class="nowrap opt" data-label="Время"><input name="minutes" value="{{ t.minutes }}" size="3" class="mini" form="work{{ t.id }}"> мин</td>
+      <td class="nowrap" data-label="Арендатору: работа + запчасть"><input name="price" value="{{ '' if t.price is none else t.price }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—"> + <input name="parts_price" value="{{ '' if t.price is none else t.parts_price }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—">
         {% if t.own_total is not none %}= <b>{{ money(t.own_total) }}</b>{% else %}<span class="muted">нет в прайсе</span>{% endif %}</td>
-      <td class="nowrap"><input name="price_ext" value="{{ '' if t.price_ext is none else t.price_ext }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—"> + <input name="parts_price_ext" value="{{ '' if t.price_ext is none else t.parts_price_ext }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—">
+      <td class="nowrap" data-label="Стороннему: работа + запчасть"><input name="price_ext" value="{{ '' if t.price_ext is none else t.price_ext }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—"> + <input name="parts_price_ext" value="{{ '' if t.price_ext is none else t.parts_price_ext }}" size="6" class="mini" form="work{{ t.id }}" placeholder="—">
         {% if t.ext_total is not none %}= <b>{{ money(t.ext_total) }}</b>{% else %}<span class="muted">нет в прайсе</span>{% endif %}</td>
-      <td class="num opt">{{ t.used }}</td>
-      <td class="actions nowrap"><button type="submit" class="ghost" form="work{{ t.id }}">Сохранить</button>
+      <td class="num opt" data-label="Использований">{{ t.used }}</td>
+      <td class="actions nowrap" data-label="Действие"><button type="submit" class="ghost" form="work{{ t.id }}">Сохранить</button>
         <button type="submit" name="action" value="toggle" class="ghost" form="work{{ t.id }}">{{ 'Выключить' if t.active else 'Включить' }}</button></td>
+      {% else %}
+      <td data-label="Наименование">{{ t.title }}{% if not t.active %} <small class="muted">· выключен</small>{% endif %}</td>
+      <td class="opt" data-label="Категория">{{ t.category or '' }}{% if t.node %} <small class="muted">· {{ REPAIR_NODES.get(t.node, t.node) }}</small>{% endif %}</td>
+      <td class="nowrap opt" data-label="Время">{{ t.minutes }} мин</td>
+      {# Работа + запчасть = цена клиенту: человеку на точке нужна итоговая
+         цена, слагаемые - мелким под ней. #}
+      <td data-label="Арендатору: работа + запчасть">{% if t.own_total is not none %}<b>{{ money(t.own_total) }}</b>{% if t.parts_price %}<br><small class="muted"><span class="nowrap">{{ money(t.price) }} + {{ money(t.parts_price) }}</span></small>{% endif %}{% else %}<span class="muted">нет в прайсе</span>{% endif %}</td>
+      <td data-label="Стороннему: работа + запчасть">{% if t.ext_total is not none %}<b>{{ money(t.ext_total) }}</b>{% if t.parts_price_ext %}<br><small class="muted"><span class="nowrap">{{ money(t.price_ext) }} + {{ money(t.parts_price_ext) }}</span></small>{% endif %}{% else %}<span class="muted">нет в прайсе</span>{% endif %}</td>
+      <td class="num opt" data-label="Использований">{{ t.used }}</td>
+      {% endif %}
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Каталог пуст.</td></tr>{% endfor %}
     {{ list.footer(tools, '/work-types', 7) }}
   </table>
   </div>
+  {% if can_manage %}
   <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок, кнопки строки справа.</p>
   {# Формы - за таблицей, поля ссылаются на них атрибутом form: <form>
      внутри <tr> браузер выносит наружу, и строки разъезжаются. #}
   {% for t in rows %}<form id="work{{ t.id }}" method="post" action="/work-types/{{ t.id }}"></form>{% endfor %}
-  </fieldset>
-  {% if not can_manage %}<p class="muted">Виды работ вам открыты только на просмотр.</p>{% endif %}
+  {% endif %}
   <p class="muted">Два прайса: <b>арендатору</b> — за поломку по его вине на нашем
     велосипеде, <b>стороннему</b> — за ремонт чужой техники. Цена клиенту
     это работа плюс запчасть; в наряд подставляется лист по объекту: свой
@@ -65,25 +79,25 @@
      сделан мотор. Пусто - у узла своего срока нет, его строку меряет общий.
      «Срок», а не «норма»: нормой ремонта план месяца зовёт число
      велосипедов в ремонте. #}
-  <form method="post" action="/work-types/norms">
-  <fieldset {% if not can_manage %}disabled{% endif %} class="plain">
+  {# Без права правки - текстом, как прайс выше: пустой срок узла - «общий». #}
+  {% if can_manage %}<form method="post" action="/work-types/norms">
   <label class="inline-label">Общий срок, суток
     <input name="repair_norm_days" value="{{ repair_norm }}" size="3" class="mini" inputmode="numeric"></label>
+  {% else %}<p>Общий срок — <b>{{ repair_norm }}</b> сут.</p>{% endif %}
   <div class="table-wrap">
   <table class="editable">
     <tr><th>Узел</th><th class="num">Срок, суток</th></tr>
     {% for n in nodes %}
     <tr>
       <td>{{ n.title }}</td>
-      <td class="num"><input name="norm_{{ n.code }}" value="{{ '' if n.norm_days is none else n.norm_days }}"
-        size="3" class="mini" inputmode="numeric" placeholder="{{ repair_norm }}" aria-label="Срок: {{ n.title }}"></td>
+      <td class="num">{% if can_manage %}<input name="norm_{{ n.code }}" value="{{ '' if n.norm_days is none else n.norm_days }}"
+        size="3" class="mini" inputmode="numeric" placeholder="{{ repair_norm }}" aria-label="Срок: {{ n.title }}">{% elif n.norm_days is none %}<span class="muted">общий</span>{% else %}{{ n.norm_days }}{% endif %}</td>
     </tr>
     {% endfor %}
   </table>
   </div>
-  {% if can_manage %}<button type="submit">Сохранить сроки</button>{% endif %}
-  </fieldset>
-  </form>
+  {% if can_manage %}<button type="submit">Сохранить сроки</button>
+  </form>{% endif %}
   <p class="muted">Наряд дольше срока подсвечивается на рабочем столе и в
     списке нарядов («просрочено на N дн.») и попадает в утреннюю сводку
     служебного чата. Срок наряда — самый долгий из сроков его строк; пустое

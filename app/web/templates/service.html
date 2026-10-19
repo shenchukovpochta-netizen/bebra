@@ -29,6 +29,65 @@
   {% endif %}
 </div>
 
+{# Список - сразу под плитками: ради него стол сервиса и открывают, а
+   график и парк против нормы - фон, который смотрят реже. На телефоне
+   они стояли двумя экранами над списком. #}
+<section class="card">
+  <h2>Велосипеды в сервисе</h2>
+  {% if rows or q %}
+  {% set money_ok = can_view(staff, 'finance') %}
+  <div class="table-wrap">
+  <table class="cards">
+    <tr>
+      {{ list.th('Велосипед', 'bike', tools) }}
+      {{ list.th('Модель', 'model', tools) }}
+      {{ list.th('Этап', 'stage', tools) }}
+      {{ list.th('Суток', 'days', tools, 'num') }}
+      {% if money_ok %}{{ list.th('Потеряно', 'lost', tools, 'num') }}{% endif %}
+      {{ list.th('Наряд', 'order', tools) }}
+      {{ list.th('Техник', 'tech', tools) }}
+      {{ list.th('Чей ремонт', 'payer', tools) }}
+      {{ list.th('Клиент', 'client', tools, 'opt') }}
+      {% if money_ok %}{{ list.th('Смета', 'estimate', tools, 'opt num') }}{% endif %}
+      <th>Жалоба</th>
+    </tr>
+    {% for r in rows %}
+    <tr class="{% if r.stuck %}warn-row{% endif %}">
+      <td data-label="Велосипед"><a href="/bikes/{{ r.id }}"><span class="nowrap">№ {{ r.code }}</span></a></td>
+      <td data-label="Модель">{{ r.model }}</td>
+      {# «Просрочено» - под этапом, а не под сутками: в числовой колонке
+         строка не переносится, раздувала её, и «Жалоба» уезжала за
+         прокрутку таблицы. #}
+      <td data-label="Этап">{% if r.order %}<span class="tag order-{{ r.order.status }}">{{ r.stage }}</span>{% else %}<span class="tag bad">Без наряда</span>{% endif %}{% if r.overdue %}<br><small class="bad" title="срок {{ r.norm }} дн.">просрочено на {{ r.overdue }} дн.</small>{% endif %}</td>
+      <td class="num {% if r.stuck %}bad{% endif %}" data-label="Суток">{{ r.days }}</td>
+      {# Прочерк - пустой ячейкой: на телефоне пустая не показывается, а
+         «Техник —» в карточке - подпись без значения. #}
+      {% if money_ok %}<td class="num {% if r.lost %}bad{% endif %}" data-label="Потеряно">{%- if r.lost -%}−{{ money(r.lost) }}{%- endif -%}</td>{% endif %}
+      <td data-label="Наряд">{%- if r.order -%}<a href="/orders/{{ r.order.id }}">{{ r.order.no }}</a>{%- elif can -%}<a href="/orders/new?bike={{ r.id }}">открыть</a>{%- endif -%}</td>
+      <td data-label="Техник">{{ r.order.tech_name if r.order and r.order.tech_name else '' }}</td>
+      <td data-label="Чей ремонт">{{ r.payer_title or '' }}</td>
+      <td class="opt" data-label="Клиент">{%- if r.order and r.order.client_id and can_view(staff, 'clients') -%}<a href="/clients/{{ r.order.client_id }}">{{ r.client }}</a>{%- else -%}{{ r.client or '' }}{%- endif -%}</td>
+      {% if money_ok %}<td class="num opt" data-label="Смета">{%- if r.estimate -%}{{ money(r.estimate) }}{%- endif -%}</td>{% endif %}
+      <td class="muted" data-label="Жалоба">{{ r.complaint or '' }}</td>
+    </tr>
+    {% else %}<tr><td colspan="11" class="muted">По запросу ничего нет.</td></tr>{% endfor %}
+    {{ list.footer(tools, '/service', 11,
+                   (summary.days ~ ' велосипеде-дней' ~ ((' · потеряно ' ~ money(summary.lost)) if money_ok else ''))) }}
+  </table>
+  </div>
+  <p class="muted">«Без наряда» — велосипед в ремонте, но работой никто не занят: он копит простой, а в отчётах выглядит как обычный ремонт. Такие стоят первыми.
+    «Просрочено» — наряд стоит дольше самого долгого из сроков своих строк (строку без своего срока меряет общий, {{ repair_norm }} дн.); сроки — в «Видах работ».</p>
+  {% if spares %}
+  <h3>Подменный фонд <span class="muted">· {{ spares|length }} из нормы {{ plan.spare }}</span></h3>
+  {# Резерв сервиса на замены: подменный у клиента - это замена, которая
+     уже сработала, свободный подменный - та, что ещё может. #}
+  {# Запись - одним куском: на телефоне номер оставался в конце строки,
+     а его статус и точка уезжали на следующую, к чужому номеру. #}
+  <p>{% for b in spares %}<span class="nowrap"><a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="tag {{ b.status }}">{{ BIKE_STATUSES[b.status] }}</span>{% if b.location %} <small class="muted">{{ b.location }}</small>{% endif %}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>
+  {% endif %}
+  {% else %}<p class="muted">В сервисе пусто — весь операционный парк свободен или в аренде.</p>{% endif %}
+</section>
+
 <section class="card">
   <h2>В ремонте по дням <span class="muted">· {% if span.prev_key %}<a class="arrow" href="/service?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %} {{ month.strftime('%m.%Y') }} {% if span.next_key %}<a class="arrow" href="/service?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %} · норма {{ chart.norm }}</span></h2>
   {# Столбики чистым CSS: высота в процентах от пика. Библиотека графиков
@@ -70,57 +129,5 @@
   </div>
   <p class="muted">Проценты считаются от операционного парка: потерянные,
     проданные и списанные в знаменатель не попадают никогда.</p>
-</section>
-
-<section class="card">
-  <h2>Велосипеды в сервисе</h2>
-  {% if rows or q %}
-  {% set money_ok = can_view(staff, 'finance') %}
-  <div class="table-wrap">
-  <table>
-    <tr>
-      {{ list.th('Велосипед', 'bike', tools) }}
-      {{ list.th('Модель', 'model', tools) }}
-      {{ list.th('Этап', 'stage', tools) }}
-      {{ list.th('Суток', 'days', tools, 'num') }}
-      {% if money_ok %}{{ list.th('Потеряно', 'lost', tools, 'num') }}{% endif %}
-      {{ list.th('Наряд', 'order', tools) }}
-      {{ list.th('Техник', 'tech', tools) }}
-      {{ list.th('Чей ремонт', 'payer', tools) }}
-      {{ list.th('Клиент', 'client', tools, 'opt') }}
-      {% if money_ok %}{{ list.th('Смета', 'estimate', tools, 'opt num') }}{% endif %}
-      <th>Жалоба</th>
-    </tr>
-    {% for r in rows %}
-    <tr class="{% if r.stuck %}warn-row{% endif %}">
-      <td><a href="/bikes/{{ r.id }}">№ {{ r.code }}</a></td>
-      <td>{{ r.model }}</td>
-      {# «Просрочено» - под этапом, а не под сутками: в числовой колонке
-         строка не переносится, раздувала её, и «Жалоба» уезжала за
-         прокрутку таблицы. #}
-      <td>{% if r.order %}<span class="tag order-{{ r.order.status }}">{{ r.stage }}</span>{% else %}<span class="tag bad">Без наряда</span>{% endif %}{% if r.overdue %}<br><small class="bad" title="срок {{ r.norm }} дн.">просрочено на {{ r.overdue }} дн.</small>{% endif %}</td>
-      <td class="num {% if r.stuck %}bad{% endif %}">{{ r.days }}</td>
-      {% if can_view(staff, 'finance') %}<td class="num {% if r.lost %}bad{% endif %}">{% if r.lost %}−{{ money(r.lost) }}{% else %}—{% endif %}</td>{% endif %}
-      <td>{% if r.order %}<a href="/orders/{{ r.order.id }}">{{ r.order.no }}</a>{% elif can %}<a href="/orders/new?bike={{ r.id }}">открыть</a>{% else %}—{% endif %}</td>
-      <td>{{ r.order.tech_name if r.order and r.order.tech_name else '—' }}</td>
-      <td>{{ r.payer_title or '—' }}</td>
-      <td class="opt">{% if r.order and r.order.client_id and can_view(staff, 'clients') %}<a href="/clients/{{ r.order.client_id }}">{{ r.client }}</a>{% else %}{{ r.client or '—' }}{% endif %}</td>
-      {% if money_ok %}<td class="num opt">{% if r.estimate %}{{ money(r.estimate) }}{% else %}—{% endif %}</td>{% endif %}
-      <td class="muted">{{ r.complaint }}</td>
-    </tr>
-    {% else %}<tr><td colspan="11" class="muted">По запросу ничего нет.</td></tr>{% endfor %}
-    {{ list.footer(tools, '/service', 11,
-                   (summary.days ~ ' велосипеде-дней' ~ ((' · потеряно ' ~ money(summary.lost)) if money_ok else ''))) }}
-  </table>
-  </div>
-  <p class="muted">«Без наряда» — велосипед в ремонте, но работой никто не занят: он копит простой, а в отчётах выглядит как обычный ремонт. Такие стоят первыми.
-    «Просрочено» — наряд стоит дольше самого долгого из сроков своих строк (строку без своего срока меряет общий, {{ repair_norm }} дн.); сроки — в «Видах работ».</p>
-  {% if spares %}
-  <h3>Подменный фонд <span class="muted">· {{ spares|length }} из нормы {{ plan.spare }}</span></h3>
-  {# Резерв сервиса на замены: подменный у клиента - это замена, которая
-     уже сработала, свободный подменный - та, что ещё может. #}
-  <p>{% for b in spares %}<a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="tag {{ b.status }}">{{ BIKE_STATUSES[b.status] }}</span>{% if b.location %} <small class="muted">{{ b.location }}</small>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>
-  {% endif %}
-  {% else %}<p class="muted">В сервисе пусто — весь операционный парк свободен или в аренде.</p>{% endif %}
 </section>
 {% endblock %}
