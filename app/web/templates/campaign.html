@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}{{ campaign.no }} — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>{{ campaign.no }} · {{ campaign.title }}
@@ -40,17 +41,20 @@
 </section>
 
 <section class="card">
-  <h2>Получатели</h2>
-  <table>
-    <tr><th>Клиент</th><th>Куда</th><th>Статус</th><th class="opt">Ошибка</th></tr>
-    {% for s in sends %}
+  <h2>Получатели <span class="muted">· недошедшие первыми</span></h2>
+  {# Ошибка видна и на телефоне: у недошедшего это главное, у остальных
+     ячейка пустая и не показывается. #}
+  <table class="cards">
+    <tr><th>Клиент</th><th>Куда</th><th>Статус</th><th>Ошибка</th></tr>
+    {% for s in rows %}
     <tr class="{% if s.status == 'failed' %}warn-row{% endif %}">
-      <td>{% if can_view(staff, 'clients') %}<a href="/clients/{{ s.client_id }}">{{ s.full_name }}</a>{% else %}{{ s.full_name }}{% endif %}</td>
-      <td>{{ SEND_CHANNELS.get(s.channel, s.channel) }}</td>
-      <td>{{ SEND_STATUSES.get(s.status, s.status) }}{% if s.sent_at %} <span class="muted">{{ s.sent_at|dmy }}</span>{% endif %}</td>
-      <td class="opt muted">{{ s.error or '' }}</td>
+      <td data-label="Клиент">{% if can_view(staff, 'clients') %}<a href="/clients/{{ s.client_id }}">{{ s.full_name }}</a>{% else %}{{ s.full_name }}{% endif %}</td>
+      <td data-label="Куда">{{ SEND_CHANNELS.get(s.channel, s.channel) }}</td>
+      <td data-label="Статус">{{ SEND_STATUSES.get(s.status, s.status) }}{% if s.sent_at %} <span class="muted">{{ s.sent_at|dmy }}</span>{% endif %}</td>
+      <td class="muted" data-label="Ошибка">{{ s.error or '' }}</td>
     </tr>
     {% else %}<tr><td colspan="4" class="muted">Получателей нет.</td></tr>{% endfor %}
+    {% if tools.total %}{{ list.footer(tools, '/mailing/' ~ campaign.id, 4) }}{% endif %}
   </table>
 </section>
 </div>

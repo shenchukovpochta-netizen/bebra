@@ -5896,7 +5896,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             since = (since - timedelta(days=1)).replace(day=1)
         data = logic.feedback_report(await crm.feedback_rows(since), months=months,
                                      today=today)
-        return render(request, "feedback.html", since=since, **data)
+        # Низких - последние двадцать, остальные по ссылке «все».
+        return render(request, "feedback.html", since=since,
+                      all_low=request.query_params.get("low") == "all", **data)
 
     @app.get("/reports/referrals")
     async def referrals_report(request: Request) -> Response:
@@ -8410,7 +8412,12 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
                     await crm.client_balance(client["id"]),
                     pay_url=cfg.pay_url)
                 preview = logic.render_template(campaign.get("body") or "", values)
+        # Недошедшие - первыми и постранично: тысяча получателей одной
+        # таблицей прятала ошибки где-то в середине.
+        failed_first = sorted(sends, key=lambda s: s.get("status") != "failed")
+        tools = list_tools(request, failed_first, allowed={})
         return render(request, "campaign.html", campaign=campaign, sends=sends,
+                      rows=tools["rows"], tools=tools,
                       progress=logic.campaign_progress(sends), preview=preview)
 
     @app.post("/mailing/{campaign_id}/start")
