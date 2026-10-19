@@ -8,9 +8,10 @@
 <section class="card">
   <h2>{{ t.who }}</h2>
   <dl>
-    <dt>Канал</dt><dd>{{ t.channel_label }}{% if t.origin == 'hook' %} <span class="muted">(через шлюз)</span>{% endif %}</dd>
+    <dt>Канал</dt><dd>{{ t.channel_label }}{% if t.origin == 'hook' %} <span class="muted">({% if t.ext_channel %}через Wazzup{% else %}через шлюз{% endif %})</span>{% endif %}</dd>
     {% if t.name %}<dt>Имя в канале</dt><dd>{{ t.name }}</dd>{% endif %}
-    {% if t.username %}<dt>{% if t.channel == 'tg' %}Telegram{% else %}Логин в {{ t.channel_label }}{% endif %}</dt><dd>{% if links.tg %}<a href="{{ links.tg }}" target="_blank" rel="noopener noreferrer">@{{ t.username }}</a>{% else %}@{{ t.username }}{% endif %}</dd>{% endif %}
+    {% if t.username %}<dt>{% if t.channel == 'tg' %}Telegram{% else %}Логин в {{ t.channel_label }}{% endif %}</dt><dd>{% set profile = links.tg or links.ig %}{% if profile %}<a href="{{ profile }}" target="_blank" rel="noopener noreferrer">@{{ t.username }}</a>{% else %}@{{ t.username }}{% endif %}</dd>{% endif %}
+    {% if links.vk %}<dt>ВКонтакте</dt><dd><a href="{{ links.vk }}" target="_blank" rel="noopener noreferrer">профиль</a></dd>{% endif %}
     {% if t.phone %}<dt>Телефон</dt><dd>{{ t.phone }}{% if links.wa %} · <a href="{{ links.wa }}" target="_blank" rel="noopener noreferrer">WhatsApp</a>{% endif %}</dd>{% endif %}
     {% if t.subject %}<dt>Тема</dt><dd>{% if links.avito %}<a href="{{ links.avito }}" target="_blank" rel="noopener noreferrer">{{ t.subject }}</a>{% else %}{{ t.subject }}{% endif %}</dd>{% endif %}
     {% if bot_state %}<dt>В боте</dt><dd>{{ bot_state.label }}</dd>{% endif %}
@@ -64,7 +65,7 @@
   {% if can_reply %}
   <form method="post" action="/inbox/{{ t.id }}/reply">
     <input type="hidden" name="once" value="{{ once() }}">
-    <textarea name="text" rows="4" maxlength="{{ reply_limit }}" required placeholder="{% if t.channel == 'wa' %}Ответ уйдёт в WhatsApp с нашего номера через Wazzup{% else %}Ответ уйдёт в {{ t.channel_label }} от имени бота{% endif %}">{{ draft or '' }}</textarea>
+    <textarea name="text" rows="4" maxlength="{{ reply_limit }}" required placeholder="{% if t.channel == 'wa' %}Ответ уйдёт в WhatsApp с нашего номера через Wazzup{% elif t.origin == 'hook' %}Ответ уйдёт в {{ t.channel_label }} через Wazzup — с того канала, куда писал человек{% else %}Ответ уйдёт в {{ t.channel_label }} от имени бота{% endif %}">{{ draft or '' }}</textarea>
     <button type="submit">Ответить</button>
   </form>
   {% else %}

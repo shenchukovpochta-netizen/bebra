@@ -65,6 +65,9 @@ class WebConfig:
     # /hook/inbox для шлюзов WhatsApp и n8n. Пустой токен - хука нет.
     inbox_key: str = ""
     inbox_hook_token: str = ""
+    # Домен панели (CRM_DOMAIN) - для абсолютных ссылок наружу: Wazzup
+    # показывает у контакта и сделки «открыть в CRM». Пусто - без ссылки.
+    crm_domain: str = ""
     # Франшиза. metrics_token - токен адреса /hook/metrics этой копии
     # (пусто - адреса нет, 404); franchise_key - ключ, которым франчайзер
     # шифрует токены своих франчайзи (тот же файл, что у бота).
@@ -108,6 +111,7 @@ class WebConfig:
             tochka_customer_code=_env("TOCHKA_CUSTOMER_CODE"),
             inbox_key=_secret("INBOX_KEY", required=False),
             inbox_hook_token=_secret("INBOX_HOOK_TOKEN", required=False),
+            crm_domain=_env("CRM_DOMAIN"),
             metrics_token=_secret("METRICS_TOKEN", required=False),
             franchise_key=_secret("FRANCHISE_KEY", required=False),
             demo_url=demo_url(_env("DEMO_DOMAIN", "")),

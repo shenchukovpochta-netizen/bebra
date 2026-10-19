@@ -7,7 +7,8 @@
     с ранних этапов: Отложенный спрос или Не взял
 
 Сделка - не клиент и не аренда: она ссылается на них. Сообщение из
-Telegram, MAX, Авито или WhatsApp, заявка из кабинета, выдача без заявки -
+Telegram, MAX, Авито, WhatsApp и других каналов Wazzup, заявка из кабинета,
+«Создать сделку» в окне чата Wazzup (`from_wazzup`), выдача без заявки -
 у каждого своя сделка, и у клиента одна открытая. Этапы «В аренде»,
 «Повторное продление» и «Сдал» ставит сама аренда, и руками их не
 переставить: колонка «В аренде» обязана совпадать с арендами. Ранние
@@ -29,7 +30,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from .. import logic as bot_logic
-from . import logic, quickforms
+from . import logic, quickforms, service
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +52,13 @@ MANUAL = ("new", "touch", "contract", "deferred", "lost")
 CLOSED = ("returned", "lost")
 SOURCES: dict[str, str] = {
     "tg": "Telegram", "max": "MAX", "avito": "Авито", "wa": "WhatsApp",
-    "tgp": "Telegram", "booking": "Заявка", "rental": "Выдача", "manual": "Вручную",
+    "tgp": "Telegram", "ig": "Instagram", "vk": "ВКонтакте", "viber": "Viber",
+    "booking": "Заявка", "rental": "Выдача", "manual": "Вручную",
+    # заявка из окна чата Wazzup на карточку клиента, без обращения
+    "wazzup": "Wazzup",
 }
+# Кем заведена сделка из Wazzup (created_by и автор этапа в истории).
+WAZZUP_BY = "wazzup"
 # Закрытые на доске - за этот срок: «Сдал» копится сотнями.
 CLOSED_DAYS = 30
 # Имя и телефон человека без карточки в закрытой сделке живут столько:
@@ -312,6 +318,7 @@ def dress(deal: Mapping[str, Any], *, inbox_ok: bool,
     d["who"] = "Обращение" if hidden else card_name(d)
     d["phone_shown"] = None if hidden else (d.get("client_phone") or d.get("phone"))
     d["source_title"] = SOURCES.get(str(d.get("source") or ""), d.get("source") or "—")
+    d["via_wazzup"] = d.get("created_by") == WAZZUP_BY and d.get("source") != "wazzup"
     d["stage_title"] = stage_title(d.get("stage"))
     d["when"] = when(d.get("stage_at"), now=now)
     d["waiting"] = (bool(d.get("waiting_since"))
@@ -465,6 +472,92 @@ async def move(crm: Any, deal: Mapping[str, Any], stage: str, *, by: str) -> str
         return None
     await crm.move_deal(int(deal["id"]), stage, by=by, close=stage in CLOSED)
     return None
+
+
+async def from_wazzup(crm: Any, req: Mapping[str, Any], *,
+                      now: datetime | None = None) -> dict[str, Any] | None:
+    """Заявка из Wazzup (createDeal, `logic.wazzup_crm_request`): сделка в
+    «Новой заявке» по обращению или карточке клиента. Время этапа - сейчас.
+
+    К чему привязать: наш id из `contacts` («thread-N» - обращение,
+    «client-N» - карточка) или, если пришли данные чата, обращение этого
+    чата (заводится, как у createContact). Правила воронки - те же, что у
+    сверки: у обращения сделка одна, у клиента одна открытая. Поэтому
+    повтор запроса и заявка на чат с идущей сделкой возвращают её, а не
+    вторую; закрытая сделка обращения - так:
+    - есть карточка - новая сделка на клиента (обращение занято старой);
+    - нет карточки, «Не взял» - та же сделка снова в «Новой заявке»;
+    - спам - сделка остаётся закрытой и возвращается как есть.
+
+    {"deal": строка сделки, "created": bool, "contact": наш id контакта}
+    или None - не к чему привязать. Денег и карточек клиента не заводит.
+    """
+    now = now or datetime.now(UTC)
+    thread: dict | None = None
+    client: dict | None = None
+    contact: str | None = None
+    for kind, ref in req.get("refs") or ():
+        row = await (crm.inbox_thread(ref) if kind == "thread" else crm.client(ref))
+        if row is not None:
+            thread, client = (row, None) if kind == "thread" else (None, row)
+            contact = f"{kind}-{ref}"
+            break
+    if thread is None and client is None:
+        got = await service.wazzup_contact(crm, dict(req))
+        if got is None:
+            return None
+        thread = await crm.inbox_thread(got["thread_id"])
+        contact = f"thread-{got['thread_id']}"
+        if thread is None:
+            return None
+    client_id = (int(client["id"]) if client is not None
+                 else int(thread["client_id"]) if thread and thread.get("client_id")
+                 else None)
+    own = None                       # сделка обращения, открытая или закрытая
+    if thread is not None:
+        found = await crm.deals(thread_id=int(thread["id"]))
+        own = found[0] if found else None
+        if own is not None and own.get("client_id") and client_id is None:
+            client_id = int(own["client_id"])
+    if own is not None and not own.get("closed_at"):
+        return {"deal": own, "created": False, "contact": contact}
+    if client_id is not None:
+        for deal in await crm.deals(open_only=True, client_id=client_id):
+            if thread is not None and own is None and not deal.get("thread_id"):
+                # Обращение ещё без сделки - к идущей сделке клиента, как у сверки.
+                await crm.update_deal(int(deal["id"]), thread_id=int(thread["id"]))
+                deal = await crm.deal(int(deal["id"])) or deal
+            return {"deal": deal, "created": False, "contact": contact}
+    signal = logic.wazzup_deal_signal(thread, now=now)
+    if own is not None and client_id is None:
+        if own.get("stage") != "lost" or (thread or {}).get("status") == "spam":
+            return {"deal": own, "created": False, "contact": contact}
+        await crm.move_deal(int(own["id"]), "new", by=WAZZUP_BY, at=now)
+        if signal:
+            await crm.update_deal(int(own["id"]), announced_at=None)
+        return {"deal": await crm.deal(int(own["id"])) or own, "created": False,
+                "contact": contact}
+    fields: dict[str, Any] = {"client_id": client_id,
+                              "source": (thread or {}).get("channel") or "wazzup",
+                              "announced_at": None if signal else now}
+    if thread is not None:
+        if own is None:
+            fields["thread_id"] = int(thread["id"])
+        fields["title"] = thread.get("subject")
+        if client_id is None:
+            fields.update(name=thread.get("name"), phone=thread.get("phone"))
+    deal_id = await crm.create_deal(stage="new", by=WAZZUP_BY, at=now, **fields)
+    if deal_id is None:
+        # Два одинаковых запроса разом: второй упёрся в уникальный индекс -
+        # отдать сделку первого.
+        again = (await crm.deals(thread_id=int(thread["id"]))
+                 if "thread_id" in fields else [])
+        if not again and client_id is not None:
+            again = await crm.deals(open_only=True, client_id=client_id)
+        if not again:
+            return None
+        return {"deal": again[0], "created": False, "contact": contact}
+    return {"deal": await crm.deal(deal_id), "created": True, "contact": contact}
 
 
 async def quick_add(crm: Any, *, name: str | None, phone: str | None, title: str | None,

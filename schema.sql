@@ -2573,7 +2573,8 @@ alter table crm.trackers add column if not exists phone text;
 -- возвращает его в «новые», а не заводит второе (спам остаётся спамом).
 -- origin - кто завёл строку. От него зависит ответ из панели: в Telegram
 -- и MAX бот пишет только тем, кого завёл сам бот. Хук принимает лишь
--- avito и wa: с утёкшим токеном бот не станет рассыльщиком по чужим tg_id.
+-- каналы шлюзов (avito, wa и остальные каналы Wazzup, но не tg и max): с
+-- утёкшим токеном бот не станет рассыльщиком по чужим tg_id.
 -- Раздел видит только встроенный «Владелец» (литерал owner выше).
 create table if not exists crm.inbox_threads (
   id            bigserial primary key,
@@ -3100,6 +3101,13 @@ create unique index if not exists deals_rental_idx
 create unique index if not exists deals_client_open
   on crm.deals (client_id) where client_id is not null and closed_at is null;
 create index if not exists deals_stage_idx on crm.deals (stage, stage_at desc);
+-- Сигнал «новая заявка из Wazzup» в служебный чат (app/crm/inbox.py):
+-- null - ещё не уходил. По умолчанию now(): сделки сверки и прежние строки
+-- сигнала не ждут, его ставит только заявка из окна чата Wazzup, и только
+-- когда о том же разговоре сигнала не было (logic.wazzup_deal_signal).
+alter table crm.deals add column if not exists announced_at timestamptz default now();
+create index if not exists deals_announce_idx
+  on crm.deals (id) where announced_at is null;
 
 -- История переходов сделки: кто и когда перенёс (или аренда сама).
 create table if not exists crm.deal_log (
@@ -3316,9 +3324,11 @@ create index if not exists cash_plan_due_idx on crm.cash_plan (due_on) where don
 -- Личный Telegram через Wazzup (app/crm/logic.py, канал tgp): не бот, а
 -- аккаунт менеджера. Отдельный канал, а не tg: хук не должен писать в
 -- разговоры бота, а номер чата Wazzup и tg_id бота - разные пространства.
+-- Остальные каналы Wazzup - Instagram (ig), ВКонтакте (vk) и Viber - тоже
+-- только хуком; ответ из панели уходит через Wazzup с того же канала.
 alter table crm.inbox_threads drop constraint if exists inbox_threads_channel_check;
 alter table crm.inbox_threads add constraint inbox_threads_channel_check
-  check (channel in ('tg', 'max', 'avito', 'wa', 'tgp'));
+  check (channel in ('tg', 'max', 'avito', 'wa', 'tgp', 'ig', 'vk', 'viber'));
 
 -- Названия каталога без «(Два АКБ)» и «Monster» (просьба владельца,
 -- 10.2026), один раз (settings.catalog_titles_v2) и только у строк, которые

@@ -87,6 +87,8 @@ TAKE_FIELDS = frozenset({"scope", "location", "status", "note", "expected",
 DEAL_FIELDS = frozenset({
     "title", "name", "phone", "responsible_id", "location", "note",
     "client_id", "thread_id", "booking_id", "rental_id",
+    # null - сигнал «новая заявка из Wazzup» ещё не уходил (inbox.announce_deals_once)
+    "announced_at",
 })
 # Задача дня: что правится в карточке. Статус - своими методами (взять,
 # сделано, отменить): у каждого перехода своё условие в самом UPDATE.
@@ -6604,6 +6606,48 @@ class CrmDB:
             return {"thread_id": thread_id, "created": bool(thread["created"]),
                     "message_id": int(message_id) if message_id is not None else None}
 
+    async def inbox_contact(self, *, channel: str, origin: str, ext_id: str,
+                            name: str | None = None, username: str | None = None,
+                            phone: str | None = None, client_id: int | None = None,
+                            ext_channel: str | None = None) -> dict:
+        """Обращение чата без сообщения: Wazzup просит контакт («создать
+        контакт» в окне чата или новый чат). Тот же ключ, что у сообщений,
+        (channel, ext_id): повтор и сообщение того же чата попадают в эту
+        же строку. Сигнала нет (announced_at = now()): ждать человек
+        начинает сообщением, и сигнал даст оно.
+
+        Чужое обращение (чат завёл опрос Авито) не трогается - строка
+        возвращается как есть с foreign=True: ссылка на неё в сделке
+        ничего не пишет в разговор.
+        """
+        row = await self.pool.fetchrow(
+            """
+            insert into crm.inbox_threads (channel, origin, ext_id, name, username, phone,
+                                           client_id, announced_at, ext_channel)
+            values ($1, $2, $3, $4, $5, $6, $7, now(), $8)
+            on conflict (channel, ext_id) do update
+               set name = coalesce(excluded.name, crm.inbox_threads.name),
+                   username = coalesce(excluded.username, crm.inbox_threads.username),
+                   phone = coalesce(excluded.phone, crm.inbox_threads.phone),
+                   ext_channel = coalesce(excluded.ext_channel,
+                                          crm.inbox_threads.ext_channel),
+                   client_id = case when crm.inbox_threads.client_manual
+                                    then crm.inbox_threads.client_id
+                                    else coalesce(crm.inbox_threads.client_id,
+                                                  excluded.client_id) end,
+                   updated_at = now()
+             where crm.inbox_threads.origin = excluded.origin
+            returning id, client_id, (xmax = 0) as created
+            """, channel, origin, ext_id, name, username, phone, client_id, ext_channel)
+        if row is not None:
+            return {"id": int(row["id"]), "client_id": row["client_id"],
+                    "created": bool(row["created"]), "foreign": False}
+        row = await self.pool.fetchrow(
+            "select id, client_id from crm.inbox_threads where channel = $1 and ext_id = $2",
+            channel, ext_id)
+        return {"id": int(row["id"]), "client_id": row["client_id"], "created": False,
+                "foreign": True}
+
     _INBOX_SELECT = """
         select t.*, c.full_name as client_name, c.phone as client_phone,
                exists (select 1 from crm.rentals r
@@ -6805,9 +6849,11 @@ class CrmDB:
     """
 
     async def deals(self, *, open_only: bool = False, client_id: int | None = None,
-                    closed_days: int | None = None, limit: int = 5000) -> list[dict]:
+                    closed_days: int | None = None, thread_id: int | None = None,
+                    limit: int = 5000) -> list[dict]:
         """Сделки доски. open_only - только открытые (сверка); closed_days -
-        открытые и закрытые за столько дней (доска)."""
+        открытые и закрытые за столько дней (доска); thread_id - сделка
+        обращения, открытая или закрытая (она у обращения одна)."""
         conds: list[str] = []
         args: list[Any] = []
         if open_only:
@@ -6819,6 +6865,9 @@ class CrmDB:
         if client_id is not None:
             args.append(client_id)
             conds.append(f"d.client_id = ${len(args)}")
+        if thread_id is not None:
+            args.append(thread_id)
+            conds.append(f"d.thread_id = ${len(args)}")
         where = ("where " + " and ".join(conds)) if conds else ""
         args.append(limit)
         return _rows(await self.pool.fetch(
@@ -6886,6 +6935,12 @@ class CrmDB:
     async def deal_log(self, deal_id: int) -> list[dict]:
         return _rows(await self.pool.fetch(
             "select * from crm.deal_log where deal_id = $1 order by at, id", deal_id))
+
+    async def deals_to_announce(self, limit: int = 20) -> list[dict]:
+        """Сделки, о которых сигнал «новая заявка из Wazzup» ещё не уходил."""
+        return _rows(await self.pool.fetch(
+            f"{self._DEAL_SELECT} where d.announced_at is null order by d.id limit $1",
+            limit))
 
     async def purge_deal_contacts(self, *, days: int) -> int:
         """Имя и телефон человека без карточки в давно закрытой сделке:

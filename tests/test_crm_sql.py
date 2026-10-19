@@ -159,6 +159,16 @@ class TestCrmSql(unittest.TestCase):
             self.db.mark_send(1, status="sent"), self.db.claim_send(1),
             self.db.fail_stuck_sends(), self.db.fail_stuck_sends(older_minutes=10),
             self.db.inbox_to_announce(), self.db.purge_inbox(30),
+            # заявки из окна чата Wazzup: обращение без сообщения, сделка
+            # обращения, сигнал о сделке
+            self.db.inbox_contact(channel="ig", origin="hook", ext_id="anna.kzn",
+                                  name="n", username="u", phone=None, client_id=None,
+                                  ext_channel="ch-1"),
+            self.db.deals(thread_id=1), self.db.deals(open_only=True, client_id=1,
+                                                      thread_id=1),
+            self.db.deals_to_announce(), self.db.update_deal(1, announced_at=None),
+            self.db.create_deal(stage="new", by="wazzup", source="ig", thread_id=1,
+                                announced_at=None),
             # точки: журнал мест, точка аренды и наряда, каскад, касса
             self.db.create_staff("b", "h", "n", "manager", location="Павлюхина"),
             self.db.set_staff_location(1, "Павлюхина"), self.db.bike_location_log(1),

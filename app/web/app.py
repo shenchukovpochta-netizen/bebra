@@ -4237,7 +4237,7 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     @app.post("/hook/inbox")
     async def inbox_hook(request: Request) -> Response:
-        """Точка входа для шлюза WhatsApp (Green-API, Wazzup) и n8n.
+        """Точка входа для шлюзов (Wazzup, Green-API) и n8n.
 
         Входа в панель у отправителя нет, поэтому проверки свои: пустой
         токен - хука нет вовсе (404), неверный - 401 и счёт неудач с
@@ -4254,6 +4254,52 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         API, шлёт вебхук без заголовка авторизации - подписывать ему нечем.
         Адрес с токеном знает только Wazzup (подписку ставит бот)."""
         return await inbox_hook_in(request, given.strip())
+
+    def wazzup_uri(path: str) -> str | None:
+        return logic.wazzup_panel_url(getattr(cfg, "crm_domain", ""), path)
+
+    async def wazzup_crm_in(req: dict) -> Response:
+        """«Создать контакт / сделку» из окна чата Wazzup (createContact,
+        createDeal): ответ - созданная сущность, как её ждёт Wazzup.
+
+        Контакт - обращение этого чата (карточка клиента не заводится),
+        сделка - «Новая заявка» воронки (deals.from_wazzup). Повтор того же
+        запроса отдаёт то же самое. Не к чему привязать - 200 и «пропущено»:
+        Wazzup шлёт и такое, а 4xx он счёл бы сбоем. В лог - только номера.
+        """
+        try:
+            if req["kind"] == "contact":
+                got = await service.wazzup_contact(crm, req)
+            else:
+                got = await deals.from_wazzup(crm, req)
+        except (service.ServiceError, UnicodeError, ValueError, DataError):
+            got = None
+        if got is None:
+            log.info("хук входящих: Wazzup %s пропущен - не к чему привязать",
+                     req["kind"])
+            return JSONResponse({"ok": True, "skipped": 1})
+        if req["kind"] == "contact":
+            # С утёкшим токеном хук не должен отвечать, чей это номер:
+            # ответ одинаков для клиента и для чужого. Имя - из запроса,
+            # иначе номер обращения (имя, записанное раньше, и ФИО карточки
+            # не уходят), ссылка - всегда на обращение, а не на карточку
+            # клиента: её номер в ответе выдал бы, что номер - наш клиент.
+            # Карточку обращение и так показывает.
+            thread_id = int(got["thread_id"])
+            name = req.get("name") or logic.inbox_no(thread_id)
+            log.info("хук входящих: Wazzup контакт - обращение %s (%s)",
+                     logic.inbox_no(thread_id),
+                     "новое" if got["created"] else "уже было")
+            return JSONResponse(logic.wazzup_contact_reply(
+                req, contact_id=f"thread-{thread_id}", name=name,
+                uri=wazzup_uri(f"/inbox/{thread_id}")))
+        deal = got["deal"]
+        log.info("хук входящих: Wazzup сделка %s (%s)", int(deal["id"]),
+                 "новая" if got["created"] else "уже была")
+        return JSONResponse(logic.wazzup_deal_reply(
+            req, deal_id=int(deal["id"]), contact_id=got.get("contact"),
+            uri=wazzup_uri(f"/deals/{int(deal['id'])}"),
+            closed=deal.get("closed_at") is not None))
 
     async def inbox_hook_in(request: Request, given: str) -> Response:
         token = str(getattr(cfg, "inbox_hook_token", "") or "")
@@ -4287,6 +4333,9 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             # RecursionError - тело из тысяч вложенных скобок: для хука это
             # тоже «не JSON», а не падение обработчика.
             return JSONResponse({"ok": False, "error": "not json"}, status_code=400)
+        wazzup_req = logic.wazzup_crm_request(payload)
+        if wazzup_req is not None:
+            return await wazzup_crm_in(wazzup_req)
         items, skipped = logic.parse_inbound(payload)
         # Разбор уже обрезал пачку и учёл лишнее в skipped: здесь каждое
         # сообщение либо пишется, либо тоже идёт в счёт.
