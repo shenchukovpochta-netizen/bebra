@@ -1,14 +1,23 @@
 {% extends "base.html" %}
 {% block title %}Команда — {{ app_title }}{% endblock %}
 {% block content %}
-{# «Команда» (app/crm/team.py): сотрудник за месяц - план, факт, темп и
-   начисленное по его условиям. Факт - из своих таблиц по автору записи. #}
-<div class="bar"><h1>Команда <small class="muted">{{ month_title }}</small></h1>
-  <nav class="inline-form" aria-label="Месяц">
-    {% if span.prev_key %}<a class="btn ghost small" href="/team?month={{ span.prev_key }}">← {{ span.prev.strftime('%m.%Y') }}</a>{% endif %}
-    {% if span.next_key %}<a class="btn ghost small" href="/team?month={{ span.next_key }}">{{ span.next.strftime('%m.%Y') }} →</a>{% endif %}
+{# «Команда» (app/crm/team.py): сотрудник за месяц, неделю или день - план,
+   факт, темп; за месяц ещё начисленное по его условиям. Факт - из своих
+   таблиц по автору записи. План недели и дня без своего - доля месяца. #}
+{% set head = month_title if kind == 'month' else period.title %}
+<div class="bar"><h1>Команда <small class="muted">{{ head }}</small></h1>
+  <nav class="tabs" aria-label="Период">
+    {% for code, label in periods %}<a href="/team{% if code == 'month' %}?month={{ span.key }}{% else %}?period={{ code }}{% endif %}" {% if code == kind %}class="on" aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
   </nav>
-  {% if money_ok %}<a class="btn ghost" href="/team.xlsx?month={{ span.key }}">Excel</a>{% endif %}
+  <nav class="tabs" aria-label="Листать">
+    {% if kind == 'month' %}
+    {% if span.prev_key %}<a href="/team?month={{ span.prev_key }}" title="прошлый месяц">‹</a>{% endif %}<a href="/team?month={{ span.key }}" class="on">{{ span.first.strftime('%m.%Y') }}</a>{% if span.next_key %}<a href="/team?month={{ span.next_key }}" title="следующий месяц">›</a>{% endif %}
+    {% else %}
+    <a href="/team?period={{ kind }}&amp;{{ kind }}={{ period.prev.isoformat() }}" title="{{ 'прошлая неделя' if kind == 'week' else 'день назад' }}">‹</a><a href="/team?period={{ kind }}&amp;{{ kind }}={{ period.key }}" class="on">{% if period.is_current %}{{ 'эта неделя' if kind == 'week' else 'сегодня' }}{% else %}{{ period.start.strftime('%d.%m') }}{% endif %}</a>{% if period.next %}<a href="/team?period={{ kind }}&amp;{{ kind }}={{ period.next.isoformat() }}" title="{{ 'следующая неделя' if kind == 'week' else 'день вперёд' }}">›</a>{% endif %}
+    {% if not period.is_current %}<a href="/team?period={{ kind }}">{{ 'к этой неделе' if kind == 'week' else 'к сегодня' }}</a>{% endif %}
+    {% endif %}
+  </nav>
+  {% if money_ok and kind == 'month' %}<a class="btn ghost" href="/team.xlsx?month={{ span.key }}">Excel</a>{% endif %}
 </div>
 <div class="tiles">
   <div class="tile"><b>{{ total.issues }}</b><span>выдач</span></div>
@@ -16,34 +25,47 @@
   <div class="tile"><b>{{ total.tasks }}</b><span>задач сделано</span></div>
   {% if money_ok %}
   <div class="tile"><b>{{ money(total.revenue) }}</b><span>принесли денег</span></div>
-  <div class="tile"><b>{{ money(total.pay) }}</b><span>начислено зарплаты</span></div>
+  {% if kind == 'month' %}<div class="tile"><b>{{ money(total.pay) }}</b><span>начислено зарплаты</span></div>{% endif %}
   {% endif %}
 </div>
-{% if span.is_current %}<p class="muted">Месяц идёт: день {{ span.passed }} из {{ span.days }}. Темп — сколько плана должно быть сделано к сегодняшнему дню при ровной работе.</p>{% endif %}
+{% if kind == 'month' and span.is_current %}<p class="muted">Месяц идёт: день {{ span.passed }} из {{ span.days }}. Темп — сколько плана должно быть сделано к сегодняшнему дню при ровной работе.</p>
+{% elif kind == 'week' and period.is_current %}<p class="muted">Неделя идёт: день {{ period.passed }} из 7. Темп — сколько плана недели должно быть сделано к сегодняшнему дню.</p>
+{% elif kind == 'day' and period.is_current %}<p class="muted">День идёт: невыполненное к вечеру ещё не отставание — красным станет завтра.</p>
+{% elif period and period.future %}<p class="muted">Период ещё не начался — здесь видно, какой план на него стоит.</p>{% endif %}
 <div class="card">
 <div class="table-wrap">
 <table class="cards">
   <tr><th>Сотрудник</th><th class="num">Выдачи</th><th class="num">Наряды</th><th class="num">Задачи</th>
     {% if money_ok %}<th class="num">Принёс денег</th>{% endif %}<th class="num">План</th>
-    {% if money_ok %}<th class="num">Начислено</th>{% endif %}</tr>
+    {% if money_ok and kind == 'month' %}<th class="num">Начислено</th>{% endif %}</tr>
   {% for r in rows %}
   <tr class="{% if r.behind %}warn-row{% endif %}">
-    <td data-label="Сотрудник"><a href="/team/{{ r.id }}?month={{ span.key }}"><b>{{ r.name }}</b></a>
+    <td data-label="Сотрудник"><a href="/team/{{ r.id }}?{{ member_q }}"><b>{{ r.name }}</b></a>
       <br><small class="muted">{{ r.role }}{% if r.location %} · {{ r.location }}{% endif %}{% if not r.active %} · отключён{% endif %}</small></td>
     {% for key in ('issues', 'orders', 'tasks') %}{% set m = r.metrics[key] %}
-    <td class="num" data-label="{{ m.title }}">{{ m.fact }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan }}</small>{% endif %}</td>
+    <td class="num" data-label="{{ m.title }}">{{ m.fact_text }}{% if m.plan is not none %} <small class="muted">/ {{ m.plan_text }}</small>{% endif %}</td>
     {% endfor %}
-    {% if money_ok %}{% set m = r.metrics['revenue'] %}<td class="num" data-label="Принёс денег">{{ money(m.fact) }}{% if m.plan is not none %}<br><small class="muted">из {{ money(m.plan) }}</small>{% endif %}</td>{% endif %}
-    <td class="num" data-label="План">{% if r.percent is not none %}<b class="{% if r.behind %}bad{% else %}ok{% endif %}">{{ r.percent }} %</b>{% else %}<span class="muted">не задан</span>{% endif %}</td>
-    {% if money_ok %}<td class="num" data-label="Начислено">{{ money(r.pay.total) }}{% if r.inherited %}<br><small class="muted">условия прошлого месяца</small>{% endif %}</td>{% endif %}
+    {% if money_ok %}{% set m = r.metrics['revenue'] %}<td class="num" data-label="Принёс денег">{{ m.fact_text }}{% if m.plan is not none %}<br><small class="muted">из {{ m.plan_text }}</small>{% endif %}</td>{% endif %}
+    <td class="num" data-label="План">{% if r.percent is not none %}<b class="{% if r.behind %}bad{% elif r.ahead %}ok{% endif %}">{{ r.percent }} %</b>
+      {% if kind != 'month' %}<br><small class="muted">{% if r.source == 'own' %}свой план {{ 'недели' if kind == 'week' else 'дня' }}{% elif r.source == 'month' %}из плана месяца{% else %}свой + из месяца{% endif %}</small>{% endif %}
+      {% else %}<span class="muted">не задан</span>{% endif %}</td>
+    {% if money_ok and kind == 'month' %}<td class="num" data-label="Начислено">{{ money(r.pay.total) }}{% if r.inherited %}<br><small class="muted">условия прошлого месяца</small>{% endif %}</td>{% endif %}
   </tr>
   {% else %}<tr><td colspan="7" class="muted">Сотрудников нет.</td></tr>{% endfor %}
 </table>
 </div>
 </div>
+{% if kind == 'month' %}
 <p class="muted">Выдачи — аренды, оформленные сотрудником; наряды — закрытые, где он техник;
   задачи — сделанные им поручения. «Принёс денег» — платежи, которые он принял (банк и
   автозачисление ничьи), плюс клиентские наряды. План и условия оплаты задаются в карточке
   сотрудника на месяц: месяц без своих условий живёт по прошлым. Зарплата — расчёт по
   условиям, в журнал денег клиентов она не идёт.</p>
+{% else %}
+<p class="muted">Факт — те же выдачи, наряды, задачи и деньги, что в месяце, но за
+  {{ 'эти семь дней (неделя с понедельника; на стыке месяцев — по датам)' if kind == 'week' else 'этот день' }}.
+  План {{ 'недели' if kind == 'week' else 'дня' }} без своего — доля плана месяца по дням:
+  каждый день берёт свою часть плана своего месяца. Свой план задаётся в карточке
+  сотрудника и главнее выведенного. Начисления — только за месяц.</p>
+{% endif %}
 {% endblock %}

@@ -79,6 +79,7 @@ class FakeCrm:
         self.deals_: dict[int, dict] = {}
         self.tasks_: dict[int, dict] = {}
         self.staff_plans_: dict[tuple, dict] = {}
+        self.staff_period_plans_: dict[tuple, dict] = {}
         self.cash_plan_: dict[int, dict] = {}
         self.deal_log_: list[dict] = []
         self.inbox_messages_: dict[int, dict] = {}
@@ -5025,6 +5026,30 @@ class FakeCrm:
             "plan_tasks": None, "plan_revenue": None, "salary_base": Decimal(0),
             "per_issue": Decimal(0), "order_pct": Decimal(0), "revenue_pct": Decimal(0)})
         row.update(fields, updated_by=by, updated_at=self._now())
+
+    async def staff_period_plans(self, kind, starts):
+        if kind not in ("week", "day"):
+            raise ValueError(f"неизвестный период: {kind}")
+        return {sid: dict(row) for (sid, k, d), row in self.staff_period_plans_.items()
+                if k == kind and d == starts}
+
+    async def set_staff_period_plan(self, staff_id, kind, starts, *, by, **fields):
+        cols = ("plan_issues", "plan_orders", "plan_tasks", "plan_revenue")
+        if kind not in ("week", "day"):
+            raise ValueError(f"неизвестный период: {kind}")
+        unknown = set(fields) - set(cols)
+        if unknown:
+            raise ValueError(f"недопустимые колонки: {sorted(unknown)}")
+        if kind == "week" and starts.weekday() != 0:
+            raise ValueError("неделя - с понедельника")      # check в schema.sql
+        key = (staff_id, kind, starts)
+        values = {c: fields.get(c) for c in cols}
+        if all(v is None for v in values.values()):
+            self.staff_period_plans_.pop(key, None)
+            return
+        self.staff_period_plans_[key] = {"staff_id": staff_id, "kind": kind, "starts": starts,
+                                         **values, "updated_by": by,
+                                         "updated_at": self._now()}
 
     async def team_facts(self, since, until):
         def inside(moment):

@@ -2181,9 +2181,10 @@ async def _saved_views(conn: asyncpg.Connection, c: _Ctx) -> None:
 
 
 async def _team(conn: asyncpg.Connection, c: _Ctx) -> None:
-    """Поручения «Задач дня» и план месяца команды (app/crm/tasks.py,
-    app/crm/team.py): своё, незакреплённое точки, просроченное и сделанное
-    сегодня - чтобы «Все задачи», «Команда» и «Критично» не были пустыми.
+    """Поручения «Задач дня» и планы команды на месяц, неделю и день
+    (app/crm/tasks.py, app/crm/team.py): своё, незакреплённое точки,
+    просроченное и сделанное сегодня - чтобы «Все задачи», «Команда» и
+    «Критично» не были пустыми.
     Имена и цифры вымышленные, как всё в демо."""
     s = c.w.staff
     today = _msk(c.now).date()
@@ -2227,6 +2228,20 @@ async def _team(conn: asyncpg.Connection, c: _Ctx) -> None:
         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'staff:demo')
         on conflict (staff_id, month) do nothing
         """, [(s[login].id, first, *rest) for login, *rest in plans if login in s])
+    # Свой план недели и дня: у администратора - на эту неделю, у второго
+    # и у мастера - на сегодня; остальные живут долей плана месяца.
+    monday = today - timedelta(days=today.weekday())
+    period = (("operator", "week", monday, 12, None, 3, D("40000")),
+              ("operator2", "day", today, 3, None, None, None),
+              ("mechanic", "day", today, None, 2, 1, None))
+    await conn.executemany(
+        """
+        insert into crm.staff_period_plans (staff_id, kind, starts, plan_issues,
+                                            plan_orders, plan_tasks, plan_revenue,
+                                            updated_by)
+        values ($1, $2, $3, $4, $5, $6, $7, 'staff:demo')
+        on conflict (staff_id, kind, starts) do nothing
+        """, [(s[login].id, *rest) for login, *rest in period if login in s])
 
 
 async def _settings(conn: asyncpg.Connection, c: _Ctx) -> None:
