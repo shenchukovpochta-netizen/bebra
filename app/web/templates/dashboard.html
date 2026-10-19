@@ -364,7 +364,7 @@
         <td data-label="Велосипед"><a href="/bikes/{{ b.id }}">№ {{ b.code }}</a> <span class="muted">{{ b.model }}</span></td>
         <td data-label="Статус">{{ BIKE_STATUSES[b.status] }}</td>
         <td class="num" data-label="Суток">{{ b.idle_days }}</td>
-        {% if money_ok %}<td class="num {% if b.lost %}bad{% endif %}" data-label="Потеряно">{% if b.lost %}−{{ money(b.lost) }}{% else %}—{% endif %}</td>{% endif %}
+        {% if money_ok %}<td class="num {% if b.lost %}bad{% endif %}" data-label="Потеряно">{%- if b.lost -%}−{{ money(b.lost) }}{%- endif -%}</td>{% endif %}
       </tr>
       {% endfor %}
     </table>

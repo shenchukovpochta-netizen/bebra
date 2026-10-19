@@ -16,10 +16,17 @@
     <input type="hidden" name="status" value="{{ status }}">
     {% if view %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
     <input name="q" value="{{ q }}" placeholder="клиент, телефон, № велосипеда, договор">
-    <select name="location" aria-label="Точка выдачи"><option value="">любая точка</option>
-      {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
-      <option value="none" {% if location == 'none' %}selected{% endif %}>{{ NO_POINT_TITLE }}</option>
-    </select>
+    {# Точка - под раскрывашкой (details.filters в style.css): на телефоне
+       список и так ниже поиска и вкладок. Заданная точка раскрыта. #}
+    <details class="filters"{% if location %} open{% endif %}>
+      <summary>Точка</summary>
+      <div class="fields">
+        <select name="location" aria-label="Точка выдачи"><option value="">любая точка</option>
+          {% for loc in places %}<option value="{{ loc }}" {% if location == loc %}selected{% endif %}>{{ loc }}</option>{% endfor %}
+          <option value="none" {% if location == 'none' %}selected{% endif %}>{{ NO_POINT_TITLE }}</option>
+        </select>
+      </div>
+    </details>
     <button type="submit">Найти</button>
   </form>
   <a class="btn ghost" href="/rentals.xlsx?status={{ status }}&view={{ view }}&q={{ q|urlencode }}{{ lq }}">Excel</a>

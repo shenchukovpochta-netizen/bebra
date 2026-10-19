@@ -8,7 +8,7 @@
 {# Колонки плана - когда план есть хоть у одной точки: без него они пустые. #}
 {% set planned = money_ok and report.planned %}
 {% set q = ('?' ~ span.query) if span.query else '' %}
-<div class="bar"><h1>По точкам <small class="muted">· {{ span.label }}</small></h1>
+<div class="bar"><h1>По точкам <small class="muted">{{ span.label }}</small></h1>
   {% with active = 'points' %}{% include "_report_tabs.html" %}{% endwith %}
 </div>
 <div class="bar">
@@ -62,6 +62,14 @@
 {% if not report.rows %}
 <p class="muted">Точек пока нет — их заводят в настройках, раздел «Точки».</p>
 {% endif %}
+</div>
+
+{# «Как считается» - справка, а не данные: свёрнута своей карточкой под
+   таблицей - на телефоне пять абзацев отодвигали переброску на два
+   экрана. Не внутри карточки списка: с раскрывашкой она осталась бы на
+   телефоне в рамке, как карточка с формами. #}
+<details class="card fold">
+<summary>Как считается</summary>
 <p class="muted">Простой и чек — те же формулы, что на сводке, только
   ограниченные точкой (цели: простой меньше {{ IDLE_TARGET_PERCENT }} %{% if money_ok %}, чек {{ money(CHECK_TARGET) }} в день{% endif %}).
   Дни — по журналу мест: где велосипед стоял в каждый момент, там и его
@@ -89,7 +97,7 @@
   нельзя. Наличные — по кассовым сменам точки{% endif %}. Наряды —
   закрытые за период, по точке ремонта{% if money_ok %}; сервис —
   оплаченные клиентские наряды, в выручку аренды они не входят{% endif %}.</p>
-</div>
+</details>
 
 {# Переброска - совет на завтра и послезавтра, от периода отчёта не
    зависит. Везёт человек: отмечает велосипеды и жмёт кнопку, панель
@@ -97,7 +105,7 @@
 {% if transfer %}
 {% set move_ok = can_edit(staff, 'bikes') %}
 <section class="card" id="transfer">
-  <h2>Переброска между точками <span class="muted">· на {{ transfer.days|map('dmy')|join(' и ') }}</span></h2>
+  <h2>Переброска между точками&nbsp;<span class="muted">·&nbsp;на {{ transfer.days|map('dmy')|join(' и ') }}</span></h2>
   {% for g in transfer.moves %}
   <div>
     <h3>Перевезти {{ g.label }}</h3>
@@ -130,7 +138,7 @@
     клиент не сказал «продлю». Точка отдаёт только свободные сверх своего прогноза и
     запаса {{ transfer.safety }}, недостача закрывается от самого большого излишка.</p>
   {% if transfer.rows %}
-  <details>
+  <details class="more">
     <summary>Прогноз по точкам и моделям</summary>
     <div class="table-wrap">
     <table class="cards">

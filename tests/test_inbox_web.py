@@ -365,6 +365,22 @@ class TestInboxList(InboxCase):
         self.assertIn("Азиз Каримов", page, "неизвестный канал - без фильтра")
         self.assertIn("Иван Курьеров", page)
 
+    def test_saved_filters_open_only_on_real_filter(self):
+        # Раскрывашка «Мои фильтры» раскрыта по поиску или каналу, а не по
+        # любому параметру: вкладки, сортировка и «строк: N» несут свои
+        # параметры, и на телефоне она раскрывалась бы почти всегда.
+        closed = '<details class="filters">'
+        opened = '<details class="filters" open>'
+        for path in ("/inbox", "/inbox?tab=new", "/inbox?tab=open",
+                     "/inbox?sort=name&dir=desc", "/inbox?rows=100",
+                     "/inbox?channel=sms"):
+            page = self.get_ok(path)
+            self.assertIn(closed, page, path)
+            self.assertNotIn(opened, page, path)
+        for path in ("/inbox?channel=wa", "/inbox?tab=all&channel=max",
+                     "/inbox?q=kugoo"):
+            self.assertIn(opened, self.get_ok(path), path)
+
     def test_search(self):
         page = self.get_ok("/inbox?q=kugoo")
         self.assertIn("Мария Авито", page, "поиск по объявлению без регистра")

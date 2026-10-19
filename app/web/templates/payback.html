@@ -13,41 +13,46 @@
 </div>
 
 <div class="card">
-<table>
-  <tr><th>Модель</th><th>Великов</th><th class="opt">Дней в аренде</th><th>Чек/день</th>
-      <th>Оплачено</th><th class="opt">Начислено</th><th>Ремонт</th>
-      <th class="opt">Работы клиентам</th><th>Амортизация</th><th>Маржа</th><th>Маржа %</th></tr>
+<div class="table-wrap">
+{# Перенос в двухсловных заголовках, как в «По точкам»: одиннадцать
+   колонок на ноутбуке иначе уводили маржу за край. #}
+<table class="cards">
+  <tr><th>Модель</th><th class="num">Великов</th><th class="num opt">Дней<br>в аренде</th><th class="num">Чек/день</th>
+      <th class="num">Оплачено</th><th class="num opt">Начислено</th><th class="num">Ремонт</th>
+      <th class="num opt">Работы<br>клиентам</th><th class="num">Амортизация</th><th class="num">Маржа</th><th class="num">Маржа %</th></tr>
   {% for r in rows %}
   <tr>
-    <td>{{ r.model }}</td>
-    <td class="num">{{ r.bikes }}{% if r.priced < r.bikes %} <small class="muted" title="у остальных не задана цена покупки">цена у {{ r.priced }}</small>{% endif %}</td>
-    <td class="num opt">{{ r.rented_days|round(1) }}</td>
-    <td class="num {% if r.check_per_day is none %}muted{% elif r.check_per_day >= CHECK_TARGET %}ok{% else %}bad{% endif %}">{% if r.check_per_day is none %}—{% else %}{{ money(r.check_per_day) }}{% endif %}</td>
-    <td class="num ok">{{ money(r.paid) }}</td>
-    <td class="num opt">{{ money(r.charged) }}</td>
-    <td class="num">{{ money(r.repair_cost) }}</td>
-    <td class="num opt">{{ money(r.works) }}</td>
-    <td class="num">{{ money(r.amortization) }}</td>
-    <td class="num {% if r.margin > 0 %}ok{% else %}bad{% endif %}">{{ money(r.margin) }}</td>
-    <td class="num {% if r.margin_percent is none %}muted{% elif r.margin_percent > 0 %}ok{% else %}bad{% endif %}">{% if r.margin_percent is none %}—{% else %}{{ r.margin_percent }} %{% endif %}</td>
+    <td data-label="Модель">{{ r.model }}</td>
+    <td class="num" data-label="Великов">{{ r.bikes }}{% if r.priced < r.bikes %} <small class="muted" title="у остальных не задана цена покупки">цена у {{ r.priced }}</small>{% endif %}</td>
+    <td class="num opt" data-label="Дней в аренде">{{ r.rented_days|round(1) }}</td>
+    <td class="num {% if r.check_per_day is none %}muted{% elif r.check_per_day >= CHECK_TARGET %}ok{% else %}bad{% endif %}" data-label="Чек/день">{% if r.check_per_day is none %}—{% else %}{{ money(r.check_per_day) }}{% endif %}</td>
+    <td class="num ok" data-label="Оплачено">{{ money(r.paid) }}</td>
+    <td class="num opt" data-label="Начислено">{{ money(r.charged) }}</td>
+    <td class="num" data-label="Ремонт">{{ money(r.repair_cost) }}</td>
+    <td class="num opt" data-label="Работы клиентам">{{ money(r.works) }}</td>
+    <td class="num" data-label="Амортизация">{{ money(r.amortization) }}</td>
+    <td class="num {% if r.margin > 0 %}ok{% else %}bad{% endif %}" data-label="Маржа">{{ money(r.margin) }}</td>
+    <td class="num {% if r.margin_percent is none %}muted{% elif r.margin_percent > 0 %}ok{% else %}bad{% endif %}" data-label="Маржа %">{% if r.margin_percent is none %}—{% else %}{{ r.margin_percent }} %{% endif %}</td>
   </tr>
   {% else %}<tr><td colspan="11" class="muted">За период нет ни денег, ни парка.</td></tr>{% endfor %}
   {% if rows %}
   <tr class="total">
-    <td><b>ИТОГО</b></td>
-    <td class="num">{{ total.bikes }}</td>
-    <td class="num opt">{{ total.rented_days|round(1) }}</td>
-    <td class="num">{% if total.check_per_day is none %}—{% else %}{{ money(total.check_per_day) }}{% endif %}</td>
-    <td class="num">{{ money(total.paid) }}</td>
-    <td class="num opt">{{ money(total.charged) }}</td>
-    <td class="num">{{ money(total.repair_cost) }}</td>
-    <td class="num opt">{{ money(total.works) }}</td>
-    <td class="num">{{ money(total.amortization) }}</td>
-    <td class="num {% if total.margin > 0 %}ok{% else %}bad{% endif %}">{{ money(total.margin) }}</td>
-    <td class="num">{% if total.margin_percent is none %}—{% else %}{{ total.margin_percent }} %{% endif %}</td>
+    <td data-label="Модель"><b>ИТОГО</b></td>
+    <td class="num" data-label="Великов">{{ total.bikes }}</td>
+    <td class="num opt" data-label="Дней в аренде">{{ total.rented_days|round(1) }}</td>
+    <td class="num" data-label="Чек/день">{% if total.check_per_day is none %}—{% else %}{{ money(total.check_per_day) }}{% endif %}</td>
+    <td class="num" data-label="Оплачено">{{ money(total.paid) }}</td>
+    <td class="num opt" data-label="Начислено">{{ money(total.charged) }}</td>
+    <td class="num" data-label="Ремонт">{{ money(total.repair_cost) }}</td>
+    <td class="num opt" data-label="Работы клиентам">{{ money(total.works) }}</td>
+    <td class="num" data-label="Амортизация">{{ money(total.amortization) }}</td>
+    <td class="num {% if total.margin > 0 %}ok{% else %}bad{% endif %}" data-label="Маржа">{{ money(total.margin) }}</td>
+    <td class="num" data-label="Маржа %">{% if total.margin_percent is none %}—{% else %}{{ total.margin_percent }} %{% endif %}</td>
   </tr>
   {% endif %}
 </table>
+</div>
+<p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
 <p class="muted">
   <b>Маржа = оплачено + работы клиентам − ремонт − амортизация.</b>
   Амортизация пересчитана с месячной на дни периода; она берётся только с
