@@ -138,6 +138,19 @@ class TestAssetsInPanel(tw.WebCase):
         self.assertIn("B-101", page)
         self.assertIn("вложено в парк", page)
 
+    def test_list_is_paged_and_sorted(self):
+        """Весь парк одной лентой - двести карточек на телефоне, и форма
+        закупки под ними недосягаема: список постраничный, плитки - по всему."""
+        self.buy(codes=" ".join(f"P-{n:03d}" for n in range(60)))
+        page = self.get_ok("/assets")
+        self.assertIn("показано 50", page)
+        self.assertIn("стр. 1 из 2", page)
+        self.assertIn("Новая закупка", page)
+        page = self.get_ok("/assets?sort=code&dir=desc")
+        self.assertLess(page.index(">P-059<"), page.index(">P-058<"))
+        self.assertNotIn(">P-000<", page, "первый по номеру - на второй странице")
+        self.assertIn(">P-000<", self.get_ok("/assets?sort=code&dir=desc&page=2"))
+
     def test_tabs_filter_the_list(self):
         self.buy()
         tw.run(self.crm.update_bike(tw.run(self.crm.bike_by_code("B-101"))["id"],

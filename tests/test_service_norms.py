@@ -711,6 +711,12 @@ class TestBatteryPlanInPanel(tw.WebCase):
         self.assertNotIn("АКБ-3", page, "новая - вне полугода")
         self.assertIn("32 000", page, "две Kugoo за квартал по цене каталога")
         self.assertIn(f"/batteries/new?model_id={self.model_id}", page)
+        # «Что менять» - постранично, с подвалом и сортировкой: сотня батарей
+        # одной лентой на телефоне уводила форму ресурса за тридцать экранов.
+        self.assertIn("<b>Итого 2</b>", page)
+        self.assertLess(page.index(">АКБ-1<"), page.index(">АКБ-2<"), "раньше срок - выше")
+        page = self.get_ok("/batteries/plan?sort=replace&dir=desc")
+        self.assertLess(page.index(">АКБ-2<"), page.index(">АКБ-1<"))
         self.assertIn("План замены", self.get_ok("/batteries"))
         csv = self.client.get("/batteries/plan.csv").content.decode("utf-8-sig")
         self.assertIn("Заменить до", csv)

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_list.html" as list %}
 {% block title %}Основные средства — {{ app_title }}{% endblock %}
 {% block content %}
 <div class="bar"><h1>Основные средства</h1>
@@ -18,20 +19,21 @@
 </div>
 
 <div class="card">
-<table>
-  <tr><th>№</th><th>Модель</th><th class="opt">Куплен</th><th>Цена</th><th>Износ</th><th>Остаточная</th><th class="opt">Аморт./мес</th><th>Статус</th></tr>
+<table class="cards">
+  <tr>{{ list.th('№', 'code', tools) }}{{ list.th('Модель', 'model', tools) }}{{ list.th('Куплен', 'bought', tools, 'opt') }}{{ list.th('Цена', 'price', tools) }}{{ list.th('Износ', 'wear', tools) }}{{ list.th('Остаточная', 'book', tools) }}<th class="opt">Аморт./мес</th>{{ list.th('Статус', 'status', tools) }}</tr>
   {% for b in rows %}
   <tr>
-    <td><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
-    <td>{{ b.model }}</td>
-    <td class="opt">{% if b.purchased_on %}{{ b.purchased_on|dmy }}{% else %}<span class="muted">—</span>{% endif %}</td>
-    <td class="num">{% if b.purchase_price is not none %}{{ money(b.purchase_price) }}{% else %}<span class="muted">не задана</span>{% endif %}</td>
-    <td class="num {% if b.worn_out %}bad{% endif %}">{% if b.wear is none %}—{% else %}{{ b.wear }} %{% endif %}</td>
-    <td class="num">{% if b.book is not none %}{{ money(b.book) }}{% else %}—{% endif %}</td>
-    <td class="num opt">{% if b.month %}{{ money(b.month) }}{% else %}—{% endif %}</td>
-    <td><span class="tag {{ b.status }}">{{ BIKE_STATUSES[b.status] }}</span></td>
+    <td data-label="№"><a href="/bikes/{{ b.id }}">{{ b.code }}</a></td>
+    <td data-label="Модель">{{ b.model }}</td>
+    <td class="opt" data-label="Куплен">{% if b.purchased_on %}{{ b.purchased_on|dmy }}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="num" data-label="Цена">{% if b.purchase_price is not none %}{{ money(b.purchase_price) }}{% else %}<span class="muted">не задана</span>{% endif %}</td>
+    <td class="num {% if b.worn_out %}bad{% endif %}" data-label="Износ">{%- if b.wear is not none -%}{{ b.wear }} %{%- endif -%}</td>
+    <td class="num" data-label="Остаточная">{%- if b.book is not none -%}{{ money(b.book) }}{%- endif -%}</td>
+    <td class="num opt" data-label="Аморт./мес">{% if b.month %}{{ money(b.month) }}{% else %}—{% endif %}</td>
+    <td data-label="Статус"><span class="tag {{ b.status }}">{{ BIKE_STATUSES[b.status] }}</span></td>
   </tr>
   {% else %}<tr><td colspan="8" class="muted">Ничего нет.</td></tr>{% endfor %}
+  {{ list.footer(tools, '/assets', 8) }}
 </table>
 <p class="muted">Износ считается по сроку службы, а не по пробегу: срок задан
   у каждого велосипеда, а одометры половины парка переписывали не каждую
@@ -41,25 +43,27 @@
 
 <div class="card">
   <h2>Закупки</h2>
-  <table>
+  <table class="cards">
     <tr><th>№</th><th>Дата</th><th>Поставщик</th><th>Велосипедов</th><th>Сумма</th><th class="opt">Списано</th><th class="opt">Комментарий</th></tr>
     {% for p in purchases %}
     <tr>
-      <td>{{ p.no }}</td>
-      <td>{{ p.purchased_on|dmy }}</td>
-      <td>{{ p.supplier_name or '—' }}</td>
-      <td class="num">{{ p.bikes }}</td>
-      <td class="num">{{ money(p.total) }}</td>
-      <td class="num opt">{{ p.written_off }}</td>
-      <td class="opt">{{ p.note or '' }}</td>
+      <td data-label="№">{{ p.no }}</td>
+      <td data-label="Дата">{{ p.purchased_on|dmy }}</td>
+      <td data-label="Поставщик">{{ p.supplier_name or '' }}</td>
+      <td class="num" data-label="Велосипедов">{{ p.bikes }}</td>
+      <td class="num" data-label="Сумма">{{ money(p.total) }}</td>
+      <td class="num opt" data-label="Списано">{{ p.written_off }}</td>
+      <td class="opt" data-label="Комментарий">{{ p.note or '' }}</td>
     </tr>
     {% else %}<tr><td colspan="7" class="muted">Закупок не заводили. Велосипеды, заведённые поштучно, в этот список не попадают.</td></tr>{% endfor %}
   </table>
 </div>
 
 {% if can_edit(staff, 'bikes') %}
-<div class="card">
-  <h2>Новая закупка</h2>
+{# Партию заводят раз в несколько месяцев, а форма в двенадцать полей
+   на телефоне - два экрана: свёрнута, пока не нужна. #}
+<details class="card fold">
+  <summary>Новая закупка <small class="muted">партия велосипедов одним документом</small></summary>
   {# Номера вводятся как есть: они уже наклеены на рамы, и придумывать
      нумерацию за оператора значило бы разойтись с наклейками. #}
   <form method="post" action="/assets" class="grid2">
@@ -81,6 +85,6 @@
     номера проверяются до вставки. Каждый велосипед остаётся отдельной
     единицей учёта — партия может состоять из разных моделей, и складывать
     их в одну строку значило бы потерять велосипед.</p>
-</div>
+</details>
 {% endif %}
 {% endblock %}

@@ -7858,11 +7858,18 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
         return logic.battery_wear_plan(await crm.batteries(limit=10000),
                                        today=date.today(), max_cycles=cycles)
 
+    BATTERY_PLAN_SORTS = {"code": "code", "model": "model_title", "status": "status",
+                          "cycles": "cycles", "replace": "replace_on"}
+
     @app.get("/batteries/plan")
     async def battery_plan_page(request: Request) -> Response:
         """Что менять в ближайшие 1/3/6 месяцев и сколько на это отложить."""
         plan = await battery_plan_data()
-        return render(request, "battery_plan.html", plan=plan,
+        # «Что менять» - постранично: сотня батарей одной лентой на телефоне
+        # уводила форму ресурса на тридцать экранов вниз. Плитки и «По
+        # моделям» считаются по всем строкам, а не по странице.
+        tools = list_tools(request, plan["rows"], allowed=BATTERY_PLAN_SORTS)
+        return render(request, "battery_plan.html", plan=plan, tools=tools,
                       summary=logic.battery_summary(logic.battery_rows(
                           await crm.batteries(), max_cycles=plan["max_cycles"])))
 
@@ -9779,6 +9786,10 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
 
     # ─────────────────── закупки основных средств ───────────────────
 
+    ASSET_SORTS = {"code": "code", "model": "model", "bought": "purchased_on",
+                   "price": "purchase_price", "wear": "wear", "book": "book",
+                   "status": "status"}
+
     @app.get("/assets")
     async def assets_page(request: Request) -> Response:
         """Парк как основные средства: сколько вложено, сколько осталось."""
@@ -9794,7 +9805,11 @@ def create_app(*, crm: Any, db: Any, cfg: WebConfig, bot: Any = None) -> FastAPI
             rows = [b for b in rows if b.get("status") in ("sold", "written_off")]
         elif tab == "live":
             rows = [b for b in rows if b.get("status") not in ("sold", "written_off")]
-        return render(request, "assets.html", rows=rows, summary=summary, tab=tab,
+        # Постранично: весь парк одной лентой - это двести карточек на
+        # телефоне, и форма закупки под ними недосягаема. Плитки - по всему.
+        tools = list_tools(request, rows, allowed=ASSET_SORTS)
+        return render(request, "assets.html", rows=tools["rows"], tools=tools,
+                      summary=summary, tab=tab,
                       places=await location_names(),
                       purchases=await crm.purchases(limit=100),
                       suppliers=await crm.suppliers(active_only=True))
