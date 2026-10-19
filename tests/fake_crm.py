@@ -617,9 +617,13 @@ class FakeCrm:
         bike = self.bikes_[bike_id]
         return {"status": bike["status"], "location": bike.get("location")}
 
-    async def bike_counts(self):
+    async def bike_counts(self, location=None):
         out: dict[str, int] = {}
         for b in self.bikes_.values():
+            if location == "none" and b.get("location") is not None:
+                continue
+            if location and location != "none" and b.get("location") != location:
+                continue
             out[b["status"]] = out.get(b["status"], 0) + 1
         return out
 

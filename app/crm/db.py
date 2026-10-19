@@ -796,9 +796,22 @@ class CrmDB:
             """, since, until))
         return {"by_node": by_node, "by_model": by_model}
 
-    async def bike_counts(self) -> dict[str, int]:
-        rows = await self.pool.fetch(
-            "select status, count(*) as n from crm.bikes group by status")
+    async def bike_counts(self, location: str | None = None) -> dict[str, int]:
+        """Велосипедов по статусам. location - как у bikes(): имя точки или
+        "none" (не на точке); без него - весь парк. Список, отфильтрованный
+        по точке, со счётчиками всего парка в выпадающем списке врал:
+        «свободен (40)», а в списке их шесть."""
+        if location == "none":
+            rows = await self.pool.fetch(
+                "select status, count(*) as n from crm.bikes "
+                "where location is null group by status")
+        elif location:
+            rows = await self.pool.fetch(
+                "select status, count(*) as n from crm.bikes "
+                "where location = $1 group by status", location)
+        else:
+            rows = await self.pool.fetch(
+                "select status, count(*) as n from crm.bikes group by status")
         return {r["status"]: int(r["n"]) for r in rows}
 
     async def bike_log(self, bike_id: int, limit: int = 50,

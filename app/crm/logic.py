@@ -6444,6 +6444,32 @@ def tracker_state_title(row: Mapping[str, Any]) -> str:
     return "стоит"
 
 
+# Фильтр списка устройств: состояние - то же слово, что тег в строке, плюс
+# «без велосипеда» и «сняты»: их ищут, чтобы привязать или вернуть.
+TRACKER_FILTERS: dict[str, str] = {
+    "alarm": "тревога", "moving": "едет", "offline": "молчит", "parked": "стоит",
+    "free": "без велосипеда", "off": "сняты с наблюдения",
+}
+
+
+def tracker_filter(rows: Iterable[Mapping[str, Any]], state: str | None) -> list[dict]:
+    """Устройства в выбранном состоянии; пусто или неизвестное - все.
+
+    Порядок tracker_rows (тревога, едет, молчит) сохраняется, но снятые с
+    наблюдения уходят в конец: их молчание никого не ждёт, а сверху они
+    заслоняли живые тревоги - на 130 трекерах это первая страница.
+    """
+    rows = [dict(r) for r in rows]
+    if state in ("alarm", "moving", "offline", "parked"):
+        title = TRACKER_FILTERS[state]
+        rows = [r for r in rows if tracker_state_title(r) == title]
+    elif state == "free":
+        rows = [r for r in rows if not r.get("bike_id")]
+    elif state == "off":
+        rows = [r for r in rows if not r.get("active", True)]
+    return sorted(rows, key=lambda r: not r.get("active", True))
+
+
 def alert_summary(rows: Iterable[dict], *, now: datetime | None = None) -> dict[str, int]:
     rows = list(rows)
     open_rows = [r for r in rows if r["open"]]

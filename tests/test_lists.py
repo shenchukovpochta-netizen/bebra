@@ -12,6 +12,7 @@ import unittest
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -130,6 +131,21 @@ class TestExports(tw.WebCase):
         only = self.csv("/bikes.csv?q=B-Z")
         self.assertIn("B-Z", only)
         self.assertNotIn("B-1", only, "выгружают то, что видят")
+
+    def test_status_counts_follow_the_point(self):
+        """Числа в выборе статуса - по выбранной точке, как сам список:
+        «свободен (3)» над списком из одного велосипеда - неправда."""
+        _run(self.crm.update_bike(self.bike_id, location="Павлюхина"))
+        _run(self.crm.create_bike(code="B-2", model="Kugoo V3", location="Адоратского"))
+        _run(self.crm.create_bike(code="B-3", model="Kugoo V3"))
+        whole = self.get_ok("/bikes")
+        self.assertIn("Свободен (3)", whole)
+        point = self.get_ok("/bikes?location=" + quote("Павлюхина"))
+        self.assertIn("Свободен (1)", point)
+        self.assertIn(">B-1<", point)
+        self.assertNotIn(">B-2<", point)
+        self.assertIn("Свободен (1)", self.get_ok("/bikes?location=none"))
+        self.assertEqual(_run(self.crm.bike_counts(location="none")), {"available": 1})
 
     def test_rentals_export_opens(self):
         text = self.csv("/rentals.csv?status=all")
