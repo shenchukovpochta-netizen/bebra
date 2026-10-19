@@ -1244,12 +1244,26 @@ main>details.filters{margin-bottom:12px}
   details.filters>summary{display:none}
   details.filters::details-content{content-visibility:visible}
 }}
+/* Строка «Без новых клиентов: …» под «Клиентами и каналами» - только
+   телефону: на компьютере эти месяцы стоят в таблице нулями. */
+.zero-months{display:none}
 @media (max-width:640px){
   /* «Мои фильтры» - уже в заголовке раскрывашки */
   details.filters>.saved-views>.muted:first-child{display:none}
   /* Плитка, которая повторяет вкладку с тем же числом (группы клиентов),
      на телефоне только отодвигает список: вкладки и так над ним. */
   .tile.tab-dup{display:none}
+  /* Без «Финансов» у клиентов остаются только такие плитки - пустой ряд
+     плиток не оставляет полосу над вкладками. */
+  .tiles:not(:has(>:not(.tab-dup))){display:none}
+  /* Месяц без новых клиентов - карточка «Всего 0»: на телефоне их
+     называет одна строка .zero-months под таблицей. */
+  table.cards tr.zero-row{display:none}
+  .zero-months{display:block}
+  /* Таблицы сводки, оставленные таблицами (статьи, «По дням», «По
+     моделям»): правило «поля уже» выше проигрывало по весу полям
+     .table-wrap, и на 360 px последняя колонка уезжала за край обёртки. */
+  .table-wrap>table.compact>tbody>tr>th,.table-wrap>table.compact>tbody>tr>td{padding-left:6px;padding-right:6px}
 }
 /* Карточка, которая на узком экране идёт первой (переписка обращения):
    в две колонки она справа, а в одну оказывалась под формами. */

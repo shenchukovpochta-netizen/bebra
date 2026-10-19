@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -106,6 +106,15 @@ class TestChannelsInPanel(tw.WebCase):
         page = self.get_ok("/reports/channels")
         self.assertIn("Авито", page)
         self.assertIn("ИТОГО", page)
+        # Месяцы без новых клиентов: на телефоне строки скрыты (zero-row),
+        # а под таблицей - одна строка с их диапазоном.
+        self.assertEqual(page.count('<tr class="zero-row">'), 11)
+        month = date.today().replace(day=1)
+        last = (month - timedelta(days=1)).replace(day=1)
+        first = month
+        for _ in range(11):
+            first = (first - timedelta(days=1)).replace(day=1)
+        self.assertIn(f"Без новых клиентов: {first:%m.%Y}–{last:%m.%Y}.", page)
         r = self.client.get("/reports/channels.csv")
         self.assertEqual(r.status_code, 200)
         self.assertIn("Авито", r.text)

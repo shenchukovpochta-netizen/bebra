@@ -9,12 +9,18 @@
 <div class="card">
 {# Колонки - каналы, по которым кто-то пришёл, поэтому подпись ячейки -
    тоже имя канала. Ноль - пустая ячейка: на телефоне карточка месяца -
-   только каналы, откуда пришли, а не столбик нулей. #}
+   только каналы, откуда пришли, а не столбик нулей. Месяц без новых
+   клиентов (zero-row) на телефоне скрыт - от него оставалась карточка
+   «Всего 0», шесть подряд были полэкраном до месяцев с данными; они
+   названы одной строкой под таблицей (zero-months, только телефон). #}
+{% set zero = namespace(runs=[], cur=[]) %}
+{% for r in rows %}{% if not r.total %}{% set zero.cur = zero.cur + [r.month] %}{% else %}{% if zero.cur %}{% set zero.runs = zero.runs + [zero.cur] %}{% endif %}{% set zero.cur = [] %}{% endif %}{% endfor %}
+{% if zero.cur %}{% set zero.runs = zero.runs + [zero.cur] %}{% endif %}
 <div class="table-wrap">
 <table class="cards">
   <tr><th>Месяц</th>{% for code in columns %}<th class="num">{{ channel_label(code) }}</th>{% endfor %}<th class="num">Всего</th></tr>
   {% for r in rows %}
-  <tr>
+  <tr{% if not r.total %} class="zero-row"{% endif %}>
     <td data-label="Месяц">{{ r.month.strftime('%m.%Y') }}</td>
     {% for code in columns %}<td class="num" data-label="{{ channel_label(code) }}">{{ r.cells[code] or '' }}</td>{% endfor %}
     <td class="num {% if not r.total %}muted{% endif %}" data-label="Всего">{{ r.total }}</td>
@@ -27,6 +33,7 @@
   </tr>
 </table>
 </div>
+{% if columns and zero.runs %}<p class="muted zero-months">Без новых клиентов: {% for run in zero.runs %}{{ run[0].strftime('%m.%Y') }}{% if run|length > 1 %}–{{ run[-1].strftime('%m.%Y') }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
 <p class="scroll-hint">Таблица шире экрана — прокрутите её вбок.</p>
 {% if not columns %}<p class="muted">За год новых клиентов не было.</p>{% endif %}
 <p class="muted">Считаются карточки по дате появления. «Не спросили» — канал
